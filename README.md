@@ -8,6 +8,7 @@
 - Claude Code 셋업: [`.claude/`](.claude/) (agents / skills / commands / hooks)
 - **파일럿 런북(지금 여기부터)**: [`docs/pilot/README.md`](docs/pilot/README.md) — 워크스페이스 1개 + `@tybot`
 - 서버 배치(Rocky Linux 8): [`docs/deploy/rocky8.md`](docs/deploy/rocky8.md)
+- **멀티 워크스페이스 · 크로스 열람 권한**: [`docs/multi-workspace.md`](docs/multi-workspace.md)
 - DB 선택·조직 권한 설계: [`docs/design/db-and-acl.md`](docs/design/db-and-acl.md)
 - PostgreSQL vs MariaDB 비교: [`docs/design/postgres-vs-mariadb.md`](docs/design/postgres-vs-mariadb.md)
 
@@ -24,6 +25,9 @@ pytest
 src/tybot/
 ├── config.py           # 환경설정
 ├── answer.py           # 질의응답 파이프라인 (환각방지 4겹)
+├── intent.py           # 의도 분류 (LLM + 규칙 폴백)
+├── audit.py            # 질의응답 감사 기록
+├── workspaces.py       # 멀티 워크스페이스 설정 · 크로스 열람 화이트리스트
 ├── gateway/            # LLM 게이트웨이 (모델 선택·민감도 라우팅·비용 가드)
 ├── slack/pilot.py      # 파일럿 봇 (Socket Mode, 단일 워크스페이스)
 ├── archive/            # store.py=원문 검색 / writer.py=원문 수집

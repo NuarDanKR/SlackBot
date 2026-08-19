@@ -1,10 +1,14 @@
-"""파일럿 봇 — 단일 워크스페이스, Socket Mode(아웃바운드 전용).
+"""워크스페이스 봇 — Socket Mode(아웃바운드 전용). 여러 워크스페이스를 한 프로세스에서 운영한다.
 
 수집 경로 두 가지:
 1. **실시간**(기본) — message.channels / message.groups 이벤트로 들어오는 즉시 원문 append.
    Slack 신규 비-마켓플레이스 앱은 conversations.history 가 분당 1요청/15건으로 제한되므로
    이 경로가 본선이다. 비공개 채널은 봇이 초대된 곳만 이벤트가 온다.
 2. **백필**(`수집`) — 과거 대화 보충용. rate limit 때문에 느리다.
+
+멀티 워크스페이스: 워크스페이스마다 앱을 따로 만들고(봇 토큰 + 앱 토큰), 각각 Socket Mode 연결을
+연다. 아카이브·감사기록·LLM 게이트웨이는 공유하되 **조회 권한은 워크스페이스 경계로 분리**한다
+(`docs/multi-workspace.md`).
 
 실행: python -m tybot.slack.pilot
 """
@@ -14,6 +18,7 @@ import logging
 import os
 import pathlib
 import re
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -24,6 +29,7 @@ from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..archive import writer
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
+from ..workspaces import WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
 
@@ -65,58 +71,44 @@ def _scope_label(ctx: RequestContext | None) -> str:
     return f"채널 {len(ctx.channels)}개"
 
 
-class PilotBot:
-    def __init__(self) -> None:
+class WorkspaceBot:
+    """워크스페이스 1개에 대응하는 Socket Mode 봇.
+
+    아카이브·감사기록·LLM 게이트웨이는 **모든 워크스페이스가 공유**한다.
+    (아카이브는 디렉터리로, 조회 권한은 RequestContext 로 분리된다.)
+    """
+
+    def __init__(
+        self,
+        cfg: WorkspaceConfig,
+        *,
+        store: ArchiveStore,
+        engine: AnswerEngine,
+        qa_log: QALog,
+        archive_dir: str,
+    ) -> None:
         from slack_bolt import App
 
-        self.workspace = os.getenv("PILOT_WORKSPACE", "pilot")
-        self.archive_dir = os.getenv("ARCHIVE_DIR", "./archive")
+        self.cfg = cfg
+        self.workspace = cfg.key
+        self.archive_dir = archive_dir
         self.bot_name = os.getenv("BOT_NAME", "tybot")
         self.realtime = _truthy(os.getenv("REALTIME_INGEST", "1"))
-        # 전 채널 통합조회 허용 사용자(Slack user id, 콤마 구분). 채널 멤버십 필터를 우회한다.
+        # 전 채널·전 워크스페이스 통합조회 허용 사용자. 채널 멤버십과 워크스페이스 경계를 모두 우회한다.
         self.exec_users = {
             u.strip() for u in (os.getenv("EXEC_USERS") or "").split(",") if u.strip()
         }
-        self.app = App(token=os.environ["SLACK_BOT_TOKEN"])
-        self.store = ArchiveStore(self.archive_dir)
-        # 감사 기록은 아카이브 밖에 둔다 - 봇 답변이 근거로 재사용되면 요약 재귀가 된다(원칙 1).
-        self.qa_log = QALog(
-            os.getenv("QA_LOG_DIR", "./qa-log"),
-            write_md=_truthy(os.getenv("QA_LOG_MD", "1")),
-        )
-        self.engine = AnswerEngine(self.store, self._router())
+        self.app = App(token=cfg.bot_token)
+        self.store = store
+        self.engine = engine
+        self.qa_log = qa_log
         self._started = datetime.now(timezone.utc)
         self._last_ingest_at: datetime | None = None
         self._ingested = 0
         self._user_cache: dict[str, str] = {}
         self._chan_cache: dict[str, str] = {}
-        self._check_paths()
-        self._register()
-
-    def _check_paths(self) -> None:
         self.path_problems: dict[str, str] = {}
-        for label, path in (
-            ("아카이브", self.archive_dir),
-            ("감사기록", str(self.qa_log.root)),
-        ):
-            why = _writable(path)
-            if why:
-                self.path_problems[label] = f"{path} ({why})"
-                log.error(
-                    "%s 디렉터리에 쓸 수 없습니다: %s - %s. "
-                    "tybot.env 의 ARCHIVE_DIR/QA_LOG_DIR 를 /var/lib/tybot 아래로 지정하세요.",
-                    label, path, why,
-                )
-        if not self.path_problems:
-            log.info("경로 점검 통과 - archive=%s qa_log=%s", self.archive_dir, self.qa_log.root)
-
-    def _router(self):
-        from ..gateway.router import Router
-
-        return Router.from_default_registry(
-            daily_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
-            default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
-        )
+        self._register()
 
     # --- Slack 조회 헬퍼 ---------------------------------------------------
     def _user_name(self, client, user_id: str) -> str:
@@ -153,7 +145,11 @@ class PilotBot:
             channels = {"#" + c["name"] for c in res.get("channels", [])}
         except Exception as e:
             log.warning("users.conversations 실패(%s) — 권한 범위 축소 폴백", e)
-        return RequestContext(workspace=self.workspace, channels=frozenset(channels))
+        return RequestContext(
+            workspace=self.workspace,
+            channels=frozenset(channels),
+            readable_workspaces=self.cfg.readable,
+        )
 
     # --- 핸들러 -----------------------------------------------------------
     def _register(self) -> None:
@@ -397,7 +393,11 @@ class PilotBot:
             if self._last_ingest_at
             else "없음"
         )
+        cross = (
+            ", ".join(sorted(self.cfg.readable)) if self.cfg.readable else "없음(자기 워크스페이스만)"
+        )
         lines = [
+            f"*워크스페이스*: {self.cfg.label} (`{self.workspace}`) · 크로스 열람 허용: {cross}",
             f"*연결*: {conn}{who}",
             f"*가동*: {hours}시간 {rem // 60}분 · 실시간 수집 {'ON' if self.realtime else 'OFF'}"
             f" · 이번 세션 수집 {self._ingested} 건 (마지막 {last})",
@@ -410,19 +410,73 @@ class PilotBot:
             lines.append(f"  • {d.channel} — {len(d.raw_lines)}줄 (최근 {d.last_ingested or '-'})")
         if broken:
             lines.append(f"⚠️ 형식 위반 {len(broken)}건: " + ", ".join(p.name for p, _ in broken))
+        for label, why in self.path_problems.items():
+            lines.append(f"🛑 *{label} 쓰기 불가* — {why}. 수집이 저장되지 않습니다.")
+        if not docs and not self.path_problems:
+            lines.append("ℹ️ 아직 수집된 원문이 없습니다. 채널에서 `수집` 또는 대화가 쌓이길 기다리세요.")
         return "\n".join(lines)
 
-    def start(self) -> None:
+    def connect(self) -> None:
+        """Socket Mode 연결을 비동기로 연다(블로킹하지 않는다).
+
+        워크스페이스마다 연결이 하나씩이므로, 여러 개를 띄우려면 블로킹하면 안 된다.
+        """
         from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+        self._handler = SocketModeHandler(self.app, self.cfg.app_token)
+        self._handler.connect()
         log.info(
-            "파일럿 봇 기동 — workspace=%s archive=%s realtime=%s exec=%d명",
-            self.workspace,
-            self.archive_dir,
+            "워크스페이스 연결 — %s / 실시간수집=%s / 크로스열람=%s",
+            self.cfg.masked(),
             self.realtime,
-            len(self.exec_users),
+            sorted(self.cfg.readable) or "없음",
         )
-        SocketModeHandler(self.app, os.environ["SLACK_APP_TOKEN"]).start()
+
+
+def check_paths(archive_dir: str, qa_dir: str) -> dict[str, str]:
+    """아카이브·감사기록 쓰기 가능 여부. 조용한 고장을 기동 시점에 드러낸다."""
+    problems: dict[str, str] = {}
+    for label, path in (("아카이브", archive_dir), ("감사기록", qa_dir)):
+        why = _writable(path)
+        if why:
+            problems[label] = f"{path} ({why})"
+            log.error(
+                "%s 디렉터리에 쓸 수 없습니다: %s - %s. "
+                "tybot.env 의 ARCHIVE_DIR/QA_LOG_DIR 를 /var/lib/tybot 아래로 지정하세요.",
+                label, path, why,
+            )
+    if not problems:
+        log.info("경로 점검 통과 - archive=%s qa_log=%s", archive_dir, qa_dir)
+    return problems
+
+
+def build_bots() -> list[WorkspaceBot]:
+    """설정을 읽어 워크스페이스별 봇을 만든다. 공유 자원은 한 번만 생성한다."""
+    from ..gateway.router import Router
+
+    archive_dir = os.getenv("ARCHIVE_DIR", "./archive")
+    qa_log = QALog(
+        os.getenv("QA_LOG_DIR", "./qa-log"), write_md=_truthy(os.getenv("QA_LOG_MD", "1"))
+    )
+    problems = check_paths(archive_dir, str(qa_log.root))
+
+    store = ArchiveStore(archive_dir)
+    engine = AnswerEngine(
+        store,
+        Router.from_default_registry(
+            daily_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
+            default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
+        ),
+    )
+
+    bots = []
+    for cfg in load_workspaces():
+        bot = WorkspaceBot(
+            cfg, store=store, engine=engine, qa_log=qa_log, archive_dir=archive_dir
+        )
+        bot.path_problems = problems
+        bots.append(bot)
+    return bots
 
 
 def main() -> None:
@@ -436,7 +490,13 @@ def main() -> None:
         load_dotenv()
     except ImportError:
         pass
-    PilotBot().start()
+
+    bots = build_bots()
+    for bot in bots:
+        bot.connect()
+    log.info("기동 완료 — 워크스페이스 %d개: %s", len(bots), [b.workspace for b in bots])
+    # 연결은 백그라운드 스레드가 유지한다. 메인 스레드는 종료 신호를 기다린다.
+    threading.Event().wait()
 
 
 if __name__ == "__main__":
