@@ -21,13 +21,20 @@ logger = logging.getLogger("tybot.intent")
 # 분류 전용 저가 모델. 레지스트리에 없으면 기본 모델로 폴백한다.
 CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
 
-KINDS = ("status", "help", "summary", "search", "advice", "smalltalk", "out_of_scope")
+KINDS = (
+    "status", "help", "summary", "search", "advice", "smalltalk", "out_of_scope",
+    "ingest", "ingest_all",
+)
 
 CLASSIFIER_PROMPT = """너는 사내 Slack 아카이브 봇의 **라우터**다. 질문에 답하지 말고 분류만 한다.
 
 kind 를 하나 고른다:
-- status: 봇 자신의 상태·연결·가동·수집 현황·사용 모델·설정에 대한 질문
+- status: 봇 자신의 상태를 **묻는** 질문 (연결·가동·수집 현황·사용 모델·설정)
   (예: "너 상태 어때", "연결됐어?", "잘 돌아가?", "무슨 모델 써?", "몇 건 모았어?")
+- ingest: 지금 이 채널의 대화를 **수집하라는 지시** (질문이 아니라 명령)
+  (예: "수집해", "내용 수집해", "이 채널 취합해줘", "대화 모아줘", "긁어와")
+- ingest_all: **모든 채널**을 수집하라는 지시 (예: "전체 수집해", "모든 채널 수집", "다 모아줘")
+  주의: "몇 건 수집했어?"처럼 **현황을 묻는** 것은 status 다. 수집을 **실행**하라는 것만 ingest 다.
 - help: **봇 자신의** 사용법·명령어·기능을 묻는 질문 (예: "뭘 할 수 있어?", "명령어 알려줘")
   주의: 업무 방식에 대한 조언 요청은 help 가 아니라 advice 다
 - summary: 특정 키워드가 아니라 **기간 전체의 진행 상황·동향**을 알고 싶은 질문
@@ -51,9 +58,19 @@ JSON 만 출력한다. 설명·코드펜스 금지.
 STATUS_RE = re.compile(
     r"(^\s*(상태|status)\b|연결\s*(상태|상황|확인|됐|되었|잘)|접속\s*(상태|상황|확인)|"
     r"살아\s*있|정상\s*(작동|동작|이야|인가)|헬스\s*체크|health\s*check|\bping\b|"
-    r"(봇|너|자기)\s*(의)?\s*(상태|상황)|버전\s*(확인|알려|뭐)|어떤\s*모델|무슨\s*모델|설정\s*확인)"
+    r"(봇|너|자기)\s*(의)?\s*(상태|상황)|버전\s*(확인|알려|뭐)|어떤\s*모델|무슨\s*모델|설정\s*확인|"
+    # '수집 현황을 묻는' 표현 - 수집 '지시'보다 먼저 걸러야 한다(아래 INGEST_RE 보다 우선 검사).
+    r"(수집|취합)\s*(현황|상태|건수|얼마나|몇)|몇\s*건|수집(했|됐|된)|취합(했|됐|된))"
 )
 HELP_RE = re.compile(r"(도움말|사용법|명령어|뭘\s*할\s*수|어떻게\s*써|\bhelp\b)")
+# 수집 '지시'만 잡는다. "몇 건 수집했어?"(현황 질문)는 STATUS_RE 가 먼저 잡도록 순서를 둔다.
+INGEST_ALL_RE = re.compile(
+    r"((전체|모든|전부|다)\s*(채널\s*)?(수집|취합)|(수집|취합)\s*(전체|모두)|ingest\s*all)"
+)
+INGEST_RE = re.compile(
+    r"((수집|취합)\s*(해|해줘|하자|해라|시작|좀)|^\s*(수집|취합|ingest)\s*$|"
+    r"(대화|내용|채팅|기록)\s*(를|을)?\s*(수집|취합|모아|긁어)|모아\s*줘|긁어\s*와)"
+)
 ADVICE_RE = re.compile(
     r"(추천|권장|의견|조언|어느\s*(쪽|방향|게)|어떤\s*(쪽|방향|방법)|"
     r"좋을까|나을까|낫나|낫니|낫을까|장단점|비교해|괜찮을까|문제\s*(될|있을|생길)|"
@@ -104,6 +121,10 @@ def classify_by_rule(text: str) -> Intent:
     """LLM 없이 판단. 분류기 장애 시 폴백 경로."""
     if STATUS_RE.search(text):
         return Intent("status", source="regex")
+    if INGEST_ALL_RE.search(text):
+        return Intent("ingest_all", source="regex")
+    if INGEST_RE.search(text):
+        return Intent("ingest", source="regex")
     if HELP_RE.search(text):
         return Intent("help", source="regex")
     if SUMMARY_RE.search(text):

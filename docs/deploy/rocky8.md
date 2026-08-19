@@ -132,10 +132,15 @@ DEFAULT_MODEL=claude-haiku-4-5-20251001
 DAILY_COST_LIMIT_USD=5
 PILOT_WORKSPACE=pilot
 BOT_NAME=tybot
-ARCHIVE_DIR=/var/lib/tybot/archive     # ← 서버 경로 (install.sh 가 자동 설정)
+ARCHIVE_DIR=/var/lib/tybot/archive     # ← 서버 경로. 빠뜨리면 /opt/tybot/archive 로 가고
+QA_LOG_DIR=/var/lib/tybot/qa-log       #    거기엔 쓰기 권한이 없어 수집이 저장되지 않는다
+QA_LOG_MD=1
 REALTIME_INGEST=1
 EXEC_USERS=
 ```
+> `install.sh` 는 **새로 만들 때만** 이 두 경로를 채운다. 이미 `tybot.env` 가 있으면 건드리지 않으니
+> 직접 확인해야 한다. 기동 로그의 `경로 점검 통과 - archive=... qa_log=...` 줄로 확인하고,
+> `상태` 에 `🛑 쓰기 불가` 가 보이면 이 두 줄이 빠진 것이다.
 
 확인 (값은 마스킹되어 출력 — 공유 안전):
 ```bash
@@ -205,6 +210,7 @@ sudo reboot                                                            # 부팅 
 | 기동은 되는데 Slack 응답 없음 | 아웃바운드 443 차단. `sudo -u tybot curl -sI https://slack.com` |
 | 프록시 환경 | `/etc/systemd/system/tybot.service.d/proxy.conf` 생성:<br>`[Service]`<br>`Environment=HTTPS_PROXY=http://프록시:포트`<br>`Environment=NO_PROXY=localhost,127.0.0.1`<br>후 `systemctl daemon-reload && systemctl restart tybot` |
 | `Permission denied: /var/lib/tybot/...` | `sudo chown -R tybot:tybot /var/lib/tybot` |
+| 응답은 정상인데 **문서 0건 · 수집 0건** | `tybot.env` 에 `ARCHIVE_DIR`/`QA_LOG_DIR` 누락. 기본값(`/opt/tybot/archive`)은 봇에게 쓰기 권한이 없다. 기동 로그의 `쓸 수 없습니다` 에러 확인 |
 | SELinux 관련 거부 | `sudo ausearch -m avc -ts recent`. 표준 경로(`/var/lib`)를 쓰면 보통 발생하지 않음. **enforcing 을 끄지 말고** 원인부터 확인 |
 | `conversations.history` 실패/느림 | Slack 신규 앱 제한(분당 1요청/15건). 정상 — 백필은 느리고, 실시간 수집이 본선 |
 | 비공개 채널이 안 보임 | 해당 채널에서 `/invite @tybot`. 봇은 초대 없이 비공개 채널을 목록조차 못 본다 |

@@ -113,3 +113,22 @@ def test_rule_fallback_strips_request_words():
 )
 def test_parse_period(text, days):
     assert parse_period(text) == days
+
+
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("내용 수집해", "ingest"),
+        ("수집해줘", "ingest"),
+        ("이 채널 취합해줘", "ingest"),
+        ("대화 모아줘", "ingest"),
+        ("수집", "ingest"),
+        ("전체 수집해", "ingest_all"),
+        ("모든 채널 수집", "ingest_all"),
+        # 현황 '질문'은 수집 실행이 아니다
+        ("몇 건 수집했어?", "status"),
+        ("수집 상태 알려줘", "status"),
+    ],
+)
+def test_ingest_command_vs_status_question(text, kind):
+    assert classify_by_rule(text).kind == kind

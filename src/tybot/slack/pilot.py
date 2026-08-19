@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import re
 import time
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ from datetime import datetime, timezone
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..audit import QALog, QARecord
-from ..intent import Intent
+from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..archive import writer
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
@@ -27,8 +28,6 @@ from ..archive.writer import KST
 log = logging.getLogger("tybot.slack")
 
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
-INGEST_ALL_RE = re.compile(r"^\s*(전체\s*수집|수집\s*전체|ingest\s*all)\b")
-INGEST_RE = re.compile(r"^\s*(수집|취합|ingest)\b")
 HISTORY_LIMIT = 15  # 신규 앱 conversations.history 상한
 
 
@@ -38,6 +37,23 @@ def _clean(text: str) -> str:
 
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _writable(path: str) -> str | None:
+    """쓰기 가능 여부 점검. 문제가 있으면 사유 문자열을 반환한다.
+
+    아카이브 쓰기 실패는 '조용한 고장'의 대표 사례다 - 봇은 정상 응답하는데
+    원문이 하나도 쌓이지 않는다. 기동 시점에 잡아 로그와 `상태`에 드러낸다.
+    """
+    d = pathlib.Path(path)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return None
+    except Exception as e:
+        return f"{e.__class__.__name__}: {e}"
 
 
 def _scope_label(ctx: RequestContext | None) -> str:
@@ -74,7 +90,25 @@ class PilotBot:
         self._ingested = 0
         self._user_cache: dict[str, str] = {}
         self._chan_cache: dict[str, str] = {}
+        self._check_paths()
         self._register()
+
+    def _check_paths(self) -> None:
+        self.path_problems: dict[str, str] = {}
+        for label, path in (
+            ("아카이브", self.archive_dir),
+            ("감사기록", str(self.qa_log.root)),
+        ):
+            why = _writable(path)
+            if why:
+                self.path_problems[label] = f"{path} ({why})"
+                log.error(
+                    "%s 디렉터리에 쓸 수 없습니다: %s - %s. "
+                    "tybot.env 의 ARCHIVE_DIR/QA_LOG_DIR 를 /var/lib/tybot 아래로 지정하세요.",
+                    label, path, why,
+                )
+        if not self.path_problems:
+            log.info("경로 점검 통과 - archive=%s qa_log=%s", self.archive_dir, self.qa_log.root)
 
     def _router(self):
         from ..gateway.router import Router
@@ -176,21 +210,26 @@ class PilotBot:
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
 
-        if INGEST_ALL_RE.match(text):
-            finish(self._ingest_all(client), intent=Intent("ingest_all", source="cmd"), ans=None, ctx=None)
-            return
-        if in_channel and INGEST_RE.match(text):
-            finish(
-                self._ingest_channel(client, channel_id),
-                intent=Intent("ingest", source="cmd"),
-                ans=None,
-                ctx=None,
-            )
-            return
+        # 명시 명령은 LLM 을 거치지 않는다(비용·지연 절약). 그 외 표현은 분류기가 판단한다.
+        if INGEST_ALL_RE.search(text):
+            intent = Intent("ingest_all", source="cmd")
+        elif INGEST_RE.search(text):
+            intent = Intent("ingest", source="cmd")
+        else:
+            intent = self.engine.classify(text)
 
-        # 의도 분류는 LLM 이 한다(표현이 바뀌어도 새지 않게). 실패 시 규칙 기반 폴백.
-        intent = self.engine.classify(text)
-
+        if intent.kind == "ingest_all":
+            finish(self._ingest_all(client), intent=intent, ans=None, ctx=None)
+            return
+        if intent.kind == "ingest":
+            if not in_channel:
+                finish(
+                    "수집은 채널에서만 실행할 수 있습니다. 대상 채널에서 `수집` 이라고 불러주세요.",
+                    intent=intent, ans=None, ctx=None,
+                )
+                return
+            finish(self._ingest_channel(client, channel_id), intent=intent, ans=None, ctx=None)
+            return
         if intent.kind == "status":
             finish(self._status(client), intent=intent, ans=None, ctx=None)
             return
