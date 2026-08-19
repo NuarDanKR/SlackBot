@@ -7,7 +7,7 @@ from typing import Sequence
 from .base import LLMResponse, Message, ModelSpec, Provider, Sensitivity
 from .cost import CostGuard
 
-logger = logging.getLogger("hermes.gateway")
+logger = logging.getLogger("tybot.gateway")
 
 
 class UnknownModel(KeyError):
@@ -28,8 +28,10 @@ DEFAULT_REGISTRY: dict[str, ModelSpec] = {
     "claude-sonnet-5": ModelSpec(
         "claude-sonnet-5", "anthropic", 3.0, 15.0, Sensitivity.CONFIDENTIAL
     ),
+    # 민감도는 모델 티어가 아니라 **벤더 계약(DPA/zero-retention)** 단위로 정한다.
+    # Anthropic 계약 하나로 묶이므로 haiku 도 confidential 허용.
     "claude-haiku-4-5-20251001": ModelSpec(
-        "claude-haiku-4-5-20251001", "anthropic", 1.0, 5.0, Sensitivity.INTERNAL
+        "claude-haiku-4-5-20251001", "anthropic", 1.0, 5.0, Sensitivity.CONFIDENTIAL
     ),
     # OpenAI 모델 ID/단가는 배포 시 확정. 기본은 사내(internal) 이하로 제한.
     "gpt-4o": ModelSpec("gpt-4o", "openai", 2.5, 10.0, Sensitivity.INTERNAL),
@@ -80,6 +82,14 @@ class Router:
             default_model=default_model,
         )
 
+    @property
+    def spent_today(self) -> float:
+        return self._cost.spent_today
+
+    @property
+    def default_model(self) -> str:
+        return self._default_model
+
     def resolve(self, model: str | None, sensitivity: Sensitivity) -> ModelSpec:
         """모델 선택 + 민감도 검증. 부적합하면 예외."""
         name = model or self._default_model
@@ -87,9 +97,14 @@ class Router:
         if spec is None:
             raise UnknownModel(f"등록되지 않은 모델: {name}")
         if sensitivity.rank() > spec.max_sensitivity.rank():
+            allowed = sorted(
+                m for m, s in self._registry.items()
+                if sensitivity.rank() <= s.max_sensitivity.rank() and s.provider in self._providers
+            )
             raise ModelNotAllowed(
                 f"민감도 '{sensitivity.value}' 는 모델 '{name}'(허용 최대 "
-                f"'{spec.max_sensitivity.value}')로 처리할 수 없습니다."
+                f"'{spec.max_sensitivity.value}')로 처리할 수 없습니다. "
+                f"사용 가능: {', '.join(allowed) or '없음'}"
             )
         if spec.provider not in self._providers:
             raise UnknownModel(f"프로바이더 미등록: {spec.provider}")

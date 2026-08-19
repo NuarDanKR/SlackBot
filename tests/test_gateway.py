@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_hub.gateway import (
+from tybot.gateway import (
     CostLimitExceeded,
     LLMResponse,
     Message,
@@ -12,7 +12,7 @@ from hermes_hub.gateway import (
     Sensitivity,
     UnknownModel,
 )
-from hermes_hub.gateway.router import DEFAULT_REGISTRY
+from tybot.gateway.router import DEFAULT_REGISTRY
 
 
 class FakeProvider:

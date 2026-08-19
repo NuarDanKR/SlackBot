@@ -1,0 +1,38 @@
+# TYBot 파일럿 — Slack 앱 매니페스트
+# api.slack.com/apps → Create New App → From an app manifest → 파일럿 워크스페이스 선택 → 이 YAML 붙여넣기
+display_information:
+  name: TYBot
+  description: 태영건설 사내 아카이브 봇 (파일럿). 아카이브 원문만 근거로 답합니다.
+  background_color: "#1a3a5c"
+features:
+  bot_user:
+    display_name: tybot    # ASCII 만 허용(봇 핸들). 변경: App Home → Your App's Presence → Edit
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read     # @tybot 호출 수신
+      - channels:history      # 공개 채널 원문 수집
+      - groups:history        # 비공개 채널 원문 수집
+      - im:history            # DM 수신
+      - mpim:history
+      - channels:read         # 채널 목록/멤버십 조회(ACL)
+      - groups:read
+      - users:read            # 발화자 실명 매핑
+      - chat:write            # 답변
+      - im:write
+      - files:read            # 첨부 다운로드 — 없으면 파일 대신 로그인 HTML(조용한 고장)
+      - reactions:write       # 👀 수신 표시
+      - channels:join         # 채널 자가참여 — 없으면 일부 채널만 보임(조용한 고장)
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - message.channels   # 공개 채널 실시간 수집
+      - message.groups     # 비공개 채널 실시간 수집(봇이 초대된 곳만)
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true   # 인바운드 포트 없음
+  token_rotation_enabled: false

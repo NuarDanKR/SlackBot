@@ -1,0 +1,48 @@
+[Unit]
+Description=TYBot — Slack AI 아카이브 봇 (Socket Mode, 아웃바운드 전용)
+Documentation=file:///opt/tybot/docs/deploy/rocky8.md
+# postgresql 은 인덱서 도입 단계에서 사용. 미설치 상태여도 무해하다.
+After=network-online.target postgresql-16.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+
+# 시크릿은 저장소가 아니라 이 파일에만 (0640 root:tybot)
+EnvironmentFile=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.slack.pilot
+
+# 봇은 반드시 단일 인스턴스. systemd 가 중복 기동을 막는다(중복 답변·비용 2배 방지).
+Restart=always
+RestartSec=10
+# 재시작 폭주 차단
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 로그는 journald 로 (파일 로테이션 불필요)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot
+
+# --- 샌드박싱 ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# 쓰기 허용 경로 — 아카이브와 캐시만
+ReadWritePaths=/var/lib/tybot
+# 인바운드 소켓 불필요(Socket Mode 는 아웃바운드 WebSocket)
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

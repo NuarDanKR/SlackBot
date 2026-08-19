@@ -1,13 +1,13 @@
 [project]
-name = "hermes-hub"
+name = "tybot"
 version = "0.1.0"
-description = "태영건설 Slack AI TFT — 멀티 워크스페이스 아카이브 봇"
+description = "TYBot — 태영건설 Slack AI 아카이브 봇"
 requires-python = ">=3.11"
 dependencies = [
-    # 실제 프로바이더 SDK는 배포 환경에서 설치 (게이트웨이는 lazy import)
-    # "anthropic>=0.40",
-    # "openai>=1.50",
-    # "slack-bolt>=1.20",
+    # 게이트웨이는 lazy import — openai 등은 필요 시 추가
+    "anthropic>=0.40",
+    "slack-bolt>=1.20",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
