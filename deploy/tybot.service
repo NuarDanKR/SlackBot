@@ -4,6 +4,9 @@ Documentation=file:///opt/tybot/docs/deploy/rocky8.md
 # postgresql 은 인덱서 도입 단계에서 사용. 미설치 상태여도 무해하다.
 After=network-online.target postgresql-16.service
 Wants=network-online.target
+# 재시작 폭주 차단 - 이 두 지시자는 [Unit] 섹션이다([Service] 에 두면 무시되고 경고만 뜬다).
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -21,9 +24,6 @@ ExecStart=/opt/tybot/.venv/bin/python -m tybot.slack.pilot
 # 봇은 반드시 단일 인스턴스. systemd 가 중복 기동을 막는다(중복 답변·비용 2배 방지).
 Restart=always
 RestartSec=10
-# 재시작 폭주 차단
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # 로그는 journald 로 (파일 로테이션 불필요)
 StandardOutput=journal
