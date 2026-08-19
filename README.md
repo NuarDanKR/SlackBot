@@ -9,6 +9,7 @@
 - **파일럿 런북(지금 여기부터)**: [`docs/pilot/README.md`](docs/pilot/README.md) — 워크스페이스 1개 + `@tybot`
 - 서버 배치(Rocky Linux 8): [`docs/deploy/rocky8.md`](docs/deploy/rocky8.md)
 - **멀티 워크스페이스 · 크로스 열람 권한**: [`docs/multi-workspace.md`](docs/multi-workspace.md)
+- 에이전트 구조(마스터봇·정리봇 검토): [`docs/design/agent-architecture.md`](docs/design/agent-architecture.md)
 - DB 선택·조직 권한 설계: [`docs/design/db-and-acl.md`](docs/design/db-and-acl.md)
 - PostgreSQL vs MariaDB 비교: [`docs/design/postgres-vs-mariadb.md`](docs/design/postgres-vs-mariadb.md)
 
