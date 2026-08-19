@@ -12,6 +12,9 @@ Group=tybot
 WorkingDirectory=/opt/tybot
 
 # 시크릿은 저장소가 아니라 이 파일에만 (0640 root:tybot)
+# 로그 즉시 flush(journald 지연 방지) + 한글 출력 안전
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
 EnvironmentFile=/etc/tybot/tybot.env
 ExecStart=/opt/tybot/.venv/bin/python -m tybot.slack.pilot
 

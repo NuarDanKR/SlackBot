@@ -15,9 +15,15 @@ PY=python3.11
 
 [[ $EUID -eq 0 ]] || { echo "root 로 실행하세요 (sudo)"; exit 1; }
 
-echo "== 1/6 python 3.11 =="
-command -v $PY >/dev/null || dnf install -y python3.11 python3.11-devel
+echo "== 1/6 시스템 패키지 =="
+command -v $PY >/dev/null || dnf install -y python3.11 python3.11-pip
 command -v rsync >/dev/null || dnf install -y rsync
+command -v git   >/dev/null || dnf install -y git
+
+# 요약 기간 계산이 서버 로컬 날짜를 쓴다 - 시간대가 KST 여야 "오늘/이번주"가 맞는다.
+if [[ "$(timedatectl show -p Timezone --value 2>/dev/null)" != "Asia/Seoul" ]]; then
+  echo "  ! 시간대가 Asia/Seoul 이 아닙니다: sudo timedatectl set-timezone Asia/Seoul"
+fi
 
 echo "== 2/6 계정·디렉터리 =="
 id tybot &>/dev/null || useradd -r -d "$DATA_DIR" -s /sbin/nologin tybot

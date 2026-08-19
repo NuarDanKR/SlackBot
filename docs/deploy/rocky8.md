@@ -7,15 +7,44 @@ _TYBot (패키지 `tybot`, Slack 핸들 `@tybot`) · 파일럿 1개 워크스페
 
 ---
 
-## 0. 사전 확인 (3개)
+## 0. 사전 확인 · 시스템 준비 (새 VM 기준)
 
-| 확인 | 명령 / 방법 | 안 되면 |
-|---|---|---|
-| Python 3.11 설치 가능? | `dnf list available python3.11` | RL8 기본 python3 은 3.6 — 우리 코드는 3.11+ 필수 |
-| **아웃바운드 443** 열려 있나? | `curl -sI https://slack.com \| head -1` | 방화벽/프록시 담당자에게 요청 (인바운드는 0개 필요) |
-| PyPI 접근 되나? | `curl -sI https://pypi.org \| head -1` | 안 되면 1-B 오프라인 경로로 진행 |
+### 0-1. 확인
+```bash
+cat /etc/rocky-release
+curl -sI https://slack.com | head -1     # HTTP/2 200 이어야 함 (아웃바운드 443)
+curl -sI https://pypi.org  | head -1     # 안 되면 1절 오프라인 경로
+```
+인바운드 포트는 **0개** 필요하다(Socket Mode 아웃바운드 전용). 프록시 환경이면 [7절](#7-트러블슈팅) 참조.
 
-프록시를 써야 하면 [7절](#7-트러블슈팅)의 프록시 설정을 먼저 적용한다.
+### 0-2. 필요한 시스템 패키지 — 이것뿐이다
+```bash
+sudo dnf install -y python3.11 python3.11-pip git rsync
+```
+
+| 패키지 | 왜 |
+|---|---|
+| `python3.11` | RL8 기본 `python3` 은 3.6. 우리 코드는 3.11+ |
+| `python3.11-pip` | venv 안에서 의존성 설치 |
+| `git` | 저장소 clone / 업데이트 |
+| `rsync` | `install.sh` 가 코드를 `/opt/tybot` 으로 동기화 |
+
+**필요 없는 것**: Node.js(순수 Python 스택), gcc·python3.11-devel(`pydantic_core`·`jiter` 는 리눅스 휠 제공 → 컴파일 없음),
+DB(이 단계는 MD 파일만), nginx·httpd(인바운드 없음).
+
+### 0-3. 시간대 (필수)
+요약 기간 계산이 **서버 로컬 날짜**를 쓴다. KST 가 아니면 "오늘/이번주" 경계가 틀어진다.
+```bash
+sudo timedatectl set-timezone Asia/Seoul
+timedatectl | head -3
+```
+
+### 0-4. (권장) 보안 기본값
+```bash
+sudo dnf update -y            # 새 VM 이면 한 번
+sestatus | head -1            # enforcing 유지 — 끄지 않는다
+sudo firewall-cmd --state     # 인바운드는 열 필요 없음
+```
 
 ---
 
