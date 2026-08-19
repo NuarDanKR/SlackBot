@@ -1,0 +1,30 @@
+"""환경설정 로더. 시크릿은 env(서버 시크릿 매니저 주입)에서만 읽는다."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Settings:
+    slack_bot_token: str | None
+    slack_app_token: str | None
+    anthropic_api_key: str | None
+    openai_api_key: str | None
+    default_model: str
+    daily_cost_limit_usd: float
+    archive_repo: str | None
+    archive_pull_interval_min: int
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        return cls(
+            slack_bot_token=os.getenv("SLACK_BOT_TOKEN"),
+            slack_app_token=os.getenv("SLACK_APP_TOKEN"),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
+            daily_cost_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
+            archive_repo=os.getenv("ARCHIVE_REPO"),
+            archive_pull_interval_min=int(os.getenv("ARCHIVE_PULL_INTERVAL_MIN", "15")),
+        )

@@ -1,0 +1,20 @@
+# 시크릿 — 절대 커밋 금지
+.env
+*.env
+!.env.example
+secrets/
+*credentials*
+*_token*
+service-account*.json
+
+# 개인정보 / 아카이브 제외 대상
+**/등기부*
+**/계약자명단*
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/

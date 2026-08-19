@@ -1,0 +1,6 @@
+# 줄바꿈 정규화: 저장소는 LF, 체크아웃은 OS 기본
+* text=auto
+*.py text eol=lf
+*.md text
+*.json text
+*.toml text
