@@ -1,0 +1,15 @@
+[Unit]
+Description=TYBot 자동 업데이트 (git fetch → 테스트 → 배포)
+Documentation=file:///opt/tybot/docs/deploy/rocky8.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# git 접근에 /root/.ssh/tybot_deploy(읽기전용 deploy key)를 쓰므로 root 로 실행한다.
+User=root
+ExecStart=/usr/bin/bash /opt/tybot/deploy/update.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-update
+TimeoutStartSec=600

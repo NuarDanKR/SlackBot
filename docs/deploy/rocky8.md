@@ -212,6 +212,72 @@ sudo reboot                                                            # 부팅 
 
 ---
 
+## 7-A. 질의응답 기록 보기
+
+요청 1건마다 **journald 1줄 + 파일 2건**이 남는다. 경로마다 로그가 달라지지 않게 한 곳으로 모았다.
+
+```bash
+# 질문·의도·근거·비용이 한 줄에 (상태 질문도 질문 텍스트가 남는다)
+journalctl -u tybot -f | grep " qa "
+
+# 사람이 읽는 일자별 기록
+sudo cat /var/lib/tybot/qa-log/$(date +%F).md
+
+# 기계 분석용 (월별 JSONL)
+sudo jq -r '[.ts, .user_name, .intent_kind, .reason, .hits, .cost_usd, .question] | @tsv' /var/lib/tybot/qa-log/qa-$(date +%Y-%m).jsonl
+
+# 오늘 비용 합계
+sudo jq -s 'map(.cost_usd)|add' /var/lib/tybot/qa-log/qa-$(date +%Y-%m).jsonl
+
+# 근거를 못 찾은 질문만 (검색 품질 점검용)
+sudo jq -r 'select(.reason=="no_hits")|.question' /var/lib/tybot/qa-log/qa-$(date +%Y-%m).jsonl
+```
+
+**아카이브와 분리되어 있다.** `qa-log/` 는 `archive/channels/` 밖이고, `ArchiveStore` 는 이 파일을
+읽지 않는다 — 봇 답변이 다시 근거가 되면 요약 재귀가 발생하기 때문이다(원칙 1).
+회귀 테스트로 고정돼 있다(`test_md_is_not_read_as_archive`).
+
+기록에는 질문 원문이 그대로 들어간다. `/var/lib/tybot` 은 `0750 tybot:tybot` 이고,
+백업 시 이 디렉터리도 사내 자료로 취급해야 한다.
+
+---
+
+## 7-B. 협업자 push 자동 배포
+
+협업자가 push 할 때마다 사람이 `git pull` 하지 않아도 되게 타이머를 쓴다.
+**인바운드 포트가 필요 없다**(서버가 GitHub 로 나가서 확인하는 방식).
+
+```bash
+sudo cp /opt/tybot/deploy/tybot-update.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tybot-update.timer
+systemctl list-timers tybot-update    # 다음 실행 시각 확인
+```
+
+동작 순서 — [update.sh](../../deploy/update.sh):
+1. `git fetch` → 변경 없으면 아무것도 안 함
+2. 새 커밋 있으면 **소스 클론에서 테스트 먼저 실행**
+3. **통과한 커밋만** `install.sh` → `systemctl restart tybot`
+4. 실패 시 배포 중단 — 운영 프로세스는 그대로 유지되므로 롤백이 필요 없다
+
+기본 주기는 업무시간(월~금 09~19시) 10분 간격이다. 야간엔 사람이 지켜볼 수 없으니 돌리지 않는다.
+주기·브랜치 변경:
+```bash
+sudo systemctl edit tybot-update.service   # Environment=TYBOT_BRANCH=deploy 등
+sudo systemctl edit tybot-update.timer     # OnCalendar 변경
+```
+
+```bash
+# 수동 실행 / 결과 확인
+sudo bash /opt/tybot/deploy/update.sh
+journalctl -u tybot-update -n 40
+```
+
+> **자동 배포의 유일한 안전장치가 테스트다.** 검토 없이 운영에 들어가는 게 부담이면
+> `TYBOT_BRANCH=deploy` 로 바꿔 사람이 머지한 브랜치만 배포하게 하는 편이 안전하다.
+
+---
+
 ## 8. 운영 명령
 
 | 확인 | 명령 |
@@ -221,6 +287,8 @@ sudo reboot                                                            # 부팅 
 | 오늘 LLM 호출·비용 | `journalctl -u tybot --since today \| grep llm_call` |
 | 의도 분류 추이 | `journalctl -u tybot --since today \| grep "intent kind"` |
 | 아카이브 용량 | `du -sh /var/lib/tybot/archive` |
+| 질의응답 기록 | `journalctl -u tybot -f \| grep " qa "` / `sudo cat /var/lib/tybot/qa-log/$(date +%F).md` |
+| 자동 배포 이력 | `journalctl -u tybot-update -n 40` |
 | 환경변수 점검 | `sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py` |
 
 `intent ... src=regex` 가 계속 보이면 LLM 분류 호출이 실패하는 것이다(규칙 폴백으로 동작 중).
@@ -241,5 +309,6 @@ journalctl -u tybot -n 30
 | 대상 | 방법 | 우선순위 |
 |---|---|---|
 | `/var/lib/tybot/archive` | 중앙 Git 비공개 저장소로 push (쓰기 권한 필요) 또는 파일 백업 | **최우선 — 재생성 불가** |
+| `/var/lib/tybot/qa-log` | 감사 기록 — 재생성 불가. 질문 원문 포함이라 사내 자료로 취급 | **높음** |
 | `/etc/tybot/tybot.env` | 시크릿 매니저/봉인 문서. 백업 매체 암호화 필수 | 중 (재발급 가능) |
 | 코드 | Git 저장소 | 하 |

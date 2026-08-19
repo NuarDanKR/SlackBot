@@ -13,10 +13,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 
 from ..access import RequestContext
-from ..answer import AnswerEngine
+from ..answer import Answer, AnswerEngine
+from ..audit import QALog, QARecord
+from ..intent import Intent
 from ..archive import writer
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
@@ -37,6 +40,15 @@ def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _scope_label(ctx: RequestContext | None) -> str:
+    """감사 기록용 권한범위 표기 — 채널명은 남기지 않는다(로그 자체가 유출 경로가 되지 않게)."""
+    if ctx is None:
+        return "-"
+    if ctx.role == "exec":
+        return "exec(전체)"
+    return f"채널 {len(ctx.channels)}개"
+
+
 class PilotBot:
     def __init__(self) -> None:
         from slack_bolt import App
@@ -51,6 +63,11 @@ class PilotBot:
         }
         self.app = App(token=os.environ["SLACK_BOT_TOKEN"])
         self.store = ArchiveStore(self.archive_dir)
+        # 감사 기록은 아카이브 밖에 둔다 - 봇 답변이 근거로 재사용되면 요약 재귀가 된다(원칙 1).
+        self.qa_log = QALog(
+            os.getenv("QA_LOG_DIR", "./qa-log"),
+            write_md=_truthy(os.getenv("QA_LOG_MD", "1")),
+        )
         self.engine = AnswerEngine(self.store, self._router())
         self._started = datetime.now(timezone.utc)
         self._last_ingest_at: datetime | None = None
@@ -128,33 +145,62 @@ class PilotBot:
         user_id = event.get("user", "")
         channel_id = event.get("channel", "")
         thread_ts = event.get("thread_ts") or event.get("ts")
+        started = time.monotonic()
 
         try:
             client.reactions_add(channel=channel_id, timestamp=event["ts"], name="eyes")
         except Exception:
             pass
 
+        def finish(reply: str, *, intent: Intent, ans: Answer | None, ctx: RequestContext | None):
+            """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
+            say(text=reply, thread_ts=thread_ts)
+            rec = QARecord.build(
+                workspace=self.workspace,
+                channel=self._chan_cache.get(channel_id, channel_id),
+                channel_id=channel_id,
+                user=user_id,
+                user_name=self._user_name(client, user_id) if user_id else "unknown",
+                question=text,
+                intent_kind=intent.kind,
+                intent_source=intent.source,
+                reason=ans.reason if ans else intent.kind,
+                hits=ans.hit_count if ans else 0,
+                scope=_scope_label(ctx),
+                citations=list(ans.citations) if ans else [],
+                model=ans.model if ans else None,
+                cost_usd=ans.cost_usd if ans else 0.0,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                answer=reply,
+            )
+            log.info("%s", rec.log_line())
+            self.qa_log.write(rec)
+
         if INGEST_ALL_RE.match(text):
-            say(text=self._ingest_all(client), thread_ts=thread_ts)
+            finish(self._ingest_all(client), intent=Intent("ingest_all", source="cmd"), ans=None, ctx=None)
             return
         if in_channel and INGEST_RE.match(text):
-            say(text=self._ingest_channel(client, channel_id), thread_ts=thread_ts)
+            finish(
+                self._ingest_channel(client, channel_id),
+                intent=Intent("ingest", source="cmd"),
+                ans=None,
+                ctx=None,
+            )
             return
+
         # 의도 분류는 LLM 이 한다(표현이 바뀌어도 새지 않게). 실패 시 규칙 기반 폴백.
         intent = self.engine.classify(text)
-        log.info("intent kind=%s src=%s user=%s", intent.kind, intent.source, user_id)
 
         if intent.kind == "status":
-            say(text=self._status(client), thread_ts=thread_ts)
+            finish(self._status(client), intent=intent, ans=None, ctx=None)
             return
         if intent.kind == "help":
-            say(text=self._help(), thread_ts=thread_ts)
+            finish(self._help(), intent=intent, ans=None, ctx=None)
             return
 
         ctx = self._context(client, user_id)
         ans = self.engine.respond(text, ctx, intent)
-        log.info("q user=%s ch=%s reason=%s hits=%d", user_id, channel_id, ans.reason, ans.hit_count)
-        say(text=ans.to_slack(), thread_ts=thread_ts)
+        finish(ans.to_slack(), intent=intent, ans=ans, ctx=ctx)
 
     # --- 수집 -------------------------------------------------------------
     def _ingest_live(self, client, event) -> None:
@@ -317,6 +363,7 @@ class PilotBot:
             f"*가동*: {hours}시간 {rem // 60}분 · 실시간 수집 {'ON' if self.realtime else 'OFF'}"
             f" · 이번 세션 수집 {self._ingested} 건 (마지막 {last})",
             f"*모델*: {self.engine.model_info()} · 오늘 사용액 ${self.engine.spent_today():.3f}",
+            f"*감사기록*: `{self.qa_log.root}`",
             f"*아카이브*: `{self.archive_dir}` — 문서 {len(docs)}건, "
             f"원문 {sum(len(d.raw_lines) for d in docs)}줄",
         ]

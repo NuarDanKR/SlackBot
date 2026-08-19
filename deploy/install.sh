@@ -27,7 +27,7 @@ fi
 
 echo "== 2/6 계정·디렉터리 =="
 id tybot &>/dev/null || useradd -r -d "$DATA_DIR" -s /sbin/nologin tybot
-mkdir -p "$APP_DIR" "$CONF_DIR" "$DATA_DIR/archive" "$DATA_DIR/cache"
+mkdir -p "$APP_DIR" "$CONF_DIR" "$DATA_DIR/archive" "$DATA_DIR/cache" "$DATA_DIR/qa-log"
 chown -R tybot:tybot "$DATA_DIR"
 chmod 750 "$DATA_DIR"
 
@@ -68,6 +68,7 @@ echo "== 6/6 설정 파일·서비스 =="
 if [[ ! -f "$CONF_DIR/tybot.env" ]]; then
   install -m 0640 -o root -g tybot "$APP_DIR/.env.example" "$CONF_DIR/tybot.env"
   sed -i 's|^ARCHIVE_DIR=.*|ARCHIVE_DIR=/var/lib/tybot/archive|' "$CONF_DIR/tybot.env"
+  sed -i 's|^QA_LOG_DIR=.*|QA_LOG_DIR=/var/lib/tybot/qa-log|' "$CONF_DIR/tybot.env"
   echo "  → $CONF_DIR/tybot.env 생성됨. 토큰·키를 직접 입력하세요(REPLACE_ME)."
 else
   echo "  → $CONF_DIR/tybot.env 이미 존재 — 건드리지 않음."

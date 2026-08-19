@@ -1,0 +1,11 @@
+[Unit]
+Description=TYBot 자동 업데이트 주기 실행
+
+[Timer]
+# 업무시간(09~19시) 10분 간격. 야간 배포는 사람이 못 지켜보므로 하지 않는다.
+OnCalendar=Mon..Fri 09,10,11,12,13,14,15,16,17,18,19:00/10
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
