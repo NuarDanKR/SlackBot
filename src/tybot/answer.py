@@ -47,8 +47,26 @@ SUMMARY_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것�
 8. 질문이 아카이브 내용과 무관하면(봇 설정·연결 상태 등) 정리하지 말고 "아카이브 원문으로 답할 수 있는 질문이 아닙니다"라고만 답한다.
 """
 
+ADVICE_PROMPT = """너는 태영건설 사내 Slack 아카이브 봇 'TYBot'이다.
+지금은 **사실 조회가 아니라 업무 판단·권고** 요청을 받았다.
+
+지켜야 할 경계:
+1. **사내 사실**(금액·날짜·조직·인원·결정사항·현장 상태)은 <원문>에 적힌 것만 말한다.
+   원문에 없으면 "아카이브에 근거가 없다"고 밝히고, 절대 추정치나 예시를 사실처럼 쓰지 않는다.
+2. **일반 원칙·장단점·권고**는 네 지식으로 제시해도 된다. 단 그것이 일반적 판단임이 드러나게 쓴다.
+3. <원문>에 관련 내용이 있으면 그것을 우선 근거로 삼고, 우리 상황에 맞춰 판단한다.
+4. 사실과 판단을 섞어 쓰지 않는다. 무엇이 원문 근거이고 무엇이 일반 판단인지 구분된 문장으로.
+
+형식(Slack mrkdwn — `#` 제목, `**굵게**`, `---` 금지. 굵게는 *별표 하나*):
+• 결론 한 줄부터 시작한다.
+• 선택지가 둘 이상이면 각각 장단점을 2~3개씩. 각 항목은 한 줄.
+• 마지막에 *권고*: 어떤 조건이면 어느 쪽인지 명시한다.
+• 판단의 전제나 확인이 필요한 사항이 있으면 한 줄로 덧붙인다.
+한국어, 간결하게. 출처 줄은 시스템이 붙이므로 쓰지 않는다."""
+
 MODEL_FLAG_RE = re.compile(r"--model=([A-Za-z0-9._\-]+)")
 TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
 
 @dataclass
 class Answer:
@@ -57,7 +75,7 @@ class Answer:
     model: str | None
     cost_usd: float
     hit_count: int
-    reason: str  # answered | no_hits | no_access | error
+    reason: str  # answered | advice | no_hits | no_access | smalltalk | out_of_scope | error
 
     def to_slack(self) -> str:
         if not self.citations:
@@ -170,6 +188,52 @@ class AnswerEngine:
         )
         return Answer(resp.text.strip(), citations, resp.model, resp.cost_usd, total, "answered")
 
+    def advise(
+        self, question: str, ctx: RequestContext, *, terms: list[str] | None = None
+    ) -> Answer:
+        """판단·권고 요청 — 사내 사실은 원문만, 일반 판단은 LLM 지식 허용(라벨 부착).
+
+        "출처 없으면 답하지 않는다"는 **사실 조회**의 규칙이다. 판단 요청에 그 규칙을 적용하면
+        답을 못 하고, 반대로 라벨 없이 답하면 판단이 사내 사실로 오독된다. 그래서 둘을 분리한다.
+        """
+        model, q = parse_model_flag(question)
+        query = " ".join(terms) if terms else q
+        hits = self._store.search(query, ctx, limit=self._max_hits) if query else []
+
+        evidence = (
+            f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n"
+            if hits
+            else "<원문>\n(관련 원문 없음)\n</원문>\n\n"
+        )
+        messages = [
+            Message("system", ADVICE_PROMPT),
+            Message("user", f"{evidence}질문: {q}"),
+        ]
+        try:
+            resp = self._router.complete(
+                messages, model=model, sensitivity=self._sensitivity, max_tokens=1500
+            )
+        except (UnknownModel, ModelNotAllowed) as e:
+            return Answer(f"모델 선택 오류: {e}", [], model, 0.0, len(hits), "error")
+        except CostLimitExceeded as e:
+            return Answer(f"오늘 LLM 사용 한도에 도달했습니다. ({e})", [], model, 0.0, 0, "error")
+
+        # 라벨은 코드가 붙인다 — LLM 이 빼먹을 수 있는 것을 원칙에 맡기지 않는다.
+        if hits:
+            head = f"💬 판단 요청으로 답합니다. 아카이브 원문 {len(hits)}건을 근거로 참고했습니다.\n\n"
+            citations = [h.citation() for h in hits[:5]]
+        else:
+            head = "💬 판단 요청으로 답합니다. *아카이브에 관련 원문이 없어 일반적인 판단입니다* — 사내 사실 확인이 필요하면 원문을 따로 확인하세요.\n\n"
+            citations = []
+
+        logger.info(
+            "advice ws=%s hits=%d model=%s cost=$%.4f q=%r",
+            ctx.workspace, len(hits), resp.model, resp.cost_usd, q,
+        )
+        return Answer(
+            head + resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits), "advice"
+        )
+
     def classify(self, question: str) -> Intent:
         """의도 분류(LLM, 실패 시 규칙). 라우팅만 하고 답은 만들지 않는다."""
         _, q = parse_model_flag(question)
@@ -187,6 +251,8 @@ class AnswerEngine:
 
         if intent.kind == "summary":
             return self.summarize(ctx, days=intent.days or DEFAULT_DAYS, model=model)
+        if intent.kind == "advice":
+            return self.advise(question, ctx, terms=intent.terms)
         if intent.kind == "smalltalk":
             return Answer(
                 "네, 대기 중입니다. 아카이브에 쌓인 원문으로 답할 수 있는 걸 물어보세요. "
@@ -243,6 +309,7 @@ class AnswerEngine:
                 f"「{q}」에 해당하는 원문을 아카이브에서 찾지 못했습니다. 추측으로 답하지 않습니다.\n\n"
                 f"열람 가능한 문서:\n{listed}{more}\n\n"
                 "• 최근 대화 정리가 필요하면 `요약` 또는 `이번주 진행상황`\n"
+                "• 판단·권고가 필요하면 그대로 물어보세요 (예: 「어느 방향이 나을까?」)\n"
                 "• 봇 연결·수집 상태는 `상태`",
                 [],
                 None,

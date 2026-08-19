@@ -21,24 +21,27 @@ logger = logging.getLogger("tybot.intent")
 # 분류 전용 저가 모델. 레지스트리에 없으면 기본 모델로 폴백한다.
 CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
 
-KINDS = ("status", "help", "summary", "search", "smalltalk", "out_of_scope")
+KINDS = ("status", "help", "summary", "search", "advice", "smalltalk", "out_of_scope")
 
 CLASSIFIER_PROMPT = """너는 사내 Slack 아카이브 봇의 **라우터**다. 질문에 답하지 말고 분류만 한다.
 
 kind 를 하나 고른다:
 - status: 봇 자신의 상태·연결·가동·수집 현황·사용 모델·설정에 대한 질문
   (예: "너 상태 어때", "연결됐어?", "잘 돌아가?", "무슨 모델 써?", "몇 건 모았어?")
-- help: 사용법·명령어·무엇을 할 수 있는지 묻는 질문
+- help: **봇 자신의** 사용법·명령어·기능을 묻는 질문 (예: "뭘 할 수 있어?", "명령어 알려줘")
+  주의: 업무 방식에 대한 조언 요청은 help 가 아니라 advice 다
 - summary: 특정 키워드가 아니라 **기간 전체의 진행 상황·동향**을 알고 싶은 질문
   (예: "요약해줘", "이번주 어땠어", "무슨 일 있었어", "프로젝트 어디까지 갔어")
 - search: 아카이브 원문에서 **구체적 사실**을 찾는 질문
   (예: "김해외동 기성금 얼마야", "누가 승인했어", "착공일 언제야")
+- advice: 사실 조회가 아니라 **판단·권고·설계 방향**을 묻는 업무 질문
+  (예: "채널을 잘게 쪼개는 게 나아 하나로 묶는 게 나아?", "이 구성의 장단점 알려줘",
+   "어느 방향을 추천해?", "이렇게 하면 문제 생길까?")
 - smalltalk: 인사·감사·잡담 (예: "안녕", "고마워")
-- out_of_scope: 사내 아카이브로 답할 수 없는 일반 지식·외부 정보 질문
-  (예: "파이썬 문법 알려줘", "내일 날씨")
+- out_of_scope: 사내 업무와 무관한 질문 (예: "내일 날씨", "야구 결과", 개인 잡담성 정보 요청)
 
 days: summary 일 때만, 질문이 가리키는 기간을 일수로. 언급 없으면 7. "오늘"=1, "이번주"=7, "한달"=30.
-terms: search 일 때만, 아카이브 검색에 쓸 **핵심 명사·고유명사·숫자**만 골라 배열로.
+terms: search 또는 advice 일 때, 아카이브 검색에 쓸 **핵심 명사·고유명사·숫자**만 골라 배열로.
   조사·서술어·"알려줘" 같은 요청 표현은 제외한다. 현장명·팀명·금액·문서명은 반드시 포함.
 
 JSON 만 출력한다. 설명·코드펜스 금지.
@@ -51,6 +54,11 @@ STATUS_RE = re.compile(
     r"(봇|너|자기)\s*(의)?\s*(상태|상황)|버전\s*(확인|알려|뭐)|어떤\s*모델|무슨\s*모델|설정\s*확인)"
 )
 HELP_RE = re.compile(r"(도움말|사용법|명령어|뭘\s*할\s*수|어떻게\s*써|\bhelp\b)")
+ADVICE_RE = re.compile(
+    r"(추천|권장|의견|조언|어느\s*(쪽|방향|게)|어떤\s*(쪽|방향|방법)|"
+    r"좋을까|나을까|낫나|낫니|낫을까|장단점|비교해|괜찮을까|문제\s*(될|있을|생길)|"
+    r"어떻게\s*(하는\s*게|해야|가는\s*게)|바람직)"
+)
 SUMMARY_RE = re.compile(
     r"(요약|브리핑|정리해|정리 좀|진행\s*상황|진행\s*현황|현재\s*상황|현황|"
     r"어디까지|어떻게\s*돼가|무슨\s*일|summary|summarize|status\s*update)"
@@ -101,6 +109,8 @@ def classify_by_rule(text: str) -> Intent:
     if SUMMARY_RE.search(text):
         return Intent("summary", days=parse_period(text), source="regex")
     terms = [t for t in TOKEN_RE.findall(text) if t not in STOPWORDS]
+    if ADVICE_RE.search(text):
+        return Intent("advice", terms=terms, source="regex")
     return Intent("search", terms=terms or TOKEN_RE.findall(text), source="regex")
 
 
@@ -149,7 +159,7 @@ def classify(text: str, router: Router | None) -> Intent:
         logger.warning("분류 파싱 실패(%s) — 규칙 기반으로 폴백. raw=%r", e, resp.text[:200])
         return classify_by_rule(text)
 
-    if kind == "search" and not terms:
+    if kind in ("search", "advice") and not terms:
         # 검색인데 핵심어를 못 뽑았으면 원문 전체를 토큰화해 시도한다.
         terms = [t for t in TOKEN_RE.findall(text) if t not in STOPWORDS]
 
