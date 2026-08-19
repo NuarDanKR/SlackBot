@@ -67,7 +67,8 @@ sudo git clone <저장소 URL> /tmp/tybot-src
 ### B. 압축 전송 (Git 저장소가 아직 없을 때)
 ```bash
 # 로컬 PC (Git Bash)에서
-tar --exclude=.git --exclude=.venv --exclude=.env --exclude=archive \
+# 주의: --exclude=archive 로 쓰면 src/tybot/archive/ 까지 빠진다. './archive' 로 루트 고정.
+tar --exclude=./.git --exclude=./.venv --exclude=./.env --exclude=./archive \
     --exclude=__pycache__ --exclude=.pytest_cache --exclude='*.egg-info' \
     -czf tybot.tar.gz -C /d/200_TYDEV/SlackBot .
 

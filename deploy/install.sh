@@ -34,10 +34,18 @@ chmod 750 "$DATA_DIR"
 echo "== 3/6 코드 배치 =="
 if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   # .env·아카이브·git 메타는 옮기지 않는다(시크릿은 /etc, 데이터는 /var/lib)
+  # 주의: 패턴 앞의 '/' 는 전송 루트 고정이다. 'archive' 로 쓰면 하위의
+  # src/tybot/archive/ 까지 제외되어 봇이 ModuleNotFoundError 로 죽는다.
   rsync -a --delete \
-    --exclude '.git' --exclude '.venv' --exclude '.env' --exclude 'archive' \
+    --exclude '/.git' --exclude '/.venv' --exclude '/.env' --exclude '/archive' \
+    --exclude '/wheels' \
     --exclude '__pycache__' --exclude '.pytest_cache' --exclude '*.egg-info' \
     "$SRC_DIR"/ "$APP_DIR"/
+
+  # 배치 결과를 검증한다 — 조용히 빠진 모듈이 가장 잡기 어렵다.
+  for m in answer.py intent.py archive/store.py archive/writer.py slack/pilot.py; do
+    [[ -f "$APP_DIR/src/tybot/$m" ]] || { echo "배치 누락: src/tybot/$m"; exit 1; }
+  done
 fi
 
 echo "== 4/6 가상환경 =="
