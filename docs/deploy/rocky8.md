@@ -113,6 +113,7 @@ sudo OFFLINE=1 bash deploy/install.sh    # wheels/ 사용
 |---|---|---|
 | 코드 | `/opt/tybot` | 재배포로 갈아엎히는 영역 |
 | 시크릿 | `/etc/tybot/tybot.env` | 설정은 `/etc`. `0640 root:tybot`, 저장소와 물리 분리 |
+| | | 앱이 python-dotenv 로 직접 읽는다(유닛의 `EnvironmentFile=` 미사용) |
 | **원문 아카이브** | `/var/lib/tybot/archive` | **코드와 분리** — `git pull`·재클론이 원문을 건드리면 안 된다 |
 | 로그 | journald | 로테이션 자동 |
 
@@ -141,6 +142,13 @@ EXEC_USERS=
 > `install.sh` 는 **새로 만들 때만** 이 두 경로를 채운다. 이미 `tybot.env` 가 있으면 건드리지 않으니
 > 직접 확인해야 한다. 기동 로그의 `경로 점검 통과 - archive=... qa_log=...` 줄로 확인하고,
 > `상태` 에 `🛑 쓰기 불가` 가 보이면 이 두 줄이 빠진 것이다.
+
+> ⚠️ **값 뒤에 인라인 주석을 쓰지 마세요.** `BOT_NAME=tybot   # 설명` 처럼 쓰면 파서에 따라
+> 주석까지 값에 포함된다. 설명은 줄 앞에 단독으로 둔다. `export` 접두사도 쓰지 않는다.
+>
+> 앱은 이 파일을 python-dotenv 로 직접 읽는다. 유닛의 `EnvironmentFile=` 을 쓰지 않는 이유는
+> systemd 파서가 `export`·`=` 주변 공백·인라인 주석을 다르게 처리해서, **점검은 통과하는데
+> 기동은 실패하는** 어긋남이 생기기 때문이다.
 
 확인 (값은 마스킹되어 출력 — 공유 안전):
 ```bash
@@ -209,6 +217,8 @@ sudo reboot                                                            # 부팅 
 | `Failed to start` / `ModuleNotFoundError` | `sudo -u tybot /opt/tybot/.venv/bin/python -c "import tybot, slack_bolt"` 로 확인. 실패면 `install.sh` 재실행 |
 | 기동은 되는데 Slack 응답 없음 | 아웃바운드 443 차단. `sudo -u tybot curl -sI https://slack.com` |
 | 프록시 환경 | `/etc/systemd/system/tybot.service.d/proxy.conf` 생성:<br>`[Service]`<br>`Environment=HTTPS_PROXY=http://프록시:포트`<br>`Environment=NO_PROXY=localhost,127.0.0.1`<br>후 `systemctl daemon-reload && systemctl restart tybot` |
+| 설정을 고쳤는데 반영 안 됨 | `journalctl -u tybot \| grep "환경설정 출처"` 로 읽은 파일 확인. 인라인 주석·`export` 접두사·`=` 주변 공백을 제거 |
+| `Start request repeated too quickly` | `sudo systemctl reset-failed tybot` 후 재시작(재시작 폭주 차단이 걸린 상태) |
 | `Permission denied: /var/lib/tybot/...` | `sudo chown -R tybot:tybot /var/lib/tybot` |
 | 응답은 정상인데 **문서 0건 · 수집 0건** | `tybot.env` 에 `ARCHIVE_DIR`/`QA_LOG_DIR` 누락. 기본값(`/opt/tybot/archive`)은 봇에게 쓰기 권한이 없다. 기동 로그의 `쓸 수 없습니다` 에러 확인 |
 | SELinux 관련 거부 | `sudo ausearch -m avc -ts recent`. 표준 경로(`/var/lib`)를 쓰면 보통 발생하지 않음. **enforcing 을 끄지 말고** 원인부터 확인 |

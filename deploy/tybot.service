@@ -14,11 +14,16 @@ User=tybot
 Group=tybot
 WorkingDirectory=/opt/tybot
 
-# 시크릿은 저장소가 아니라 이 파일에만 (0640 root:tybot)
 # 로그 즉시 flush(journald 지연 방지) + 한글 출력 안전
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=C.UTF-8
-EnvironmentFile=/etc/tybot/tybot.env
+
+# 시크릿·설정은 /etc/tybot/tybot.env (0640 root:tybot).
+# EnvironmentFile= 을 쓰지 않는 이유: systemd 파서는 `export VAR=`, `VAR = `(공백),
+# 인라인 주석을 무시하거나 값에 포함시킨다. 앱이 python-dotenv 로 직접 읽으면
+# 그 계열의 어긋남(점검은 통과, 기동은 실패)이 사라진다.
+# 값을 임시로 덮어쓸 때는 drop-in 에 Environment= 를 쓰면 파일보다 우선한다.
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
 ExecStart=/opt/tybot/.venv/bin/python -m tybot.slack.pilot
 
 # 봇은 반드시 단일 인스턴스. systemd 가 중복 기동을 막는다(중복 답변·비용 2배 방지).
