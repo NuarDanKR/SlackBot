@@ -27,6 +27,22 @@ Slack 에서 한 앱을 여러 워크스페이스에 넣는 방법은 두 가지
 
 ## 2. 새 워크스페이스 추가 절차
 
+### 2-0. 먼저 '키'를 정한다
+워크스페이스 키는 짧은 ASCII 식별자 하나이고, 세 곳에 동시에 쓰인다.
+
+| 쓰이는 곳 | 키가 `mgmt` 일 때 |
+|---|---|
+| 환경변수 접미사 | `SLACK_BOT_TOKEN_MGMT`, `SLACK_APP_TOKEN_MGMT` |
+| 아카이브 디렉터리 | `archive/channels/mgmt/` |
+| 프론트매터·권한 판정·감사 로그 | `workspace: mgmt` |
+
+접미사는 키를 대문자로 바꾸고 영숫자 외 문자를 `_` 로 치환한 값이다. 한글·공백을 쓰면 환경변수
+이름이 깨지므로 **소문자 ASCII 로 짧게** 정한다. 사람이 볼 이름은 `WORKSPACE_LABEL_*`(한글 가능)로 준다.
+
+⚠️ **이미 수집을 시작한 워크스페이스의 키는 바꾸지 않는다.** 수집된 MD 의 디렉터리명과
+프론트매터 `workspace:` 값에 키가 박혀 있어서, 바꾸면 권한 판정이 어긋나 **기존 원문이 안 보인다.**
+부득이 바꿀 때는 디렉터리 이동 + 모든 파일의 프론트매터를 함께 고쳐야 한다.
+
 ### 2-1. Slack 앱 생성
 1. 새 워크스페이스 계정으로 https://api.slack.com/apps → **Create New App → From a manifest**
 2. 대상 워크스페이스 선택 → [`docs/pilot/slack-app-manifest.yaml`](pilot/slack-app-manifest.yaml) 붙여넣기
@@ -98,12 +114,27 @@ Slack 에서 `@tybot 상태` 를 치면 첫 줄에 나온다:
 - `EXEC_USERS` 에 등록된 사용자는 **채널 멤버십과 워크스페이스 경계를 모두 우회**한다. 최소 인원만.
 
 ### 자료를 공유하는 실제 절차
+
+전용 도구를 쓴다. 프론트매터의 `visibility` 한 줄만 바꾸고, 변경 전후로 스키마와 원문 라인 수를
+검증한다. 원문이 한 글자라도 바뀌면 중단·되돌린다.
+
 ```bash
-# 예: 파일럿의 특정 채널 원문을 경영본부에서도 볼 수 있게
-sudo -u tybot vi /var/lib/tybot/archive/channels/pilot/프로젝트-업데이트.md
-#   visibility: private  →  visibility: public
+cd /opt/tybot
+# 1) 현재 공개 상태 확인
+sudo -u tybot ARCHIVE_DIR=/var/lib/tybot/archive .venv/bin/python scripts/share.py --list
+
+# 2) 바뀔 내용 미리보기
+sudo -u tybot .venv/bin/python scripts/share.py   /var/lib/tybot/archive/channels/pilot/프로젝트-업데이트.md --public --dry-run
+
+# 3) 실제 전환
+sudo -u tybot .venv/bin/python scripts/share.py   /var/lib/tybot/archive/channels/pilot/프로젝트-업데이트.md --public
 ```
-바꾸는 순간부터 `CROSS_WS_READ` 에 등록된 워크스페이스에서 조회된다. **원문 블록은 손대지 않는다.**
+
+바꾸는 순간부터 `CROSS_WS_READ` 에 등록된 워크스페이스에서 조회된다.
+되돌리려면 같은 명령에 `--private` 를 쓴다.
+
+> 손으로 편집해도 되지만(`vi`), 그때는 **`## 원문` 블록을 절대 건드리지 않도록** 주의해야 한다.
+> 도구는 그 실수를 코드로 막는다.
 
 ### 회귀 테스트로 고정된 규칙
 `tests/test_multi_workspace.py` — 화이트리스트 없으면 차단 / 화이트리스트 있어도 비공개는 차단 /
