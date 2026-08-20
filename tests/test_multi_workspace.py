@@ -182,3 +182,94 @@ def test_titles_hide_unreachable_workspaces(store):
     ctx = _ctx(ws="pilot", channels=("#파일럿_비공개",), readable=())
     titles = store.titles(ctx)
     assert "#경영_내부" not in titles  # 권한 없으면 채널명도 노출하지 않는다
+
+
+# --- 크로스 조회 답변 경로 ------------------------------------------------
+
+
+class _Fake:
+    name = "anthropic"
+
+    def __init__(self):
+        self.calls = []
+
+    def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0):
+        from tybot.gateway.base import LLMResponse
+
+        self.calls.append(list(messages))
+        return LLMResponse("정리 결과", spec.model, self.name, 200, 40, 0.001)
+
+
+def _engine(tmp_path):
+    from tybot.answer import AnswerEngine
+    from tybot.gateway.base import ModelSpec, Sensitivity
+    from tybot.gateway.cost import CostGuard
+    from tybot.gateway.router import Router
+
+    fake = _Fake()
+    router = Router(
+        providers={"anthropic": fake},
+        registry={
+            "claude-sonnet-5": ModelSpec(
+                "claude-sonnet-5", "anthropic", 3.0, 15.0, Sensitivity.CONFIDENTIAL
+            )
+        },
+        cost_guard=CostGuard(10.0),
+    )
+    return AnswerEngine(ArchiveStore(tmp_path), router), fake
+
+
+def _today_doc(ws, channel, visibility, line):
+    import datetime as dt
+
+    return _doc(ws, channel, visibility, line).replace(
+        "2026-08-19 09:00", f"{dt.date.today()} 09:00"
+    )
+
+
+def test_summary_marks_other_workspace_in_sources(tmp_path):
+    """다른 워크스페이스 자료는 출처와 근거에 워크스페이스가 표기돼야 한다."""
+    base = tmp_path / "channels"
+    (base / "pilot").mkdir(parents=True)
+    (base / "mgmt").mkdir(parents=True)
+    (base / "pilot" / "공개.md").write_text(
+        _today_doc("pilot", "#파일럿_공개", "public", "기성금 3억 청구"), encoding="utf-8"
+    )
+    (base / "mgmt" / "경영.md").write_text(
+        _today_doc("mgmt", "#경영_내부", "private", "경영 회의 진행"), encoding="utf-8"
+    )
+    eng, fake = _engine(tmp_path)
+    ctx = _ctx(ws="mgmt", channels=("#경영_내부",), readable=("pilot",))
+
+    ans = eng.summarize(ctx, days=7)
+    assert ans.reason == "answered"
+    evidence = fake.calls[0][1].content
+    assert "[pilot] 채널 #파일럿_공개" in evidence  # 근거에 소유 워크스페이스 표기
+    assert "### 채널 #경영_내부" in evidence  # 자기 워크스페이스는 태그 없음
+    assert any(c.startswith("[pilot] ") for c in ans.citations)
+
+
+def test_scope_question_is_not_refused(tmp_path):
+    """'다른 워크스페이스 내용 알려줘' 를 외부 정보 질문으로 거절하지 않는다."""
+    from tybot.intent import Intent
+
+    base = tmp_path / "channels" / "pilot"
+    base.mkdir(parents=True)
+    (base / "공개.md").write_text(
+        _today_doc("pilot", "#파일럿_공개", "public", "기성금 3억 청구"), encoding="utf-8"
+    )
+    eng, fake = _engine(tmp_path)
+    ctx = _ctx(ws="mgmt", channels=(), readable=("pilot",))
+
+    ans = eng.respond("현재 다른 워크스페이스의 내용을 알려줘", ctx, Intent("out_of_scope"))
+    assert ans.reason == "answered"
+    assert fake.calls  # 거절이 아니라 정리로 답한다
+
+
+def test_truly_unrelated_question_still_refused(tmp_path):
+    from tybot.intent import Intent
+
+    eng, fake = _engine(tmp_path)
+    ans = eng.respond("내일 날씨 어때?", _ctx(ws="mgmt", channels=()), Intent("out_of_scope"))
+    assert ans.reason == "out_of_scope"
+    assert fake.calls == []

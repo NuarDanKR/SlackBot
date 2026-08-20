@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
-from .intent import DEFAULT_DAYS, Intent, classify
+from .intent import DEFAULT_DAYS, Intent, classify, parse_period
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -65,6 +65,10 @@ ADVICE_PROMPT = """너는 태영건설 사내 Slack 아카이브 봇 'TYBot'이�
 한국어, 간결하게. 출처 줄은 시스템이 붙이므로 쓰지 않는다."""
 
 MODEL_FLAG_RE = re.compile(r"--model=([A-Za-z0-9._\-]+)")
+# 아카이브 범위 자체를 묻는 표현. 분류기가 out_of_scope 로 잘못 보내도 여기서 되돌린다.
+ARCHIVE_SCOPE_RE = re.compile(
+    r"(워크스페이스|채널|아카이브|자료|문서|기록|대화|수집|공유|본부|팀|현장|프로젝트)"
+)
 TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 
 
@@ -148,9 +152,11 @@ class AnswerEngine:
             recent = recent[-self._max_lines_per_channel :]
             total += len(recent)
             body = "\n".join(f"[{ln.ts}] {ln.speaker}: {ln.text}" for ln in recent)
-            blocks.append(f"### 채널 {doc.channel}\n{body}")
+            # 다른 워크스페이스 자료임을 근거와 출처 양쪽에 밝힌다.
+            ws_tag = "" if doc.workspace == ctx.workspace else f"[{doc.workspace}] "
+            blocks.append(f"### {ws_tag}채널 {doc.channel}\n{body}")
             date = recent[-1].ts.split()[0]
-            citations.append(f"{doc.channel}, 📄{doc.path.name}({date})")
+            citations.append(f"{ws_tag}{doc.channel}, 📄{doc.path.name}({date})")
 
         if not blocks:
             titles = self._store.titles(ctx)
@@ -159,8 +165,17 @@ class AnswerEngine:
                     "열람 권한 범위에 아카이브된 문서가 없습니다. 채널에 봇을 초대하고 수집을 기다려 주세요.",
                     [], None, 0.0, 0, "no_access",
                 )
+            hint = ""
+            if ctx.readable_workspaces:
+                names = ", ".join(sorted(ctx.readable_workspaces))
+                hint = (
+                    f"\n\n참고: 다른 워크스페이스({names}) 자료는 "
+                    "`visibility: public` 으로 표시된 문서만 조회됩니다."
+                )
             return Answer(
-                f"최근 {days}일 원문이 없습니다. 아카이브된 문서: " + ", ".join(titles[:20]),
+                f"최근 {days}일 원문이 없습니다. 아카이브된 문서: "
+                + ", ".join(titles[:20])
+                + hint,
                 [], None, 0.0, 0, "no_hits",
             )
 
@@ -221,7 +236,9 @@ class AnswerEngine:
         # 라벨은 코드가 붙인다 — LLM 이 빼먹을 수 있는 것을 원칙에 맡기지 않는다.
         if hits:
             head = f"💬 판단 요청으로 답합니다. 아카이브 원문 {len(hits)}건을 근거로 참고했습니다.\n\n"
-            citations = [h.citation() for h in hits[:5]]
+            citations = [
+            h.citation(with_workspace=h.doc.workspace != ctx.workspace) for h in hits[:5]
+        ]
         else:
             head = "💬 판단 요청으로 답합니다. *아카이브에 관련 원문이 없어 일반적인 판단입니다* — 사내 사실 확인이 필요하면 원문을 따로 확인하세요.\n\n"
             citations = []
@@ -260,6 +277,11 @@ class AnswerEngine:
                 [], None, 0.0, 0, "smalltalk",
             )
         if intent.kind == "out_of_scope":
+            # 분류기가 "다른 워크스페이스 내용 알려줘" 같은 범위 질문을 외부 정보로 오인하는 일이
+            # 있었다. 아카이브 관련 표현이 있으면 거절하지 않고 기간 요약으로 되돌린다.
+            if ARCHIVE_SCOPE_RE.search(q):
+                logger.info("out_of_scope 재분류 -> summary q=%r", q)
+                return self.summarize(ctx, days=parse_period(q), model=model)
             return Answer(
                 "사내 아카이브에 쌓인 원문만 근거로 답하는 봇입니다. "
                 "일반 지식이나 외부 정보는 다루지 않습니다.",
@@ -331,7 +353,9 @@ class AnswerEngine:
         except CostLimitExceeded as e:
             return Answer(f"오늘 LLM 사용 한도에 도달했습니다. ({e})", [], model, 0.0, len(hits), "error")
 
-        citations = [h.citation() for h in hits[:5]]
+        citations = [
+            h.citation(with_workspace=h.doc.workspace != ctx.workspace) for h in hits[:5]
+        ]
         # 4겹: 질문·답변·근거를 전부 남긴다.
         logger.info(
             "answer ok ws=%s user=%s model=%s hits=%d cost=$%.4f q=%r srcs=%s",

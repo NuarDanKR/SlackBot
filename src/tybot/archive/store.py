@@ -51,10 +51,15 @@ class SearchHit:
     line: RawLine
     score: int
 
-    def citation(self) -> str:
-        """출처 문자열 (4겹: 출처 강제)."""
+    def citation(self, *, with_workspace: bool = False) -> str:
+        """출처 문자열 (4겹: 출처 강제).
+
+        다른 워크스페이스 자료를 인용할 때는 워크스페이스를 함께 밝힌다 -
+        읽는 사람이 "이건 우리 자료가 아니다"를 알 수 있어야 한다.
+        """
         date = self.line.ts.split()[0] if self.line.ts else ""
-        return f"{self.doc.channel}, 📄{self.doc.path.name}({date})"
+        prefix = f"[{self.doc.workspace}] " if with_workspace else ""
+        return f"{prefix}{self.doc.channel}, 📄{self.doc.path.name}({date})"
 
 
 class SchemaError(ValueError):
