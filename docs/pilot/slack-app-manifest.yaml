@@ -8,6 +8,11 @@ features:
   bot_user:
     display_name: tybot    # ASCII 만 허용(봇 핸들). 변경: App Home → Your App's Presence → Edit
     always_online: true
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    # false 여야 DM 입력창이 열린다. 기본값(true)이면 "메시지를 보내는 기능이 꺼져 있습니다" 로 막힌다.
+    messages_tab_read_only_enabled: false
 oauth_config:
   scopes:
     bot:

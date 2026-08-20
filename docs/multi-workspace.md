@@ -48,7 +48,11 @@ Slack 에서 한 앱을 여러 워크스페이스에 넣는 방법은 두 가지
 2. 대상 워크스페이스 선택 → [`docs/pilot/slack-app-manifest.yaml`](pilot/slack-app-manifest.yaml) 붙여넣기
 3. **Basic Information → App-Level Tokens → Generate**: 스코프 `connections:write` → `xapp-...`
 4. **OAuth & Permissions → Install to Workspace** → `xoxb-...`
-5. 수집 대상 채널마다 `/invite @tybot`
+5. **App Home → Show Tabs → Messages Tab** 활성화 +
+   *"Allow users to send Slash commands and messages from the messages tab"* **체크**
+   - 이걸 빼면 DM 입력창이 "이 앱으로 메시지를 보내는 기능이 꺼져 있습니다" 로 막힌다.
+     매니페스트로 만들었으면 이미 켜져 있다(`messages_tab_read_only_enabled: false`).
+6. 수집 대상 채널마다 `/invite @tybot`
 
 ### 2-2. 서버 설정
 `/etc/tybot/tybot.env` 를 이렇게 바꾼다. 키(`pilot`, `mgmt`)는 **아카이브 디렉터리 이름이자 ACL 식별자**라
