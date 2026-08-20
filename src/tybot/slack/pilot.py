@@ -484,12 +484,10 @@ def main() -> None:
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    try:
-        from dotenv import load_dotenv
+    # systemd EnvironmentFile 과 파싱 규칙이 어긋나는 문제를 피하려고 직접 읽는다.
+    from ..envfile import load_env_file
 
-        load_dotenv()
-    except ImportError:
-        pass
+    log.info("환경설정 출처: %s", load_env_file())
 
     bots = build_bots()
     for bot in bots:

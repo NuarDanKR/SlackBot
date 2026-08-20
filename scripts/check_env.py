@@ -10,28 +10,11 @@ import os
 import pathlib
 import sys
 
-def _load_env() -> str:
-    """환경변수 출처를 결정한다. 서버는 /etc/tybot/tybot.env, 로컬은 ./.env."""
-    candidates = [
-        os.getenv("TYBOT_ENV_FILE"),
-        "/etc/tybot/tybot.env",
-        str(pathlib.Path(__file__).resolve().parent.parent / ".env"),
-    ]
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return "dotenv 미설치 - 프로세스 환경변수만 확인"
-    for c in candidates:
-        if c and pathlib.Path(c).is_file():
-            load_dotenv(c)
-            return c
-    load_dotenv()
-    return "파일 없음 - 프로세스 환경변수만 확인"
-
-
-ENV_SOURCE = _load_env()
-
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+
+from tybot.envfile import load_env_file  # noqa: E402
+
+ENV_SOURCE = load_env_file()
 
 OPTIONAL = [
     "ARCHIVE_DIR", "QA_LOG_DIR", "DEFAULT_MODEL", "DAILY_COST_LIMIT_USD",
