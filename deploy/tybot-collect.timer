@@ -1,0 +1,12 @@
+[Unit]
+Description=TYBot 정기 백필 (업무시간 매시 정시)
+
+[Timer]
+# 07:00~19:00 매시 정시 = 하루 13회. 실시간 수집이 본선이고, 이 배치는
+# 봇 재시작·네트워크 단절 구간을 메우는 보조 경로다.
+OnCalendar=*-*-* 07..19:00:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

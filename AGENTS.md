@@ -1,4 +1,4 @@
-# AGENTS.md — Hermes Hub (Codex / 에이전트 공통 규칙)
+# AGENTS.md — TYBot (Codex / 에이전트 공통 규칙)
 
 > 이 파일은 Codex 및 CLAUDE.md를 읽지 않는 도구가 참조하는 규칙이다.
 > Claude Code용 상세는 `CLAUDE.md`, 도메인 표준은 `.claude/skills/`, `.claude/agents/` 참조.

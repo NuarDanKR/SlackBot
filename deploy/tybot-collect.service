@@ -1,0 +1,25 @@
+[Unit]
+Description=TYBot 정기 백필 (conversations.history 페이싱 준수)
+Documentation=file:///opt/tybot/docs/deploy/rocky8.md
+After=network-online.target tybot.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.collect
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-collect
+# 채널이 많으면 분당 1요청 페이싱 때문에 오래 걸린다. 다음 정시 전에는 끝내게 상한을 둔다.
+TimeoutStartSec=3000
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tybot

@@ -74,6 +74,10 @@ else
   echo "  → $CONF_DIR/tybot.env 이미 존재 — 건드리지 않음."
 fi
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
+# 타이머(자동배포·정기백필)는 파일만 배치한다. enable 은 운영자가 결정한다.
+for u in tybot-update.service tybot-update.timer tybot-collect.service tybot-collect.timer; do
+  install -m 0644 "$APP_DIR/deploy/$u" "/etc/systemd/system/$u"
+done
 systemctl daemon-reload
 
 cat <<EOF

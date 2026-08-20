@@ -1,5 +1,5 @@
 {
-  "name": "hermes-hub",
+  "name": "tybot",
   "version": "0.1.0",
   "description": "태영건설 Slack AI TFT — 멀티 워크스페이스 아카이브 봇 개발용 Claude Code 플러그인 (에이전트/스킬/커맨드/훅 번들). TFT 팀원 배포용.",
   "author": { "name": "Slack AI TFT" },

@@ -27,6 +27,7 @@ from ..answer import Answer, AnswerEngine
 from ..audit import QALog, QARecord
 from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..archive import writer
+from ..archive.files import file_lines
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
 from ..workspaces import WorkspaceConfig, load_workspaces
@@ -94,6 +95,9 @@ class WorkspaceBot:
         self.archive_dir = archive_dir
         self.bot_name = os.getenv("BOT_NAME", "tybot")
         self.realtime = _truthy(os.getenv("REALTIME_INGEST", "1"))
+        # 스레드 답글 대신 채널 본문에 답할지. 스레드가 기본인 이유는 채널 소음과
+        # 자기 답변 재수집(요약 재귀) 위험을 줄이기 때문이다.
+        self.reply_in_thread = _truthy(os.getenv("REPLY_IN_THREAD", "1"))
         # 전 채널·전 워크스페이스 통합조회 허용 사용자. 채널 멤버십과 워크스페이스 경계를 모두 우회한다.
         self.exec_users = {
             u.strip() for u in (os.getenv("EXEC_USERS") or "").split(",") if u.strip()
@@ -162,8 +166,11 @@ class WorkspaceBot:
 
         @self.app.event("message")
         def on_message(event, client, say):
-            if event.get("bot_id") or event.get("subtype"):
-                return  # 1겹: 봇 출력·시스템 메시지는 아카이브 대상 아님
+            if event.get("bot_id"):
+                return  # 1겹: 봇 출력은 아카이브 대상 아님
+            # 첨부만 올린 메시지는 subtype=file_share 로 온다 - 이건 수집한다.
+            if event.get("subtype") not in (None, "file_share"):
+                return  # 입퇴장·핀 등 시스템 메시지 제외
             ctype = event.get("channel_type")
             if ctype == "im":
                 self._handle(event, client, say, in_channel=False)
@@ -175,7 +182,13 @@ class WorkspaceBot:
         text = _clean(event.get("text", ""))
         user_id = event.get("user", "")
         channel_id = event.get("channel", "")
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        # 스레드 안에서 부른 경우에는 설정과 무관하게 그 스레드에 답한다(대화 맥락 유지).
+        in_existing_thread = bool(event.get("thread_ts"))
+        thread_ts = (
+            (event.get("thread_ts") or event.get("ts"))
+            if (self.reply_in_thread or in_existing_thread)
+            else None
+        )
         started = time.monotonic()
 
         try:
@@ -185,7 +198,10 @@ class WorkspaceBot:
 
         def finish(reply: str, *, intent: Intent, ans: Answer | None, ctx: RequestContext | None):
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
-            say(text=reply, thread_ts=thread_ts)
+            if thread_ts:
+                say(text=reply, thread_ts=thread_ts)
+            else:
+                say(text=reply)  # 채널 본문에 답한다
             rec = QARecord.build(
                 workspace=self.workspace,
                 channel=self._chan_cache.get(channel_id, channel_id),
@@ -239,20 +255,37 @@ class WorkspaceBot:
         finish(ans.to_slack(), intent=intent, ans=ans, ctx=ctx)
 
     # --- 수집 -------------------------------------------------------------
+    def _messages_from(self, client, event: dict) -> list:
+        """Slack 메시지 1건 → 원문 라인들(본문 + 첨부).
+
+        첨부는 텍스트 형식만 본문을 넣고, 나머지는 목록만 남긴다(files.py 참조).
+        """
+        ts = datetime.fromtimestamp(float(event["ts"]), tz=timezone.utc)
+        speaker = self._user_name(client, event.get("user", "unknown"))
+        out = []
+        body = (event.get("text") or "").strip()
+        if body:
+            out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=body))
+        if event.get("files"):
+            lines, warns = file_lines(event["files"], self.cfg.bot_token)
+            for ln in lines:
+                out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=ln))
+            for w in warns:
+                log.warning("첨부 처리 경고 ch=%s: %s", event.get("channel"), w)
+        return out
+
     def _ingest_live(self, client, event) -> None:
-        """실시간 원문 1건 append. 실패해도 봇은 계속 살아 있어야 한다."""
+        """실시간 원문 append. 실패해도 봇은 계속 살아 있어야 한다."""
         channel = self._channel_name(client, event.get("channel", ""))
-        msg = writer.IncomingMessage(
-            ts=datetime.fromtimestamp(float(event["ts"]), tz=timezone.utc),
-            speaker=self._user_name(client, event.get("user", "unknown")),
-            text=event.get("text", ""),
-        )
+        msgs = self._messages_from(client, event)
+        if not msgs:
+            return
         try:
             r = writer.ingest(
                 self.archive_dir,
                 workspace=self.workspace,
                 channel=channel,
-                messages=[msg],
+                messages=msgs,
                 acl=[channel],
             )
         except Exception as e:
@@ -278,13 +311,7 @@ class WorkspaceBot:
         for m in reversed(res.get("messages", [])):
             if m.get("bot_id") or m.get("subtype"):
                 continue
-            msgs.append(
-                writer.IncomingMessage(
-                    ts=datetime.fromtimestamp(float(m["ts"]), tz=timezone.utc),
-                    speaker=self._user_name(client, m.get("user", "unknown")),
-                    text=m.get("text", ""),
-                )
-            )
+            msgs.extend(self._messages_from(client, m))
 
         try:
             r = writer.ingest(
@@ -403,6 +430,7 @@ class WorkspaceBot:
             f"*크로스 열람 허용*: {cross}",
             f"*연결*: {conn}{who}",
             f"*가동*: {hours}시간 {rem // 60}분 · 실시간 수집 {'ON' if self.realtime else 'OFF'}"
+            f" · 답변 위치 {'스레드' if self.reply_in_thread else '채널'}"
             f" · 이번 세션 수집 {self._ingested} 건 (마지막 {last})",
             f"*모델*: {self.engine.model_info()} · 오늘 사용액 ${self.engine.spent_today():.3f}",
             f"*감사기록*: `{self.qa_log.root}`",

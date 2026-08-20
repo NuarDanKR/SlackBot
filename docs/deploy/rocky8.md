@@ -294,6 +294,24 @@ journalctl -u tybot-update -n 40
 
 ---
 
+## 7-C. 정기 백필 타이머 (선택)
+
+실시간 수집이 본선이지만, 봇 재시작·네트워크 단절 구간을 메우려면 정기 백필을 켠다.
+
+```bash
+sudo systemctl enable --now tybot-collect.timer
+systemctl list-timers tybot-collect
+sudo systemctl start tybot-collect.service    # 즉시 1회 실행
+journalctl -u tybot-collect -n 40
+```
+
+- 업무시간 **07~19시 매시 정시**(하루 13회) 실행.
+- Slack 신규 앱 제한은 **"하루 15회"가 아니라 `conversations.history` 요청당 15건 · 분당 1요청**이다.
+  따라서 채널당 하루 최대 약 195건까지 메울 수 있고, 그보다 활발한 채널은 실시간 수집이 담당한다.
+- 채널이 N개면 페이싱 때문에 **최소 N분**이 걸린다(`COLLECT_PACE_SECONDS=65`).
+  채널이 40개를 넘으면 정시 간격 안에 못 끝나므로 그때는 채널을 나눠 돌리거나 주기를 늘린다.
+- 재수집은 멱등이다 — 이미 있는 원문 라인은 다시 쓰지 않는다.
+
 ## 8. 운영 명령
 
 | 확인 | 명령 |

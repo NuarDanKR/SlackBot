@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hermes Hub PreToolUse 가드.
+"""TYBot PreToolUse 가드.
 
 - 시크릿(슬랙/LLM 토큰, 개인키 등)이 커밋/파일에 들어가는 것을 차단
 - PII/아카이브 제외 대상 키워드 차단
@@ -26,7 +26,7 @@ PII_KEYWORDS = ["등기부등본", "계약자명단", "계약자 명단", "주�
 
 
 def block(msg: str):
-    sys.stderr.write(f"[hermes-guard] BLOCKED: {msg}\n")
+    sys.stderr.write(f"[tybot-guard] BLOCKED: {msg}\n")
     sys.exit(2)
 
 
@@ -68,7 +68,7 @@ def main():
             if kw in blob:
                 block(
                     f"개인정보/아카이브 제외 키워드('{kw}') 감지 — "
-                    f"Hermes 원칙상 이 자료는 아카이브 대상에서 제외입니다."
+                    f"아카이브 원칙상 이 자료는 아카이브 대상에서 제외입니다."
                 )
         return
 
