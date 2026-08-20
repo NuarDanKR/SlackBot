@@ -69,7 +69,11 @@ def parse_cross_read(spec: str | None, known: set[str]) -> dict[str, frozenset[s
         reader, _, targets = chunk.partition(":")
         reader = reader.strip()
         if reader not in known:
-            raise ConfigError(f"CROSS_WS_READ 의 '{reader}' 는 WORKSPACES 에 없습니다")
+            raise ConfigError(
+                f"CROSS_WS_READ 의 읽는쪽 '{reader}' 는 WORKSPACES 에 없습니다. "
+                f"사용 가능한 키: {sorted(known)} "
+                f"(라벨이 아니라 키를 씁니다 - WORKSPACE_LABEL_* 값은 여기에 쓰지 않습니다)"
+            )
         allowed: set[str] = set()
         for t in targets.split("|"):
             t = t.strip()
@@ -79,7 +83,11 @@ def parse_cross_read(spec: str | None, known: set[str]) -> dict[str, frozenset[s
                 allowed |= known - {reader}
                 continue
             if t not in known:
-                raise ConfigError(f"CROSS_WS_READ 의 대상 '{t}' 는 WORKSPACES 에 없습니다")
+                raise ConfigError(
+                    f"CROSS_WS_READ 의 대상 '{t}' 는 WORKSPACES 에 없습니다. "
+                    f"사용 가능한 키: {sorted(known)} "
+                    f"(라벨이 아니라 키를 씁니다 - WORKSPACE_LABEL_* 값은 여기에 쓰지 않습니다)"
+                )
             allowed.add(t)
         out[reader] = frozenset(allowed - {reader})
     return out
