@@ -37,6 +37,8 @@ class ArchiveDoc:
     channel: str
     visibility: str
     acl: frozenset[str]
+    # 이 문서를 넘길 다른 워크스페이스 목록(선택). 비어 있으면 동등 워크스페이스로 안 나간다.
+    share_with: frozenset[str]
     last_ingested: str | None
     raw_lines: list[RawLine] = field(default_factory=list)
 
@@ -145,6 +147,8 @@ def load_doc(path: Path) -> ArchiveDoc:
     fm = validate(text, path=str(path))
     acl_raw = fm.get("acl") or []
     acl = frozenset(acl_raw if isinstance(acl_raw, list) else [acl_raw])
+    sw_raw = fm.get("share_with") or []
+    share_with = frozenset(sw_raw if isinstance(sw_raw, list) else [sw_raw])
     body, offset = _raw_section(text)
     lines: list[RawLine] = []
     for i, ln in enumerate(body.splitlines(), start=offset + 1):
@@ -164,6 +168,7 @@ def load_doc(path: Path) -> ArchiveDoc:
         channel=str(fm["channel"]),
         visibility=str(fm.get("visibility", "private")),
         acl=acl,
+        share_with=share_with,
         last_ingested=str(fm.get("last_ingested")) if fm.get("last_ingested") else None,
         raw_lines=lines,
     )
@@ -209,6 +214,7 @@ class ArchiveStore:
                 visibility=d.visibility,
                 acl=d.acl if d.acl else None,
                 owner_workspace=d.workspace,
+                share_with=d.share_with if d.share_with else None,
             )
         ]
 

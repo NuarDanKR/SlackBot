@@ -149,6 +149,7 @@ class WorkspaceBot:
             workspace=self.workspace,
             channels=frozenset(channels),
             readable_workspaces=self.cfg.readable,
+            is_root=self.cfg.is_root,
         )
 
     # --- 핸들러 -----------------------------------------------------------
@@ -396,8 +397,10 @@ class WorkspaceBot:
         cross = (
             ", ".join(sorted(self.cfg.readable)) if self.cfg.readable else "없음(자기 워크스페이스만)"
         )
+        role = "상위(root) - 산하 자료 전량 열람" if self.cfg.is_root else "일반 - 소속 채널만"
         lines = [
-            f"*워크스페이스*: {self.cfg.label} (`{self.workspace}`) · 크로스 열람 허용: {cross}",
+            f"*워크스페이스*: {self.cfg.label} (`{self.workspace}`) · 등급: {role}",
+            f"*크로스 열람 허용*: {cross}",
             f"*연결*: {conn}{who}",
             f"*가동*: {hours}시간 {rem // 60}분 · 실시간 수집 {'ON' if self.realtime else 'OFF'}"
             f" · 이번 세션 수집 {self._ingested} 건 (마지막 {last})",

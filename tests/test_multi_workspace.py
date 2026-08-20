@@ -71,12 +71,14 @@ def test_wildcard_expands_and_excludes_self():
 # --- 권한 판정 -----------------------------------------------------------
 
 
-def _ctx(ws="pilot", channels=("#팀_자금(ABB540)_주간보고",), readable=(), role="member"):
+def _ctx(ws="pilot", channels=("#팀_자금(ABB540)_주간보고",), readable=(), role="member",
+         is_root=False):
     return RequestContext(
         workspace=ws,
         channels=frozenset(channels),
         role=role,
         readable_workspaces=frozenset(readable),
+        is_root=is_root,
     )
 
 
@@ -89,26 +91,57 @@ def test_cross_workspace_blocked_without_whitelist():
     )
 
 
-def test_cross_workspace_allows_only_public_documents():
-    ctx = _ctx(ws="mgmt", channels=(), readable=("pilot",))
-    assert can_access(ctx, visibility="public", acl=None, owner_workspace="pilot")
-    # 화이트리스트가 있어도 비공개 문서는 나가지 않는다 — 무엇을 공개할지는 소유 쪽이 정한다
-    assert not can_access(ctx, visibility="private", acl=None, owner_workspace="pilot")
-    assert not can_access(ctx, visibility=None, acl=None, owner_workspace="pilot")
+def test_root_workspace_reads_subordinate_regardless_of_flags():
+    """상위(root) 워크스페이스는 산하 자료를 문서 표시와 무관하게 열람한다."""
+    root = _ctx(ws="mgmt", channels=(), readable=("pilot",), is_root=True)
+    assert can_access(root, visibility="private", acl=None, owner_workspace="pilot")
+    assert can_access(root, visibility=None, acl=frozenset({"#남의채널"}), owner_workspace="pilot")
 
 
-def test_cross_workspace_ignores_channel_acl():
-    """acl 은 소유 워크스페이스 안의 채널 목록이다.
-
-    수집기가 acl=[채널명] 을 항상 넣으므로, 크로스 판정에 acl 을 걸면 `visibility: public`
-    표시가 무력해진다. 크로스는 화이트리스트 + 공개 표시 두 관문으로만 판정한다.
-    """
-    ctx = _ctx(ws="mgmt", channels=(), readable=("pilot",))
+def test_peer_workspace_needs_explicit_share_with():
+    """동등 워크스페이스는 화이트리스트만으로 부족하다 - 문서가 지목해야 넘어간다."""
+    peer = _ctx(ws="team_b", channels=(), readable=("pilot",))
+    assert not can_access(peer, visibility="public", acl=None, owner_workspace="pilot")
     assert can_access(
-        ctx, visibility="public", acl=frozenset({"#파일럿_공개"}), owner_workspace="pilot"
+        peer, visibility="private", acl=None, owner_workspace="pilot",
+        share_with=frozenset({"team_b"}),
     )
+    # 다른 워크스페이스를 지목한 문서는 넘어가지 않는다
     assert not can_access(
-        ctx, visibility="private", acl=frozenset({"#파일럿_공개"}), owner_workspace="pilot"
+        peer, visibility="private", acl=None, owner_workspace="pilot",
+        share_with=frozenset({"mgmt"}),
+    )
+
+
+def test_public_no_longer_crosses_workspaces():
+    """visibility: public 은 자기 워크스페이스 안에서만 유효하다.
+
+    예전에는 이 하나가 크로스 열람까지 열어서, 화이트리스트에 제3의 동등 워크스페이스가
+    추가되면 그쪽에도 자료가 나갔다.
+    """
+    peer = _ctx(ws="team_b", channels=(), readable=("pilot",))
+    assert not can_access(peer, visibility="public", acl=None, owner_workspace="pilot")
+
+
+def test_non_member_channel_blocked_even_if_public_channel_in_slack():
+    """같은 워크스페이스라도 소속되지 않은 채널은 답하지 않는다.
+
+    Slack 에서 공개 채널이어도, 그 채널에 들어가 있지 않은 사람이 봇으로 우회 열람하면 안 된다.
+    """
+    ctx = _ctx(ws="pilot", channels=("#내가_있는채널",))
+    assert not can_access(
+        ctx, visibility="private", acl=frozenset({"#남의_공개채널"}), owner_workspace="pilot"
+    )
+    assert can_access(
+        ctx, visibility="private", acl=frozenset({"#내가_있는채널"}), owner_workspace="pilot"
+    )
+
+
+def test_root_workspace_ignores_channel_membership_in_own_workspace():
+    """취합·열람 전담 워크스페이스는 자기 워크스페이스 안에서 멤버십 필터를 받지 않는다."""
+    root = _ctx(ws="mgmt", channels=(), is_root=True)
+    assert can_access(
+        root, visibility="private", acl=frozenset({"#경영_어느채널"}), owner_workspace="mgmt"
     )
 
 
@@ -170,12 +203,28 @@ def store(tmp_path):
     return ArchiveStore(tmp_path)
 
 
-def test_search_crosses_only_public_docs(store):
-    ctx = _ctx(ws="mgmt", channels=("#경영_내부",), readable=("pilot",))
+def test_root_search_sees_all_subordinate_docs(store):
+    """상위 워크스페이스는 산하 자료를 표시와 무관하게 검색한다."""
+    ctx = _ctx(ws="mgmt", channels=(), readable=("pilot",), is_root=True)
     texts = [h.line.text for h in store.search("기성금", ctx)]
-    assert "공개 기성금 3억" in texts  # 화이트리스트 + 공개
-    assert "경영 기성금 5억" in texts  # 자기 워크스페이스 채널 멤버
-    assert "비밀 기성금 9억" not in texts  # 타 워크스페이스 비공개
+    assert "공개 기성금 3억" in texts
+    assert "비밀 기성금 9억" in texts  # root 는 private 도 본다
+    assert "경영 기성금 5억" in texts  # 자기 워크스페이스, 멤버십 무관
+
+
+def test_peer_search_sees_nothing_without_share_with(store):
+    """동등 워크스페이스는 문서가 지목하지 않으면 아무것도 못 본다."""
+    ctx = _ctx(ws="team_b", channels=(), readable=("pilot",))
+    assert store.search("기성금", ctx) == []
+
+
+def test_member_search_limited_to_own_channels(store):
+    """일반 워크스페이스 사용자는 자기 채널만 본다(공개 표시 문서는 예외)."""
+    ctx = _ctx(ws="pilot", channels=("#파일럿_비공개",))
+    texts = [h.line.text for h in store.search("기성금", ctx)]
+    assert "비밀 기성금 9억" in texts  # 소속 채널
+    assert "공개 기성금 3억" in texts  # visibility: public (사람이 명시)
+    assert "경영 기성금 5억" not in texts  # 타 워크스페이스
 
 
 def test_titles_hide_unreachable_workspaces(store):
@@ -228,6 +277,7 @@ def _today_doc(ws, channel, visibility, line):
 
 
 def test_summary_marks_other_workspace_in_sources(tmp_path):
+    """상위 워크스페이스가 산하 자료를 정리할 때 출처에 워크스페이스가 붙는다."""
     """다른 워크스페이스 자료는 출처와 근거에 워크스페이스가 표기돼야 한다."""
     base = tmp_path / "channels"
     (base / "pilot").mkdir(parents=True)
@@ -239,7 +289,7 @@ def test_summary_marks_other_workspace_in_sources(tmp_path):
         _today_doc("mgmt", "#경영_내부", "private", "경영 회의 진행"), encoding="utf-8"
     )
     eng, fake = _engine(tmp_path)
-    ctx = _ctx(ws="mgmt", channels=("#경영_내부",), readable=("pilot",))
+    ctx = _ctx(ws="mgmt", channels=("#경영_내부",), readable=("pilot",), is_root=True)
 
     ans = eng.summarize(ctx, days=7)
     assert ans.reason == "answered"
@@ -259,7 +309,7 @@ def test_scope_question_is_not_refused(tmp_path):
         _today_doc("pilot", "#파일럿_공개", "public", "기성금 3억 청구"), encoding="utf-8"
     )
     eng, fake = _engine(tmp_path)
-    ctx = _ctx(ws="mgmt", channels=(), readable=("pilot",))
+    ctx = _ctx(ws="mgmt", channels=(), readable=("pilot",), is_root=True)
 
     ans = eng.respond("현재 다른 워크스페이스의 내용을 알려줘", ctx, Intent("out_of_scope"))
     assert ans.reason == "answered"

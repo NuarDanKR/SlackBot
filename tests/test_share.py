@@ -87,3 +87,56 @@ def test_missing_visibility_line_is_refused(tmp_path):
     )
     with pytest.raises(SchemaError):
         set_visibility(p, "public")
+
+
+def test_share_with_added_after_visibility(doc):
+    from share import set_share_with
+
+    before = doc.read_text(encoding="utf-8")
+    set_share_with(doc, {"mgmt", "team_b"})
+    after = doc.read_text(encoding="utf-8")
+
+    assert load_doc(doc).share_with == frozenset({"mgmt", "team_b"})
+    # 원문은 바이트 단위로 동일
+    assert before.split("## 원문", 1)[1] == after.split("## 원문", 1)[1]
+    # 프론트매터 안에 들어가야 한다(--- 로 닫히기 전)
+    front = after.split("---", 2)[1]
+    assert "share_with:" in front
+
+
+def test_share_with_replaces_existing(doc):
+    from share import set_share_with
+
+    set_share_with(doc, {"mgmt"})
+    set_share_with(doc, {"team_b"})
+    assert load_doc(doc).share_with == frozenset({"team_b"})
+    assert doc.read_text(encoding="utf-8").count("share_with:") == 1
+
+
+def test_unshare_clears_targets(doc):
+    from share import set_share_with
+
+    set_share_with(doc, {"mgmt"})
+    set_share_with(doc, set())
+    assert load_doc(doc).share_with == frozenset()
+
+
+def test_share_with_dry_run_writes_nothing(doc):
+    from share import set_share_with
+
+    original = doc.read_text(encoding="utf-8")
+    assert "예정" in set_share_with(doc, {"mgmt"}, dry_run=True)
+    assert doc.read_text(encoding="utf-8") == original
+
+
+def test_visibility_and_share_with_are_independent(doc):
+    """내부 공개와 타 워크스페이스 공유는 별개 축이다."""
+    from share import set_share_with, set_visibility
+
+    set_share_with(doc, {"mgmt"})
+    d = load_doc(doc)
+    assert d.share_with == frozenset({"mgmt"}) and d.visibility == "private"
+
+    set_visibility(doc, "public")
+    d = load_doc(doc)
+    assert d.share_with == frozenset({"mgmt"}) and d.visibility == "public"

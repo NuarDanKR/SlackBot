@@ -1,9 +1,24 @@
 """접근 제어(ACL) / 권한 필터.
 
 구현 지침: `.claude/skills/access-control`.
-- 답변 생성 이전에 요청자 워크스페이스/채널 멤버십으로 검색 범위 축소.
-- visibility 미설정 → 비공개 폴백. 권한 없음은 채널명도 숨김.
-- 크로스 워크스페이스는 화이트리스트만, 그중에서도 **공개 표시된 문서만**.
+
+## 권한 3층 (독립된 축이다 — 하나가 다른 것을 대신하지 않는다)
+
+| 축 | 통제 대상 | 정하는 주체 |
+|---|---|---|
+| 채널 멤버십 | 같은 워크스페이스 안에서 **어느 채널**을 볼 수 있나 | Slack 초대 |
+| `share_with` | 이 문서를 **어느 다른 워크스페이스**에 넘길지 | 자료 소유 쪽 사람 |
+| root 워크스페이스 | 산하 자료를 취합·열람하는 상위 조직 | 서버 운영자(`ROOT_WORKSPACES`) |
+
+핵심 규칙:
+- **같은 워크스페이스라도 소속되지 않은 채널은 답하지 않는다.** 공개 채널이어도 마찬가지다.
+  Slack 에서 그 채널에 들어가 있지 않은 사람은 봇을 통해 우회 열람할 수 없다.
+- **동등(peer) 워크스페이스로는 문서에 명시된 것만 넘어간다**(`share_with`).
+  화이트리스트(`CROSS_WS_READ`)는 '넘어갈 수 있는 후보'를 정하고, 무엇을 넘길지는 소유 쪽이 정한다.
+- **root 워크스페이스**(경영본부 등)는 산하 자료를 문서 표시와 무관하게 열람하고,
+  자기 워크스페이스 안에서 채널 멤버십 필터를 받지 않는다.
+- `visibility: public` 은 **자기 워크스페이스 안에서만** 멤버십을 면제하는 표시다.
+  크로스 워크스페이스 권한과는 무관하다(예전에는 이 하나가 둘 다 열어서 위험했다).
 """
 from __future__ import annotations
 
@@ -16,10 +31,11 @@ class RequestContext:
 
     workspace: str
     channels: frozenset[str] = field(default_factory=frozenset)
-    role: str = "member"  # member | exec (통합조회 화이트리스트)
-    # 이 요청자가 자기 워크스페이스 외에 **추가로** 볼 수 있는 워크스페이스.
-    # 설정(CROSS_WS_READ)에서 명시한 것만 채워진다. 기본은 비어 있다.
+    role: str = "member"  # member | exec (개인 단위 통합조회 화이트리스트)
+    # 설정(CROSS_WS_READ)에서 명시한, 이 워크스페이스가 볼 수 있는 다른 워크스페이스.
     readable_workspaces: frozenset[str] = field(default_factory=frozenset)
+    # 상위(root) 워크스페이스에서 온 요청인가 (ROOT_WORKSPACES).
+    is_root: bool = False
 
     def may_reach(self, owner_workspace: str) -> bool:
         """워크스페이스 경계 판정. 답변 생성 이전 1차 필터."""
@@ -34,14 +50,13 @@ def can_access(
     visibility: str | None,
     acl: frozenset[str] | None,
     owner_workspace: str,
+    share_with: frozenset[str] | None = None,
 ) -> bool:
-    """막는 쪽이 기본값.
+    """막는 쪽이 기본값. 판정 순서를 바꾸지 말 것.
 
-    판정 순서(바꾸지 말 것):
-    1. 워크스페이스 경계 — 화이트리스트에 없는 워크스페이스는 여기서 끝.
-    2. 크로스 워크스페이스는 `visibility: public` 문서만. 화이트리스트는 '볼 수 있는 후보'를
-       넓힐 뿐이고, 무엇을 공개할지는 문서 소유 쪽이 정한다(원칙 3·4).
-    3. 자기 워크스페이스 안에서는 공개 문서이거나 채널 멤버십이 ACL 과 겹칠 때만.
+    1. 워크스페이스 경계 — 화이트리스트에 없으면 여기서 끝.
+    2. 다른 워크스페이스 자료: root 는 전량, 동등 워크스페이스는 `share_with` 명시분만.
+    3. 자기 워크스페이스 자료: root 는 전량, 그 외는 **채널 멤버십**(또는 명시적 public).
     """
     if not ctx.may_reach(owner_workspace):
         return False
@@ -49,14 +64,18 @@ def can_access(
         return True
 
     if owner_workspace != ctx.workspace:
-        # 크로스 워크스페이스는 관문 두 개를 모두 통과해야 한다:
-        #   (1) 설정의 화이트리스트 — 위 may_reach 에서 이미 확인
-        #   (2) 문서에 `visibility: public` 표시 — 사람이 명시적으로 공개한 것만
-        # acl 은 '소유 워크스페이스 안의 채널 목록'이라 크로스 판정에는 쓰지 않는다.
-        # (수집기가 acl=[채널명] 을 항상 넣기 때문에, 여기에 acl 을 걸면 공개 표시가 무력해진다.)
-        return visibility == "public"
+        # 상위 조직은 산하 자료를 열람할 책임과 권한이 있다.
+        if ctx.is_root:
+            return True
+        # 동등 워크스페이스끼리는 소유 쪽이 명시한 것만 넘어간다.
+        return bool(share_with and ctx.workspace in share_with)
 
+    # --- 자기 워크스페이스 ---
+    if ctx.is_root:
+        # 취합·열람 전담 워크스페이스는 채널 멤버십 필터를 받지 않는다.
+        return True
     if visibility == "public":
+        # 사람이 명시적으로 '워크스페이스 전체 공개'로 표시한 문서.
         return True
     if acl and (ctx.workspace in acl or ctx.channels & acl):
         return True

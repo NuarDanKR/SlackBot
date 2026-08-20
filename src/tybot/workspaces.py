@@ -12,8 +12,9 @@
     SLACK_APP_TOKEN_PILOT=xapp-...
     SLACK_BOT_TOKEN_MGMT=xoxb-...
     SLACK_APP_TOKEN_MGMT=xapp-...
-    WORKSPACE_LABEL_MGMT=경영본부          # (선택) 사람이 읽는 이름
-    CROSS_WS_READ=mgmt:pilot,pilot:        # 아래 참조
+    WORKSPACE_LABEL_MGMT=경영본부
+    CROSS_WS_READ=mgmt:pilot
+    ROOT_WORKSPACES=mgmt
 
 WORKSPACES 가 없으면 기존 단일 워크스페이스 설정(PILOT_WORKSPACE + SLACK_BOT_TOKEN)을 그대로 쓴다.
 """
@@ -44,9 +45,18 @@ class WorkspaceConfig:
     # 이 워크스페이스에서 물었을 때 **추가로** 읽을 수 있는 다른 워크스페이스들.
     # 기본은 비어 있다 = 크로스 워크스페이스 차단(원칙 4).
     readable: frozenset[str] = field(default_factory=frozenset)
+    # 상위(root) 워크스페이스인가. 경영본부처럼 산하 자료를 취합·열람하는 곳.
+    # root 는 (1) readable 대상의 자료를 문서 표시와 무관하게 열람하고
+    #         (2) 자기 워크스페이스 안에서 채널 멤버십 필터를 받지 않는다.
+    # 동등(peer) 워크스페이스끼리는 root 가 아니므로 문서에 명시된 share_with 만 넘어간다.
+    is_root: bool = False
 
     def masked(self) -> str:
-        return f"{self.key}({self.label}) bot={self.bot_token[:9]}… readable={sorted(self.readable) or '없음'}"
+        role = "root" if self.is_root else "member"
+        return (
+            f"{self.key}({self.label}) role={role} bot={self.bot_token[:9]}… "
+            f"readable={sorted(self.readable) or '없음'}"
+        )
 
 
 def parse_cross_read(spec: str | None, known: set[str]) -> dict[str, frozenset[str]]:
@@ -118,6 +128,20 @@ def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
 
     cross = parse_cross_read(e.get("CROSS_WS_READ"), set(keys))
 
+    roots = {k.strip() for k in (e.get("ROOT_WORKSPACES") or "").split(",") if k.strip()}
+    unknown = roots - set(keys)
+    if unknown:
+        raise ConfigError(
+            f"ROOT_WORKSPACES 의 {sorted(unknown)} 는 WORKSPACES 에 없습니다. "
+            f"사용 가능한 키: {sorted(keys)}"
+        )
+    for r in roots:
+        if not cross.get(r):
+            logger.warning(
+                "'%s' 가 root 로 지정됐지만 CROSS_WS_READ 에 열람 대상이 없습니다 - "
+                "자기 워크스페이스만 보게 됩니다.", r
+            )
+
     configs: list[WorkspaceConfig] = []
     for key in keys:
         sfx = env_suffix(key)
@@ -133,6 +157,7 @@ def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
                 bot_token=bot,
                 app_token=app,
                 readable=cross.get(key, frozenset()),
+                is_root=key in roots,
             )
         )
     return configs
