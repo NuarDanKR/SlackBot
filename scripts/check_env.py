@@ -58,6 +58,9 @@ def check_workspaces() -> bool:
         cfgs = load_workspaces()
     except ConfigError as e:
         print(f"  [MISS] 워크스페이스 설정 오류: {e}")
+        if not os.getenv("WORKSPACES"):
+            print("         힌트: tybot.env 의 'WORKSPACES=' 줄이 없거나 '#' 으로 주석 처리돼 "
+                  "있는지 확인하세요(.env.example 에서는 주석 상태입니다).")
         return False
 
     mode = "멀티" if os.getenv("WORKSPACES") else "단일"
@@ -82,6 +85,7 @@ def main() -> int:
     ok = True
     print(f"환경변수 출처: {ENV_SOURCE}")
     print("=== 워크스페이스 ===")
+    print(f"  [ .. ] WORKSPACES: {os.getenv('WORKSPACES') or '(미설정 -> 단일 워크스페이스 모드)'}")
     ok = check_workspaces() and ok
     print("=== LLM ===")
     v = os.getenv("ANTHROPIC_API_KEY", "")
