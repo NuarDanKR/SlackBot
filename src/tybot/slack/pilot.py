@@ -35,7 +35,8 @@ from ..workspaces import WorkspaceConfig, load_workspaces
 log = logging.getLogger("tybot.slack")
 
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
-HISTORY_LIMIT = 15  # 신규 앱 conversations.history 상한
+HISTORY_LIMIT = 15  # 신규 앱 conversations.history / replies 요청당 상한
+THREAD_FETCH_LIMIT = 5  # 한 번의 수집에서 답글까지 받아올 스레드 수(rate limit 고려)
 
 
 def _clean(text: str) -> str:
@@ -308,10 +309,30 @@ class WorkspaceBot:
             )
 
         msgs = []
+        thread_parents = []
         for m in reversed(res.get("messages", [])):
-            if m.get("bot_id") or m.get("subtype"):
+            if m.get("bot_id") or m.get("subtype") not in (None, "file_share"):
                 continue
             msgs.extend(self._messages_from(client, m))
+            # conversations.history 는 스레드 답글을 주지 않는다. 답글이 있으면 따로 받는다.
+            if int(m.get("reply_count") or 0) > 0:
+                thread_parents.append(m["ts"])
+
+        replies = 0
+        for parent in thread_parents[:THREAD_FETCH_LIMIT]:
+            try:
+                rr = client.conversations_replies(
+                    channel=channel_id, ts=parent, limit=HISTORY_LIMIT
+                )
+            except Exception as e:
+                log.warning("스레드 답글 조회 실패 ch=%s ts=%s: %s", channel, parent, e)
+                continue
+            for m in rr.get("messages", [])[1:]:  # 첫 건은 부모 메시지
+                if m.get("bot_id") or m.get("subtype") not in (None, "file_share"):
+                    continue
+                got = self._messages_from(client, m)
+                msgs.extend(got)
+                replies += len(got)
 
         try:
             r = writer.ingest(
@@ -325,6 +346,11 @@ class WorkspaceBot:
             return f"형식 검사 실패로 이번 취합을 롤백했습니다: {e}"
 
         out = [f"{channel}: 원문 {r.written}건 저장 (봇 발언 {r.skipped_bot}건 제외)"]
+        if thread_parents:
+            out.append(
+                f"스레드 {min(len(thread_parents), THREAD_FETCH_LIMIT)}개의 답글 {replies}건 포함"
+                + (f" (답글 있는 스레드 {len(thread_parents)}개 중)" if len(thread_parents) > THREAD_FETCH_LIMIT else "")
+            )
         if r.refused:
             out.append(f"제외 대상 {len(r.refused)}건(개인정보/등기부 등)은 아카이브하지 않았습니다.")
         out.append(

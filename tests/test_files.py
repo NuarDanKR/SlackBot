@@ -30,11 +30,13 @@ class _Resp(io.BytesIO):
         self.close()
 
 
-def test_unconverted_types_are_listed_not_parsed():
-    lines, warns = file_lines([_f("도면.dwg", "dwg"), _f("원가.xlsx", "xlsx")], "xoxb-t")
-    assert len(lines) == 2 and warns == []
+def test_unconvertible_types_are_listed_only():
+    """도면·이미지·구형 바이너리는 다운로드조차 하지 않고 목록만 남긴다."""
+    lines, warns = file_lines(
+        [_f("도면.dwg", "dwg"), _f("사진.jpg", "jpg"), _f("구형.hwp", "hwp")], "xoxb-t"
+    )
+    assert len(lines) == 3 and warns == []
     assert all("[첨부:미변환]" in ln for ln in lines)
-    assert "도면.dwg" in lines[0] and "원가.xlsx" in lines[1]
 
 
 def test_text_file_body_is_collected():
@@ -59,6 +61,39 @@ def test_login_html_is_detected_as_failure():
 def test_no_token_warns_without_crashing():
     lines, warns = file_lines([_f("메모.txt", "txt")], None)
     assert len(lines) == 1 and "토큰이 없어" in warns[0]
+
+
+def test_document_is_converted_and_tagged():
+    """업무 문서는 변환해서 넣고, 자동 변환본임을 표시한다."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.active.title = "기성"
+    wb.active.append(["항목", "금액"])
+    wb.active.append(["김해외동 기성금", "3억 2천만원"])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    with patch("tybot.archive.files.download_bytes", return_value=buf.getvalue()):
+        lines, warns = file_lines([_f("원가.xlsx", "xlsx")], "xoxb-t")
+    assert warns == []
+    assert "[첨부:변환]" in lines[0]
+    assert any("[첨부추출:원가.xlsx] [시트] 기성" == ln for ln in lines)
+    assert any("김해외동 기성금 | 3억 2천만원" in ln for ln in lines)
+
+
+def test_failed_conversion_still_leaves_a_trace():
+    """변환 실패해도 목록 줄은 남는다 - 「변환하지 못한 것」이 색인에 보이게."""
+    with patch("tybot.archive.files.download_bytes", return_value=b"not a real xlsx"):
+        lines, warns = file_lines([_f("깨진.xlsx", "xlsx")], "xoxb-t")
+    assert len(lines) == 1 and "[첨부:미변환]" in lines[0]
+    assert len(warns) == 1
+
+
+def test_oversized_document_is_not_converted():
+    huge = _f("대용량.xlsx", "xlsx", size=50 * 1024 * 1024)
+    lines, warns = file_lines([huge], "xoxb-t")
+    assert "[첨부:미변환]" in lines[0] and warns == []
 
 
 def test_long_text_is_truncated():

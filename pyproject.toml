@@ -8,6 +8,12 @@ dependencies = [
     "anthropic>=0.40",
     "slack-bolt>=1.20",
     "python-dotenv>=1.0",
+    # 첨부 문서 변환. 없으면 해당 형식은 '미변환' 으로 남고 경고가 뜬다.
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
+    "python-pptx>=1.0",
+    "pypdf>=5.0",
+    "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]

@@ -8,6 +8,7 @@
 - 서버 배치(Rocky Linux 8): [`docs/deploy/rocky8.md`](docs/deploy/rocky8.md)
 - **멀티 워크스페이스 · 권한 3층**: [`docs/multi-workspace.md`](docs/multi-workspace.md)
 - 에이전트 구조(마스터봇·정리봇 검토): [`docs/design/agent-architecture.md`](docs/design/agent-architecture.md)
+- **그룹웨어 Oracle → PostgreSQL 동기화**: [`docs/design/oracle-sync.md`](docs/design/oracle-sync.md)
 - 사용자 식별·그룹웨어 인증 검토: [`docs/design/identity-and-legacy-login.md`](docs/design/identity-and-legacy-login.md)
 - DB 선택·조직 권한 설계: [`docs/design/db-and-acl.md`](docs/design/db-and-acl.md) · [PG vs MariaDB](docs/design/postgres-vs-mariadb.md)
 - 전체 아키텍처(기획): [`docs/architecture.md`](docs/architecture.md)
