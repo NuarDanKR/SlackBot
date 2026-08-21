@@ -30,6 +30,7 @@ from ..archive import writer
 from ..archive.files import file_lines
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
+from ..config import cost_state_path
 from ..workspaces import WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
@@ -523,6 +524,8 @@ def build_bots() -> list[WorkspaceBot]:
         Router.from_default_registry(
             daily_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
             default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
+            # 재시작해도 당일 누적이 유지되어야 상한이 실제로 상한 역할을 한다.
+            cost_state_path=cost_state_path(str(qa_log.root)),
         ),
     )
 

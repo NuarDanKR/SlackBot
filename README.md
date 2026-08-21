@@ -151,7 +151,7 @@ flowchart LR
 python -m venv .venv && .venv/Scripts/activate    # Windows
 pip install -e ".[dev]"
 cp .env.example .env                              # 값은 직접 입력, 커밋 금지
-pytest                                            # 116 tests
+pytest                                            # 154 tests
 python -m tybot.slack.pilot                       # 로컬 기동
 ```
 
@@ -192,4 +192,5 @@ resp = router.complete(
 print(resp.text, resp.model, resp.cost_usd)
 ```
 
-민감도는 모델 티어가 아니라 **벤더 계약(DPA)** 단위로 판정한다. 일별 비용 상한은 전 워크스페이스 합산.
+민감도는 모델 티어가 아니라 **벤더 계약(DPA)** 단위로 판정한다. 일별 비용 상한은 전 워크스페이스 합산이고,
+당일 누적은 `COST_STATE_PATH`(기본 `<QA_LOG_DIR>/cost-state.json`)에 남아 **봇을 재시작해도 유지**된다.

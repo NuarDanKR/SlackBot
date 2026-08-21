@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -175,34 +176,60 @@ def load_doc(path: Path) -> ArchiveDoc:
 
 
 class ArchiveStore:
-    """archive/channels 아래 MD 파일 집합."""
+    """archive/channels 아래 MD 파일 집합.
+
+    파싱 결과는 **파일 mtime·크기 기준으로 캐시**한다. 한 질문을 처리하는 동안
+    `visible_docs()` 가 여러 번 불리고(검색 → 0건이면 제목 목록), 매번 전 파일을 다시
+    읽으면 문서 수에 비례해 느려진다. 수집기는 append 만 하므로 mtime 이 바뀌면
+    그 파일만 다시 읽으면 된다.
+
+    캐시는 워크스페이스 봇들이 공유하는 인스턴스에 얹히므로 락으로 감싼다.
+    """
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
+        # path -> (stat 지문, 파싱 결과 또는 SchemaError 메시지)
+        self._cache: dict[Path, tuple[tuple[int, int], ArchiveDoc | str]] = {}
+        self._lock = threading.Lock()
 
     def _files(self) -> list[Path]:
         base = self.root / "channels"
         return sorted(base.rglob("*.md")) if base.is_dir() else []
 
+    def _load(self, path: Path) -> ArchiveDoc | str:
+        """캐시된 파싱 결과. 형식 위반은 사유 문자열로 캐시한다(재파싱 낭비 방지)."""
+        try:
+            st = path.stat()
+        except OSError as e:
+            return f"{path}: 읽을 수 없다 ({e})"
+        fingerprint = (st.st_mtime_ns, st.st_size)
+        with self._lock:
+            cached = self._cache.get(path)
+            if cached and cached[0] == fingerprint:
+                return cached[1]
+        try:
+            result: ArchiveDoc | str = load_doc(path)
+        except SchemaError as e:
+            result = str(e)
+        with self._lock:
+            self._cache[path] = (fingerprint, result)
+            # 삭제된 파일의 캐시는 흘려두지 않는다.
+            if len(self._cache) > 4096:
+                self._cache = {p: v for p, v in self._cache.items() if p.exists()}
+        return result
+
     def docs(self) -> list[ArchiveDoc]:
         out: list[ArchiveDoc] = []
         for p in self._files():
-            try:
-                out.append(load_doc(p))
-            except SchemaError:
-                # 조용한 0건이 가장 위험 — 형식 위반은 건너뛰되 상위에서 감지 가능하게 남긴다.
-                continue
+            got = self._load(p)
+            # 조용한 0건이 가장 위험 — 형식 위반은 건너뛰되 broken() 으로 감지 가능하게 남긴다.
+            if isinstance(got, ArchiveDoc):
+                out.append(got)
         return out
 
     def broken(self) -> list[tuple[Path, str]]:
         """형식 검사 실패 목록. 운영 알림용."""
-        bad: list[tuple[Path, str]] = []
-        for p in self._files():
-            try:
-                load_doc(p)
-            except SchemaError as e:
-                bad.append((p, str(e)))
-        return bad
+        return [(p, got) for p in self._files() if isinstance(got := self._load(p), str)]
 
     def visible_docs(self, ctx: RequestContext) -> list[ArchiveDoc]:
         """3겹/권한: 답변 생성 **이전에** 검색 범위를 축소한다."""

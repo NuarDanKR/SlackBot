@@ -122,9 +122,12 @@ class AnswerEngine:
     def from_env(cls, archive_dir: str | Path, **kw) -> "AnswerEngine":
         import os
 
+        from .config import cost_state_path
+
         router = Router.from_default_registry(
             daily_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
             default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
+            cost_state_path=cost_state_path(),
         )
         return cls(ArchiveStore(archive_dir), router, **kw)
 
@@ -169,8 +172,11 @@ class AnswerEngine:
             if ctx.readable_workspaces:
                 names = ", ".join(sorted(ctx.readable_workspaces))
                 hint = (
-                    f"\n\n참고: 다른 워크스페이스({names}) 자료는 "
-                    "`visibility: public` 으로 표시된 문서만 조회됩니다."
+                    f"\n\n참고: 다른 워크스페이스({names}) 자료는 상위(root) 워크스페이스로서 "
+                    "전량 조회됩니다."
+                    if ctx.is_root
+                    else f"\n\n참고: 다른 워크스페이스({names}) 자료는 그쪽에서 "
+                    "`share_with` 로 넘긴 문서만 조회됩니다."
                 )
             return Answer(
                 f"최근 {days}일 원문이 없습니다. 아카이브된 문서: "

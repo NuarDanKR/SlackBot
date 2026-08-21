@@ -65,11 +65,14 @@ class Router:
         daily_limit_usd: float = 50.0,
         default_model: str = "claude-sonnet-5",
         providers: dict[str, Provider] | None = None,
+        cost_state_path: str | None = None,
     ) -> "Router":
         """기본 레지스트리로 라우터 생성.
 
         providers 를 주지 않으면 실 프로바이더를 lazy import 한다(SDK 필요).
         테스트에서는 fake provider dict 를 주입한다.
+
+        cost_state_path 를 주면 당일 누적 비용이 재시작에도 유지된다(운영 기본값).
         """
         if providers is None:
             from .providers import build_default_providers
@@ -78,7 +81,7 @@ class Router:
         return cls(
             providers=providers,
             registry=dict(DEFAULT_REGISTRY),
-            cost_guard=CostGuard(daily_limit_usd),
+            cost_guard=CostGuard(daily_limit_usd, state_path=cost_state_path),
             default_model=default_model,
         )
 
