@@ -103,6 +103,10 @@ conn = oracledb.connect(user="TYBOT_RO", password=..., dsn="host:1521/SERVICE")
 
 ## 2-B. 방식 B(push) 구현 — 스냅샷 파일
 
+> 인프라·보안 담당자에게 그대로 넘길 요청서:
+> [`docs/deploy/infra-request-snapshot-push.md`](../deploy/infra-request-snapshot-push.md)
+> (방화벽 규칙 1건, DMZ 계정 생성 명령, 수용 검증 8항목, 폐기 절차 포함)
+
 내부망 배치서버에서 (기존 사내 배치 도구·쉘·SQL*Plus 무엇이든):
 
 ```bash
