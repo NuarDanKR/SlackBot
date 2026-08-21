@@ -101,26 +101,74 @@ conn = oracledb.connect(user="TYBOT_RO", password=..., dsn="host:1521/SERVICE")
 계정  : TYBOT_RO (읽기 전용, 뷰 2개만 GRANT)
 ```
 
+## 2-B-0. 누가 push 를 실행하나 — 뷰만으로는 안 된다
+
+**뷰는 SELECT 정의일 뿐이라 스스로 아무것도 내보내지 못한다.** push 에는 세 가지가 필요하다.
+
+| 필요한 것 | 뜻 | 후보 |
+|---|---|---|
+| ① 스케줄러 | "언제 돌릴지" | cron / Control-M / 사내 배치 프레임워크 / `DBMS_SCHEDULER` |
+| ② 쿼리 실행자 | "뷰를 조회할 클라이언트" | sqlplus / sqlcl / python-oracledb / 사내 ETL |
+| ③ 전송 수단 | "파일을 DMZ 로 옮길 것" | sftp / 사내 파일전송 시스템 / 공유 스토리지 |
+
+"Oracle 이 쏴준다"는 표현이 성립하려면 ①②③ 이 **DB 서버 안에서** 다 돌아야 하는데,
+그건 가능하긴 하지만 대개 DBA·보안이 원하지 않는 구성이다(아래 D안).
+
+### 실행 위치 선택지
+
+| 안 | ①②③ 위치 | 필요 조건 | 판단 |
+|---|---|---|---|
+| **A. 별도 배치 호스트** | 내부망 리눅스 서버 1대 | 그 서버 → Oracle 리스너(1521) 접속, 그 서버 → DMZ(22) | **권장.** DB 서버를 건드리지 않는다 |
+| **B. 기존 사내 스케줄러/EAI** | 이미 있는 배치 인프라 | 승인된 전송 경로 재사용 | **가능하면 1순위.** 신규 규칙 0건 |
+| C. Oracle DB 서버 OS 의 cron | DB 서버 | DB 서버에 스크립트·SSH 키 상주 | DB 서버에 외부 접속 키를 두게 된다. 보통 반대에 부딪힌다 |
+| D. `DBMS_SCHEDULER` 외부 잡 | DB 안에서 OS 명령 실행 | `CREATE EXTERNAL JOB` 권한, 스케줄러 에이전트 | DB 계정이 OS 명령 실행권을 갖는다. 권한 상승 경로가 되어 권장하지 않는다 |
+| E. `UTL_HTTP` 로 DB 가 직접 전송 | DB 안에서 네트워크 호출 | 네트워크 ACL(`DBMS_NETWORK_ACL_ADMIN`), **DMZ 에 수신 HTTP 엔드포인트** | DMZ 에 인바운드 웹 엔드포인트를 만들어야 한다. SFTP 는 `UTL_TCP` 로 구현 불가(SSH) |
+| F. DB Gateway/DBLINK → PostgreSQL 직접 INSERT | Oracle 이 DMZ PG 에 직접 씀 | DG4ODBC + unixODBC + psqlODBC 설치, **내부→DMZ 5432 개방**, 라이선스 확인 | 진짜 "DB 가 push". 설치·라이선스 부담이 크고 DB 서버에 ODBC 스택이 들어간다 |
+
+**권고: A 또는 B.** ②는 DB 서버가 아니라 **리스너로 접속하는 클라이언트**여도 충분하다.
+`sqlplus` 든 python 이든 내부망 어느 호스트에서 돌려도 결과는 같다.
+
+> 질문에 대한 직답: **Oracle 이 쏘는 게 아니라, Oracle 에 접속할 수 있는 내부망 호스트의
+> 스케줄러가 조회해서 쏜다.** 그 호스트가 DB 서버일 필요는 없다.
+
+### 이미 있는 것부터 확인
+- 야간 배치 인프라(Control-M, Jenkins, 사내 스케줄러)가 있나 → ①② 해결
+- 사내 파일전송 시스템·공유 스토리지가 있나 → ③ 해결, 방화벽 요청 불필요
+- 둘 다 있으면 **신규 방화벽 규칙 0건**으로 끝난다
+
+---
+
 ## 2-B. 방식 B(push) 구현 — 스냅샷 파일
 
 > 인프라·보안 담당자에게 그대로 넘길 요청서:
 > [`docs/deploy/infra-request-snapshot-push.md`](../deploy/infra-request-snapshot-push.md)
 > (방화벽 규칙 1건, DMZ 계정 생성 명령, 수용 검증 8항목, 폐기 절차 포함)
 
-내부망 배치서버에서 (기존 사내 배치 도구·쉘·SQL*Plus 무엇이든):
+추출 스크립트는 저장소에 있다: [`deploy/sql/export_org.sql`](../../deploy/sql/export_org.sql),
+[`deploy/sql/export_emp.sql`](../../deploy/sql/export_emp.sql)
 
 ```bash
-# 예: SQL*Plus 로 JSON 한 줄씩 뽑고 SFTP 로 밀어넣기
-sqlplus -s TYBOT_RO/****@ORCL @export_tybot.sql > /tmp/tybot_org.jsonl
-sqlplus -s TYBOT_RO/****@ORCL @export_emp.sql > /tmp/tybot_emp.jsonl
-
-sha256sum /tmp/tybot_*.jsonl > /tmp/tybot.sha256
-sftp -i /path/key tybot_ingest@<DMZ서버> <<'EOF'
-put /tmp/tybot_org.jsonl /var/lib/tybot/inbox/
-put /tmp/tybot_emp.jsonl /var/lib/tybot/inbox/
-put /tmp/tybot.sha256    /var/lib/tybot/inbox/
-EOF
+export NLS_LANG=KOREAN_KOREA.AL32UTF8   # 출력을 UTF-8 로 고정. 이걸 빼면 한글이 깨진다
+sqlplus -s TYBOT_RO/"$ORA_PW"@ORCL @export_org.sql > /var/tmp/tybot/org.jsonl
+sqlplus -s TYBOT_RO/"$ORA_PW"@ORCL @export_emp.sql > /var/tmp/tybot/emp.jsonl
 ```
+
+전송·검증 절차(임시 이름 업로드 후 rename, 체크섬, 행 수 방어)는
+[인프라 요청서 6절](../deploy/infra-request-snapshot-push.md#6-스냅샷-추출전송-내부망-배치-dba--배치-담당)에 있다.
+
+### 추출 방식 선택 (Oracle 버전별)
+
+| 버전 | 방법 | 비고 |
+|---|---|---|
+| **19c / 12.2+** | `JSON_OBJECT` (위 스크립트) | 이스케이프를 DB 가 처리한다. **가장 안전** |
+| 12.1 이하 | **sqlcl** `SET SQLFORMAT json-formatted` | 별도 설치(무료). 문자열 연결보다 안전 |
+| 그 외 | python-oracledb + `json.dumps` | 클라이언트에서 직렬화. 이스케이프 걱정 없음 |
+
+**문자열 연결(`'{"a":"' || col || '"}'`)로 JSON 을 만들지 말 것.** 조직명·직위에 `"` 나
+역슬래시가 들어오면 파일 전체가 깨지고, 그게 조용히 부분 반영으로 이어진다.
+
+`SET` 명령이 많은 이유: sqlplus 는 기본값이 페이지 헤더·개행 삽입을 하므로
+`PAGESIZE 0 / TRIMSPOOL ON / LINESIZE 32767` 을 주지 않으면 JSON 한 줄이 잘린다.
 
 DMZ 쪽 준비:
 - 전용 계정 `tybot_ingest`, **SFTP 전용**(`ForceCommand internal-sftp`, `ChrootDirectory`)
