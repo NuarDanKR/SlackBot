@@ -8,8 +8,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from share import set_visibility  # noqa: E402
-from tybot.archive.store import SchemaError, load_doc  # noqa: E402
+from share import set_visibility
+
+from tybot.archive.store import SchemaError, load_doc
 
 DOC = """---
 workspace: pilot

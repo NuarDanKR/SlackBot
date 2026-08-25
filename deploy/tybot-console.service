@@ -1,0 +1,36 @@
+[Unit]
+Description=TYBot 관리 콘솔 (읽기 API + 화면)
+Documentation=file:///opt/tybot/docs/design/console.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+
+# 설정은 봇과 같은 파일을 읽는다(아카이브·감사기록 경로가 같아야 하므로).
+# 콘솔 전용 값(CONSOLE_USERS 등)도 같은 파일에 둔다.
+EnvironmentFile=/etc/tybot/tybot.env
+
+# 127.0.0.1 에만 바인딩한다.
+#   - VPN(Tailscale/WireGuard) 인터페이스로 노출하려면 --host 를 그 인터페이스 주소로 바꾼다.
+#   - 0.0.0.0 으로 열지 않는다. 이 콘솔은 봇 토큰과 배포 권한을 쥔 화면이다.
+ExecStart=/opt/tybot/.venv/bin/uvicorn tybot.console.app:app \
+    --host 127.0.0.1 --port 8787 --app-dir /opt/tybot/src
+
+Restart=on-failure
+RestartSec=5s
+
+# 콘솔은 봇을 재기동할 수 있어야 하지만, 그 외 권한은 갖지 않는다.
+# 재기동 기능을 켤 때 아래 sudoers 한 줄만 추가한다:
+#   tybot ALL=(root) NOPASSWD: /usr/bin/systemctl restart tybot.service
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/tybot
+
+[Install]
+WantedBy=multi-user.target

@@ -24,3 +24,9 @@ venv/
 
 # 빌드 산물
 *.egg-info/
+
+# 관리 콘솔 프론트엔드
+console-web/node_modules/
+console-web/dist/
+# 스크린샷·브라우저 자동화 산출물
+.playwright-mcp/

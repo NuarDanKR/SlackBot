@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
-from tybot.envfile import load_env_file  # noqa: E402
+from tybot.envfile import load_env_file
 
 ENV_SOURCE = load_env_file()
 

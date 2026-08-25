@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# 도구 무관 커밋 가드 — 사람·Claude Code·Codex·CI 어디서 커밋해도 동일하게 걸린다.
+#
+# 설치: git config core.hooksPath .githooks
+# 우회: git commit --no-verify  (정당한 사유가 있을 때만. 이력에 남지 않으니 조심)
+#
+# .claude/hooks/guard.py 는 Claude Code 도구 호출만 검사한다. 다른 에이전트는 그 훅을
+# 거치지 않으므로, 저장소 차원의 방어선이 별도로 필요하다.
+set -uo pipefail
+
+fail=0
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[[ -z "$staged" ]] && exit 0
+
+block() { echo "[pre-commit] 차단: $1" >&2; fail=1; }
+
+# 1) .env 등 시크릿 파일 자체
+while IFS= read -r f; do
+  case "$f" in
+    .env|*/.env|*.env)
+      [[ "$f" == *.env.example ]] || block "$f — 시크릿 파일은 커밋하지 않는다(.env.example 만)" ;;
+    */id_rsa|*/id_ed25519|*.pem|*.p12|*.pfx|*service-account*.json)
+      block "$f — 개인키/자격증명 파일" ;;
+  esac
+done <<< "$staged"
+
+# 2) 스테이징된 내용의 시크릿 패턴
+patterns='xox[baprs]-[A-Za-z0-9]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+if git diff --cached -U0 | grep -nEq "^\+.*($patterns)"; then
+  git diff --cached -U0 | grep -nE "^\+.*($patterns)" | head -5 >&2
+  block "시크릿 패턴이 변경분에 포함됨 — 서버 시크릿 매니저로만 관리한다"
+fi
+
+# 3) PII / 아카이브 제외 대상
+#    - 주민번호 '형식'은 어디서든 차단한다(실제 값일 가능성이 높다).
+#    - 키워드(주민번호·등기부등본 등)는 규칙을 '설명'하는 문서에도 나온다.
+#      그런 표면(docs·안내문·훅 자신)까지 막으면 훅이 문서 작업을 방해한다.
+#      실제 원문은 archive/ 로 들어오고 그건 4)에서 통째로 막힌다.
+DOC_SURFACES=':(exclude).githooks/* :(exclude).claude/* :(exclude)docs/* :(exclude)*.md :(exclude)console-web/src/*'
+
+rrn='[0-9]{6}\s*-\s*[1-4][0-9]{6}'
+if git diff --cached -U0 | grep -nEq "^\+.*($rrn)"; then
+  block "주민번호 형식이 변경분에 포함됨"
+fi
+
+pii_kw='주민등록번호|주민번호|등기부\s*등본|계약자\s*명단'
+# shellcheck disable=SC2086
+if git diff --cached -U0 -- . $DOC_SURFACES | grep -nEq "^\+.*($pii_kw)"; then
+  block "PII/아카이브 제외 키워드가 코드·데이터 변경분에 포함됨"
+fi
+
+# 4) 아카이브 원문·감사기록은 코드 저장소에 커밋하지 않는다
+if echo "$staged" | grep -qE '^(archive|qa-log)/'; then
+  block "archive/ · qa-log/ 는 사내 대화 원문·감사기록이다. 코드 저장소 금지"
+fi
+
+# 5) 테스트 (tests/ 가 있고 pytest 가 설치돼 있을 때만)
+if [[ -d tests ]]; then
+  if [[ -x .venv/bin/python ]]; then PY=.venv/bin/python
+  elif [[ -x .venv/Scripts/python.exe ]]; then PY=.venv/Scripts/python.exe
+  else PY=$(command -v python3 || command -v python || true); fi
+  if [[ -n "${PY:-}" ]] && "$PY" -c "import pytest" 2>/dev/null; then
+    "$PY" -m pytest -q --no-header -x >/tmp/tybot-pretest.log 2>&1
+    rc=$?
+    # 5 = 수집된 테스트 없음(빈 저장소). 실패로 보지 않는다.
+    if [[ $rc -ne 0 && $rc -ne 5 ]]; then
+      tail -20 /tmp/tybot-pretest.log >&2
+      block "테스트 실패 — 커밋 전에 고친다"
+    fi
+  fi
+fi
+
+exit $fail

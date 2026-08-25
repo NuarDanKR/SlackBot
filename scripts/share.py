@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from tybot.archive.store import SchemaError, load_doc, validate  # noqa: E402
+from tybot.archive.store import SchemaError, load_doc, validate
 
 VISIBILITY_RE = re.compile(r"^visibility:\s*\S+\s*$", re.MULTILINE)
 SHARE_WITH_RE = re.compile(r"^share_with:.*$", re.MULTILINE)

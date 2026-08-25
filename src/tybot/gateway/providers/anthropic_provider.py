@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Sequence
+from collections.abc import Sequence
 
 from ..base import LLMResponse, Message, ModelSpec
 

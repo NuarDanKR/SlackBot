@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ..lock import archive_write_lock
 from .store import RAW_HEADING_RE, SchemaError, validate
 
 KST = timezone(timedelta(hours=9))
@@ -97,7 +98,32 @@ def ingest(
     visibility: str = "private",
     acl: list[str] | None = None,
 ) -> IngestResult:
-    """원문 append. 형식 검사 실패 시 SchemaError 를 올리고 **아무것도 쓰지 않는다**(롤백)."""
+    """원문 append. 형식 검사 실패 시 SchemaError 를 올리고 **아무것도 쓰지 않는다**(롤백).
+
+    읽기-수정-쓰기 전체를 아카이브 쓰기 락 안에서 한다. 실시간 수집(`tybot.service`)과
+    정기 백필(`tybot-collect.timer`)은 별도 프로세스라, 락이 없으면 같은 파일에 동시에 append 해
+    라인이 섞이거나 `doc_count` 갱신이 유실될 수 있다.
+    """
+    with archive_write_lock(root):
+        return _ingest_locked(
+            root,
+            workspace=workspace,
+            channel=channel,
+            messages=messages,
+            visibility=visibility,
+            acl=acl,
+        )
+
+
+def _ingest_locked(
+    root: Path | str,
+    *,
+    workspace: str,
+    channel: str,
+    messages: list[IncomingMessage],
+    visibility: str,
+    acl: list[str] | None,
+) -> IngestResult:
     path = doc_path(root, workspace, channel)
     existing = path.read_text(encoding="utf-8") if path.exists() else None
     text = existing if existing is not None else _new_doc(workspace, channel, visibility, acl or [])

@@ -11,10 +11,10 @@ from pathlib import Path
 
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
-from .intent import DEFAULT_DAYS, Intent, classify, parse_period
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
+from .intent import DEFAULT_DAYS, Intent, classify, parse_period
 
 logger = logging.getLogger("tybot.answer")
 
@@ -119,7 +119,7 @@ class AnswerEngine:
         self._max_lines_per_channel = max_lines_per_channel
 
     @classmethod
-    def from_env(cls, archive_dir: str | Path, **kw) -> "AnswerEngine":
+    def from_env(cls, archive_dir: str | Path, **kw) -> AnswerEngine:
         import os
 
         from .config import cost_state_path

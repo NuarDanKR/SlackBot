@@ -22,11 +22,12 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .archive import writer
 from .archive.files import file_lines
 from .envfile import load_env_file
+from .lock import AlreadyRunning, LockUnavailable, instance_lock
 from .workspaces import load_workspaces
 
 log = logging.getLogger("tybot.collect")
@@ -36,7 +37,7 @@ PACE_SECONDS = 65  # 분당 1요청 제한 + 여유
 
 
 def _messages_from(client, event: dict, bot_token: str, name_cache: dict) -> list:
-    ts = datetime.fromtimestamp(float(event["ts"]), tz=timezone.utc)
+    ts = datetime.fromtimestamp(float(event["ts"]), tz=UTC)
     uid = event.get("user", "unknown")
     if uid not in name_cache:
         try:
@@ -136,6 +137,26 @@ def main() -> int:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     log.info("환경설정 출처: %s", load_env_file())
+
+    # 앞 회차가 아직 안 끝났는데 타이머가 다시 뜨면(채널이 많으면 회차가 길어진다)
+    # 같은 채널을 두 번 긁어 rate limit 만 소모한다. 봇 프로세스와는 다른 이름이라 서로 막지 않는다.
+    lock = instance_lock("collect")
+    try:
+        lock.acquire()
+    except AlreadyRunning as e:
+        log.warning("앞 회차 백필이 아직 실행 중입니다. 이번 회차는 건너뜁니다 — %s", e)
+        return 0
+    except LockUnavailable as e:
+        log.error("단일 실행 락을 만들 수 없어 백필을 멈춥니다 — %s", e)
+        return 1
+
+    try:
+        return _collect_all()
+    finally:
+        lock.release()
+
+
+def _collect_all() -> int:
     archive_dir = os.getenv("ARCHIVE_DIR", "./archive")
     pace = float(os.getenv("COLLECT_PACE_SECONDS", PACE_SECONDS))
 

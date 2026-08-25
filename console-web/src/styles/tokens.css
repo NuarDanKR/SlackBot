@@ -1,0 +1,258 @@
+/* TYBot 관리 콘솔 — 디자인 토큰
+ *
+ * ## 서체 (네이버 무료 한글 글꼴, CDN)
+ *   제목        나눔스퀘어 Neo      NanumSquareNeo
+ *   일반 UI     나눔스퀘어 라운드   NanumSquareRound
+ *   긴 본문     마루 부리           MaruBuri — 명조꼴이 필요한 설명문·문서 미리보기
+ *   수치·코드   IBM Plex Mono      숫자·커밋해시·경로·토큰 마스크에만
+ *
+ * ## 색
+ *   CI 컬러(#800020)는 **강조·포인트 전용**입니다. 브랜드 표식, 활성 메뉴,
+ *   주요 실행 버튼에만 씁니다. 상태 표시는 CI 색이 아니라 기능색으로 합니다.
+ *   그래야 화면에서 "지금 중요한 것"이 CI 색 하나로 잡힙니다.
+ *
+ *   상태색 역할
+ *     info   파랑   진행 중 · 데이터 계열
+ *     ok     초록   정상
+ *     warn   주황   주의 · 수집 공백
+ *     danger 빨강   실패 · 오류
+ */
+
+/* ===== 웹폰트 ===== */
+/* 제목용 — 나눔스퀘어 Neo (네이버 공식 배포, 나눔스퀘어의 현행 후속).
+ *
+ * 처음에는 jsDelivr 의 구 나눔스퀘어 woff2 를 직접 물렸는데, 그 파일에는 **한글 글리프가
+ * 없어서** 제목이 조용히 나눔스퀘어 라운드로 폴백됐습니다(파일 155KB, 한글 포함이면 380KB 이상).
+ * 네이버 공식 CDN 의 Neo 로 교체했습니다. */
+@font-face {
+  font-family: 'NanumSquareNeo';
+  src: url('https://hangeul.pstatic.net/hangeul_static/webfont/NanumSquareNeo/NanumSquareNeoTTF-bRg.woff2')
+    format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'NanumSquareNeo';
+  src: url('https://hangeul.pstatic.net/hangeul_static/webfont/NanumSquareNeo/NanumSquareNeoTTF-cBd.woff2')
+    format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'NanumSquareNeo';
+  src: url('https://hangeul.pstatic.net/hangeul_static/webfont/NanumSquareNeo/NanumSquareNeoTTF-dEb.woff2')
+    format('woff2');
+  font-weight: 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'NanumSquareRound';
+  src: url('https://hangeul.pstatic.net/hangeul_static/webfont/NanumSquareRound/NanumSquareRoundR.woff2')
+    format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'NanumSquareRound';
+  src: url('https://hangeul.pstatic.net/hangeul_static/webfont/NanumSquareRound/NanumSquareRoundB.woff2')
+    format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'MaruBuri';
+  src: url('https://hangeul.pstatic.net/hangeul_static/webfont/MaruBuri/MaruBuri-Regular.woff2')
+    format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'MaruBuri';
+  src: url('https://hangeul.pstatic.net/hangeul_static/webfont/MaruBuri/MaruBuri-SemiBold.woff2')
+    format('woff2');
+  font-weight: 600;
+  font-display: swap;
+}
+
+:root {
+  /* --- 지면 --- */
+  --bg: #f6f8fa;
+  --surface: #ffffff;
+  --sunk: #eef1f5;
+  --line: #e1e6ed;
+  --line-2: #cbd3de;
+
+  /* --- 글자 --- */
+  --text: #101828;
+  --text-2: #4a5566;
+  --text-3: #8b96a5;
+
+  /* --- CI (강조·포인트 전용) --- */
+  /* 채워진 면에는 언제나 CI 원색을 씁니다. 흰 글자와의 대비가 9.7:1 이라 다크에서도 그대로 둡니다. */
+  --brand-solid: #800020;
+  --brand-solid-hover: #66001a;
+  --brand: #800020;
+  --brand-hover: #66001a;
+  --brand-on: #ffffff;
+  --brand-soft: rgba(128, 0, 32, 0.07);
+  --brand-edge: rgba(128, 0, 32, 0.22);
+
+  /* --- 상태색 --- */
+  --info: #1d6ff2;
+  --info-soft: rgba(29, 111, 242, 0.1);
+  --ok: #067a5b;
+  --ok-soft: rgba(6, 122, 91, 0.1);
+  --warn: #b8620a;
+  --warn-soft: rgba(184, 98, 10, 0.11);
+  --danger: #cf2b3d;
+  --danger-soft: rgba(207, 43, 61, 0.1);
+
+  /* --- 데이터 계열 (수집량 농도) --- */
+  --data-1: #cfe0fb;
+  --data-2: #9dc0f6;
+  --data-3: #5b95ee;
+  --data-4: #1d6ff2;
+
+  /* --- 형태 --- */
+  --r-sm: 5px;
+  --r: 8px;
+  --r-lg: 12px;
+  --rail: 248px;
+  --shell-max: 1320px;
+
+  /* --- 서체 --- */
+  --font-display: 'NanumSquareNeo', 'NanumSquareRound', system-ui, sans-serif;
+  --font-body: 'NanumSquareRound', 'NanumSquareNeo', system-ui, -apple-system, sans-serif;
+  --font-serif: 'MaruBuri', 'Nanum Myeongjo', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'Courier New', monospace;
+
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow: 0 1px 3px rgba(16, 24, 40, 0.08), 0 12px 28px -14px rgba(16, 24, 40, 0.18);
+  --focus: #1d6ff2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #0b0f16;
+    --surface: #141a24;
+    --sunk: #0f151e;
+    --line: #222b38;
+    --line-2: #313d4d;
+
+    --text: #e8edf5;
+    --text-2: #9dabbd;
+    --text-3: #6a798c;
+
+    /* 3px 세로선이나 배지 글자처럼 **얇은 요소**는 어두운 지면에서 #800020 이 거의 검게
+       죽습니다. 그런 자리에만 같은 계열로 한 단 올려 씁니다. 채워진 면(--brand-solid)은
+       원색을 유지합니다. */
+    --brand: #cf3355;
+    --brand-hover: #c01a47;
+    --brand-soft: rgba(168, 21, 60, 0.18);
+    --brand-edge: rgba(168, 21, 60, 0.45);
+
+    --info: #64a3ff;
+    --info-soft: rgba(100, 163, 255, 0.14);
+    --ok: #3fbc95;
+    --ok-soft: rgba(63, 188, 149, 0.14);
+    --warn: #e0973f;
+    --warn-soft: rgba(224, 151, 63, 0.14);
+    --danger: #f4707f;
+    --danger-soft: rgba(244, 112, 127, 0.14);
+
+    --data-1: #1c3763;
+    --data-2: #2d5da8;
+    --data-3: #4a8ae0;
+    --data-4: #85b6f7;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 14px 32px -16px rgba(0, 0, 0, 0.75);
+    --focus: #64a3ff;
+  }
+}
+
+[data-theme='dark'] {
+  --bg: #0b0f16;
+  --surface: #141a24;
+  --sunk: #0f151e;
+  --line: #222b38;
+  --line-2: #313d4d;
+
+  --text: #e8edf5;
+  --text-2: #9dabbd;
+  --text-3: #6a798c;
+
+  --brand: #cf3355;
+  --brand-hover: #c01a47;
+  --brand-soft: rgba(168, 21, 60, 0.18);
+  --brand-edge: rgba(168, 21, 60, 0.45);
+
+  --info: #64a3ff;
+  --info-soft: rgba(100, 163, 255, 0.14);
+  --ok: #3fbc95;
+  --ok-soft: rgba(63, 188, 149, 0.14);
+  --warn: #e0973f;
+  --warn-soft: rgba(224, 151, 63, 0.14);
+  --danger: #f4707f;
+  --danger-soft: rgba(244, 112, 127, 0.14);
+
+  --data-1: #1c3763;
+  --data-2: #2d5da8;
+  --data-3: #4a8ae0;
+  --data-4: #85b6f7;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 14px 32px -16px rgba(0, 0, 0, 0.75);
+  --focus: #64a3ff;
+}
+
+/* ===== 리셋 ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+* {
+  margin: 0;
+}
+html {
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+button {
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+a {
+  color: var(--info);
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

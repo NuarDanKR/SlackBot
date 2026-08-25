@@ -77,6 +77,5 @@ def can_access(
     if visibility == "public":
         # 사람이 명시적으로 '워크스페이스 전체 공개'로 표시한 문서.
         return True
-    if acl and (ctx.workspace in acl or ctx.channels & acl):
-        return True
-    return False
+    # 채널 멤버십(또는 워크스페이스 단위 acl 항목)이 겹칠 때만 허용한다.
+    return bool(acl and (ctx.workspace in acl or ctx.channels & acl))

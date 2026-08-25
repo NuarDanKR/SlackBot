@@ -23,7 +23,7 @@ CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
 
 KINDS = (
     "status", "help", "summary", "search", "advice", "smalltalk", "out_of_scope",
-    "ingest", "ingest_all",
+    "ingest", "ingest_all", "memory",
 )
 
 CLASSIFIER_PROMPT = """너는 사내 Slack 아카이브 봇의 **라우터**다. 질문에 답하지 말고 분류만 한다.
@@ -35,6 +35,10 @@ kind 를 하나 고른다:
   (예: "수집해", "내용 수집해", "이 채널 취합해줘", "대화 모아줘", "긁어와")
 - ingest_all: **모든 채널**을 수집하라는 지시 (예: "전체 수집해", "모든 채널 수집", "다 모아줘")
   주의: "몇 건 수집했어?"처럼 **현황을 묻는** 것은 status 다. 수집을 **실행**하라는 것만 ingest 다.
+- memory: **봇이 이전 대화·답변을 기억하는지** 묻는 질문
+  (예: "이전에 네가 했던 답변 기억나?", "아까 뭐라고 했지?", "우리 대화 기억해?",
+   "맥락 유지돼?", "내가 전에 물어본 거 알아?")
+  주의: 봇의 연결·가동 상태(status)와 다르다. '기억·이전 답변·대화 맥락'을 묻는 것만 memory 다.
 - help: **봇 자신의** 사용법·명령어·기능을 묻는 질문 (예: "뭘 할 수 있어?", "명령어 알려줘")
   주의: 업무 방식에 대한 조언 요청은 help 가 아니라 advice 다
 - summary: 특정 키워드가 아니라 **범위 전체의 내용·진행 상황**을 알고 싶은 질문
@@ -67,6 +71,15 @@ STATUS_RE = re.compile(
     r"(수집|취합)\s*(현황|상태|건수|얼마나|몇)|몇\s*건|수집(했|됐|된)|취합(했|됐|된))"
 )
 HELP_RE = re.compile(r"(도움말|사용법|명령어|뭘\s*할\s*수|어떻게\s*써|\bhelp\b)")
+# 봇의 '기억'을 묻는 질문. STATUS_RE 보다 먼저 검사한다 —
+# "이전에 네가 했던 답변" 류가 '(너) ... 상태' 패턴에 걸려 status 로 새는 일이 있었다.
+MEMORY_RE = re.compile(
+    r"(기억(나|해|하|되|할|은|을|이)|까먹|잊었|"
+    r"이전\s*(에)?\s*(한|했던|말한|답변|대화)|아까\s*(뭐|한|했던|말)|방금\s*(뭐|한|말)|"
+    r"previous\s*(answer|reply)|"
+    r"(대화|답변|맥락|컨텍스트|context)\s*(를|을|이)?\s*(유지|기억|저장|남|알)|"
+    r"세션\s*(유지|기억))"
+)
 # 수집 '지시'만 잡는다. "몇 건 수집했어?"(현황 질문)는 STATUS_RE 가 먼저 잡도록 순서를 둔다.
 INGEST_ALL_RE = re.compile(
     r"((전체|모든|전부|다)\s*(채널\s*)?(수집|취합)|(수집|취합)\s*(전체|모두)|ingest\s*all)"
@@ -123,6 +136,8 @@ def parse_period(text: str, *, default: int = DEFAULT_DAYS) -> int:
 
 def classify_by_rule(text: str) -> Intent:
     """LLM 없이 판단. 분류기 장애 시 폴백 경로."""
+    if MEMORY_RE.search(text):
+        return Intent("memory", source="regex")
     if STATUS_RE.search(text):
         return Intent("status", source="regex")
     if INGEST_ALL_RE.search(text):

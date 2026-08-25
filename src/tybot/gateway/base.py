@@ -1,12 +1,13 @@
 """게이트웨이 공통 타입 및 프로바이더 프로토콜."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 
-class Sensitivity(str, Enum):
+class Sensitivity(str, Enum):  # noqa: UP042 - StrEnum 은 3.11+ 이지만 기존 직렬화 호환 유지
     """데이터 민감도. 민감도별로 허용 프로바이더를 제한한다."""
 
     PUBLIC = "public"

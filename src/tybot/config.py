@@ -28,7 +28,7 @@ class Settings:
     archive_pull_interval_min: int
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         return cls(
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN"),
             slack_app_token=os.getenv("SLACK_APP_TOKEN"),

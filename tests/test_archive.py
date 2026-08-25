@@ -1,7 +1,7 @@
 """아카이브 스키마/검색/수집 — 절대 원칙이 코드로 지켜지는지 검증."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -77,7 +77,7 @@ def test_cross_workspace_blocked(tmp_path):
 
 def _msg(text, speaker="홍길동", is_bot=False, minute=15):
     return writer.IncomingMessage(
-        ts=datetime(2026, 8, 12, 0, minute, tzinfo=timezone.utc),
+        ts=datetime(2026, 8, 12, 0, minute, tzinfo=UTC),
         speaker=speaker,
         text=text,
         is_bot=is_bot,

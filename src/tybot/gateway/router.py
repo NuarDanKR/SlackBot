@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from collections.abc import Sequence
 
 from .base import LLMResponse, Message, ModelSpec, Provider, Sensitivity
 from .cost import CostGuard
@@ -66,7 +66,7 @@ class Router:
         default_model: str = "claude-sonnet-5",
         providers: dict[str, Provider] | None = None,
         cost_state_path: str | None = None,
-    ) -> "Router":
+    ) -> Router:
         """기본 레지스트리로 라우터 생성.
 
         providers 를 주지 않으면 실 프로바이더를 lazy import 한다(SDK 필요).

@@ -35,10 +35,15 @@
 ## MD 아카이브 스키마
 파일별 프론트매터 필수 — `md-archive-schema` 스킬 참조. 원문 블록은 절대 편집 금지.
 
+## 백로그 · 인계
+다음 작업은 [`BACKLOG.md`](BACKLOG.md) 에서 고른다. 착수 시 상태를 `진행중` 으로 바꿔 커밋해
+다른 세션·에이전트와 중복되지 않게 한다. "하지 않기로 한 것" 목록도 그 파일에 있다.
+
 ## 개발 워크플로
 - **Claude Code + Codex** 병행. 커밋 메시지/PR은 사람이 검토 후.
 - 언어: Python (봇/파이프라인), LLM 게이트웨이는 프로바이더 추상화(LiteLLM 등 검토).
-- 테스트: `pytest`. 포맷: `ruff`.
+- 테스트: `pytest`(154). 린트: `ruff check src tests scripts`(0건 유지, 규칙은 pyproject 에 고정).
+- 커밋 가드: `git config core.hooksPath .githooks` — 도구와 무관하게 시크릿·PII·원문 커밋을 차단.
 - 절대 하지 말 것: 봇 프로세스 2곳에서 동시 기동(중복 답변·비용 2배), 중앙 저장소 force push.
 
 ## 하위 에이전트 / 스킬 (이 저장소 `.claude/`)

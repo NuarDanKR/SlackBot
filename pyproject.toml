@@ -18,10 +18,33 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+# 관리 콘솔 백엔드. 봇만 돌릴 때는 설치하지 않아도 된다.
+console = ["fastapi>=0.115", "uvicorn>=0.30", "psycopg[binary]>=3.2"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+# 규칙 집합을 명시 고정한다. ruff 버전이 올라가면 기본 규칙이 바뀌어
+# "어제는 통과했는데 오늘은 61건" 같은 상황이 생기고, 인계받는 사람이 그걸 진단해야 한다.
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "BLE"]
+ignore = [
+    "E501",    # 줄 길이는 formatter 가 처리. 한글 주석에서 오탐이 많다
+    "RUF001",  # 전각 문자(·, —) 사용은 의도적이다
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 테스트는 픽스처 구성상 지역 import·긴 리터럴이 잦다
+"tests/*" = ["BLE001", "B017", "SIM117"]
+# 아래 모듈은 "실패해도 봇은 계속 살아 있어야 한다"가 설계 결정이다.
+# Slack API·첨부 처리·분류 호출이 하나 실패했다고 프로세스가 죽으면 워크스페이스 전체가 멈춘다.
+# 넓은 except 는 의도이며, 각 지점에 이유 주석이 붙어 있다.
+"src/tybot/slack/pilot.py" = ["BLE001"]
+"src/tybot/collect.py" = ["BLE001"]
+"src/tybot/intent.py" = ["BLE001"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

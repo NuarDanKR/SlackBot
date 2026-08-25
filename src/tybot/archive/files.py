@@ -50,7 +50,7 @@ class SlackFile:
     mimetype: str = ""
 
     @classmethod
-    def from_event(cls, f: dict) -> "SlackFile":
+    def from_event(cls, f: dict) -> SlackFile:
         return cls(
             id=str(f.get("id", "")),
             name=str(f.get("name") or f.get("title") or f.get("id") or "unnamed"),
@@ -81,7 +81,7 @@ def download_bytes(f: SlackFile, bot_token: str, limit: int) -> bytes:
     if not f.url_private_download:
         raise DownloadError(f"{f.name}: 다운로드 URL 없음")
     req = Request(f.url_private_download, headers={"Authorization": f"Bearer {bot_token}"})
-    with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:  # noqa: S310 - Slack 고정 도메인
+    with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:
         raw = resp.read(limit + 1)
     if raw[:15].lstrip().lower().startswith(b"<!doctype html"):
         raise DownloadError(f"{f.name}: 로그인 페이지가 내려왔다 - files:read 스코프 확인")
@@ -93,7 +93,7 @@ def download_text(f: SlackFile, bot_token: str) -> str:
     if not f.url_private_download:
         raise DownloadError(f"{f.name}: 다운로드 URL 없음")
     req = Request(f.url_private_download, headers={"Authorization": f"Bearer {bot_token}"})
-    with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:  # noqa: S310 - Slack 고정 도메인
+    with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         raw = resp.read(MAX_TEXT_BYTES + 1)
     # files:read 누락 시 Slack 은 로그인 페이지를 200 으로 돌려준다.
@@ -145,7 +145,7 @@ def file_lines(files: list[dict], bot_token: str | None) -> tuple[list[str], lis
             warnings.append(f"{f.name}: {e}")
             logger.warning("첨부 처리 실패 %s: %s", f.name, e)
             continue
-        except Exception as e:  # noqa: BLE001 - 첨부 하나가 수집 전체를 막지 않는다
+        except Exception as e:
             lines.append(f.describe("미변환"))
             warnings.append(f"{f.name}: 예상치 못한 오류 {e.__class__.__name__}: {e}")
             logger.exception("첨부 처리 중 예외 %s", f.name)

@@ -52,7 +52,7 @@ def _clip(s: object) -> str:
 
 def _finish(lines: list[str]) -> list[str]:
     if len(lines) > MAX_LINES:
-        lines = lines[:MAX_LINES] + [f"…(이하 생략, 총 {len(lines)}줄)"]
+        lines = [*lines[:MAX_LINES], f"…(이하 생략, 총 {len(lines)}줄)"]
     return [ln for ln in lines if ln.strip()]
 
 

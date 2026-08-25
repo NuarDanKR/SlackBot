@@ -3,6 +3,7 @@
 태영건설 Slack AI TFT — 워크스페이스별 봇이 대화를 수집해 **MD 아카이브**로 자산화하고,
 **권한이 허용된 원문만 근거로** 답한다. 근거가 없으면 추측하지 않는다.
 
+- **백로그·인계**: [`BACKLOG.md`](BACKLOG.md) — 다음에 무엇을 할지, 무엇을 하지 않기로 했는지
 - 설계 원칙·컨벤션: [`CLAUDE.md`](CLAUDE.md), [`AGENTS.md`](AGENTS.md)
 - **파일럿 런북(여기부터)**: [`docs/pilot/README.md`](docs/pilot/README.md)
 - 서버 배치(Rocky Linux 8): [`docs/deploy/rocky8.md`](docs/deploy/rocky8.md)
@@ -12,6 +13,7 @@
   - 인프라·보안 담당자 요청서: [`docs/deploy/infra-request-snapshot-push.md`](docs/deploy/infra-request-snapshot-push.md)
 - 사용자 식별·그룹웨어 인증 검토: [`docs/design/identity-and-legacy-login.md`](docs/design/identity-and-legacy-login.md)
 - DB 선택·조직 권한 설계: [`docs/design/db-and-acl.md`](docs/design/db-and-acl.md) · [PG vs MariaDB](docs/design/postgres-vs-mariadb.md)
+- **관리 콘솔(현황·수집 문서 열람·사용량·규칙 편집·배포 승인)**: [`docs/design/console.md`](docs/design/console.md) · 프론트엔드 [`console-web/`](console-web/)
 - 전체 아키텍처(기획): [`docs/architecture.md`](docs/architecture.md)
 
 ---

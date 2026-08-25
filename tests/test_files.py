@@ -78,7 +78,7 @@ def test_document_is_converted_and_tagged():
         lines, warns = file_lines([_f("원가.xlsx", "xlsx")], "xoxb-t")
     assert warns == []
     assert "[첨부:변환]" in lines[0]
-    assert any("[첨부추출:원가.xlsx] [시트] 기성" == ln for ln in lines)
+    assert any(ln == "[첨부추출:원가.xlsx] [시트] 기성" for ln in lines)
     assert any("김해외동 기성금 | 3억 2천만원" in ln for ln in lines)
 
 
@@ -125,4 +125,4 @@ def test_one_bad_attachment_does_not_block_others():
     with patch("tybot.archive.files.urlopen", side_effect=side_effect):
         lines, warns = file_lines([bad, good], "xoxb-t")
     assert len(warns) == 1
-    assert any("[첨부본문:좋음.txt] ok line" == ln for ln in lines)
+    assert any(ln == "[첨부본문:좋음.txt] ok line" for ln in lines)

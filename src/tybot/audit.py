@@ -56,7 +56,7 @@ class QARecord:
     answer: str = ""
 
     @classmethod
-    def build(cls, **kw) -> "QARecord":
+    def build(cls, **kw) -> QARecord:
         kw["ts"] = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
         kw["question"] = _clip(kw.get("question"))
         kw["answer"] = _clip(kw.get("answer"))
@@ -95,6 +95,40 @@ class QALog:
                 self._append_md(rec)
         except Exception as e:  # noqa: BLE001 - 감사 실패로 봇을 죽이지 않는다
             logger.error("감사 기록 실패: %s", e)
+
+    def recent_for_user(
+        self, workspace: str, slack_user: str, *, days: int = 7, limit: int = 5
+    ) -> list[tuple[str, str]]:
+        """**요청자 본인의** 최근 질문만 (시각, 질문) 으로 돌려준다.
+
+        남의 질문은 절대 섞지 않는다 - 감사 기록이 열람 우회 경로가 되면 안 된다.
+        답변 생성에는 쓰이지 않는다. 화면에 보여주기 위한 것이다(원칙 1: 요약 재귀 금지).
+        """
+        import datetime as _dt
+
+        if not slack_user:
+            return []
+        cutoff = (_dt.datetime.now(KST) - _dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+        out: list[tuple[str, str]] = []
+        try:
+            months = sorted(self.root.glob("qa-*.jsonl"), reverse=True)[:2]
+            for path in months:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("workspace") != workspace or row.get("user") != slack_user:
+                        continue
+                    ts = str(row.get("ts", ""))
+                    if ts[:19] < cutoff:
+                        continue
+                    out.append((ts, str(row.get("question", ""))))
+        except OSError as e:
+            logger.warning("감사 기록 조회 실패: %s", e)
+            return []
+        out.sort(reverse=True)
+        return out[:limit]
 
     def _append_md(self, rec: QARecord) -> None:
         path = self._md_path(rec.ts)

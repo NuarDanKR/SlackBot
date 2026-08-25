@@ -14,23 +14,26 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import pathlib
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+from .. import heartbeat
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
-from ..audit import QALog, QARecord
-from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..archive import writer
 from ..archive.files import file_lines
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
+from ..audit import QALog, QARecord
 from ..config import cost_state_path
+from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
+from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..workspaces import WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
@@ -38,6 +41,8 @@ log = logging.getLogger("tybot.slack")
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
 HISTORY_LIMIT = 15  # 신규 앱 conversations.history / replies 요청당 상한
 THREAD_FETCH_LIMIT = 5  # 한 번의 수집에서 답글까지 받아올 스레드 수(rate limit 고려)
+# 상태 파일 갱신 주기. heartbeat.STALE_AFTER_SECONDS(180초)보다 짧아야 한다.
+HEARTBEAT_SECONDS = 60
 
 
 def _clean(text: str) -> str:
@@ -108,7 +113,7 @@ class WorkspaceBot:
         self.store = store
         self.engine = engine
         self.qa_log = qa_log
-        self._started = datetime.now(timezone.utc)
+        self._started = datetime.now(UTC)
         self._last_ingest_at: datetime | None = None
         self._ingested = 0
         self._user_cache: dict[str, str] = {}
@@ -193,10 +198,9 @@ class WorkspaceBot:
         )
         started = time.monotonic()
 
-        try:
+        # 👀 표시는 부가 기능이다. 실패해도 답변은 계속한다.
+        with contextlib.suppress(Exception):
             client.reactions_add(channel=channel_id, timestamp=event["ts"], name="eyes")
-        except Exception:
-            pass
 
         def finish(reply: str, *, intent: Intent, ans: Answer | None, ctx: RequestContext | None):
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
@@ -251,6 +255,9 @@ class WorkspaceBot:
         if intent.kind == "help":
             finish(self._help(), intent=intent, ans=None, ctx=None)
             return
+        if intent.kind == "memory":
+            finish(self._memory(user_id), intent=intent, ans=None, ctx=None)
+            return
 
         ctx = self._context(client, user_id)
         ans = self.engine.respond(text, ctx, intent)
@@ -262,7 +269,7 @@ class WorkspaceBot:
 
         첨부는 텍스트 형식만 본문을 넣고, 나머지는 목록만 남긴다(files.py 참조).
         """
-        ts = datetime.fromtimestamp(float(event["ts"]), tz=timezone.utc)
+        ts = datetime.fromtimestamp(float(event["ts"]), tz=UTC)
         speaker = self._user_name(client, event.get("user", "unknown"))
         out = []
         body = (event.get("text") or "").strip()
@@ -295,7 +302,7 @@ class WorkspaceBot:
             return
         if r.written:
             self._ingested += r.written
-            self._last_ingest_at = datetime.now(timezone.utc)
+            self._last_ingest_at = datetime.now(UTC)
         if r.refused:
             log.warning("제외 대상으로 미저장 ch=%s 사유=%s", channel, r.refused[0][1])
 
@@ -415,6 +422,29 @@ class WorkspaceBot:
         )
         return "\n".join(lines)
 
+    def _memory(self, user_id: str) -> str:
+        """"이전 답변 기억나?" — 설계상 기억하지 않는다는 것을 그대로 말한다.
+
+        매번 아카이브 원문에서 처음부터 찾는 것이 요약 재귀를 막는 장치다(원칙 1).
+        대신 감사 기록에 남은 **본인 질문**은 보여준다.
+        """
+        lines = [
+            "*이전 답변을 기억하지 않습니다.* 질문마다 아카이브 원문에서 처음부터 찾습니다.",
+            "",
+            "그렇게 만든 이유:",
+            "• 제 답변을 다시 근거로 쓰면 틀린 내용이 사실처럼 굳습니다(요약 재귀).",
+            "• 근거는 사람이 쓴 원문뿐이어야 출처를 붙이고 검증할 수 있습니다.",
+            "",
+            "다만 스레드 안에서 이어 물으시면 그 스레드에 답합니다. "
+            "이전 답변 내용을 근거로 삼지는 않습니다.",
+        ]
+        recent = self.qa_log.recent_for_user(self.workspace, user_id)
+        if recent:
+            lines += ["", "*참고 — 감사 기록에 남은 회원님의 최근 질문*"]
+            lines += [f"• {ts[5:16].replace('T', ' ')}  {q}" for ts, q in recent]
+            lines.append("(기록용이며 답변 생성에는 쓰이지 않습니다. 본인 질문만 표시됩니다.)")
+        return "\n".join(lines)
+
     def _help(self) -> str:
         return "\n".join(
             [
@@ -424,6 +454,7 @@ class WorkspaceBot:
                 "• `어느 방향이 나을까?` 같은 판단·권고 요청 — 원문이 있으면 근거로, 없으면 일반 판단으로 답합니다",
                 "• `수집` — 이 채널 과거 대화 백필 / `전체수집` — 전 채널",
                 "• `상태` — 연결·수집 상태 / `도움말` — 이 안내",
+                "• `이전 답변 기억나?` — 기억 여부와 그 이유(매번 원문에서 다시 찾습니다)",
                 "• `--model=claude-opus-4-8 질문` — 모델 지정",
                 "*사실*은 아카이브 원문만 근거로 답합니다. 근거가 없으면 추측하지 않습니다.",
             ]
@@ -433,7 +464,7 @@ class WorkspaceBot:
         """봇 자체 상태 — 아카이브 질의가 아니므로 LLM 을 호출하지 않는다(비용 0)."""
         docs = self.store.docs()
         broken = self.store.broken()
-        up = datetime.now(timezone.utc) - self._started
+        up = datetime.now(UTC) - self._started
         hours, rem = divmod(int(up.total_seconds()), 3600)
         conn = "Socket Mode 연결됨"
         who = ""
@@ -489,6 +520,43 @@ class WorkspaceBot:
             self.realtime,
             sorted(self.cfg.readable) or "없음",
         )
+        self.publish_status(connected=True)
+
+    def publish_status(self, *, connected: bool) -> None:
+        """관리 콘솔이 읽을 상태 파일을 남긴다.
+
+        연결 상태·채널 수처럼 **Slack 만 아는 것**은 봇이 적어 둔다. 콘솔이 직접 Slack 을
+        호출하면 콘솔에도 토큰이 필요해지고 rate limit 을 나눠 쓰게 된다.
+        """
+        channels = uninvited = 0
+        try:
+            client = self.app.client
+            res = client.conversations_list(
+                types="public_channel,private_channel", exclude_archived=True, limit=1000
+            )
+            found = res.get("channels", [])
+            channels = sum(1 for c in found if c.get("is_member"))
+            uninvited = len(found) - channels
+        except Exception as e:
+            log.debug("채널 수를 세지 못했습니다(상태 파일): %s", e)
+
+        heartbeat.write(
+            heartbeat.BotStatus(
+                workspace=self.workspace,
+                connected=connected,
+                realtime=self.realtime,
+                channels=channels,
+                uninvited_channels=uninvited,
+                spend_today_usd=round(self.engine.spent_today(), 6),
+                limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
+                started_at=self._started.astimezone(KST).isoformat(timespec="seconds"),
+                updated_at=heartbeat.now_iso(),
+                write_problem="; ".join(
+                    f"{label}: {why}" for label, why in self.path_problems.items()
+                )
+                or None,
+            )
+        )
 
 
 def check_paths(archive_dir: str, qa_dir: str) -> dict[str, str]:
@@ -539,7 +607,7 @@ def build_bots() -> list[WorkspaceBot]:
     return bots
 
 
-def main() -> None:
+def main() -> int:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -549,13 +617,39 @@ def main() -> None:
 
     log.info("환경설정 출처: %s", load_env_file())
 
-    bots = build_bots()
-    for bot in bots:
-        bot.connect()
-    log.info("기동 완료 — 워크스페이스 %d개: %s", len(bots), [b.workspace for b in bots])
-    # 연결은 백그라운드 스레드가 유지한다. 메인 스레드는 종료 신호를 기다린다.
-    threading.Event().wait()
+    # 봇이 두 곳에서 뜨면 같은 질문에 두 번 답하고 LLM 비용이 두 배가 된다.
+    # Slack 에 연결하기 **전에** 막는다 — 연결한 뒤에 알면 이미 중복 응답이 나간다.
+    lock = instance_lock("bot")
+    try:
+        lock.acquire()
+    except AlreadyRunning as e:
+        log.error(
+            "봇이 이미 실행 중입니다. 이 프로세스는 종료합니다. %s "
+            "이미 뜬 프로세스를 끄려면: systemctl stop tybot",
+            e,
+        )
+        return 1
+    except LockUnavailable as e:
+        log.error("단일 실행 락을 만들 수 없어 기동을 멈춥니다 — %s", e)
+        return 1
+
+    try:
+        bots = build_bots()
+        for bot in bots:
+            bot.connect()
+        log.info("기동 완료 — 워크스페이스 %d개: %s", len(bots), [b.workspace for b in bots])
+
+        # 연결은 백그라운드 스레드가 유지한다. 메인 스레드는 종료 신호를 기다리면서
+        # 주기적으로 상태 파일을 갱신한다. 갱신이 멈추면 콘솔이 '상태 모름'으로 표시하므로,
+        # 봇이 죽었는데 화면만 멀쩡해 보이는 상황이 생기지 않는다.
+        stop = threading.Event()
+        while not stop.wait(HEARTBEAT_SECONDS):
+            for bot in bots:
+                bot.publish_status(connected=True)
+    finally:
+        lock.release()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
