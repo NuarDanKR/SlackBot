@@ -12,15 +12,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tybot.console import app as console_app
-from tybot.console.auth import Authenticator
+from tybot.console.auth import Authenticator, hash_password
 
 KST = timezone(timedelta(hours=9))
 
-OWNER_TOKEN = "owner-token"
-MEMBER_TOKEN = "member-token"
-USERS = (
-    f"{OWNER_TOKEN}:dan@taeyoung.com:owner:*, "
-    f"{MEMBER_TOKEN}:sh.kim@taeyoung.com:member:fin"
+OWNER_PW = "owner-pass"
+MEMBER_PW = "member-pass"
+# 아이디:비밀번호해시:이메일:역할[:워크스페이스]
+ACCOUNTS = (
+    f"dan:{hash_password(OWNER_PW)}:dan@taeyoung.com:owner:*, "
+    f"sukhyun:{hash_password(MEMBER_PW)}:sh.kim@taeyoung.com:member:fin"
 )
 
 DOC_FIN = """---
@@ -137,9 +138,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
     console_app.reset_state()
-    console_app.app.dependency_overrides[console_app.authenticator] = lambda: Authenticator(
-        mode="token", users_spec=USERS
-    )
+    auth = Authenticator(accounts_spec=ACCOUNTS, secret="test-secret")
+    console_app.app.dependency_overrides[console_app.authenticator] = lambda: auth
     yield tmp_path
     console_app.app.dependency_overrides.clear()
     console_app.reset_state()
@@ -150,24 +150,69 @@ def client(env):
     return TestClient(console_app.app)
 
 
+def _login(client, username: str, password: str) -> dict:
+    """로그인하고 세션 쿠키를 헤더로 돌려준다.
+
+    TestClient 는 쿠키를 자동으로 들고 다니지만, 테스트마다 어느 계정으로 보내는지
+    분명히 보이도록 헤더를 직접 만든다.
+    """
+    r = client.post("/api/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    cookie = r.cookies.get("tybot_console")
+    assert cookie
+    client.cookies.clear()  # 다음 호출이 자동 쿠키에 기대지 않게 한다
+    return {"Cookie": f"tybot_console={cookie}"}
+
+
 def owner(client):
-    return {"Authorization": f"Bearer {OWNER_TOKEN}"}
+    return _login(client, "dan", OWNER_PW)
 
 
 def member(client):
-    return {"Authorization": f"Bearer {MEMBER_TOKEN}"}
+    return _login(client, "sukhyun", MEMBER_PW)
 
 
 # --- 인증 -----------------------------------------------------------------
 
-def test_no_token_is_rejected(client):
+def test_without_login_is_rejected(client):
     assert client.get("/api/status").status_code == 401
 
 
-def test_wrong_token_is_rejected(client):
-    r = client.get("/api/status", headers={"Authorization": "Bearer nope"})
+def test_tampered_session_is_rejected(client):
+    """서명이 맞지 않는 쿠키는 거절한다 — 값을 지어내 관리자가 될 수 없어야 한다."""
+    r = client.get("/api/status", headers={"Cookie": "tybot_console=ZGFu.aaaa"})
     assert r.status_code == 401
-    assert "등록되지 않은" in r.json()["detail"]
+    assert "서명" in r.json()["detail"] or "올바르지 않" in r.json()["detail"]
+
+
+def test_wrong_password_is_rejected(client):
+    r = client.post("/api/login", json={"username": "dan", "password": "틀린비번"})
+    assert r.status_code == 401
+    # 아이디가 있는지 없는지 알려 주지 않는다
+    assert r.json()["detail"] == "아이디 또는 비밀번호가 맞지 않습니다."
+
+
+def test_unknown_user_gives_same_message(client):
+    r = client.post("/api/login", json={"username": "없는사람", "password": "아무거나"})
+    assert r.status_code == 401
+    assert r.json()["detail"] == "아이디 또는 비밀번호가 맞지 않습니다."
+
+
+def test_login_sets_httponly_cookie(client):
+    r = client.post("/api/login", json={"username": "dan", "password": OWNER_PW})
+    assert r.status_code == 200
+    raw = r.headers["set-cookie"]
+    assert "HttpOnly" in raw  # 화면 스크립트가 읽지 못하게
+    assert "SameSite=strict" in raw  # 다른 사이트에서 요청을 보낼 수 없게
+
+
+def test_logout_clears_session(client):
+    headers = owner(client)
+    assert client.get("/api/me", headers=headers).status_code == 200
+    client.post("/api/logout")
+    # 쿠키를 지웠으므로 자동 쿠키로는 더 이상 들어갈 수 없다
+    client.cookies.clear()
+    assert client.get("/api/me").status_code == 401
 
 
 def test_health_needs_no_token(client):
@@ -185,7 +230,7 @@ def test_me_reports_role(client):
 
 def test_proxy_mode_uses_forwarded_email(env):
     console_app.app.dependency_overrides[console_app.authenticator] = lambda: Authenticator(
-        mode="proxy", users_spec=USERS
+        mode="proxy", accounts_spec=ACCOUNTS, secret="test-secret"
     )
     c = TestClient(console_app.app)
     r = c.get("/api/me", headers={"X-Forwarded-Email": "dan@taeyoung.com"})
@@ -424,3 +469,57 @@ def test_harness_files_are_listed(client):
 def test_harness_is_scoped_for_member(client):
     files = client.get("/api/harness", headers=member(client)).json()["files"]
     assert {f["workspace"] for f in files} == {"fin"}
+
+
+# --- 임시 기본 계정 ---------------------------------------------------------
+
+def test_default_account_opens_when_unconfigured():
+    """`CONSOLE_ACCOUNTS` 가 없으면 임시 계정 admin/1111 로 들어갈 수 있다.
+
+    파일럿에서 화면을 보기 위한 편의값이다. 운영에서 이 상태로 두면 VPN 에 들어온 누구나
+    관리자가 되므로, 아래 테스트가 '기본값이 쓰이고 있다'는 표시가 함께 나오는지 확인한다.
+    """
+    auth = Authenticator(accounts_spec="", secret="test-secret")
+    assert auth.using_default is True
+    session = auth.login("admin", "1111")
+    user = auth.verify(session)
+    assert user.role == "owner"
+    assert user.all_workspaces is True
+
+
+def test_default_account_is_replaced_by_config():
+    auth = Authenticator(accounts_spec=ACCOUNTS, secret="test-secret")
+    assert auth.using_default is False
+    with pytest.raises(Exception):
+        auth.login("admin", "1111")
+
+
+def test_me_flags_default_account(monkeypatch):
+    """화면이 경고를 띄울 수 있게 `/api/me` 가 기본 계정 사용 여부를 알려 준다."""
+    monkeypatch.delenv("CONSOLE_ACCOUNTS", raising=False)
+    console_app.reset_state()
+    console_app.app.dependency_overrides.clear()
+    c = TestClient(console_app.app)
+    r = c.post("/api/login", json={"username": "admin", "password": "1111"})
+    assert r.status_code == 200
+    assert r.json()["usingDefaultAccount"] is True
+    console_app.reset_state()
+
+
+def test_session_expires(monkeypatch):
+    """만료된 세션은 거절한다."""
+    import time as _time
+
+    auth = Authenticator(accounts_spec=ACCOUNTS, secret="test-secret")
+    session = auth.issue("dan", now=_time.time() - 13 * 3600)  # 12시간 유효, 13시간 전 발급
+    with pytest.raises(Exception) as err:
+        auth.verify(session)
+    assert "만료" in str(err.value)
+
+
+def test_session_from_other_secret_is_rejected():
+    """다른 키로 서명한 세션은 통하지 않는다."""
+    mine = Authenticator(accounts_spec=ACCOUNTS, secret="secret-a")
+    theirs = Authenticator(accounts_spec=ACCOUNTS, secret="secret-b")
+    with pytest.raises(Exception):
+        mine.verify(theirs.issue("dan"))

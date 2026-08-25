@@ -27,7 +27,7 @@ fi
 
 echo "== 2/6 계정·디렉터리 =="
 id tybot &>/dev/null || useradd -r -d "$DATA_DIR" -s /sbin/nologin tybot
-mkdir -p "$APP_DIR" "$CONF_DIR" "$DATA_DIR/archive" "$DATA_DIR/cache" "$DATA_DIR/qa-log"
+mkdir -p "$APP_DIR" "$CONF_DIR" "$DATA_DIR"/{archive,cache,qa-log,reports}
 chown -R tybot:tybot "$DATA_DIR"
 chmod 750 "$DATA_DIR"
 
@@ -69,14 +69,16 @@ if [[ ! -f "$CONF_DIR/tybot.env" ]]; then
   install -m 0640 -o root -g tybot "$APP_DIR/.env.example" "$CONF_DIR/tybot.env"
   sed -i 's|^ARCHIVE_DIR=.*|ARCHIVE_DIR=/var/lib/tybot/archive|' "$CONF_DIR/tybot.env"
   sed -i 's|^QA_LOG_DIR=.*|QA_LOG_DIR=/var/lib/tybot/qa-log|' "$CONF_DIR/tybot.env"
+  sed -i 's|^REPORTS_DIR=.*|REPORTS_DIR=/var/lib/tybot/reports|' "$CONF_DIR/tybot.env"
   echo "  → $CONF_DIR/tybot.env 생성됨. 토큰·키를 직접 입력하세요(REPLACE_ME)."
 else
   echo "  → $CONF_DIR/tybot.env 이미 존재 — 건드리지 않음."
 fi
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
-# 타이머(자동배포·정기백필)는 파일만 배치한다. enable 은 운영자가 결정한다.
-for u in tybot-update.service tybot-update.timer tybot-collect.service tybot-collect.timer; do
-  install -m 0644 "$APP_DIR/deploy/$u" "/etc/systemd/system/$u"
+# 타이머(자동배포·정기백필·점검)는 파일만 배치한다. enable 은 운영자가 결정한다.
+for u in tybot-update tybot-collect tybot-tidy; do
+  install -m 0644 "$APP_DIR/deploy/$u.service" "/etc/systemd/system/$u.service"
+  install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"
 done
 systemctl daemon-reload
 

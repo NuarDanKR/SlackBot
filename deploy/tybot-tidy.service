@@ -1,0 +1,26 @@
+[Unit]
+Description=TYBot 아카이브 점검 (스키마 위반·수집 밀림 탐지)
+Documentation=file:///opt/tybot/docs/deploy/rocky8.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.tidy
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-tidy
+TimeoutStartSec=300
+
+# 점검은 읽기 전용이다. 리포트 경로만 쓰기를 허용한다.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tybot/reports
+ReadOnlyPaths=/var/lib/tybot/archive

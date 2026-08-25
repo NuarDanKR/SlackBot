@@ -258,6 +258,41 @@ sudo jq -r 'select(.reason=="no_hits")|.question' /var/lib/tybot/qa-log/qa-$(dat
 
 ---
 
+## 7-A2. 아카이브 점검 타이머 (권장)
+
+아카이브는 **조용히 고장난다.** 스키마가 깨져 검색에서 통째로 빠지거나, 채널 하나만 며칠째
+멈춰 있어도 사람이 `상태` 를 물어야 드러난다. 15분마다 점검해서 로그와 리포트로 남긴다.
+
+```bash
+sudo systemctl enable --now tybot-tidy.timer
+systemctl list-timers tybot-tidy
+sudo systemctl start tybot-tidy.service      # 즉시 1회
+journalctl -u tybot-tidy -n 30
+```
+
+한 줄 요약이 매회 남는다:
+```
+tidy docs=12 lines=1043 errors=0 warns=1
+tidy #프로젝트-업데이트: 4.2일째 수집 없음 - 봇 초대·권한 확인
+```
+
+| 검사 | 심각도 | 왜 위험한가 |
+|---|---|---|
+| 스키마 위반 | 오류 | 그 파일이 **검색에서 통째로 빠진다** |
+| 파싱 안 되는 원문 줄 | 오류 | 그 줄만 조용히 누락된다 |
+| N일째 수집 없음 | 경고 | 봇이 채널에서 빠졌거나 권한이 끊겼다 |
+| 원문 0줄 / 중복 라인 | 경고 | 수집 경로·멱등성 문제 |
+
+사람이 읽는 리포트: `sudo cat /var/lib/tybot/reports/tidy-$(date +%F).md` (30일 보관 후 자동 정리)
+
+**점검 잡은 원문을 절대 수정하지 않는다.** systemd 유닛에서도 아카이브를 `ReadOnlyPaths` 로
+묶고 리포트 경로만 쓰기를 허용한다. 리포트는 `archive/` 밖에 쓴다 — 안에 쓰면 그게 다시
+근거로 검색된다(요약 재귀).
+
+`TIDY_STALE_DAYS` 로 밀림 판정 기준(기본 3일)을 조정한다.
+
+---
+
 ## 7-B. 협업자 push 자동 배포
 
 협업자가 push 할 때마다 사람이 `git pull` 하지 않아도 되게 타이머를 쓴다.
@@ -323,6 +358,7 @@ journalctl -u tybot-collect -n 40
 | 아카이브 용량 | `du -sh /var/lib/tybot/archive` |
 | 질의응답 기록 | `journalctl -u tybot -f \| grep " qa "` / `sudo cat /var/lib/tybot/qa-log/$(date +%F).md` |
 | 자동 배포 이력 | `journalctl -u tybot-update -n 40` |
+| 아카이브 점검 | `journalctl -u tybot-tidy \| grep " tidy "` / `sudo cat /var/lib/tybot/reports/tidy-$(date +%F).md` |
 | 환경변수 점검 | `sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py` |
 
 `intent ... src=regex` 가 계속 보이면 LLM 분류 호출이 실패하는 것이다(규칙 폴백으로 동작 중).

@@ -4,22 +4,13 @@
  * (`vite.config.ts` 의 proxy). 운영에서는 같은 프로세스가 화면과 API 를 함께 서빙하므로
  * 상대 경로 그대로 동작합니다.
  *
- * ## 접속 토큰
- * 서버가 `Authorization: Bearer <토큰>` 으로 사용자를 구분합니다(`CONSOLE_USERS`).
- * 토큰은 브라우저의 localStorage 에 둡니다. 콘솔은 사내 VPN 안에서만 열리고, 토큰이 없으면
- * 첫 화면에서 입력을 받습니다. 로그아웃은 저장된 값을 지우는 것입니다.
+ * ## 로그인
+ * 아이디·비밀번호로 `POST /api/login` 하면 서버가 **HttpOnly 세션 쿠키**를 내려줍니다.
+ * 이후 요청은 브라우저가 그 쿠키를 자동으로 붙입니다.
+ *
+ * 화면 코드가 세션 값을 들고 있지 않습니다. localStorage 에 토큰을 두면 화면에서 실행되는
+ * 어떤 스크립트든 그 값을 읽을 수 있지만, HttpOnly 쿠키는 스크립트가 읽지 못합니다.
  */
-
-const TOKEN_KEY = 'tybot-console-token'
-
-export function getToken(): string {
-  return localStorage.getItem(TOKEN_KEY) ?? ''
-}
-
-export function setToken(token: string): void {
-  if (token) localStorage.setItem(TOKEN_KEY, token)
-  else localStorage.removeItem(TOKEN_KEY)
-}
 
 export class ApiError extends Error {
   constructor(
@@ -30,8 +21,8 @@ export class ApiError extends Error {
     this.name = 'ApiError'
   }
 
-  /** 토큰이 없거나 틀렸다 — 화면은 토큰 입력으로 돌아가야 합니다. */
-  get needsToken(): boolean {
+  /** 로그인이 필요하거나 만료됐다 — 화면은 로그인으로 돌아가야 합니다. */
+  get needsLogin(): boolean {
     return this.status === 401
   }
 }
@@ -41,15 +32,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     res = await fetch(path, {
       ...init,
-      headers: {
-        ...(init?.headers ?? {}),
-        Authorization: `Bearer ${getToken()}`,
-        'Content-Type': 'application/json',
-      },
+      // 세션 쿠키를 함께 보냅니다.
+      credentials: 'same-origin',
+      headers: { ...(init?.headers ?? {}), 'Content-Type': 'application/json' },
     })
   } catch (e) {
     // 서버가 꺼져 있거나 VPN 이 끊긴 경우입니다. 원인을 사람 말로 바꿔 줍니다.
-    throw new ApiError(0, `서버에 연결하지 못했습니다. VPN 연결과 콘솔 서버 상태를 확인해 주세요. (${e})`)
+    throw new ApiError(
+      0,
+      `서버에 연결하지 못했습니다. VPN 연결과 콘솔 서버 상태를 확인해 주세요. (${e})`,
+    )
   }
 
   if (!res.ok) {
@@ -67,6 +59,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body: unknown) =>
-    request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+  post: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}) }),
+}
+
+export interface Me {
+  name: string
+  email: string
+  role: 'owner' | 'member'
+  workspaces: string[]
+  allWorkspaces: boolean
+  /** 임시 계정(admin/1111)으로 열려 있으면 true — 화면에 경고를 띄웁니다. */
+  usingDefaultAccount: boolean
+}
+
+export function login(username: string, password: string): Promise<Me> {
+  return api.post<Me>('/api/login', { username, password })
+}
+
+export function logout(): Promise<{ ok: boolean }> {
+  return api.post<{ ok: boolean }>('/api/logout')
 }

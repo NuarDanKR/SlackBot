@@ -1,0 +1,11 @@
+[Unit]
+Description=TYBot 아카이브 점검 주기 실행
+
+[Timer]
+# 15분 간격. 조용한 고장(원문이 안 쌓임·스키마 깨짐)을 빨리 드러내는 게 목적이다.
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

@@ -21,12 +21,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from ..archive.store import ArchiveStore
 from . import reader
-from .auth import Authenticator, AuthError, ConsoleUser
+from .auth import SESSION_COOKIE, SESSION_HOURS, Authenticator, AuthError, ConsoleUser
 
 logger = logging.getLogger("tybot.console.api")
 KST = timezone(timedelta(hours=9))
@@ -69,13 +70,59 @@ def current_user(
     # Depends 로 받아야 테스트에서 `dependency_overrides` 로 갈아끼울 수 있다.
     # 함수 안에서 authenticator() 를 직접 부르면 오버라이드가 무시된다.
     auth: Annotated[Authenticator, Depends(authenticator)],
-    authorization: Annotated[str | None, Header()] = None,
+    tybot_console: Annotated[str | None, Cookie()] = None,
     x_forwarded_email: Annotated[str | None, Header()] = None,
 ) -> ConsoleUser:
     try:
-        return auth.identify(authorization=authorization, forwarded_email=x_forwarded_email)
+        return auth.identify(session=tybot_console, forwarded_email=x_forwarded_email)
     except AuthError as e:
         raise HTTPException(status_code=401, detail=str(e)) from e
+
+
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/login")
+def login(
+    body: LoginBody,
+    response: Response,
+    auth: Annotated[Authenticator, Depends(authenticator)],
+) -> dict:
+    """아이디·비밀번호로 로그인하고 세션 쿠키를 받는다.
+
+    쿠키를 쓰는 이유: 화면이 토큰을 들고 있으면 localStorage 에 남고, 화면 스크립트가
+    읽을 수 있는 값이 된다. HttpOnly 쿠키는 스크립트가 읽지 못한다.
+    `SameSite=strict` 로 두어 다른 사이트에서 이 콘솔로 요청을 보낼 수 없게 한다.
+    """
+    try:
+        session = auth.login(body.username, body.password)
+    except AuthError as e:
+        logger.warning("로그인 실패 — 아이디 %r", body.username)
+        raise HTTPException(status_code=401, detail=str(e)) from e
+
+    response.set_cookie(
+        SESSION_COOKIE,
+        session,
+        max_age=SESSION_HOURS * 3600,
+        httponly=True,
+        samesite="strict",
+        # VPN 안에서 http 로 열 수 있으므로 secure 는 강제하지 않는다.
+        # HTTPS 를 붙이면 CONSOLE_COOKIE_SECURE=1 로 켠다.
+        secure=os.getenv("CONSOLE_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes"),
+        path="/",
+    )
+    user = auth.by_username(body.username)
+    assert user is not None  # login() 이 성공했으면 반드시 있다
+    logger.info("로그인 — %s (%s)", body.username, user.user.email)
+    return _me(user.user, auth)
+
+
+@app.post("/api/logout")
+def logout(response: Response) -> dict:
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
 
 
 User = Annotated[ConsoleUser, Depends(current_user)]
@@ -92,15 +139,21 @@ def _visible(user: ConsoleUser, rows: list[dict], key: str = "workspace") -> lis
 # 읽기 엔드포인트
 # ---------------------------------------------------------------------------
 
-@app.get("/api/me")
-def me(user: User) -> dict:
+def _me(user: ConsoleUser, auth: Authenticator) -> dict:
     return {
         "name": user.display(),
         "email": user.email,
         "role": user.role,
         "workspaces": sorted(user.workspaces),
         "allWorkspaces": user.all_workspaces,
+        # 임시 계정으로 열려 있으면 화면에도 경고를 띄운다.
+        "usingDefaultAccount": auth.using_default,
     }
+
+
+@app.get("/api/me")
+def me(user: User, auth: Annotated[Authenticator, Depends(authenticator)]) -> dict:
+    return _me(user, auth)
 
 
 @app.get("/api/status")
