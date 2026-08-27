@@ -8,7 +8,9 @@
  * 접혀 있으면 못 찾습니다.
  *
  * 매니페스트는 저장소의 `docs/pilot/slack-app-manifest.yaml` 과 같은 내용입니다.
- * 스코프나 이벤트를 바꿀 때는 두 곳을 함께 고쳐 주세요.
+ * 스코프나 이벤트를 바꿀 때는 두 곳을 함께 고쳐 주세요 —
+ * `tests/test_manifest_sync.py` 가 두 파일을 대조해 어긋나면 실패합니다.
+ * 한쪽만 고치면 이 화면을 보고 만든 앱에 권한이 빠져, 봇이 오류 없이 반쪽만 동작합니다.
  *
  * 화면 캡처는 `public/guide/` 에 넣으면 각 단계에 붙습니다(BACKLOG B-18).
  * Slack 앱 관리 화면은 로그인해야 보이므로 캡처는 사람이 찍어야 합니다.
@@ -27,6 +29,20 @@ features:
     home_tab_enabled: false
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
+  shortcuts:
+    - name: 업무 채널 만들기
+      type: global
+      callback_id: create_work_channel
+      description: TYBot 수집 규칙에 맞는 공개 또는 비공개 업무 채널을 만듭니다.
+  slash_commands:
+    - command: /채널
+      description: 업무 채널을 만들거나 이름을 변경합니다.
+      usage_hint: 생성 | 이름변경 | 도움말
+      should_escape: false
+    - command: /ty-channel
+      description: /채널 명령의 영문 예비 명령입니다.
+      usage_hint: 생성 | 이름변경 | 도움말
+      should_escape: false
 oauth_config:
   scopes:
     bot:
@@ -41,8 +57,12 @@ oauth_config:
       - chat:write
       - im:write
       - files:read
+      - canvases:read
       - reactions:write
       - channels:join
+      - commands
+      - channels:manage
+      - groups:write
 settings:
   event_subscriptions:
     bot_events:
@@ -50,8 +70,10 @@ settings:
       - message.im
       - message.channels
       - message.groups
+      - channel_created
+      - channel_rename
   interactivity:
-    is_enabled: false
+    is_enabled: true
   org_deploy_enabled: false
   socket_mode_enabled: true
   token_rotation_enabled: false`
@@ -233,6 +255,34 @@ export function SetupGuide() {
                   <span>
                     공개 채널에 봇이 스스로 들어갑니다. 빠지면 일부 채널만 수집되어 "왜 이 채널은 안
                     나오지" 상황이 생깁니다.
+                  </span>
+                </div>
+                <div className="scope-row">
+                  <code>canvases:read</code>
+                  <span>
+                    채널 캔버스 본문을 수집합니다. 빠지면 캔버스가 <b>미변환</b> 으로만 기록되고
+                    내용은 들어가지 않습니다.
+                  </span>
+                </div>
+                <div className="scope-row">
+                  <code>channel_created</code> · <code>channel_rename</code>
+                  <span>
+                    채널을 새로 만들거나 이름을 바꾼 <b>그 순간</b> 봇이 규칙을 확인해 참여합니다.
+                    빠지면 다음 재기동 때까지 그 채널이 수집되지 않습니다.
+                  </span>
+                </div>
+                <div className="scope-row">
+                  <code>commands</code> · <code>channels:manage</code> · <code>groups:write</code>
+                  <span>
+                    <code>/채널</code> 명령으로 규칙에 맞는 업무 채널을 만들고 이름을 고칩니다.
+                    비공개 채널은 봇이 스스로 들어갈 수 없으므로, 만들 때 함께 넣는 이 경로가 필요합니다.
+                  </span>
+                </div>
+                <div className="scope-row">
+                  <code>interactivity.is_enabled</code>
+                  <span>
+                    전역 바로가기와 입력 창을 씁니다. <b>Socket Mode 라 Request URL 은 입력하지
+                    않습니다</b> — 서버에 외부에서 들어오는 포트는 여전히 열지 않습니다.
                   </span>
                 </div>
                 <div className="scope-row">

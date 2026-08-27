@@ -186,6 +186,27 @@ ARCHIVE_DIR=./archive REPORTS_DIR=/tmp/r python -m tybot.tidy
 
 ---
 
+## I. 매니페스트 이중 관리 — 자동 대조
+
+**주장** — 같은 매니페스트가 두 곳에 있다(`docs/pilot/slack-app-manifest.yaml`,
+`console-web/src/components/SetupGuide.tsx` 의 `MANIFEST` 상수). 한쪽만 고치면
+**화면 안내를 보고 만든 앱에 권한이 빠져** 봇이 오류 없이 반쪽만 동작한다.
+
+```bash
+pytest -q tests/test_manifest_sync.py    # 5 passed
+```
+스코프 16개·이벤트 6개 목록과 핵심 설정 3개(`socket_mode_enabled`,
+`messages_tab_read_only_enabled`, `token_rotation_enabled`)를 대조한다.
+
+실제로 잡는지 확인:
+```bash
+# 저장소 매니페스트에서 스코프 한 줄을 지우고 테스트 → 실패해야 한다
+pytest -q tests/test_manifest_sync.py
+git checkout docs/pilot/slack-app-manifest.yaml
+```
+
+---
+
 ## H. 이번에 손대지 않은 것 (다른 담당 영역)
 
 - `console-web/`, `src/tybot/console/` — 관리 콘솔은 다른 에이전트 담당
