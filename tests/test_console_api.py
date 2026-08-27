@@ -2,6 +2,15 @@
 
 DB 없이 아카이브 MD·감사기록에서 화면 데이터를 만드는 경로를 검증한다.
 특히 **권한으로 응답이 좁혀지는지**와 **내려보내면 안 되는 것이 새지 않는지**를 본다.
+
+## fastapi 가 없으면 이 파일 전체를 건너뛴다
+콘솔 백엔드는 **선택 의존성**이다(`pip install -e ".[console]"`). 봇만 돌리는 서버에는
+fastapi 가 없다. 그런데 이 파일이 최상단에서 fastapi 를 import 하면 **수집 단계에서 오류가
+나고 pytest 가 통째로 멈춘다.** 자동 배포(`deploy/update.sh`)는 테스트 통과를 게이트로 쓰므로,
+봇과 무관한 콘솔 의존성 때문에 봇 배포가 막힌다.
+
+`importorskip` 은 조용히 빠지는 것이 아니라 **skip 으로 보고**되므로, 콘솔을 돌리는 서버에서
+의존성이 빠진 경우도 결과에 드러난다.
 """
 from __future__ import annotations
 
@@ -9,6 +18,10 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+pytest.importorskip("fastapi", reason="콘솔 백엔드 선택 의존성 — pip install -e '.[console]'")
+pytest.importorskip("httpx", reason="fastapi TestClient 가 httpx 를 쓴다")
+
 from fastapi.testclient import TestClient
 
 from tybot.console import app as console_app
