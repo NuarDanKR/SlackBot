@@ -18,7 +18,6 @@ import contextlib
 import json
 import logging
 import os
-import pathlib
 import re
 import threading
 import time
@@ -46,7 +45,8 @@ from ..config import cost_state_path
 from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
-from ..workspaces import WorkspaceConfig, load_workspaces
+from ..paths import check_paths
+from ..workspaces import ConfigError, WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
 
@@ -63,23 +63,6 @@ def _clean(text: str) -> str:
 
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _writable(path: str) -> str | None:
-    """쓰기 가능 여부 점검. 문제가 있으면 사유 문자열을 반환한다.
-
-    아카이브 쓰기 실패는 '조용한 고장'의 대표 사례다 - 봇은 정상 응답하는데
-    원문이 하나도 쌓이지 않는다. 기동 시점에 잡아 로그와 `상태`에 드러낸다.
-    """
-    d = pathlib.Path(path)
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-        probe = d / ".write-test"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
-        return None
-    except Exception as e:
-        return f"{e.__class__.__name__}: {e}"
 
 
 def _scope_label(ctx: RequestContext | None) -> str:
@@ -857,21 +840,29 @@ class WorkspaceBot:
         )
 
 
-def check_paths(archive_dir: str, qa_dir: str) -> dict[str, str]:
-    """아카이브·감사기록 쓰기 가능 여부. 조용한 고장을 기동 시점에 드러낸다."""
-    problems: dict[str, str] = {}
-    for label, path in (("아카이브", archive_dir), ("감사기록", qa_dir)):
-        why = _writable(path)
-        if why:
-            problems[label] = f"{path} ({why})"
-            log.error(
-                "%s 디렉터리에 쓸 수 없습니다: %s - %s. "
-                "tybot.env 의 ARCHIVE_DIR/QA_LOG_DIR 를 /var/lib/tybot 아래로 지정하세요.",
-                label, path, why,
-            )
-    if not problems:
-        log.info("경로 점검 통과 - archive=%s qa_log=%s", archive_dir, qa_dir)
-    return problems
+def enforce_archive_writable(problems: dict[str, str]) -> None:
+    """아카이브에 못 쓰면 기동을 막는다.
+
+    답은 하면서 원문을 버리는 상태가 가장 위험하다 — 사람은 봇이 정상이라 믿고,
+    Slack 백필은 분당 1요청 제한이라 그 기간 원문은 사실상 복구가 안 된다.
+    락(`_resolve_lock_path`)과 달리 이건 봇의 존재 이유라서 경고로 넘기지 않는다.
+
+    감사기록(qa-log)은 경고만 한다 — 없어도 원문 자산이 사라지지는 않는다.
+    """
+    if "아카이브" not in problems:
+        return
+    if _truthy(os.getenv("ALLOW_READONLY_ARCHIVE", "0")):
+        log.warning(
+            "아카이브 쓰기 불가 상태로 기동합니다(ALLOW_READONLY_ARCHIVE=1) — %s. "
+            "수집은 되지 않고 조회만 됩니다.",
+            problems["아카이브"],
+        )
+        return
+    raise ConfigError(
+        f"아카이브에 쓸 수 없어 기동하지 않습니다 - {problems['아카이브']}. "
+        "tybot.env 의 ARCHIVE_DIR 을 쓰기 가능한 경로(예: /var/lib/tybot/archive)로 "
+        "지정하세요. 조회 전용으로 띄우려면 ALLOW_READONLY_ARCHIVE=1."
+    )
 
 
 def build_bots() -> list[WorkspaceBot]:
@@ -883,6 +874,7 @@ def build_bots() -> list[WorkspaceBot]:
         os.getenv("QA_LOG_DIR", "./qa-log"), write_md=_truthy(os.getenv("QA_LOG_MD", "1"))
     )
     problems = check_paths(archive_dir, str(qa_log.root))
+    enforce_archive_writable(problems)
 
     store = ArchiveStore(archive_dir)
     engine = AnswerEngine(

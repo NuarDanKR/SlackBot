@@ -72,7 +72,18 @@ if [[ ! -f "$CONF_DIR/tybot.env" ]]; then
   sed -i 's|^REPORTS_DIR=.*|REPORTS_DIR=/var/lib/tybot/reports|' "$CONF_DIR/tybot.env"
   echo "  → $CONF_DIR/tybot.env 생성됨. 토큰·키를 직접 입력하세요(REPLACE_ME)."
 else
-  echo "  → $CONF_DIR/tybot.env 이미 존재 — 건드리지 않음."
+  echo "  → $CONF_DIR/tybot.env 이미 존재 — 시크릿은 건드리지 않음."
+  # 경로 키만 보강한다. 값이 이미 있으면 절대 덮지 않고, 없거나 비었을 때만 추가한다.
+  # 이 키가 빠지면 봇이 코드 경로(읽기 전용)에 쓰려 해서 기동 자체가 막힌다.
+  for kv in ARCHIVE_DIR=/var/lib/tybot/archive QA_LOG_DIR=/var/lib/tybot/qa-log REPORTS_DIR=/var/lib/tybot/reports STATE_DIR=/var/lib/tybot; do
+    k="${kv%%=*}"
+    if grep -qE "^${k}=.+" "$CONF_DIR/tybot.env"; then
+      continue
+    fi
+    sed -i -E "/^${k}=\s*$/d" "$CONF_DIR/tybot.env"   # 빈 값 줄 제거 후 추가
+    echo "$kv" >> "$CONF_DIR/tybot.env"
+    echo "  → 누락된 $k 를 추가했습니다: $kv"
+  done
 fi
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
 # 타이머(자동배포·정기백필·점검)는 파일만 배치한다. enable 은 운영자가 결정한다.

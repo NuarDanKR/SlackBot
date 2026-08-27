@@ -17,13 +17,38 @@ from tybot.envfile import load_env_file
 ENV_SOURCE = load_env_file()
 
 OPTIONAL = [
-    "ARCHIVE_DIR", "QA_LOG_DIR", "DEFAULT_MODEL", "DAILY_COST_LIMIT_USD",
+    "DEFAULT_MODEL", "DAILY_COST_LIMIT_USD", "STATE_DIR",
     "BOT_NAME", "REALTIME_INGEST", "EXEC_USERS", "CROSS_WS_READ",
 ]
 
 
 def mask(v: str) -> str:
     return f"{v[:6]}…{v[-4:]} (len={len(v)})" if len(v) > 14 else f"<짧음 len={len(v)}>"
+
+
+def check_write_paths() -> bool:
+    """원문·감사기록을 실제로 쓸 수 있는지 확인한다.
+
+    봇과 같은 코드(`tybot.paths.check_paths`)를 쓴다. 이 점검이 없어서, 경로 설정이 빠진
+    서버가 "설정 정상"으로 보이는데 봇은 원문을 한 줄도 저장하지 못하는 상태로 떴다.
+    """
+    from tybot.paths import LABELS, archive_dir, check_paths, qa_log_dir
+
+    a, q = archive_dir(), qa_log_dir()
+    for label, path in (("아카이브", a), ("감사기록", q)):
+        if not pathlib.Path(path).is_absolute():
+            print(f"  [WARN] {label} 경로가 상대경로입니다: {path}")
+            print(f"         서비스는 WorkingDirectory 기준으로 해석하며 그 경로는 "
+                  f"읽기 전용입니다. {LABELS[label]} 를 /var/lib/tybot 아래 절대경로로 "
+                  f"지정하세요.")
+    problems = check_paths(a, q)
+    for label, why in problems.items():
+        print(f"  [MISS] {label} 쓰기 불가: {why}")
+        print(f"         조치: tybot.env 에 {LABELS[label]}=/var/lib/tybot/... 지정 후 "
+              f"sudo chown -R tybot:tybot /var/lib/tybot")
+    if not problems:
+        print(f"  [OK]   쓰기 가능 - archive={a} qa_log={q}")
+    return not problems
 
 
 def check_workspaces() -> bool:
@@ -80,6 +105,8 @@ def main() -> int:
         ok = False
     else:
         print(f"  [OK]   ANTHROPIC_API_KEY: {mask(v)}")
+    print("=== 쓰기 경로 ===")
+    ok = check_write_paths() and ok
     print("=== 선택 ===")
     for key in OPTIONAL:
         print(f"  [ .. ] {key}: {os.getenv(key) or '(기본값)'}")

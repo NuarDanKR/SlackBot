@@ -218,7 +218,8 @@ sudo reboot                                                            # 부팅 
 | 기동은 되는데 Slack 응답 없음 | 아웃바운드 443 차단. `sudo -u tybot curl -sI https://slack.com` |
 | 프록시 환경 | `/etc/systemd/system/tybot.service.d/proxy.conf` 생성:<br>`[Service]`<br>`Environment=HTTPS_PROXY=http://프록시:포트`<br>`Environment=NO_PROXY=localhost,127.0.0.1`<br>후 `systemctl daemon-reload && systemctl restart tybot` |
 | 설정을 고쳤는데 반영 안 됨 | `journalctl -u tybot \| grep "환경설정 출처"` 로 읽은 파일 확인. 인라인 주석·`export` 접두사·`=` 주변 공백을 제거 |
-| `단일 실행 락을 만들 수 없어` + `Read-only file system: '.locks'` | `ARCHIVE_DIR` 이 비어 락 경로가 코드 경로(`/opt/tybot`, 읽기 전용) 아래로 떨어진 것이다. `tybot.env` 의 `ARCHIVE_DIR=/var/lib/tybot/archive` 확인, 또는 `STATE_DIR=/var/lib/tybot` 지정 |
+| `아카이브에 쓸 수 없어 기동하지 않습니다` | `ARCHIVE_DIR` 누락 또는 권한 문제. `sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py` 의 `=== 쓰기 경로 ===` 절 참조. 조회 전용으로 띄우려면 `ALLOW_READONLY_ARCHIVE=1` |
+| `락 디렉터리를 쓸 수 없어 임시 경로로 대체` | `ARCHIVE_DIR` 이 비어 락 경로가 코드 경로(`/opt/tybot`, 읽기 전용) 아래로 떨어진 것이다. `tybot.env` 의 `ARCHIVE_DIR=/var/lib/tybot/archive` 확인, 또는 `STATE_DIR=/var/lib/tybot` 지정 |
 | `Start request repeated too quickly` | `sudo systemctl reset-failed tybot` 후 재시작(재시작 폭주 차단이 걸린 상태) |
 | `Permission denied: /var/lib/tybot/...` | `sudo chown -R tybot:tybot /var/lib/tybot` |
 | 응답은 정상인데 **문서 0건 · 수집 0건** | `tybot.env` 에 `ARCHIVE_DIR`/`QA_LOG_DIR` 누락. 기본값(`/opt/tybot/archive`)은 봇에게 쓰기 권한이 없다. 기동 로그의 `쓸 수 없습니다` 에러 확인 |
