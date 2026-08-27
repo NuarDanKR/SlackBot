@@ -60,8 +60,8 @@ function CodeBlock({ label, code }: { label: string; code: string }) {
   const [copied, setCopied] = useState(false)
 
   async function copy() {
-    // 콘솔은 사내 VPN 안에서 http 로 열릴 수 있습니다. 그때 navigator.clipboard 는
-    // 보안 컨텍스트가 아니라 동작하지 않으므로, 실패하면 텍스트를 선택해 줍니다.
+    // 콘솔을 http 로 열면 navigator.clipboard 가 보안 컨텍스트 제약으로 동작하지 않을 수
+    // 있으므로, 실패하면 텍스트를 선택해 줍니다.
     try {
       await navigator.clipboard.writeText(code)
       setCopied(true)

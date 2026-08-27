@@ -116,6 +116,30 @@ def test_ingest_is_idempotent_and_append_only(tmp_path):
     assert after.count("첫 메시지") == 1
 
 
+def test_ingest_dedupe_key_skips_a_whole_snapshot_across_timestamps(tmp_path):
+    key = "canvas:test-snapshot"
+    first = writer.IncomingMessage(
+        ts=datetime(2026, 8, 12, 0, 15, tzinfo=UTC),
+        speaker="캔버스",
+        text=f"[캔버스:수집] 회의록 [수집키:{key}]",
+        dedupe_key=key,
+    )
+    body = writer.IncomingMessage(
+        ts=datetime(2026, 8, 12, 0, 15, tzinfo=UTC),
+        speaker="캔버스",
+        text="[캔버스본문:회의록] 동일 내용",
+        dedupe_key=key,
+    )
+    args = dict(workspace="pilot", channel="#팀-전산_ABB110-회의", acl=[])
+    assert writer.ingest(tmp_path, messages=[first, body], **args).written == 2
+
+    later = datetime(2026, 8, 13, 0, 15, tzinfo=UTC)
+    repeated = [
+        writer.IncomingMessage(later, m.speaker, m.text, dedupe_key=key) for m in (first, body)
+    ]
+    assert writer.ingest(tmp_path, messages=repeated, **args).written == 0
+
+
 def test_org_metadata_recorded_from_channel_name(tmp_path):
     """조직코드는 조직 개편·워크스페이스 통합 뒤에도 문서 출신을 추적하게 해준다."""
     from tybot.archive.store import load_doc

@@ -12,6 +12,11 @@
  * 어떤 스크립트든 그 값을 읽을 수 있지만, HttpOnly 쿠키는 스크립트가 읽지 못합니다.
  */
 
+const SERVER_DOWN = [
+  'API 서버가 응답하지 않습니다. 저장소 루트에서 아래 명령으로 서버를 먼저 띄워 주세요.',
+  'uvicorn tybot.console.app:app --host 127.0.0.1 --port 8787 --app-dir src',
+].join('\n')
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -37,20 +42,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       headers: { ...(init?.headers ?? {}), 'Content-Type': 'application/json' },
     })
   } catch (e) {
-    // 서버가 꺼져 있거나 VPN 이 끊긴 경우입니다. 원인을 사람 말로 바꿔 줍니다.
-    throw new ApiError(
-      0,
-      `서버에 연결하지 못했습니다. VPN 연결과 콘솔 서버 상태를 확인해 주세요. (${e})`,
-    )
+    // 서버가 꺼져 있거나 네트워크가 끊긴 경우입니다. 원인을 사람 말로 바꿔 줍니다.
+    throw new ApiError(0, `${SERVER_DOWN} (원인: ${e})`)
   }
 
   if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`
+    let detail = ''
     try {
       const body = await res.json()
       if (body?.detail) detail = String(body.detail)
     } catch {
-      // 본문이 JSON 이 아니면 상태 코드만 씁니다.
+      // 본문이 JSON 이 아닌 경우입니다(아래에서 상태 코드로 사유를 만듭니다).
+    }
+    if (!detail) {
+      // 서버가 사유를 주지 못한 5xx 는 대개 "서버가 안 떠 있음"입니다.
+      // 그대로 "500 Internal Server Error" 라고 보여 주면 무엇을 해야 할지 알 수 없습니다.
+      detail =
+        res.status >= 500
+          ? SERVER_DOWN
+          : `요청이 거절되었습니다. (${res.status} ${res.statusText})`
     }
     throw new ApiError(res.status, detail)
   }

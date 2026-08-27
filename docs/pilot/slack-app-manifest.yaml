@@ -13,6 +13,20 @@ features:
     messages_tab_enabled: true
     # false 여야 DM 입력창이 열린다. 기본값(true)이면 "메시지를 보내는 기능이 꺼져 있습니다" 로 막힌다.
     messages_tab_read_only_enabled: false
+  shortcuts:
+    - name: 업무 채널 만들기
+      type: global
+      callback_id: create_work_channel
+      description: TYBot 수집 규칙에 맞는 공개 또는 비공개 업무 채널을 만듭니다.
+  slash_commands:
+    - command: /채널
+      description: 업무 채널을 만들거나 이름을 변경합니다.
+      usage_hint: 생성 | 이름변경 | 도움말
+      should_escape: false
+    - command: /ty-channel
+      description: /채널 명령의 영문 예비 명령입니다.
+      usage_hint: 생성 | 이름변경 | 도움말
+      should_escape: false
 oauth_config:
   scopes:
     bot:
@@ -30,6 +44,9 @@ oauth_config:
       - canvases:read         # 채널 캔버스 본문 수집(없으면 캔버스는 '미변환' 으로만 남음)
       - reactions:write       # 👀 수신 표시
       - channels:join         # 채널 자가참여 — 없으면 일부 채널만 보임(조용한 고장)
+      - commands              # /채널 명령과 전역 바로가기
+      - channels:manage       # TYBot이 공개 업무 채널 생성·이름 변경
+      - groups:write          # TYBot이 비공개 업무 채널 생성·초대·이름 변경
 settings:
   event_subscriptions:
     bot_events:
@@ -40,7 +57,7 @@ settings:
       - channel_created    # 새 공개 채널 - 이름이 규칙에 맞으면 즉시 자동 참여
       - channel_rename     # 이름을 규칙에 맞게 고치면 그때부터 수집
   interactivity:
-    is_enabled: false
+    is_enabled: true          # 전역 바로가기·모달. Socket Mode라 인바운드 Request URL은 없음
   org_deploy_enabled: false
   socket_mode_enabled: true   # 인바운드 포트 없음
   token_rotation_enabled: false

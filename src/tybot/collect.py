@@ -13,8 +13,8 @@ Slack 은 2025-05 이후 만들어진 **비-마켓플레이스 앱**의 `convers
 - 채널이 N개면 페이싱 때문에 최소 N분이 걸린다. 그래서 채널 사이에 60초 이상 쉰다.
 
 ## 하는 일
-1. 봇이 멤버인 채널 목록 조회
-2. 채널마다 최근 15건을 받아 원문에 append (멱등 - 이미 있는 라인은 건너뜀)
+1. 봇이 멤버인 채널 중 이름 규칙에 맞는 채널만 선택
+2. 채널마다 최근 15건과 캔버스 스냅샷을 원문에 append (멱등)
 3. 결과를 로그로 남기고, 새로 쌓인 게 있으면 건수를 집계
 """
 from __future__ import annotations
@@ -25,7 +25,9 @@ import time
 from datetime import UTC, datetime
 
 from .archive import writer
+from .archive.canvas import canvas_lines
 from .archive.files import file_lines
+from .channels import should_collect
 from .envfile import load_env_file
 from .lock import AlreadyRunning, LockUnavailable, instance_lock
 from .workspaces import load_workspaces
@@ -65,7 +67,7 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
     from slack_sdk import WebClient
 
     client = WebClient(token=cfg.bot_token)
-    stats = {"channels": 0, "written": 0, "skipped": 0, "failed": 0}
+    stats = {"channels": 0, "written": 0, "skipped": 0, "skipped_rule": 0, "failed": 0}
     name_cache: dict[str, str] = {}
 
     try:
@@ -78,7 +80,13 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
                 limit=200,
                 cursor=cursor,
             )
-            channels.extend([c for c in res.get("channels", []) if c.get("is_member")])
+            for channel in res.get("channels", []):
+                if not channel.get("is_member"):
+                    continue
+                if not should_collect("#" + channel.get("name", "")):
+                    stats["skipped_rule"] += 1
+                    continue
+                channels.append(channel)
             cursor = (res.get("response_metadata") or {}).get("next_cursor")
             if not cursor:
                 break
@@ -105,6 +113,21 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
             if m.get("bot_id") or m.get("subtype") not in (None, "file_share"):
                 continue
             msgs.extend(_messages_from(client, m, cfg.bot_token, name_cache))
+
+        canvas = canvas_lines(client, ch["id"], cfg.bot_token)
+        if canvas.lines:
+            now = datetime.now(UTC)
+            msgs.extend(
+                writer.IncomingMessage(
+                    ts=now,
+                    speaker="캔버스",
+                    text=line,
+                    dedupe_key=canvas.dedupe_key,
+                )
+                for line in canvas.lines
+            )
+        for warning in canvas.warnings:
+            log.warning("[%s] %s 캔버스 처리 경고: %s", cfg.key, name, warning)
         if not msgs:
             continue
 

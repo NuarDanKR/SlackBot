@@ -39,6 +39,9 @@ class IncomingMessage:
     speaker: str
     text: str
     is_bot: bool = False
+    # 같은 논리 원문 묶음을 재수집할 때 쓰는 영속 키. 키 자체도 메시지 본문에
+    # `[수집키:<key>]` 로 기록되어야 프로세스 재시작 뒤에도 중복을 판정할 수 있다.
+    dedupe_key: str | None = None
 
 
 def screen(text: str) -> str | None:
@@ -140,12 +143,19 @@ def _ingest_locked(
     text = existing if existing is not None else _new_doc(workspace, channel, visibility, acl or [])
 
     seen = set(text.splitlines())
+    existing_dedupe_keys = {
+        m.dedupe_key
+        for m in messages
+        if m.dedupe_key and f"[수집키:{m.dedupe_key}]" in text
+    }
     lines: list[str] = []
     refused: list[tuple[str, str]] = []
     skipped_bot = 0
     for m in messages:
         if m.is_bot:
             skipped_bot += 1  # 1겹: 봇 출력은 근거가 될 수 없다
+            continue
+        if m.dedupe_key in existing_dedupe_keys:
             continue
         reason = screen(m.text)
         if reason:

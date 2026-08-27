@@ -15,11 +15,15 @@ _결정 문서 · 2026-08-21 · 데이터 현황 · 수집 문서 열람 · API 
 
 | 항목 | 결정 |
 |---|---|
-| 노출 경로 | **Tailscale/WireGuard VPN 내부에만.** 공개 HTTPS 없음 |
+| 노출 경로 | **미정.** 현재 배포 서비스는 `127.0.0.1` 에만 바인딩 |
 | 스택 | React + Vite SPA + FastAPI |
 | 승인 권한 | **관리자(owner) 한 사람.** 담당자는 요청만 |
+| 로그인 | 아이디·비밀번호 → HttpOnly 세션 쿠키(SameSite=strict) |
 | 배포 게이트 | 자동 검사 4종 통과 + 승인 + 실패 시 자동 되돌리기 |
 | DB | 기존 PostgreSQL |
+
+사내 원격접속망은 현재 없으며, 콘솔을 어느 범위에 노출할지는 아직 결정하지 않았습니다. 노출 경로와
+접근 통제가 승인되기 전에는 `deploy/tybot-console.service` 의 루프백 바인딩을 유지합니다.
 
 서버(Rocky 8)는 인터넷이 연결되어 있으므로 한글 웹폰트는 CDN 에서 불러오고, 프론트 빌드
 산출물(`dist/`)만 서버로 옮깁니다.
@@ -212,8 +216,10 @@ TYBot 은 두 층으로 움직입니다.
       `/api/collected/audit` `/api/harness` `/api/health`.
       **DB 없이 아카이브 MD·감사기록에서 만든다** — 파일럿 규모에서는 그것으로 충분하고,
       DB 는 문서가 늘어난 뒤 같은 함수 뒤에 캐시로 끼워 넣으면 된다.
-- [x] **콘솔 인증** — `src/tybot/console/auth.py`
-      토큰 방식이 기본이고, 앞단에 인증 프록시를 두면 `CONSOLE_AUTH=proxy` 로 바꾼다.
+- [x] **콘솔 로그인** — `src/tybot/console/auth.py`
+      아이디·비밀번호 → 서명된 HttpOnly 세션 쿠키. 비밀번호는 scrypt 로 저장한다(표준 라이브러리).
+      계정은 `CONSOLE_ACCOUNTS` 로 관리하고, 비어 있으면 임시 계정 `admin`/`1111` 이 열린다
+      (기동 로그와 화면에 경고). 계정 관리를 PostgreSQL 로 옮기는 것은 B-16.
 - [x] **봇 상태 파일** — `src/tybot/heartbeat.py`
       연결 상태·채널 수처럼 Slack 만 아는 값은 봇이 60초마다 적고 콘솔이 읽는다.
       콘솔이 Slack 을 직접 호출하지 않으므로 콘솔에 봇 토큰이 필요 없다.

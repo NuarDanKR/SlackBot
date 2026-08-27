@@ -9,7 +9,7 @@ _작성 2026-08-25 · 작성 주체 Claude(봇 담당) · **검증 주체: Codex
 ```bash
 git config core.hooksPath .githooks
 pip install -e ".[dev]"
-pytest -q          # 283 passed
+pytest -q          # 292 passed
 ruff check src tests scripts   # All checks passed
 ```
 
@@ -32,6 +32,9 @@ EOF
 기대: 앞 2개 `True`, 뒤 3개 `False`
 (마지막은 **조직코드가 없어서** 탈락 — 코드는 필수다)
 
+이 판정은 자동 참여뿐 아니라 실시간 수집·수동 `수집`/`전체수집`·정기 백필에 모두 적용한다.
+봇이 이미 멤버여도 규칙 밖 채널은 읽거나 저장하지 않는다.
+
 ```bash
 pytest -q tests/test_channels.py    # 19 passed
 ```
@@ -50,17 +53,17 @@ pytest -q tests/test_channels.py    # 19 passed
 `channel_created`·`channel_rename` 이벤트로 즉시 반영.
 
 ```bash
-pytest -q tests/test_autojoin.py    # 10 passed
+pytest -q tests/test_autojoin.py    # 11 passed
 ```
 코드 확인 지점:
-- `src/tybot/autojoin.py::sweep` — 규칙 불일치는 `skipped_rule`, 비공개는 `need_invite`
+- `src/tybot/autojoin.py::sweep` — 규칙 불일치는 `skipped_rule`
 - `src/tybot/slack/pilot.py::WorkspaceBot.autojoin_sweep` — 기동 시 호출(`connect()` 끝)
 - 같은 파일 `_register()` 의 `channel_created`·`channel_rename` 핸들러
 
 서버에서:
 ```bash
 journalctl -u tybot | grep autojoin
-# [pilot] autojoin joined=3 already=2 skipped=7 need_invite=1 failed=0
+# [pilot] autojoin joined=3 already=2 skipped=7 private_skipped=0 failed=0
 ```
 
 **전제 조건** — Slack 앱 매니페스트에 다음이 있어야 한다. 없으면 조용히 동작하지 않는다.
@@ -75,6 +78,9 @@ bot_events: channel_created, channel_rename
 
 **주장** — Slack 설계상 봇 토큰으로는 비공개 채널에 자가 참여할 수 없고, 목록 조회도 안 된다.
 `conversations.join` 은 공개 채널 전용이다.
+
+따라서 자동 참여 스윕은 **초대가 필요한 비공개 채널 목록을 만들 수 없다.** 목록에 보이는 비공개
+채널은 이미 봇이 멤버인 곳뿐이다. 초대 대상 확인은 채널 관리자 절차나 일회성 사용자 토큰 도구로 한다.
 
 **검증 방법** — 서버에서 직접 확인하는 게 가장 확실하다:
 ```bash
@@ -130,11 +136,13 @@ head -12 /var/lib/tybot/archive/channels/<ws>/<채널>.md
 - 실제 응답이 마크다운인지 HTML 인지 확인하지 못했다. 둘 다 처리하도록 짰다.
 - `canvases:read` 스코프가 실제로 필요한지/충분한지 확인하지 못했다. 매니페스트에 넣어뒀다.
 
-**그래서 이렇게 방어했다** — 응답이 예상과 다르면 **추측해서 파싱하지 않고** `[캔버스:미변환]`
-줄만 남기고 경고를 올린다. 잘못 파싱한 텍스트가 원문에 들어가면 되돌릴 수 없기 때문이다.
+**그래서 이렇게 방어했다** — UTF-8 `text/plain`·`text/markdown` 또는 HTML만 허용한다.
+그 외 MIME, 바이너리 제어문자, 디코딩 실패, API 조회 실패는 **추측해서 파싱하지 않고**
+`[캔버스:미변환]` 줄만 남기고 경고를 올린다. 내용 해시 기반 `[수집키:...]` 를 함께 기록해
+같은 스냅샷은 수집 시각이 달라도 다시 쓰지 않는다.
 
 ```bash
-pytest -q tests/test_canvas.py    # 10 passed (모두 가짜 클라이언트)
+pytest -q tests/test_canvas.py    # 12 passed (모두 가짜 클라이언트)
 ```
 
 **실제 검증 절차 (Codex 가 해줬으면 하는 것)**
@@ -145,8 +153,8 @@ pytest -q tests/test_canvas.py    # 10 passed (모두 가짜 클라이언트)
 5. 아카이브 MD 에 `[캔버스본문:...]` 줄이 들어갔는지, **내용이 원본과 같은지** 대조
 6. 실패하면 어떤 에러/응답이 왔는지 기록 → `src/tybot/archive/canvas.py` 의 가정 수정
 
-**되돌리는 법** — 캔버스 수집만 끄려면 `canvas_lines` 호출부(pilot.py `_ingest_channel`)를
-주석 처리하면 된다. 다른 수집 경로에 영향 없다.
+**되돌리는 법** — 캔버스 수집만 끄려면 `canvas_lines` 호출부 두 곳
+(`pilot.py::_ingest_channel`, `collect.py::collect_workspace`)을 제거한다. 다른 수집 경로에 영향 없다.
 
 ---
 
@@ -171,10 +179,9 @@ ARCHIVE_DIR=./archive REPORTS_DIR=/tmp/r python -m tybot.tidy
 
 | 위험 | 확인 방법 |
 |---|---|
-| 구 형식 채널이 자동 참여에서 빠진다 | 의도된 동작. 이미 봇이 멤버인 채널은 실시간 수집 계속됨 |
-| 규칙 밖 채널에 봇이 이미 있음 | `should_collect` 는 **참여 여부만** 정한다. 이미 멤버면 계속 수집된다 |
-| 자동 참여로 채널 수가 급증 | `AUTOJOIN_CHANNELS=0` 으로 끌 수 있다. LLM 비용은 수집이 아니라 질의에서 발생 |
-| 캔버스 수집이 rate limit 소모 | `conversations.info` + `files.info` 각 1회/수집. 수동 `수집` 에서만 호출 |
+| 구 형식·규칙 밖 채널에 봇이 이미 있음 | 실시간·수동·정기 수집 모두 건너뛴다. 기존 문서는 수정하지 않는다 |
+| 자동 참여로 채널 수가 급증 | `AUTOJOIN_CHANNELS=0` 으로 스윕과 채널 이벤트 참여를 모두 끈다 |
+| 캔버스 수집이 rate limit 소모 | 수동·정기 수집에서 `conversations.info` + `files.info` 각 1회/채널 |
 | 봇 답변이 캔버스에 섞임 | 캔버스는 사람이 쓰는 문서다. 봇은 캔버스에 쓰지 않는다 |
 
 ---
@@ -184,4 +191,4 @@ ARCHIVE_DIR=./archive REPORTS_DIR=/tmp/r python -m tybot.tidy
 - `console-web/`, `src/tybot/console/` — 관리 콘솔은 다른 에이전트 담당
 - `src/tybot/lock.py` — 다른 세션 작업
 - 실시간 수집 경로의 캔버스 반영 — 캔버스 편집 이벤트를 구독하지 않았다.
-  현재는 `수집` 명령·정기 백필 시점의 스냅샷만 남는다(백로그 후보)
+  현재는 `수집` 명령·정기 백필 시점의 스냅샷만 남는다(B-22)

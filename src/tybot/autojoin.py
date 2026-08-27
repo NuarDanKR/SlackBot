@@ -31,13 +31,13 @@ class JoinResult:
     joined: list[str] = field(default_factory=list)
     already: list[str] = field(default_factory=list)
     skipped_rule: list[str] = field(default_factory=list)  # 이름이 규칙과 다름
-    need_invite: list[str] = field(default_factory=list)  # 비공개 - 사람이 초대해야 함
+    skipped_private: list[str] = field(default_factory=list)  # 방어용: 보이지만 미가입인 비공개
     failed: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         return (
             f"autojoin joined={len(self.joined)} already={len(self.already)} "
-            f"skipped={len(self.skipped_rule)} need_invite={len(self.need_invite)} "
+            f"skipped={len(self.skipped_rule)} private_skipped={len(self.skipped_private)} "
             f"failed={len(self.failed)}"
         )
 
@@ -74,8 +74,8 @@ def sweep(client, *, dry_run: bool = False) -> JoinResult:
             result.already.append(name)
             continue
         if ch.get("is_private"):
-            # 봇이 스스로 들어갈 수 없다. 사람이 초대해야 한다.
-            result.need_invite.append(name)
+            # 일반적으로 미가입 비공개 채널은 목록에도 보이지 않는다. API가 돌려주더라도 참여하지 않는다.
+            result.skipped_private.append(name)
             continue
         if dry_run:
             result.joined.append(name)
@@ -91,11 +91,15 @@ def sweep(client, *, dry_run: bool = False) -> JoinResult:
     return result
 
 
-def on_channel_event(client, channel: dict, *, dry_run: bool = False) -> str | None:
+def on_channel_event(
+    client, channel: dict, *, enabled: bool = True, dry_run: bool = False
+) -> str | None:
     """채널 생성·이름 변경 이벤트 처리. 참여했으면 채널명을 돌려준다.
 
     새 채널이 규칙에 맞으면 그 즉시 들어간다 - 다음 정기 스윕까지 기다리지 않는다.
     """
+    if not enabled:
+        return None
     name = "#" + (channel.get("name") or "")
     spec = parse(name)
     if spec is None or channel.get("is_private") or channel.get("is_member"):

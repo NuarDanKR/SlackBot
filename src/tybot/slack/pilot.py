@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import pathlib
@@ -33,6 +34,14 @@ from ..archive.store import ArchiveStore
 from ..archive.writer import KST
 from ..audit import QALog, QARecord
 from ..autojoin import on_channel_event, sweep
+from ..channel_management import (
+    ChannelNameError,
+    ChannelOwnerStore,
+    create_modal,
+    rename_modal,
+    request_from_view,
+)
+from ..channels import parse, should_collect
 from ..config import cost_state_path
 from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
@@ -113,6 +122,13 @@ class WorkspaceBot:
         self.exec_users = {
             u.strip() for u in (os.getenv("EXEC_USERS") or "").split(",") if u.strip()
         }
+        # 봇이 가진 채널 관리 권한을 대신 사용할 수 있는 최소 별도 화이트리스트.
+        # EXEC_USERS(전 자료 열람)와 섞지 않는다.
+        self.channel_admin_users = {
+            u.strip()
+            for u in (os.getenv("CHANNEL_ADMIN_USERS") or "").split(",")
+            if u.strip()
+        }
         self.app = App(token=cfg.bot_token)
         self.store = store
         self.engine = engine
@@ -122,6 +138,9 @@ class WorkspaceBot:
         self._ingested = 0
         self._user_cache: dict[str, str] = {}
         self._chan_cache: dict[str, str] = {}
+        self.channel_owners = ChannelOwnerStore(
+            heartbeat.state_dir() / "channel-owners.json"
+        )
         self.path_problems: dict[str, str] = {}
         self._register()
 
@@ -170,7 +189,7 @@ class WorkspaceBot:
     def autojoin_sweep(self) -> None:
         """규칙에 맞는 공개 채널에 자동 참여. 기동 시 1회."""
         if not self.autojoin:
-            log.info("[%s] 자동 참여 비활성(AUTOJOIN=0)", self.workspace)
+            log.info("[%s] 자동 참여 비활성(AUTOJOIN_CHANNELS=0)", self.workspace)
             return
         try:
             r = sweep(self.app.client)
@@ -178,24 +197,76 @@ class WorkspaceBot:
             log.error("[%s] 자동 참여 스윕 실패: %s", self.workspace, e)
             return
         log.info("[%s] %s", self.workspace, r.summary())
-        if r.need_invite:
-            log.warning(
-                "[%s] 비공개 채널 %d개는 봇이 스스로 못 들어간다 - `/invite @%s` 필요: %s",
-                self.workspace, len(r.need_invite), self.bot_name, ", ".join(r.need_invite[:10]),
-            )
 
     # --- 핸들러 -----------------------------------------------------------
     def _register(self) -> None:
+        @self.app.shortcut("create_work_channel")
+        def on_create_shortcut(ack, body, client):
+            ack()
+            self._open_create_modal(
+                client, body["trigger_id"], (body.get("user") or {}).get("id", "")
+            )
+
+        @self.app.command("/채널")
+        @self.app.command("/ty-channel")
+        def on_channel_command(ack, command, client, respond):
+            ack()
+            action = (command.get("text") or "").strip().replace(" ", "")
+            if action in ("", "생성", "만들기"):
+                self._open_create_modal(client, command["trigger_id"], command["user_id"])
+                return
+            if action in ("이름변경", "이름바꾸기"):
+                self._open_rename_modal(
+                    client,
+                    command["trigger_id"],
+                    command["user_id"],
+                    command.get("channel_id", ""),
+                    respond,
+                )
+                return
+            respond(
+                "사용법: `/채널 생성`, `/채널 이름변경`, `/채널 도움말`\n"
+                "명령어 없이 `/채널`만 입력해도 생성 화면이 열립니다.",
+                response_type="ephemeral",
+            )
+
+        @self.app.view("tybot_create_channel")
+        def on_create_submission(ack, body, client, view):
+            try:
+                request = request_from_view(view, include_channel_options=True)
+            except ChannelNameError as e:
+                ack(response_action="errors", errors={e.block_id: str(e)})
+                return
+            ack()
+            user_id = (body.get("user") or {}).get("id", "")
+            self._create_channel(client, user_id, request)
+
+        @self.app.view("tybot_rename_channel")
+        def on_rename_submission(ack, body, client, view):
+            try:
+                request = request_from_view(view, include_channel_options=False)
+            except ChannelNameError as e:
+                ack(response_action="errors", errors={e.block_id: str(e)})
+                return
+            ack()
+            metadata = self._modal_metadata(view)
+            user_id = (body.get("user") or {}).get("id", "")
+            self._rename_channel(client, user_id, metadata.get("channel_id", ""), request.name)
+
         @self.app.event("channel_created")
         def on_channel_created(event, client):
-            joined = on_channel_event(client, event.get("channel", {}))
+            joined = on_channel_event(
+                client, event.get("channel", {}), enabled=self.autojoin
+            )
             if joined:
                 log.info("[%s] 새 채널 수집 시작: %s", self.workspace, joined)
 
         @self.app.event("channel_rename")
         def on_channel_renamed(event, client):
             # 이름을 규칙에 맞게 고친 순간부터 수집 대상이 된다.
-            joined = on_channel_event(client, event.get("channel", {}))
+            joined = on_channel_event(
+                client, event.get("channel", {}), enabled=self.autojoin
+            )
             if joined:
                 log.info("[%s] 이름 변경으로 수집 시작: %s", self.workspace, joined)
 
@@ -218,6 +289,146 @@ class WorkspaceBot:
                 return
             if ctype in ("channel", "group") and self.realtime:
                 self._ingest_live(client, event)
+
+    def _modal_metadata(self, view: dict) -> dict:
+        try:
+            value = json.loads(view.get("private_metadata") or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _open_create_modal(self, client, trigger_id: str, user_id: str) -> None:
+        metadata = json.dumps({"user_id": user_id}, ensure_ascii=False)
+        try:
+            client.views_open(trigger_id=trigger_id, view=create_modal(metadata))
+        except Exception as e:
+            log.warning("[%s] 채널 생성 모달 열기 실패: %s", self.workspace, e)
+
+    def _can_manage_channel(self, channel_id: str, user_id: str) -> bool:
+        return user_id in self.channel_admin_users or self.channel_owners.is_owner(
+            self.workspace, channel_id, user_id
+        )
+
+    def _open_rename_modal(
+        self, client, trigger_id: str, user_id: str, channel_id: str, respond
+    ) -> None:
+        if not channel_id or not self._can_manage_channel(channel_id, user_id):
+            respond(
+                "이 채널의 최초 생성 요청자 또는 TYBot 채널 관리자만 이름을 변경할 수 있습니다.",
+                response_type="ephemeral",
+            )
+            return
+        try:
+            channel = client.conversations_info(channel=channel_id)["channel"]
+            spec = parse(channel.get("name", ""))
+            if spec is None:
+                respond(
+                    "현재 채널명이 TYBot 표준 형식이 아니어서 이 화면에서 변경할 수 없습니다.",
+                    response_type="ephemeral",
+                )
+                return
+            metadata = json.dumps({"channel_id": channel_id}, ensure_ascii=False)
+            client.views_open(
+                trigger_id=trigger_id,
+                view=rename_modal(metadata, spec),
+            )
+        except Exception as e:
+            log.warning("[%s] 채널 이름 변경 모달 열기 실패: %s", self.workspace, e)
+            respond("채널 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+
+    def _notify_user(self, client, user_id: str, text: str) -> None:
+        if not user_id:
+            return
+        try:
+            client.chat_postMessage(channel=user_id, text=text)
+        except Exception as e:
+            log.warning("[%s] 채널 관리 결과 DM 실패 user=%s: %s", self.workspace, user_id, e)
+
+    def _create_channel(self, client, user_id: str, request) -> None:
+        try:
+            # Slack 채널명의 영문은 소문자만 허용한다. 조직코드 입력은 대소문자를 받되
+            # 실제 채널명에서는 Slack 규칙에 맞게 소문자로 보낸다.
+            api_name = request.name.lower()
+            result = client.conversations_create(
+                name=api_name,
+                is_private=request.visibility == "private",
+            )
+            channel = result["channel"]
+            channel_id = channel["id"]
+            actual_name = channel.get("name") or request.name
+        except Exception as e:
+            log.warning("[%s] 채널 생성 실패 name=%s: %s", self.workspace, request.name, e)
+            self._notify_user(
+                client,
+                user_id,
+                f"채널을 만들지 못했습니다: `{request.name}`\nSlack 앱 권한과 채널명을 확인해 주세요.",
+            )
+            return
+
+        try:
+            self.channel_owners.record(self.workspace, channel_id, user_id, actual_name)
+        except OSError as e:
+            # 소유권을 기록하지 못하면 이름 변경 권한은 막히지만, 만들어진 채널은 유지한다.
+            log.error("[%s] 채널 소유권 기록 실패 channel=%s: %s", self.workspace, channel_id, e)
+
+        members = sorted({user_id, *request.members} - {""})
+        invite_error = False
+        if members:
+            try:
+                client.conversations_invite(channel=channel_id, users=",".join(members))
+            except Exception as e:
+                invite_error = True
+                log.warning("[%s] 채널 참여자 초대 실패 channel=%s: %s", self.workspace, channel_id, e)
+
+        visibility = "비공개" if request.visibility == "private" else "공개"
+        suffix = "\n일부 참여자 초대에 실패했습니다. 채널에서 직접 초대해 주세요." if invite_error else ""
+        self._notify_user(
+            client,
+            user_id,
+            f"{visibility} 업무 채널 <#{channel_id}>을 만들었습니다."
+            "\n`/채널 이름변경`으로 표준 이름 안에서 변경할 수 있습니다."
+            "\nSlack 기본 관리 권한이 필요하면 채널 정보 → 관리자로 지정에서 추가하세요."
+            + suffix,
+        )
+        with contextlib.suppress(Exception):
+            client.chat_postMessage(
+                channel=channel_id,
+                text=(
+                    "이 채널은 TYBot 수집 대상 표준으로 생성되었습니다. "
+                    "채널명을 규칙 밖으로 변경하면 이후 대화는 수집되지 않습니다."
+                ),
+            )
+        log.info(
+            "[%s] 업무 채널 생성 channel=%s name=%s private=%s requester=%s",
+            self.workspace,
+            channel_id,
+            actual_name,
+            request.visibility == "private",
+            user_id,
+        )
+
+    def _rename_channel(self, client, user_id: str, channel_id: str, name: str) -> None:
+        if not channel_id or not self._can_manage_channel(channel_id, user_id):
+            self._notify_user(client, user_id, "이 채널의 이름을 변경할 권한이 없습니다.")
+            return
+        try:
+            result = client.conversations_rename(channel=channel_id, name=name.lower())
+            actual_name = result.get("channel", {}).get("name") or name
+            self._chan_cache[channel_id] = "#" + actual_name
+        except Exception as e:
+            log.warning("[%s] 채널 이름 변경 실패 channel=%s: %s", self.workspace, channel_id, e)
+            self._notify_user(
+                client, user_id, f"채널 이름을 변경하지 못했습니다: `{name}`"
+            )
+            return
+        self._notify_user(client, user_id, f"채널 이름을 <#{channel_id}>으로 변경했습니다.")
+        log.info(
+            "[%s] 업무 채널 이름 변경 channel=%s name=%s requester=%s",
+            self.workspace,
+            channel_id,
+            actual_name,
+            user_id,
+        )
 
     def _handle(self, event, client, say, *, in_channel: bool) -> None:
         text = _clean(event.get("text", ""))
@@ -320,6 +531,9 @@ class WorkspaceBot:
     def _ingest_live(self, client, event) -> None:
         """실시간 원문 append. 실패해도 봇은 계속 살아 있어야 한다."""
         channel = self._channel_name(client, event.get("channel", ""))
+        if not should_collect(channel):
+            log.debug("채널 규칙 밖이라 실시간 수집 생략 ch=%s", channel)
+            return
         msgs = self._messages_from(client, event)
         if not msgs:
             return
@@ -342,6 +556,8 @@ class WorkspaceBot:
 
     def _ingest_channel(self, client, channel_id: str) -> str:
         channel = self._channel_name(client, channel_id)
+        if not should_collect(channel):
+            return f"{channel}: 채널 이름이 수집 규칙과 달라 건너뛰었습니다."
         try:
             res = client.conversations_history(channel=channel_id, limit=HISTORY_LIMIT)
         except Exception as e:
@@ -378,14 +594,20 @@ class WorkspaceBot:
 
         # 채널 캔버스 스냅샷. 없으면 조용히 넘어간다(정상).
         canvas_note = ""
-        c_lines, c_warns = canvas_lines(client, channel_id, self.cfg.bot_token)
-        if c_lines:
+        canvas = canvas_lines(client, channel_id, self.cfg.bot_token)
+        if canvas.lines:
             now = datetime.now(UTC)
             msgs.extend(
-                writer.IncomingMessage(ts=now, speaker="캔버스", text=ln) for ln in c_lines
+                writer.IncomingMessage(
+                    ts=now,
+                    speaker="캔버스",
+                    text=ln,
+                    dedupe_key=canvas.dedupe_key,
+                )
+                for ln in canvas.lines
             )
-            canvas_note = f"캔버스 {len(c_lines)}줄 포함"
-        for w in c_warns:
+            canvas_note = f"캔버스 {len(canvas.lines)}줄 포함"
+        for w in canvas.warnings:
             log.warning("[%s] %s", self.workspace, w)
             canvas_note = f"캔버스 처리 경고: {w}"
 
@@ -417,7 +639,7 @@ class WorkspaceBot:
         return "\n".join(out)
 
     def _ingest_all(self, client) -> str:
-        """봇이 볼 수 있는 모든 채널 백필. 공개 채널은 자가참여 시도."""
+        """봇이 볼 수 있는 채널 중 이름 규칙에 맞는 채널만 백필."""
         try:
             channels = []
             cursor = None
@@ -435,12 +657,25 @@ class WorkspaceBot:
         except Exception as e:
             return f"채널 목록 조회 실패: {e} (`channels:read`, `groups:read` 확인)"
 
-        joined, done, skipped_private, failed = [], 0, [], []
+        joined, done, skipped_rule, skipped_disabled, skipped_private, failed = (
+            [],
+            0,
+            [],
+            [],
+            [],
+            [],
+        )
         for ch in channels:
             name = "#" + ch["name"]
+            if not should_collect(name):
+                skipped_rule.append(name)
+                continue
             if not ch.get("is_member"):
                 if ch.get("is_private"):
                     skipped_private.append(name)  # 봇은 비공개 채널에 자가참여 불가
+                    continue
+                if not self.autojoin:
+                    skipped_disabled.append(name)
                     continue
                 try:
                     client.conversations_join(channel=ch["id"])
@@ -458,6 +693,10 @@ class WorkspaceBot:
         lines = [f"백필 완료: {done}개 채널"]
         if joined:
             lines.append(f"자가참여: {', '.join(joined)}")
+        if skipped_rule:
+            lines.append(f"채널 규칙 밖이라 생략: {len(skipped_rule)}개")
+        if skipped_disabled:
+            lines.append(f"자동 참여가 꺼져 있어 미가입 채널 생략: {len(skipped_disabled)}개")
         if skipped_private:
             lines.append(
                 f"⚠️ 비공개 채널 {len(skipped_private)}개는 봇이 스스로 들어갈 수 없습니다 — "
@@ -501,7 +740,7 @@ class WorkspaceBot:
                 "• `요약` / `이번주 진행상황` / `30일 요약` — 기간별 정리",
                 "• `<키워드> 얼마야?` 같은 구체 질문 — 원문 검색 + 출처",
                 "• `어느 방향이 나을까?` 같은 판단·권고 요청 — 원문이 있으면 근거로, 없으면 일반 판단으로 답합니다",
-                "• `수집` — 이 채널 과거 대화 백필 / `전체수집` — 전 채널",
+                "• `수집` — 이 채널 과거 대화 백필 / `전체수집` — 규칙에 맞는 전 채널",
                 "• `상태` — 연결·수집 상태 / `도움말` — 이 안내",
                 "• `이전 답변 기억나?` — 기억 여부와 그 이유(매번 원문에서 다시 찾습니다)",
                 "• `--model=claude-opus-4-8 질문` — 모델 지정",

@@ -144,9 +144,7 @@ export function Failed({
       <div>
         <div className="notice-title">{what} 불러오지 못했습니다</div>
         <div className="notice-detail">{detail}</div>
-        <div className="notice-detail">
-          콘솔 서버가 떠 있는지, 사내 VPN 에 연결되어 있는지 확인해 주세요.
-        </div>
+        <div className="notice-detail">콘솔 API 서버가 떠 있는지 확인해 주세요.</div>
       </div>
       {onRetry && (
         <div className="notice-actions">

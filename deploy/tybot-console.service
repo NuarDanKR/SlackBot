@@ -15,8 +15,8 @@ WorkingDirectory=/opt/tybot
 EnvironmentFile=/etc/tybot/tybot.env
 
 # 127.0.0.1 에만 바인딩한다.
-#   - VPN(Tailscale/WireGuard) 인터페이스로 노출하려면 --host 를 그 인터페이스 주소로 바꾼다.
-#   - 0.0.0.0 으로 열지 않는다. 이 콘솔은 봇 토큰과 배포 권한을 쥔 화면이다.
+# 외부 노출 경로와 접근 통제는 아직 정해지지 않았다. 오너 승인 없이 --host 를 바꾸지 않는다.
+# 이 콘솔은 봇 토큰과 배포 권한을 쥔 화면이다.
 ExecStart=/opt/tybot/.venv/bin/uvicorn tybot.console.app:app \
     --host 127.0.0.1 --port 8787 --app-dir /opt/tybot/src
 

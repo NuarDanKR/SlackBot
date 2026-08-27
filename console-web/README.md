@@ -22,14 +22,18 @@
 ## 함께 띄우기
 
 ```bash
-# 1) API 서버 (저장소 루트에서)
+# 화면과 API 서버를 한 번에 (console-web 에서)
+npm run dev:all
+
+# 또는 따로: API 서버 (저장소 루트에서)
 uvicorn tybot.console.app:app --host 127.0.0.1 --port 8787 --app-dir src
 
-# 2) 화면 (console-web 에서) — /api 요청은 위 서버로 넘어갑니다
+# 화면 (console-web 에서) — /api 요청은 위 서버로 넘어갑니다
 npm run dev
 ```
 
-접속하면 토큰을 묻습니다. 서버의 `CONSOLE_USERS` 에 등록한 값을 넣으면 됩니다.
+접속하면 아이디·비밀번호를 묻습니다. 서버의 `CONSOLE_ACCOUNTS` 에 등록한 계정을 씁니다.
+설정이 비어 있으면 **임시 계정 `admin` / `1111`** 로 들어갈 수 있고, 그때는 화면 위에 경고가 뜹니다.
 운영에서는 `CONSOLE_DIST` 를 지정해 API 서버가 화면까지 함께 서빙합니다(웹서버 불필요).
 
 ## 실행
@@ -42,8 +46,8 @@ npm run build        # dist/ 생성 (tsc 타입검사 포함)
 npm run preview      # 빌드 결과 확인
 ```
 
-dev·preview 서버는 `127.0.0.1` 에 묶여 있습니다. 콘솔은 VPN 안에서만 열기로 정했으므로,
-개발 중에도 사내망에 실수로 노출되지 않게 기본값을 이렇게 둡니다.
+dev·preview 서버는 `127.0.0.1` 에 묶여 있어 같은 PC 에서만 접속할 수 있습니다.
+다른 장비에 노출하는 방식은 아직 정하지 않았으며, 기본 바인딩은 변경하지 않습니다.
 
 ## 구조
 

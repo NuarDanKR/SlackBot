@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { ApiError, setToken } from './api/client'
+import type { Me } from './api/client'
+import { ApiError, login as apiLogin, logout as apiLogout } from './api/client'
 import { useResource } from './api/hooks'
 import type { ConsoleUser } from './types'
 import { Dashboard } from './pages/Dashboard'
@@ -47,65 +48,89 @@ function useTheme() {
   return { theme, setTheme }
 }
 
-/** 서버가 내려주는 사용자 정보. `/api/me` 응답 그대로입니다. */
-interface Me {
-  name: string
-  email: string
-  role: 'owner' | 'member'
-  workspaces: string[]
-  allWorkspaces: boolean
-}
-
 function toUser(me: Me): ConsoleUser {
   return { name: me.name, email: me.email, role: me.role, workspaces: me.workspaces }
 }
 
-/** 토큰이 없거나 거부됐을 때의 첫 화면. */
-function SignIn({ message, onSubmit }: { message?: string; onSubmit: (token: string) => void }) {
-  const [value, setValue] = useState('')
+/** 로그인 화면. 아이디·비밀번호를 받아 세션 쿠키를 발급받습니다. */
+function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!username.trim() || !password) return
+    setBusy(true)
+    setError(null)
+    try {
+      await apiLogin(username.trim(), password)
+      onSignedIn()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err))
+      setPassword('')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="signin">
       <div className="signin-card">
         <span className="brand-mark">TAEYOUNG</span>
         <h1 className="signin-title">태영건설 TYBot 관리 콘솔</h1>
-        <p className="signin-note">
-          관리자에게 받은 접속 토큰을 입력해 주세요. 이 콘솔은 사내 VPN 안에서만 열립니다.
-        </p>
-        {message && (
+        <p className="signin-note">사내 계정으로 로그인해 주세요.</p>
+
+        {error && (
           <div className="notice bad" style={{ marginBottom: 14 }}>
             <div>
-              <div className="notice-title">접속하지 못했습니다</div>
-              <div className="notice-detail">{message}</div>
+              <div className="notice-title">로그인하지 못했습니다</div>
+              <div className="notice-detail">{error}</div>
             </div>
           </div>
         )}
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (value.trim()) onSubmit(value.trim())
-          }}
-        >
+
+        <form onSubmit={submit}>
           <div className="field">
-            <label className="field-label" htmlFor="token">
-              접속 토큰
+            <label className="field-label" htmlFor="username">
+              아이디
             </label>
             <input
-              id="token"
-              className="input mono"
-              type="password"
-              autoComplete="off"
+              id="username"
+              className="input"
+              autoComplete="username"
               autoFocus
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
             />
-            <span className="field-help">
-              토큰은 이 브라우저에만 저장됩니다. 공용 PC 에서는 사용 후 로그아웃해 주세요.
-            </span>
           </div>
-          <button className="btn btn-primary btn-block" style={{ marginTop: 14 }} type="submit">
-            접속
+          <div className="field" style={{ marginTop: 14 }}>
+            <label className="field-label" htmlFor="password">
+              비밀번호
+            </label>
+            <input
+              id="password"
+              className="input"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          <button
+            className="btn btn-primary btn-block"
+            style={{ marginTop: 18 }}
+            type="submit"
+            disabled={busy}
+          >
+            {busy ? '확인 중…' : '로그인'}
           </button>
         </form>
+
+        <p className="signin-foot">
+          비밀번호를 잊었거나 계정이 없으면 관리자에게 문의해 주세요.
+        </p>
       </div>
     </div>
   )
@@ -125,32 +150,28 @@ export default function App() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4600)
   }
 
-  function signIn(token: string) {
-    setToken(token)
+  async function signOut() {
+    try {
+      await apiLogout()
+    } catch {
+      // 서버에 못 닿아도 화면은 로그인으로 돌려보냅니다.
+    }
     setAuthTick((n) => n + 1)
   }
 
-  function signOut() {
-    setToken('')
-    setAuthTick((n) => n + 1)
-  }
-
-  // 토큰이 없거나 거부됐으면 접속 화면으로 돌아갑니다.
-  if (me.error?.needsToken || (!me.loading && !me.data)) {
-    return <SignIn message={me.error ? me.error.message : undefined} onSubmit={signIn} />
-  }
-  if (me.loading || !me.data) {
+  // 아직 확인 중일 때는 빈 화면 대신 안내를 둡니다.
+  if (me.loading) {
     return (
       <div className="signin">
         <div className="signin-card">
-          <p className="signin-note">접속 중입니다…</p>
+          <p className="signin-note">확인 중입니다…</p>
         </div>
       </div>
     )
   }
-  // 서버는 붙었지만 다른 이유로 실패한 경우(예: 서버 오류)
-  if (me.error && !(me.error instanceof ApiError && me.error.needsToken)) {
-    return <SignIn message={me.error.message} onSubmit={signIn} />
+  // 로그인이 필요하거나 만료됐으면 로그인 화면으로 돌아갑니다.
+  if (!me.data) {
+    return <SignIn onSignedIn={() => setAuthTick((n) => n + 1)} />
   }
 
   const user = toUser(me.data)
@@ -219,12 +240,23 @@ export default function App() {
             </button>
           </div>
 
-          <span className="rail-note">사내 VPN 안에서만 접속됩니다</span>
         </div>
       </aside>
 
       <main className="main">
         <div className="main-inner">
+          {me.data.usingDefaultAccount && (
+            <div className="notice bad" style={{ marginBottom: 20 }}>
+              <div className="notice-kind">임시 계정</div>
+              <div>
+                <div className="notice-title">기본 계정으로 접속 중입니다</div>
+                <div className="notice-detail">
+                  이 콘솔은 봇 토큰과 배포 권한을 다루는 화면입니다. 콘솔에 접속할 수 있는 누구나
+                  같은 계정으로 들어올 수 있으니, 운영 전에 계정을 교체해 주세요.
+                </div>
+              </div>
+            </div>
+          )}
           {activeTab === 'status' && <Dashboard user={user} onToast={toast} />}
           {activeTab === 'collected' && <Collected user={user} onToast={toast} />}
           {activeTab === 'usage' && <Usage user={user} onToast={toast} />}

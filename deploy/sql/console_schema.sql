@@ -69,7 +69,7 @@ COMMENT ON TABLE workspace_secret IS
 -- 2. 콘솔 사용자와 권한
 -- ===========================================================================
 
--- VPN 안이어도 사용자 식별은 필요하다 — 누가 승인했는지 남겨야 하기 때문이다.
+-- 접속 경로와 무관하게 사용자 식별은 필요하다 — 누가 승인했는지 남겨야 하기 때문이다.
 CREATE TABLE IF NOT EXISTS console_user (
     email       text PRIMARY KEY,
     name        text NOT NULL,

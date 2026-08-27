@@ -4,7 +4,7 @@
     uvicorn tybot.console.app:app --host 127.0.0.1 --port 8787
 
 ## 보안 전제
-- **VPN 안에서만 연다.** 기본 바인딩은 루프백이고, 공개 HTTPS 로 노출하지 않는다.
+- 기본 바인딩은 루프백이다. 외부 노출 경로와 접근 통제는 아직 결정되지 않았다.
 - 그래도 사용자 식별은 한다 — 누가 승인했고 누가 원문을 열었는지 남겨야 하기 때문이다(`auth.py`).
 - 응답에 담지 않는 것: 사용자 질문·답변 본문, 시크릿 원문.
 - 아카이브 원문 본문은 **관리자에게만**, 그리고 **열람 기록을 남기며** 내려보낸다.
@@ -35,7 +35,7 @@ KST = timezone(timedelta(hours=9))
 app = FastAPI(
     title="TYBot 관리 콘솔 API",
     version="0.1.0",
-    # 문서 페이지는 열어 둔다 — VPN 안이고, 붙이는 사람이 확인할 수 있어야 한다.
+    # 개발·운영 점검용 문서 페이지. 외부 노출 경로를 정할 때 접근 제한도 함께 검토한다.
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
@@ -108,7 +108,7 @@ def login(
         max_age=SESSION_HOURS * 3600,
         httponly=True,
         samesite="strict",
-        # VPN 안에서 http 로 열 수 있으므로 secure 는 강제하지 않는다.
+        # 기본 구성은 http 이므로 secure 를 강제하지 않는다.
         # HTTPS 를 붙이면 CONSOLE_COOKIE_SECURE=1 로 켠다.
         secure=os.getenv("CONSOLE_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes"),
         path="/",

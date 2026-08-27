@@ -1,4 +1,4 @@
-"""자동 참여 — 규칙에 맞는 공개 채널만, 비공개는 초대 필요 목록으로."""
+"""자동 참여 — 규칙에 맞는 공개 채널만, 비공개 채널은 절대 자가 참여하지 않음."""
 from __future__ import annotations
 
 from tybot.autojoin import on_channel_event, sweep
@@ -42,12 +42,12 @@ def test_skips_channels_that_break_the_rule():
     assert len(r.skipped_rule) == 3
 
 
-def test_private_channels_go_to_need_invite():
-    """Slack 설계상 봇은 비공개 채널에 스스로 못 들어간다."""
+def test_defensively_skips_visible_private_nonmember():
+    """실환경에서는 보이지 않는 상태지만 API가 돌려줘도 참여하지 않는다."""
     c = FakeClient([_ch("C1", "팀-인사_HR100-비밀", private=True)])
     r = sweep(c)
     assert c.joined == []
-    assert r.need_invite == ["#팀-인사_HR100-비밀"]
+    assert r.skipped_private == ["#팀-인사_HR100-비밀"]
 
 
 def test_already_member_is_not_rejoined():
@@ -81,6 +81,13 @@ def test_new_channel_event_joins_immediately():
 def test_new_channel_event_ignores_non_matching():
     c = FakeClient([])
     assert on_channel_event(c, _ch("C9", "잡담방")) is None
+    assert c.joined == []
+
+
+def test_channel_event_respects_disabled_setting():
+    c = FakeClient([])
+    channel = _ch("C9", "팀-전산_ABB110-주간회의")
+    assert on_channel_event(c, channel, enabled=False) is None
     assert c.joined == []
 
 
