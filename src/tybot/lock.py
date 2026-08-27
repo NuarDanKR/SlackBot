@@ -30,6 +30,7 @@ import logging
 import os
 import socket
 import sys
+import tempfile
 import time
 import zlib
 from collections.abc import Iterator
@@ -269,11 +270,17 @@ Lock = FileLock | PostgresAdvisoryLock
 
 
 def _lock_dir() -> Path:
-    """락 파일을 둘 곳. 아카이브·감사기록과 같은 상태 디렉터리 아래에 둔다."""
+    """락 파일을 둘 곳. 아카이브·감사기록과 같은 상태 디렉터리 아래에 둔다.
+
+    항상 **절대경로**다. 예전에는 `ARCHIVE_DIR` 이 비면 `./.locks` 로 떨어졌는데,
+    운영 유닛은 코드 경로가 읽기 전용이라 그 순간 기동이 막혔다.
+    """
+    from .config import state_dir
+
     explicit = os.getenv("LOCK_DIR")
     if explicit:
-        return Path(explicit)
-    return Path(os.getenv("ARCHIVE_DIR", "./archive")).parent / ".locks"
+        return Path(explicit).expanduser().resolve()
+    return state_dir() / ".locks"
 
 
 def make_lock(name: str, *, label: str, dsn: str | None = None) -> Lock:
@@ -281,7 +288,31 @@ def make_lock(name: str, *, label: str, dsn: str | None = None) -> Lock:
     dsn = dsn if dsn is not None else os.getenv("DATABASE_URL")
     if dsn:
         return PostgresAdvisoryLock(dsn, label=label, name=name)
-    return FileLock(_lock_dir() / f"{name}.lock", label=label)
+    return FileLock(_resolve_lock_path(name), label=label)
+
+
+def _resolve_lock_path(name: str) -> Path:
+    """락 파일 경로를 정하되, 그 디렉터리를 못 만들면 임시 디렉터리로 물러난다.
+
+    락을 못 잡아 **봇 전체가 안 뜨는 것**보다, 경고를 남기고 뜨는 쪽이 낫다.
+    단일 인스턴스는 systemd 가 이미 보장하고, 이 락은 그 위의 추가 안전장치다.
+    """
+    primary = _lock_dir()
+    try:
+        primary.mkdir(parents=True, exist_ok=True)
+        probe = primary / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return primary / f"{name}.lock"
+    except OSError as e:
+        fallback = Path(tempfile.gettempdir()) / "tybot-locks"
+        logger.warning(
+            "락 디렉터리를 쓸 수 없어 임시 경로로 대체합니다: %s (%s) -> %s. "
+            "운영에서는 STATE_DIR 또는 ARCHIVE_DIR 을 쓰기 가능한 경로로 지정하세요.",
+            primary, e, fallback,
+        )
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback / f"{name}.lock"
 
 
 def instance_lock(name: str = "bot", *, dsn: str | None = None) -> Lock:

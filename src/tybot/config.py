@@ -6,6 +6,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def state_dir() -> Path:
+    """봇이 쓰기 상태 파일을 두는 곳(락·상태·리포트의 기준).
+
+    **절대경로로 돌려준다.** 상대경로로 두면 `WorkingDirectory` 기준이 되는데,
+    운영 유닛은 `ProtectSystem=strict` 로 코드 경로(`/opt/tybot`)가 읽기 전용이라
+    "Read-only file system" 으로 기동이 막힌다.
+    """
+    for key in ("STATE_DIR", "LOCK_DIR"):
+        v = os.getenv(key)
+        if v:
+            return Path(v).expanduser().resolve()
+    for key in ("ARCHIVE_DIR", "QA_LOG_DIR"):
+        v = os.getenv(key)
+        if v:
+            return Path(v).expanduser().resolve().parent
+    return Path.cwd()
+
+
 def cost_state_path(qa_log_dir: str | None = None) -> str:
     """당일 누적 LLM 비용을 남길 파일 경로.
 
