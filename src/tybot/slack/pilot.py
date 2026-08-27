@@ -27,6 +27,7 @@ from .. import heartbeat
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
+from ..archive.canvas import canvas_lines
 from ..archive.files import file_lines
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
@@ -375,6 +376,19 @@ class WorkspaceBot:
                 msgs.extend(got)
                 replies += len(got)
 
+        # 채널 캔버스 스냅샷. 없으면 조용히 넘어간다(정상).
+        canvas_note = ""
+        c_lines, c_warns = canvas_lines(client, channel_id, self.cfg.bot_token)
+        if c_lines:
+            now = datetime.now(UTC)
+            msgs.extend(
+                writer.IncomingMessage(ts=now, speaker="캔버스", text=ln) for ln in c_lines
+            )
+            canvas_note = f"캔버스 {len(c_lines)}줄 포함"
+        for w in c_warns:
+            log.warning("[%s] %s", self.workspace, w)
+            canvas_note = f"캔버스 처리 경고: {w}"
+
         try:
             r = writer.ingest(
                 self.archive_dir,
@@ -387,6 +401,8 @@ class WorkspaceBot:
             return f"형식 검사 실패로 이번 취합을 롤백했습니다: {e}"
 
         out = [f"{channel}: 원문 {r.written}건 저장 (봇 발언 {r.skipped_bot}건 제외)"]
+        if canvas_note:
+            out.append(canvas_note)
         if thread_parents:
             out.append(
                 f"스레드 {min(len(thread_parents), THREAD_FETCH_LIMIT)}개의 답글 {replies}건 포함"

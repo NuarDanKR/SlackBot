@@ -63,6 +63,7 @@ ruff check src tests scripts        # 0 errors
 | 주제 | 문서 |
 |---|---|
 | 백로그·인계 | [`BACKLOG.md`](BACKLOG.md) |
+| **검증 요청**(내가 확신 못 한 것) | [`docs/verification/`](docs/verification/) |
 | 구조 개요·도식 | [`README.md`](README.md) |
 | 멀티 워크스페이스·권한 3층 | [`docs/multi-workspace.md`](docs/multi-workspace.md) |
 | 에이전트 구조(하지 않을 것 포함) | [`docs/design/agent-architecture.md`](docs/design/agent-architecture.md) |
