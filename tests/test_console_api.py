@@ -127,6 +127,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("QA_LOG_DIR", str(qa))
     monkeypatch.setenv("HARNESS_DIR", str(harness))
     monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ENV_SETTINGS_PATH", str(tmp_path / "state" / "config" / "managed.env"))
     monkeypatch.setenv("WORKSPACES", "fin,site-gimhae,mgmt")
     monkeypatch.setenv("WORKSPACE_LABEL_FIN", "자금팀")
     monkeypatch.setenv("WORKSPACE_LABEL_SITE_GIMHAE", "현장 김해외동(180182)")
@@ -469,6 +470,103 @@ def test_harness_files_are_listed(client):
 def test_harness_is_scoped_for_member(client):
     files = client.get("/api/harness", headers=member(client)).json()["files"]
     assert {f["workspace"] for f in files} == {"fin"}
+
+
+# --- 환경변수 설정 ---------------------------------------------------------
+
+def _write_headers(headers: dict) -> dict:
+    return {**headers, "Origin": "http://testserver", "X-TYBot-CSRF": "1"}
+
+
+def _env_payload(client, headers: dict) -> dict:
+    data = client.get("/api/env-settings", headers=headers).json()
+    return {
+        "workspaces": data["workspaces"],
+        "realtimeIngest": data["realtimeIngest"],
+        "autojoinChannels": data["autojoinChannels"],
+        "replyInThread": data["replyInThread"],
+    }
+
+
+def test_env_settings_are_owner_only(client):
+    assert client.get("/api/env-settings", headers=member(client)).status_code == 403
+    assert client.get("/api/env-settings", headers=owner(client)).status_code == 200
+
+
+def test_env_settings_never_return_secrets(client, monkeypatch):
+    monkeypatch.setenv("SLACK_BOT_TOKEN_FIN", "xoxb-secret-value")
+    monkeypatch.setenv("SLACK_APP_TOKEN_FIN", "xapp-secret-value")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-value")
+    body = client.get("/api/env-settings", headers=owner(client)).text
+    assert "xoxb-" not in body
+    assert "xapp-" not in body
+    assert "sk-ant-" not in body
+
+
+def test_owner_saves_validated_env_overlay_and_restart_request(client, env):
+    headers = owner(client)
+    payload = _env_payload(client, headers)
+    mgmt = next(row for row in payload["workspaces"] if row["key"] == "mgmt")
+    mgmt["readable"] = ["fin"]
+    payload["replyInThread"] = False
+
+    response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
+    assert response.status_code == 200, response.text
+    assert {"CROSS_WS_READ", "REPLY_IN_THREAD"} <= set(response.json()["changed"])
+
+    managed = (env / "state" / "config" / "managed.env").read_text(encoding="utf-8")
+    assert 'CROSS_WS_READ="mgmt:fin"' in managed
+    assert 'REPLY_IN_THREAD="0"' in managed
+    assert "SLACK_BOT_TOKEN" not in managed
+    assert (env / "state" / "restart-request.json").is_file()
+
+    audit = (env / "qa-log" / "env-settings.jsonl").read_text(encoding="utf-8")
+    assert "CROSS_WS_READ" in audit
+    assert "xoxb-" not in audit
+
+
+def test_env_write_requires_owner_origin_and_csrf(client):
+    owner_headers = owner(client)
+    payload = _env_payload(client, owner_headers)
+    assert client.put("/api/env-settings", json=payload, headers=owner_headers).status_code == 403
+    assert (
+        client.put(
+            "/api/env-settings",
+            json=payload,
+            headers={**owner_headers, "Origin": "https://evil.example", "X-TYBot-CSRF": "1"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put(
+            "/api/env-settings", json=payload, headers=_write_headers(member(client))
+        ).status_code
+        == 403
+    )
+
+
+def test_env_write_rejects_unknown_or_self_read_target(client, env):
+    headers = owner(client)
+    payload = _env_payload(client, headers)
+    payload["workspaces"][0]["readable"] = [payload["workspaces"][0]["key"]]
+    response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
+    assert response.status_code == 422
+    assert not (env / "state" / "config" / "managed.env").exists()
+
+
+def test_default_admin_cannot_write_env_settings(env):
+    auth = Authenticator(accounts_spec="", secret="test-secret")
+    console_app.app.dependency_overrides[console_app.authenticator] = lambda: auth
+    c = TestClient(console_app.app)
+    login = c.post("/api/login", json={"username": "admin", "password": "1111"})
+    payload = _env_payload(c, {"Cookie": f"tybot_console={login.cookies.get('tybot_console')}"})
+    response = c.put(
+        "/api/env-settings",
+        json=payload,
+        headers={"Origin": "http://testserver", "X-TYBot-CSRF": "1"},
+    )
+    assert response.status_code == 403
+    assert "임시" in response.json()["detail"]
 
 
 # --- 임시 기본 계정 ---------------------------------------------------------

@@ -9,8 +9,9 @@ import { Deploy } from './pages/Deploy'
 import { Workspaces } from './pages/Workspaces'
 import { Harness } from './pages/Harness'
 import { Collected } from './pages/Collected'
+import { EnvSettings } from './pages/EnvSettings'
 
-type Tab = 'status' | 'collected' | 'usage' | 'harness' | 'deploy' | 'workspaces'
+type Tab = 'status' | 'collected' | 'usage' | 'harness' | 'deploy' | 'workspaces' | 'env'
 
 /** 메뉴 이름은 화면 제목과 똑같이 씁니다 — 어디에 있는지 헷갈리지 않게 합니다. */
 const NAV: { group: string; items: { id: Tab; label: string; ownerOnly?: boolean }[] }[] = [
@@ -28,6 +29,7 @@ const NAV: { group: string; items: { id: Tab; label: string; ownerOnly?: boolean
       { id: 'harness', label: '봇 규칙 편집' },
       { id: 'deploy', label: '배포 승인' },
       { id: 'workspaces', label: '워크스페이스 관리', ownerOnly: true },
+      { id: 'env', label: '환경변수 설정', ownerOnly: true },
     ],
   },
 ]
@@ -182,7 +184,7 @@ export default function App() {
     items: g.items.filter((i) => !i.ownerOnly || isOwner),
   })).filter((g) => g.items.length)
 
-  const activeTab: Tab = !isOwner && tab === 'workspaces' ? 'status' : tab
+  const activeTab: Tab = !isOwner && (tab === 'workspaces' || tab === 'env') ? 'status' : tab
 
   return (
     <div className="shell">
@@ -263,6 +265,7 @@ export default function App() {
           {activeTab === 'harness' && <Harness user={user} onToast={toast} />}
           {activeTab === 'deploy' && <Deploy user={user} onToast={toast} />}
           {activeTab === 'workspaces' && <Workspaces onToast={toast} />}
+          {activeTab === 'env' && <EnvSettings onToast={toast} />}
         </div>
       </main>
 

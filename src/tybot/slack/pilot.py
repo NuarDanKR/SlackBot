@@ -45,6 +45,7 @@ from ..channels import parse, should_collect
 from ..config import cost_state_path
 from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
+from ..managed_env import consume_restart_request
 from ..workspaces import WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
@@ -812,6 +813,13 @@ class WorkspaceBot:
         )
         self.publish_status(connected=True)
 
+    def close(self) -> None:
+        """재시작·종료 전에 Socket Mode 연결과 작업 스레드를 정리한다."""
+        handler = getattr(self, "_handler", None)
+        if handler is not None:
+            with contextlib.suppress(Exception):
+                handler.close()
+
     def publish_status(self, *, connected: bool) -> None:
         """관리 콘솔이 읽을 상태 파일을 남긴다.
 
@@ -923,6 +931,7 @@ def main() -> int:
         log.error("단일 실행 락을 만들 수 없어 기동을 멈춥니다 — %s", e)
         return 1
 
+    bots: list[WorkspaceBot] = []
     try:
         bots = build_bots()
         for bot in bots:
@@ -934,9 +943,19 @@ def main() -> int:
         # 봇이 죽었는데 화면만 멀쩡해 보이는 상황이 생기지 않는다.
         stop = threading.Event()
         while not stop.wait(HEARTBEAT_SECONDS):
+            restart = consume_restart_request()
+            if restart is not None:
+                log.warning(
+                    "환경변수 설정 변경으로 봇을 재시작합니다 — actor=%s changed=%s",
+                    restart.get("actor", "-"),
+                    restart.get("changed", []),
+                )
+                break
             for bot in bots:
                 bot.publish_status(connected=True)
     finally:
+        for bot in bots:
+            bot.close()
         lock.release()
     return 0
 

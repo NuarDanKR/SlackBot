@@ -1,4 +1,4 @@
-"""관리 콘솔 API (읽기).
+"""관리 콘솔 API.
 
 실행:
     uvicorn tybot.console.app:app --host 127.0.0.1 --port 8787
@@ -9,8 +9,7 @@
 - 응답에 담지 않는 것: 사용자 질문·답변 본문, 시크릿 원문.
 - 아카이브 원문 본문은 **관리자에게만**, 그리고 **열람 기록을 남기며** 내려보낸다.
 
-이 파일에는 쓰기(등록·승인·반영) 엔드포인트가 없다. 서버를 바꾸는 동작은 자동 검사·승인·되돌리기
-장치와 함께 붙여야 해서 다음 단계로 미룬다.
+환경설정 쓰기는 owner 전용 허용 목록만 제공한다. 원문·시크릿·임의 파일 편집 경로는 없다.
 """
 from __future__ import annotations
 
@@ -21,12 +20,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..archive.store import ArchiveStore
-from . import reader
+from . import env_settings, reader
 from .auth import SESSION_COOKIE, SESSION_HOURS, Authenticator, AuthError, ConsoleUser
 
 logger = logging.getLogger("tybot.console.api")
@@ -82,6 +81,20 @@ def current_user(
 class LoginBody(BaseModel):
     username: str
     password: str
+
+
+class EnvWorkspaceBody(BaseModel):
+    key: str
+    label: str
+    root: bool
+    readable: list[str]
+
+
+class EnvSettingsBody(BaseModel):
+    workspaces: list[EnvWorkspaceBody]
+    realtimeIngest: bool
+    autojoinChannels: bool
+    replyInThread: bool
 
 
 @app.post("/api/login")
@@ -215,6 +228,63 @@ def collected_audit(user: User) -> dict:
 def harness(user: User) -> dict:
     """봇 규칙 문서 목록과 내용."""
     return {"files": _visible(user, reader.harness_files())}
+
+
+def _require_owner(user: ConsoleUser) -> None:
+    if not user.is_owner:
+        raise HTTPException(status_code=403, detail="관리자만 환경변수 설정을 볼 수 있습니다.")
+
+
+def _check_write_request(request: Request, auth: Authenticator) -> None:
+    """쿠키 인증 쓰기 요청의 CSRF와 임시 관리자 계정 사용을 차단한다."""
+    if auth.using_default:
+        raise HTTPException(
+            status_code=403,
+            detail="임시 admin/1111 계정에서는 환경설정을 변경할 수 없습니다. CONSOLE_ACCOUNTS를 먼저 설정하세요.",
+        )
+    if request.headers.get("x-tybot-csrf") != "1":
+        raise HTTPException(status_code=403, detail="CSRF 확인 헤더가 없습니다.")
+
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    same_origin = f"{request.url.scheme}://{request.headers.get('host', '')}".rstrip("/")
+    allowed = {
+        value.strip().rstrip("/")
+        for value in (os.getenv("CONSOLE_ALLOWED_ORIGINS") or "").split(",")
+        if value.strip()
+    }
+    if not origin or (origin != same_origin and origin not in allowed):
+        raise HTTPException(status_code=403, detail="허용되지 않은 화면에서 보낸 변경 요청입니다.")
+
+
+@app.get("/api/env-settings")
+def get_env_settings(user: User) -> dict:
+    _require_owner(user)
+    return env_settings.snapshot()
+
+
+@app.put("/api/env-settings")
+def put_env_settings(
+    body: EnvSettingsBody,
+    request: Request,
+    user: User,
+    auth: Annotated[Authenticator, Depends(authenticator)],
+) -> dict:
+    _require_owner(user)
+    _check_write_request(request, auth)
+    try:
+        result, changed = env_settings.save(body.model_dump(), actor=user.display())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except OSError as e:
+        logger.error("환경변수 설정 저장 실패: %s", e)
+        raise HTTPException(status_code=500, detail="환경변수 설정 파일을 저장하지 못했습니다.") from e
+
+    try:
+        env_settings.audit_change(user.display(), user.email, changed, "applied")
+    except OSError as e:
+        logger.error("환경변수 설정 감사 로그 실패: %s", e)
+    logger.warning("환경변수 설정 변경 — actor=%s changed=%s", user.email, changed)
+    return {**result, "changed": changed}
 
 
 @app.get("/api/health")

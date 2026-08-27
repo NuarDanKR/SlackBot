@@ -28,9 +28,21 @@ def load_env_file() -> str:
     except ImportError:
         return "dotenv 미설치 - 프로세스 환경변수만 사용"
 
+    source = "파일 없음 - 프로세스 환경변수만 사용"
     for p in paths:
         if p and pathlib.Path(p).is_file():
             load_dotenv(p, override=False)
-            return p
-    load_dotenv(override=False)
-    return "파일 없음 - 프로세스 환경변수만 사용"
+            source = p
+            break
+    else:
+        load_dotenv(override=False)
+
+    # 콘솔은 원본 환경파일을 덮지 않고 허용 항목만 별도 파일에 쓴다. 원본을 먼저 읽어
+    # STATE_DIR을 확정한 다음 오버레이를 적용해야 운영 경로를 정확히 찾는다.
+    from .managed_env import managed_env_path
+
+    managed = managed_env_path()
+    if managed.is_file():
+        load_dotenv(managed, override=True)
+        return f"{source} + {managed}"
+    return source

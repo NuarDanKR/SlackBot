@@ -1,5 +1,5 @@
 [Unit]
-Description=TYBot 관리 콘솔 (읽기 API + 화면)
+Description=TYBot 관리 콘솔 (조회 + 제한된 환경설정)
 Documentation=file:///opt/tybot/docs/design/console.md
 After=network-online.target
 Wants=network-online.target
