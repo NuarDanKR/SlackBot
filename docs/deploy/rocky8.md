@@ -156,6 +156,12 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py
 ```
 `[OK]` 필수 3개 + 패키지 3개가 모두 떠야 한다.
 
+**키가 실제로 통하는지도 확인한다** — 형식 검사로는 폐기된 키를 구분할 수 없다. 이 절을 건너뛰면 봇은 정상 기동하고 **질문마다** 401 로 죽는다:
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py --live
+```
+`[OK]   LLM 실호출 성공` 이 떠야 한다. 1토큰만 쓰므로 비용은 무시할 수준이다.
+
 ---
 
 ## 4. ⚠️ 로컬 봇 먼저 끄기
@@ -218,6 +224,7 @@ sudo reboot                                                            # 부팅 
 | 기동은 되는데 Slack 응답 없음 | 아웃바운드 443 차단. `sudo -u tybot curl -sI https://slack.com` |
 | 프록시 환경 | `/etc/systemd/system/tybot.service.d/proxy.conf` 생성:<br>`[Service]`<br>`Environment=HTTPS_PROXY=http://프록시:포트`<br>`Environment=NO_PROXY=localhost,127.0.0.1`<br>후 `systemctl daemon-reload && systemctl restart tybot` |
 | 설정을 고쳤는데 반영 안 됨 | `journalctl -u tybot \| grep "환경설정 출처"` 로 읽은 파일 확인. 인라인 주석·`export` 접두사·`=` 주변 공백을 제거 |
+| 봇은 뜨는데 질문마다 답이 없거나 `⚠️ LLM 인증에 실패했습니다(401)` | 키가 폐기·삭제됐다. `check_env.py --live` 로 확인 후 console.anthropic.com > API keys 에서 재발급. 형식·길이 검사로는 안 잡힌다 |
 | `아카이브에 쓸 수 없어 기동하지 않습니다` | `ARCHIVE_DIR` 누락 또는 권한 문제. `sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py` 의 `=== 쓰기 경로 ===` 절 참조. 조회 전용으로 띄우려면 `ALLOW_READONLY_ARCHIVE=1` |
 | `락 디렉터리를 쓸 수 없어 임시 경로로 대체` | `ARCHIVE_DIR` 이 비어 락 경로가 코드 경로(`/opt/tybot`, 읽기 전용) 아래로 떨어진 것이다. `tybot.env` 의 `ARCHIVE_DIR=/var/lib/tybot/archive` 확인, 또는 `STATE_DIR=/var/lib/tybot` 지정 |
 | `Start request repeated too quickly` | `sudo systemctl reset-failed tybot` 후 재시작(재시작 폭주 차단이 걸린 상태) |

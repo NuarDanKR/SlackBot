@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """환경변수 점검 - 값은 절대 전부 출력하지 않는다(마스킹).
 
-사용: python scripts/check_env.py
+사용: python scripts/check_env.py [--live]
+  --live : LLM 에 1토큰을 실제로 보내 키가 통하는지 확인한다(폐기된 키 탐지).
 출력물은 그대로 공유해도 안전하다(앞 6자 + 뒤 4자만 노출).
 """
 from __future__ import annotations
@@ -49,6 +50,55 @@ def check_write_paths() -> bool:
     if not problems:
         print(f"  [OK]   쓰기 가능 - archive={a} qa_log={q}")
     return not problems
+
+
+def check_llm_live() -> bool:
+    """키가 실제로 통하는지 1토큰 호출로 확인한다(--live 옵션).
+
+    왜 필요한가 — 키가 폐기되면 봇은 정상으로 기동하고 **질문마다** 401 로 죽는다.
+    형식 검사(sk-ant- 접두사, 길이)로는 폐기된 키를 구분할 수 없다. 배포 런북에서
+    이 절을 통과시키면 그 계열의 장애를 기동 전에 잡는다.
+
+    비용은 1토큰이라 무시할 수준이다. 기본 실행에 넣지 않는 이유: 네트워크가 없는
+    환경에서도 설정 점검은 되어야 한다.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not key:
+        print("  [MISS] ANTHROPIC_API_KEY 가 없어 실호출을 건너뜁니다")
+        return False
+    model = os.getenv("DEFAULT_MODEL", "claude-haiku-4-5-20251001")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(
+            {"model": model, "max_tokens": 1,
+             "messages": [{"role": "user", "content": "hi"}]}
+        ).encode(),
+        headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print(f"  [OK]   LLM 실호출 성공 (HTTP {r.status}, model={model})")
+            return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:200]
+        print(f"  [MISS] LLM 실호출 실패 (HTTP {e.code}): {body}")
+        if e.code == 401:
+            print("         키가 폐기·삭제됐거나 다른 조직의 키입니다. "
+                  "console.anthropic.com > API keys 에서 목록에 남아 있는지 확인하고 "
+                  "재발급하세요. 값의 공백/줄바꿈도 함께 확인하세요.")
+        elif e.code == 404:
+            print(f"         모델 이름을 확인하세요: DEFAULT_MODEL={model}")
+        elif e.code == 429:
+            print("         한도 초과입니다. 키 자체는 유효합니다.")
+        return False
+    except urllib.error.URLError as e:
+        print(f"  [WARN] LLM 에 접속하지 못했습니다(네트워크/프록시): {e.reason}")
+        return True  # 키 문제로 단정할 수 없다
 
 
 def check_workspaces() -> bool:
@@ -110,6 +160,9 @@ def main() -> int:
     print("=== 선택 ===")
     for key in OPTIONAL:
         print(f"  [ .. ] {key}: {os.getenv(key) or '(기본값)'}")
+    if "--live" in sys.argv:
+        print("=== LLM 실호출 ===")
+        ok = check_llm_live() and ok
     print("=== 패키지 ===")
     for mod in ("slack_bolt", "anthropic", "dotenv"):
         try:
