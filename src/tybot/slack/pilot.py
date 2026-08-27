@@ -42,6 +42,7 @@ from ..channel_management import (
 )
 from ..channels import parse, should_collect
 from ..config import cost_state_path
+from ..failures import failure_message
 from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
@@ -415,6 +416,24 @@ class WorkspaceBot:
         )
 
     def _handle(self, event, client, say, *, in_channel: bool) -> None:
+        """요청 처리 진입점. 어떤 예외가 나도 **사람에게 무슨 일인지 알린다.**
+
+        예전에는 예외가 여기서 조용히 사라져 👀 만 붙고 답이 없었다. 사용자는 봇이
+        무시했다고 생각하고, 원인은 서버 로그를 보는 사람만 알 수 있었다.
+        """
+        try:
+            self._handle_request(event, client, say, in_channel=in_channel)
+        except Exception as e:
+            log.exception("요청 처리 실패 ws=%s ch=%s", self.workspace, event.get("channel"))
+            reply = failure_message(e)
+            with contextlib.suppress(Exception):
+                ts = event.get("thread_ts") or event.get("ts")
+                if self.reply_in_thread or event.get("thread_ts"):
+                    say(text=reply, thread_ts=ts)
+                else:
+                    say(text=reply)
+
+    def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
         text = _clean(event.get("text", ""))
         user_id = event.get("user", "")
         channel_id = event.get("channel", "")

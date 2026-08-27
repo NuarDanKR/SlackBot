@@ -132,3 +132,38 @@ def test_parse_period(text, days):
 )
 def test_ingest_command_vs_status_question(text, kind):
     assert classify_by_rule(text).kind == kind
+
+
+# --- 상태 질문: LLM 분류기가 죽었을 때가 가장 중요하다 -------------------------
+# 실제 사고: 키가 401 이 되어 분류기가 규칙으로 폴백했는데, 규칙이 "현재 상태" 를
+# search 로 봤다. 그래서 상태 질문이 아카이브 검색 -> LLM 호출 -> 또 401 로 죽었다.
+STATUS_QUESTIONS = [
+    "현재 상태",
+    "지금 상태",
+    "상태 알려줘",
+    "상태는 어때?",
+    "상태 확인해줘",
+    "봇 상태",
+    "상태",
+    "시스템 상태",
+    "서버 상황",
+    "현재 상황 보여줘",
+]
+
+
+@pytest.mark.parametrize("q", STATUS_QUESTIONS)
+def test_status_questions_need_no_llm(q):
+    assert classify_by_rule(q).kind == "status"
+
+
+# 상태 표현이 들어갔지만 실제로는 아카이브 질문인 것들 - status 로 새면 안 된다.
+NOT_STATUS = [
+    ("현재 자금 상태 문서 찾아줘", "search"),
+    ("이번주 현장 진행 상황 요약해줘", "summary"),
+    ("이전 답변 기억나?", "memory"),
+]
+
+
+@pytest.mark.parametrize(("q", "kind"), NOT_STATUS)
+def test_status_pattern_does_not_swallow_archive_questions(q, kind):
+    assert classify_by_rule(q).kind == kind
