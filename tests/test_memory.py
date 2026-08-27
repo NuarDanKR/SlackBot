@@ -78,12 +78,12 @@ def test_write_intent_is_never_mixed_with_others():
     assert [t.kind for t in tasks] == ["ingest"]
 
 
-def test_task_count_is_capped():
+def test_planner_preserves_over_cap_count_for_user_notice():
     tasks = plan_by_rule(
         "상태 어때? 그리고 기억나? 그리고 김해외동 기성금 얼마야? "
         "그리고 이번주 요약해줘? 그리고 도움말 알려줘?"
     )
-    assert len(tasks) <= MAX_TASKS
+    assert len(tasks) > MAX_TASKS
 
 
 def _rec(**kw):

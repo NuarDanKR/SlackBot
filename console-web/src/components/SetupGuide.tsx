@@ -43,6 +43,14 @@ features:
       description: /채널 명령의 영문 예비 명령입니다.
       usage_hint: 생성 | 이름변경 | 도움말
       should_escape: false
+    - command: /투표
+      description: 채널에서 투표를 만듭니다. 중복 선택·익명·마감 시간을 고를 수 있습니다.
+      usage_hint: 질문 | 도움말
+      should_escape: false
+    - command: /ty-poll
+      description: /투표 명령의 영문 예비 명령입니다.
+      usage_hint: 질문 | 도움말
+      should_escape: false
 oauth_config:
   scopes:
     bot:
@@ -59,6 +67,7 @@ oauth_config:
       - files:read
       - canvases:read
       - reactions:write
+      - reactions:read
       - channels:join
       - commands
       - channels:manage
@@ -72,6 +81,8 @@ settings:
       - message.groups
       - channel_created
       - channel_rename
+      - reaction_added
+      - reaction_removed
   interactivity:
     is_enabled: true
   org_deploy_enabled: false

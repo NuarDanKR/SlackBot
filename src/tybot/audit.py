@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,10 +55,17 @@ class QARecord:
     cost_usd: float = 0.0
     elapsed_ms: int = 0
     answer: str = ""
+    record_id: str = ""
+    request_ts: str = ""
+    response_ts: str = ""
+    thread_ts: str = ""
+    channel_type: str = ""
+    error: str = ""
 
     @classmethod
     def build(cls, **kw) -> QARecord:
         kw["ts"] = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+        kw.setdefault("record_id", uuid.uuid4().hex)
         kw["question"] = _clip(kw.get("question"))
         kw["answer"] = _clip(kw.get("answer"))
         return cls(**kw)
@@ -129,6 +137,39 @@ class QALog:
             return []
         out.sort(reverse=True)
         return out[:limit]
+
+    def find_answer(
+        self,
+        workspace: str,
+        channel_id: str,
+        *,
+        response_ts: str = "",
+        thread_ts: str = "",
+    ) -> dict | None:
+        """Reaction·정정이 가리키는 최근 QA 레코드를 찾는다.
+
+        답변 본문을 다른 저장소로 복제하지 않기 위해 피드백은 이 레코드의 ID만 참조한다.
+        """
+        if not channel_id or not (response_ts or thread_ts):
+            return None
+        try:
+            paths = sorted(self.root.glob("qa-*.jsonl"), reverse=True)[:2]
+            for path in paths:
+                lines = path.read_text(encoding="utf-8").splitlines()
+                for line in reversed(lines):
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("workspace") != workspace or row.get("channel_id") != channel_id:
+                        continue
+                    if response_ts and row.get("response_ts") == response_ts:
+                        return row
+                    if thread_ts and row.get("thread_ts") == thread_ts:
+                        return row
+        except OSError as e:
+            logger.warning("피드백 대상 QA 기록 조회 실패: %s", e)
+        return None
 
     def _append_md(self, rec: QARecord) -> None:
         path = self._md_path(rec.ts)

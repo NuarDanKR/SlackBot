@@ -40,6 +40,7 @@ def test_jsonl_and_md_written(tmp_path):
     row = json.loads(jsonl[0].read_text(encoding="utf-8").strip())
     assert row["question"] == "김해외동 기성금 얼마야?"
     assert row["citations"] and row["model"] and row["elapsed_ms"] == 1234
+    assert row["record_id"]
 
     md = list(tmp_path.glob("20*.md"))
     assert len(md) == 1

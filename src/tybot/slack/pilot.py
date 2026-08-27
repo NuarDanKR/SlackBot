@@ -44,6 +44,7 @@ from ..channels import parse, should_collect
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
 from ..failures import failure_message
+from ..feedback import FeedbackLog, correction_text, reaction_kind
 from ..intent import (
     INGEST_ALL_RE,
     INGEST_RE,
@@ -55,6 +56,33 @@ from ..intent import (
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
 from ..paths import check_paths
+from ..poll_view import (
+    ACTION_CLOSE,
+    ACTION_RESULTS,
+    ACTION_VOTE,
+    private_results,
+)
+from ..poll_view import (
+    MODAL_CALLBACK as POLL_MODAL,
+)
+from ..poll_view import (
+    create_modal as poll_create_modal,
+)
+from ..poll_view import (
+    fallback_text as poll_fallback,
+)
+from ..poll_view import (
+    help_text as poll_help,
+)
+from ..poll_view import (
+    message_blocks as poll_blocks,
+)
+from ..poll_view import (
+    read_modal as read_poll_modal,
+)
+from ..polls import PollError, apply_vote, close_poll, create_poll
+from ..polls import load as load_poll
+from ..polls import save as save_poll
 from ..workspaces import ConfigError, WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
@@ -84,6 +112,13 @@ def _scope_label(ctx: RequestContext | None) -> str:
     if ctx.role == "exec":
         return "exec(전체)"
     return f"채널 {len(ctx.channels)}개"
+
+
+def _response_ts(response) -> str:
+    try:
+        return str(response.get("ts") or "")
+    except (AttributeError, TypeError):
+        return ""
 
 
 class WorkspaceBot:
@@ -129,6 +164,7 @@ class WorkspaceBot:
         self.store = store
         self.engine = engine
         self.qa_log = qa_log
+        self.feedback_log = FeedbackLog(qa_log.root)
         self._started = datetime.now(UTC)
         self._last_ingest_at: datetime | None = None
         self._ingested = 0
@@ -249,6 +285,75 @@ class WorkspaceBot:
             user_id = (body.get("user") or {}).get("id", "")
             self._rename_channel(client, user_id, metadata.get("channel_id", ""), request.name)
 
+        # --- 투표 (/투표) ---------------------------------------------------
+        @self.app.command("/투표")
+        @self.app.command("/ty-poll")
+        def on_poll_command(ack, command, client, respond):
+            ack()
+            text = (command.get("text") or "").strip()
+            if text.replace(" ", "") in ("도움말", "help", "?"):
+                respond(poll_help(), response_type="ephemeral")
+                return
+            # 명령 뒤에 적은 문장은 질문 칸에 미리 채워 준다. 두 번 입력하지 않게.
+            try:
+                client.views_open(
+                    trigger_id=command["trigger_id"],
+                    view=poll_create_modal(
+                        channel_id=command.get("channel_id", ""), prefill_question=text
+                    ),
+                )
+            except Exception as e:
+                log.warning("[%s] 투표 모달 열기 실패: %s", self.workspace, e)
+                respond(
+                    "투표 화면을 열지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                    response_type="ephemeral",
+                )
+
+        @self.app.view(POLL_MODAL)
+        def on_poll_submission(ack, body, client, view):
+            fields = read_poll_modal(view)
+            user_id = (body.get("user") or {}).get("id", "")
+            try:
+                poll = create_poll(workspace=self.workspace, creator=user_id, **fields)
+            except PollError as e:
+                # 입력 오류는 모달 안에서 알려 준다. 창이 닫히면 적은 내용이 사라진다.
+                ack(response_action="errors", errors={e.block_id or "question": str(e)})
+                return
+            ack()
+            self._publish_poll(client, poll)
+
+        @self.app.action(re.compile(rf"^{ACTION_VOTE}:\d+$"))
+        def on_poll_vote(ack, body, client, action):
+            ack()
+            self._handle_vote(client, body, action)
+
+        @self.app.action(ACTION_RESULTS)
+        def on_poll_results(ack, body, client, action):
+            ack()
+            poll = load_poll(self.workspace, str(action.get("value") or ""))
+            user_id = (body.get("user") or {}).get("id", "")
+            if poll is None:
+                self._poll_notice(client, body, user_id, "투표를 찾을 수 없습니다.")
+                return
+            self._poll_notice(client, body, user_id, private_results(poll, user_id))
+
+        @self.app.action(ACTION_CLOSE)
+        def on_poll_close(ack, body, client, action):
+            ack()
+            user_id = (body.get("user") or {}).get("id", "")
+            poll = load_poll(self.workspace, str(action.get("value") or ""))
+            if poll is None:
+                self._poll_notice(client, body, user_id, "투표를 찾을 수 없습니다.")
+                return
+            try:
+                close_poll(poll, user_id, is_admin=user_id in self.channel_admin_users)
+            except PollError as e:
+                self._poll_notice(client, body, user_id, str(e))
+                return
+            save_poll(poll)
+            self._refresh_poll(client, poll)
+            self._poll_notice(client, body, user_id, "투표를 마감했습니다.")
+
         @self.app.event("channel_created")
         def on_channel_created(event, client):
             joined = on_channel_event(
@@ -270,7 +375,17 @@ class WorkspaceBot:
         def on_mention(event, client, say):
             if event.get("bot_id"):
                 return
+            if self._handle_correction(event, say):
+                return
             self._handle(event, client, say, in_channel=True)
+
+        @self.app.event("reaction_added")
+        def on_reaction_added(event):
+            self._handle_feedback_reaction(event, action="added")
+
+        @self.app.event("reaction_removed")
+        def on_reaction_removed(event):
+            self._handle_feedback_reaction(event, action="removed")
 
         @self.app.event("message")
         def on_message(event, client, say):
@@ -281,10 +396,65 @@ class WorkspaceBot:
                 return  # 입퇴장·핀 등 시스템 메시지 제외
             ctype = event.get("channel_type")
             if ctype == "im":
+                if self._handle_correction(event, say):
+                    return
                 self._handle(event, client, say, in_channel=False)
                 return
             if ctype in ("channel", "group") and self.realtime:
                 self._ingest_live(client, event)
+
+    def _handle_feedback_reaction(self, event: dict, *, action: str) -> None:
+        kind = reaction_kind(str(event.get("reaction") or ""))
+        item = event.get("item") or {}
+        if kind is None or item.get("type") != "message":
+            return
+        channel_id = str(item.get("channel") or "")
+        answer_ts = str(item.get("ts") or "")
+        row = self.qa_log.find_answer(
+            self.workspace, channel_id, response_ts=answer_ts
+        )
+        if not row or not row.get("record_id"):
+            return  # TYBot 답변이 아닌 메시지의 반응은 수집하지 않는다.
+        self.feedback_log.write(
+            workspace=self.workspace,
+            channel_id=channel_id,
+            qa_record_id=str(row["record_id"]),
+            answer_ts=answer_ts,
+            actor=str(event.get("user") or ""),
+            kind=kind,
+            action=action,
+        )
+
+    def _handle_correction(self, event: dict, say) -> bool:
+        text = correction_text(_clean(event.get("text", "")))
+        if text is None:
+            return False
+        thread_ts = str(event.get("thread_ts") or "")
+        if not thread_ts:
+            say(text="정정할 TYBot 답변의 스레드에서 `@tybot 정정: 올바른 내용`으로 남겨주세요.")
+            return True
+        if not text:
+            say(text="`정정:` 뒤에 올바른 내용을 적어주세요.", thread_ts=thread_ts)
+            return True
+        channel_id = str(event.get("channel") or "")
+        row = self.qa_log.find_answer(
+            self.workspace, channel_id, thread_ts=thread_ts
+        )
+        if not row or not row.get("record_id"):
+            say(text="이 스레드에서 연결할 TYBot 답변 기록을 찾지 못했습니다.", thread_ts=thread_ts)
+            return True
+        self.feedback_log.write(
+            workspace=self.workspace,
+            channel_id=channel_id,
+            qa_record_id=str(row["record_id"]),
+            answer_ts=str(row.get("response_ts") or ""),
+            actor=str(event.get("user") or ""),
+            kind="correction",
+            action="submitted",
+            text=text,
+        )
+        say(text="정정 의견을 기록했습니다. 답변 품질 검토에 반영하겠습니다.", thread_ts=thread_ts)
+        return True
 
     def _modal_metadata(self, view: dict) -> dict:
         try:
@@ -299,6 +469,83 @@ class WorkspaceBot:
             client.views_open(trigger_id=trigger_id, view=create_modal(metadata))
         except Exception as e:
             log.warning("[%s] 채널 생성 모달 열기 실패: %s", self.workspace, e)
+
+    # --- 투표 -------------------------------------------------------------
+    def _publish_poll(self, client, poll) -> None:
+        """투표를 채널에 올리고 메시지 위치를 기억한다.
+
+        메시지 위치(ts)를 저장하는 이유: 누가 투표할 때마다 **같은 메시지를 갱신**해야 한다.
+        새 메시지를 계속 올리면 채널이 투표 알림으로 도배된다.
+        """
+        try:
+            posted = client.chat_postMessage(
+                channel=poll.channel_id,
+                text=poll_fallback(poll),
+                blocks=poll_blocks(poll),
+            )
+            poll.message_ts = posted.get("ts")
+        except Exception as e:
+            log.warning("[%s] 투표 게시 실패: %s", self.workspace, e)
+            with contextlib.suppress(Exception):
+                client.chat_postEphemeral(
+                    channel=poll.channel_id,
+                    user=poll.creator,
+                    text=(
+                        "투표를 올리지 못했습니다. 이 채널에 봇이 초대되어 있는지 확인해 주세요"
+                        f" (`/invite @{self.bot_name}`)."
+                    ),
+                )
+            return
+        try:
+            save_poll(poll)
+        except PollError as e:
+            log.error("[%s] 투표 저장 실패: %s", self.workspace, e)
+
+    def _refresh_poll(self, client, poll) -> None:
+        """올려 둔 투표 메시지를 새 결과로 바꿔 그린다."""
+        if not poll.message_ts:
+            return
+        try:
+            client.chat_update(
+                channel=poll.channel_id,
+                ts=poll.message_ts,
+                text=poll_fallback(poll),
+                blocks=poll_blocks(poll),
+            )
+        except Exception as e:
+            log.warning("[%s] 투표 메시지 갱신 실패: %s", self.workspace, e)
+
+    def _poll_notice(self, client, body, user_id: str, message: str) -> None:
+        """누른 사람에게만 보이는 안내. 채널을 어지럽히지 않는다."""
+        channel = ((body.get("channel") or {}).get("id")) or ""
+        if not channel or not user_id:
+            return
+        with contextlib.suppress(Exception):
+            client.chat_postEphemeral(channel=channel, user=user_id, text=message)
+
+    def _handle_vote(self, client, body, action) -> None:
+        user_id = (body.get("user") or {}).get("id", "")
+        raw = str(action.get("value") or "")
+        poll_id, _, index_text = raw.partition(":")
+        poll = load_poll(self.workspace, poll_id)
+        if poll is None:
+            self._poll_notice(client, body, user_id, "투표를 찾을 수 없습니다. 이미 지워졌을 수 있습니다.")
+            return
+        try:
+            message = apply_vote(poll, user_id, int(index_text))
+        except (PollError, ValueError) as e:
+            self._poll_notice(client, body, user_id, str(e))
+            # 마감된 투표를 눌렀다면 메시지가 낡은 것이므로 다시 그려 준다
+            if isinstance(e, PollError) and not poll.is_open():
+                self._refresh_poll(client, poll)
+            return
+        try:
+            save_poll(poll)
+        except PollError as e:
+            self._poll_notice(client, body, user_id, str(e))
+            return
+        self._refresh_poll(client, poll)
+        self._poll_notice(client, body, user_id, message)
 
     def _can_manage_channel(self, channel_id: str, user_id: str) -> bool:
         return user_id in self.channel_admin_users or self.channel_owners.is_owner(
@@ -432,17 +679,40 @@ class WorkspaceBot:
         예전에는 예외가 여기서 조용히 사라져 👀 만 붙고 답이 없었다. 사용자는 봇이
         무시했다고 생각하고, 원인은 서버 로그를 보는 사람만 알 수 있었다.
         """
+        started = time.monotonic()
         try:
             self._handle_request(event, client, say, in_channel=in_channel)
         except Exception as e:
             log.exception("요청 처리 실패 ws=%s ch=%s", self.workspace, event.get("channel"))
             reply = failure_message(e)
+            response_ts = ""
             with contextlib.suppress(Exception):
                 ts = event.get("thread_ts") or event.get("ts")
                 if self.reply_in_thread or event.get("thread_ts"):
-                    say(text=reply, thread_ts=ts)
+                    response_ts = _response_ts(say(text=reply, thread_ts=ts))
                 else:
-                    say(text=reply)
+                    response_ts = _response_ts(say(text=reply))
+            rec = QARecord.build(
+                workspace=self.workspace,
+                channel=self._chan_cache.get(event.get("channel", ""), event.get("channel", "")),
+                channel_id=str(event.get("channel") or ""),
+                user=str(event.get("user") or ""),
+                user_name=self._user_name(client, str(event.get("user") or "")),
+                question=_clean(event.get("text", "")),
+                intent_kind="error",
+                intent_source="runtime",
+                reason="error",
+                hits=0,
+                scope="-",
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                answer=reply,
+                request_ts=str(event.get("ts") or ""),
+                response_ts=response_ts,
+                thread_ts=str(event.get("thread_ts") or event.get("ts") or ""),
+                channel_type=str(event.get("channel_type") or ("channel" if in_channel else "im")),
+                error=type(e).__name__,
+            )
+            self.qa_log.write(rec)
 
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
         text = _clean(event.get("text", ""))
@@ -463,10 +733,9 @@ class WorkspaceBot:
 
         def finish(reply: str, *, intent: Intent, ans: Answer | None, ctx: RequestContext | None):
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
-            if thread_ts:
-                say(text=reply, thread_ts=thread_ts)
-            else:
-                say(text=reply)  # 채널 본문에 답한다
+            response = (
+                say(text=reply, thread_ts=thread_ts) if thread_ts else say(text=reply)
+            )
             rec = QARecord.build(
                 workspace=self.workspace,
                 channel=self._chan_cache.get(channel_id, channel_id),
@@ -484,6 +753,10 @@ class WorkspaceBot:
                 cost_usd=ans.cost_usd if ans else 0.0,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 answer=reply,
+                request_ts=str(event.get("ts") or ""),
+                response_ts=_response_ts(response),
+                thread_ts=str(event.get("thread_ts") or event.get("ts") or ""),
+                channel_type=str(event.get("channel_type") or ("channel" if in_channel else "im")),
             )
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)

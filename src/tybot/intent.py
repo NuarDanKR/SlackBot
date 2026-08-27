@@ -271,7 +271,9 @@ def plan_by_rule(text: str) -> list[Intent]:
     tasks = _dedupe(tasks)
     if len(tasks) == 1:
         tasks[0].question = text
-    return tasks[:MAX_TASKS]
+    # 실행 계층이 MAX_TASKS까지만 처리하고 초과 개수를 사용자에게 알린다. 여기서 먼저
+    # 자르면 몇 개가 생략됐는지 알 수 없어 질문을 조용히 버리게 된다.
+    return tasks
 
 
 def plan(text: str, router: Router | None) -> list[Intent]:
@@ -332,7 +334,8 @@ def plan(text: str, router: Router | None) -> list[Intent]:
     writes = [x for x in tasks if x.kind in WRITE_KINDS]
     if writes:
         return [writes[0]]
-    return _dedupe(tasks)[:MAX_TASKS]
+    # 실행 계층이 상한을 적용하고 생략 안내를 만든다. planner는 전체 개수를 보존한다.
+    return _dedupe(tasks)
 
 
 def _extract_json(raw: str) -> dict:
