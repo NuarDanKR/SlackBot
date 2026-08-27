@@ -1,0 +1,19 @@
+[Unit]
+Description=TYBot 배포 실행 (요청 1건 처리)
+Documentation=file:///opt/tybot/docs/deploy/rocky8.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# git deploy key(/root/.ssh) 와 /opt 쓰기, systemctl restart 가 필요해 root 로 돈다.
+# 이 유닛이 root 인 대신, 콘솔은 root 권한 없이 요청 파일만 쓴다.
+User=root
+Environment=TYBOT_BRANCH=master
+Environment=TYBOT_SRC=/tmp/tybot-src
+Environment=STATE_DIR=/var/lib/tybot
+ExecStart=/usr/bin/bash /opt/tybot/deploy/deploy-runner.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-deploy
+TimeoutStartSec=900

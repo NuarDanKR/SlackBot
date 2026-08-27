@@ -216,6 +216,50 @@ sudo reboot                                                            # 부팅 
 
 ---
 
+## 6-A. 코드 업데이트 — 서버 터미널 없이
+
+매번 `git pull` + `install.sh` 를 치지 않는 방법 3가지. 셋 다 같은 `update.sh` 를 쓰며,
+**테스트를 통과하지 못한 커밋은 배포되지 않는다**(운영 프로세스 미변경).
+
+### A. 자동 (권장 — 지금 바로 가능)
+```bash
+sudo systemctl enable --now tybot-update.timer
+systemctl list-timers tybot-update --no-pager
+```
+업무시간(월~금 09~19시) 10분 간격. push 후 최대 10분이면 반영된다.
+야간 배포는 사람이 못 지켜보므로 돌지 않는다.
+
+### B. 콘솔 버튼 (B-25 — 콘솔 API·UI 작업 남음)
+관리 콘솔에서 '지금 배포'. 콘솔은 root 권한 없이 요청 파일만 만들고,
+root 로 도는 path 유닛이 그것을 보고 배포한다.
+```bash
+sudo systemctl enable --now tybot-deploy.path
+```
+| 흐름 | |
+|---|---|
+| 콘솔(`User=tybot`) | `/var/lib/tybot/deploy-request.json` 생성 |
+| `tybot-deploy.path` | 파일 생성 감지 → `tybot-deploy.service` 기동 |
+| `tybot-deploy.service`(root) | `deploy-runner.sh` → `update.sh` |
+| 콘솔 | `/var/lib/tybot/deploy-status.json` 폴링해 진행 표시 |
+
+**요청 파일의 내용은 명령 인자로 쓰이지 않는다.** 브랜치·경로는 유닛에 고정돼 있어
+웹에서 온 값이 실행에 영향을 주는 경로가 없다. 콘솔에 sudo·polkit·setuid 를 주지 않는다 —
+그 순간 웹 취약점 하나가 서버 장악이 된다.
+
+수동 확인:
+```bash
+sudo -u tybot bash -c 'echo "{\"actor\":\"test\"}" > /var/lib/tybot/deploy-request.json'
+journalctl -u tybot-deploy -f
+cat /var/lib/tybot/deploy-status.json
+```
+
+### C. 수동 (여전히 유효)
+```bash
+sudo bash /opt/tybot/deploy/update.sh
+```
+
+---
+
 ## 7. 트러블슈팅
 
 | 증상 | 원인 / 조치 |
