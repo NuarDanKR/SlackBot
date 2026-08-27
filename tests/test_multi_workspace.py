@@ -299,6 +299,36 @@ def test_summary_marks_other_workspace_in_sources(tmp_path):
     assert any(c.startswith("[pilot] ") for c in ans.citations)
 
 
+def test_summary_named_workspace_excludes_other_visible_workspaces(tmp_path, monkeypatch):
+    """특정 워크스페이스를 물으면 root가 볼 수 있는 다른 자료를 근거에 섞지 않는다."""
+    base = tmp_path / "channels"
+    for workspace, channel, line in (
+        ("pilot", "#파일럿_공개", "파일럿 업무"),
+        ("mgmt", "#경영_내부", "경영 업무"),
+        ("tyit", "#전산_업무", "전산팀 업무"),
+    ):
+        path = base / workspace / f"{workspace}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_today_doc(workspace, channel, "private", line), encoding="utf-8")
+    monkeypatch.setenv("WORKSPACES", "pilot,mgmt,tyit")
+    monkeypatch.setenv("WORKSPACE_LABEL_PILOT", "파일럿")
+    monkeypatch.setenv("WORKSPACE_LABEL_MGMT", "경영본부")
+    monkeypatch.setenv("WORKSPACE_LABEL_TYIT", "전산팀")
+    eng, fake = _engine(tmp_path)
+    ctx = _ctx(ws="mgmt", channels=(), readable=("pilot", "tyit"), is_root=True)
+
+    from tybot.intent import Intent
+
+    ans = eng.respond("지금 전산팀 워크스페이스에서는 무슨 일이 벌어지고 있어?", ctx, Intent("summary"))
+
+    assert ans.reason == "answered"
+    evidence = fake.calls[0][1].content
+    assert "전산팀 업무" in evidence
+    assert "파일럿 업무" not in evidence
+    assert "경영 업무" not in evidence
+    assert all(c.startswith("[tyit] ") for c in ans.citations)
+
+
 def test_scope_question_is_not_refused(tmp_path):
     """'다른 워크스페이스 내용 알려줘' 를 외부 정보 질문으로 거절하지 않는다."""
     from tybot.intent import Intent

@@ -43,7 +43,7 @@ from ..channel_management import (
 from ..channels import parse, should_collect
 from ..config import cost_state_path
 from ..failures import failure_message
-from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
+from ..intent import INGEST_ALL_RE, INGEST_RE, Intent, memory_companion_query
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
 from ..paths import check_paths
@@ -477,13 +477,25 @@ class WorkspaceBot:
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
 
+        # 기억 질문 뒤에 실제 업무 질문이 붙으면 memory 하나로 삼키지 않는다.
+        companion_query = memory_companion_query(text)
+        route_text = companion_query or text
+
         # 명시 명령은 LLM 을 거치지 않는다(비용·지연 절약). 그 외 표현은 분류기가 판단한다.
         if INGEST_ALL_RE.search(text):
             intent = Intent("ingest_all", source="cmd")
         elif INGEST_RE.search(text):
             intent = Intent("ingest", source="cmd")
         else:
-            intent = self.engine.classify(text)
+            intent = self.engine.classify(route_text)
+
+        def include_memory_boundary(reply: str) -> str:
+            if not companion_query:
+                return reply
+            return (
+                "*이전 답변은 기억하지 않습니다.* 아래 내용은 아카이브 원문을 새로 검색한 결과입니다."
+                f"\n\n{reply}"
+            )
 
         if intent.kind == "ingest_all":
             finish(self._ingest_all(client), intent=intent, ans=None, ctx=None)
@@ -498,18 +510,18 @@ class WorkspaceBot:
             finish(self._ingest_channel(client, channel_id), intent=intent, ans=None, ctx=None)
             return
         if intent.kind == "status":
-            finish(self._status(client), intent=intent, ans=None, ctx=None)
+            finish(include_memory_boundary(self._status(client)), intent=intent, ans=None, ctx=None)
             return
         if intent.kind == "help":
-            finish(self._help(), intent=intent, ans=None, ctx=None)
+            finish(include_memory_boundary(self._help()), intent=intent, ans=None, ctx=None)
             return
         if intent.kind == "memory":
             finish(self._memory(user_id), intent=intent, ans=None, ctx=None)
             return
 
         ctx = self._context(client, user_id)
-        ans = self.engine.respond(text, ctx, intent)
-        finish(ans.to_slack(), intent=intent, ans=ans, ctx=ctx)
+        ans = self.engine.respond(route_text, ctx, intent)
+        finish(include_memory_boundary(ans.to_slack()), intent=intent, ans=ans, ctx=ctx)
 
     # --- 수집 -------------------------------------------------------------
     def _messages_from(self, client, event: dict) -> list:

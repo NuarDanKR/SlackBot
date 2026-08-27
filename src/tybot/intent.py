@@ -115,6 +115,9 @@ STOPWORDS = {
     "뭐야", "무엇", "어떻게", "어때", "지금", "현재", "우리", "저기", "그거", "이거",
 }
 TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+CLAUSE_SPLIT_RE = re.compile(
+    r"(?:[?!.。！？]+|\s+(?:그리고|그런데|근데|또한|또)\s+)"
+)
 
 
 @dataclass
@@ -127,6 +130,21 @@ class Intent:
     @property
     def query(self) -> str:
         return " ".join(self.terms)
+
+
+def memory_companion_query(text: str) -> str | None:
+    """기억 질문과 함께 적힌 별도 질문을 돌려준다.
+
+    기억 질문 하나만 있으면 기존 memory 응답을 유지한다. 문장부호나 접속사로 분리된 다른
+    질문이 있으면 그 질문까지 버리지 않고 별도 라우팅할 수 있게 한다.
+    """
+    clauses = [part.strip(" \t\r\n,，") for part in CLAUSE_SPLIT_RE.split(text)]
+    clauses = [part for part in clauses if part]
+    if len(clauses) < 2 or not any(MEMORY_RE.search(part) for part in clauses):
+        return None
+    companions = [part for part in clauses if not MEMORY_RE.search(part)]
+    query = " ".join(companions).strip()
+    return query if TOKEN_RE.search(query) else None
 
 
 def parse_period(text: str, *, default: int = DEFAULT_DAYS) -> int:

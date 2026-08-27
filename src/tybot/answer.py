@@ -72,6 +72,24 @@ ARCHIVE_SCOPE_RE = re.compile(
 TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 
 
+def _mentioned_workspaces(question: str) -> frozenset[str]:
+    """질문에 명시된 워크스페이스 키·표시 이름을 비시크릿 환경설정에서 찾는다."""
+    import os
+
+    from .workspaces import env_suffix
+
+    found: set[str] = set()
+    keys = [key.strip() for key in (os.getenv("WORKSPACES") or "").split(",") if key.strip()]
+    for key in keys:
+        label = (os.getenv(f"WORKSPACE_LABEL_{env_suffix(key)}") or "").strip()
+        if label and label in question:
+            found.add(key)
+            continue
+        if re.search(rf"(?<![A-Za-z0-9-]){re.escape(key)}(?![A-Za-z0-9-])", question, re.I):
+            found.add(key)
+    return frozenset(found)
+
+
 @dataclass
 class Answer:
     text: str
@@ -137,7 +155,15 @@ class AnswerEngine:
     def spent_today(self) -> float:
         return self._router.spent_today
 
-    def summarize(self, ctx: RequestContext, *, days: int = 7, model: str | None = None) -> Answer:
+    def summarize(
+        self,
+        ctx: RequestContext,
+        *,
+        days: int = 7,
+        model: str | None = None,
+        workspace_filter: frozenset[str] | None = None,
+        question: str | None = None,
+    ) -> Answer:
         """기간 요약 — 권한 내 전 채널의 최근 원문을 채널별로 정리한다.
 
         검색이 아니라 기간 스캔이므로, 근거는 여전히 원문 라인 그대로만 넣는다.
@@ -148,7 +174,12 @@ class AnswerEngine:
         blocks: list[str] = []
         citations: list[str] = []
         total = 0
-        for doc in self._store.visible_docs(ctx):
+        visible_docs = [
+            doc
+            for doc in self._store.visible_docs(ctx)
+            if not workspace_filter or doc.workspace in workspace_filter
+        ]
+        for doc in visible_docs:
             recent = [ln for ln in doc.raw_lines if TS_RE.match(ln.ts) and ln.ts[:10] >= cutoff]
             if not recent:
                 continue
@@ -162,7 +193,7 @@ class AnswerEngine:
             citations.append(f"{ws_tag}{doc.channel}, 📄{doc.path.name}({date})")
 
         if not blocks:
-            titles = self._store.titles(ctx)
+            titles = [doc.channel for doc in visible_docs]
             if not titles:
                 return Answer(
                     "열람 권한 범위에 아카이브된 문서가 없습니다. 채널에 봇을 초대하고 수집을 기다려 주세요.",
@@ -191,7 +222,7 @@ class AnswerEngine:
                 "user",
                 "<원문>\n"
                 + "\n\n".join(blocks)
-                + f"\n</원문>\n\n최근 {days}일 진행 상황을 정리해 주세요.",
+                + f"\n</원문>\n\n질문: {question or f'최근 {days}일 진행 상황을 정리해 주세요.'}",
             ),
         ]
         try:
@@ -273,7 +304,13 @@ class AnswerEngine:
         intent = intent or classify(q, self._router)
 
         if intent.kind == "summary":
-            return self.summarize(ctx, days=intent.days or DEFAULT_DAYS, model=model)
+            return self.summarize(
+                ctx,
+                days=intent.days or DEFAULT_DAYS,
+                model=model,
+                workspace_filter=_mentioned_workspaces(q) or None,
+                question=q,
+            )
         if intent.kind == "advice":
             return self.advise(question, ctx, terms=intent.terms)
         if intent.kind == "smalltalk":
@@ -287,7 +324,13 @@ class AnswerEngine:
             # 있었다. 아카이브 관련 표현이 있으면 거절하지 않고 기간 요약으로 되돌린다.
             if ARCHIVE_SCOPE_RE.search(q):
                 logger.info("out_of_scope 재분류 -> summary q=%r", q)
-                return self.summarize(ctx, days=parse_period(q), model=model)
+                return self.summarize(
+                    ctx,
+                    days=parse_period(q),
+                    model=model,
+                    workspace_filter=_mentioned_workspaces(q) or None,
+                    question=q,
+                )
             return Answer(
                 "사내 아카이브에 쌓인 원문만 근거로 답하는 봇입니다. "
                 "일반 지식이나 외부 정보는 다루지 않습니다.",

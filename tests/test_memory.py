@@ -6,7 +6,7 @@ import json
 import pytest
 
 from tybot.audit import QALog, QARecord
-from tybot.intent import classify_by_rule
+from tybot.intent import classify_by_rule, memory_companion_query
 
 
 @pytest.mark.parametrize(
@@ -36,6 +36,22 @@ def test_memory_questions_are_not_status(text):
 )
 def test_other_intents_unaffected(text, kind):
     assert classify_by_rule(text).kind == kind
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        (
+            "다시, 너가 예전에 했던 말 기억나? 그리고 지금 전산팀 워크스페이스에서는 무슨 일이 벌어지고 있어?",
+            "지금 전산팀 워크스페이스에서는 무슨 일이 벌어지고 있어",
+        ),
+        ("전산팀 현황 알려줘. 이전 답변도 기억나?", "전산팀 현황 알려줘"),
+        ("이전 답변 기억나?", None),
+        ("기억나? 왜?", None),
+    ],
+)
+def test_memory_companion_query_preserves_separate_work_question(text, expected):
+    assert memory_companion_query(text) == expected
 
 
 def _rec(**kw):
