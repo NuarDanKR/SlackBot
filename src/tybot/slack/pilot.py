@@ -41,9 +41,17 @@ from ..channel_management import (
     request_from_view,
 )
 from ..channels import parse, should_collect
+from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
 from ..failures import failure_message
-from ..intent import INGEST_ALL_RE, INGEST_RE, Intent, memory_companion_query
+from ..intent import (
+    INGEST_ALL_RE,
+    INGEST_RE,
+    MAX_TASKS,
+    SELF_KINDS,
+    WRITE_KINDS,
+    Intent,
+)
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
 from ..paths import check_paths
@@ -56,6 +64,9 @@ HISTORY_LIMIT = 15  # 신규 앱 conversations.history / replies 요청당 상�
 THREAD_FETCH_LIMIT = 5  # 한 번의 수집에서 답글까지 받아올 스레드 수(rate limit 고려)
 # 상태 파일 갱신 주기. heartbeat.STALE_AFTER_SECONDS(180초)보다 짧아야 한다.
 HEARTBEAT_SECONDS = 60
+
+
+BLANK = chr(10) * 2  # 문단 구분
 
 
 def _clean(text: str) -> str:
@@ -477,51 +488,62 @@ class WorkspaceBot:
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
 
-        # 기억 질문 뒤에 실제 업무 질문이 붙으면 memory 하나로 삼키지 않는다.
-        companion_query = memory_companion_query(text)
-        route_text = companion_query or text
-
-        # 명시 명령은 LLM 을 거치지 않는다(비용·지연 절약). 그 외 표현은 분류기가 판단한다.
+        # 명시 명령은 LLM 을 거치지 않는다(비용·지연 절약).
+        # 그 외에는 1차 LLM 이 **하위질문 목록**으로 분해한다 - 사람은 한 번에 여러 가지를
+        # 묻는데, 라벨 하나만 고르던 예전 구조에서는 그중 하나만 처리 경로에 도달했다.
         if INGEST_ALL_RE.search(text):
-            intent = Intent("ingest_all", source="cmd")
+            tasks = [Intent("ingest_all", source="cmd", question=text)]
         elif INGEST_RE.search(text):
-            intent = Intent("ingest", source="cmd")
+            tasks = [Intent("ingest", source="cmd", question=text)]
         else:
-            intent = self.engine.classify(route_text)
+            tasks = self.engine.plan(text)
+        if not tasks:
+            tasks = [Intent("search", source="regex", question=text)]
 
-        def include_memory_boundary(reply: str) -> str:
-            if not companion_query:
-                return reply
-            return (
-                "*이전 답변은 기억하지 않습니다.* 아래 내용은 아카이브 원문을 새로 검색한 결과입니다."
-                f"\n\n{reply}"
-            )
+        dropped = len(tasks) - MAX_TASKS if len(tasks) > MAX_TASKS else 0
+        tasks = tasks[:MAX_TASKS]
+        first = tasks[0]
 
-        if intent.kind == "ingest_all":
-            finish(self._ingest_all(client), intent=intent, ans=None, ctx=None)
-            return
-        if intent.kind == "ingest":
+        # 쓰기 동작은 **단독으로만** 실행한다. 무엇을 실행하는지 모호하면 실행하지 않는다.
+        if first.kind in WRITE_KINDS:
+            if first.kind == "ingest_all":
+                finish(self._ingest_all(client), intent=first, ans=None, ctx=None)
+                return
             if not in_channel:
                 finish(
                     "수집은 채널에서만 실행할 수 있습니다. 대상 채널에서 `수집` 이라고 불러주세요.",
-                    intent=intent, ans=None, ctx=None,
+                    intent=first, ans=None, ctx=None,
                 )
                 return
-            finish(self._ingest_channel(client, channel_id), intent=intent, ans=None, ctx=None)
-            return
-        if intent.kind == "status":
-            finish(include_memory_boundary(self._status(client)), intent=intent, ans=None, ctx=None)
-            return
-        if intent.kind == "help":
-            finish(include_memory_boundary(self._help()), intent=intent, ans=None, ctx=None)
-            return
-        if intent.kind == "memory":
-            finish(self._memory(user_id), intent=intent, ans=None, ctx=None)
+            finish(self._ingest_channel(client, channel_id), intent=first, ans=None, ctx=None)
             return
 
-        ctx = self._context(client, user_id)
-        ans = self.engine.respond(route_text, ctx, intent)
-        finish(include_memory_boundary(ans.to_slack()), intent=intent, ans=ans, ctx=ctx)
+        sections: list[str] = []
+        ctx: RequestContext | None = None
+        last: Answer | None = None
+        for task in tasks:
+            q = task.question or text
+            if task.kind in SELF_KINDS:
+                sections.append(self._self_reply(task.kind, q, client=client, user_id=user_id))
+                continue
+            # 아카이브 근거 답변은 엔진 출력을 **그대로** 쓴다 - 출처가 붙어 있으므로
+            # 문장을 다시 만들면 본문과 출처가 어긋날 수 있다(원칙 2).
+            if ctx is None:
+                ctx = self._context(client, user_id)
+            ans = self.engine.respond(q, ctx, task)
+            last = ans
+            sections.append(ans.to_slack())
+
+        if dropped:
+            sections.append(truncated_notice(dropped))
+
+        # 감사기록에는 처리한 의도를 전부 남긴다(예: "memory+summary").
+        merged = Intent(
+            kind="+".join(dict.fromkeys(x.kind for x in tasks)),
+            source=first.source,
+            question=text,
+        )
+        finish(join_sections(sections), intent=merged, ans=last, ctx=ctx)
 
     # --- 수집 -------------------------------------------------------------
     def _messages_from(self, client, event: dict) -> list:
@@ -724,6 +746,93 @@ class WorkspaceBot:
             "앞으로의 대화는 실시간 수집됩니다."
         )
         return "\n".join(lines)
+
+    # --- 봇 자신에 대한 답변 -------------------------------------------------
+    def _memory_facts(self, user_id: str) -> dict:
+        """기억 정책을 '사실'로 넘긴다. 문장은 LLM 이 질문에 맞춰 쓴다.
+
+        예전에는 이 내용이 고정 문단이어서, 같은 메시지에 붙은 다른 질문을 반영할 수
+        없었다. 정책 자체는 코드가 정한다 - 모델이 기억 여부를 창작하면 안 된다.
+        """
+        recent = self.qa_log.recent_for_user(self.workspace, user_id)
+        return {
+            "이전_답변_기억": False,
+            "이유": [
+                "봇 답변을 다시 근거로 쓰면 틀린 내용이 사실처럼 굳는다(요약 재귀).",
+                "근거는 사람이 쓴 원문이어야 출처를 붙이고 검증할 수 있다.",
+            ],
+            "예외": "스레드 안에서 이어 물으면 그 스레드에 답한다. "
+                    "다만 이전 답변 내용을 근거로 삼지는 않는다.",
+            "매_질문마다": "아카이브 원문에서 처음부터 다시 찾는다.",
+            "본인_최근_질문": [
+                {"시각": ts[5:16].replace("T", " "), "질문": q} for ts, q in recent
+            ],
+            "최근_질문_주의": "감사 기록이며 답변 생성에는 쓰이지 않는다. 본인 질문만 보인다.",
+        }
+
+    def _status_facts(self, client=None) -> dict:
+        """상태 요약을 사실로 넘긴다. 상세 목록은 코드가 만든 블록을 그대로 붙인다."""
+        docs = self.store.docs()
+        up = datetime.now(UTC) - self._started
+        hours, rem = divmod(int(up.total_seconds()), 3600)
+        return {
+            "워크스페이스": f"{self.cfg.label} ({self.workspace})",
+            "등급": "상위(root)" if self.cfg.is_root else "일반",
+            "크로스_열람_허용": sorted(self.cfg.readable) or "없음",
+            "가동시간": f"{hours}시간 {rem // 60}분",
+            "실시간_수집": self.realtime,
+            "자동참여": self.autojoin,
+            "모델": self.engine.model_info(),
+            "오늘_사용액_USD": round(self.engine.spent_today(), 4),
+            "아카이브_문서수": len(docs),
+            "아카이브_원문줄수": sum(len(d.raw_lines) for d in docs),
+            "형식위반_건수": len(self.store.broken()),
+            "쓰기_불가_경로": self.path_problems or "없음",
+        }
+
+    def _self_reply(self, kind: str, question: str, *, client, user_id: str) -> str:
+        """봇 자신에 대한 답변. 사실은 코드가, 문장은 LLM 이 만든다.
+
+        데이터가 촘촘한 답변(status/help)은 결정적 블록을 유지한다 - 모델이 다시 쓰면
+        채널별 줄 수나 명령어 목록이 조용히 빠지거나 없는 명령이 생길 수 있다.
+        LLM 은 '질문에 대한 첫 문장'만 쓴다.
+        """
+        router = getattr(self.engine, "router", None)
+        if kind == "memory":
+            return write_from_facts(
+                router,
+                question=question,
+                facts=self._memory_facts(user_id),
+                fallback=self._memory(user_id),
+            )
+        if kind == "status":
+            block = self._status(client)
+            lead = write_from_facts(
+                router,
+                question=question,
+                facts=self._status_facts(client),
+                fallback="",
+                max_tokens=300,
+            )
+            return lead + BLANK + block if lead else block
+        if kind == "help":
+            return self._help()
+        if kind == "smalltalk":
+            return write_from_facts(
+                router,
+                question=question,
+                facts={
+                    "역할": "사내 Slack 아카이브 봇. 수집된 원문만 근거로 답한다.",
+                    "할_수_있는_것": ["기간 요약", "원문 검색", "판단·권고", "수집", "상태 확인"],
+                    "도움말_명령": "도움말",
+                },
+                fallback="네, 대기 중입니다. `도움말` 로 사용법을 볼 수 있습니다.",
+                max_tokens=200,
+            )
+        return (
+            "사내 아카이브에 쌓인 원문만 근거로 답하는 봇입니다. "
+            "그 범위를 벗어난 질문에는 답하지 않습니다. `도움말` 을 참고하세요."
+        )
 
     def _memory(self, user_id: str) -> str:
         """"이전 답변 기억나?" — 설계상 기억하지 않는다는 것을 그대로 말한다.

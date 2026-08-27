@@ -14,7 +14,13 @@ from .archive.store import ArchiveStore, SearchHit
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
-from .intent import DEFAULT_DAYS, Intent, classify, parse_period
+from .intent import (
+    DEFAULT_DAYS,
+    Intent,
+    classify,
+    parse_period,
+    plan,
+)
 
 logger = logging.getLogger("tybot.answer")
 
@@ -292,6 +298,20 @@ class AnswerEngine:
         """의도 분류(LLM, 실패 시 규칙). 라우팅만 하고 답은 만들지 않는다."""
         _, q = parse_model_flag(question)
         return classify(q, self._router)
+
+    def plan(self, question: str) -> list[Intent]:
+        """복합 질문을 하위질문 목록으로 분해한다(1차 LLM, 실패 시 규칙).
+
+        라벨 하나만 돌려주던 `classify` 를 대체한다 - 사람은 한 번에 여러 가지를 묻고,
+        예전 구조에서는 그중 하나만 처리 경로에 도달했다.
+        """
+        _, q = parse_model_flag(question)
+        return plan(q, self._router)
+
+    @property
+    def router(self):
+        """문장 생성(compose)용. 답변 엔진 밖에서도 같은 비용 상한을 쓰게 한다."""
+        return self._router
 
     def respond(self, question: str, ctx: RequestContext, intent: Intent | None = None) -> Answer:
         """아카이브로 답할 수 있는 의도를 처리한다.

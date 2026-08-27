@@ -6,7 +6,7 @@ import json
 import pytest
 
 from tybot.audit import QALog, QARecord
-from tybot.intent import classify_by_rule, memory_companion_query
+from tybot.intent import MAX_TASKS, classify_by_rule, plan_by_rule
 
 
 @pytest.mark.parametrize(
@@ -38,20 +38,52 @@ def test_other_intents_unaffected(text, kind):
     assert classify_by_rule(text).kind == kind
 
 
+# 좁은 특수 처리(memory_companion_query)는 일반 분해(plan_by_rule)로 대체됐다.
+# 실제 사고: "기억나? 그리고 전산팀은 무슨 일 있어?" 에서 두 번째 질문이 답변에
+# 아예 반영되지 않았다 - 라벨을 하나만 고르는 구조였기 때문이다.
 @pytest.mark.parametrize(
-    "text,expected",
+    ("text", "kinds"),
     [
         (
-            "다시, 너가 예전에 했던 말 기억나? 그리고 지금 전산팀 워크스페이스에서는 무슨 일이 벌어지고 있어?",
-            "지금 전산팀 워크스페이스에서는 무슨 일이 벌어지고 있어",
+            "다시, 너가 예전에 했던 말 기억나? "
+            "그리고 지금 전산팀 워크스페이스에서는 무슨 일이 벌어지고 있어?",
+            ["memory", "summary"],
         ),
-        ("전산팀 현황 알려줘. 이전 답변도 기억나?", "전산팀 현황 알려줘"),
-        ("이전 답변 기억나?", None),
-        ("기억나? 왜?", None),
+        ("전산팀 현황 알려줘. 이전 답변도 기억나?", ["summary", "memory"]),
+        ("이전 답변 기억나?", ["memory"]),
+        ("기억나? 왜?", ["memory"]),
     ],
 )
-def test_memory_companion_query_preserves_separate_work_question(text, expected):
-    assert memory_companion_query(text) == expected
+def test_compound_question_is_split_into_tasks(text, kinds):
+    assert [task.kind for task in plan_by_rule(text)] == kinds
+
+
+def test_each_task_carries_its_own_question_text():
+    """하위질문 원문이 있어야 답변 생성이 그 절만 보고 답할 수 있다."""
+    tasks = plan_by_rule("이전 답변 기억나? 그리고 김해외동 기성금 얼마야?")
+    assert len(tasks) == 2
+    assert "기억" in tasks[0].question
+    assert "김해외동" in tasks[1].question
+    assert "기억" not in tasks[1].question
+
+
+def test_single_question_keeps_full_text_as_question():
+    (task,) = plan_by_rule("이전 답변 기억나?")
+    assert task.question == "이전 답변 기억나?"
+
+
+def test_write_intent_is_never_mixed_with_others():
+    """수집 지시가 섞이면 그것만 남긴다 - 실행 대상이 모호하면 실행하지 않는다."""
+    tasks = plan_by_rule("수집해. 그리고 상태 알려줘")
+    assert [t.kind for t in tasks] == ["ingest"]
+
+
+def test_task_count_is_capped():
+    tasks = plan_by_rule(
+        "상태 어때? 그리고 기억나? 그리고 김해외동 기성금 얼마야? "
+        "그리고 이번주 요약해줘? 그리고 도움말 알려줘?"
+    )
+    assert len(tasks) <= MAX_TASKS
 
 
 def _rec(**kw):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import string
 from dataclasses import dataclass, field
 
 from .gateway.base import Message, Sensitivity
@@ -120,31 +121,33 @@ CLAUSE_SPLIT_RE = re.compile(
 )
 
 
+# 한 질문에서 처리할 하위질문 상한. 비용·지연을 묶는다 - 사람이 한 번에 묻는 질문은
+# 보통 2개, 많아도 3개다. 넘치면 앞의 것부터 답하고 나머지는 다시 묻게 안내한다.
+MAX_TASKS = 3
+
+
 @dataclass
 class Intent:
     kind: str
     days: int = DEFAULT_DAYS
     terms: list[str] = field(default_factory=list)
     source: str = "llm"  # llm | regex
+    # 이 하위질문이 가리키는 원문 조각. 복합 질문을 나눴을 때 각 조각을 답변 생성에 넘긴다.
+    # 비어 있으면 호출자가 전체 질문을 쓴다(기존 호출부 호환).
+    question: str = ""
 
     @property
     def query(self) -> str:
         return " ".join(self.terms)
 
 
-def memory_companion_query(text: str) -> str | None:
-    """기억 질문과 함께 적힌 별도 질문을 돌려준다.
-
-    기억 질문 하나만 있으면 기존 memory 응답을 유지한다. 문장부호나 접속사로 분리된 다른
-    질문이 있으면 그 질문까지 버리지 않고 별도 라우팅할 수 있게 한다.
-    """
-    clauses = [part.strip(" \t\r\n,，") for part in CLAUSE_SPLIT_RE.split(text)]
-    clauses = [part for part in clauses if part]
-    if len(clauses) < 2 or not any(MEMORY_RE.search(part) for part in clauses):
-        return None
-    companions = [part for part in clauses if not MEMORY_RE.search(part)]
-    query = " ".join(companions).strip()
-    return query if TOKEN_RE.search(query) else None
+# 아카이브 원문을 근거로 답하는 의도. 이 의도의 답변은 **답변 엔진 출력을 그대로** 쓴다 -
+# 출처가 붙어 있으므로 다시 생성하면 원칙 2(출처 강제)가 깨진다.
+ARCHIVE_KINDS = ("summary", "search", "advice")
+# 봇 자신에 대한 답변. 사실은 코드가 만들고 문장은 LLM 이 쓴다(compose.py).
+SELF_KINDS = ("status", "help", "memory", "smalltalk", "out_of_scope")
+# 쓰기 동작. 절대 다른 의도와 섞지 않는다 - 무엇을 실행하는지 모호하면 실행하지 않는다.
+WRITE_KINDS = ("ingest", "ingest_all")
 
 
 def parse_period(text: str, *, default: int = DEFAULT_DAYS) -> int:
@@ -176,6 +179,160 @@ def classify_by_rule(text: str) -> Intent:
     if ADVICE_RE.search(text):
         return Intent("advice", terms=terms, source="regex")
     return Intent("search", terms=terms or TOKEN_RE.findall(text), source="regex")
+
+
+# 절 경계에서 떼어낼 공백·구두점(전각 쉼표 포함).
+PLANNER_PROMPT = CLASSIFIER_PROMPT.replace(
+    "kind 를 하나 고른다:",
+    "각 하위질문마다 kind 를 하나 고른다:",
+).replace(
+    """JSON 만 출력한다. 설명·코드펜스 금지.
+{"kind": "...", "days": 7, "terms": ["..."]}""",
+    """사람은 한 번에 여러 가지를 묻는다. **질문을 하위질문으로 나눠라.**
+- "이전 답변 기억나? 그리고 전산팀은 무슨 일 있어?" -> memory 1개 + summary 1개
+- "상태 어때? 그리고 김해외동 기성금 얼마야?" -> status 1개 + search 1개
+- 질문이 하나면 task 도 하나다. 억지로 쪼개지 말 것.
+- 최대 3개. 각 task 의 question 에는 그 하위질문의 원문 조각을 그대로 넣는다.
+- 수집 지시(ingest/ingest_all)가 섞여 있으면 그것만 남긴다 —
+  무엇을 실행하는지 모호한 상태로 실행해서는 안 된다.
+
+JSON 만 출력한다. 설명·코드펜스 금지.
+{"tasks": [{"kind": "...", "question": "...", "days": 7, "terms": ["..."]}]}""",
+)
+
+_CLAUSE_TRIM = string.whitespace + ',，'
+
+
+def _clamp_days(v) -> int:
+    """모델이 준 기간을 안전 범위로 자른다. 없거나 이상하면 기본값."""
+    try:
+        return min(max(int(v), 1), 365)
+    except (TypeError, ValueError):
+        return DEFAULT_DAYS
+
+
+def split_clauses(text: str) -> list[str]:
+    """질문을 절 단위로 나눈다. 복합 질문의 규칙 기반 분해에 쓴다."""
+    parts = [c.strip(_CLAUSE_TRIM) for c in CLAUSE_SPLIT_RE.split(text)]
+    return [c for c in parts if c]
+
+
+def _dedupe(tasks: list[Intent]) -> list[Intent]:
+    """같은 의도가 여러 번 나오면 하나로 합친다. 검색어는 합집합으로 모은다.
+
+    "전산팀 상황이랑 자금팀 상황" 같은 질문을 요약 두 번 돌리지 않기 위한 것이다.
+    """
+    out: list[Intent] = []
+    for task in tasks:
+        same = next((x for x in out if x.kind == task.kind), None)
+        if same is None:
+            out.append(task)
+            continue
+        for term in task.terms:
+            if term not in same.terms:
+                same.terms.append(term)
+        if task.question and task.question not in same.question:
+            same.question = f"{same.question} {task.question}".strip()
+    return out
+
+
+def plan_by_rule(text: str) -> list[Intent]:
+    """LLM 없이 복합 질문을 분해한다. 분류기 장애 시 폴백 경로.
+
+    절 단위로 나눠 각각 분류한다. 절이 하나뿐이거나 분해해도 같은 의도면 1개로 돌아간다.
+    """
+    clauses = split_clauses(text)
+    if len(clauses) < 2:
+        one = classify_by_rule(text)
+        one.question = text
+        return [one]
+
+    tasks: list[Intent] = []
+    for clause in clauses:
+        task = classify_by_rule(clause)
+        task.question = clause
+        # "기억나? 왜?" 의 "왜" 처럼 검색어가 없는 조각은 질문이 아니다. 남겨두면
+        # 0건 검색 답변이 붙어 "물어본 적 없는 것에 답을 못했다" 는 문장이 나간다.
+        if task.kind == "search" and not task.terms:
+            continue
+        tasks.append(task)
+    if not tasks:
+        one = classify_by_rule(text)
+        one.question = text
+        return [one]
+
+    # 쓰기 동작이 섞이면 실행 대상이 모호하다. 쓰기 하나만 남긴다.
+    writes = [x for x in tasks if x.kind in WRITE_KINDS]
+    if writes:
+        writes[0].question = text
+        return [writes[0]]
+
+    # 절을 나눴더니 전부 search 로 흩어지는 경우가 많다 - 그럴 땐 원문 전체로 한 번 분류한다.
+    tasks = _dedupe(tasks)
+    if len(tasks) == 1:
+        tasks[0].question = text
+    return tasks[:MAX_TASKS]
+
+
+def plan(text: str, router: Router | None) -> list[Intent]:
+    """복합 질문을 하위질문 목록으로 분해한다(1차 LLM). 실패하면 규칙으로 폴백한다.
+
+    라벨 하나만 돌려주던 예전 구조에서는 "기억나? 그리고 전산팀은 무슨 일 있어?" 처럼
+    두 가지를 물으면 **한쪽이 처리 경로에 도달조차 하지 못했다.** 분해를 분류기 책임으로
+    옮겨 사람이 실제로 묻는 방식에 맞춘다.
+    """
+    if router is None:
+        return plan_by_rule(text)
+
+    messages = [Message("system", PLANNER_PROMPT), Message("user", text)]
+    for model in (CLASSIFIER_MODEL, None):
+        try:
+            resp = router.complete(
+                messages,
+                model=model,
+                sensitivity=Sensitivity.CONFIDENTIAL,
+                max_tokens=500,
+            )
+            break
+        except (UnknownModel, ModelNotAllowed) as e:
+            logger.info("분류 모델 %s 사용 불가(%s) - 다음 후보 시도", model, e)
+        except Exception as e:
+            logger.warning("분해 호출 실패(%s) - 규칙 기반으로 폴백", e)
+            return plan_by_rule(text)
+    else:
+        return plan_by_rule(text)
+
+    try:
+        raw = _extract_json(resp.text)
+        items = raw.get("tasks")
+        if not isinstance(items, list) or not items:
+            raise ValueError(f"tasks 없음: {raw!r}")
+        tasks: list[Intent] = []
+        for item in items:
+            kind = str(item.get("kind", "")).strip()
+            if kind not in KINDS:
+                logger.info("알 수 없는 kind 무시: %r", kind)
+                continue
+            terms = [str(x) for x in (item.get("terms") or []) if str(x).strip()]
+            tasks.append(
+                Intent(
+                    kind=kind,
+                    days=_clamp_days(item.get("days")),
+                    terms=terms,
+                    source="llm",
+                    question=str(item.get("question") or "").strip() or text,
+                )
+            )
+        if not tasks:
+            raise ValueError("유효한 task 없음")
+    except Exception as e:
+        logger.warning("분해 파싱 실패(%s) - 규칙 기반으로 폴백. raw=%r", e, resp.text[:200])
+        return plan_by_rule(text)
+
+    writes = [x for x in tasks if x.kind in WRITE_KINDS]
+    if writes:
+        return [writes[0]]
+    return _dedupe(tasks)[:MAX_TASKS]
 
 
 def _extract_json(raw: str) -> dict:
