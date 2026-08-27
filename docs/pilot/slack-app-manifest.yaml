@@ -36,6 +36,8 @@ settings:
       - message.im
       - message.channels   # 공개 채널 실시간 수집
       - message.groups     # 비공개 채널 실시간 수집(봇이 초대된 곳만)
+      - channel_created    # 새 공개 채널 - 이름이 규칙에 맞으면 즉시 자동 참여
+      - channel_rename     # 이름을 규칙에 맞게 고치면 그때부터 수집
   interactivity:
     is_enabled: false
   org_deploy_enabled: false

@@ -114,3 +114,31 @@ def test_ingest_is_idempotent_and_append_only(tmp_path):
     after = r2.path.read_text(encoding="utf-8")
     assert first.split("## 원문")[1].strip() in after  # 기존 원문 라인 보존
     assert after.count("첫 메시지") == 1
+
+
+def test_org_metadata_recorded_from_channel_name(tmp_path):
+    """조직코드는 조직 개편·워크스페이스 통합 뒤에도 문서 출신을 추적하게 해준다."""
+    from tybot.archive.store import load_doc
+
+    r = writer.ingest(
+        tmp_path,
+        workspace="pilot",
+        channel="#팀-전산_ABB110-주간회의",
+        messages=[_msg("회의 시작")],
+        acl=["#팀-전산_ABB110-주간회의"],
+    )
+    doc = load_doc(r.path)
+    assert doc.org_code == "ABB110"
+    assert doc.org_kind == "team"
+    assert doc.org_name == "전산"
+
+
+def test_org_metadata_absent_for_non_rule_channel(tmp_path):
+    """규칙 밖 채널도 저장은 되되(수동 초대 등) 조직 메타는 비어 있다."""
+    from tybot.archive.store import load_doc
+
+    r = writer.ingest(
+        tmp_path, workspace="pilot", channel="#잡담", messages=[_msg("점심 뭐 먹지")], acl=["#잡담"]
+    )
+    doc = load_doc(r.path)
+    assert doc.org_code is None and doc.org_kind is None

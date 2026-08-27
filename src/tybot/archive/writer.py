@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ..channels import parse as parse_channel
 from ..lock import archive_write_lock
 from .store import RAW_HEADING_RE, SchemaError, validate
 
@@ -60,12 +61,22 @@ def doc_path(root: Path | str, workspace: str, channel: str) -> Path:
 
 def _new_doc(workspace: str, channel: str, visibility: str, acl: list[str]) -> str:
     acl_s = "[" + ", ".join(acl) + "]"
+    # 채널명에서 조직 정보를 뽑아 남긴다. 조직명은 바뀌어도 코드는 유지되므로,
+    # 조직 개편·워크스페이스 통합 뒤에도 이 문서가 어느 조직 것인지 추적할 수 있다.
+    spec = parse_channel(channel)
+    org_lines = ""
+    if spec:
+        org_lines = f"org_kind: {spec.kind}\n"
+        if spec.org_code:
+            org_lines += f"org_code: {spec.org_code}\n"
+        org_lines += f"org_name: {spec.org_name}\n"
     return (
         "---\n"
         f"workspace: {workspace}\n"
         f'channel: "{channel}"\n'
         f"visibility: {visibility}\n"
         f"acl: {acl_s}\n"
+        f"{org_lines}"
         "doc_count: 0\n"
         "last_ingested: \n"
         "---\n\n"

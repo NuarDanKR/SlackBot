@@ -41,6 +41,10 @@ class ArchiveDoc:
     # 이 문서를 넘길 다른 워크스페이스 목록(선택). 비어 있으면 동등 워크스페이스로 안 나간다.
     share_with: frozenset[str]
     last_ingested: str | None
+    # 채널명에서 뽑은 조직 정보(선택). 조직 트리 연결·개편 추적에 쓴다.
+    org_code: str | None = None
+    org_kind: str | None = None
+    org_name: str | None = None
     raw_lines: list[RawLine] = field(default_factory=list)
 
     @property
@@ -172,6 +176,9 @@ def load_doc(path: Path) -> ArchiveDoc:
         share_with=share_with,
         last_ingested=str(fm.get("last_ingested")) if fm.get("last_ingested") else None,
         raw_lines=lines,
+        org_code=str(fm["org_code"]) if fm.get("org_code") else None,
+        org_kind=str(fm["org_kind"]) if fm.get("org_kind") else None,
+        org_name=str(fm["org_name"]) if fm.get("org_name") else None,
     )
 
 

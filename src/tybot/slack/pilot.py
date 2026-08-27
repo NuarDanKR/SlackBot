@@ -31,6 +31,7 @@ from ..archive.files import file_lines
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
 from ..audit import QALog, QARecord
+from ..autojoin import on_channel_event, sweep
 from ..config import cost_state_path
 from ..intent import INGEST_ALL_RE, INGEST_RE, Intent
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
@@ -105,6 +106,8 @@ class WorkspaceBot:
         # 스레드 답글 대신 채널 본문에 답할지. 스레드가 기본인 이유는 채널 소음과
         # 자기 답변 재수집(요약 재귀) 위험을 줄이기 때문이다.
         self.reply_in_thread = _truthy(os.getenv("REPLY_IN_THREAD", "1"))
+        # 채널 이름이 규칙에 맞으면 초대 없이 봇이 스스로 참여한다(공개 채널만).
+        self.autojoin = _truthy(os.getenv("AUTOJOIN_CHANNELS", "1"))
         # 전 채널·전 워크스페이스 통합조회 허용 사용자. 채널 멤버십과 워크스페이스 경계를 모두 우회한다.
         self.exec_users = {
             u.strip() for u in (os.getenv("EXEC_USERS") or "").split(",") if u.strip()
@@ -163,8 +166,38 @@ class WorkspaceBot:
             is_root=self.cfg.is_root,
         )
 
+    def autojoin_sweep(self) -> None:
+        """규칙에 맞는 공개 채널에 자동 참여. 기동 시 1회."""
+        if not self.autojoin:
+            log.info("[%s] 자동 참여 비활성(AUTOJOIN=0)", self.workspace)
+            return
+        try:
+            r = sweep(self.app.client)
+        except Exception as e:
+            log.error("[%s] 자동 참여 스윕 실패: %s", self.workspace, e)
+            return
+        log.info("[%s] %s", self.workspace, r.summary())
+        if r.need_invite:
+            log.warning(
+                "[%s] 비공개 채널 %d개는 봇이 스스로 못 들어간다 - `/invite @%s` 필요: %s",
+                self.workspace, len(r.need_invite), self.bot_name, ", ".join(r.need_invite[:10]),
+            )
+
     # --- 핸들러 -----------------------------------------------------------
     def _register(self) -> None:
+        @self.app.event("channel_created")
+        def on_channel_created(event, client):
+            joined = on_channel_event(client, event.get("channel", {}))
+            if joined:
+                log.info("[%s] 새 채널 수집 시작: %s", self.workspace, joined)
+
+        @self.app.event("channel_rename")
+        def on_channel_renamed(event, client):
+            # 이름을 규칙에 맞게 고친 순간부터 수집 대상이 된다.
+            joined = on_channel_event(client, event.get("channel", {}))
+            if joined:
+                log.info("[%s] 이름 변경으로 수집 시작: %s", self.workspace, joined)
+
         @self.app.event("app_mention")
         def on_mention(event, client, say):
             if event.get("bot_id"):
@@ -489,6 +522,7 @@ class WorkspaceBot:
             f"*연결*: {conn}{who}",
             f"*가동*: {hours}시간 {rem // 60}분 · 실시간 수집 {'ON' if self.realtime else 'OFF'}"
             f" · 답변 위치 {'스레드' if self.reply_in_thread else '채널'}"
+            f" · 자동참여 {'ON' if self.autojoin else 'OFF'}"
             f" · 이번 세션 수집 {self._ingested} 건 (마지막 {last})",
             f"*모델*: {self.engine.model_info()} · 오늘 사용액 ${self.engine.spent_today():.3f}",
             f"*감사기록*: `{self.qa_log.root}`",
@@ -514,6 +548,7 @@ class WorkspaceBot:
 
         self._handler = SocketModeHandler(self.app, self.cfg.app_token)
         self._handler.connect()
+        self.autojoin_sweep()
         log.info(
             "워크스페이스 연결 — %s / 실시간수집=%s / 크로스열람=%s",
             self.cfg.masked(),
