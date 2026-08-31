@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .channels import COLLECT_PREFIXES, ChannelSpec, parse
+from .orgsearch import decode_value
 
 _OWNER_LOCK = threading.Lock()
 _SPACE_RE = re.compile(r"\s+")
@@ -78,14 +79,41 @@ def _selected(state: dict, block_id: str, action_id: str) -> dict:
     return state.get(block_id, {}).get(action_id, {})
 
 
+def _org_from_state(state: dict) -> tuple[str, str, str]:
+    """(조직명, 조직코드, 조직명에서 뽑은 구분).
+
+    조직 검색 선택(`org` 블록)이 있으면 그것을 쓰고, 없으면 예전 수동 입력을 읽는다.
+    DB 를 못 읽는 환경에서도 채널을 만들 수 있어야 해서 두 경로를 모두 남긴다.
+    """
+    picked = _selected(state, "org", "org").get("selected_option")
+    if picked:
+        code, prefix, name = decode_value(picked.get("value", ""))
+        if not code:
+            # 안내용 항목("일치하는 조직이 없습니다")을 고른 경우다.
+            raise ChannelNameError(
+                "조직을 목록에서 선택해 주세요. 검색 결과가 없으면 관리자에게 "
+                "조직도 동기화를 요청하세요.",
+                "org",
+            )
+        return name, code, prefix
+    return (
+        _selected(state, "org_name", "org_name").get("value", ""),
+        _selected(state, "org_code", "org_code").get("value", ""),
+        "",
+    )
+
+
 def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRequest:
     """Slack view_submission의 state.values를 ChannelRequest로 바꾼다."""
     state = (view.get("state") or {}).get("values") or {}
     prefix = (_selected(state, "prefix", "prefix").get("selected_option") or {}).get(
         "value", ""
     )
-    org_name = _selected(state, "org_name", "org_name").get("value", "")
-    org_code = _selected(state, "org_code", "org_code").get("value", "")
+    org_name, org_code, picked_prefix = _org_from_state(state)
+    # 조직명 끝에서 구분이 나오면 그것을 쓴다(경영혁신실 -> 실).
+    # `org_unit.kind` 는 추정값이라 채널명 근거로 삼지 않는다 — 조직명은 사람이 붙인 것이다.
+    if picked_prefix:
+        prefix = picked_prefix
     task = _selected(state, "task", "task").get("value", "")
     visibility = "private"
     members: tuple[str, ...] = ()
@@ -101,24 +129,60 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
     return request
 
 
-def _name_inputs(spec: ChannelSpec | None = None) -> list[dict]:
+def org_select_block() -> dict:
+    """조직 검색 입력. 후보는 `block_suggestion` 으로 서버가 채운다.
+
+    Socket Mode 에서도 검색 콜백은 소켓으로 오므로 인바운드 포트가 필요 없다.
+    """
+    return {
+        "type": "input",
+        "block_id": "org",
+        "label": {"type": "plain_text", "text": "조직"},
+        "element": {
+            "type": "external_select",
+            "action_id": "org",
+            "min_query_length": 1,
+            "placeholder": {
+                "type": "plain_text",
+                "text": "조직명 또는 코드로 검색 (예: 경영)",
+            },
+        },
+    }
+
+
+def _name_inputs(spec: ChannelSpec | None = None, *, org_search: bool = False) -> list[dict]:
+    """이름 네 조각을 받는 입력들.
+
+    `org_search=True` 면 조직명·조직코드 두 칸을 조직 검색 하나로 바꾼다.
+    조직코드(`ABB110`)를 외우고 있는 사람은 거의 없고, 잘못 적으면 채널은 만들어지되
+    조직 매핑이 어긋난다 — 그건 나중에 권한·집계에서야 드러난다.
+
+    조직도(DB)를 못 읽는 환경에서는 수동 입력을 그대로 쓴다. 채널 생성이 DB 가용성에
+    묶이면 안 된다.
+    """
     prefix_options = [
         {"text": {"type": "plain_text", "text": p}, "value": p}
         for p in ("본부", "실", "팀", "현장", "프로젝트")
     ]
     selected_prefix = spec.prefix if spec else "팀"
-    return [
-        {
-            "type": "input",
-            "block_id": "prefix",
-            "label": {"type": "plain_text", "text": "조직 구분"},
-            "element": {
-                "type": "static_select",
-                "action_id": "prefix",
-                "options": prefix_options,
-                "initial_option": next(o for o in prefix_options if o["value"] == selected_prefix),
-            },
+    # 검색으로 고르면 조직명 끝에서 구분이 나온다(경영혁신실 -> 실). 그때 이 선택은
+    # 쓰이지 않으므로 언제 쓰이는지 라벨에 적는다 — 안 적으면 "골랐는데 왜 안 반영되지" 가 된다.
+    prefix_label = (
+        "조직 구분 (조직명에 본부·실·팀이 없을 때만 사용)" if org_search else "조직 구분"
+    )
+
+    prefix_block = {
+        "type": "input",
+        "block_id": "prefix",
+        "label": {"type": "plain_text", "text": prefix_label},
+        "element": {
+            "type": "static_select",
+            "action_id": "prefix",
+            "options": prefix_options,
+            "initial_option": next(o for o in prefix_options if o["value"] == selected_prefix),
         },
+    }
+    manual_blocks = [
         {
             "type": "input",
             "block_id": "org_name",
@@ -141,23 +205,25 @@ def _name_inputs(spec: ChannelSpec | None = None) -> list[dict]:
                 **({"initial_value": spec.org_code} if spec else {}),
             },
         },
-        {
-            "type": "input",
-            "block_id": "task",
-            "label": {"type": "plain_text", "text": "업무명"},
-            "element": {
-                "type": "plain_text_input",
-                "action_id": "task",
-                "placeholder": {"type": "plain_text", "text": "예: 주간회의"},
-                **({"initial_value": spec.task} if spec else {}),
-            },
-        },
     ]
+    task_block = {
+        "type": "input",
+        "block_id": "task",
+        "label": {"type": "plain_text", "text": "업무명"},
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "task",
+            "placeholder": {"type": "plain_text", "text": "예: 주간회의"},
+            **({"initial_value": spec.task} if spec else {}),
+        },
+    }
+    org_blocks = [org_select_block()] if org_search else manual_blocks
+    return [prefix_block, *org_blocks, task_block]
 
 
-def create_modal(private_metadata: str) -> dict:
+def create_modal(private_metadata: str, *, org_search: bool = False) -> dict:
     """전역 바로가기와 `/채널 생성`이 공유하는 생성 모달."""
-    blocks = _name_inputs()
+    blocks = _name_inputs(org_search=org_search)
     blocks.extend(
         [
             {

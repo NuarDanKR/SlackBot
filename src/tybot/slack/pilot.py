@@ -45,6 +45,7 @@ from ..collection_status import ChannelFacts
 from ..collection_status import report as collection_report
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
+from ..db import available as db_available
 from ..db import connect as db_connect
 from ..failures import failure_message
 from ..feedback import (
@@ -70,6 +71,10 @@ from ..intent import (
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
+from ..orgsearch import NO_MATCH, notice_option
+from ..orgsearch import UNAVAILABLE as ORG_UNAVAILABLE
+from ..orgsearch import options as org_options
+from ..orgsearch import search as org_search_db
 from ..paths import check_paths
 from ..poll_view import (
     ACTION_CLOSE,
@@ -469,6 +474,17 @@ class WorkspaceBot:
             except Exception as e:
                 log.warning("[%s] 일정 공유 실패: %s", self.workspace, e)
 
+        @self.app.options("org")
+        def on_org_options(ack, payload):
+            """조직 검색 결과를 모달에 채운다.
+
+            조직코드를 사람이 외워서 입력하던 자리다. 틀리게 적어도 채널은 만들어지고,
+            어긋난 조직 매핑은 나중에 권한·집계에서야 드러난다. 목록에서 고르게 한다.
+
+            Socket Mode 에서도 이 콜백은 소켓으로 오므로 인바운드 포트가 필요 없다.
+            """
+            ack(options=self._org_options(payload.get("value", "")))
+
         @self.app.view("tybot_create_channel")
         def on_create_submission(ack, body, client, view):
             try:
@@ -753,10 +769,33 @@ class WorkspaceBot:
             return {}
         return value if isinstance(value, dict) else {}
 
+    def _org_options(self, query: str) -> list[dict]:
+        """조직 검색 옵션. 실패해도 빈 목록만 주지 않는다.
+
+        빈 목록은 사람에게 '검색이 고장났다' 와 '결과가 없다' 를 구별해 주지 않는다.
+        """
+        with db_connect() as conn:
+            if conn is None:
+                return [notice_option(ORG_UNAVAILABLE)]
+            try:
+                hits = org_search_db(conn, query)
+            except Exception as e:
+                log.warning("[%s] 조직 검색 실패: %s", self.workspace, e)
+                return [notice_option(ORG_UNAVAILABLE)]
+        if not hits:
+            return [notice_option(NO_MATCH)]
+        log.info("[%s] 조직 검색 q=%r hits=%d", self.workspace, query[:20], len(hits))
+        return org_options(hits)
+
     def _open_create_modal(self, client, trigger_id: str, user_id: str) -> None:
         metadata = json.dumps({"user_id": user_id}, ensure_ascii=False)
         try:
-            client.views_open(trigger_id=trigger_id, view=create_modal(metadata))
+            # 조직도(DB)를 읽을 수 있을 때만 검색 입력을 쓴다. 없으면 수동 입력으로
+            # 되돌아간다 - 채널 생성이 DB 가용성에 묶이면 안 된다.
+            client.views_open(
+                trigger_id=trigger_id,
+                view=create_modal(metadata, org_search=db_available()),
+            )
         except Exception as e:
             log.warning("[%s] 채널 생성 모달 열기 실패: %s", self.workspace, e)
 
