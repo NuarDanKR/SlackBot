@@ -390,7 +390,9 @@ def test_usage_baseline_excludes_other_workspaces(client, env):
     path = env / "qa-log" / f"qa-{month}.jsonl"
     rows = [
         {
-            "ts": f"{day}T08:00:00+09:00",
+            # 자정 직후로 둔다. 기준선은 '오늘 이 시각까지 누적' 만 세므로,
+            # 08:00 같은 시각을 쓰면 그 시각 이전에 돌린 빌드가 항상 깨진다.
+            "ts": f"{day}T00:01:00+09:00",
             "workspace": "site-gimhae",
             "intent_kind": "search",
             "intent_source": "llm",
