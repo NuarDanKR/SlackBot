@@ -49,6 +49,14 @@ features:
       description: /피드백 명령의 영문 예비 명령입니다.
       usage_hint: (비워두면 선택 화면) | 무엇이 잘못됐는지
       should_escape: false
+    - command: /일정
+      description: 그룹웨어 팀 일정을 조회합니다. 본인에게만 표시됩니다.
+      usage_hint: (비워두면 오늘·내일) | 오늘 | 이번주 | 9월
+      should_escape: false
+    - command: /ty-schedule
+      description: /일정 명령의 영문 예비 명령입니다.
+      usage_hint: (비워두면 오늘·내일) | 오늘 | 이번주 | 9월
+      should_escape: false
 oauth_config:
   scopes:
     bot:

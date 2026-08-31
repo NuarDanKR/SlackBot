@@ -45,6 +45,7 @@ from ..collection_status import ChannelFacts
 from ..collection_status import report as collection_report
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
+from ..db import connect as db_connect
 from ..failures import failure_message
 from ..feedback import (
     SLASH_HELP,
@@ -97,6 +98,23 @@ from ..poll_view import (
 from ..polls import PollError, apply_vote, close_poll, create_poll
 from ..polls import load as load_poll
 from ..polls import save as save_poll
+from ..schedule import HELP as SCHEDULE_HELP
+from ..schedule import (
+    UNAVAILABLE as SCHEDULE_UNAVAILABLE,
+)
+from ..schedule import (
+    fetch as schedule_fetch,
+)
+from ..schedule import (
+    format_reply as schedule_reply,
+)
+from ..schedule import (
+    last_sync as schedule_last_sync,
+)
+from ..schedule import (
+    parse_window,
+    unknown_window,
+)
 from ..workspaces import ConfigError, WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
@@ -136,6 +154,27 @@ def _clean(text: str) -> str:
 
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def schedule_blocks(body: str, *, share_payload: str = "") -> list[dict]:
+    """일정 응답 블록. 본문 + '채널에 공유' 버튼.
+
+    기본은 ephemeral 이고 공유는 사용자가 누를 때만 일어난다 - 일정 제목·장소가
+    채널 대화에 섞이는 것을 기본값으로 두지 않는다.
+    """
+    out: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": body[:2900]}}]
+    if "보여드릴 수 있는 일정이 없습니다" in body or "준비되지 않았습니다" in body:
+        return out
+    out.append({
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "action_id": "tybot_schedule_share",
+            "text": {"type": "plain_text", "text": "채널에 공유"},
+            "value": share_payload[:200],
+        }],
+    })
+    return out
 
 
 def _scope_label(ctx: RequestContext | None) -> str:
@@ -384,6 +423,52 @@ class WorkspaceBot:
                 ),
             )
 
+        # --- 일정 (/일정) ----------------------------------------------------
+        @self.app.command("/일정")
+        @self.app.command("/ty-schedule")
+        def on_schedule_command(ack, command, client, respond):
+            """그룹웨어 팀 일정 조회.
+
+            ephemeral 로만 답한다. 채널에 뿌리면 일정 제목·장소가 대화에 섞이고,
+            그 채널이 수집 대상이면 아카이브 금지 규칙(원칙 1·5)과 충돌한다.
+            공유가 필요하면 아래 버튼으로 사용자가 명시적으로 올린다.
+            """
+            ack()
+            text = (command.get("text") or "").strip()
+            if text in ("도움말", "help", "?"):
+                respond(SCHEDULE_HELP, response_type="ephemeral")
+                return
+            body = self._schedule_text(
+                text,
+                channel_id=command.get("channel_id", ""),
+                user_id=command.get("user_id", ""),
+            )
+            respond(
+                text=body,
+                response_type="ephemeral",
+                blocks=schedule_blocks(body, share_payload=text),
+            )
+
+        @self.app.action("tybot_schedule_share")
+        def on_schedule_share(ack, body, client):
+            """사용자가 누른 경우에만 채널에 올린다.
+
+            봇 발언은 수집에서 제외되므로(`writer.ingest` 의 skipped_bot) 아카이브에는
+            남지 않는다. 다만 채널 사람들에게는 보이므로 누른 사람을 함께 표기한다.
+            """
+            ack()
+            user_id = (body.get("user") or {}).get("id", "")
+            channel_id = ((body.get("channel") or {}).get("id")) or ""
+            payload = ((body.get("actions") or [{}])[0]).get("value") or ""
+            shared = self._schedule_text(payload, channel_id=channel_id, user_id=user_id)
+            try:
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"<@{user_id}> 님이 공유한 일정\n{shared}",
+                )
+            except Exception as e:
+                log.warning("[%s] 일정 공유 실패: %s", self.workspace, e)
+
         @self.app.view("tybot_create_channel")
         def on_create_submission(ack, body, client, view):
             try:
@@ -524,6 +609,42 @@ class WorkspaceBot:
                 return
             if ctype in ("channel", "group") and self.realtime:
                 self._ingest_live(client, event)
+
+    def _schedule_text(self, text: str, *, channel_id: str, user_id: str) -> str:
+        """`/일정` 본문. 제목·장소는 여기서만 다루고 로그에는 남기지 않는다."""
+        window = parse_window(text)
+        if window is None:
+            return unknown_window(text)
+
+        with db_connect() as conn:
+            if conn is None:
+                return SCHEDULE_UNAVAILABLE
+            try:
+                rows, scope = schedule_fetch(
+                    conn,
+                    workspace=self.workspace,
+                    channel_id=channel_id,
+                    slack_user=user_id,
+                    window=window,
+                )
+                synced_at = schedule_last_sync(conn)
+            except Exception as e:
+                log.warning("[%s] 일정 조회 실패: %s", self.workspace, e)
+                return (
+                    "일정을 조회하지 못했습니다. 잠시 뒤 다시 시도해 주세요.\n"
+                    "계속되면 관리자에게 알려 주세요."
+                )
+
+        # 건수·범위만 남긴다. 제목·장소는 로그에 넣지 않는다(설계 문서 §2).
+        log.info(
+            "[%s] 일정 조회 scope=%s window=%s rows=%d folders=%s",
+            self.workspace,
+            scope,
+            window.label,
+            len(rows),
+            sorted({r.source_folder_id for r in rows}),
+        )
+        return schedule_reply(rows, window=window, scope=scope, synced_at=synced_at)
 
     def _collection_status(self, client, channel_id: str) -> str:
         """`/수집상태` 가 보여줄 문장. 사실 수집만 하고 판단은 collection_status 가 한다."""
@@ -1310,6 +1431,7 @@ class WorkspaceBot:
                 "• `어느 방향이 나을까?` 같은 판단·권고 요청 — 원문이 있으면 근거로, 없으면 일반 판단으로 답합니다",
                 "• `수집` — 이 채널 과거 대화 백필 / `전체수집` — 규칙에 맞는 전 채널",
                 "• `상태` — 연결·수집 상태 / `도움말` — 이 안내",
+                "• `/일정` — 그룹웨어 팀 일정 (본인에게만 표시)",
                 "• `/수집상태` — 지금 이 채널이 수집되는지, 아니면 왜 아닌지",
                 "• `/피드백` — 답변 품질 신고. 선택 화면이 열립니다 "
                 "(`/피드백 <내용>` 으로 바로 보내거나, 답변에 :+1:/:-1: 도 가능)",
