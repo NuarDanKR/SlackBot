@@ -4,7 +4,7 @@
 질문·의도·권한범위·근거·모델·비용을 모두 적어서 사고를 역추적할 수 있게 한다.
 
 **중요: 이 기록은 아카이브가 아니다.**
-- 저장 위치는 `archive/channels/` **밖**이다. ArchiveStore 는 이 파일을 절대 읽지 않는다.
+- 저장 위치는 `archive/workspaces/` **밖**이다. ArchiveStore 는 이 파일을 절대 읽지 않는다.
 - 봇 답변을 근거로 재사용하면 요약 재귀가 발생한다(원칙 1). 그래서 물리적으로 분리한다.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ MAX_TEXT = 4000  # 한 건이 로그를 잡아먹지 않게 상한
 MD_HEADER = """# 질의응답 기록 {date}
 
 > 이 파일은 **감사 기록**이다. 아카이브 원문이 아니며 봇 답변의 근거로 쓰이지 않는다.
-> 원문 아카이브는 `archive/channels/` 에 있다.
+> 원문 아카이브는 `archive/workspaces/` 에 있다.
 
 """
 
@@ -169,6 +169,34 @@ class QALog:
                         return row
         except OSError as e:
             logger.warning("피드백 대상 QA 기록 조회 실패: %s", e)
+        return None
+
+    def last_answer_for_user(self, workspace: str, channel_id: str, user: str) -> dict | None:
+        """이 채널에서 **본인이** 마지막으로 받은 답변 기록.
+
+        `/피드백` 이 어느 답변에 대한 신고인지 연결하는 데 쓴다. 리액션·정정과 달리
+        슬래시 명령에는 대상 메시지가 없기 때문이다.
+
+        남의 질문 기록은 돌려주지 않는다 - 감사기록 조회는 본인 것만이라는
+        `recent_for_user` 와 같은 규칙이다.
+        """
+        if not channel_id or not user:
+            return None
+        try:
+            for path in sorted(self.root.glob("qa-*.jsonl"), reverse=True)[:2]:
+                for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        row.get("workspace") == workspace
+                        and row.get("channel_id") == channel_id
+                        and row.get("user") == user
+                    ):
+                        return row
+        except OSError as e:
+            logger.warning("최근 답변 기록 조회 실패: %s", e)
         return None
 
     def _append_md(self, rec: QARecord) -> None:

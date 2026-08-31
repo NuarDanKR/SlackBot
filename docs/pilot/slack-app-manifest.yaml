@@ -35,6 +35,20 @@ features:
       description: /투표 명령의 영문 예비 명령입니다.
       usage_hint: 질문 | 도움말
       should_escape: false
+    - command: /수집상태
+      description: 이 채널이 수집 대상인지, 아니면 왜 아닌지 알려줍니다.
+      should_escape: false
+    - command: /ty-collection
+      description: /수집상태 명령의 영문 예비 명령입니다.
+      should_escape: false
+    - command: /피드백
+      description: 답변이 잘못됐을 때 신고합니다.
+      usage_hint: 무엇이 잘못됐는지
+      should_escape: false
+    - command: /ty-feedback
+      description: /피드백 명령의 영문 예비 명령입니다.
+      usage_hint: 무엇이 잘못됐는지
+      should_escape: false
 oauth_config:
   scopes:
     bot:

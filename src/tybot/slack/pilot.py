@@ -41,10 +41,12 @@ from ..channel_management import (
     request_from_view,
 )
 from ..channels import parse, should_collect
+from ..collection_status import ChannelFacts
+from ..collection_status import report as collection_report
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
 from ..failures import failure_message
-from ..feedback import FeedbackLog, correction_text, reaction_kind
+from ..feedback import SLASH_HELP, FeedbackLog, correction_text, reaction_kind
 from ..intent import (
     INGEST_ALL_RE,
     INGEST_RE,
@@ -281,6 +283,37 @@ class WorkspaceBot:
                 response_type="ephemeral",
             )
 
+        @self.app.command("/수집상태")
+        @self.app.command("/ty-collection")
+        def on_collection_command(ack, command, client, respond):
+            """이 채널이 수집되는지, 아니면 왜 안 되는지 그 자리에서 답한다.
+
+            ephemeral 로만 답한다 - 채널에 봇 발언을 남기지 않는다(원칙 1과 같은 축).
+            """
+            ack()
+            respond(
+                self._collection_status(client, command.get("channel_id", "")),
+                response_type="ephemeral",
+            )
+
+        @self.app.command("/피드백")
+        @self.app.command("/ty-feedback")
+        def on_feedback_command(ack, command, client, respond):
+            """대상 메시지를 고를 수 없을 때의 신고 입구.
+
+            리액션·`정정:` 답글과 **같은 로그**에 쌓는다 - 입구마다 저장소가 갈라지면
+            품질 검토에서 한쪽을 놓친다.
+            """
+            ack()
+            respond(
+                self._record_slash_feedback(
+                    user_id=command.get("user_id", ""),
+                    channel_id=command.get("channel_id", ""),
+                    text=(command.get("text") or "").strip(),
+                ),
+                response_type="ephemeral",
+            )
+
         @self.app.view("tybot_create_channel")
         def on_create_submission(ack, body, client, view):
             try:
@@ -421,6 +454,63 @@ class WorkspaceBot:
                 return
             if ctype in ("channel", "group") and self.realtime:
                 self._ingest_live(client, event)
+
+    def _collection_status(self, client, channel_id: str) -> str:
+        """`/수집상태` 가 보여줄 문장. 사실 수집만 하고 판단은 collection_status 가 한다."""
+        channel = self._channel_name(client, channel_id)
+        info = {}
+        try:
+            info = (client.conversations_info(channel=channel_id) or {}).get("channel", {})
+        except Exception as e:
+            log.warning("[%s] 채널 정보 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
+
+        doc = next((d for d in self.store.docs() if d.channel == channel), None)
+        return collection_report(
+            ChannelFacts(
+                channel=channel,
+                is_private=bool(info.get("is_private")),
+                is_member=bool(info.get("is_member")),
+                is_dm=bool(info.get("is_im")) or channel_id.startswith("D"),
+                autojoin_enabled=self.autojoin,
+                realtime_enabled=self.realtime,
+                bot_name=self.bot_name,
+                raw_lines=len(doc.raw_lines) if doc else 0,
+                last_ingested=doc.last_ingested if doc else None,
+                write_problems=dict(self.path_problems),
+            )
+        )
+
+    def _record_slash_feedback(self, *, user_id: str, channel_id: str, text: str) -> str:
+        """`/피드백 <내용>` 을 기록하고 사용자에게 확인을 돌려준다."""
+        if not text:
+            return SLASH_HELP.format(bot=self.bot_name)
+
+        row = self.qa_log.last_answer_for_user(self.workspace, channel_id, user_id)
+        record_id = str(row.get("record_id") or "") if row else ""
+        self.feedback_log.write(
+            workspace=self.workspace,
+            channel_id=channel_id,
+            qa_record_id=record_id,
+            answer_ts=str(row.get("response_ts") or "") if row else "",
+            actor=user_id,
+            kind="correction",
+            action="submitted",
+            text=text,
+        )
+        if record_id:
+            asked = str(row.get("question") or "").strip()
+            detail = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if asked else "직전 답변에 연결했습니다."
+        else:
+            # 연결할 답변이 없으면 그 사실을 말한다. 검토자가 재현하지 못하기 때문이다.
+            detail = (
+                "이 채널에서 회원님이 받은 답변 기록을 찾지 못해 "
+                "특정 답변에 연결하지는 못했습니다."
+            )
+        return (
+            "신고를 접수했습니다. 답변 품질 검토에 반영하겠습니다.\n"
+            f"{detail}\n"
+            "신고 내용은 아카이브에 저장되지 않으며 답변 근거로도 쓰이지 않습니다."
+        )
 
     def _handle_feedback_reaction(self, event: dict, *, action: str) -> None:
         kind = reaction_kind(str(event.get("reaction") or ""))
@@ -1160,6 +1250,8 @@ class WorkspaceBot:
                 "• `어느 방향이 나을까?` 같은 판단·권고 요청 — 원문이 있으면 근거로, 없으면 일반 판단으로 답합니다",
                 "• `수집` — 이 채널 과거 대화 백필 / `전체수집` — 규칙에 맞는 전 채널",
                 "• `상태` — 연결·수집 상태 / `도움말` — 이 안내",
+                "• `/수집상태` — 지금 이 채널이 수집되는지, 아니면 왜 아닌지",
+                "• `/피드백 <내용>` — 답변이 틀렸을 때 신고 (답변에 :+1:/:-1: 도 가능)",
                 "• `이전 답변 기억나?` — 기억 여부와 그 이유(매번 원문에서 다시 찾습니다)",
                 "• `--model=claude-opus-4-8 질문` — 모델 지정",
                 "*사실*은 아카이브 원문만 근거로 답합니다. 근거가 없으면 추측하지 않습니다.",
