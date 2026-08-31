@@ -94,6 +94,25 @@ THREAD_FETCH_LIMIT = 5  # 한 번의 수집에서 답글까지 받아올 스레�
 HEARTBEAT_SECONDS = 60
 
 
+# 채널 생성 직후 채널에 남기는 안내. 참여자 전원이 보므로 **사실만** 적는다.
+#
+# 자주 나오는 오해: "TYBot 으로 만든 채널만 수집된다". 사실이 아니다 -
+# 수집 여부는 `channels.should_collect()`, 즉 **채널 이름**이 정한다(생성 경로가 아니라).
+# 다만 비공개 채널은 봇이 스스로 들어갈 수 없다는 Slack 제약이 있어서,
+# 결과적으로 `/채널` 로 만들거나 사람이 초대해야 수집이 시작된다. 그 차이를 그대로 적는다.
+CHANNEL_CREATED_NOTICE = (
+    "이 채널은 TYBot 수집 대상 표준({visibility})으로 만들어졌습니다. "
+    "여기 올라오는 대화·스레드·첨부는 중앙 아카이브에 원문 그대로 쌓이고, "
+    "권한이 있는 사람의 질문에 근거로 쓰입니다.\n"
+    "• 수집 여부는 **채널 이름**이 정합니다. 규칙 밖 이름으로 바꾸면 그 시점부터 멈춥니다.\n"
+    "• 비공개 채널은 봇이 스스로 들어갈 수 없습니다. "
+    "`/채널` 로 만들었거나 `/invite @{bot}` 한 채널만 수집됩니다.\n"
+    "• 개인 인적사항·부동산 등본류·개인이 특정되는 목록은 올리지 마세요. "
+    "아카이브에 저장되지 않도록 걸러지지만, "
+    "Slack 대화에는 그대로 남습니다."
+)
+
+
 BLANK = chr(10) * 2  # 문단 구분
 
 
@@ -628,17 +647,19 @@ class WorkspaceBot:
         self._notify_user(
             client,
             user_id,
-            f"{visibility} 업무 채널 <#{channel_id}>을 만들었습니다."
-            "\n`/채널 이름변경`으로 표준 이름 안에서 변경할 수 있습니다."
+            f"{visibility} 업무 채널 <#{channel_id}>을 만들었습니다. "
+            f"이름이 수집 규칙에 맞아 **이 채널의 대화는 아카이브에 쌓입니다.**"
+            "\n`/채널 이름변경`으로 표준 이름 안에서 변경할 수 있습니다. "
+            "규칙 밖 이름으로 바꾸면 그 시점부터 수집이 멈춥니다."
             "\nSlack 기본 관리 권한이 필요하면 채널 정보 → 관리자로 지정에서 추가하세요."
             + suffix,
         )
         with contextlib.suppress(Exception):
             client.chat_postMessage(
                 channel=channel_id,
-                text=(
-                    "이 채널은 TYBot 수집 대상 표준으로 생성되었습니다. "
-                    "채널명을 규칙 밖으로 변경하면 이후 대화는 수집되지 않습니다."
+                text=CHANNEL_CREATED_NOTICE.format(
+                    bot=self.bot_name,
+                    visibility="비공개" if request.visibility == "private" else "공개",
                 ),
             )
         log.info(

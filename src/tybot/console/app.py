@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -291,6 +292,51 @@ def put_env_settings(
 def health() -> dict:
     """인증 없이 열어 두는 확인용 엔드포인트. 상태만 알려 주고 내용은 담지 않는다."""
     return {"ok": True, "at": datetime.now(KST).isoformat(timespec="seconds")}
+
+
+# ---------------------------------------------------------------------------
+# Slack 앱 매니페스트 — 저장소 파일을 그대로 내려보낸다
+# ---------------------------------------------------------------------------
+
+def manifest_path() -> Path:
+    """매니페스트 원본 위치. 배포본에서도 같은 상대 위치에 있다."""
+    override = os.getenv("MANIFEST_PATH")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[3] / "docs" / "pilot" / "slack-app-manifest.yaml"
+
+
+@app.get("/api/manifest")
+def manifest(user: User) -> dict:
+    """설치 안내 화면이 보여줄 매니페스트를 **파일에서 직접** 읽어 준다.
+
+    예전에는 같은 내용이 화면 코드(`SetupGuide.tsx`)에 상수로 박혀 있었다. 기능을 더해
+    스코프나 이벤트가 늘 때마다 두 곳을 함께 고쳐야 했고, 한쪽만 고치면 **이 화면을 보고
+    만든 앱에 권한이 빠져 봇이 오류 없이 반쪽만 동작했다.** 파일 하나를 진실로 삼는다.
+
+    내용에 시크릿은 없다(설치 템플릿). 그래도 스코프 구성이 드러나므로 로그인은 요구한다.
+    """
+    path = manifest_path()
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.error("매니페스트를 읽지 못했습니다: %s (%s)", path, e)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "매니페스트 파일을 읽지 못했습니다. 저장소의 "
+                "docs/pilot/slack-app-manifest.yaml 이 배포본에 포함됐는지 확인하세요."
+            ),
+        ) from e
+
+    stat = path.stat()
+    return {
+        "content": content,
+        "path": str(path),
+        # 화면에서 '언제 것인지' 를 보여주면, 배포가 안 된 상태를 사람이 바로 알아챈다.
+        "updated_at": datetime.fromtimestamp(stat.st_mtime, KST).isoformat(timespec="seconds"),
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()[:12],
+    }
 
 
 # ---------------------------------------------------------------------------

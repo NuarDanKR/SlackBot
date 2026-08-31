@@ -79,6 +79,33 @@ export const api = {
     }),
 }
 
+/** Slack 앱 매니페스트 — 저장소 파일을 서버가 그대로 읽어 줍니다.
+ *
+ * 화면에 상수로 박아 두면 스코프가 늘 때마다 두 곳을 고쳐야 하고, 한쪽만 고치면
+ * 이 화면을 보고 만든 앱에 권한이 빠져 봇이 오류 없이 반쪽만 동작합니다.
+ */
+export interface Manifest {
+  content: string
+  path: string
+  updatedAt: string
+  sha256: string
+}
+
+export async function fetchManifest(): Promise<Manifest> {
+  const raw = await api.get<{
+    content: string
+    path: string
+    updated_at: string
+    sha256: string
+  }>('/api/manifest')
+  return {
+    content: raw.content,
+    path: raw.path,
+    updatedAt: raw.updated_at,
+    sha256: raw.sha256,
+  }
+}
+
 export interface Me {
   name: string
   email: string

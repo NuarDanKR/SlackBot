@@ -125,3 +125,39 @@ def test_channel_admin_can_rename_without_archive_read_privilege(tmp_path):
         channel="C1", name="팀-전산_abb110-변경"
     )
     assert bot._chan_cache["C1"] == "#팀-전산_abb110-변경"
+
+
+# --- 생성 안내 문구 --------------------------------------------------------
+# 자주 나오는 오해: "TYBot 으로 만든 채널만 수집된다". 사실이 아니다 - 수집은 채널 이름이
+# 정한다. 참여자 전원이 보는 안내에 사실과 다른 문장을 넣으면 안 된다.
+def test_notice_says_the_name_decides_collection():
+    from tybot.slack.pilot import CHANNEL_CREATED_NOTICE
+
+    text = CHANNEL_CREATED_NOTICE.format(bot="tybot", visibility="공개")
+    assert "채널 이름" in text
+    assert "규칙 밖 이름으로 바꾸면" in text
+
+
+def test_notice_explains_the_private_channel_limitation():
+    """비공개는 봇이 자가 참여할 수 없다 - 이 제약이 안내의 실제 알맹이다."""
+    from tybot.slack.pilot import CHANNEL_CREATED_NOTICE
+
+    text = CHANNEL_CREATED_NOTICE.format(bot="tybot", visibility="비공개")
+    assert "스스로 들어갈 수 없습니다" in text
+    assert "/invite @tybot" in text
+
+
+def test_notice_does_not_claim_only_slash_created_channels_are_collected():
+    """사실과 다른 안내를 못 넣게 고정한다."""
+    from tybot.slack.pilot import CHANNEL_CREATED_NOTICE
+
+    text = CHANNEL_CREATED_NOTICE.format(bot="tybot", visibility="공개")
+    assert "만든 채널만 수집" not in text
+
+
+def test_notice_warns_about_pii():
+    from tybot.slack.pilot import CHANNEL_CREATED_NOTICE
+
+    text = CHANNEL_CREATED_NOTICE.format(bot="tybot", visibility="공개")
+    assert "올리지 마세요" in text
+    assert "Slack 대화에는 그대로 남습니다" in text

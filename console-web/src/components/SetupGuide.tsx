@@ -7,87 +7,18 @@
  * 처음인 사람은 + 를 눌러 펼치면 됩니다. 다만 매니페스트는 **펼친 채로** 둡니다 —
  * 접혀 있으면 못 찾습니다.
  *
- * 매니페스트는 저장소의 `docs/pilot/slack-app-manifest.yaml` 과 같은 내용입니다.
- * 스코프나 이벤트를 바꿀 때는 두 곳을 함께 고쳐 주세요 —
- * `tests/test_manifest_sync.py` 가 두 파일을 대조해 어긋나면 실패합니다.
- * 한쪽만 고치면 이 화면을 보고 만든 앱에 권한이 빠져, 봇이 오류 없이 반쪽만 동작합니다.
+ * 매니페스트는 **서버가 저장소 파일을 읽어 내려줍니다**(`GET /api/manifest`).
+ * 예전에는 같은 내용이 이 파일에도 상수로 있었고, 기능을 더할 때마다 두 곳을 함께
+ * 고쳐야 했습니다. 한쪽만 고치면 이 화면을 보고 만든 앱에 권한이 빠져 봇이 오류 없이
+ * 반쪽만 동작했습니다. 이제 고칠 곳은 `docs/pilot/slack-app-manifest.yaml` 하나입니다.
  *
  * 화면 캡처는 `public/guide/` 에 넣으면 각 단계에 붙습니다(BACKLOG B-18).
  * Slack 앱 관리 화면은 로그인해야 보이므로 캡처는 사람이 찍어야 합니다.
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
-const MANIFEST = `display_information:
-  name: TYBot
-  description: 태영건설 사내 아카이브 봇. 아카이브 원문만 근거로 답합니다.
-  background_color: "#800020"
-features:
-  bot_user:
-    display_name: tybot
-    always_online: true
-  app_home:
-    home_tab_enabled: false
-    messages_tab_enabled: true
-    messages_tab_read_only_enabled: false
-  shortcuts:
-    - name: 업무 채널 만들기
-      type: global
-      callback_id: create_work_channel
-      description: TYBot 수집 규칙에 맞는 공개 또는 비공개 업무 채널을 만듭니다.
-  slash_commands:
-    - command: /채널
-      description: 업무 채널을 만들거나 이름을 변경합니다.
-      usage_hint: 생성 | 이름변경 | 도움말
-      should_escape: false
-    - command: /ty-channel
-      description: /채널 명령의 영문 예비 명령입니다.
-      usage_hint: 생성 | 이름변경 | 도움말
-      should_escape: false
-    - command: /투표
-      description: 채널에서 투표를 만듭니다. 중복 선택·익명·마감 시간을 고를 수 있습니다.
-      usage_hint: 질문 | 도움말
-      should_escape: false
-    - command: /ty-poll
-      description: /투표 명령의 영문 예비 명령입니다.
-      usage_hint: 질문 | 도움말
-      should_escape: false
-oauth_config:
-  scopes:
-    bot:
-      - app_mentions:read
-      - channels:history
-      - groups:history
-      - im:history
-      - mpim:history
-      - channels:read
-      - groups:read
-      - users:read
-      - chat:write
-      - im:write
-      - files:read
-      - canvases:read
-      - reactions:write
-      - reactions:read
-      - channels:join
-      - commands
-      - channels:manage
-      - groups:write
-settings:
-  event_subscriptions:
-    bot_events:
-      - app_mention
-      - message.im
-      - message.channels
-      - message.groups
-      - channel_created
-      - channel_rename
-      - reaction_added
-      - reaction_removed
-  interactivity:
-    is_enabled: true
-  org_deploy_enabled: false
-  socket_mode_enabled: true
-  token_rotation_enabled: false`
+import { fetchManifest } from '../api/client'
+
 
 function CodeBlock({ label, code }: { label: string; code: string }) {
   const [copied, setCopied] = useState(false)
@@ -127,6 +58,59 @@ function CodeBlock({ label, code }: { label: string; code: string }) {
 }
 
 /** 화면 캡처. 파일이 없으면 아무것도 그리지 않습니다(캡처는 나중에 채웁니다). */
+/** 저장소의 매니페스트를 받아 보여 줍니다.
+ *
+ * 실패해도 **낡은 사본을 대신 보여 주지 않습니다.** 그것이 정확히 예전 문제였습니다 —
+ * 화면과 저장소가 다른데 사람은 알 수 없었습니다. 못 읽으면 못 읽었다고 말합니다.
+ */
+function ManifestBlock() {
+  const [code, setCode] = useState<string | null>(null)
+  const [meta, setMeta] = useState<{ updatedAt: string; sha256: string } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    fetchManifest()
+      .then((m) => {
+        if (!alive) return
+        setCode(m.content)
+        setMeta({ updatedAt: m.updatedAt, sha256: m.sha256 })
+      })
+      .catch((e: unknown) => {
+        if (!alive) return
+        setError(e instanceof Error ? e.message : '매니페스트를 불러오지 못했습니다.')
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  if (error) {
+    return (
+      <div className="rule bad">
+        <span className="rule-mark">불러오기 실패</span>
+        <span>
+          {error}
+          <br />
+          저장소의 <code>docs/pilot/slack-app-manifest.yaml</code> 을 직접 열어 복사해 주세요.
+        </span>
+      </div>
+    )
+  }
+  if (code === null) return <p className="muted">매니페스트를 불러오는 중…</p>
+
+  return (
+    <>
+      <CodeBlock label="manifest.yaml" code={code} />
+      {meta && (
+        <p className="muted">
+          저장소 파일 기준 · 수정 {meta.updatedAt} · 체크섬 <code>{meta.sha256}</code>
+        </p>
+      )}
+    </>
+  )
+}
+
 function Shot({ src, alt }: { src: string; alt: string }) {
   const [ok, setOk] = useState(true)
   if (!ok) return null
@@ -226,7 +210,7 @@ export function SetupGuide() {
             />
             <Shot src="/guide/01-create-app.png" alt="Create New App → From an app manifest 선택 화면" />
 
-            <CodeBlock label="manifest.yaml" code={MANIFEST} />
+            <ManifestBlock />
 
             <div className="rule-list">
               <div className="rule ok">
