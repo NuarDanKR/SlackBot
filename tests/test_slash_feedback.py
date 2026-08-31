@@ -49,11 +49,10 @@ def test_empty_text_never_records_an_empty_report(tmp_path):
 
 
 def test_usage_leads_with_the_modal_then_the_other_entry_points(tmp_path):
-    """모달이 주 입구다. 리액션은 남겨 두지만 먼저 안내하지 않는다."""
+    """모달이 주 입구다. 다른 입구는 뒤에 안내한다."""
     bot = _bot(tmp_path)
     reply = bot._record_slash_feedback(user_id="U1", channel_id="C1", text="")
-    assert reply.index("선택 화면") < reply.index(":+1:")
-    assert "정정:" in reply
+    assert reply.index("선택 화면") < reply.index("정정:")
     assert "@tybot" in reply  # 봇 이름이 채워진다
 
 

@@ -266,6 +266,9 @@ def _bot():
     bot = WorkspaceBot.__new__(WorkspaceBot)
     bot.workspace = "pilot"
     bot.app = Mock()
+    bot.org_scope = False          # 소속 제한 없는 기본 상황
+    bot.org_scope_strict = False
+    bot.channel_admin_users = set()
     return bot
 
 
@@ -414,3 +417,129 @@ def test_end_to_end_channel_name(code, name, expected):
     req = request_from_view(view, include_channel_options=False)
     assert req.name == expected
     assert build_channel_name(hit.prefix, hit.base_name, hit.code, "주간회의") == expected
+
+
+# --- 소속 조직 제한 -----------------------------------------------------------
+# 전산팀원이면 전산팀·경영본부 채널만 만들 수 있다. 남의 팀 채널을 내가 만들면
+# 그 채널의 주인이 처음부터 어긋난다.
+def test_my_orgs_walks_up_the_tree():
+    from tybot.orgsearch import MY_ORGS_SQL, my_org_codes
+
+    conn = FakeConn([{"code": "ABB110"}, {"code": "ABB300"}])
+    codes = my_org_codes(conn, workspace="pilot", slack_user="U1")
+    assert codes == ["ABB110", "ABB300"]
+    _, params = conn.executed[-1]
+    assert "with recursive" in MY_ORGS_SQL
+    assert params == {"workspace": "pilot", "slack_user": "U1"}
+
+
+def test_my_orgs_stops_recursing_on_a_cycle():
+    """스키마는 자기 자신이 부모인 것만 막는다. 더 긴 순환은 여기서 끊는다."""
+    from tybot.orgsearch import MY_ORGS_SQL
+
+    assert "up.depth < 20" in MY_ORGS_SQL
+
+
+def test_my_orgs_returns_none_without_identity():
+    """'모른다' 와 '소속이 없다' 는 다르게 다뤄야 한다."""
+    from tybot.orgsearch import my_org_codes
+
+    assert my_org_codes(FakeConn([]), workspace="pilot", slack_user="U1") is None
+    assert my_org_codes(FakeConn(), workspace="pilot", slack_user="") is None
+
+
+def test_my_orgs_only_counts_active_rows():
+    from tybot.orgsearch import MY_ORGS_SQL
+
+    assert "e.active" in MY_ORGS_SQL
+    assert "o.active" in MY_ORGS_SQL
+    assert "p.active" in MY_ORGS_SQL
+
+
+def test_search_can_be_limited_to_my_orgs():
+    conn = FakeConn()
+    search(conn, "경영", only_codes=["ABB110", "ABB300"])
+    sql, params = conn.executed[-1]
+    assert "o.code = any(%(only)s)" in sql
+    assert params["only"] == ["ABB110", "ABB300"]
+
+
+def test_empty_allowed_list_finds_nothing_without_querying():
+    """'소속이 하나도 없다' 를 '제한 없음' 으로 바꿔 읽으면 전 조직이 열린다."""
+    conn = FakeConn([{"code": "X", "name": "아무개팀", "parent_name": ""}])
+    assert search(conn, "경영", only_codes=[]) == []
+    assert conn.executed == []
+
+
+def test_no_limit_when_only_codes_is_none():
+    conn = FakeConn()
+    search(conn, "경영", only_codes=None)
+    assert conn.executed[-1][1]["only"] is None
+
+
+# --- 봇 쪽 판정 ---------------------------------------------------------------
+def _scoped_bot(*, allowed=None, strict=False, admins=()):
+    from unittest.mock import Mock
+
+    from tybot.slack.pilot import WorkspaceBot
+
+    bot = WorkspaceBot.__new__(WorkspaceBot)
+    bot.workspace = "pilot"
+    bot.app = Mock()
+    bot.org_scope = True
+    bot.org_scope_strict = strict
+    bot.channel_admin_users = set(admins)
+    bot._my_org_codes = lambda user_id: allowed
+    return bot
+
+
+def test_own_org_passes():
+    assert _scoped_bot(allowed=["ABB110", "ABB300"])._org_scope_error(
+        "U1", "ABB110", "전산팀"
+    ) == ""
+
+
+def test_parent_org_passes():
+    """팀원이 본부 단위 채널을 만드는 일이 실제로 있다."""
+    assert _scoped_bot(allowed=["ABB110", "ABB300"])._org_scope_error(
+        "U1", "ABB300", "경영본부"
+    ) == ""
+
+
+def test_other_org_is_refused_with_a_reason():
+    msg = _scoped_bot(allowed=["ABB110"])._org_scope_error("U1", "ABB540", "자금팀")
+    assert "자금팀" in msg
+    assert "소속 조직이 아닙니다" in msg
+
+
+def test_unknown_identity_passes_by_default():
+    """신원 매핑 작업이 끝나기 전에 채널 생성이 통째로 멈추면 안 된다."""
+    assert _scoped_bot(allowed=None)._org_scope_error("U1", "ABB540", "자금팀") == ""
+
+
+def test_unknown_identity_is_refused_in_strict_mode():
+    msg = _scoped_bot(allowed=None, strict=True)._org_scope_error("U1", "ABB540", "자금팀")
+    assert "계정 연결" in msg
+
+
+def test_channel_admin_bypasses_the_scope():
+    bot = _scoped_bot(allowed=["ABB110"], admins={"U9"})
+    assert bot._org_scope_error("U9", "ABB540", "자금팀") == ""
+
+
+def test_scope_off_allows_everything():
+    bot = _scoped_bot(allowed=["ABB110"])
+    bot.org_scope = False
+    assert bot._org_scope_error("U1", "ABB540", "자금팀") == ""
+
+
+def test_options_say_why_the_list_is_empty(monkeypatch):
+    """소속 제한으로 0건이면 '없다' 가 아니라 '소속만 된다' 를 알려야 한다."""
+    import contextlib
+
+    import tybot.slack.pilot as pilot_mod
+
+    bot = _scoped_bot(allowed=["ABB110"])
+    monkeypatch.setattr(pilot_mod, "db_connect", lambda: contextlib.nullcontext(FakeConn()))
+    (opt,) = bot._org_options("자금", "U1")
+    assert "소속 조직만" in opt["text"]["text"]

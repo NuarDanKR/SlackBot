@@ -13,18 +13,26 @@ from pathlib import Path
 logger = logging.getLogger("tybot.feedback")
 KST = timezone(timedelta(hours=9))
 MAX_CORRECTION = 2000
-REACTIONS = {"+1": "positive", "thumbsup": "positive", "-1": "negative", "thumbsdown": "negative"}
+MIN_CORRECTION = 5
 
 # 신고 종류. `missing`(근거를 못 찾음)을 `negative`(틀린 답)와 나누는 이유:
 # 근거를 못 찾은 것은 수집·검색 문제이고, 틀린 답은 생성 문제다. 조치하는 사람이 다르다.
 KINDS = frozenset({"positive", "negative", "correction", "missing"})
 
 # 모달의 선택지. value 가 그대로 kind 가 된다.
+# 👍/👎 를 쓰는 이유: 예전에는 답변에 이모지를 눌러 표시하는 길이 따로 있었다.
+# 입구가 둘이면 사용자는 어느 쪽이 접수되는지 모르고, 우리는 두 경로를 다 유지해야 했다.
+# **`/피드백` 하나로 합쳤고**, 사람들이 이미 아는 기호를 그대로 쓴다.
 KIND_CHOICES = (
-    ("positive", "🟢 정확했다"),
-    ("negative", "🔴 틀렸다"),
-    ("missing", "🟡 근거를 못 찾았다"),
+    ("positive", "👍 정확했다"),
+    ("negative", "👎 틀렸다"),
+    ("missing", "🔍 근거를 못 찾았다"),
 )
+
+# 이 종류들은 **정정 사항을 반드시 받는다.**
+# "틀렸다"만 눌리고 끝나면 무엇이 틀렸는지 아무도 모른다. 그 신고는 숫자만 늘릴 뿐
+# 고칠 거리가 되지 못한다. 올바른 내용을 함께 받아야 아카이브·규칙을 고칠 수 있다.
+REQUIRES_CORRECTION = frozenset({"negative", "missing"})
 
 
 @dataclass(frozen=True)
@@ -85,10 +93,6 @@ class FeedbackLog:
             logger.error("답변 피드백 기록 실패: %s", e)
 
 
-def reaction_kind(name: str) -> str | None:
-    return REACTIONS.get((name or "").strip().lower())
-
-
 def correction_text(text: str) -> str | None:
     """`정정: 실제 내용`에서 사람이 쓴 정정 내용만 꺼낸다."""
     value = (text or "").strip()
@@ -105,7 +109,6 @@ SLASH_HELP = (
     "바로 적어 보내려면: `/피드백 <무엇이 잘못됐는지>`\n"
     "예) `/피드백 김해외동 기성금을 물었는데 다른 현장 내용이 나왔어요`\n"
     "\n"
-    "답변에 직접 표시하려면 그 답변에 :+1: / :-1: 를 누르거나, "
     "답변 스레드에서 `@{bot} 정정: 올바른 내용` 이라고 적어도 됩니다.\n"
     "신고 내용은 아카이브에 저장되지 않고 답변 근거로도 쓰이지 않습니다."
 )
@@ -147,11 +150,18 @@ def feedback_modal(private_metadata: str, *, target: str = "") -> dict:
             ],
         },
     })
+    # Slack 모달은 선택에 따라 필수 여부를 바꾸지 못한다. 그래서 칸 자체는 선택으로 두고,
+    # 제출할 때 `validation_errors()` 로 막는다(👍 에는 글을 요구하지 않기 위해서다).
     blocks.append({
         "type": "input",
         "block_id": "detail",
         "optional": True,
-        "label": {"type": "plain_text", "text": "무엇이 어땠는지 (선택)"},
+        "label": {"type": "plain_text", "text": "정정 사항"},
+        "hint": {
+            "type": "plain_text",
+            "text": "👎 틀렸다 · 🔍 근거를 못 찾았다 를 고르면 반드시 적어 주세요. "
+                    "올바른 내용을 알아야 고칠 수 있습니다.",
+        },
         "element": {
             "type": "plain_text_input",
             "action_id": "detail",
@@ -159,7 +169,8 @@ def feedback_modal(private_metadata: str, *, target: str = "") -> dict:
             "max_length": MAX_CORRECTION,
             "placeholder": {
                 "type": "plain_text",
-                "text": "예) 김해외동을 물었는데 다른 현장 내용이 나왔습니다",
+                "text": "예) 김해외동 기성금은 3억 2천만원입니다. "
+                        "2026-08-12 주간보고에 있습니다",
             },
         },
     })
@@ -193,6 +204,22 @@ def from_view(view: dict) -> tuple[str, str]:
     kind = picked if picked in KINDS else "negative"
     text = (state.get("detail", {}).get("detail", {}).get("value") or "").strip()
     return kind, text[:MAX_CORRECTION]
+
+
+def validation_errors(kind: str, text: str) -> dict[str, str] | None:
+    """모달 제출을 막아야 하면 Slack 이 칸 아래에 띄울 문구를 낸다.
+
+    `negative`·`missing` 은 **정정 사항이 있어야 접수한다.** 내용 없는 신고는
+    "만족도 낮음" 숫자만 만들고 고칠 거리를 남기지 않는다.
+    """
+    if kind not in REQUIRES_CORRECTION:
+        return None
+    body = (text or "").strip()
+    if not body:
+        return {"detail": "무엇이 잘못됐고 올바른 내용이 무엇인지 적어 주세요."}
+    if len(body) < MIN_CORRECTION:
+        return {"detail": f"조금 더 자세히 적어 주세요(최소 {MIN_CORRECTION}자)."}
+    return None
 
 
 def thanks(kind: str, *, linked: str = "") -> str:

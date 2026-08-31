@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 
+from tybot import feedback
 from tybot.archive.store import ArchiveStore
 from tybot.audit import QALog, QARecord
-from tybot.feedback import FeedbackLog, correction_text, reaction_kind
+from tybot.feedback import FeedbackLog, correction_text
 from tybot.slack.pilot import WorkspaceBot
 
 
@@ -65,43 +66,44 @@ def test_feedback_log_references_qa_without_copying_answer(tmp_path):
     assert ArchiveStore(tmp_path / "archive").docs() == []
 
 
-def test_reaction_and_correction_parsing():
-    assert reaction_kind("+1") == "positive"
-    assert reaction_kind("-1") == "negative"
-    assert reaction_kind("eyes") is None
+def test_correction_parsing():
     assert correction_text("정정: 실제 완료일은 8월 27일") == "실제 완료일은 8월 27일"
     assert correction_text("일반 질문") is None
 
 
-def test_workspace_bot_records_only_reactions_to_known_answers(tmp_path):
-    bot = WorkspaceBot.__new__(WorkspaceBot)
-    bot.workspace = "mgmt"
-    bot.qa_log = QALog(tmp_path, write_md=False)
-    bot.feedback_log = FeedbackLog(tmp_path)
-    record = _qa()
-    bot.qa_log.write(record)
+def test_feedback_entry_is_only_the_command():
+    """입구가 둘이면 어느 쪽이 접수됐는지 사용자가 모른다. `/피드백` 하나로 합쳤다."""
+    assert not hasattr(WorkspaceBot, "_handle_feedback_reaction")
+    assert not hasattr(feedback, "reaction_kind")
 
-    bot._handle_feedback_reaction(
-        {
-            "reaction": "-1",
-            "user": "U2",
-            "item": {"type": "message", "channel": "C1", "ts": "100.2"},
-        },
-        action="added",
-    )
-    bot._handle_feedback_reaction(
-        {
-            "reaction": "-1",
-            "user": "U2",
-            "item": {"type": "message", "channel": "C1", "ts": "unknown"},
-        },
-        action="added",
-    )
 
-    rows = _rows(tmp_path)
-    assert len(rows) == 1
-    assert rows[0]["kind"] == "negative"
-    assert rows[0]["qa_record_id"] == record.record_id
+def test_modal_offers_thumbs_choices():
+    """사람들이 이미 아는 기호를 그대로 쓴다."""
+    modal = feedback.feedback_modal("{}")
+    kind_block = next(b for b in modal["blocks"] if b.get("block_id") == "kind")
+    labels = [o["text"]["text"] for o in kind_block["element"]["options"]]
+    assert any("👍" in x for x in labels)
+    assert any("👎" in x for x in labels)
+
+
+def test_negative_feedback_requires_a_correction():
+    """'틀렸다'만 눌리고 끝나면 고칠 거리가 없다. 숫자만 나빠진다."""
+    assert feedback.validation_errors("negative", "") is not None
+    assert feedback.validation_errors("missing", "   ") is not None
+    assert feedback.validation_errors("negative", "가") is not None, "너무 짧으면 막는다"
+    assert feedback.validation_errors("negative", "기성금은 3억 2천만원입니다") is None
+
+
+def test_praise_does_not_require_typing():
+    """👍 에까지 글을 요구하면 아무도 누르지 않는다."""
+    assert feedback.validation_errors("positive", "") is None
+
+
+def test_validation_message_says_what_to_write():
+    errors = feedback.validation_errors("negative", "")
+    assert "올바른 내용" in errors["detail"]
+    # Slack 은 block_id 로 칸을 찾는다. 이름이 틀리면 오류가 화면에 안 뜬다.
+    assert set(errors) == {"detail"}
 
 
 def test_correction_requires_matching_thread_and_records_human_text(tmp_path):

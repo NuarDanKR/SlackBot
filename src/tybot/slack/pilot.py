@@ -53,13 +53,15 @@ from ..feedback import (
     FeedbackLog,
     correction_text,
     feedback_modal,
-    reaction_kind,
 )
 from ..feedback import (
     from_view as feedback_from_view,
 )
 from ..feedback import (
     thanks as feedback_thanks,
+)
+from ..feedback import (
+    validation_errors as feedback_errors,
 )
 from ..intent import (
     INGEST_ALL_RE,
@@ -71,7 +73,14 @@ from ..intent import (
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
-from ..orgsearch import NO_MATCH, notice_option
+from ..orgsearch import NO_IDENTITY as ORG_NO_IDENTITY
+from ..orgsearch import (
+    NO_MATCH,
+    NOT_MY_ORG,
+    my_org_codes,
+    not_my_org_message,
+    notice_option,
+)
 from ..orgsearch import UNAVAILABLE as ORG_UNAVAILABLE
 from ..orgsearch import options as org_options
 from ..orgsearch import search as org_search_db
@@ -237,6 +246,12 @@ class WorkspaceBot:
             for u in (os.getenv("CHANNEL_ADMIN_USERS") or "").split(",")
             if u.strip()
         }
+        # 본인 소속(과 상위) 조직의 채널만 만들게 한다. 남의 팀 채널을 내가 만들면
+        # 그 채널의 주인이 처음부터 어긋난다.
+        self.org_scope = _truthy(os.getenv("CHANNEL_ORG_SCOPE", "1"))
+        # 신원 매핑이 아직 없는 사람을 막을지. 기본은 막지 않는다 — 매핑 작업이 끝나기
+        # 전에 채널 생성이 통째로 멈추면 안 된다. 매핑이 끝나면 1 로 올린다.
+        self.org_scope_strict = _truthy(os.getenv("CHANNEL_ORG_SCOPE_STRICT", "0"))
         self.app = App(token=cfg.bot_token)
         self.store = store
         self.engine = engine
@@ -404,9 +419,15 @@ class WorkspaceBot:
 
         @self.app.view("tybot_feedback")
         def on_feedback_submission(ack, body, client, view):
+            kind, detail = feedback_from_view(view)
+            # 👎·🔍 는 정정 사항이 있어야 접수한다. 내용 없는 신고는 만족도 숫자만
+            # 낮추고 고칠 거리를 남기지 않는다. **ack 전에** 막아야 모달이 닫히지 않는다.
+            errors = feedback_errors(kind, detail)
+            if errors:
+                ack(response_action="errors", errors=errors)
+                return
             ack()
             meta = self._modal_metadata(view)
-            kind, detail = feedback_from_view(view)
             user_id = (body.get("user") or {}).get("id", "")
             self.feedback_log.write(
                 workspace=self.workspace,
@@ -475,7 +496,7 @@ class WorkspaceBot:
                 log.warning("[%s] 일정 공유 실패: %s", self.workspace, e)
 
         @self.app.options("org")
-        def on_org_options(ack, payload):
+        def on_org_options(ack, payload, body):
             """조직 검색 결과를 모달에 채운다.
 
             조직코드를 사람이 외워서 입력하던 자리다. 틀리게 적어도 채널은 만들어지고,
@@ -483,17 +504,28 @@ class WorkspaceBot:
 
             Socket Mode 에서도 이 콜백은 소켓으로 오므로 인바운드 포트가 필요 없다.
             """
-            ack(options=self._org_options(payload.get("value", "")))
+            ack(
+                options=self._org_options(
+                    payload.get("value", ""),
+                    (body.get("user") or {}).get("id", ""),
+                )
+            )
 
         @self.app.view("tybot_create_channel")
         def on_create_submission(ack, body, client, view):
+            user_id = (body.get("user") or {}).get("id", "")
             try:
                 request = request_from_view(view, include_channel_options=True)
             except ChannelNameError as e:
                 ack(response_action="errors", errors={e.block_id: str(e)})
                 return
+            # 검색 목록을 좁히는 것만으로는 부족하다. 모달은 오래 열려 있을 수 있고
+            # 제출 내용은 클라이언트에서 온다 - 만드는 순간 다시 확인한다.
+            denied = self._org_scope_error(user_id, request.org_code, request.org_name)
+            if denied:
+                ack(response_action="errors", errors={"org": denied})
+                return
             ack()
-            user_id = (body.get("user") or {}).get("id", "")
             self._create_channel(client, user_id, request)
 
         @self.app.view("tybot_rename_channel")
@@ -602,14 +634,6 @@ class WorkspaceBot:
                 return
             self._handle(event, client, say, in_channel=True)
 
-        @self.app.event("reaction_added")
-        def on_reaction_added(event):
-            self._handle_feedback_reaction(event, action="added")
-
-        @self.app.event("reaction_removed")
-        def on_reaction_removed(event):
-            self._handle_feedback_reaction(event, action="removed")
-
         @self.app.event("message")
         def on_message(event, client, say):
             if event.get("bot_id"):
@@ -709,28 +733,6 @@ class WorkspaceBot:
         linked = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if record_id and asked else ""
         return feedback_thanks("correction", linked=linked)
 
-    def _handle_feedback_reaction(self, event: dict, *, action: str) -> None:
-        kind = reaction_kind(str(event.get("reaction") or ""))
-        item = event.get("item") or {}
-        if kind is None or item.get("type") != "message":
-            return
-        channel_id = str(item.get("channel") or "")
-        answer_ts = str(item.get("ts") or "")
-        row = self.qa_log.find_answer(
-            self.workspace, channel_id, response_ts=answer_ts
-        )
-        if not row or not row.get("record_id"):
-            return  # TYBot 답변이 아닌 메시지의 반응은 수집하지 않는다.
-        self.feedback_log.write(
-            workspace=self.workspace,
-            channel_id=channel_id,
-            qa_record_id=str(row["record_id"]),
-            answer_ts=answer_ts,
-            actor=str(event.get("user") or ""),
-            kind=kind,
-            action=action,
-        )
-
     def _handle_correction(self, event: dict, say) -> bool:
         text = correction_text(_clean(event.get("text", "")))
         if text is None:
@@ -769,22 +771,74 @@ class WorkspaceBot:
             return {}
         return value if isinstance(value, dict) else {}
 
-    def _org_options(self, query: str) -> list[dict]:
+    def _my_org_codes(self, user_id: str) -> list[str] | None:
+        """이 사용자가 채널을 만들 수 있는 조직코드. 제한하지 않으면 `None`."""
+        if not self.org_scope or user_id in self.channel_admin_users:
+            return None
+        with db_connect() as conn:
+            if conn is None:
+                return None
+            try:
+                return my_org_codes(
+                    conn, workspace=self.workspace, slack_user=user_id
+                )
+            except Exception as e:
+                log.warning("[%s] 소속 조직 조회 실패: %s", self.workspace, e)
+                return None
+
+    def _org_scope_error(self, user_id: str, code: str, name: str) -> str:
+        """소속 밖 조직이면 모달에 띄울 문구. 문제 없으면 빈 문자열."""
+        if not self.org_scope or user_id in self.channel_admin_users:
+            return ""
+        allowed = self._my_org_codes(user_id)
+        if allowed is None:
+            # 누구인지 모른다. 기본은 통과시키되 기록은 남긴다.
+            if self.org_scope_strict:
+                return (
+                    "계정 연결이 없어 소속을 확인할 수 없습니다. "
+                    "관리자에게 계정 연결을 요청해 주세요."
+                )
+            log.info(
+                "[%s] 소속 확인 불가로 통과 user=%s code=%s", self.workspace, user_id, code
+            )
+            return ""
+        if code in allowed:
+            return ""
+        log.info(
+            "[%s] 소속 밖 조직 생성 거절 user=%s code=%s allowed=%d건",
+            self.workspace, user_id, code, len(allowed),
+        )
+        return not_my_org_message(name, code)
+
+    def _org_options(self, query: str, user_id: str = "") -> list[dict]:
         """조직 검색 옵션. 실패해도 빈 목록만 주지 않는다.
 
         빈 목록은 사람에게 '검색이 고장났다' 와 '결과가 없다' 를 구별해 주지 않는다.
+        소속 제한이 걸려 있으면 애초에 본인 조직만 보여준다 — 고를 수 없는 것을 늘어놓고
+        제출 단계에서 막는 것보다 낫다.
         """
+        only = self._my_org_codes(user_id) if user_id else None
         with db_connect() as conn:
             if conn is None:
                 return [notice_option(ORG_UNAVAILABLE)]
             try:
-                hits = org_search_db(conn, query)
+                hits = org_search_db(conn, query, only_codes=only)
             except Exception as e:
                 log.warning("[%s] 조직 검색 실패: %s", self.workspace, e)
                 return [notice_option(ORG_UNAVAILABLE)]
         if not hits:
+            if only is not None:
+                return [notice_option(NOT_MY_ORG)]
+            if self.org_scope and self.org_scope_strict:
+                return [notice_option(ORG_NO_IDENTITY)]
             return [notice_option(NO_MATCH)]
-        log.info("[%s] 조직 검색 q=%r hits=%d", self.workspace, query[:20], len(hits))
+        log.info(
+            "[%s] 조직 검색 q=%r hits=%d 범위=%s",
+            self.workspace,
+            query[:20],
+            len(hits),
+            "소속" if only is not None else "전체",
+        )
         return org_options(hits)
 
     def _open_create_modal(self, client, trigger_id: str, user_id: str) -> None:

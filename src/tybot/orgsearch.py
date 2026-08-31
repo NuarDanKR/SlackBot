@@ -115,12 +115,40 @@ def split_org_name(name: str) -> tuple[str, str]:
     return "", n
 
 
+# 본인 소속 조직과 그 상위 사슬. 전산팀원이면 {전산팀, 경영본부, ...}.
+#
+# 왜 상위까지 — 팀원이 본부 단위 업무 채널을 만드는 일이 실제로 있다(본부 워크숍 등).
+# 반대로 **하위·형제 조직은 넣지 않는다.** 내 팀이 아닌 팀의 채널을 내가 만들면
+# 그 채널의 주인이 처음부터 어긋난다.
+#
+# depth 로 재귀를 끊는다. 스키마가 자기 자신을 부모로 두는 것만 막고 더 긴 순환은
+# 막지 못한다. 순환이 생기면 이 조회가 영원히 도는 대신 20단계에서 멈춘다.
+MY_ORGS_SQL = """
+with recursive up as (
+    select o.code, o.parent_code, 1 as depth
+      from org_unit o
+      join employee e on e.org_code = o.code and e.active
+      join user_identity ui
+        on ui.emp_no = e.emp_no
+       and ui.workspace = %(workspace)s
+       and ui.slack_user = %(slack_user)s
+     where o.active
+    union all
+    select p.code, p.parent_code, up.depth + 1
+      from org_unit p
+      join up on p.code = up.parent_code
+     where p.active and up.depth < 20
+)
+select distinct code from up
+"""
+
 SEARCH_SQL = """
 select o.code, o.name, coalesce(p.name, '') as parent_name
   from org_unit o
   left join org_unit p on p.code = o.parent_code
  where o.active
    and (%(company)s is null or o.company_code is null or o.company_code = %(company)s)
+   and (%(only)s::text[] is null or o.code = any(%(only)s))
    and (o.name ilike %(like)s or o.code ilike %(prefix)s)
  order by
    -- 이름이 검색어로 시작하는 것을 먼저. "경영" 을 치면 "경영본부" 가
@@ -132,21 +160,51 @@ select o.code, o.name, coalesce(p.name, '') as parent_name
 """
 
 
+def my_org_codes(conn, *, workspace: str, slack_user: str) -> list[str] | None:
+    """본인 소속 조직과 상위 사슬의 코드. 신원 매핑이 없으면 `None`.
+
+    `None` 과 `[]` 는 다르다 — `None` 은 "누구인지 모른다"(제한 판단 불가),
+    `[]` 는 "알지만 소속 조직이 없다". 호출자가 그 둘을 다르게 다뤄야 한다.
+    """
+    if not workspace or not slack_user:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(MY_ORGS_SQL, {"workspace": workspace, "slack_user": slack_user})
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    codes = [
+        str(r["code"] if isinstance(r, dict) else r[0])
+        for r in rows
+    ]
+    return sorted({c for c in codes if c})
+
+
 def search(
-    conn, query: str, *, limit: int = MAX_OPTIONS, company_code: str | None = None
+    conn,
+    query: str,
+    *,
+    limit: int = MAX_OPTIONS,
+    company_code: str | None = None,
+    only_codes: list[str] | None = None,
 ) -> list[OrgHit]:
     """조직명·조직코드로 찾는다. 비활성 조직은 제외한다.
 
     폐지된 조직으로 채널을 만들면 그 채널은 처음부터 잘못된 조직에 매달린다.
+
+    `only_codes` 를 주면 그 코드만 돌려준다(본인 소속 제한). `None` 이면 제한하지 않는다.
     """
     q = (query or "").strip()
     if not q:
+        return []
+    if only_codes is not None and not only_codes:
         return []
     params = {
         "like": f"%{q}%",
         "prefix": f"{q}%",
         "limit": max(1, min(limit, MAX_OPTIONS)),
         "company": company_code,
+        "only": list(only_codes) if only_codes is not None else None,
     }
     with conn.cursor() as cur:
         cur.execute(SEARCH_SQL, params)
@@ -219,3 +277,15 @@ def notice_option(text: str) -> dict:
     고를 수는 있지만 코드가 비어 제출 단계에서 막힌다 — 그때 이유를 다시 말해 준다.
     """
     return {"text": {"type": "plain_text", "text": text[:MAX_TEXT]}, "value": ""}
+
+NOT_MY_ORG = "소속 조직만 만들 수 있습니다"
+NO_IDENTITY = "계정 연결이 없어 소속을 확인할 수 없습니다"
+
+
+def not_my_org_message(name: str, code: str) -> str:
+    """소속 밖 조직으로 제출했을 때 모달에 띄울 문구."""
+    return (
+        f"{name or code} 은(는) 회원님 소속 조직이 아닙니다. "
+        "본인이 속한 조직과 그 상위 조직의 채널만 만들 수 있습니다. "
+        "다른 조직의 채널이 필요하면 그 조직 담당자나 관리자에게 요청하세요."
+    )
