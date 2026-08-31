@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import heartbeat
-from ..archive.store import ArchiveStore
+from ..archive.store import ArchiveStore, workspace_from_path
 from ..config import cost_state_path
 
 logger = logging.getLogger("tybot.console.reader")
@@ -135,8 +135,7 @@ def workspace_status(store: ArchiveStore | None = None) -> list[dict]:
         by_ws[d.workspace].append(d)
     broken_by_ws: dict[str, int] = defaultdict(int)
     for path, _reason in broken:
-        # 파일 경로의 상위 폴더 이름이 워크스페이스다 (channels/<ws>/<channel>.md)
-        broken_by_ws[path.parent.name] += 1
+        broken_by_ws[workspace_from_path(path, store.root)] += 1
 
     # 설정에 없지만 아카이브에는 있는 워크스페이스도 보여 준다(설정에서 빠진 것을 알 수 있게)
     keys = sorted(set(labels) | set(by_ws) | set(broken_by_ws))
@@ -362,7 +361,7 @@ def collected_docs(store: ArchiveStore | None = None) -> list[dict]:
     root = archive_dir()
     out: list[dict] = []
 
-    for d in store.docs():
+    for d in store.source_docs():
         try:
             size = d.path.stat().st_size
         except OSError:
@@ -391,10 +390,11 @@ def collected_docs(store: ArchiveStore | None = None) -> list[dict]:
             size = path.stat().st_size
         except OSError:
             size = 0
+        workspace = workspace_from_path(path, root)
         out.append(
             {
-                "workspace": path.parent.name,
-                "workspaceLabel": labels.get(path.parent.name, path.parent.name),
+                "workspace": workspace,
+                "workspaceLabel": labels.get(workspace, workspace),
                 "channel": path.stem,
                 "path": path.relative_to(root).as_posix(),
                 "lines": 0,

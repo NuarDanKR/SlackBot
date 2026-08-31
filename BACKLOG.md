@@ -1,9 +1,70 @@
 # BACKLOG — TYBot
 
-_최종 갱신: 2026-08-27_
+_최종 갱신: 2026-08-31_
 
 이 파일은 **다른 세션·다른 에이전트(Codex 등)·다른 사람에게 넘기는 인계 문서**다.
 아이디어는 여기 쌓고, 구현은 준비된 순서대로 한다.
+
+## 🔴 인계 (2026-08-31, Claude → Codex)
+
+이번 세션에서 **Oracle 연동을 처음부터 끝까지 뚫었다.** 아래는 이미 끝난 것이니
+다시 하지 말 것. 다음 착수는 **B-33**(알림 중계) 또는 **B-05**(사번↔Slack 매핑)이다.
+
+### 끝난 것 — 실제 서버에 반영됨
+
+| | 상태 |
+|---|---|
+| PostgreSQL `pg_bigm`·`pgvector` 설치, `raw_line_bigm` 인덱스 | 완료 |
+| Oracle `TYSLACK` 스키마 + `V_TYSLACK_ORG`/`V_TYSLACK_EMP` 뷰 | 완료 |
+| Oracle `TYSLACK_BOT` 계정 (뷰 2개 SELECT 만) | 완료 · 원본 차단 확인(`ORA-00942`) |
+| `org_unit` 1,370행 / `employee` 1,129행 실제 반영 | 완료 (2026-08-31) |
+| 인프라 요청서 → 담당자 전달 | 완료 · 방화벽 심사 대기 |
+
+### 새로 생긴 파일
+
+| 파일 | 역할 |
+|---|---|
+| `deploy/sql/oracle_tyslack_setup.sql` | Oracle 뷰·계정 (A: DBA / B: TYSLACK / C: 확인) |
+| `scripts/oracle_export.py` | **내부망 실행.** 뷰 → JSONL + manifest(sha256) |
+| `src/tybot/orgsync.py` | **봇 서버.** `python -m tybot.orgsync`. Oracle 을 import 하지 않는다 |
+| `scripts/oracle_probe.py` | 원본 구조 조사. SELECT 만. 민감 컬럼은 값을 안 본다 |
+| `scripts/check_search_index.py` | `--compare` 로 pg_bigm vs pg_trgm 재측정 |
+| `docs/deploy/oracle-checklist.md` | Oracle 담당자용. 진행 상황 표 포함 |
+| `docs/design/notify-relay.md` | **B-33 설계 + 실측.** 착수 전 반드시 읽는다 |
+
+### 이 세션에서 배운 것 — 되풀이하지 말 것
+
+1. **측정 말뭉치를 대충 만들면 결론이 뒤집힌다.** pg_trgm/pg_bigm 비교에서 어휘를 16개만
+   써서 검색어가 전체 행의 절반에 나왔고, 그러면 인덱스를 안 쓰는 게 정상이라 엉뚱한
+   결론이 나왔다. 채움말 800개에 검색어를 0.5%만 심어야 실제와 비슷하다.
+   `scripts/check_search_index.py --compare` 로 재현된다
+2. **`SELECT enable_seqscan = off` 를 켜고 측정하지 말 것.** 인덱스를 강제로 쓰게 만든다
+3. **권한은 "준 것"이 아니라 "막힌 것"으로 확인한다.** `dba_tab_privs` 만 보면 실수로 더
+   열린 걸 못 잡는다. 봇 계정으로 원본을 실제 `SELECT` 해서 `ORA-00942` 를 확인했다
+4. **Bash heredoc 안에서 `
+` 과 백슬래시가 깨진다.** 파이썬 문자열 치환을 heredoc 으로
+   할 때 여러 번 파일을 망가뜨렸다. `chr(92)`·`chr(10)` 을 쓰거나 Write 도구를 쓴다
+5. **12.1 에는 `JSON_OBJECT` 가 없다.** 문자열 연결로 JSON 을 만들면 조직명의 큰따옴표
+   하나에 그 줄이 조용히 깨진다. `deploy/sql/export_*_12_1.sql` 은 대비책으로만 남겨 두고,
+   상시 경로는 `scripts/oracle_export.py`(파이썬 직렬화)를 쓴다
+
+### 2026-08-31 오후 — 전송 방식이 B → A 로 바뀌었다
+
+인프라 담당자가 SFTP 방식을 반대했고, **DMZ 에서 사내 DB 를 직접 조회하는 서버가 이미
+사내에 있다**는 선례가 확인됐다. 그래서 방식 A 로 확정했다.
+
+- 방화벽은 규칙 1건: 봇서버 → `172.16.10.20:1523/tcp`
+- 내부망 배치서버·SFTP 계정·chroot·bind mount 전부 불필요
+- `docs/deploy/infra-request-snapshot-push.md` 를 A안으로 교체했다(378줄 → 158줄)
+- **추출 → 파일 → 반영 두 단계는 유지한다.** 직접 조회여도 파일 사이의 검사가 필요하다
+
+### 접속 정보 (`.env`, 커밋되지 않음)
+
+- `ORACLE_USER=TYSLACK_BOT` — 봇·배치가 쓰는 최소 권한 계정. **여기를 바꾸지 말 것**
+- `GW_PROBE_USER`/`GW_PROBE_PASSWORD` — GWUSER. **조사 전용.**
+  `DROP ANY TABLE` 을 가진 강한 계정이라 B-33 조사가 끝나면 지운다
+
+---
 
 ## 이 파일을 읽는 에이전트가 먼저 할 일
 
@@ -31,8 +92,8 @@ _최종 갱신: 2026-08-27_
 |---|---|---|---|---|
 | [B-01](#b-01) | 정리 잡 — 스키마 검사·수집 밀림 경보 | **높음** | 완료 (08-25) | 없음 |
 | [B-02](#b-02) | 운영 관리 채널(`#운영_tybot`) 리포트 | 높음 | 준비됨 | B-01 |
-| [B-03](#b-03) | PostgreSQL 인덱서 (원문 → `raw_line`) | 높음 | 준비됨 | DB 설치 |
-| [B-04](#b-04) | 조직·인사 스냅샷 반영 잡 | 높음 | 대기 | 보안 승인, B-03 |
+| [B-03](#b-03) | PostgreSQL 인덱서 (원문 → `raw_line`) | **높음** | 준비됨 (DB·스키마·검색 인덱스 완료) | 없음 |
+| [B-04](#b-04) | 조직·인사 스냅샷 반영 잡 | 높음 | 진행중 (반영 잡 구현 완료 · 전송 경로 대기) | B-03 |
 | [B-05](#b-05) | Slack 이메일 → 사번 매핑 | 중 | 대기 | B-04 |
 | [B-06](#b-06) | 조직 트리 기반 권한 상속 | 중 | 대기 | B-05 |
 | [B-07](#b-07) | PII 사후 스캔 + 승인 큐(묘비) | 중 | 대기 | B-02 |
@@ -40,11 +101,11 @@ _최종 갱신: 2026-08-27_
 | [B-09](#b-09) | 중앙 아카이브 Git 저장소 연결 | 중 | 준비됨 | 없음 |
 | [B-10](#b-10) | 일일·주간 요약 정기 발행 | 낮음 | 준비됨 | B-02 |
 | [B-11](#b-11) | 스캔 PDF·구형 hwp 변환 | 낮음 | 대기 | 사람 승인 흐름 |
-| [B-12](#b-12) | 임베딩 검색(pgvector) | 낮음 | 대기 | B-03 |
+| [B-12](#b-12) | 임베딩 검색(pgvector) | 낮음 | 대기 (pgvector 0.8.6 설치됨) | B-03 |
 | [B-13](#b-13) | 단일 인스턴스 락 | 낮음 | 준비됨 | 없음 |
 | [B-14](#b-14) | 분류 프롬프트 비용 절감 | 낮음 | 준비됨 | 없음 |
 | [B-15](#b-15) | Slack 표시 이름 일괄 변경 도구 | 낮음 | 보류 | — |
-| [B-16](#b-16) | 콘솔 쓰기 API + 배포·규칙 반영 러너 | **높음** | 대기 | PostgreSQL 설치 |
+| [B-16](#b-16) | 콘솔 쓰기 API + 배포·규칙 반영 러너 | **높음** | 준비됨 (DB 완료 08-30) | 없음 |
 | [B-17](#b-17) | 규칙 편집 QA — 수정 전후 답변 비교 | **높음** | 준비됨 | B-16 |
 | [B-18](#b-18) | 워크스페이스 안내 절차화 + 화면 캡처 | 중 | 준비됨 | 캡처 이미지 |
 | [B-19](#b-19) | 이상 사용량 감지 API | 중 | 준비됨 | 없음 |
@@ -60,7 +121,9 @@ _최종 갱신: 2026-08-27_
 | [B-29](#b-29) | **Hermes 아카이브 병합** (합병) | **높음** | 대기 (형식 확인 필요) | 없음 |
 | [B-30](#b-30) | 투표 마감 자동 반영 · 명령 늘리기 | 중 | 준비됨 | 없음 |
 | [B-31](#b-31) | 콘솔 선택 의존성 설치를 배포에 포함 | 중 | 대기 (콘솔 운영 결정) | B-16 |
-| [B-32](#b-32) | 아카이브 v2 전환 — 워크스페이스/채널ID/일자별 원문·첨부 분리 | **높음** | 진행중 (Codex/2026-08-31) | 없음 |
+| [B-32](#b-32) | 아카이브 v2 전환 — 워크스페이스/채널ID/일자별 원문·첨부 분리 | **높음** | 완료 (Codex/2026-08-31) | 없음 |
+| [B-33](#b-33) | 그룹웨어 알림 → Slack DM 중계 | **높음** | 설계 완료 · 착수 대기 | B-05 |
+| [B-34](#b-34) | 팀 일정 공지 + `/일정` 명령 | **높음** | 추출기 완료 · 수신기·명령 대기 | 없음 |
 | [B-26](#b-26) | 복합 기억 질문의 하위 워크스페이스 조회 누락 | 높음 | 완료 (Codex/2026-08-27) | B-07 |
 
 ---
@@ -140,13 +203,69 @@ B-01 결과를 사람이 보는 곳으로 보낸다. 마스터봇의 실질적 �
 **주의** — DB 미설치 환경에서도 봇이 동작해야 한다. 인덱서는 **선택 경로**이고,
 없으면 파일 스캔으로 폴백한다. DB 선택 근거는 [postgres-vs-mariadb.md](docs/design/postgres-vs-mariadb.md).
 
+**검색 인덱스 완료(2026-08-31).** `pg_bigm` 1.2 · `pgvector` 0.8.6 설치, `raw_line_bigm` 생성.
+같은 데이터에 인덱스만 바꿔 끼워 비교한 결과가 pg_bigm 선택의 근거다(행 2만):
+
+| 검색어 | 글자 | pg_bigm | pg_trgm |
+|---|---|---|---|
+| 기성 · 타설 · 결재 | 2 | 인덱스 0.2~0.3ms | **전체 스캔 7~9ms** |
+| 기성률 · 김해외동 | 3~4 | 인덱스 0.2~0.3ms | 인덱스 0.1ms |
+
+`python scripts/check_search_index.py --compare --rows 20000` 으로 언제든 재현된다.
+측정 데이터와 임시 인덱스는 트랜잭션 안에서만 쓰고 되돌린다.
+
 ---
 
 ## B-04
 ### 조직·인사 스냅샷 반영 잡
-**우선 높음 · 상태 대기(보안 승인) · 의존 B-03**
+**우선 높음 · 상태 대기(오라클 확인) · 의존 B-03**
 
-설계·요청서 완료. 보안팀 승인과 DBA 뷰 생성이 선행 조건.
+설계·요청서 완료. 담당자(류대안)가 [oracle-checklist.md](docs/deploy/oracle-checklist.md) 를
+진행 중이다.
+
+**원본 구조 확인 완료(2026-08-31).** 실제 DB(BPROD, 12.1.0.2.0)를 조회해 매핑을 확정했다.
+뷰 SQL: [oracle_tyslack_setup.sql](deploy/sql/oracle_tyslack_setup.sql)
+
+| 원본 | → | 우리 |
+|---|---|---|
+| `COVI_SMART4J.SYS_OBJECT_GROUP` (GROUPTYPE='Dept') | `V_TYSLACK_ORG` | `org_unit` |
+| `COVI_SMART4J.SYS_OBJECT_USER` (ISHR='Y') | `V_TYSLACK_EMP` | `employee` |
+
+- 접속은 **SID=BPROD** (서비스명 아님). `ORACLE_SID` 로 지정한다
+- `JSON_OBJECT` 없음(12.2에서 추가) → `export_*_12_1.sql` 을 쓴다
+- 트리 검증 통과: 고아 0 · 순환 0 · 최대 깊이 4 · 상위가 미사용인 사용중 조직 0
+- `org_unit` 에 `company_code`·`org_path` 추가함 — 계열사(TY / SUB / SPC) 격리용
+
+**반영 잡에서 반드시 지킬 것**
+1. 퇴직자는 `ISHR` 이 'N' 으로 바뀌어 **스냅샷에서 사라진다.**
+   "이번 스냅샷에 없는 사번 = `active=false`" 로 처리한다. 안 그러면 조회 권한이 남는다
+2. `org_unit.parent_code` 는 자기 참조 외래키다. 부모부터 넣거나 제약을 지연시킨다
+3. `kind`(hq/team/site/project)는 **이름 기준 추정이다.** 권한 판정은 트리로 한다
+
+**Oracle 쪽 완료(2026-08-31).** `TYSLACK` 스키마 + `V_TYSLACK_ORG`/`V_TYSLACK_EMP` 뷰,
+`TYSLACK_BOT` 계정 생성됨. 봇 계정으로 원본 테이블이 실제로 안 보이는 것까지 확인
+(`ORA-00942`). 권한은 `CREATE SESSION` + 뷰 2개 SELECT 뿐.
+
+**방식 B(push) 채택.** Oracle 은 사내 사설망(172.16.x)이고 봇 서버는 공인 IP 라,
+방식 A 는 공인 서버에서 사내로 들어가는 구멍을 뚫어야 한다.
+
+**구현 완료**
+- 보내는 쪽 `scripts/oracle_export.py` — 내부망 실행. JSONL + manifest(sha256) 생성.
+  `sqlplus` 대신 `python-oracledb` 를 쓴다: 12.1 에 `JSON_OBJECT` 가 없어
+  문자열 연결로 JSON 을 만들면 조직명의 큰따옴표 하나에 그 줄이 조용히 깨진다
+- 받는 쪽 `src/tybot/orgsync.py` — `python -m tybot.orgsync`. **Oracle 을 import 하지 않는다**
+  (봇 서버에 Oracle 자격증명이 없는 것이 방식 B 의 전부다)
+- 테스트 `tests/test_orgsync.py` 21건 — 대부분 "막혀야 하는 경우"
+
+**남은 것**
+- [ ] `V_TYSLACK_EMP` 에 `COALESCE(NICKNAME, DISPLAYNAME)` 반영 — 실제 추출에서
+      이름이 빈 재직자 3명이 잡혔다(검사 장치가 걸러서 반영은 안 됐다)
+- [ ] 내부망 배치 호스트 결정 + cron 등록
+- [ ] DMZ `tybot_ingest` SFTP 계정·방화벽 (인프라 요청서 4·5절)
+- [ ] `tybot-sync.timer` 등록
+- [ ] 문자셋(`NLS_CHARACTERSET`) 확인
+- [ ] 조사 끝나면 `.env` 의 `GW_PROBE_USER`/`GW_PROBE_PASSWORD` 삭제 —
+      GWUSER 는 `DROP ANY TABLE` 을 가진 강한 계정이라 개발 PC 에도 오래 두지 않는다
 
 **할 일** — [oracle-sync.md](docs/design/oracle-sync.md) 3·4·6절
 - `/var/lib/tybot/inbox` 감시 → `sha256` 검증 → 스테이징 → 트랜잭션 1개로 교체
@@ -162,7 +281,7 @@ B-01 결과를 사람이 보는 곳으로 보낸다. 마스터봇의 실질적 �
 
 **선행 (우리 밖)**
 - [ ] 보안: 방화벽 규칙 1건 — [요청서](docs/deploy/infra-request-snapshot-push.md)
-- [ ] DBA: `V_TYBOT_ORG` / `V_TYBOT_EMP` 뷰 + `TYBOT_RO` 계정
+- [ ] DBA: `TYSLACK` 스키마 + `TYSLACK_BOT` 계정 (deploy/sql/oracle_tyslack_setup.sql A절)
 - [ ] 내부망: 스냅샷 추출·전송 cron ([export SQL](deploy/sql/) 제공됨)
 
 ---
@@ -516,6 +635,72 @@ API 문서에서 요청을 보내 응답을 확인하듯, 콘솔에서 규칙을
 - [ ] 저장소 어디에도 `1111` 이 비밀번호로 남아 있지 않다
 - [ ] 계정 설정이 비면 콘솔이 기동을 멈추고 사유를 로그에 남긴다
 - [ ] 비밀번호 변경·계정 추가를 화면에서 할 수 있다
+
+---
+
+## B-34
+### 팀 일정 공지 + `/일정` 명령
+**우선 높음 · 상태 추출기 완료 · 수신기·명령 미착수**
+
+인계 문서: [schedule-command.md](docs/design/schedule-command.md) — **먼저 읽을 것.**
+
+**끝난 것**
+- Oracle 뷰 `V_TYSLACK_SCHEDULE`, `V_TYSLACK_SCHEDULE_FOLDER` (실제 생성됨)
+- `scripts/schedule_export.py` + 테스트 28건. live 7건 / reconcile 28건 실제 추출 확인
+- `deploy/sql/schedule_schema.sql` 테이블 5개 (실제 DB 적용됨)
+
+**남은 것**
+- [ ] 스냅샷 → `schedule_occurrence` 수신기 (`src/tybot/orgsync.py` 를 본뜬다)
+- [ ] 발송 잡 — `schedule_delivery` 큐에서 30분/10분 전 공지
+- [ ] `/일정` 슬래시 명령
+- [ ] 시각이 KST 로 맞는지 사람이 그룹웨어 화면과 대조
+
+**폴더는 하드코딩하지 않는다.** Oracle 폴더 ACL(`SYS_OBJECT_ACL`)의 부서 권한에서
+나온다. 그래서 개인 달력(타입이 `Schedule` 인데 실제로는 개인 것)이 저절로 빠지고,
+어느 팀에 알릴지가 `org_code` 로 데이터에서 결정된다.
+
+**주의**
+- `schedule_occurrence` 를 직접 훑지 말고 항상 `schedule_channel` 과 조인한다.
+  빼면 다른 팀 일정이 보인다
+- 일정 제목·장소를 MD 아카이브와 로그에 쓰지 않는다
+- 제목·장소는 종료 7일 후 NULL 이 된다. 비어 있음을 정상으로 처리한다
+- 수신기는 `horizon_start`~`horizon_end` **범위 안에서만** 누락을 삭제로 판정한다
+
+---
+
+## B-33
+### 그룹웨어 알림 → Slack DM 중계
+**우선 높음 · 상태 설계 완료(착수 전) · 의존 B-05(사번↔Slack 매핑)**
+
+설계·실측: [notify-relay.md](docs/design/notify-relay.md) — **먼저 읽을 것.**
+그룹웨어가 사내 메신저로 보내던 결재·업무 알림(`COVI_SMART4J.MSG_SND`)을
+봇이 Slack DM 으로도 전달한다.
+
+**절대 하지 말 것 — `MSG_SND.SND_Y_N` 을 'Y' 로 바꾸지 않는다.**
+그건 기존 메신저의 소비 표시다. 두 소비자가 같은 플래그를 쓰면 각 알림이 둘 중
+하나에게만 가고, "가끔 메신저 알림이 안 온다" 로 나타나 추적이 매우 어렵다.
+읽기만 하고 진도는 우리 DB(`notify_watermark`)에 따로 기록한다.
+
+**착수 전 검증(여기가 갈림길)** — `MSG_ID` 가 고정폭 0 패딩이고 시간순 증가인지.
+맞으면 PK 인덱스로 훑을 수 있어 COVI 에 인덱스를 추가할 필요가 없다.
+아니면 `WRITE_DATE` 기준으로 바꿔야 하고, 그러면 인덱스 추가(DBA 작업)가 필요하다.
+`MSG_SND` 인덱스는 PK 하나뿐이고 행이 200만이다.
+
+**전달 경로** — 이미 신청한 SFTP 규칙을 그대로 쓰고 주기만 30초로 줄인다.
+inbox 하위 `notify/` 폴더. **신규 방화벽 규칙 0건.**
+
+**할 일**
+- `scripts/notify_export.py` (내부망) · `src/tybot/notify.py` (봇 서버)
+- `notify_watermark` · `notification` 테이블 (설계 문서 4절 DDL)
+- 밀린 알림 폭탄 방지: 6시간 초과분은 요약 1건, 1인당 개별 10건 상한
+- `RCV_USER` 는 쉼표로 여러 명이 들어온다(13,987건). 분리해서 1행 1명
+
+**완료 조건**
+- [ ] 같은 `MSG_ID`+수신자를 두 번 보내지 않음 (PK 제약 + 테스트)
+- [ ] 매핑 없는 사번은 보내지 않고 `no_account` 로 남김 (추측 금지)
+- [ ] 알림 내용이 MD 아카이브에 저장되지 않음
+- [ ] 로그에 제목·URL 평문이 남지 않음
+- [ ] 봇 6시간 정지 후 재기동 시 개별 발송 폭탄이 없음
 
 ---
 
@@ -903,16 +1088,16 @@ Hermes 정지 후 TYBot 설치 순서를 지킨다.
 
 ## B-32
 ### 아카이브 v2 전환 — 워크스페이스/채널ID/일자별 원문·첨부 분리
-**우선 높음 · 상태 진행중 (Codex/2026-08-31) · 의존 없음**
+**우선 높음 · 상태 완료 (Codex/2026-08-31) · 의존 없음**
 
 운영 전 전환한다. 새 원문 경로는
 `archive/workspaces/<workspace>/channels/<channel-id>__<name>/raw/YYYY-MM-DD.md` 이다.
 
-- [ ] 신규 수집은 채널 ID 기준 일자별 원문 파일에 기록
-- [ ] 기존 `archive/channels/<workspace>/<channel>.md` 읽기 호환 유지
-- [ ] 첨부 원본·추출본은 메시지 원문과 분리하고 승인 전 검색 제외
-- [ ] 기존 원문을 삭제하지 않는 드라이런 기본 마이그레이션 제공
-- [ ] 콘솔·설계·배포 문서와 테스트 갱신
+- [x] 신규 수집은 채널 ID 기준 일자별 원문 파일에 기록
+- [x] 기존 `archive/channels/<workspace>/<channel>.md` 읽기 호환 유지
+- [x] 첨부 원본·추출본은 메시지 원문과 분리하고 승인 전 검색 제외
+- [x] 기존 원문을 삭제하지 않는 드라이런 기본 마이그레이션 제공
+- [x] 콘솔·설계·배포 문서와 테스트 갱신
 
 ---
 

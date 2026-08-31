@@ -48,19 +48,19 @@ A 는 그 원칙을 정면으로 깨고, 심사에서도 A 가 더 어렵다. B 
 
 ```sql
 -- DBA 에게 요청할 뷰 (컬럼 화이트리스트)
-CREATE OR REPLACE VIEW V_TYBOT_ORG AS
+CREATE OR REPLACE VIEW V_TYSLACK_ORG AS
 SELECT org_code, org_name, parent_org_code, org_kind, use_yn
   FROM <기존 조직도 뷰>;
 
-CREATE OR REPLACE VIEW V_TYBOT_EMP AS
+CREATE OR REPLACE VIEW V_TYSLACK_EMP AS
 SELECT emp_no, emp_name, email, org_code, position_name, use_yn
   FROM <기존 인사기본 뷰>;
 
 -- 읽기 전용 계정
-CREATE USER TYBOT_RO IDENTIFIED BY "<강한 비밀번호>";
-GRANT CREATE SESSION TO TYBOT_RO;
-GRANT SELECT ON V_TYBOT_ORG TO TYBOT_RO;
-GRANT SELECT ON V_TYBOT_EMP TO TYBOT_RO;
+CREATE USER TYSLACK_BOT IDENTIFIED BY "<강한 비밀번호>";
+GRANT CREATE SESSION TO TYSLACK_BOT;
+GRANT SELECT ON V_TYSLACK_ORG TO TYSLACK_BOT;
+GRANT SELECT ON V_TYSLACK_EMP TO TYSLACK_BOT;
 -- 그 외 어떤 권한도 주지 않는다(DML·DDL·다른 테이블 SELECT 금지)
 ```
 
@@ -80,7 +80,7 @@ GRANT SELECT ON V_TYBOT_EMP TO TYBOT_RO;
 
 ```python
 import oracledb
-conn = oracledb.connect(user="TYBOT_RO", password=..., dsn="host:1521/SERVICE")
+conn = oracledb.connect(user="TYSLACK_BOT", password=..., dsn="host:1521/SERVICE")
 ```
 
 **먼저 확인할 것 — thin 모드 요건**
@@ -98,7 +98,7 @@ conn = oracledb.connect(user="TYBOT_RO", password=..., dsn="host:1521/SERVICE")
 출발지: <DMZ 봇서버 IP>
 목적지: <Oracle IP>  포트: 1521/tcp
 용도  : 조직도·인사기본 뷰 조회(SELECT only), 야간 1회 + 수동 트리거
-계정  : TYBOT_RO (읽기 전용, 뷰 2개만 GRANT)
+계정  : TYSLACK_BOT (읽기 전용, 뷰 2개만 GRANT)
 ```
 
 ## 2-B-0. 누가 push 를 실행하나 — 뷰만으로는 안 된다
@@ -131,10 +131,8 @@ conn = oracledb.connect(user="TYBOT_RO", password=..., dsn="host:1521/SERVICE")
 > 질문에 대한 직답: **Oracle 이 쏘는 게 아니라, Oracle 에 접속할 수 있는 내부망 호스트의
 > 스케줄러가 조회해서 쏜다.** 그 호스트가 DB 서버일 필요는 없다.
 
-### 이미 있는 것부터 확인
-- 야간 배치 인프라(Control-M, Jenkins, 사내 스케줄러)가 있나 → ①② 해결
-- 사내 파일전송 시스템·공유 스토리지가 있나 → ③ 해결, 방화벽 요청 불필요
-- 둘 다 있으면 **신규 방화벽 규칙 0건**으로 끝난다
+**확정(2026-08-31): 방화벽 규칙 1건을 신청해 A안(별도 배치 호스트)으로 간다.**
+사내 파일전송 시스템을 경유하는 대안은 검토했으나 채택하지 않았다.
 
 ---
 
@@ -142,33 +140,35 @@ conn = oracledb.connect(user="TYBOT_RO", password=..., dsn="host:1521/SERVICE")
 
 > 인프라·보안 담당자에게 그대로 넘길 요청서:
 > [`docs/deploy/infra-request-snapshot-push.md`](../deploy/infra-request-snapshot-push.md)
-> (방화벽 규칙 1건, DMZ 계정 생성 명령, 수용 검증 8항목, 폐기 절차 포함)
 
-추출 스크립트는 저장소에 있다: [`deploy/sql/export_org.sql`](../../deploy/sql/export_org.sql),
-[`deploy/sql/export_emp.sql`](../../deploy/sql/export_emp.sql)
+**보내는 쪽**: [`scripts/oracle_export.py`](../../scripts/oracle_export.py) — 내부망에서 실행.
+뷰 2개를 읽어 `org.jsonl`·`emp.jsonl`·`manifest.json`(sha256) 을 만든다.
+
+**받는 쪽**: [`src/tybot/orgsync.py`](../../src/tybot/orgsync.py) — `python -m tybot.orgsync`.
+이 파일은 Oracle 을 import 하지 않는다. 봇 서버에 Oracle 자격증명이 없는 것이 방식 B 의
+전부이므로, 여기서 Oracle 을 부르면 그 이점이 사라진다.
 
 ```bash
-export NLS_LANG=KOREAN_KOREA.AL32UTF8   # 출력을 UTF-8 로 고정. 이걸 빼면 한글이 깨진다
-sqlplus -s TYBOT_RO/"$ORA_PW"@ORCL @export_org.sql > /var/tmp/tybot/org.jsonl
-sqlplus -s TYBOT_RO/"$ORA_PW"@ORCL @export_emp.sql > /var/tmp/tybot/emp.jsonl
+# 내부망 배치서버 (야간 1회)
+python3 scripts/oracle_export.py --out /var/tmp/tyslack
+# 봇 서버
+python -m tybot.orgsync
 ```
 
-전송·검증 절차(임시 이름 업로드 후 rename, 체크섬, 행 수 방어)는
-[인프라 요청서 6절](../deploy/infra-request-snapshot-push.md#6-스냅샷-추출전송-내부망-배치-dba--배치-담당)에 있다.
+전송 절차(임시 이름 업로드 후 rename, 체크섬, 행 수 방어)는
+[인프라 요청서 6절](../deploy/infra-request-snapshot-push.md)에 있다.
 
-### 추출 방식 선택 (Oracle 버전별)
+### 왜 sqlplus 가 아닌가
 
-| 버전 | 방법 | 비고 |
-|---|---|---|
-| **19c / 12.2+** | `JSON_OBJECT` (위 스크립트) | 이스케이프를 DB 가 처리한다. **가장 안전** |
-| 12.1 이하 | **sqlcl** `SET SQLFORMAT json-formatted` | 별도 설치(무료). 문자열 연결보다 안전 |
-| 그 외 | python-oracledb + `json.dumps` | 클라이언트에서 직렬화. 이스케이프 걱정 없음 |
+우리 DB 는 **12.1** 이라 `JSON_OBJECT` 가 없다(12.2에서 추가). 그래서 SQL 로 JSON 을 만들려면
+문자열을 이어 붙여야 하는데, 조직명·직위에 `"` 나 역슬래시가 하나 들어오면 **그 줄만 조용히
+깨지고** 그게 부분 반영으로 이어진다. `json.dumps` 는 그 문제가 없다.
 
-**문자열 연결(`'{"a":"' || col || '"}'`)로 JSON 을 만들지 말 것.** 조직명·직위에 `"` 나
-역슬래시가 들어오면 파일 전체가 깨지고, 그게 조용히 부분 반영으로 이어진다.
+sqlplus 특유의 사고도 함께 사라진다 — `LINESIZE` 부족으로 JSON 한 줄이 잘리는 것,
+`NLS_LANG` 을 안 걸어 한글이 깨지는 것.
 
-`SET` 명령이 많은 이유: sqlplus 는 기본값이 페이지 헤더·개행 삽입을 하므로
-`PAGESIZE 0 / TRIMSPOOL ON / LINESIZE 32767` 을 주지 않으면 JSON 한 줄이 잘린다.
+저장소의 `deploy/sql/export_*_12_1.sql` 은 12.1 용 문자열 연결 버전이다. 이스케이프를
+검증해 뒀지만 **상시 경로로는 쓰지 않는다.** 파이썬을 못 쓰는 환경의 대비책이다.
 
 DMZ 쪽 준비:
 - 전용 계정 `tybot_ingest`, **SFTP 전용**(`ForceCommand internal-sftp`, `ChrootDirectory`)
@@ -316,7 +316,7 @@ COMMIT;
 | 단계 | 내용 | 담당 |
 |---|---|---|
 | 1 | 방식 A/B 결정 (보안 담당 협의) | 우리 + 보안 |
-| 2 | `V_TYBOT_ORG` / `V_TYBOT_EMP` 뷰 + `TYBOT_RO` 계정 생성 | DBA |
+| 2 | `V_TYSLACK_ORG` / `V_TYSLACK_EMP` 뷰 + `TYSLACK_BOT` 계정 생성 | DBA |
 | 3 | PostgreSQL 설치 + 3절 스키마 | 우리 |
 | 4 | 동기화 잡 구현 (선택한 방식) + `sync_run` 이력 | 우리 |
 | 5 | Slack 이메일 매핑 → `user_identity` | 우리 |
@@ -328,7 +328,7 @@ COMMIT;
 
 ### DBA·보안에게 보낼 요청 요약
 > 조직도·인사기본 정보를 사내 Slack 봇의 권한 판정에 쓰려고 합니다.
-> - 필요한 컬럼만 담은 전용 뷰 2개(`V_TYBOT_ORG`, `V_TYBOT_EMP`) 생성 요청
+> - 필요한 컬럼만 담은 전용 뷰 2개(`V_TYSLACK_ORG`, `V_TYSLACK_EMP`) 생성 요청
 >   — 조직코드/조직명/상위조직/구분/사용여부, 사번/이름/이메일/조직코드/직위/사용여부
 >   — **주민번호·연락처·주소·급여·평가 컬럼은 포함하지 않습니다**
 > - 그 뷰 2개에만 SELECT 권한을 가진 읽기전용 계정 1개

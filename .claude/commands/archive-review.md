@@ -4,7 +4,7 @@ description: 중앙 아카이브 무결성·권한·환각방지 장치를 점�
 
 중앙 MD 아카이브의 건강 상태를 점검하고 문제만 보고한다:
 
-1. **스키마 검증** — 모든 `archive/channels/**/*.md` 프론트매터가 `md-archive-schema` 를 만족하는가. 위반 파일 목록.
+1. **스키마 검증** — 모든 `archive/workspaces/*/channels/*/raw/*.md`와 전환 중인 v1 원문이 `md-archive-schema`를 만족하는가. 위반 파일 목록.
 2. **요약 재귀 오염** — 원문 블록에 봇 답변/요약이 섞여 들어간 흔적이 있는가.
 3. **ACL 누락** — `visibility`/`acl` 미설정 파일(→ 비공개 폴백돼야 함) 목록.
 4. **권한 필터 위치** — 답변 코드에서 권한 필터가 검색/모델 호출 "이전"에 적용되는가(`access-control`, `hallucination-guard` 기준).

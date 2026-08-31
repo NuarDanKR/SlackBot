@@ -62,7 +62,7 @@ _결정 문서 · 2026-08-19 · "수집봇 + 정리봇 + 마스터봇" 구상에
 ### 그럼 오염은 어떻게 막나 — 레이어 분리
 
 ```
-archive/channels/<ws>/<channel>.md
+archive/workspaces/<ws>/channels/<channel-id>__<name>/raw/YYYY-MM-DD.md
 ├── 프론트매터        ← 메타데이터. 정리 봇이 갱신 가능(visibility, 조직코드, 색인 상태)
 ├── ## 요약           ← 사람이 관리. 봇은 읽지도 쓰지도 않음
 └── ## 원문           ← 불변, append only. 어떤 봇도 기존 라인을 수정·삭제하지 않음
@@ -148,7 +148,7 @@ Slack 버튼 한 번으로 처리할 수 있게 만드는 것이 마스터 봇�
 
 ```
 [워크스페이스 A 앱] ┐
-[워크스페이스 B 앱] ┼── Socket Mode ──► tybot.service ──► archive/channels/  (원문, append only)
+[워크스페이스 B 앱] ┼── Socket Mode ──► tybot.service ──► archive/workspaces/  (원문, 일자별 append only)
 [워크스페이스 C 앱] ┘                    (수집 + 응답)          │
                                                               │ 읽기만
                           tybot-tidy.timer  ────────────────────┤

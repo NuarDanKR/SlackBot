@@ -134,8 +134,10 @@ def test_attachments_recorded(tmp_path):
         },
     )
     _run(tmp_path, client)
-    md = next((tmp_path / "channels" / "pilot").glob("*.md")).read_text(encoding="utf-8")
-    assert "[첨부:미변환] 도면.dwg" in md
+    md = next((tmp_path / "workspaces" / "pilot").glob("channels/*/raw/*.md")).read_text(
+        encoding="utf-8"
+    )
+    assert "[첨부:처리실패] 도면.dwg" in md
     assert "도면 공유" in md
 
 
@@ -158,5 +160,7 @@ def test_periodic_collect_captures_canvas_idempotently(tmp_path):
         second = _run(tmp_path, client)
     assert first["written"] == 2
     assert second["written"] == 0
-    md = next((tmp_path / "channels" / "pilot").glob("*.md")).read_text(encoding="utf-8")
+    md = next((tmp_path / "workspaces" / "pilot").glob("channels/*/raw/*.md")).read_text(
+        encoding="utf-8"
+    )
     assert md.count("[캔버스본문:회의록] same canvas") == 1

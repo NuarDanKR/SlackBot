@@ -6,13 +6,18 @@ description: 중앙 MD 아카이브 파일을 만들거나 수정할 때 사용.
 # MD 아카이브 스키마
 
 ## 파일 위치
-`archive/channels/<workspace>/<channel>.md` — 워크스페이스·채널별 1파일.
+`archive/workspaces/<workspace>/channels/<channel-id>__<name>/raw/YYYY-MM-DD.md`
+— 워크스페이스·Slack 채널 ID·KST 날짜별 원문 파일. 기존
+`archive/channels/<workspace>/<channel>.md`는 전환 기간 읽기 전용 호환 경로다.
 
 ## 프론트매터(필수)
 ```yaml
 ---
+schema_version: 2
 workspace: 팀_자금(ABB540)         # 워크스페이스 식별자
 channel: "#팀_자금(ABB540)_주간보고"  # 채널명 (명명규칙 준수)
+channel_id: C0123456789             # 변경되지 않는 Slack 채널 ID
+source_date: 2026-08-31             # 파일에 담긴 KST 날짜
 visibility: private                 # public | private (기본 private)
                                     # public = **자기 워크스페이스 안에서만** 멤버십 면제
                                     #          크로스 워크스페이스와 무관하다
@@ -25,19 +30,17 @@ last_ingested: 2026-08-19T17:00+09:00
 ---
 ```
 
-## 본문 구조 — 요약과 원문을 반드시 분리
+## 본문 구조 — 원문만 저장
 ```markdown
-## 요약 (사람이 관리, 봇은 수정 금지)
-- ...
-
 ## 원문 (자동 취합, 편집 금지)
 > [2026-08-12 09:15] 홍길동: ...
-> [2026-08-12 09:20] @tybot: ... (출처: 📄계약서_v3, 2026-07-31)
+> [2026-08-12 09:20] 이순신: 승인했습니다
 ```
 
 ## 규칙
 - **원문 블록은 절대 편집하지 않는다.** 틀린 내용은 `[정정]` 라인으로 옆에 덧붙인다.
 - **봇 답변/요약을 원문 블록에 넣지 않는다.**
+- 첨부 원본은 `objects/`, 추출본은 승인 전 `staging/`에 두며 둘 다 원문 검색에서 제외한다.
 - `visibility: public` 이 명시되지 않으면 비공개로 취급.
 - **같은 워크스페이스라도 소속되지 않은 채널은 답변 대상이 아니다**(공개 채널 포함).
 - 크로스 워크스페이스 공유는 `share_with` 로만. `visibility` 로는 열리지 않는다.

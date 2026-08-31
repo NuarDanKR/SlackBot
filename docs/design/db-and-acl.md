@@ -121,20 +121,13 @@ DB 안의 텍스트가 아니라 MD 가 근거라는 원칙이 여기서 지켜�
 판정은 **AND**다. 디렉터리에 있고, 프론트매터가 허용하고, DB 규칙이 허용해야 근거로 쓴다.
 **DB 장애 시엔 프론트매터만으로 판정 = 자동으로 좁아지는 쪽(막는 쪽)으로 폴백**한다.
 
-### 디렉터리 구조 (조직 트리를 그대로 반영)
+### 디렉터리 구조 (물리 소유권은 워크스페이스·Slack 채널 ID)
 ```
-/var/lib/tybot/archive/
-├── hq_건축본부(AB)/
-│   ├── _본부/                      # 본부 직할 채널
-│   ├── team_건축현장관리팀(ABB540)/
-│   │   ├── _팀/
-│   │   ├── site_김해외동(180182)/
-│   │   └── site_AA현장(180199)/
-│   └── team_.../
-└── hq_토목본부(TB)/
+/var/lib/tybot/archive/workspaces/<workspace>/channels/
+└── <channel-id>__<initial-name>/raw/YYYY-MM-DD.md
 ```
-- 이 구조면 "본부 단위로 저장소를 쪼갠다"는 결정을 **나중에 디렉터리 이동만으로** 할 수 있다.
-- 현재 `archive/channels/<workspace>/<channel>.md` 는 파일럿용 평면 구조 → 조직 매핑 붙일 때 이 트리로 이행.
+- 조직은 이름·소속 변경이 있으므로 물리 경로가 아니라 `org_kind`·`org_code`와 DB 관계로 표현한다.
+- v1 `archive/channels/<workspace>/<channel>.md`는 전환 기간 읽기 호환만 유지한다.
 
 ## 4. 조직 상속 규칙 — 여기가 사고 나는 지점
 

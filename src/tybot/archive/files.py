@@ -11,8 +11,12 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 from .convert import ConvertError, can_convert, convert
@@ -76,6 +80,46 @@ class SlackFile:
         return f"[첨부:{state}] {self.name} ({self.filetype or self.mimetype or '?'}, {kb}KB)"
 
 
+@dataclass(frozen=True)
+class AttachmentStorage:
+    """승인 전 첨부를 원문 아카이브 밖에 격리하는 위치."""
+
+    staging_dir: Path
+    objects_dir: Path
+
+
+def attachment_storage(
+    archive_root: Path | str, workspace: str, channel_id: str
+) -> AttachmentStorage:
+    """ARCHIVE_DIR의 형제인 staging/objects 아래 채널별 저장 위치를 만든다."""
+    archive = Path(archive_root)
+    safe_ws = _safe_component(workspace)
+    safe_channel = _safe_component(channel_id)
+    suffix = Path("workspaces") / safe_ws / "channels" / safe_channel / "attachments"
+    return AttachmentStorage(
+        staging_dir=archive.parent / "staging" / suffix,
+        objects_dir=archive.parent / "objects" / suffix,
+    )
+
+
+def _safe_component(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value).strip("._")
+    return safe or "unnamed"
+
+
+def _decode_text(raw: bytes, declared_size: int) -> str:
+    truncated = len(raw) > MAX_TEXT_BYTES
+    text = raw[:MAX_TEXT_BYTES].decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if len(lines) > MAX_TEXT_LINES:
+        lines = lines[:MAX_TEXT_LINES]
+        truncated = True
+    out = "\n".join(lines)
+    if truncated:
+        out += f"\n…(이하 생략, 원본 {max(1, declared_size // 1024)}KB)"
+    return out
+
+
 def download_bytes(f: SlackFile, bot_token: str, limit: int) -> bytes:
     """원본 바이트를 가져온다. 로그인 HTML 이 오면 실패로 처리한다."""
     if not f.url_private_download:
@@ -111,6 +155,94 @@ def download_text(f: SlackFile, bot_token: str) -> str:
     if truncated:
         out += f"\n…(이하 생략, 원본 {max(1, f.size // 1024)}KB)"
     return out
+
+
+def stage_files(
+    files: list[dict],
+    bot_token: str | None,
+    storage: AttachmentStorage,
+) -> tuple[list[str], list[str]]:
+    """원본과 추출본을 격리 저장하고 원문에는 검수대기 표지만 반환한다.
+
+    ``staging``과 ``objects``는 ArchiveStore 검색 범위 밖이다. 추출 결과는 사람이
+    검수해 별도 승인 절차로 등록하기 전까지 답변 근거가 되지 않는다.
+    """
+    lines: list[str] = []
+    warnings: list[str] = []
+    for item in files or []:
+        f = SlackFile.from_event(item)
+        file_id = _safe_component(f.id or hashlib.sha256(f.name.encode()).hexdigest()[:16])
+        staged = storage.staging_dir / file_id
+        objects = storage.objects_dir / file_id
+        state = "pending_review"
+        error: str | None = None
+        extracted: str | None = None
+        object_path: Path | None = None
+        digest: str | None = None
+
+        try:
+            if not bot_token:
+                raise DownloadError(f"{f.name}: 토큰이 없어 원본을 가져오지 못했습니다")
+            if f.size > MAX_DOC_BYTES:
+                raise DownloadError(f"{f.name}: {MAX_DOC_BYTES // 1024 // 1024}MB 제한 초과")
+            raw = download_bytes(f, bot_token, MAX_DOC_BYTES)
+            if len(raw) > MAX_DOC_BYTES:
+                raise DownloadError(f"{f.name}: {MAX_DOC_BYTES // 1024 // 1024}MB 제한 초과")
+
+            digest = hashlib.sha256(raw).hexdigest()
+            objects.mkdir(parents=True, exist_ok=True)
+            object_path = objects / _safe_component(f.name)
+            object_path.write_bytes(raw)
+
+            if f.is_text:
+                extracted = _decode_text(raw, f.size)
+            elif f.is_convertible:
+                extracted = "\n".join(convert(f.filetype, raw))
+        except (DownloadError, ConvertError, OSError) as exc:
+            state = "download_or_extract_failed"
+            error = str(exc)
+            warnings.append(error)
+            logger.warning("첨부 격리 저장 실패 %s: %s", f.name, exc)
+        except Exception as exc:
+            state = "download_or_extract_failed"
+            error = f"{f.name}: 예상하지 못한 오류 {exc.__class__.__name__}: {exc}"
+            warnings.append(error)
+            logger.exception("첨부 격리 저장 중 예외 %s", f.name)
+
+        try:
+            staged.mkdir(parents=True, exist_ok=True)
+            metadata = {
+                "schema_version": 1,
+                "status": state,
+                "slack_file_id": f.id,
+                "name": f.name,
+                "filetype": f.filetype,
+                "mimetype": f.mimetype,
+                "declared_size": f.size,
+                "sha256": digest,
+                "object_path": str(object_path) if object_path else None,
+                "extracted": extracted is not None,
+                "error": error,
+                "staged_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            }
+            (staged / "metadata.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            if extracted is not None:
+                (staged / "extracted.md").write_text(
+                    "<!-- 승인 전 검색 금지 -->\n"
+                    f"# {f.name}\n\n"
+                    f"{extracted.rstrip()}\n",
+                    encoding="utf-8",
+                )
+        except OSError as exc:
+            warning = f"{f.name}: 검수 메타데이터 저장 실패: {exc}"
+            warnings.append(warning)
+            logger.warning(warning)
+
+        label = "검수대기" if state == "pending_review" else "처리실패"
+        lines.append(f.describe(label))
+    return lines, warnings
 
 
 def file_lines(files: list[dict], bot_token: str | None) -> tuple[list[str], list[str]]:

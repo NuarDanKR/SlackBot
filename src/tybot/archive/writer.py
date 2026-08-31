@@ -1,15 +1,14 @@
-"""원문 수집기 — Slack 메시지를 MD 아카이브 '## 원문' 섹션에 append.
+"""Slack 사람 메시지를 아카이브 v2의 일자별 원문 MD에 저장한다.
 
-절대 원칙:
-- 1겹: 봇 자신의 답변/요약은 저장하지 않는다(요약 재귀 금지).
-- 원문 블록은 편집하지 않는다. append only. 정정은 `[정정]` 라인 추가로만.
-- PII/제외 대상 키워드가 있으면 그 메시지는 아카이브하지 않는다.
+신규 경로는 ``workspaces/<workspace>/channels/<channel-id>__<name>/raw/YYYY-MM-DD.md``다.
+봇 출력은 저장하지 않고, 원문은 기존 라인을 보존한 채 뒤에만 추가한다.
 """
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from ..channels import parse as parse_channel
@@ -18,7 +17,6 @@ from .store import RAW_HEADING_RE, SchemaError, validate
 
 KST = timezone(timedelta(hours=9))
 
-# CLAUDE.md 원칙 5 — 아카이브 금지 대상
 PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\d{6}\s*[-–]\s*[1-4]\d{6}"), "주민등록번호 형식"),
     (re.compile(r"등기부\s*등본"), "등기부등본"),
@@ -39,8 +37,6 @@ class IncomingMessage:
     speaker: str
     text: str
     is_bot: bool = False
-    # 같은 논리 원문 묶음을 재수집할 때 쓰는 영속 키. 키 자체도 메시지 본문에
-    # `[수집키:<key>]` 로 기록되어야 프로세스 재시작 뒤에도 중복을 판정할 수 있다.
     dedupe_key: str | None = None
 
 
@@ -52,20 +48,59 @@ def screen(text: str) -> str | None:
     return None
 
 
-def _slugify(channel: str) -> str:
-    """채널명 → 파일명. 원 채널명은 프론트매터에 보존한다."""
-    s = channel.lstrip("#").strip()
+def _slugify(value: str) -> str:
+    s = value.lstrip("#").strip()
     return re.sub(r"[^0-9A-Za-z가-힣()_\-]+", "_", s).strip("_") or "unnamed"
 
 
-def doc_path(root: Path | str, workspace: str, channel: str) -> Path:
-    return Path(root) / "channels" / _slugify(workspace) / f"{_slugify(channel)}.md"
+def _stable_channel_id(channel: str, channel_id: str | None) -> str:
+    if channel_id:
+        cleaned = re.sub(r"[^0-9A-Za-z_-]+", "_", channel_id).strip("_")
+        if cleaned:
+            return cleaned
+    digest = hashlib.sha256(channel.encode("utf-8")).hexdigest()[:12]
+    return f"legacy-{digest}"
 
 
-def _new_doc(workspace: str, channel: str, visibility: str, acl: list[str]) -> str:
+def channel_dir(
+    root: Path | str,
+    workspace: str,
+    channel: str,
+    channel_id: str | None = None,
+) -> Path:
+    """채널 ID가 같은 기존 디렉터리를 재사용해 이름 변경에도 경로를 유지한다."""
+    base = Path(root) / "workspaces" / _slugify(workspace) / "channels"
+    stable_id = _stable_channel_id(channel, channel_id)
+    existing = sorted(base.glob(f"{stable_id}__*")) if base.is_dir() else []
+    if existing:
+        return existing[0]
+    return base / f"{stable_id}__{_slugify(channel)}"
+
+
+def doc_path(
+    root: Path | str,
+    workspace: str,
+    channel: str,
+    *,
+    channel_id: str | None = None,
+    day: date | None = None,
+) -> Path:
+    day = day or datetime.now(KST).date()
+    return channel_dir(root, workspace, channel, channel_id) / "raw" / f"{day.isoformat()}.md"
+
+
+def _new_doc(
+    workspace: str,
+    channel: str,
+    channel_id: str,
+    source_date: date,
+    visibility: str,
+    acl: list[str],
+    share_with: list[str],
+    imported_from: str | None,
+) -> str:
     acl_s = "[" + ", ".join(acl) + "]"
-    # 채널명에서 조직 정보를 뽑아 남긴다. 조직명은 바뀌어도 코드는 유지되므로,
-    # 조직 개편·워크스페이스 통합 뒤에도 이 문서가 어느 조직 것인지 추적할 수 있다.
+    share_s = "[" + ", ".join(share_with) + "]"
     spec = parse_channel(channel)
     org_lines = ""
     if spec:
@@ -73,18 +108,22 @@ def _new_doc(workspace: str, channel: str, visibility: str, acl: list[str]) -> s
         if spec.org_code:
             org_lines += f"org_code: {spec.org_code}\n"
         org_lines += f"org_name: {spec.org_name}\n"
+    import_line = f'imported_from: "{imported_from}"\n' if imported_from else ""
     return (
         "---\n"
+        "schema_version: 2\n"
         f"workspace: {workspace}\n"
         f'channel: "{channel}"\n'
+        f"channel_id: {channel_id}\n"
+        f"source_date: {source_date.isoformat()}\n"
         f"visibility: {visibility}\n"
         f"acl: {acl_s}\n"
+        f"share_with: {share_s}\n"
+        f"{import_line}"
         f"{org_lines}"
         "doc_count: 0\n"
         "last_ingested: \n"
         "---\n\n"
-        "## 요약 (사람이 관리, 봇은 수정 금지)\n"
-        "- \n\n"
         "## 원문 (자동 취합, 편집 금지)\n"
     )
 
@@ -100,7 +139,8 @@ class IngestResult:
     path: Path
     written: int
     skipped_bot: int
-    refused: list[tuple[str, str]]  # (speaker, 사유)
+    refused: list[tuple[str, str]]
+    paths: tuple[Path, ...] = field(default_factory=tuple)
 
 
 def ingest(
@@ -109,23 +149,24 @@ def ingest(
     workspace: str,
     channel: str,
     messages: list[IncomingMessage],
+    channel_id: str | None = None,
     visibility: str = "private",
     acl: list[str] | None = None,
+    share_with: list[str] | None = None,
+    imported_from: str | None = None,
 ) -> IngestResult:
-    """원문 append. 형식 검사 실패 시 SchemaError 를 올리고 **아무것도 쓰지 않는다**(롤백).
-
-    읽기-수정-쓰기 전체를 아카이브 쓰기 락 안에서 한다. 실시간 수집(`tybot.service`)과
-    정기 백필(`tybot-collect.timer`)은 별도 프로세스라, 락이 없으면 같은 파일에 동시에 append 해
-    라인이 섞이거나 `doc_count` 갱신이 유실될 수 있다.
-    """
+    """원문을 KST 날짜별 파일에 추가한다. 검증 실패 시 어떤 파일도 쓰지 않는다."""
     with archive_write_lock(root):
         return _ingest_locked(
             root,
             workspace=workspace,
             channel=channel,
+            channel_id=channel_id,
             messages=messages,
             visibility=visibility,
             acl=acl,
+            share_with=share_with,
+            imported_from=imported_from,
         )
 
 
@@ -134,61 +175,86 @@ def _ingest_locked(
     *,
     workspace: str,
     channel: str,
+    channel_id: str | None,
     messages: list[IncomingMessage],
     visibility: str,
     acl: list[str] | None,
+    share_with: list[str] | None,
+    imported_from: str | None,
 ) -> IngestResult:
-    path = doc_path(root, workspace, channel)
-    existing = path.read_text(encoding="utf-8") if path.exists() else None
-    text = existing if existing is not None else _new_doc(workspace, channel, visibility, acl or [])
-
-    seen = set(text.splitlines())
+    stable_id = _stable_channel_id(channel, channel_id)
+    directory = channel_dir(root, workspace, channel, stable_id)
+    raw_dir = directory / "raw"
+    existing_texts: dict[Path, str] = {
+        path: path.read_text(encoding="utf-8") for path in sorted(raw_dir.glob("*.md"))
+    }
+    all_existing = "\n".join(existing_texts.values())
+    seen = set(all_existing.splitlines())
     existing_dedupe_keys = {
         m.dedupe_key
         for m in messages
-        if m.dedupe_key and f"[수집키:{m.dedupe_key}]" in text
+        if m.dedupe_key and f"[수집키:{m.dedupe_key}]" in all_existing
     }
-    lines: list[str] = []
+
+    grouped: dict[date, list[str]] = {}
     refused: list[tuple[str, str]] = []
     skipped_bot = 0
-    for m in messages:
-        if m.is_bot:
-            skipped_bot += 1  # 1겹: 봇 출력은 근거가 될 수 없다
+    for message in messages:
+        if message.is_bot:
+            skipped_bot += 1
             continue
-        if m.dedupe_key in existing_dedupe_keys:
+        if message.dedupe_key in existing_dedupe_keys:
             continue
-        reason = screen(m.text)
+        reason = screen(message.text)
         if reason:
-            refused.append((m.speaker, reason))
+            refused.append((message.speaker, reason))
             continue
-        line = format_line(m)
+        line = format_line(message)
         if line in seen:
-            continue  # 재수집 멱등
+            continue
         seen.add(line)
-        lines.append(line)
+        grouped.setdefault(message.ts.astimezone(KST).date(), []).append(line)
 
-    if not lines:
-        if existing is None:
-            validate(text, path=str(path))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
-        return IngestResult(path=path, written=0, skipped_bot=skipped_bot, refused=refused)
+    fallback_day = messages[0].ts.astimezone(KST).date() if messages else datetime.now(KST).date()
+    fallback_path = doc_path(root, workspace, channel, channel_id=stable_id, day=fallback_day)
+    if not grouped:
+        return IngestResult(fallback_path, 0, skipped_bot, refused)
 
-    body = text.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
     stamp = datetime.now(KST).strftime("%Y-%m-%dT%H:%M+09:00")
-    body = re.sub(r"^last_ingested:.*$", f"last_ingested: {stamp}", body, count=1, flags=re.MULTILINE)
-    body = re.sub(
-        r"^doc_count:\s*(\d+)\s*$",
-        lambda m: f"doc_count: {int(m.group(1)) + len(lines)}",
-        body,
-        count=1,
-        flags=re.MULTILINE,
-    )
+    pending: dict[Path, str] = {}
+    for day, lines in sorted(grouped.items()):
+        path = doc_path(root, workspace, channel, channel_id=stable_id, day=day)
+        text = existing_texts.get(path) or _new_doc(
+            workspace,
+            channel,
+            stable_id,
+            day,
+            visibility,
+            acl or [],
+            share_with or [],
+            imported_from,
+        )
+        body = text.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+        body = re.sub(
+            r"^last_ingested:.*$", f"last_ingested: {stamp}", body, count=1, flags=re.MULTILINE
+        )
+        # 콜백 대신 직접 자른다. 루프 변수를 참조하는 람다는 늦게 불릴 때
+        # 값이 어긋날 수 있어(ruff B023) 애초에 만들지 않는다.
+        counted = re.search(r"^doc_count:\s*(\d+)\s*$", body, flags=re.MULTILINE)
+        if counted:
+            body = (
+                body[: counted.start()]
+                + f"doc_count: {int(counted.group(1)) + len(lines)}"
+                + body[counted.end() :]
+            )
+        validate(body, path=str(path))
+        if not RAW_HEADING_RE.search(body):
+            raise SchemaError(f"{path}: '## 원문' 섹션 유실")
+        pending[path] = body
 
-    # 게시 전 형식 검사 — 실패하면 디스크에 아무것도 남기지 않는다.
-    validate(body, path=str(path))
-    if not RAW_HEADING_RE.search(body):
-        raise SchemaError(f"{path}: '## 원문' 섹션 유실")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-    return IngestResult(path=path, written=len(lines), skipped_bot=skipped_bot, refused=refused)
+    for path, body in pending.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+    paths = tuple(pending)
+    return IngestResult(paths[-1], sum(map(len, grouped.values())), skipped_bot, refused, paths)

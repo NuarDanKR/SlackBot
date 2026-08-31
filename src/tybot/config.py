@@ -27,7 +27,7 @@ def state_dir() -> Path:
 def cost_state_path(qa_log_dir: str | None = None) -> str:
     """당일 누적 LLM 비용을 남길 파일 경로.
 
-    감사기록 디렉터리 아래에 둔다 — 아카이브(`archive/channels/`) 밖이라 답변 근거로
+    감사기록 디렉터리 아래에 둔다 — 원문 아카이브(`archive/workspaces/`) 밖이라 답변 근거로
     오염될 일이 없고, 봇이 기동 시 쓰기 가능 여부를 이미 점검하는 경로다.
     """
     base = qa_log_dir or os.getenv("QA_LOG_DIR", "./qa-log")

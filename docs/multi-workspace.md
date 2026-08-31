@@ -33,7 +33,7 @@ Slack 에서 한 앱을 여러 워크스페이스에 넣는 방법은 두 가지
 | 쓰이는 곳 | 키가 `mgmt` 일 때 |
 |---|---|
 | 환경변수 접미사 | `SLACK_BOT_TOKEN_MGMT`, `SLACK_APP_TOKEN_MGMT` |
-| 아카이브 디렉터리 | `archive/channels/mgmt/` |
+| 아카이브 디렉터리 | `archive/workspaces/mgmt/` |
 | 프론트매터·권한 판정·감사 로그 | `workspace: mgmt` |
 
 접미사는 키를 대문자로 바꾸고 영숫자 외 문자를 `_` 로 치환한 값이다. 한글·공백을 쓰면 환경변수
@@ -183,15 +183,13 @@ sudo -u tybot .venv/bin/python scripts/share.py <파일.md> --public
 ## 4. 아카이브 구조
 
 ```
-/var/lib/tybot/archive/channels/
-├── pilot/           # 워크스페이스 키가 디렉터리명
-│   └── 프로젝트-업데이트.md
-└── mgmt/
-    └── 경영_주간보고.md
+/var/lib/tybot/archive/workspaces/
+├── pilot/channels/C01__프로젝트-업데이트/raw/2026-08-31.md
+└── mgmt/channels/C02__경영_주간보고/raw/2026-08-31.md
 ```
 
-워크스페이스별 디렉터리가 **물리 격리 계층**이다. 나중에 "워크스페이스별로 저장소를 쪼갠다"는
-결정을 디렉터리 이동만으로 할 수 있다([db-and-acl.md](design/db-and-acl.md) 3절).
+워크스페이스별 디렉터리가 **물리 격리 계층**이고, 변경되지 않는 Slack 채널 ID가 채널의
+소유 키다. 상세와 v1 전환 절차는 [archive-v2.md](design/archive-v2.md)를 따른다.
 
 ---
 

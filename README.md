@@ -36,7 +36,7 @@ flowchart TB
     end
 
     subgraph ST["저장 (/var/lib/tybot)"]
-        ARC["archive/channels/&lt;ws&gt;/*.md<br/><b>원문 · append only</b>"]
+        ARC["archive/workspaces/&lt;ws&gt;/channels/&lt;id&gt;/raw/*.md<br/><b>원문 · 일자별 append only</b>"]
         QA["qa-log/<br/>감사 기록"]
     end
 

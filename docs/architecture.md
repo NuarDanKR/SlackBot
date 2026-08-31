@@ -37,7 +37,8 @@ _버전 0.1 · 2026-08-19 · Slack AI TFT_
 ### 3.2 수집 파이프라인 (자산화)
 - 대화 자동 취합 07:00 / 17:00, 밀림 알림 09:00 / 16:00, 일일요약 17:30, 주간정리 금 16:00.
 - **원문만** 아카이브에 저장(요약은 별도 섹션, 봇 수정 금지).
-- 저장 경로: `archive/channels/<workspace>/<channel>.md` (스키마: `.claude/skills/md-archive-schema`).
+- 저장 경로: `archive/workspaces/<workspace>/channels/<channel-id>__<name>/raw/YYYY-MM-DD.md`
+  (스키마: `.claude/skills/md-archive-schema`).
 - 게시 전 형식 검사, 실패 시 그날 취합 롤백. 문서 변환(pdf/한글/워드)은 사람이 승인 후.
 - 엑셀·이미지·도면은 현재 미변환 → 색인 「변환하지 못한 것」에 기록.
 

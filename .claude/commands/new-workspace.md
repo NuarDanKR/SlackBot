@@ -7,7 +7,7 @@ description: 새 워크스페이스 봇 온보딩 체크리스트를 실행한�
 1. **앱 설치** — 해당 워크스페이스에 TYBot 앱 설치, `xoxb-`/`xapp-` 발급. (토큰은 서버 시크릿 매니저에만, 저장소 금지)
 2. **채널 명명 검증** — `channel-naming` 스킬로 채널명 규칙 점검.
 3. **봇 초대** — 대상 채널 전부에 `/invite @tybot`. 초대 누락 목록을 출력.
-4. **아카이브 경로 생성** — `archive/channels/$1/` 및 각 채널 MD 스켈레톤(`md-archive-schema` 준수, `visibility: private` 기본).
+4. **아카이브 경로 확인** — 첫 수집 시 `archive/workspaces/$1/channels/<Slack-ID>__<name>/raw/`가 자동 생성된다(`visibility: private` 기본).
 5. **ACL 설정** — `access-control` 스킬로 워크스페이스 코드·허용 그룹 지정. 미설정 시 비공개 폴백 확인.
 6. **취합 스케줄 등록** — 07:00/17:00 대화 취합, 09:00/16:00 밀림 알림.
 7. **단일 인스턴스 확인** — 이 워크스페이스 봇이 한 곳에서만 기동되는지 확인(중복 기동 = 비용 2배).

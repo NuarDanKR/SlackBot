@@ -1,7 +1,10 @@
 -- TYBot 관리 콘솔 스키마 (PostgreSQL 16)
 --
--- 적용:  psql -U tybot -d tybot -f deploy/sql/console_schema.sql
+-- 적용:  psql -U <사용자> -d tyslackai -f deploy/sql/console_schema.sql
 -- 이 파일은 여러 번 실행해도 안전하다(IF NOT EXISTS).
+--
+-- DB 이름은 `tyslackai` 다. 아래 GRANT 예시의 역할 이름(tybot_console·tybot_bot)은
+-- DB 이름과 다른 개념이니 그대로 두어도 된다.
 --
 -- ## 대전제 — DB 는 진실이 아니다
 -- 원문의 진실은 `/var/lib/tybot/archive` 의 MD 파일이다. DB 는 매 질문마다 수천 개 MD 를

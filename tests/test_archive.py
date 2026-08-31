@@ -108,7 +108,9 @@ def test_ingest_skips_bot_output_and_pii(tmp_path):
 def test_ingest_is_idempotent_and_append_only(tmp_path):
     args = dict(workspace="pilot", channel="#a_b", acl=["#a_b"])
     writer.ingest(tmp_path, messages=[_msg("첫 메시지")], **args)
-    first = writer.doc_path(tmp_path, "pilot", "#a_b").read_text(encoding="utf-8")
+    first = writer.doc_path(
+        tmp_path, "pilot", "#a_b", day=datetime(2026, 8, 12, tzinfo=UTC).date()
+    ).read_text(encoding="utf-8")
     r2 = writer.ingest(tmp_path, messages=[_msg("첫 메시지"), _msg("둘째", minute=30)], **args)
     assert r2.written == 1
     after = r2.path.read_text(encoding="utf-8")

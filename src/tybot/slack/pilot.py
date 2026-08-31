@@ -28,7 +28,7 @@ from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
 from ..archive.canvas import canvas_lines
-from ..archive.files import file_lines
+from ..archive.files import attachment_storage, stage_files
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
 from ..audit import QALog, QARecord
@@ -1123,7 +1123,10 @@ class WorkspaceBot:
         if body:
             out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=body))
         if event.get("files"):
-            lines, warns = file_lines(event["files"], self.cfg.bot_token)
+            storage = attachment_storage(
+                self.archive_dir, self.workspace, event.get("channel", "unknown")
+            )
+            lines, warns = stage_files(event["files"], self.cfg.bot_token, storage)
             for ln in lines:
                 out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=ln))
             for w in warns:

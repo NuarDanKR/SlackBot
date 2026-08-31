@@ -32,20 +32,57 @@ if git diff --cached -U0 | grep -nEq "^\+.*($patterns)"; then
 fi
 
 # 3) PII / 아카이브 제외 대상
-#    - 주민번호 '형식'은 어디서든 차단한다(실제 값일 가능성이 높다).
-#    - 키워드(주민번호·등기부등본 등)는 규칙을 '설명'하는 문서에도 나온다.
-#      그런 표면(docs·안내문·훅 자신)까지 막으면 훅이 문서 작업을 방해한다.
-#      실제 원문은 archive/ 로 들어오고 그건 4)에서 통째로 막힌다.
-DOC_SURFACES=':(exclude).githooks/* :(exclude).claude/* :(exclude)docs/* :(exclude)*.md :(exclude)console-web/src/*'
+#
+# 무엇을 막으려는 것인가 — **개인정보 데이터**다. 그것을 막는 **코드와 주석**이 아니다.
+# 예전에는 둘을 구분하지 못해서, PII 탐지기 자신(`orgsync.py` 의 주민번호 정규식)과
+# "이 뷰에 주민번호 컬럼이 있으면 안 된다" 는 SQL 주석까지 막았다. 그러면 사람은
+# 문구를 우회해서 쓰거나 --no-verify 를 습관화한다. 둘 다 가드를 무력하게 만든다.
+#
+# 실제 원문이 들어오는 경로는 `archive/`·`qa-log/` 이고, 그건 4) 에서 통째로 막는다.
+# 여기서는 **그 밖의 경로에 데이터가 섞여 들어오는 것**만 본다.
+#
+# 걸리면 반드시 위치를 출력한다. 어디서 걸렸는지 모르면 고칠 수도, 판단할 수도 없다.
+
+# 규칙을 '설명'하거나 '구현'하는 표면. 키워드가 나오는 것이 정상인 곳이다.
+KEYWORD_ALLOWED=':(exclude).githooks/*
+:(exclude).claude/*
+:(exclude)docs/*
+:(exclude)*.md
+:(exclude)console-web/src/*
+:(exclude)deploy/sql/*
+:(exclude)scripts/*
+:(exclude)src/*
+:(exclude)tests/*
+:(exclude).env.example'
+
+# 주민번호 '형식'은 실제 값일 가능성이 높아 거의 모든 곳에서 막는다.
+# 예외는 tests/ 뿐이다 — PII 탐지기가 실제로 잡는지 확인하려면 형식이 필요하다.
+# 대신 조용히 넘기지 않고 경고로 보여준다(진짜 값이 섞이면 사람이 알아채야 한다).
+RRN_ALLOWED=':(exclude)tests/*'
 
 rrn='[0-9]{6}\s*-\s*[1-4][0-9]{6}'
-if git diff --cached -U0 | grep -nEq "^\+.*($rrn)"; then
+# shellcheck disable=SC2086
+rrn_hits=$(git diff --cached -U0 --name-only -- . $RRN_ALLOWED | while IFS= read -r f; do
+  git diff --cached -U0 -- "$f" | grep -nE "^\+.*($rrn)" | sed "s|^|  $f: |"
+done)
+if [[ -n "$rrn_hits" ]]; then
+  echo "$rrn_hits" | head -10 >&2
   block "주민번호 형식이 변경분에 포함됨"
+fi
+
+# shellcheck disable=SC2086
+rrn_in_tests=$(git diff --cached -U0 -- 'tests/*' | grep -cE "^\+.*($rrn)" || true)
+if [[ "${rrn_in_tests:-0}" -gt 0 ]]; then
+  echo "[pre-commit] 주의: tests/ 에 주민번호 형식 ${rrn_in_tests}건 — 가짜 값인지 확인" >&2
 fi
 
 pii_kw='주민등록번호|주민번호|등기부\s*등본|계약자\s*명단'
 # shellcheck disable=SC2086
-if git diff --cached -U0 -- . $DOC_SURFACES | grep -nEq "^\+.*($pii_kw)"; then
+kw_hits=$(git diff --cached -U0 --name-only -- . $KEYWORD_ALLOWED | while IFS= read -r f; do
+  git diff --cached -U0 -- "$f" | grep -nE "^\+.*($pii_kw)" | sed "s|^|  $f: |"
+done)
+if [[ -n "$kw_hits" ]]; then
+  echo "$kw_hits" | head -10 >&2
   block "PII/아카이브 제외 키워드가 코드·데이터 변경분에 포함됨"
 fi
 

@@ -114,8 +114,7 @@ def inspect(archive_dir: str | Path, *, stale_days: int = STALE_DAYS) -> TidyRep
     for path, why in store.broken():
         report.findings.append(Finding("error", path.name, f"스키마 위반: {why}"))
 
-    base = Path(archive_dir) / "channels"
-    for path in sorted(base.rglob("*.md")) if base.is_dir() else []:
+    for path in store.source_files():
         try:
             doc = load_doc(path)
         except SchemaError:

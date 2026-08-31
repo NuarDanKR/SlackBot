@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 
 from .archive import writer
 from .archive.canvas import canvas_lines
-from .archive.files import file_lines
+from .archive.files import attachment_storage, stage_files
 from .channels import should_collect
 from .envfile import load_env_file
 from .lock import AlreadyRunning, LockUnavailable, instance_lock
@@ -38,7 +38,7 @@ HISTORY_LIMIT = 15  # 신규 앱 요청당 상한
 PACE_SECONDS = 65  # 분당 1요청 제한 + 여유
 
 
-def _messages_from(client, event: dict, bot_token: str, name_cache: dict) -> list:
+def _messages_from(client, event: dict, bot_token: str, name_cache: dict, storage) -> list:
     ts = datetime.fromtimestamp(float(event["ts"]), tz=UTC)
     uid = event.get("user", "unknown")
     if uid not in name_cache:
@@ -56,7 +56,7 @@ def _messages_from(client, event: dict, bot_token: str, name_cache: dict) -> lis
     if body:
         out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=body))
     if event.get("files"):
-        lines, warns = file_lines(event["files"], bot_token)
+        lines, warns = stage_files(event["files"], bot_token, storage)
         out.extend(writer.IncomingMessage(ts=ts, speaker=speaker, text=ln) for ln in lines)
         for w in warns:
             log.warning("첨부 처리 경고: %s", w)
@@ -99,6 +99,7 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
 
     for i, ch in enumerate(channels):
         name = "#" + ch["name"]
+        storage = attachment_storage(archive_dir, cfg.key, ch["id"])
         if i:
             time.sleep(pace)  # 분당 1요청 페이싱
         try:
@@ -112,7 +113,7 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
         for m in reversed(res.get("messages", [])):
             if m.get("bot_id") or m.get("subtype") not in (None, "file_share"):
                 continue
-            msgs.extend(_messages_from(client, m, cfg.bot_token, name_cache))
+            msgs.extend(_messages_from(client, m, cfg.bot_token, name_cache, storage))
 
         canvas = canvas_lines(client, ch["id"], cfg.bot_token)
         if canvas.lines:
@@ -136,6 +137,7 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
                 archive_dir,
                 workspace=cfg.key,
                 channel=name,
+                channel_id=ch["id"],
                 messages=msgs,
                 acl=[name],
             )

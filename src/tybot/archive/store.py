@@ -1,7 +1,7 @@
 """로컬 MD 아카이브 읽기/검색.
 
 환각방지 2겹: 색인이 아니라 **원문 라인**을 반환한다. 답변은 이 라인만 근거로 한다.
-스키마: `.claude/skills/md-archive-schema` — archive/channels/<workspace>/<channel>.md
+v1 평면 파일과 v2 ``workspaces/<ws>/channels/<id>__<name>/raw/<date>.md``를 함께 읽는다.
 """
 from __future__ import annotations
 
@@ -21,6 +21,17 @@ RAW_LINE_RE = re.compile(r"^>\s*\[(?P<ts>[^\]]+)\]\s*(?P<speaker>[^:]+):\s*(?P<t
 TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 
 
+def workspace_from_path(path: Path, root: Path | str) -> str:
+    """v1/v2 원문 경로에서 워크스페이스 키를 얻는다."""
+    try:
+        parts = path.relative_to(Path(root)).parts
+    except ValueError:
+        return "unknown"
+    if len(parts) >= 2 and parts[0] in {"channels", "workspaces"}:
+        return parts[1]
+    return "unknown"
+
+
 @dataclass(frozen=True)
 class RawLine:
     """원문 한 줄. 편집 금지 대상."""
@@ -29,6 +40,7 @@ class RawLine:
     speaker: str
     text: str
     lineno: int
+    source_path: Path | None = None
 
 
 @dataclass
@@ -41,6 +53,8 @@ class ArchiveDoc:
     # 이 문서를 넘길 다른 워크스페이스 목록(선택). 비어 있으면 동등 워크스페이스로 안 나간다.
     share_with: frozenset[str]
     last_ingested: str | None
+    channel_id: str | None = None
+    schema_version: int = 1
     # 채널명에서 뽑은 조직 정보(선택). 조직 트리 연결·개편 추적에 쓴다.
     org_code: str | None = None
     org_kind: str | None = None
@@ -66,7 +80,8 @@ class SearchHit:
         """
         date = self.line.ts.split()[0] if self.line.ts else ""
         prefix = f"[{self.doc.workspace}] " if with_workspace else ""
-        return f"{prefix}{self.doc.channel}, 📄{self.doc.path.name}({date})"
+        source = self.line.source_path or self.doc.path
+        return f"{prefix}{self.doc.channel}, 📄{source.name}({date})"
 
 
 class SchemaError(ValueError):
@@ -130,6 +145,13 @@ def validate(text: str, *, path: str = "<memory>") -> dict[str, str | list[str]]
         raise SchemaError(f"{path}: 프론트매터 필수 필드 누락 {missing}")
     if fm.get("visibility") not in ("public", "private"):
         raise SchemaError(f"{path}: visibility 는 public|private 만 허용")
+    version = str(fm.get("schema_version") or "1")
+    if version not in {"1", "2"}:
+        raise SchemaError(f"{path}: 지원하지 않는 schema_version {version}")
+    if version == "2":
+        missing_v2 = [key for key in ("channel_id", "source_date") if not fm.get(key)]
+        if missing_v2:
+            raise SchemaError(f"{path}: v2 필수 필드 누락 {missing_v2}")
     if not RAW_HEADING_RE.search(text):
         raise SchemaError(f"{path}: '## 원문' 섹션 없음")
     return fm
@@ -165,6 +187,7 @@ def load_doc(path: Path) -> ArchiveDoc:
                     speaker=m.group("speaker").strip(),
                     text=m.group("text").strip(),
                     lineno=i,
+                    source_path=path,
                 )
             )
     return ArchiveDoc(
@@ -175,6 +198,8 @@ def load_doc(path: Path) -> ArchiveDoc:
         acl=acl,
         share_with=share_with,
         last_ingested=str(fm.get("last_ingested")) if fm.get("last_ingested") else None,
+        channel_id=str(fm["channel_id"]) if fm.get("channel_id") else None,
+        schema_version=int(str(fm.get("schema_version") or "1")),
         raw_lines=lines,
         org_code=str(fm["org_code"]) if fm.get("org_code") else None,
         org_kind=str(fm["org_kind"]) if fm.get("org_kind") else None,
@@ -183,7 +208,7 @@ def load_doc(path: Path) -> ArchiveDoc:
 
 
 class ArchiveStore:
-    """archive/channels 아래 MD 파일 집합.
+    """v1/v2 원문 MD 파일을 논리 채널 단위로 합쳐 제공한다.
 
     파싱 결과는 **파일 mtime·크기 기준으로 캐시**한다. 한 질문을 처리하는 동안
     `visible_docs()` 가 여러 번 불리고(검색 → 0건이면 제목 목록), 매번 전 파일을 다시
@@ -200,8 +225,17 @@ class ArchiveStore:
         self._lock = threading.Lock()
 
     def _files(self) -> list[Path]:
-        base = self.root / "channels"
-        return sorted(base.rglob("*.md")) if base.is_dir() else []
+        v2 = self.root / "workspaces"
+        legacy = self.root / "channels"
+        # v2를 먼저 읽어 v1과 같은 라인이 있으면 새 경로를 출처로 남긴다.
+        files = sorted(v2.glob("*/channels/*/raw/*.md")) if v2.is_dir() else []
+        if legacy.is_dir():
+            files.extend(sorted(legacy.glob("*/*.md")))
+        return files
+
+    def source_files(self) -> list[Path]:
+        """점검·마이그레이션용 실제 원문 파일 목록."""
+        return self._files()
 
     def _load(self, path: Path) -> ArchiveDoc | str:
         """캐시된 파싱 결과. 형식 위반은 사유 문자열로 캐시한다(재파싱 낭비 방지)."""
@@ -226,13 +260,72 @@ class ArchiveStore:
         return result
 
     def docs(self) -> list[ArchiveDoc]:
-        out: list[ArchiveDoc] = []
+        loaded = self.source_docs()
+
+        # v1에는 channel_id가 없다. 같은 이름의 v2 문서가 있으면 그 ID로 묶어
+        # 마이그레이션 전후 원문이 답변에 중복으로 들어가지 않게 한다.
+        ids_by_name = {
+            (doc.workspace, doc.channel): doc.channel_id for doc in loaded if doc.channel_id
+        }
+        grouped: dict[tuple[str, str], list[ArchiveDoc]] = {}
+        for doc in loaded:
+            identity = doc.channel_id or ids_by_name.get((doc.workspace, doc.channel)) or doc.channel
+            grouped.setdefault((doc.workspace, identity), []).append(doc)
+        return [self._merge(parts) for parts in grouped.values()]
+
+    def source_docs(self) -> list[ArchiveDoc]:
+        """실제 원문 파일별 문서. 콘솔 파일 목록과 점검에 사용한다."""
+        loaded: list[ArchiveDoc] = []
         for p in self._files():
             got = self._load(p)
             # 조용한 0건이 가장 위험 — 형식 위반은 건너뛰되 broken() 으로 감지 가능하게 남긴다.
             if isinstance(got, ArchiveDoc):
-                out.append(got)
-        return out
+                loaded.append(got)
+        return loaded
+
+    @staticmethod
+    def _merge(parts: list[ArchiveDoc]) -> ArchiveDoc:
+        """같은 채널의 일자 파일을 합친다. 권한 메타가 엇갈리면 막는 쪽으로 합친다."""
+        newest = max(
+            parts,
+            key=lambda doc: (
+                doc.last_ingested or "",
+                max((line.ts for line in doc.raw_lines), default=""),
+            ),
+        )
+        # ACL의 채널명은 이름 변경 전후 값이 함께 남을 수 있다. 같은 Slack 채널 ID로
+        # 묶인 문서만 합치므로 현재 멤버십 이름과 겹치도록 합집합을 쓴다.
+        acl: set[str] = set()
+        share_with = set(parts[0].share_with)
+        for doc in parts:
+            acl.update(doc.acl)
+        for doc in parts[1:]:
+            share_with.intersection_update(doc.share_with)
+
+        lines: list[RawLine] = []
+        seen: set[tuple[str, str, str]] = set()
+        for doc in parts:
+            for line in doc.raw_lines:
+                key = (line.ts, line.speaker, line.text)
+                if key not in seen:
+                    seen.add(key)
+                    lines.append(line)
+        lines.sort(key=lambda line: (line.ts, str(line.source_path), line.lineno))
+        return ArchiveDoc(
+            path=newest.path,
+            workspace=newest.workspace,
+            channel=newest.channel,
+            visibility="public" if all(d.visibility == "public" for d in parts) else "private",
+            acl=frozenset(acl),
+            share_with=frozenset(share_with),
+            last_ingested=max((d.last_ingested or "" for d in parts), default="") or None,
+            channel_id=next((d.channel_id for d in parts if d.channel_id), None),
+            schema_version=max(d.schema_version for d in parts),
+            org_code=newest.org_code,
+            org_kind=newest.org_kind,
+            org_name=newest.org_name,
+            raw_lines=lines,
+        )
 
     def broken(self) -> list[tuple[Path, str]]:
         """형식 검사 실패 목록. 운영 알림용."""

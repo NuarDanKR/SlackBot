@@ -113,7 +113,8 @@ pytest -q tests/test_archive.py -k org    # 2 passed
 ```
 실제 파일 확인:
 ```bash
-head -12 /var/lib/tybot/archive/channels/<ws>/<채널>.md
+find /var/lib/tybot/archive/workspaces/<ws>/channels -path '*/raw/*.md' -type f -print
+head -14 /var/lib/tybot/archive/workspaces/<ws>/channels/<채널ID>__*/raw/<날짜>.md
 # org_kind: team / org_code: ABB110 / org_name: 전산
 ```
 

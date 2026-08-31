@@ -21,6 +21,10 @@ venv/
 
 # 로컬 아카이브 원문 — 사내 대화. 코드 저장소에 커밋 금지(중앙 아카이브는 별도 저장소)
 /archive/
+/staging/
+/objects/
+/derived/
+/qa-log/
 
 # 빌드 산물
 *.egg-info/
