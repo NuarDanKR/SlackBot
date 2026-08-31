@@ -7,11 +7,17 @@
 
 조직도는 이미 `org_unit` 에 있다. "경영" 을 치면 후보를 보여주고 고르게 한다.
 
-## 구분(본부/실/팀)은 조직명에서 나온다
+## 구분(본부/실/팀/현장)은 조직코드와 조직명에서 나온다
 `org_unit.kind` 는 그룹웨어에 구분 컬럼이 없어 **추정한 값**이다(스키마 주석).
-추정값으로 채널명을 짓지 않는다. 대신 조직명 끝을 본다 — `경영혁신실` → `실`,
-`경영본부` → `본부`, `전산팀` → `팀`. 이건 사람이 붙인 이름 그대로라 추정이 아니다.
-끝이 규칙에 없으면 사용자가 고른 구분을 쓴다.
+추정값으로 채널명을 짓지 않는다. 대신 그룹웨어가 실제로 강제하는 두 가지를 쓴다.
+
+| 근거 | 규칙 |
+|---|---|
+| **조직코드** | 알파벳이 있으면 본사(`ABB110`), 숫자뿐이면 **현장**(`1800249`) |
+| **조직명 끝** | 본사 안에서 `경영혁신실` → `실`, `경영본부` → `본부`, `전산팀` → `팀` |
+
+코드가 이름보다 세다. 이름은 사람이 바꿀 수 있지만 코드 체계는 그룹웨어가 준다.
+본사인데 이름 끝이 규칙에 없으면(`경영지원`) 비워 두고 사용자가 고르게 한다.
 
 ## 계열사 경계
 `company_code` 가 다른 조직은 서로 보이면 안 된다(스키마 주석). 검색은 호출자가 준
@@ -45,13 +51,56 @@ class OrgHit:
 
     @property
     def prefix(self) -> str:
-        """조직명에서 뽑은 구분. 없으면 빈 문자열."""
-        return split_org_name(self.name)[0]
+        """구분. 조직코드와 조직명으로 정한다. 못 정하면 빈 문자열."""
+        return derive_prefix(self.code, self.name)
 
     @property
     def base_name(self) -> str:
-        """구분을 뗀 조직명. 채널명에 들어가는 부분이다."""
-        return split_org_name(self.name)[1]
+        """채널명에 들어갈 조직명.
+
+        **구분으로 실제 쓴 접미사만** 뗀다. 현장 조직 `공무팀`(코드 180182)은 구분이
+        코드에서 `현장` 으로 정해지므로 이름은 그대로 둔다 — `현장-공무팀_180182`.
+        여기서 `팀` 을 떼면 `현장-공무` 가 되어 무슨 조직인지 알 수 없게 된다.
+        """
+        suffix, base = split_org_name(self.name)
+        return base if suffix and suffix == self.prefix else self.name.strip()
+
+    @property
+    def is_site(self) -> bool:
+        return is_site_code(self.code)
+
+
+def is_site_code(code: str) -> bool:
+    """조직코드로 현장을 가른다.
+
+    본사 조직은 코드에 알파벳이 있다(`ABB110`). 현장은 숫자만이다(`1800249`).
+    조직명보다 확실한 근거다 — 이름은 `김해외동` 처럼 접미사가 없는 경우가 있지만
+    코드 체계는 그룹웨어가 강제한다.
+    """
+    c = (code or "").strip()
+    return bool(c) and c.isdigit()
+
+
+def derive_prefix(code: str, name: str) -> str:
+    """(조직코드, 조직명) → 구분. 못 정하면 빈 문자열.
+
+    순서가 중요하다:
+    1. 이름이 `프로젝트` 로 끝나면 프로젝트다. 본사/현장 축과 다른 갈래라 코드로 갈리지 않는다.
+    2. 코드가 숫자뿐이면 **현장**이다(그룹웨어 코드 체계).
+    3. 그 외에는 본사 조직이므로 이름 끝에서 본부·실·팀을 뽑는다.
+    4. 본사인데 이름 끝이 규칙에 없으면(`경영지원`) 비워 두고 사용자가 고르게 한다.
+
+    본사 조직에 `현장` 이 붙거나 현장 조직에 `팀` 이 붙는 것을 막는 것이 요점이다.
+    잘못 붙으면 채널명만으로 조직을 분류할 수 없게 된다.
+    """
+    suffix, _ = split_org_name(name)
+    if suffix == "프로젝트":
+        return suffix
+    if is_site_code(code):
+        return "현장"
+    # 본사 조직에는 현장을 주지 않는다. 이름이 `...현장` 이어도 코드가 본사면
+    # 코드 쪽을 믿는다 — 이름은 사람이 바꿀 수 있고 코드는 그룹웨어가 준다.
+    return "" if suffix == "현장" else suffix
 
 
 def split_org_name(name: str) -> tuple[str, str]:
@@ -119,10 +168,16 @@ def search(
 
 
 def option(hit: OrgHit) -> dict:
-    """Slack 옵션 하나. 상위 조직을 함께 보여 같은 이름을 구분한다."""
+    """Slack 옵션 하나.
+
+    상위 조직을 함께 보여 같은 이름을 구분하고, 정해진 구분(본부/실/팀/현장)을 덧붙인다.
+    고르기 전에 어떤 채널명이 될지 알 수 있어야 한다.
+    """
     label = f"{hit.name} · {hit.code}"
     if hit.parent_name:
         label = f"{hit.name} ({hit.parent_name}) · {hit.code}"
+    if hit.prefix:
+        label = f"[{hit.prefix}] {label}"
     return {
         "text": {"type": "plain_text", "text": label[:MAX_TEXT]},
         # 제출 시 DB 를 다시 조회하지 않으려고 필요한 것만 담는다.

@@ -147,6 +147,12 @@ def org_select_block() -> dict:
                 "text": "조직명 또는 코드로 검색 (예: 경영)",
             },
         },
+        # 무엇이 자동으로 정해지는지 밝힌다. 안 적으면 구분 선택이 왜 무시되는지 모른다.
+        "hint": {
+            "type": "plain_text",
+            "text": "구분은 조직코드로 정해집니다 — 숫자만이면 현장, "
+                    "알파벳이 있으면 본사(이름 끝에서 본부·실·팀).",
+        },
     }
 
 
@@ -168,7 +174,7 @@ def _name_inputs(spec: ChannelSpec | None = None, *, org_search: bool = False) -
     # 검색으로 고르면 조직명 끝에서 구분이 나온다(경영혁신실 -> 실). 그때 이 선택은
     # 쓰이지 않으므로 언제 쓰이는지 라벨에 적는다 — 안 적으면 "골랐는데 왜 안 반영되지" 가 된다.
     prefix_label = (
-        "조직 구분 (조직명에 본부·실·팀이 없을 때만 사용)" if org_search else "조직 구분"
+        "조직 구분 (자동 판단이 안 될 때만 사용)" if org_search else "조직 구분"
     )
 
     prefix_block = {

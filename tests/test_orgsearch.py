@@ -20,7 +20,9 @@ from tybot.orgsearch import (
     NO_MATCH,
     OrgHit,
     decode_value,
+    derive_prefix,
     encode_value,
+    is_site_code,
     notice_option,
     option,
     options,
@@ -184,7 +186,14 @@ def test_manual_modal_is_kept_when_db_is_unavailable():
 def test_prefix_label_explains_when_it_is_used():
     """검색으로 고르면 이 선택이 무시된다 - 안 적으면 '왜 반영이 안 되지' 가 된다."""
     label = _name_inputs(org_search=True)[0]["label"]["text"]
-    assert "조직명에 본부·실·팀이 없을 때만" in label
+    assert "자동 판단이 안 될 때만" in label
+
+
+def test_org_block_states_the_code_rule():
+    """구분이 무엇으로 정해지는지 화면에서 알 수 있어야 한다."""
+    hint = _name_inputs(org_search=True)[1]["hint"]["text"]
+    assert "숫자만이면 현장" in hint
+    assert "알파벳" in hint
 
 
 def test_create_modal_passes_the_flag():
@@ -318,3 +327,90 @@ def test_callback_does_not_log_full_query(monkeypatch, caplog):
         _bot()._org_options("가" * 100)
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert "가" * 100 not in logged
+
+
+# --- 조직코드로 본사·현장 가르기 ---------------------------------------------
+# 본사 조직은 코드에 알파벳이 있다(ABB110). 현장은 숫자만이다(1800249).
+# 이름은 사람이 바꿀 수 있지만 코드 체계는 그룹웨어가 준다.
+@pytest.mark.parametrize(
+    ("code", "site"),
+    [
+        ("ABB110", False),
+        ("ABB123", False),
+        ("1800249", True),
+        ("180182", True),
+        ("A1800249", False),   # 알파벳이 하나라도 있으면 본사
+        ("", False),           # 코드가 없으면 판단하지 않는다
+        ("  ", False),
+    ],
+)
+def test_is_site_code(code, site):
+    assert is_site_code(code) is site
+
+
+@pytest.mark.parametrize(
+    ("code", "name", "prefix"),
+    [
+        ("ABB123", "경영혁신실", "실"),
+        ("ABB300", "경영본부", "본부"),
+        ("ABB110", "전산팀", "팀"),
+        ("1800249", "김해외동", "현장"),        # 이름에 접미사가 없어도 코드가 현장
+        ("1800249", "김해외동현장", "현장"),
+        ("180182", "공무팀", "현장"),           # 현장 소속 팀 - 코드가 이긴다
+        ("ABB999", "경영지원", ""),             # 본사인데 접미사 없음 -> 사용자 선택
+        ("ABB800", "안전현장", ""),             # 본사 코드에 현장을 붙이지 않는다
+        ("ABB700", "스마트시티프로젝트", "프로젝트"),  # 프로젝트는 본사/현장 축 밖
+        ("1800300", "재개발프로젝트", "프로젝트"),
+    ],
+)
+def test_derive_prefix(code, name, prefix):
+    assert derive_prefix(code, name) == prefix
+
+
+def test_site_code_wins_over_name_suffix():
+    """현장 조직의 '공무팀' 이 팀으로 분류되면 채널명만으로 현장을 구분할 수 없다."""
+    assert OrgHit("180182", "공무팀").prefix == "현장"
+
+
+def test_hq_code_never_becomes_a_site():
+    """본사 조직에 현장이 붙으면 조직 집계가 어긋난다."""
+    assert OrgHit("ABB800", "안전현장").prefix == ""
+
+
+def test_base_name_keeps_suffix_that_was_not_used():
+    """구분으로 쓰지 않은 접미사를 떼면 무슨 조직인지 알 수 없게 된다."""
+    assert OrgHit("180182", "공무팀").base_name == "공무팀"
+    assert OrgHit("ABB800", "안전현장").base_name == "안전현장"
+
+
+def test_base_name_strips_the_suffix_that_was_used():
+    assert OrgHit("ABB123", "경영혁신실").base_name == "경영혁신"
+    assert OrgHit("1800249", "김해외동현장").base_name == "김해외동"
+
+
+def test_site_without_suffix_keeps_its_name():
+    assert OrgHit("1800249", "김해외동").base_name == "김해외동"
+
+
+def test_option_label_shows_the_derived_prefix():
+    """고르기 전에 어떤 채널명이 될지 알 수 있어야 한다."""
+    assert option(OrgHit("1800249", "김해외동"))["text"]["text"].startswith("[현장]")
+    assert option(OrgHit("ABB999", "경영지원"))["text"]["text"].startswith("경영지원")
+
+
+@pytest.mark.parametrize(
+    ("code", "name", "expected"),
+    [
+        ("ABB123", "경영혁신실", "실-경영혁신_ABB123-주간회의"),
+        ("1800249", "김해외동", "현장-김해외동_1800249-주간회의"),
+        ("180182", "공무팀", "현장-공무팀_180182-주간회의"),
+    ],
+)
+def test_end_to_end_channel_name(code, name, expected):
+    from tybot.channel_management import build_channel_name
+
+    hit = OrgHit(code, name)
+    view = _view(**_prefix("팀"), **_picked(encode_value(hit)), **_task("주간회의"))
+    req = request_from_view(view, include_channel_options=False)
+    assert req.name == expected
+    assert build_channel_name(hit.prefix, hit.base_name, hit.code, "주간회의") == expected
