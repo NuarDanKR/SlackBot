@@ -46,7 +46,19 @@ from ..collection_status import report as collection_report
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
 from ..failures import failure_message
-from ..feedback import SLASH_HELP, FeedbackLog, correction_text, reaction_kind
+from ..feedback import (
+    SLASH_HELP,
+    FeedbackLog,
+    correction_text,
+    feedback_modal,
+    reaction_kind,
+)
+from ..feedback import (
+    from_view as feedback_from_view,
+)
+from ..feedback import (
+    thanks as feedback_thanks,
+)
 from ..intent import (
     INGEST_ALL_RE,
     INGEST_RE,
@@ -299,19 +311,77 @@ class WorkspaceBot:
         @self.app.command("/피드백")
         @self.app.command("/ty-feedback")
         def on_feedback_command(ack, command, client, respond):
-            """대상 메시지를 고를 수 없을 때의 신고 입구.
+            """피드백의 **주 입구**.
 
-            리액션·`정정:` 답글과 **같은 로그**에 쌓는다 - 입구마다 저장소가 갈라지면
+            인수 없이 실행하면 선택 화면(모달)을 연다. 답변 메시지에 마우스를 올려
+            이모지를 찾는 동작은 번거롭고 모바일에서는 더 그렇다. 리액션·`정정:` 답글도
+            계속 동작하며, 셋 다 **같은 로그**에 쌓는다 - 입구마다 저장소가 갈라지면
             품질 검토에서 한쪽을 놓친다.
             """
             ack()
-            respond(
-                self._record_slash_feedback(
-                    user_id=command.get("user_id", ""),
-                    channel_id=command.get("channel_id", ""),
-                    text=(command.get("text") or "").strip(),
+            text = (command.get("text") or "").strip()
+            channel_id = command.get("channel_id", "")
+            user_id = command.get("user_id", "")
+
+            if text in ("도움말", "help", "?"):
+                respond(SLASH_HELP.format(bot=self.bot_name), response_type="ephemeral")
+                return
+            if text:
+                # 이미 적어서 보냈으면 한 번에 접수한다. 모달을 또 띄우지 않는다.
+                respond(
+                    self._record_slash_feedback(
+                        user_id=user_id, channel_id=channel_id, text=text
+                    ),
+                    response_type="ephemeral",
+                )
+                return
+
+            row = self.qa_log.last_answer_for_user(self.workspace, channel_id, user_id)
+            asked = str((row or {}).get("question") or "").strip()
+            metadata = json.dumps(
+                {
+                    "channel_id": channel_id,
+                    "qa_record_id": str((row or {}).get("record_id") or ""),
+                    "answer_ts": str((row or {}).get("response_ts") or ""),
+                    "question": asked[:80],
+                },
+                ensure_ascii=False,
+            )
+            try:
+                client.views_open(
+                    trigger_id=command["trigger_id"],
+                    view=feedback_modal(
+                        metadata, target=f"`{asked[:80]}`" if asked else ""
+                    ),
+                )
+            except Exception as e:
+                log.warning("[%s] 피드백 모달 열기 실패: %s", self.workspace, e)
+                respond(SLASH_HELP.format(bot=self.bot_name), response_type="ephemeral")
+
+        @self.app.view("tybot_feedback")
+        def on_feedback_submission(ack, body, client, view):
+            ack()
+            meta = self._modal_metadata(view)
+            kind, detail = feedback_from_view(view)
+            user_id = (body.get("user") or {}).get("id", "")
+            self.feedback_log.write(
+                workspace=self.workspace,
+                channel_id=str(meta.get("channel_id") or ""),
+                qa_record_id=str(meta.get("qa_record_id") or ""),
+                answer_ts=str(meta.get("answer_ts") or ""),
+                actor=user_id,
+                kind=kind,
+                action="submitted",
+                text=detail,
+            )
+            asked = str(meta.get("question") or "")
+            self._notify_user(
+                client,
+                user_id,
+                feedback_thanks(
+                    kind,
+                    linked=f"직전 질문(`{asked}`)에 연결했습니다." if asked else "",
                 ),
-                response_type="ephemeral",
             )
 
         @self.app.view("tybot_create_channel")
@@ -497,20 +567,10 @@ class WorkspaceBot:
             action="submitted",
             text=text,
         )
-        if record_id:
-            asked = str(row.get("question") or "").strip()
-            detail = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if asked else "직전 답변에 연결했습니다."
-        else:
-            # 연결할 답변이 없으면 그 사실을 말한다. 검토자가 재현하지 못하기 때문이다.
-            detail = (
-                "이 채널에서 회원님이 받은 답변 기록을 찾지 못해 "
-                "특정 답변에 연결하지는 못했습니다."
-            )
-        return (
-            "신고를 접수했습니다. 답변 품질 검토에 반영하겠습니다.\n"
-            f"{detail}\n"
-            "신고 내용은 아카이브에 저장되지 않으며 답변 근거로도 쓰이지 않습니다."
-        )
+        # 연결할 답변이 없으면 그 사실을 말한다 - 검토자가 재현하지 못하기 때문이다.
+        asked = str(row.get("question") or "").strip() if row else ""
+        linked = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if record_id and asked else ""
+        return feedback_thanks("correction", linked=linked)
 
     def _handle_feedback_reaction(self, event: dict, *, action: str) -> None:
         kind = reaction_kind(str(event.get("reaction") or ""))
@@ -1251,7 +1311,8 @@ class WorkspaceBot:
                 "• `수집` — 이 채널 과거 대화 백필 / `전체수집` — 규칙에 맞는 전 채널",
                 "• `상태` — 연결·수집 상태 / `도움말` — 이 안내",
                 "• `/수집상태` — 지금 이 채널이 수집되는지, 아니면 왜 아닌지",
-                "• `/피드백 <내용>` — 답변이 틀렸을 때 신고 (답변에 :+1:/:-1: 도 가능)",
+                "• `/피드백` — 답변 품질 신고. 선택 화면이 열립니다 "
+                "(`/피드백 <내용>` 으로 바로 보내거나, 답변에 :+1:/:-1: 도 가능)",
                 "• `이전 답변 기억나?` — 기억 여부와 그 이유(매번 원문에서 다시 찾습니다)",
                 "• `--model=claude-opus-4-8 질문` — 모델 지정",
                 "*사실*은 아카이브 원문만 근거로 답합니다. 근거가 없으면 추측하지 않습니다.",

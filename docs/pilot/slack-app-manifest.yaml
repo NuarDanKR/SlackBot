@@ -42,12 +42,12 @@ features:
       description: /수집상태 명령의 영문 예비 명령입니다.
       should_escape: false
     - command: /피드백
-      description: 답변이 잘못됐을 때 신고합니다.
-      usage_hint: 무엇이 잘못됐는지
+      description: 답변 품질을 신고합니다. 명령만 입력하면 선택 화면이 열립니다.
+      usage_hint: (비워두면 선택 화면) | 무엇이 잘못됐는지
       should_escape: false
     - command: /ty-feedback
       description: /피드백 명령의 영문 예비 명령입니다.
-      usage_hint: 무엇이 잘못됐는지
+      usage_hint: (비워두면 선택 화면) | 무엇이 잘못됐는지
       should_escape: false
 oauth_config:
   scopes:
