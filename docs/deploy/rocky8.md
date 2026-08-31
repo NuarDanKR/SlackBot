@@ -115,6 +115,8 @@ sudo OFFLINE=1 bash deploy/install.sh    # wheels/ 사용
 | 시크릿 | `/etc/tybot/tybot.env` | 설정은 `/etc`. `0640 root:tybot`, 저장소와 물리 분리 |
 | | | 앱이 python-dotenv 로 직접 읽는다(유닛의 `EnvironmentFile=` 미사용) |
 | **원문 아카이브** | `/var/lib/tybot/archive` | **코드와 분리** — `git pull`·재클론이 원문을 건드리면 안 된다 |
+| 첨부 검수대기 | `/var/lib/tybot/staging` | 추출본. 사람 승인 전 검색 금지 |
+| 첨부 원본 | `/var/lib/tybot/objects` | 바이너리 원본. 검색 금지·접근권한 최소화 |
 | 로그 | journald | 로테이션 자동 |
 
 ---
@@ -178,9 +180,9 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py --live
 파일럿에서 로컬에 쌓인 원문을 이어서 쓰려면:
 ```bash
 # 로컬 PC
-scp -r archive/channels <계정>@<서버>:/tmp/
+scp -r archive/workspaces <계정>@<서버>:/tmp/
 # 서버
-sudo cp -r /tmp/channels/. /var/lib/tybot/archive/channels/
+sudo cp -r /tmp/workspaces/. /var/lib/tybot/archive/workspaces/
 sudo chown -R tybot:tybot /var/lib/tybot/archive
 ```
 안 옮겨도 된다 — 실시간 수집이 새로 쌓는다. 다만 지금까지 모은 원문은 사라진다.
@@ -260,6 +262,35 @@ sudo bash /opt/tybot/deploy/update.sh
 
 ---
 
+## 6-B. 일정 연동 (선택)
+
+`/일정` 은 `schedule_occurrence` 를 읽는다. 채우는 경로는 둘이다.
+
+```bash
+# 1) 추출 — Oracle 에서 스냅샷을 만든다(방식 A: 봇 서버가 직접 조회)
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/schedule_export.py     --out /var/lib/tybot/inbox-schedule --mode live --horizon-hours 48
+
+# 2) 반영 — 먼저 검사만 해 본다
+sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.schedulesync --dry-run
+sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.schedulesync
+
+# 주기 실행(1분)
+sudo systemctl enable --now tybot-schedule-sync.timer
+journalctl -u tybot-schedule-sync -f
+```
+
+| 증상 | 원인 / 조치 |
+|---|---|
+| `삭제 판정이 지나치다` | 추출이 부분 실패했을 수 있다. Oracle 쪽을 확인하고, 정말 취소된 일정이면 `--force` |
+| `체크섬 불일치` | 전송이 끝나지 않았다. 다음 주기에 다시 시도된다 |
+| 폴더가 `미승인폴더` 로 집계됨 | `schedule_folder` 에 승인 등록이 안 됐다. 승인 목록이 곧 허용 목록이다 |
+| `/일정` 이 "동기화 지연" 을 표시 | 타이머가 멈췄거나 Oracle 조회 실패. `systemctl status tybot-schedule-sync` |
+
+**시각 대조를 한 번 해야 한다** — 추출기가 그룹웨어 시각에 `+09:00` 을 붙인다.
+데이터가 들어오면 `/일정 오늘` 출력과 그룹웨어 화면의 시각이 같은지 확인한다.
+
+---
+
 ## 7. 트러블슈팅
 
 | 증상 | 원인 / 조치 |
@@ -302,7 +333,7 @@ sudo jq -s 'map(.cost_usd)|add' /var/lib/tybot/qa-log/qa-$(date +%Y-%m).jsonl
 sudo jq -r 'select(.reason=="no_hits")|.question' /var/lib/tybot/qa-log/qa-$(date +%Y-%m).jsonl
 ```
 
-**아카이브와 분리되어 있다.** `qa-log/` 는 `archive/channels/` 밖이고, `ArchiveStore` 는 이 파일을
+**아카이브와 분리되어 있다.** `qa-log/` 는 `archive/workspaces/` 밖이고, `ArchiveStore` 는 이 파일을
 읽지 않는다 — 봇 답변이 다시 근거가 되면 요약 재귀가 발생하기 때문이다(원칙 1).
 회귀 테스트로 고정돼 있다(`test_md_is_not_read_as_archive`).
 
@@ -432,6 +463,8 @@ journalctl -u tybot -n 30
 | 대상 | 방법 | 우선순위 |
 |---|---|---|
 | `/var/lib/tybot/archive` | 중앙 Git 비공개 저장소로 push (쓰기 권한 필요) 또는 파일 백업 | **최우선 — 재생성 불가** |
+| `/var/lib/tybot/objects` | 암호화 파일 백업. Git 저장 금지 | **최우선 — 첨부 원본** |
+| `/var/lib/tybot/staging` | 검수 진행 상태와 함께 파일 백업. Git 저장 금지 | 높음 |
 | `/var/lib/tybot/qa-log` | 감사 기록 — 재생성 불가. 질문 원문 포함이라 사내 자료로 취급 | **높음** |
 | `/etc/tybot/tybot.env` | 시크릿 매니저/봉인 문서. 백업 매체 암호화 필수 | 중 (재발급 가능) |
 | 코드 | Git 저장소 | 하 |

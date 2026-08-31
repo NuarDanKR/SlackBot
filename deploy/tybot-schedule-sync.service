@@ -1,0 +1,22 @@
+[Unit]
+Description=TYBot 일정 스냅샷 반영 (inbox -> PostgreSQL)
+Documentation=file:///opt/tybot/docs/design/schedule-command.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.schedulesync
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-schedule-sync
+# 반영은 트랜잭션 하나다. 오래 걸리면 스냅샷이 밀린 것이므로 다음 실행에 맡긴다.
+TimeoutStartSec=180
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tybot

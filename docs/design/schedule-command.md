@@ -22,7 +22,7 @@ V_TYSLACK_SCHEDULE_   │  schedule_export.py    schedule_occurrence
 | `scripts/schedule_export.py` | **완료** · live 7건 / reconcile 28건 실제 추출 확인 |
 | `tests/test_schedule_export.py` | **완료** 28건 |
 | `deploy/sql/schedule_schema.sql` (테이블 5개) | **완료** · 실제 DB 적용됨 |
-| 스냅샷 → PostgreSQL 수신기 | **미구현** |
+| 스냅샷 → PostgreSQL 수신기 | **구현됨** · `src/tybot/schedulesync.py` · 테스트 36건 |
 | 발송 잡 (30분/10분 전 공지) | **미구현** |
 | `/일정` 슬래시 명령 | **구현됨** · `src/tybot/schedule.py` + 명령/버튼 · 테스트 46건 |
 
@@ -116,13 +116,17 @@ DM 에서 `/일정` 을 받으면 그 사람의 사번 → `user_identity` → `
 
 ## 4. 먼저 필요한 것 (의존)
 
-`/일정` 은 `schedule_occurrence` 에 데이터가 있어야 동작한다. 지금은 **비어 있다.**
-아래 둘 중 하나가 먼저 끝나야 한다.
+`/일정` 은 `schedule_occurrence` 에 데이터가 있어야 동작한다.
+수신기가 준비됐으므로 남은 것은 **추출기를 주기 실행해 inbox 를 채우는 것**이다.
 
-1. **스냅샷 수신기** — `schedule_export.py` 가 만든 폴더를 읽어 upsert.
-   `src/tybot/orgsync.py` 를 본뜨면 된다(체크섬 검증 → 검사 → 트랜잭션 1개 → 이력).
-   **`horizon_start`~`horizon_end` 범위 안에서만** 누락 행을 삭제로 판정한다.
-   범위 밖 일정을 지우면 안 된다.
+1. ~~**스냅샷 수신기**~~ → **완료**: `src/tybot/schedulesync.py`
+   - 삭제 판정은 `horizon_start~horizon_end` × manifest 의 `source_folders` 안으로만 한정
+   - 소프트 삭제(`source_deleted_at`)만 한다. 다시 오면 되살린다
+   - 보존 기간이 지나 비운 제목은 되살리지 않는다
+   - 구간 안 일정의 절반 넘게 지우려 하면 멈춘다(`--force` 로만 통과)
+   - 같은 `snapshot_id` 재반영 방지, 제목·장소는 로그·이력에 남기지 않음
+   - 실행: `python -m tybot.schedulesync [--dry-run] [--dir <폴더>]`
+     / 주기 실행: `tybot-schedule-sync.timer` (1분)
 2. 시험용으로 손으로 몇 행 넣기 — 명령 UI 를 먼저 만들 때만.
 
 `schedule_folder` 에 폴더를 등록해야 `schedule_channel` 연결이 가능하다.
