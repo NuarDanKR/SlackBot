@@ -124,6 +124,7 @@ def _name_inputs(
     *,
     prefix: str = "본사팀",
     defaults: dict | None = None,
+    dispatch_prefix: bool = True,
 ) -> list[dict]:
     """이름 네 조각을 받는 입력들.
 
@@ -152,7 +153,7 @@ def _name_inputs(
             "block_id": "prefix",
             # 고르는 즉시 아래 두 칸을 다시 채운다. 이 값이 없으면 Slack 이
             # 선택 사실을 서버에 보내지 않아 자동 채움이 동작하지 않는다.
-            "dispatch_action": True,
+            "dispatch_action": dispatch_prefix,
             "label": {"type": "plain_text", "text": "조직 구분"},
             "element": {
                 "type": "static_select",
@@ -279,7 +280,9 @@ def rename_modal(private_metadata: str, spec: ChannelSpec) -> dict:
         "title": {"type": "plain_text", "text": "채널 이름 변경"},
         "submit": {"type": "plain_text", "text": "변경"},
         "close": {"type": "plain_text", "text": "취소"},
-        "blocks": _name_inputs(spec),
+        # 이름변경은 제출 시 선택값을 읽으면 된다. 여기서 prefix 액션을 보내면
+        # 생성 모달 전용 views_update 핸들러가 화면을 생성 모달로 바꿔 버린다.
+        "blocks": _name_inputs(spec, dispatch_prefix=False),
     }
 
 

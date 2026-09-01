@@ -87,25 +87,26 @@ fi
 
 echo "== 4/6 가상환경 =="
 [[ -x "$APP_DIR/.venv/bin/python" ]] || $PY -m venv "$APP_DIR/.venv"
+# 콘솔을 함께 깔 때는 **한 번의 pip 호출로** 넘긴다.
+# 따로 부르면 pip 이 앞서 깐 것을 고려하지 못해, 겉으로는 성공하고
+# 실제로는 버전이 어긋난 상태가 남는다(typing-inspection 이 그랬다).
+REQ_FILES=(-r "$APP_DIR/requirements.txt")
+if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
+  REQ_FILES+=(-r "$APP_DIR/deploy/requirements-console.txt")
+fi
+
 if [[ "${OFFLINE:-0}" == "1" ]]; then
   "$APP_DIR/.venv/bin/pip" install --no-index --find-links "$APP_DIR/wheels" \
-    -r "$APP_DIR/requirements.txt"
+    "${REQ_FILES[@]}"
 else
   "$APP_DIR/.venv/bin/pip" install --upgrade pip -q
-  "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q
+  "$APP_DIR/.venv/bin/pip" install "${REQ_FILES[@]}" -q
 fi
 "$APP_DIR/.venv/bin/pip" install -e "$APP_DIR" --no-deps -q
 
 # 관리 콘솔은 선택 설치다. `-e . --no-deps` 는 extras 를 건너뛰므로 따로 깐다.
 # 이걸 빼먹으면 콘솔이 ModuleNotFoundError 로 기동하지 않고, 배포 테스트도 실패한다.
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
-  echo "  콘솔 의존성 설치"
-  if [[ "${OFFLINE:-0}" == "1" ]]; then
-    "$APP_DIR/.venv/bin/pip" install --no-index --find-links "$APP_DIR/wheels" \
-      -r "$APP_DIR/deploy/requirements-console.txt"
-  else
-    "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/deploy/requirements-console.txt" -q
-  fi
 
   # --- 콘솔 화면 빌드 ---
   # **실패해도 설치를 멈추지 않는다.** 화면이 안 만들어지는 것과 봇이 못 뜨는 것은

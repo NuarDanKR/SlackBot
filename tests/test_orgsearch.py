@@ -11,6 +11,7 @@ from tybot.channel_management import (
     ChannelNameError,
     _name_inputs,
     create_modal,
+    rename_modal,
     request_from_view,
     selected_prefix,
     typed_task,
@@ -235,6 +236,14 @@ def test_modal_has_four_inputs_and_no_search():
 def test_prefix_select_dispatches_so_defaults_can_be_filled():
     """dispatch_action 이 없으면 선택 사실이 서버에 오지 않아 자동 채움이 안 된다."""
     assert _name_inputs()[0]["dispatch_action"] is True
+
+
+def test_rename_prefix_does_not_open_the_create_modal_flow():
+    spec = parse("#본사팀-전산_ABB110-회의")
+    assert spec is not None
+    modal = rename_modal("{}", spec)
+    prefix = next(b for b in modal["blocks"] if b["block_id"] == "prefix")
+    assert prefix["dispatch_action"] is False
 
 
 def test_prefix_options_use_the_new_names():

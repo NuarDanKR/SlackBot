@@ -7,3 +7,9 @@
 # psycopg 는 조직 동기화에도 쓰이므로 requirements.txt 에 있다.
 fastapi==0.141.1
 uvicorn==0.52.4
+
+# 전이 의존성도 고정한다. requirements.txt 가 전부 고정이라 여기만 열어 두면
+# 설치 시점에 따라 서버마다 다른 버전이 깔리고, 그 차이가 재현 안 되는 장애가 된다.
+starlette==1.6.0
+annotated-doc==0.0.5
+click==8.5.0
