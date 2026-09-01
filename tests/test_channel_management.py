@@ -10,8 +10,12 @@ from tybot.channel_management import (
     ChannelRequest,
     build_channel_name,
     create_modal,
+    parse_tasks,
+    rename_modal,
     request_from_view,
+    requests_from_view,
 )
+from tybot.channels import ChannelSpec
 from tybot.orgsearch import OrgHit, option
 from tybot.slack.pilot import WorkspaceBot
 
@@ -164,3 +168,81 @@ def test_notice_warns_about_pii():
     text = CHANNEL_CREATED_NOTICE.format(bot="tybot", visibility="공개")
     assert "올리지 마세요" in text
     assert "Slack 대화에는 그대로 남습니다" in text
+
+# --- 여러 채널 한 번에 만들기 -------------------------------------------------
+
+
+def _create_view(task_text: str) -> dict:
+    return {
+        "state": {
+            "values": {
+                "prefix": {"prefix": {"selected_option": {"value": "현장"}}},
+                "org": {"org": {"selected_option": option(OrgHit("180182", "김해외동"))}},
+                "task": {"task": {"value": task_text}},
+                "visibility": {"visibility": {"selected_option": {"value": "private"}}},
+                "members": {"members": {"selected_users": ["U2"]}},
+            }
+        }
+    }
+
+
+def test_parse_tasks_splits_on_newlines_and_commas():
+    """사람이 붙여넣는 모양을 그대로 받는다 — 줄바꿈이든 쉼표든."""
+    assert parse_tasks("주간회의\n안전점검, 기성청구") == ["주간회의", "안전점검", "기성청구"]
+    assert parse_tasks("  주간회의  ") == ["주간회의"]
+
+
+def test_parse_tasks_rejects_empty_input():
+    with pytest.raises(ChannelNameError) as e:
+        parse_tasks("   \n  ")
+    assert e.value.block_id == "task"
+
+
+def test_parse_tasks_rejects_duplicates_before_creating_anything():
+    """같은 이름을 두 번 보내면 Slack 이 두 번째를 거절해 '일부만 생성' 이 된다.
+
+    만들기 전에 막아야 사람이 무엇이 빠졌는지 되짚지 않는다.
+    """
+    with pytest.raises(ChannelNameError, match="겹칩니다"):
+        parse_tasks("주간회의\n주간회의")
+    # 앞뒤 공백만 다른 것도 같은 채널이 된다.
+    with pytest.raises(ChannelNameError, match="겹칩니다"):
+        parse_tasks("주간회의\n  주간회의  ")
+    # 반면 가운데 공백은 하이픈이 되어 다른 채널이다. 막지 않는다.
+    assert parse_tasks("주간회의\n주간 회의") == ["주간회의", "주간 회의"]
+
+
+def test_parse_tasks_caps_the_batch():
+    """줄바꿈이 잘못 들어간 입력이 그대로 실행되지 않게 한다."""
+    with pytest.raises(ChannelNameError, match="10개까지"):
+        parse_tasks("\n".join(f"업무{i}" for i in range(11)))
+
+
+def test_requests_from_view_expands_one_per_task():
+    requests = requests_from_view(_create_view("주간회의\n안전점검"))
+    assert [r.name for r in requests] == [
+        "현장-김해외동_180182-주간회의",
+        "현장-김해외동_180182-안전점검",
+    ]
+    # 조직·공개범위·참여자는 모두 같아야 한다. 그것이 이 기능의 목적이다.
+    assert {r.org_code for r in requests} == {"180182"}
+    assert {r.visibility for r in requests} == {"private"}
+    assert {r.members for r in requests} == {("U2",)}
+
+
+def test_requests_from_view_still_handles_a_single_task():
+    assert len(requests_from_view(_create_view("주간회의"))) == 1
+
+
+def test_create_modal_takes_several_tasks_but_rename_takes_one():
+    """이름 변경은 채널 하나를 고치는 것이다. 여러 줄을 받으면 무엇이 되는지 알 수 없다."""
+    create_task = next(
+        b for b in create_modal("{}")["blocks"] if b.get("block_id") == "task"
+    )
+    assert create_task["element"]["multiline"] is True
+
+    spec = ChannelSpec("#현장-김해외동_180182-채팅방", "현장", "김해외동", "180182", "채팅방")
+    rename_task = next(
+        b for b in rename_modal("{}", spec)["blocks"] if b.get("block_id") == "task"
+    )
+    assert "multiline" not in rename_task["element"]

@@ -20,6 +20,11 @@ _OWNER_LOCK = threading.Lock()
 _SPACE_RE = re.compile(r"\s+")
 _CODE_RE = re.compile(r"^[0-9A-Za-z]+$")
 _CHANNEL_PREFIX = {"본사팀": "팀"}
+
+# 한 번에 만들 수 있는 채널 수.
+# 상한을 두는 이유는 두 가지다. 오타로 줄바꿈이 잔뜩 들어간 입력이 그대로 실행되는 것을
+# 막고, Slack 의 채널 생성 호출이 분당 제한에 걸려 절반만 만들어지는 상태를 피한다.
+MAX_BATCH = 10
 _ORG_BLOCK_IDS = {
     "본부": "org_hq",
     "실": "org_div",
@@ -84,6 +89,40 @@ def build_channel_name(prefix: str, org_name: str, org_code: str, task: str) -> 
     return name
 
 
+def parse_tasks(raw: str) -> list[str]:
+    """업무명 입력을 여러 개로 나눈다. 줄바꿈과 쉼표를 모두 구분자로 본다.
+
+    초기 구축 때는 조직은 같고 업무만 다른 채널을 한꺼번에 만드는 일이 잦다.
+    그때마다 모달을 다시 여는 것은 같은 값을 여러 번 고르게 만든다.
+
+    **중복은 조용히 지우지 않고 막는다.** 같은 이름이 두 번 들어오면 두 번째는
+    Slack 이 `name_taken` 으로 거절하는데, 그러면 "일부만 만들어졌다" 는 결과가
+    나오고 사람이 무엇이 빠졌는지 되짚어야 한다. 만들기 전에 알려주는 편이 낫다.
+    """
+    parts = [chunk.strip() for line in (raw or "").splitlines()
+             for chunk in line.split(",")]
+    tasks = [p for p in parts if p]
+    if not tasks:
+        raise ChannelNameError("업무명을 입력해 주세요.", "task")
+
+    seen: set[str] = set()
+    for task in tasks:
+        key = _piece(task).lower()
+        if key in seen:
+            raise ChannelNameError(
+                f"업무명이 겹칩니다: {task}. 같은 채널을 두 번 만들 수 없습니다.", "task"
+            )
+        seen.add(key)
+
+    if len(tasks) > MAX_BATCH:
+        raise ChannelNameError(
+            f"한 번에 {MAX_BATCH}개까지 만들 수 있습니다(지금 {len(tasks)}개). "
+            "나눠서 만들어 주세요.",
+            "task",
+        )
+    return tasks
+
+
 def _selected(state: dict, block_id: str, action_id: str) -> dict:
     return state.get(block_id, {}).get(action_id, {})
 
@@ -126,6 +165,29 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
     return request
 
 
+def requests_from_view(view: dict) -> list[ChannelRequest]:
+    """채널 생성 제출을 요청 목록으로 바꾼다. 업무명 줄 수만큼 나온다.
+
+    구분·조직·공개범위·참여자는 모두 같고 업무명만 다르다. 이름 조립은
+    `ChannelRequest.name` 이 하므로 여기서 규칙을 다시 쓰지 않는다.
+    """
+    base = request_from_view(view, include_channel_options=True)
+    state = (view.get("state") or {}).get("values") or {}
+    tasks = parse_tasks(_selected(state, "task", "task").get("value", ""))
+
+    out = [
+        ChannelRequest(base.prefix, base.org_name, base.org_code, task,
+                       base.visibility, base.members)
+        for task in tasks
+    ]
+    # 이름까지 조립해 봐야 규칙 위반이 여기서 드러난다. 만들다가 중간에 실패하면
+    # 절반만 만들어진 상태로 끝난다.
+    names = [r.name for r in out]
+    if len(set(names)) != len(names):
+        raise ChannelNameError("같은 채널명이 두 번 나옵니다.", "task")
+    return out
+
+
 def selected_prefix(view: dict, *, default: str = "본사팀") -> str:
     """지금 고른 구분. 구분이 바뀔 때 화면을 다시 그리는 데 쓴다."""
     state = (view.get("state") or {}).get("values") or {}
@@ -159,6 +221,7 @@ def _name_inputs(
     prefix: str = "본사팀",
     defaults: dict | None = None,
     dispatch_prefix: bool = True,
+    multi_task: bool = False,
 ) -> list[dict]:
     """구분·조직 검색·업무명을 받는다. 조직코드는 검색 선택값 안에 숨긴다."""
     options = [
@@ -216,13 +279,32 @@ def _name_inputs(
         {
             "type": "input",
             "block_id": "task",
-            "label": {"type": "plain_text", "text": "업무명"},
+            "label": {
+                "type": "plain_text",
+                "text": "업무명" + (f" (한 줄에 하나, 최대 {MAX_BATCH}개)"
+                                   if multi_task else ""),
+            },
             "element": {
                 "type": "plain_text_input",
                 "action_id": "task",
-                "placeholder": {"type": "plain_text", "text": "예: 주간회의"},
+                # 생성에서만 여러 줄을 받는다. 이름 변경은 채널 하나를 고치는 것이라
+                # 여러 줄을 받으면 무엇이 되는지 알 수 없다.
+                **({"multiline": True} if multi_task else {}),
+                "placeholder": {
+                    "type": "plain_text",
+                    "text": ("예: 주간회의\n안전점검\n기성청구"
+                             if multi_task else "예: 주간회의"),
+                },
                 **({"initial_value": spec.task} if spec else {}),
             },
+            **({
+                "hint": {
+                    "type": "plain_text",
+                    "text": "여러 개를 적으면 조직·공개범위·참여자는 같고 "
+                            "업무명만 다른 채널이 한꺼번에 만들어집니다. "
+                            "쉼표로 나눠도 됩니다.",
+                },
+            } if multi_task else {}),
         },
     ]
 
@@ -239,7 +321,7 @@ def create_modal(
     구분이 바뀔 때 이 함수로 다시 만들어 `views_update` 한다. 그래서 이미 입력한
     업무명(`task`)을 인자로 받아 되살린다 — 다시 그렸다고 입력이 사라지면 안 된다.
     """
-    blocks = _name_inputs(prefix=prefix, defaults=defaults)
+    blocks = _name_inputs(prefix=prefix, defaults=defaults, multi_task=True)
     if task:
         blocks[-1]["element"]["initial_value"] = task
     blocks.extend(

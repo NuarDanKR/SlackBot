@@ -344,7 +344,9 @@ def _client():
 
     from tybot.console.app import app
 
-    return TestClient(app)
+    # 서버 예외를 그대로 응답으로 받는다. 계정 저장소가 없는 환경(DATABASE_URL 미설정)에서
+    # 무엇이 돌아가는지도 검사 대상이기 때문이다.
+    return TestClient(app, raise_server_exceptions=False)
 
 
 def test_health_probe_stays_open():
@@ -354,6 +356,14 @@ def test_health_probe_stays_open():
     assert set(res.json()) == {"ok", "at"}
 
 
-def test_health_report_requires_login():
-    """수집 현황·질문 수가 담긴다. 열어 두면 사내 운영 정보가 새어 나간다."""
-    assert _client().get("/api/health-report").status_code == 401
+def test_health_report_is_never_served_without_login():
+    """수집 현황·질문 수가 담긴다. 열어 두면 사내 운영 정보가 새어 나간다.
+
+    상태 코드를 401 로 못박지 않는다. 계정 저장소를 못 읽으면 인증 단계가 그 전에
+    실패해 500 이 되는데, 그것도 '주지 않는다' 는 점에서는 같다. 여기서 지켜야 할
+    것은 **본문이 나가지 않는 것**이라 그쪽을 검사한다.
+    """
+    res = _client().get("/api/health-report")
+    assert res.status_code != 200
+    assert "sections" not in res.text
+    assert "workspace" not in res.text

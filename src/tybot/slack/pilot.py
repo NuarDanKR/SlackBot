@@ -40,6 +40,7 @@ from ..channel_management import (
     create_modal,
     rename_modal,
     request_from_view,
+    requests_from_view,
     selected_prefix,
     typed_task,
 )
@@ -558,12 +559,13 @@ class WorkspaceBot:
         def on_create_submission(ack, body, client, view):
             user_id = (body.get("user") or {}).get("id", "")
             try:
-                request = request_from_view(view, include_channel_options=True)
+                # 업무명을 여러 줄 적으면 그만큼 만든다. 조직·공개범위·참여자는 같다.
+                requests = requests_from_view(view)
             except ChannelNameError as e:
                 ack(response_action="errors", errors={e.block_id: str(e)})
                 return
             ack()
-            self._create_channel(client, user_id, request)
+            self._create_channels(client, user_id, requests)
 
         @self.app.view("tybot_rename_channel")
         def on_rename_submission(ack, body, client, view):
@@ -586,12 +588,17 @@ class WorkspaceBot:
             if text.replace(" ", "") in ("도움말", "help", "?"):
                 respond(poll_help(), response_type="ephemeral")
                 return
+            channel_id = command.get("channel_id", "")
+            channel_error = self._ensure_poll_channel(client, channel_id)
+            if channel_error:
+                respond(channel_error, response_type="ephemeral")
+                return
             # 명령 뒤에 적은 문장은 질문 칸에 미리 채워 준다. 두 번 입력하지 않게.
             try:
                 client.views_open(
                     trigger_id=command["trigger_id"],
                     view=poll_create_modal(
-                        channel_id=command.get("channel_id", ""), prefill_question=text
+                        channel_id=channel_id, prefill_question=text
                     ),
                 )
             except Exception as e:
@@ -956,6 +963,35 @@ class WorkspaceBot:
             log.warning("[%s] 채널 생성 모달 열기 실패: %s", self.workspace, e)
 
     # --- 투표 -------------------------------------------------------------
+    def _ensure_poll_channel(self, client, channel_id: str) -> str:
+        """투표를 게시할 채널에 접근할 수 있게 하고, 불가능하면 사용자 안내를 반환한다."""
+        if not channel_id:
+            return "현재 채널을 확인하지 못했습니다. 채널에서 다시 실행해 주세요."
+        try:
+            result = client.conversations_info(channel=channel_id)
+            channel = result.get("channel") or {}
+            if channel.get("is_member"):
+                return ""
+            if channel.get("is_private"):
+                return (
+                    "이 비공개 채널에 TYBot이 참여하지 않았습니다. "
+                    f"`/invite @{self.bot_name}` 후 다시 실행해 주세요."
+                )
+            client.conversations_join(channel=channel_id)
+            return ""
+        except Exception as e:
+            # 비공개 채널의 비멤버에게 conversations.info는 channel_not_found를 돌려준다.
+            log.warning(
+                "[%s] 투표 대상 채널 접근 실패 channel=%s: %s",
+                self.workspace,
+                channel_id,
+                e,
+            )
+            return (
+                "TYBot이 이 채널에 접근할 수 없습니다. 비공개 채널이면 "
+                f"`/invite @{self.bot_name}` 후 다시 실행해 주세요."
+            )
+
     def _publish_poll(self, client, poll) -> None:
         """투표를 채널에 올리고 메시지 위치를 기억한다.
 
@@ -971,15 +1007,14 @@ class WorkspaceBot:
             poll.message_ts = posted.get("ts")
         except Exception as e:
             log.warning("[%s] 투표 게시 실패: %s", self.workspace, e)
-            with contextlib.suppress(Exception):
-                client.chat_postEphemeral(
-                    channel=poll.channel_id,
-                    user=poll.creator,
-                    text=(
-                        "투표를 올리지 못했습니다. 이 채널에 봇이 초대되어 있는지 확인해 주세요"
-                        f" (`/invite @{self.bot_name}`)."
-                    ),
-                )
+            self._notify_user(
+                client,
+                poll.creator,
+                (
+                    "투표를 올리지 못했습니다. 이 채널에 TYBot이 참여 중인지 확인한 뒤 "
+                    f"필요하면 `/invite @{self.bot_name}` 해 주세요."
+                ),
+            )
             return
         try:
             save_poll(poll)
@@ -1076,7 +1111,14 @@ class WorkspaceBot:
         except Exception as e:
             log.warning("[%s] 채널 관리 결과 DM 실패 user=%s: %s", self.workspace, user_id, e)
 
-    def _create_channel(self, client, user_id: str, request) -> None:
+    def _create_channel(
+        self, client, user_id: str, request, *, notify: bool = True
+    ) -> tuple[str, str] | None:
+        """채널 하나를 만든다. 성공하면 (channel_id, 실제이름), 실패하면 None.
+
+        `notify=False` 는 여러 개를 만들 때 쓴다. 채널마다 DM 을 보내면 8개를
+        만들 때 DM 이 8통 오고, 무엇이 실패했는지가 오히려 묻힌다.
+        """
         try:
             # Slack 채널명의 영문은 소문자만 허용한다. 조직코드 입력은 대소문자를 받되
             # 실제 채널명에서는 Slack 규칙에 맞게 소문자로 보낸다.
@@ -1090,12 +1132,14 @@ class WorkspaceBot:
             actual_name = channel.get("name") or request.name
         except Exception as e:
             log.warning("[%s] 채널 생성 실패 name=%s: %s", self.workspace, request.name, e)
-            self._notify_user(
-                client,
-                user_id,
-                f"채널을 만들지 못했습니다: `{request.name}`\nSlack 앱 권한과 채널명을 확인해 주세요.",
-            )
-            return
+            if notify:
+                self._notify_user(
+                    client,
+                    user_id,
+                    f"채널을 만들지 못했습니다: `{request.name}`\n"
+                    "Slack 앱 권한과 채널명을 확인해 주세요.",
+                )
+            return None
 
         try:
             self.channel_owners.record(self.workspace, channel_id, user_id, actual_name)
@@ -1114,16 +1158,17 @@ class WorkspaceBot:
 
         visibility = "비공개" if request.visibility == "private" else "공개"
         suffix = "\n일부 참여자 초대에 실패했습니다. 채널에서 직접 초대해 주세요." if invite_error else ""
-        self._notify_user(
-            client,
-            user_id,
-            f"{visibility} 업무 채널 <#{channel_id}>을 만들었습니다. "
-            f"이름이 수집 규칙에 맞아 **이 채널의 대화는 아카이브에 쌓입니다.**"
-            "\n`/채널 이름변경`으로 표준 이름 안에서 변경할 수 있습니다. "
-            "규칙 밖 이름으로 바꾸면 그 시점부터 수집이 멈춥니다."
-            "\nSlack 기본 관리 권한이 필요하면 채널 정보 → 관리자로 지정에서 추가하세요."
-            + suffix,
-        )
+        if notify:
+            self._notify_user(
+                client,
+                user_id,
+                f"{visibility} 업무 채널 <#{channel_id}>을 만들었습니다. "
+                f"이름이 수집 규칙에 맞아 **이 채널의 대화는 아카이브에 쌓입니다.**"
+                "\n`/채널 이름변경`으로 표준 이름 안에서 변경할 수 있습니다. "
+                "규칙 밖 이름으로 바꾸면 그 시점부터 수집이 멈춥니다."
+                "\nSlack 기본 관리 권한이 필요하면 채널 정보 → 관리자로 지정에서 추가하세요."
+                + suffix,
+            )
         with contextlib.suppress(Exception):
             client.chat_postMessage(
                 channel=channel_id,
@@ -1140,6 +1185,44 @@ class WorkspaceBot:
             request.visibility == "private",
             user_id,
         )
+        return channel_id, actual_name
+
+    def _create_channels(self, client, user_id: str, requests: list) -> None:
+        """여러 채널을 만들고 **결과를 한 통으로** 알린다.
+
+        한 개면 기존 문구를 그대로 쓴다. 여러 개일 때 채널마다 DM 을 보내면
+        성공만 잔뜩 오고 실패가 그 사이에 묻힌다. 무엇이 만들어졌고 무엇이
+        빠졌는지는 한눈에 보여야 한다.
+
+        중간에 실패해도 멈추지 않는다. 앞의 몇 개는 이미 만들어졌으므로 멈추면
+        되돌릴 수도, 이어서 할 수도 없는 상태가 된다.
+        """
+        if len(requests) == 1:
+            self._create_channel(client, user_id, requests[0])
+            return
+
+        made: list[str] = []
+        failed: list[str] = []
+        for request in requests:
+            result = self._create_channel(client, user_id, request, notify=False)
+            if result:
+                made.append(f"<#{result[0]}>")
+            else:
+                failed.append(f"`{request.name}`")
+
+        lines = [f"업무 채널 {len(made)}개를 만들었습니다."]
+        if made:
+            lines.append(" ".join(made))
+            lines.append(
+                "이름이 수집 규칙에 맞아 **이 채널들의 대화는 아카이브에 쌓입니다.**"
+            )
+        if failed:
+            lines.append(
+                f"만들지 못한 것 {len(failed)}개: " + ", ".join(failed)
+                + "\n이미 있는 이름이거나 Slack 권한 문제일 수 있습니다. "
+                "이름을 바꿔 다시 시도해 주세요."
+            )
+        self._notify_user(client, user_id, "\n".join(lines))
 
     def _rename_channel(self, client, user_id: str, channel_id: str, name: str) -> None:
         if not channel_id or not self._can_manage_channel(channel_id, user_id):
