@@ -64,7 +64,9 @@ def test_kind_maps_to_org_tree():
     assert parse("#본부-건축_AB-회의").kind == "hq"
     assert parse("#팀-전산_ABB110-회의").kind == "team"
     assert parse("#현장-김해외동_180182-채팅").kind == "site"
-    assert parse("#프로젝트-스마트_PJ1-킥오프").kind == "project"
+    # 프로젝트는 업무로 이름이 바뀌었지만 옛 채널도 같은 종류로 읽힌다.
+    assert parse("#프로젝트-스마트_PJ1-킥오프").kind == "task"
+    assert parse("#업무-스마트_ABB110-킥오프").kind == "task"
     assert parse("#실-안전_SF1-점검").kind == "div"
 
 
@@ -85,5 +87,5 @@ def test_explain_gives_actionable_message():
     from tybot.channels import explain
 
     assert "수집 대상 아님" in explain("#점심메뉴")
-    assert "#팀-전산_ABB110-주간회의" in explain("#점심메뉴")
+    assert "#본사팀-전산_ABB110-주간회의" in explain("#점심메뉴")
     assert "수집 대상" in explain("#팀-전산_ABB110-주간회의")

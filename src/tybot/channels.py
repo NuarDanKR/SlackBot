@@ -1,9 +1,9 @@
 """채널 명명 규칙 — 수집 대상 판정과 조직 코드 추출.
 
 ## 규칙
-`#<두문자>-<조직명>_<조직코드>-<업무>`  예) `#팀-전산_ABB110-주간회의`
+`#<두문자>-<조직명>_<조직코드>-<업무>`  예) `#본사팀-전산_ABB110-주간회의`
 
-두문자가 **팀·본부·실·현장·프로젝트** 중 하나면 수집 대상이다. 아니면 수집하지 않는다.
+두문자가 **본부·실·본사팀·현장·업무** 중 하나면 수집 대상이다(옛 이름 `팀`·`프로젝트` 도 인식). 아니면 수집하지 않는다.
 잡담·개인·외부 협업 채널을 이름만으로 걸러내기 위한 장치다.
 
 조직코드를 이름에 박는 이유는 **조직 개편·워크스페이스 통합에 대비**하기 위해서다.
@@ -26,19 +26,38 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# 수집 대상 두문자 → 조직 종류(조직 트리 연결용)
+# 새로 만들 때 고를 수 있는 두문자 → 조직 종류(조직 트리 연결용).
+#
+# 조직 구조: 본부 > 본사팀 > (현장), 또는 실 > 본사팀.
+# `본사팀` 은 현장 조직과 헷갈리지 않게 `팀` 대신 쓴다.
+# `업무` 는 조직이 아니라 **다른 팀과 협업하는 채널**이다. 주관 팀의 코드를 빌린다.
 PREFIX_KINDS: dict[str, str] = {
     "본부": "hq",
     "실": "div",
-    "팀": "team",
+    "본사팀": "team",
     "현장": "site",
-    "프로젝트": "project",
+    "업무": "task",
 }
 COLLECT_PREFIXES = frozenset(PREFIX_KINDS)
 
-# 형식: #팀-전산_ABB110-주간회의
+# 예전 두문자. **새로 만들 때는 고를 수 없지만 인식은 계속한다.**
+# 인식을 끊으면 이미 만들어진 채널이 그 순간 수집 대상에서 빠진다 - 사람은 아무것도
+# 하지 않았는데 기록이 멈추는 것이 가장 나쁜 실패다.
+LEGACY_PREFIX_KINDS: dict[str, str] = {
+    "팀": "team",
+    "프로젝트": "task",
+}
+ALL_PREFIX_KINDS: dict[str, str] = {**PREFIX_KINDS, **LEGACY_PREFIX_KINDS}
+PARSE_PREFIXES = frozenset(ALL_PREFIX_KINDS)
+
+# 예전 두문자를 새 두문자로 옮길 때 쓴다(이름 변경 모달의 초기값 등).
+PREFIX_ALIASES: dict[str, str] = {"팀": "본사팀", "프로젝트": "업무"}
+
+# 형식: #본사팀-전산_ABB110-주간회의
+# 긴 두문자를 먼저 시도해야 한다 - `본사팀` 이 `팀` 보다 앞이 아니면 영영 매치되지 않는다.
+_PREFIX_ALT = "|".join(sorted(PARSE_PREFIXES, key=len, reverse=True))
 CHANNEL_RE = re.compile(
-    r"^#?(?P<prefix>본부|실|팀|현장|프로젝트)-(?P<org>[^_]+)_(?P<code>[0-9A-Za-z]+)"
+    rf"^#?(?P<prefix>{_PREFIX_ALT})-(?P<org>[^_]+)_(?P<code>[0-9A-Za-z]+)"
     r"(?:-(?P<task>.*))?$"
 )
 
@@ -48,15 +67,15 @@ class ChannelSpec:
     """규칙에 맞는 채널에서 뽑아낸 것."""
 
     raw: str
-    prefix: str  # 팀 | 본부 | 실 | 현장 | 프로젝트
+    prefix: str  # 본부 | 실 | 본사팀 | 현장 | 업무 (옛 이름 팀·프로젝트도 인식)
     org_name: str
     org_code: str
     task: str
 
     @property
     def kind(self) -> str:
-        """조직 종류(hq/div/team/site/project). 조직 트리 연결에 쓴다."""
-        return PREFIX_KINDS[self.prefix]
+        """조직 종류(hq/div/team/site/task). 조직 트리 연결에 쓴다."""
+        return ALL_PREFIX_KINDS[self.prefix]
 
     def label(self) -> str:
         return f"{self.prefix} {self.org_name}({self.org_code}) · {self.task or '-'}"
@@ -95,5 +114,5 @@ def explain(channel: str) -> str:
     return (
         "수집 대상 아님 - 이름이 규칙과 다릅니다. "
         f"`#<{'|'.join(sorted(COLLECT_PREFIXES))}>-<조직명>_<조직코드>-<업무>` 형식이어야 합니다. "
-        "예: #팀-전산_ABB110-주간회의"
+        "예: #본사팀-전산_ABB110-주간회의"
     )

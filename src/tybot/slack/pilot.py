@@ -39,13 +39,14 @@ from ..channel_management import (
     create_modal,
     rename_modal,
     request_from_view,
+    selected_prefix,
+    typed_task,
 )
 from ..channels import parse, should_collect
 from ..collection_status import ChannelFacts
 from ..collection_status import report as collection_report
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
-from ..db import available as db_available
 from ..db import connect as db_connect
 from ..failures import failure_message
 from ..feedback import (
@@ -73,17 +74,7 @@ from ..intent import (
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
-from ..orgsearch import NO_IDENTITY as ORG_NO_IDENTITY
-from ..orgsearch import (
-    NO_MATCH,
-    NOT_MY_ORG,
-    my_org_codes,
-    not_my_org_message,
-    notice_option,
-)
-from ..orgsearch import UNAVAILABLE as ORG_UNAVAILABLE
-from ..orgsearch import options as org_options
-from ..orgsearch import search as org_search_db
+from ..orgsearch import defaults_by_prefix, my_org_chain
 from ..paths import check_paths
 from ..poll_view import (
     ACTION_CLOSE,
@@ -151,6 +142,8 @@ CHANNEL_CREATED_NOTICE = (
     "여기 올라오는 대화·스레드·첨부는 중앙 아카이브에 원문 그대로 쌓이고, "
     "권한이 있는 사람의 질문에 근거로 쓰입니다.\n"
     "• 수집 여부는 **채널 이름**이 정합니다. 규칙 밖 이름으로 바꾸면 그 시점부터 멈춥니다.\n"
+    "• 두문자: 본부 > 본사팀 > 현장, 또는 실 > 본사팀. "
+    "`업무` 는 다른 팀과 협업할 때 쓰는 채널이며 주관 팀의 조직코드를 씁니다.\n"
     "• 비공개 채널은 봇이 스스로 들어갈 수 없습니다. "
     "`/채널` 로 만들었거나 `/invite @{bot}` 한 채널만 수집됩니다.\n"
     "• 개인 인적사항·부동산 등본류·개인이 특정되는 목록은 올리지 마세요. "
@@ -246,12 +239,6 @@ class WorkspaceBot:
             for u in (os.getenv("CHANNEL_ADMIN_USERS") or "").split(",")
             if u.strip()
         }
-        # 본인 소속(과 상위) 조직의 채널만 만들게 한다. 남의 팀 채널을 내가 만들면
-        # 그 채널의 주인이 처음부터 어긋난다.
-        self.org_scope = _truthy(os.getenv("CHANNEL_ORG_SCOPE", "1"))
-        # 신원 매핑이 아직 없는 사람을 막을지. 기본은 막지 않는다 — 매핑 작업이 끝나기
-        # 전에 채널 생성이 통째로 멈추면 안 된다. 매핑이 끝나면 1 로 올린다.
-        self.org_scope_strict = _truthy(os.getenv("CHANNEL_ORG_SCOPE_STRICT", "0"))
         self.app = App(token=cfg.bot_token)
         self.store = store
         self.engine = engine
@@ -495,21 +482,30 @@ class WorkspaceBot:
             except Exception as e:
                 log.warning("[%s] 일정 공유 실패: %s", self.workspace, e)
 
-        @self.app.options("org")
-        def on_org_options(ack, payload, body):
-            """조직 검색 결과를 모달에 채운다.
+        @self.app.action("prefix")
+        def on_prefix_change(ack, body, client):
+            """구분을 고르면 그 층의 **내 조직**으로 조직명·조직코드를 다시 채운다.
 
-            조직코드를 사람이 외워서 입력하던 자리다. 틀리게 적어도 채널은 만들어지고,
-            어긋난 조직 매핑은 나중에 권한·집계에서야 드러난다. 목록에서 고르게 한다.
-
-            Socket Mode 에서도 이 콜백은 소켓으로 오므로 인바운드 포트가 필요 없다.
+            `views_update` 로 화면을 다시 그린다. Slack 모달은 다른 입력을 보고 스스로
+            바뀌지 못하므로, 서버가 새 화면을 만들어 보내는 것 말고 방법이 없다.
+            이미 입력한 업무명은 그대로 되살린다.
             """
-            ack(
-                options=self._org_options(
-                    payload.get("value", ""),
-                    (body.get("user") or {}).get("id", ""),
+            ack()
+            view = body.get("view") or {}
+            user_id = (body.get("user") or {}).get("id", "")
+            try:
+                client.views_update(
+                    view_id=view.get("id"),
+                    hash=view.get("hash"),
+                    view=create_modal(
+                        view.get("private_metadata") or "{}",
+                        prefix=selected_prefix(view),
+                        defaults=self._org_defaults(user_id),
+                        task=typed_task(view),
+                    ),
                 )
-            )
+            except Exception as e:
+                log.warning("[%s] 구분 변경 반영 실패: %s", self.workspace, e)
 
         @self.app.view("tybot_create_channel")
         def on_create_submission(ack, body, client, view):
@@ -518,12 +514,6 @@ class WorkspaceBot:
                 request = request_from_view(view, include_channel_options=True)
             except ChannelNameError as e:
                 ack(response_action="errors", errors={e.block_id: str(e)})
-                return
-            # 검색 목록을 좁히는 것만으로는 부족하다. 모달은 오래 열려 있을 수 있고
-            # 제출 내용은 클라이언트에서 온다 - 만드는 순간 다시 확인한다.
-            denied = self._org_scope_error(user_id, request.org_code, request.org_name)
-            if denied:
-                ack(response_action="errors", errors={"org": denied})
                 return
             ack()
             self._create_channel(client, user_id, request)
@@ -771,84 +761,35 @@ class WorkspaceBot:
             return {}
         return value if isinstance(value, dict) else {}
 
-    def _my_org_codes(self, user_id: str) -> list[str] | None:
-        """이 사용자가 채널을 만들 수 있는 조직코드. 제한하지 않으면 `None`."""
-        if not self.org_scope or user_id in self.channel_admin_users:
-            return None
+    def _org_defaults(self, user_id: str) -> dict:
+        """구분 → 그 층의 내 조직. 모달의 조직명·조직코드 **기본값**이다.
+
+        강제하지 않는다. 조직도를 못 읽거나 계정 연결이 없으면 빈 값으로 두고,
+        사람이 직접 입력한다 — 채널 생성이 DB 가용성에 묶이면 안 된다.
+        """
+        if not user_id:
+            return {}
         with db_connect() as conn:
             if conn is None:
-                return None
+                return {}
             try:
-                return my_org_codes(
+                chain = my_org_chain(
                     conn, workspace=self.workspace, slack_user=user_id
                 )
             except Exception as e:
                 log.warning("[%s] 소속 조직 조회 실패: %s", self.workspace, e)
-                return None
-
-    def _org_scope_error(self, user_id: str, code: str, name: str) -> str:
-        """소속 밖 조직이면 모달에 띄울 문구. 문제 없으면 빈 문자열."""
-        if not self.org_scope or user_id in self.channel_admin_users:
-            return ""
-        allowed = self._my_org_codes(user_id)
-        if allowed is None:
-            # 누구인지 모른다. 기본은 통과시키되 기록은 남긴다.
-            if self.org_scope_strict:
-                return (
-                    "계정 연결이 없어 소속을 확인할 수 없습니다. "
-                    "관리자에게 계정 연결을 요청해 주세요."
-                )
-            log.info(
-                "[%s] 소속 확인 불가로 통과 user=%s code=%s", self.workspace, user_id, code
-            )
-            return ""
-        if code in allowed:
-            return ""
-        log.info(
-            "[%s] 소속 밖 조직 생성 거절 user=%s code=%s allowed=%d건",
-            self.workspace, user_id, code, len(allowed),
-        )
-        return not_my_org_message(name, code)
-
-    def _org_options(self, query: str, user_id: str = "") -> list[dict]:
-        """조직 검색 옵션. 실패해도 빈 목록만 주지 않는다.
-
-        빈 목록은 사람에게 '검색이 고장났다' 와 '결과가 없다' 를 구별해 주지 않는다.
-        소속 제한이 걸려 있으면 애초에 본인 조직만 보여준다 — 고를 수 없는 것을 늘어놓고
-        제출 단계에서 막는 것보다 낫다.
-        """
-        only = self._my_org_codes(user_id) if user_id else None
-        with db_connect() as conn:
-            if conn is None:
-                return [notice_option(ORG_UNAVAILABLE)]
-            try:
-                hits = org_search_db(conn, query, only_codes=only)
-            except Exception as e:
-                log.warning("[%s] 조직 검색 실패: %s", self.workspace, e)
-                return [notice_option(ORG_UNAVAILABLE)]
-        if not hits:
-            if only is not None:
-                return [notice_option(NOT_MY_ORG)]
-            if self.org_scope and self.org_scope_strict:
-                return [notice_option(ORG_NO_IDENTITY)]
-            return [notice_option(NO_MATCH)]
-        log.info(
-            "[%s] 조직 검색 q=%r hits=%d 범위=%s",
-            self.workspace,
-            query[:20],
-            len(hits),
-            "소속" if only is not None else "전체",
-        )
-        return org_options(hits)
+                return {}
+        if not chain:
+            log.info("[%s] 소속 조직을 찾지 못했다 user=%s", self.workspace, user_id)
+            return {}
+        return defaults_by_prefix(chain)
 
     def _open_create_modal(self, client, trigger_id: str, user_id: str) -> None:
         metadata = json.dumps({"user_id": user_id}, ensure_ascii=False)
         try:
-            # 조직도(DB)를 읽을 수 있을 때만 검색 입력을 쓴다. 없으면 수동 입력으로
-            # 되돌아간다 - 채널 생성이 DB 가용성에 묶이면 안 된다.
             client.views_open(
                 trigger_id=trigger_id,
-                view=create_modal(metadata, org_search=db_available()),
+                view=create_modal(metadata, defaults=self._org_defaults(user_id)),
             )
         except Exception as e:
             log.warning("[%s] 채널 생성 모달 열기 실패: %s", self.workspace, e)

@@ -13,8 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .channels import COLLECT_PREFIXES, ChannelSpec, parse
-from .orgsearch import decode_value
+from .channels import COLLECT_PREFIXES, PREFIX_ALIASES, ChannelSpec, parse
 
 _OWNER_LOCK = threading.Lock()
 _SPACE_RE = re.compile(r"\s+")
@@ -79,56 +78,19 @@ def _selected(state: dict, block_id: str, action_id: str) -> dict:
     return state.get(block_id, {}).get(action_id, {})
 
 
-def _org_from_state(state: dict) -> tuple[str, str, str]:
-    """(조직명, 조직코드, 조직명에서 뽑은 구분).
-
-    조직 검색 선택(`org` 블록)이 있으면 그것을 쓰고, 없으면 예전 수동 입력을 읽는다.
-    DB 를 못 읽는 환경에서도 채널을 만들 수 있어야 해서 두 경로를 모두 남긴다.
-    """
-    picked = _selected(state, "org", "org").get("selected_option")
-    if picked:
-        code, prefix, name = decode_value(picked.get("value", ""))
-        if not code:
-            # 안내용 항목("일치하는 조직이 없습니다")을 고른 경우다.
-            raise ChannelNameError(
-                "조직을 목록에서 선택해 주세요. 검색 결과가 없으면 관리자에게 "
-                "조직도 동기화를 요청하세요.",
-                "org",
-            )
-        return name, code, prefix
-    return (
-        _selected(state, "org_name", "org_name").get("value", ""),
-        _selected(state, "org_code", "org_code").get("value", ""),
-        "",
-    )
-
-
 def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRequest:
-    """Slack view_submission의 state.values를 ChannelRequest로 바꾼다."""
+    """Slack view_submission의 state.values를 ChannelRequest로 바꾼다.
+
+    조직명·조직코드는 **사람이 고칠 수 있는 입력**이다. 구분을 고르면 소속 조직이
+    기본값으로 채워지지만 강제하지 않는다 — 타 조직과 협업하는 채널은 실제로 필요하고,
+    채널 생성은 사람이 확인하고 누르는 동작이다.
+    """
     state = (view.get("state") or {}).get("values") or {}
     prefix = (_selected(state, "prefix", "prefix").get("selected_option") or {}).get(
         "value", ""
     )
-    org_name, org_code, picked_prefix = _org_from_state(state)
-    project = _selected(state, "project_name", "project_name").get("value", "")
-    has_project_block = "project_name" in state
-
-    if prefix == "프로젝트":
-        # 프로젝트는 정식 조직이 아니라 조직코드가 없다. **주관 조직의 코드를 빌린다.**
-        # 이름 자리에는 프로젝트명이 들어간다 - `프로젝트-스마트시티_ABB110-회의`.
-        # 그래야 주관 조직으로 추적·권한 상속이 그대로 이어진다.
-        if has_project_block:
-            if not project.strip():
-                raise ChannelNameError(
-                    "프로젝트명을 입력해 주세요. 조직 칸에는 프로젝트를 주관하는 "
-                    "조직을 고르면 됩니다.",
-                    "project_name",
-                )
-            org_name = project
-    elif picked_prefix:
-        # 조직명 끝에서 구분이 나오면 그것을 쓴다(경영혁신실 -> 실).
-        # `org_unit.kind` 는 추정값이라 채널명 근거로 삼지 않는다 — 조직명은 사람이 붙인 것이다.
-        prefix = picked_prefix
+    org_name = _selected(state, "org_name", "org_name").get("value", "")
+    org_code = _selected(state, "org_code", "org_code").get("value", "")
     task = _selected(state, "task", "task").get("value", "")
     visibility = "private"
     members: tuple[str, ...] = ()
@@ -144,68 +106,67 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
     return request
 
 
-def org_select_block() -> dict:
-    """조직 검색 입력. 후보는 `block_suggestion` 으로 서버가 채운다.
-
-    Socket Mode 에서도 검색 콜백은 소켓으로 오므로 인바운드 포트가 필요 없다.
-    """
-    return {
-        "type": "input",
-        "block_id": "org",
-        "label": {"type": "plain_text", "text": "조직"},
-        "element": {
-            "type": "external_select",
-            "action_id": "org",
-            "min_query_length": 1,
-            "placeholder": {
-                "type": "plain_text",
-                "text": "조직명 또는 코드로 검색 (예: 경영)",
-            },
-        },
-        # 무엇이 자동으로 정해지는지 밝힌다. 안 적으면 구분 선택이 왜 무시되는지 모른다.
-        "hint": {
-            "type": "plain_text",
-            "text": "구분은 조직코드로 정해집니다 — 숫자만이면 현장, "
-                    "알파벳이 있으면 본사(이름 끝에서 본부·실·팀).",
-        },
-    }
+def selected_prefix(view: dict, *, default: str = "본사팀") -> str:
+    """지금 고른 구분. 구분이 바뀔 때 화면을 다시 그리는 데 쓴다."""
+    state = (view.get("state") or {}).get("values") or {}
+    picked = (_selected(state, "prefix", "prefix").get("selected_option") or {}).get("value")
+    return picked or default
 
 
-def _name_inputs(spec: ChannelSpec | None = None, *, org_search: bool = False) -> list[dict]:
+def typed_task(view: dict) -> str:
+    """다시 그릴 때 이미 입력한 업무명을 잃지 않게 한다."""
+    state = (view.get("state") or {}).get("values") or {}
+    return _selected(state, "task", "task").get("value", "") or ""
+
+
+def _name_inputs(
+    spec: ChannelSpec | None = None,
+    *,
+    prefix: str = "본사팀",
+    defaults: dict | None = None,
+) -> list[dict]:
     """이름 네 조각을 받는 입력들.
 
-    `org_search=True` 면 조직명·조직코드 두 칸을 조직 검색 하나로 바꾼다.
-    조직코드(`ABB110`)를 외우고 있는 사람은 거의 없고, 잘못 적으면 채널은 만들어지되
-    조직 매핑이 어긋난다 — 그건 나중에 권한·집계에서야 드러난다.
+    구분을 고르면 그 층의 **내 조직**이 조직명·조직코드에 채워진다(`defaults`).
+    채워진 값은 그냥 기본값이라 사람이 고칠 수 있다 — 타 조직과 협업하는 채널은
+    실제로 필요하고, 채널 생성은 사람이 확인하고 누르는 동작이다.
 
-    조직도(DB)를 못 읽는 환경에서는 수동 입력을 그대로 쓴다. 채널 생성이 DB 가용성에
-    묶이면 안 된다.
+    `spec` 은 이름 변경 모달이 준다. 그때는 기존 값이 우선한다.
     """
-    prefix_options = [
+    options = [
         {"text": {"type": "plain_text", "text": p}, "value": p}
-        for p in ("본부", "실", "팀", "현장", "프로젝트")
+        for p in ("본부", "실", "본사팀", "현장", "업무")
     ]
-    selected_prefix = spec.prefix if spec else "팀"
-    # 검색으로 고르면 조직명 끝에서 구분이 나온다(경영혁신실 -> 실). 그때 이 선택은
-    # 쓰이지 않으므로 언제 쓰이는지 라벨에 적는다 — 안 적으면 "골랐는데 왜 안 반영되지" 가 된다.
-    prefix_label = (
-        "조직 구분 (프로젝트는 직접 선택 · 그 외에는 자동 판단)"
-        if org_search
-        else "조직 구분"
-    )
+    # 예전 이름으로 만들어진 채널을 이름 변경할 때 목록에 없는 값이 오지 않게 옮긴다.
+    picked = PREFIX_ALIASES.get(prefix, prefix)
+    if picked not in {o["value"] for o in options}:
+        picked = "본사팀"
 
-    prefix_block = {
-        "type": "input",
-        "block_id": "prefix",
-        "label": {"type": "plain_text", "text": prefix_label},
-        "element": {
-            "type": "static_select",
-            "action_id": "prefix",
-            "options": prefix_options,
-            "initial_option": next(o for o in prefix_options if o["value"] == selected_prefix),
+    hit = (defaults or {}).get(picked)
+    name_value = spec.org_name if spec else (hit.base_name if hit else "")
+    code_value = spec.org_code if spec else (hit.code if hit else "")
+
+    return [
+        {
+            "type": "input",
+            "block_id": "prefix",
+            # 고르는 즉시 아래 두 칸을 다시 채운다. 이 값이 없으면 Slack 이
+            # 선택 사실을 서버에 보내지 않아 자동 채움이 동작하지 않는다.
+            "dispatch_action": True,
+            "label": {"type": "plain_text", "text": "조직 구분"},
+            "element": {
+                "type": "static_select",
+                "action_id": "prefix",
+                "options": options,
+                "initial_option": next(o for o in options if o["value"] == picked),
+            },
+            "hint": {
+                "type": "plain_text",
+                "text": "본부 > 본사팀 > 현장, 또는 실 > 본사팀. "
+                        "업무는 조직이 아니라 다른 팀과 협업할 때 쓰는 채널이며, "
+                        "주관 팀의 조직코드를 그대로 씁니다.",
+            },
         },
-    }
-    manual_blocks = [
         {
             "type": "input",
             "block_id": "org_name",
@@ -214,7 +175,11 @@ def _name_inputs(spec: ChannelSpec | None = None, *, org_search: bool = False) -
                 "type": "plain_text_input",
                 "action_id": "org_name",
                 "placeholder": {"type": "plain_text", "text": "예: 전산"},
-                **({"initial_value": spec.org_name} if spec else {}),
+                **({"initial_value": name_value} if name_value else {}),
+            },
+            "hint": {
+                "type": "plain_text",
+                "text": "소속 조직이 자동으로 채워집니다. 다른 조직의 채널이면 고쳐 주세요.",
             },
         },
         {
@@ -225,46 +190,38 @@ def _name_inputs(spec: ChannelSpec | None = None, *, org_search: bool = False) -
                 "type": "plain_text_input",
                 "action_id": "org_code",
                 "placeholder": {"type": "plain_text", "text": "예: ABB110"},
-                **({"initial_value": spec.org_code} if spec else {}),
+                **({"initial_value": code_value} if code_value else {}),
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "task",
+            "label": {"type": "plain_text", "text": "업무명"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "task",
+                "placeholder": {"type": "plain_text", "text": "예: 주간회의"},
+                **({"initial_value": spec.task} if spec else {}),
             },
         },
     ]
-    # 프로젝트는 정식 조직이 아니라 조직코드가 없다. 주관 조직의 코드를 빌리고
-    # 이름 자리에는 프로젝트명을 넣는다 - `프로젝트-스마트시티_ABB110-회의`.
-    project_block = {
-        "type": "input",
-        "block_id": "project_name",
-        "optional": True,
-        "label": {"type": "plain_text", "text": "프로젝트명 (구분이 프로젝트일 때만)"},
-        "element": {
-            "type": "plain_text_input",
-            "action_id": "project_name",
-            "placeholder": {"type": "plain_text", "text": "예: 스마트시티"},
-        },
-        "hint": {
-            "type": "plain_text",
-            "text": "프로젝트는 조직코드가 없어 위에서 고른 주관 조직의 코드를 씁니다.",
-        },
-    }
-    task_block = {
-        "type": "input",
-        "block_id": "task",
-        "label": {"type": "plain_text", "text": "업무명"},
-        "element": {
-            "type": "plain_text_input",
-            "action_id": "task",
-            "placeholder": {"type": "plain_text", "text": "예: 주간회의"},
-            **({"initial_value": spec.task} if spec else {}),
-        },
-    }
-    if org_search:
-        return [prefix_block, org_select_block(), project_block, task_block]
-    return [prefix_block, *manual_blocks, task_block]
 
 
-def create_modal(private_metadata: str, *, org_search: bool = False) -> dict:
-    """전역 바로가기와 `/채널 생성`이 공유하는 생성 모달."""
-    blocks = _name_inputs(org_search=org_search)
+def create_modal(
+    private_metadata: str,
+    *,
+    prefix: str = "본사팀",
+    defaults: dict | None = None,
+    task: str = "",
+) -> dict:
+    """전역 바로가기와 `/채널 생성`이 공유하는 생성 모달.
+
+    구분이 바뀔 때 이 함수로 다시 만들어 `views_update` 한다. 그래서 이미 입력한
+    업무명(`task`)을 인자로 받아 되살린다 — 다시 그렸다고 입력이 사라지면 안 된다.
+    """
+    blocks = _name_inputs(prefix=prefix, defaults=defaults)
+    if task:
+        blocks[-1]["element"]["initial_value"] = task
     blocks.extend(
         [
             {

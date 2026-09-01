@@ -17,8 +17,8 @@ from tybot.slack.pilot import WorkspaceBot
 
 def test_build_channel_name_normalizes_people_friendly_input():
     assert (
-        build_channel_name("팀", " 전산 ", "abb110", " 주간 회의 ")
-        == "팀-전산_ABB110-주간-회의"
+        build_channel_name("본사팀", " 전산 ", "abb110", " 주간 회의 ")
+        == "본사팀-전산_ABB110-주간-회의"
     )
 
 
@@ -26,9 +26,9 @@ def test_build_channel_name_normalizes_people_friendly_input():
     "args,block",
     [
         (("부서", "전산", "ABB110", "회의"), "prefix"),
-        (("팀", "전산_운영", "ABB110", "회의"), "org_name"),
-        (("팀", "전산", "ABB-110", "회의"), "org_code"),
-        (("팀", "전산", "ABB110", ""), "task"),
+        (("본사팀", "전산_운영", "ABB110", "회의"), "org_name"),
+        (("본사팀", "전산", "ABB-110", "회의"), "org_code"),
+        (("본사팀", "전산", "ABB110", ""), "task"),
     ],
 )
 def test_build_channel_name_rejects_nonstandard_input(args, block):
@@ -88,14 +88,14 @@ def test_create_private_channel_records_owner_and_invites_requester(tmp_path):
     bot = _bot(tmp_path)
     client = Mock()
     client.conversations_create.return_value = {
-        "channel": {"id": "C1", "name": "팀-전산_abb110-주간회의"}
+        "channel": {"id": "C1", "name": "본사팀-전산_abb110-주간회의"}
     }
-    request = ChannelRequest("팀", "전산", "ABB110", "주간회의", "private", ("U2",))
+    request = ChannelRequest("본사팀", "전산", "ABB110", "주간회의", "private", ("U2",))
 
     bot._create_channel(client, "U1", request)
 
     client.conversations_create.assert_called_once_with(
-        name="팀-전산_abb110-주간회의", is_private=True
+        name="본사팀-전산_abb110-주간회의", is_private=True
     )
     client.conversations_invite.assert_called_once_with(channel="C1", users="U1,U2")
     assert bot.channel_owners.is_owner("it", "C1", "U1")
