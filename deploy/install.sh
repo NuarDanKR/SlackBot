@@ -59,6 +59,18 @@ else
 fi
 "$APP_DIR/.venv/bin/pip" install -e "$APP_DIR" --no-deps -q
 
+# 관리 콘솔은 선택 설치다. `-e . --no-deps` 는 extras 를 건너뛰므로 따로 깐다.
+# 이걸 빼먹으면 콘솔이 ModuleNotFoundError 로 기동하지 않고, 배포 테스트도 실패한다.
+if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
+  echo "  콘솔 의존성 설치"
+  if [[ "${OFFLINE:-0}" == "1" ]]; then
+    "$APP_DIR/.venv/bin/pip" install --no-index --find-links "$APP_DIR/wheels" \
+      -r "$APP_DIR/deploy/requirements-console.txt"
+  else
+    "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/deploy/requirements-console.txt" -q
+  fi
+fi
+
 echo "== 5/6 권한 (코드는 봇이 수정 불가) =="
 chown -R root:tybot "$APP_DIR"
 chmod -R g-w,o-rwx "$APP_DIR"
@@ -91,6 +103,9 @@ for u in tybot-update tybot-collect tybot-tidy tybot-schedule-sync; do
   install -m 0644 "$APP_DIR/deploy/$u.service" "/etc/systemd/system/$u.service"
   install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"
 done
+if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
+  install -m 0644 "$APP_DIR/deploy/tybot-console.service" /etc/systemd/system/tybot-console.service
+fi
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.service" /etc/systemd/system/tybot-deploy.service
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.path"    /etc/systemd/system/tybot-deploy.path
 systemctl daemon-reload
@@ -103,3 +118,13 @@ cat <<EOF
   3) 로컬 PC 봇을 먼저 끄고:  sudo systemctl enable --now tybot
   4) journalctl -u tybot -f
 EOF
+
+if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
+cat <<EOF
+관리 콘솔:
+  5) 화면 파일 경로를 설정에 넣으세요(없으면 API 만 열립니다):
+       echo 'CONSOLE_DIST=$APP_DIR/console-web/dist' >> $CONF_DIR/tybot.env
+  6) sudo systemctl enable --now tybot-console
+  7) 127.0.0.1:8787 에만 열립니다. 외부에서 보려면 앞단(nginx 등)을 두세요.
+EOF
+fi

@@ -10,7 +10,12 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-python -m pip download -r requirements.txt -d wheels \
+# 콘솔까지 오프라인으로 설치하려면 이 목록도 함께 받는다.
+#   WITH_CONSOLE=1 bash deploy/wheelhouse.sh
+REQS=(-r requirements.txt)
+[[ "${WITH_CONSOLE:-0}" == "1" ]] && REQS+=(-r deploy/requirements-console.txt)
+
+python -m pip download "${REQS[@]}" -d wheels \
   --only-binary=:all: \
   --platform manylinux2014_x86_64 \
   --python-version 3.11 \

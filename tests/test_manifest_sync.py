@@ -16,6 +16,10 @@ from pathlib import Path
 
 import pytest
 
+# 콘솔 백엔드는 선택 설치다(`pip install -e ".[console]"`). 봇만 도는 서버에서
+# 이 파일 때문에 배포 게이트가 막히면, 정작 봇 배포가 콘솔 사정에 발이 묶인다.
+pytest.importorskip("fastapi", reason="콘솔 의존성 미설치")
+
 ROOT = Path(__file__).resolve().parent.parent
 REPO_MANIFEST = ROOT / "docs" / "pilot" / "slack-app-manifest.yaml"
 CONSOLE_SRC = ROOT / "console-web" / "src"

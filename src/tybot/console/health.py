@@ -392,9 +392,7 @@ def feedback_section(events: list[dict]) -> dict:
 
 
 def manifest_text() -> str:
-    from .app import manifest_path
-
-    return _read(manifest_path())
+    return _read(reader.manifest_path())
 
 
 def code_text() -> str:

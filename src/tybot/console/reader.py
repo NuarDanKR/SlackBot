@@ -35,6 +35,19 @@ STALLED_HOURS = 24
 WATCH_HOURS = 8
 
 
+def manifest_path() -> Path:
+    """Slack 앱 매니페스트 원본 위치. 배포본에서도 같은 상대 위치에 있다.
+
+    **여기 두는 이유**: 헬스 체크가 매니페스트와 코드의 명령 목록을 맞춰 보는데,
+    이 함수가 `app.py` 에 있으면 경로 하나 때문에 FastAPI 를 import 하게 된다.
+    콘솔을 설치하지 않은(봇만 도는) 서버에서는 그것만으로 배포 테스트가 실패한다.
+    """
+    override = os.getenv("MANIFEST_PATH")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[3] / "docs" / "pilot" / "slack-app-manifest.yaml"
+
+
 def archive_dir() -> Path:
     return Path(os.getenv("ARCHIVE_DIR", "./archive"))
 

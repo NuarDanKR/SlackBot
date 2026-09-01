@@ -1,0 +1,9 @@
+# 관리 콘솔 백엔드 전용. 봇만 돌리는 서버에는 설치하지 않는다.
+#
+#   sudo WITH_CONSOLE=1 bash deploy/install.sh
+#
+# requirements.txt 와 나눠 두는 이유: 콘솔은 웹 프레임워크를 끌어오는데,
+# 봇만 도는 서버에 그걸 얹으면 갱신할 표면과 취약점 대상이 그만큼 늘어난다.
+# psycopg 는 조직 동기화에도 쓰이므로 requirements.txt 에 있다.
+fastapi==0.141.1
+uvicorn==0.52.4

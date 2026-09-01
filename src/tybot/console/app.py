@@ -312,12 +312,9 @@ def health_probe() -> dict:
 # Slack 앱 매니페스트 — 저장소 파일을 그대로 내려보낸다
 # ---------------------------------------------------------------------------
 
-def manifest_path() -> Path:
-    """매니페스트 원본 위치. 배포본에서도 같은 상대 위치에 있다."""
-    override = os.getenv("MANIFEST_PATH")
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parents[3] / "docs" / "pilot" / "slack-app-manifest.yaml"
+# 경로는 `reader` 가 갖는다. 이 모듈을 import 하면 FastAPI 가 따라오는데,
+# 헬스 체크는 콘솔이 없는 서버에서도 매니페스트를 읽어야 한다.
+manifest_path = reader.manifest_path
 
 
 @app.get("/api/manifest")
