@@ -241,7 +241,7 @@ def test_levels_without_a_match_are_absent():
 # --- 모달 ---------------------------------------------------------------------
 def test_modal_searches_org_and_hides_the_code_input():
     ids = [b["block_id"] for b in _name_inputs()]
-    assert ids == ["prefix", "org", "task"]
+    assert ids == ["prefix", "org_team", "task"]
     assert _name_inputs()[1]["element"]["type"] == "external_select"
     assert "org_code" not in ids
 
@@ -278,6 +278,16 @@ def test_defaults_select_the_matching_org():
 def test_switching_prefix_switches_the_default():
     blocks = _name_inputs(prefix="본부", defaults=defaults_by_prefix(_chain()))
     assert blocks[1]["element"]["initial_option"]["value"] == "ABB300|본부|경영"
+
+
+def test_switching_prefix_changes_org_block_so_slack_does_not_preserve_old_selection():
+    team = _name_inputs(prefix="본사팀", defaults=defaults_by_prefix(_chain()))[1]
+    hq = _name_inputs(prefix="본부", defaults=defaults_by_prefix(_chain()))[1]
+
+    assert team["block_id"] == "org_team"
+    assert hq["block_id"] == "org_hq"
+    assert team["block_id"] != hq["block_id"]
+    assert team["element"]["action_id"] == hq["element"]["action_id"] == "org"
 
 
 def test_other_orgs_are_chosen_by_search_not_by_typing_a_code():
@@ -399,7 +409,7 @@ def test_missing_org_selection_is_refused_on_the_search_block():
     )
     with pytest.raises(ChannelNameError) as e:
         request_from_view(view, include_channel_options=False)
-    assert e.value.block_id == "org"
+    assert e.value.block_id == "org_team"
 
 
 # --- 봇 쪽 ---------------------------------------------------------------------

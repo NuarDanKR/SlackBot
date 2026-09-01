@@ -20,6 +20,13 @@ _OWNER_LOCK = threading.Lock()
 _SPACE_RE = re.compile(r"\s+")
 _CODE_RE = re.compile(r"^[0-9A-Za-z]+$")
 _CHANNEL_PREFIX = {"본사팀": "팀"}
+_ORG_BLOCK_IDS = {
+    "본부": "org_hq",
+    "실": "org_div",
+    "본사팀": "org_team",
+    "현장": "org_site",
+    "업무": "org_task",
+}
 
 
 class ChannelNameError(ValueError):
@@ -81,6 +88,13 @@ def _selected(state: dict, block_id: str, action_id: str) -> dict:
     return state.get(block_id, {}).get(action_id, {})
 
 
+def _selected_by_action(state: dict, action_id: str) -> tuple[str, dict]:
+    for block_id, actions in state.items():
+        if action_id in actions:
+            return block_id, actions[action_id]
+    return "", {}
+
+
 def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRequest:
     """Slack view_submission을 채널 요청으로 바꾼다.
 
@@ -90,10 +104,13 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
     prefix = (_selected(state, "prefix", "prefix").get("selected_option") or {}).get(
         "value", ""
     )
-    selected_org = _selected(state, "org", "org").get("selected_option") or {}
+    org_block_id, org_action = _selected_by_action(state, "org")
+    selected_org = org_action.get("selected_option") or {}
     org_code, _derived_prefix, org_name = decode_value(selected_org.get("value", ""))
     if not org_code or not org_name:
-        raise ChannelNameError("조직명을 검색해 목록에서 선택해 주세요.", "org")
+        raise ChannelNameError(
+            "조직명을 검색해 목록에서 선택해 주세요.", org_block_id or "org_team"
+        )
     task = _selected(state, "task", "task").get("value", "")
     visibility = "private"
     members: tuple[str, ...] = ()
@@ -155,6 +172,7 @@ def _name_inputs(
 
     hit = (defaults or {}).get(picked)
     selected_org = OrgHit(spec.org_code, spec.org_name) if spec else hit
+    org_block_id = _ORG_BLOCK_IDS[picked]
 
     return [
         {
@@ -179,7 +197,9 @@ def _name_inputs(
         },
         {
             "type": "input",
-            "block_id": "org",
+            # views.update는 block_id/action_id가 같으면 기존 선택을 보존한다.
+            # 구분마다 block_id를 바꿔야 전산팀 → 경영본부 초기값이 실제로 반영된다.
+            "block_id": org_block_id,
             "label": {"type": "plain_text", "text": "조직명"},
             "element": {
                 "type": "external_select",
