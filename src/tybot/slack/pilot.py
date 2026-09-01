@@ -125,6 +125,7 @@ from ..schedule import (
     parse_window,
     unknown_window,
 )
+from ..status_tree import build_tree, render_tree, totals
 from ..workspaces import ConfigError, WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
@@ -1525,9 +1526,26 @@ class WorkspaceBot:
             "최근_질문_주의": "감사 기록이며 답변 생성에는 쓰이지 않는다. 본인 질문만 보인다.",
         }
 
+    def _visible_workspaces(self) -> frozenset[str]:
+        """상태에 보여줄 워크스페이스. 자기 것 + 크로스 열람 허용분.
+
+        예전에는 아카이브 전체 문서를 나열해서, 자기 워크스페이스만 볼 수 있는 봇도
+        다른 워크스페이스의 채널명을 보여줬다. 채널명에는 조직·업무가 들어 있어
+        그 자체가 노출이다(원칙 3).
+        """
+        return frozenset({self.workspace, *(self.cfg.readable or ())})
+
+    def _status_tree(self):
+        return build_tree(
+            self.store.docs(),
+            visible=self._visible_workspaces(),
+            labels=getattr(self, "workspace_labels", None) or {self.workspace: self.cfg.label},
+            own=self.workspace,
+        )
+
     def _status_facts(self, client=None) -> dict:
         """상태 요약을 사실로 넘긴다. 상세 목록은 코드가 만든 블록을 그대로 붙인다."""
-        docs = self.store.docs()
+        tree_totals = totals(self._status_tree())
         up = datetime.now(UTC) - self._started
         hours, rem = divmod(int(up.total_seconds()), 3600)
         return {
@@ -1539,8 +1557,9 @@ class WorkspaceBot:
             "자동참여": self.autojoin,
             "모델": self.engine.model_info(),
             "오늘_사용액_USD": round(self.engine.spent_today(), 4),
-            "아카이브_문서수": len(docs),
-            "아카이브_원문줄수": sum(len(d.raw_lines) for d in docs),
+            "아카이브_문서수": tree_totals["문서수"],
+            "아카이브_원문줄수": tree_totals["원문줄수"],
+            "워크스페이스별_수집": tree_totals["워크스페이스별"],
             "형식위반_건수": len(self.store.broken()),
             "쓰기_불가_경로": self.path_problems or "없음",
         }
@@ -1633,7 +1652,7 @@ class WorkspaceBot:
 
     def _status(self, client=None) -> str:
         """봇 자체 상태 — 아카이브 질의가 아니므로 LLM 을 호출하지 않는다(비용 0)."""
-        docs = self.store.docs()
+        nodes = self._status_tree()
         broken = self.store.broken()
         up = datetime.now(UTC) - self._started
         hours, rem = divmod(int(up.total_seconds()), 3600)
@@ -1664,16 +1683,16 @@ class WorkspaceBot:
             f" · 이번 세션 수집 {self._ingested} 건 (마지막 {last})",
             f"*모델*: {self.engine.model_info()} · 오늘 사용액 ${self.engine.spent_today():.3f}",
             f"*감사기록*: `{self.qa_log.root}`",
-            f"*아카이브*: `{self.archive_dir}` — 문서 {len(docs)}건, "
-            f"원문 {sum(len(d.raw_lines) for d in docs)}줄",
+            f"*아카이브*: `{self.archive_dir}` — 문서 {sum(n.docs for n in nodes)}건, "
+            f"원문 {sum(n.lines for n in nodes)}줄 · 워크스페이스 {len(nodes)}개",
         ]
-        for d in sorted(docs, key=lambda d: -len(d.raw_lines))[:10]:
-            lines.append(f"  • {d.channel} — {len(d.raw_lines)}줄 (최근 {d.last_ingested or '-'})")
+        # 워크스페이스 → 채널 트리. 평평한 목록은 어느 조직의 채널인지 알 수 없다.
+        lines.extend(render_tree(nodes))
         if broken:
             lines.append(f"⚠️ 형식 위반 {len(broken)}건: " + ", ".join(p.name for p, _ in broken))
         for label, why in self.path_problems.items():
             lines.append(f"🛑 *{label} 쓰기 불가* — {why}. 수집이 저장되지 않습니다.")
-        if not docs and not self.path_problems:
+        if not any(n.docs for n in nodes) and not self.path_problems:
             lines.append("ℹ️ 아직 수집된 원문이 없습니다. 채널에서 `수집` 또는 대화가 쌓이길 기다리세요.")
         return "\n".join(lines)
 
@@ -1786,12 +1805,18 @@ def build_bots() -> list[WorkspaceBot]:
         ),
     )
 
+    configs = load_workspaces()
+    # 상태 트리가 다른 워크스페이스 이름을 표시하려면 키만으로는 부족하다.
+    # 각 봇은 자기 cfg 만 알기 때문에 여기서 지도를 만들어 넘긴다.
+    labels = {c.key: c.label for c in configs}
+
     bots = []
-    for cfg in load_workspaces():
+    for cfg in configs:
         bot = WorkspaceBot(
             cfg, store=store, engine=engine, qa_log=qa_log, archive_dir=archive_dir
         )
         bot.path_problems = problems
+        bot.workspace_labels = labels
         bots.append(bot)
     return bots
 
