@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..archive.store import ArchiveStore
-from . import env_settings, reader
+from . import env_settings, health, reader
 from .auth import SESSION_COOKIE, SESSION_HOURS, Authenticator, AuthError, ConsoleUser
 
 logger = logging.getLogger("tybot.console.api")
@@ -288,8 +288,22 @@ def put_env_settings(
     return {**result, "changed": changed}
 
 
+@app.get("/api/health-report")
+def health_report(user: User) -> dict:
+    """헬스 체크 — 봇이 "돌고는 있는데 제 일을 못 하는" 상태를 드러낸다.
+
+    아래 `/api/health` 는 프로세스가 살아 있는지만 답하는 무인증 확인용이고,
+    이쪽은 수집·답변 품질·명령 정합·피드백까지 본다. 담당자에게는 자기 워크스페이스
+    몫만 보인다 — 범위는 `health.report` 안에서 거른다(합계가 섞이지 않게).
+    """
+    return health.report(
+        allowed=None if user.all_workspaces else user.workspaces,
+        store=store(),
+    )
+
+
 @app.get("/api/health")
-def health() -> dict:
+def health_probe() -> dict:
     """인증 없이 열어 두는 확인용 엔드포인트. 상태만 알려 주고 내용은 담지 않는다."""
     return {"ok": True, "at": datetime.now(KST).isoformat(timespec="seconds")}
 

@@ -73,7 +73,6 @@ oauth_config:
       - files:read            # 첨부 다운로드 — 없으면 파일 대신 로그인 HTML(조용한 고장)
       - canvases:read         # 채널 캔버스 본문 수집(없으면 캔버스는 '미변환' 으로만 남음)
       - reactions:write       # 👀 수신 표시
-      - reactions:read        # TYBot 답변의 👍/👎 품질 피드백 수신
       - channels:join         # 채널 자가참여 — 없으면 일부 채널만 보임(조용한 고장)
       - commands              # /채널 명령과 전역 바로가기
       - channels:manage       # TYBot이 공개 업무 채널 생성·이름 변경

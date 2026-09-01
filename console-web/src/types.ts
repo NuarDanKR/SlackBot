@@ -248,3 +248,75 @@ export interface CollectedDoc {
   attachmentLines: number
   content: string | null
 }
+
+/** 헬스 체크 — 서버 `src/tybot/console/health.py` 와 짝이 맞아야 합니다. */
+export type HealthLevel = 'ok' | 'warn' | 'bad' | 'unknown'
+
+export type HealthProblem = { section: string; message: string }
+
+export type HealthReport = {
+  level: HealthLevel
+  days: number
+  checkedAt: string
+  problems: HealthProblem[]
+  sections: {
+    bot: {
+      level: HealthLevel
+      workspaces: {
+        workspace: string
+        label: string
+        level: HealthLevel
+        /** 상태 파일이 낡으면 null 입니다 — 끊긴 것과 구분합니다. */
+        connected: boolean | null
+        problems: string[]
+      }[]
+    }
+    archive: {
+      level: HealthLevel
+      documents: number
+      brokenDocuments: number
+      staleWorkspaces: number
+      problems: string[]
+    }
+    answers: {
+      level: HealthLevel
+      questions: number
+      grounded?: number
+      noHits?: number
+      groundedRate?: number
+      errors?: number
+      errorRate?: number
+      slowAnswers?: number
+      topReasons?: { reason: string; count: number }[]
+      note?: string
+      problems: string[]
+    }
+    commands: {
+      level: HealthLevel
+      commands: { name: string; inCode: boolean; inManifest: boolean }[]
+      note?: string
+      problems: string[]
+    }
+    feedback: {
+      level: HealthLevel
+      positive: number
+      negative: number
+      missing: number
+      corrections: number
+      rated: number
+      /** 표본이 적으면 null 입니다. 0% 와 구분해야 합니다. */
+      satisfaction: number | null
+      note?: string
+      problems: string[]
+      /** 정정 사항을 많이 보낸 순. 본문은 담지 않습니다. */
+      contributors: {
+        actor: string
+        name: string
+        corrections: number
+        reports: number
+        praise: number
+        total: number
+      }[]
+    }
+  }
+}

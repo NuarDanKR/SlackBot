@@ -7,6 +7,10 @@ slack_bolt==1.30.0
 slack_sdk==3.43.0
 python-dotenv==1.2.2
 
+# DATABASE_URL 사용 시 단일 실행 락·조직 동기화에 필요하다.
+# 서버 install.sh는 이 파일을 설치하므로 별도 수동 설치가 남지 않아야 한다.
+psycopg[binary]==3.3.4
+
 # --- 첨부 문서 변환 (xlsx/docx/pptx/pdf/hwpx) ---
 openpyxl==3.1.5
 python-docx==1.2.0

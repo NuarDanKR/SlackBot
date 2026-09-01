@@ -23,6 +23,7 @@ from tybot.schedulesync import (
     SnapshotError,
     apply_snapshot,
     check_snapshot,
+    content_sha256,
     load_snapshot,
     manifest_sha256,
     newest_snapshot,
@@ -133,6 +134,13 @@ def test_broken_jsonl_line_is_refused(tmp_path):
 def test_manifest_fingerprint_is_stable():
     a, b = _snap(), _snap()
     assert manifest_sha256(a) == manifest_sha256(b)
+
+
+def test_occurrence_content_fingerprint_is_stable_and_sensitive():
+    row = _row()
+    assert content_sha256(row) == content_sha256(dict(reversed(list(row.items()))))
+    assert re.fullmatch(r"[0-9a-f]{64}", content_sha256(row))
+    assert content_sha256(row) != content_sha256({**row, "place": "changed"})
 
 
 # --- 검사 -------------------------------------------------------------------
@@ -383,6 +391,14 @@ def test_upsert_does_not_restore_purged_details():
     sql = conn.sql_for("insert into schedule_occurrence")
     assert "details_purged_at is null" in sql
     assert "else null end" in sql
+
+
+def test_upsert_supplies_and_updates_content_hash():
+    conn = _conn()
+    apply_snapshot(conn, _snap())
+    sql = conn.sql_for("insert into schedule_occurrence")
+    assert "s.content_sha256" in sql
+    assert "content_sha256 = excluded.content_sha256" in sql
 
 
 def test_upsert_only_touches_approved_folders():

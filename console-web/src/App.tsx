@@ -9,9 +9,18 @@ import { Deploy } from './pages/Deploy'
 import { Workspaces } from './pages/Workspaces'
 import { Harness } from './pages/Harness'
 import { Collected } from './pages/Collected'
+import { HealthCheck } from './pages/HealthCheck'
 import { EnvSettings } from './pages/EnvSettings'
 
-type Tab = 'status' | 'collected' | 'usage' | 'harness' | 'deploy' | 'workspaces' | 'env'
+type Tab =
+  | 'status'
+  | 'collected'
+  | 'usage'
+  | 'health'
+  | 'harness'
+  | 'deploy'
+  | 'workspaces'
+  | 'env'
 
 /** 메뉴 이름은 화면 제목과 똑같이 씁니다 — 어디에 있는지 헷갈리지 않게 합니다. */
 const NAV: { group: string; items: { id: Tab; label: string; ownerOnly?: boolean }[] }[] = [
@@ -26,6 +35,7 @@ const NAV: { group: string; items: { id: Tab; label: string; ownerOnly?: boolean
   {
     group: '봇 관리',
     items: [
+      { id: 'health', label: '헬스 체크' },
       { id: 'harness', label: '봇 규칙 편집' },
       { id: 'deploy', label: '배포 승인' },
       { id: 'workspaces', label: '워크스페이스 관리', ownerOnly: true },
@@ -262,6 +272,7 @@ export default function App() {
           {activeTab === 'status' && <Dashboard user={user} onToast={toast} />}
           {activeTab === 'collected' && <Collected user={user} onToast={toast} />}
           {activeTab === 'usage' && <Usage user={user} onToast={toast} />}
+          {activeTab === 'health' && <HealthCheck user={user} />}
           {activeTab === 'harness' && <Harness user={user} onToast={toast} />}
           {activeTab === 'deploy' && <Deploy user={user} onToast={toast} />}
           {activeTab === 'workspaces' && <Workspaces onToast={toast} />}

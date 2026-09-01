@@ -173,6 +173,27 @@ def manifest_sha256(snapshot: Snapshot) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def content_sha256(row: dict) -> str:
+    """Return a stable fingerprint for one normalized schedule occurrence."""
+    starts_at = _parse_ts(row.get("starts_at"))
+    ends_at = _parse_ts(row.get("ends_at"))
+    modified_at = _parse_ts(row.get("source_modified_at"))
+    content = {
+        "source_folder_id": int(row["source_folder_id"]),
+        "date_id": int(row["date_id"]),
+        "event_id": int(row["event_id"]),
+        "subject": row.get("subject"),
+        "place": row.get("place"),
+        "starts_at": starts_at.isoformat() if starts_at else None,
+        "ends_at": ends_at.isoformat() if ends_at else None,
+        "is_all_day": bool(row.get("is_all_day")),
+        "is_repeat": bool(row.get("is_repeat")),
+        "source_modified_at": modified_at.isoformat() if modified_at else None,
+    }
+    raw = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 # --- 검사 -------------------------------------------------------------------
 REQUIRED_ROW_FIELDS = ("source_folder_id", "date_id", "event_id", "starts_at", "ends_at")
 
@@ -249,7 +270,8 @@ create temp table schedule_stage (
     ends_at timestamptz,
     is_all_day boolean,
     is_repeat boolean,
-    source_modified_at timestamptz
+    source_modified_at timestamptz,
+    content_sha256 text
 ) on commit drop
 """
 
@@ -257,11 +279,11 @@ UPSERT_SQL = """
 insert into schedule_occurrence (
     source_folder_id, date_id, event_id, subject, place,
     starts_at, ends_at, is_all_day, is_repeat, source_modified_at,
-    last_snapshot_id, source_deleted_at
+    content_sha256, last_snapshot_id, source_deleted_at
 )
 select s.source_folder_id, s.date_id, s.event_id, s.subject, s.place,
        s.starts_at, s.ends_at, s.is_all_day, s.is_repeat, s.source_modified_at,
-       %(snapshot_id)s, NULL
+       s.content_sha256, %(snapshot_id)s, NULL
   from schedule_stage s
   join schedule_folder f on f.source_folder_id = s.source_folder_id
 on conflict (source_folder_id, date_id) do update set
@@ -276,6 +298,7 @@ on conflict (source_folder_id, date_id) do update set
     is_all_day = excluded.is_all_day,
     is_repeat = excluded.is_repeat,
     source_modified_at = excluded.source_modified_at,
+    content_sha256 = excluded.content_sha256,
     last_snapshot_id = excluded.last_snapshot_id,
     last_seen_at = now(),
     source_deleted_at = null
@@ -407,7 +430,8 @@ def apply_snapshot(
         cur.execute(STAGE_DDL)
         with cur.copy(
             "copy schedule_stage (source_folder_id, date_id, event_id, subject, place,"
-            " starts_at, ends_at, is_all_day, is_repeat, source_modified_at) from stdin"
+            " starts_at, ends_at, is_all_day, is_repeat, source_modified_at,"
+            " content_sha256) from stdin"
         ) as cp:
             for r in snapshot.rows:
                 cp.write_row((
@@ -421,6 +445,7 @@ def apply_snapshot(
                     bool(r.get("is_all_day")),
                     bool(r.get("is_repeat")),
                     _parse_ts(r.get("source_modified_at")),
+                    content_sha256(r),
                 ))
 
         # 승인되지 않은 폴더는 넣지 않는다. schedule_folder 가 허용 목록이다.

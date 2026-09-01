@@ -164,12 +164,17 @@ def main() -> int:
         print("=== LLM 실호출 ===")
         ok = check_llm_live() and ok
     print("=== 패키지 ===")
-    for mod in ("slack_bolt", "anthropic", "dotenv"):
+    modules = ["slack_bolt", "anthropic", "dotenv"]
+    if os.getenv("DATABASE_URL"):
+        modules.append("psycopg")
+    for mod in modules:
         try:
             __import__(mod)
             print(f"  [OK]   {mod}")
         except ImportError:
             print(f"  [MISS] {mod} 미설치")
+            if mod == "psycopg":
+                print("         DATABASE_URL 사용 시 필요: pip install 'psycopg[binary]'")
             ok = False
     print("\n결과:", "준비 완료 - python -m tybot.slack.pilot" if ok else "미완료(위 [MISS] 항목)")
     return 0 if ok else 1
