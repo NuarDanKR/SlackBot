@@ -98,7 +98,16 @@ def test_manifest_has_the_scopes_the_bot_actually_needs():
         "files:read",
         "chat:write",
         "commands",
+        "reactions:read",
+        "reactions:write",
     ):
         assert scope in text, f"스코프 누락: {scope}"
-    for event in ("app_mention", "message.channels", "channel_created", "channel_rename"):
+    for event in (
+        "app_mention",
+        "message.channels",
+        "channel_created",
+        "channel_rename",
+        "reaction_added",
+        "reaction_removed",
+    ):
         assert event in text, f"이벤트 누락: {event}"

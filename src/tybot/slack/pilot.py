@@ -36,6 +36,7 @@ from ..autojoin import on_channel_event, sweep
 from ..channel_management import (
     ChannelNameError,
     ChannelOwnerStore,
+    action_prefix,
     create_modal,
     rename_modal,
     request_from_view,
@@ -178,15 +179,18 @@ def schedule_blocks(body: str, *, share_payload: str = "") -> list[dict]:
     out: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": body[:2900]}}]
     if "보여드릴 수 있는 일정이 없습니다" in body or "준비되지 않았습니다" in body:
         return out
-    out.append({
-        "type": "actions",
-        "elements": [{
-            "type": "button",
-            "action_id": "tybot_schedule_share",
-            "text": {"type": "plain_text", "text": "채널에 공유"},
-            "value": share_payload[:200],
-        }],
-    })
+    button: dict = {
+        "type": "button",
+        "action_id": "tybot_schedule_share",
+        "text": {"type": "plain_text", "text": "채널에 공유"},
+    }
+    # **빈 문자열을 넣으면 안 된다.** Slack 은 value 가 빈 버튼을 거부하고
+    # 메시지 전체를 버린다. `/일정` 을 인수 없이 치면 share_payload 가 "" 라
+    # 그 경우에만 답이 안 오는데, 서버 로그에는 조회 성공만 남아 원인을 찾기 어렵다.
+    # 값이 없으면 키 자체를 넣지 않는다 — 받는 쪽은 없으면 기본 기간으로 읽는다.
+    if share_payload.strip():
+        button["value"] = share_payload[:200]
+    out.append({"type": "actions", "elements": [button]})
     return out
 
 
@@ -468,11 +472,18 @@ class WorkspaceBot:
                 channel_id=command.get("channel_id", ""),
                 user_id=command.get("user_id", ""),
             )
-            respond(
-                text=body,
-                response_type="ephemeral",
-                blocks=schedule_blocks(body, share_payload=text),
-            )
+            # 블록이 거부되면 Slack 은 메시지를 통째로 버린다. 그러면 사용자에게는
+            # "아무 반응 없음" 으로만 보이고 서버에는 조회 성공 로그만 남는다.
+            # 최소한 글은 가게 물러선다.
+            try:
+                respond(
+                    text=body,
+                    response_type="ephemeral",
+                    blocks=schedule_blocks(body, share_payload=text),
+                )
+            except Exception as e:
+                log.warning("[%s] 일정 블록 응답 실패 — 글만 보냅니다: %s", self.workspace, e)
+                respond(text=body, response_type="ephemeral")
 
         @self.app.action(schedule_dm.ACTION_ENABLE)
         def on_schedule_dm_enable(ack, body, respond):
@@ -535,7 +546,7 @@ class WorkspaceBot:
                     hash=view.get("hash"),
                     view=create_modal(
                         view.get("private_metadata") or "{}",
-                        prefix=selected_prefix(view),
+                        prefix=action_prefix(body),
                         defaults=self._org_defaults(user_id, client=client),
                         task=typed_task(view),
                     ),

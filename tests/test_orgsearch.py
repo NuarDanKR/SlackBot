@@ -10,6 +10,7 @@ import pytest
 from tybot.channel_management import (
     ChannelNameError,
     _name_inputs,
+    action_prefix,
     create_modal,
     rename_modal,
     request_from_view,
@@ -330,6 +331,15 @@ def test_selected_prefix_reads_the_current_choice():
 
 def test_selected_prefix_falls_back_to_the_default():
     assert selected_prefix(_view()) == "본사팀"
+
+
+def test_action_prefix_prefers_the_new_action_value_over_stale_view_state():
+    body = {
+        "actions": [{"selected_option": {"value": "본부"}}],
+        "view": _view(**_prefix("본사팀")),
+    }
+
+    assert action_prefix(body) == "본부"
 
 
 def test_typed_task_survives_a_redraw():

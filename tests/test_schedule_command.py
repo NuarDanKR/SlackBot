@@ -414,6 +414,25 @@ def test_blocks_offer_share_only_when_there_is_something_to_share():
     assert blocks[1]["elements"][0]["value"] == "오늘"
 
 
+def test_share_button_never_carries_an_empty_value():
+    """빈 value 를 넣으면 Slack 이 메시지 전체를 버린다.
+
+    실제로 겪은 고장이다. `/일정` 을 인수 없이 치면 share_payload 가 "" 가 되고,
+    서버 로그에는 조회 성공만 남는데 사용자에게는 아무것도 오지 않는다.
+    오류가 안 나서 원인을 찾기 어려운 종류다.
+    """
+    from tybot.slack.pilot import schedule_blocks
+
+    body = "*오늘·내일 일정* — 2건"
+    for payload in ("", "   "):
+        button = schedule_blocks(body, share_payload=payload)[1]["elements"][0]
+        assert "value" not in button, f"빈 value 가 들어갔다: {payload!r}"
+
+    # 값이 있으면 그대로 실어야 한다 — 공유 버튼이 기간을 되살리는 근거다.
+    actions = schedule_blocks(body, share_payload="이번주")[1]
+    assert actions["elements"][0]["value"] == "이번주"
+
+
 def test_blocks_hide_share_when_nothing_is_visible():
     """볼 수 없는 결과를 채널에 공유하는 버튼은 의미가 없다."""
     from tybot.schedule import UNAVAILABLE

@@ -116,6 +116,20 @@ def selected_prefix(view: dict, *, default: str = "본사팀") -> str:
     return picked or default
 
 
+def action_prefix(body: dict, *, default: str = "본사팀") -> str:
+    """block_actions의 방금 선택한 구분을 읽는다.
+
+    Slack은 action payload와 view.state를 함께 보내지만 view.state에는 변경 전 값이
+    남을 수 있다. 화면을 다시 그릴 때는 actions의 새 값을 우선해야 한다.
+    """
+    actions = body.get("actions") or []
+    selected = (actions[0].get("selected_option") or {}) if actions else {}
+    picked = str(selected.get("value") or "")
+    if picked in COLLECT_PREFIXES:
+        return picked
+    return selected_prefix(body.get("view") or {}, default=default)
+
+
 def typed_task(view: dict) -> str:
     """다시 그릴 때 이미 입력한 업무명을 잃지 않게 한다."""
     state = (view.get("state") or {}).get("values") or {}

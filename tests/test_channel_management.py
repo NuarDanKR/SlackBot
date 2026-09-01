@@ -99,6 +99,7 @@ def test_create_private_channel_records_owner_and_invites_requester(tmp_path):
         name="팀-전산_abb110-주간회의", is_private=True
     )
     client.conversations_invite.assert_called_once_with(channel="C1", users="U1,U2")
+    client.conversations_open.assert_called_once_with(users="U1")
     assert bot.channel_owners.is_owner("it", "C1", "U1")
 
 
