@@ -20,6 +20,18 @@ command -v $PY >/dev/null || dnf install -y python3.11 python3.11-pip
 command -v rsync >/dev/null || dnf install -y rsync
 command -v git   >/dev/null || dnf install -y git
 
+# 콘솔 화면을 서버에서 빌드하므로 Node 가 필요하다.
+# Rocky 8 기본 스트림은 Node 10 이고, 그 npm(6)은 lockfileVersion 3 을 읽지 못해
+# `Cannot read property 'react' of undefined` 로 죽는다. 스트림을 올려서 깐다.
+if [[ "${WITH_CONSOLE:-0}" == "1" && "${OFFLINE:-0}" != "1" ]]; then
+  if ! command -v node >/dev/null; then
+    echo "  Node 설치(nodejs:20)"
+    dnf module reset -y nodejs >/dev/null 2>&1 || true
+    dnf module enable -y nodejs:20 >/dev/null 2>&1 || true
+    dnf install -y nodejs || echo "  ! Node 설치 실패 — 화면 빌드는 건너뜁니다"
+  fi
+fi
+
 # 요약 기간 계산이 서버 로컬 날짜를 쓴다 - 시간대가 KST 여야 "오늘/이번주"가 맞는다.
 if [[ "$(timedatectl show -p Timezone --value 2>/dev/null)" != "Asia/Seoul" ]]; then
   echo "  ! 시간대가 Asia/Seoul 이 아닙니다: sudo timedatectl set-timezone Asia/Seoul"
@@ -39,6 +51,7 @@ if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   rsync -a --delete \
     --exclude '/.git' --exclude '/.venv' --exclude '/.env' --exclude '/archive' \
     --exclude '/wheels' \
+    --exclude '/console-web/node_modules' --exclude '/console-web/dist' \
     --exclude '__pycache__' --exclude '.pytest_cache' --exclude '*.egg-info' \
     "$SRC_DIR"/ "$APP_DIR"/
 
@@ -69,11 +82,44 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   else
     "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/deploy/requirements-console.txt" -q
   fi
+
+  # --- 콘솔 화면 빌드 ---
+  # **실패해도 설치를 멈추지 않는다.** 화면이 안 만들어지는 것과 봇이 못 뜨는 것은
+  # 무게가 다르다. 여기서 exit 하면 프런트엔드 사정으로 봇 배포가 막힌다.
+  build_console() {
+    command -v node >/dev/null || { echo "  ! node 가 없습니다 — 화면 빌드를 건너뜁니다"; return 1; }
+    local major minor
+    major=$(node -p "process.versions.node.split('.')[0]")
+    minor=$(node -p "process.versions.node.split('.')[1]")
+    # Vite 7 은 Node 20.19+ 를 요구한다. 낮으면 알 수 없는 오류로 죽는다.
+    if (( major < 20 )) || { (( major == 20 )) && (( minor < 19 )); }; then
+      echo "  ! Node $(node -v) 는 너무 낮습니다(20.19+ 필요) — 화면 빌드를 건너뜁니다"
+      return 1
+    fi
+    ( cd "$APP_DIR/console-web" && npm ci --no-audit --no-fund && npm run build ) || return 1
+    [[ -f "$APP_DIR/console-web/dist/index.html" ]] || return 1
+  }
+
+  if [[ "${OFFLINE:-0}" == "1" ]]; then
+    echo "  화면 빌드 건너뜀(OFFLINE=1) — dist 를 직접 올려 두세요"
+  else
+    echo "  콘솔 화면 빌드"
+    if build_console; then
+      echo "  화면 빌드 완료: $APP_DIR/console-web/dist"
+    else
+      CONSOLE_BUILD_FAILED=1
+      echo "  ! 화면 빌드 실패 — API 는 뜨지만 화면은 안 나옵니다. 설치는 계속합니다."
+    fi
+  fi
 fi
 
 echo "== 5/6 권한 (코드는 봇이 수정 불가) =="
-chown -R root:tybot "$APP_DIR"
-chmod -R g-w,o-rwx "$APP_DIR"
+# node_modules 는 건너뛴다 — 파일이 수만 개라 매 배포마다 수십 초가 든다.
+# 빌드 산출물(dist)만 봇이 읽을 수 있으면 된다.
+find "$APP_DIR" -path "$APP_DIR/console-web/node_modules" -prune -o -print0 |
+  xargs -0 -r chown root:tybot
+find "$APP_DIR" -path "$APP_DIR/console-web/node_modules" -prune -o -print0 |
+  xargs -0 -r chmod g-w,o-rwx
 chmod -R u+w "$APP_DIR/.venv"
 
 echo "== 6/6 설정 파일·서비스 =="
@@ -97,6 +143,13 @@ else
     echo "  → 누락된 $k 를 추가했습니다: $kv"
   done
 fi
+# 콘솔이 화면 파일을 어디서 읽는지. 없으면 API 만 열리고 브라우저에는 404 가 뜬다.
+if [[ "${WITH_CONSOLE:-0}" == "1" ]] && ! grep -qE "^CONSOLE_DIST=.+" "$CONF_DIR/tybot.env"; then
+  sed -i -E "/^CONSOLE_DIST=[[:space:]]*$/d" "$CONF_DIR/tybot.env"
+  echo "CONSOLE_DIST=$APP_DIR/console-web/dist" >> "$CONF_DIR/tybot.env"
+  echo "  → CONSOLE_DIST 를 추가했습니다: $APP_DIR/console-web/dist"
+fi
+
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
 # 타이머(자동배포·정기백필·점검)는 파일만 배치한다. enable 은 운영자가 결정한다.
 for u in tybot-update tybot-collect tybot-tidy tybot-schedule-sync; do
@@ -122,9 +175,14 @@ EOF
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
 cat <<EOF
 관리 콘솔:
-  5) 화면 파일 경로를 설정에 넣으세요(없으면 API 만 열립니다):
-       echo 'CONSOLE_DIST=$APP_DIR/console-web/dist' >> $CONF_DIR/tybot.env
+  5) 계정을 만드세요(안 만들면 admin/1111 임시 계정으로 열립니다):
+       $APP_DIR/.venv/bin/python -m tybot.console.auth <새비밀번호>
+       → 나온 해시를 $CONF_DIR/tybot.env 의 CONSOLE_ACCOUNTS 에 넣습니다
   6) sudo systemctl enable --now tybot-console
   7) 127.0.0.1:8787 에만 열립니다. 외부에서 보려면 앞단(nginx 등)을 두세요.
 EOF
+if [[ "${CONSOLE_BUILD_FAILED:-0}" == "1" ]]; then
+  echo "  ! 화면 빌드가 실패했습니다. 콘솔 API 는 뜨지만 브라우저에는 404 가 나옵니다."
+  echo "    Node 20.19+ 설치 후 다시 실행하거나, dist 를 직접 올리세요."
+fi
 fi

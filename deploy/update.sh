@@ -15,6 +15,18 @@ SRC=${TYBOT_SRC:-/tmp/tybot-src}
 APP=/opt/tybot
 BRANCH=${TYBOT_BRANCH:-master}
 
+# 콘솔이 이미 설치돼 있으면 자동 배포에서도 함께 갱신한다.
+# 타이머는 환경변수 없이 돌기 때문에, 여기서 스스로 판단하지 않으면
+# 손으로 돌릴 때만 화면이 갱신되고 자동 배포에서는 옛 화면이 남는다.
+if [[ -z ${WITH_CONSOLE:-} ]]; then
+  if [[ -f /etc/systemd/system/tybot-console.service ]]; then
+    WITH_CONSOLE=1
+  else
+    WITH_CONSOLE=0
+  fi
+fi
+export WITH_CONSOLE
+
 log() { echo "[$(date '+%F %T')] $*"; }
 
 [[ $EUID -eq 0 ]] || { echo "root 로 실행하세요 (sudo)"; exit 1; }
@@ -49,6 +61,13 @@ fi
 log "배포"
 bash "$SRC/deploy/install.sh"
 systemctl restart tybot
+
+# 콘솔은 봇과 별개 프로세스다. 재시작하지 않으면 새 API·화면이 반영되지 않는다.
+# 콘솔이 못 떠도 봇 배포는 성공으로 본다 — 무게가 다르다.
+if [[ "$WITH_CONSOLE" == "1" ]] && systemctl is-enabled --quiet tybot-console 2>/dev/null; then
+  systemctl restart tybot-console || log '콘솔 재시작 실패 — journalctl -u tybot-console 확인'
+fi
+
 sleep 5
 
 if systemctl is-active --quiet tybot; then

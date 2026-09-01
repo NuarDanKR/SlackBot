@@ -92,10 +92,15 @@ bash deploy/wheelhouse.sh          # → wheels/ 생성
 
 ```bash
 cd /tmp/tybot-src
-sudo bash deploy/install.sh              # 온라인
+sudo bash deploy/install.sh                      # 봇만
+sudo WITH_CONSOLE=1 bash deploy/install.sh       # 봇 + 관리 콘솔
 # 또는
-sudo OFFLINE=1 bash deploy/install.sh    # wheels/ 사용
+sudo OFFLINE=1 bash deploy/install.sh            # wheels/ 사용
 ```
+
+**`WITH_CONSOLE=1` 을 빼면 콘솔이 설치되지 않는다.** `fastapi`·`uvicorn` 은 선택
+의존성이라 봇만 돌리는 서버에는 올리지 않는다 — 웹 프레임워크를 얹으면 갱신할 표면과
+취약점 대상이 그만큼 늘어난다.
 
 스크립트가 하는 일 (멱등 — 재실행 안전):
 
@@ -107,6 +112,19 @@ sudo OFFLINE=1 bash deploy/install.sh    # wheels/ 사용
 | 4 | `/opt/tybot/.venv` 생성 + `requirements.txt` 고정 버전 설치 |
 | 5 | 코드 소유권 `root:tybot`, 봇은 **읽기·실행만** (자기 코드 수정 불가) |
 | 6 | `/etc/tybot/tybot.env` 생성(0640) + `tybot.service` 등록 |
+
+`WITH_CONSOLE=1` 이면 여기에 더해:
+
+| 단계 | 내용 |
+|---|---|
+| a | Node 20 설치 (`dnf module enable nodejs:20`) |
+| b | `deploy/requirements-console.txt` 설치 (`fastapi`·`uvicorn`) |
+| c | `console-web` 빌드 → `console-web/dist` |
+| d | `CONSOLE_DIST` 를 `tybot.env` 에 자동 추가 |
+| e | `tybot-console.service` 등록 (enable 은 사람이) |
+
+**화면 빌드가 실패해도 설치는 계속된다.** 화면이 안 만들어지는 것과 봇이 못 뜨는 것은
+무게가 다르다. 실패하면 마지막에 경고가 뜨고, 콘솔 API 는 뜨되 브라우저에는 404 가 난다.
 
 ### 경로 표준 — 왜 이렇게 나누나
 | 용도 | 경로 | 이유 |
@@ -259,6 +277,44 @@ cat /var/lib/tybot/deploy-status.json
 ```bash
 sudo bash /opt/tybot/deploy/update.sh
 ```
+
+---
+
+## 6-A2. 관리 콘솔 (선택)
+
+`WITH_CONSOLE=1` 로 설치했으면 계정을 만들고 켠다.
+
+```bash
+# 비밀번호 해시 생성 — 출력된 해시를 복사한다
+/opt/tybot/.venv/bin/python -m tybot.console.auth <새비밀번호>
+
+sudo vi /etc/tybot/tybot.env
+#   CONSOLE_ACCOUNTS=dan:<해시>:dan@taeyoung.com:owner:*
+
+sudo systemctl enable --now tybot-console
+```
+
+**계정을 만들지 않으면 `admin`/`1111` 임시 계정으로 열린다.** 화면 상단에 빨간 경고가
+뜨고, 운영 전에 반드시 제거해야 한다(BACKLOG B-20).
+
+확인:
+
+```bash
+curl -s localhost:8787/api/health      # {"ok":true,...}
+curl -sI localhost:8787/ | head -1     # HTTP/1.1 200 OK  ← 화면 파일까지 붙은 것
+```
+
+`/api/health` 는 200 인데 `/` 가 404 면 화면 빌드가 실패했거나 `CONSOLE_DIST` 가 틀렸다.
+
+| 증상 | 원인 / 조치 |
+|---|---|
+| `Cannot read property 'react' of undefined` | Node 가 낡았다(Rocky 8 기본은 10). `dnf module enable nodejs:20` |
+| 화면은 뜨는데 고친 내용이 안 보임 | 빌드를 안 했다. `sudo WITH_CONSOLE=1 bash deploy/install.sh` 재실행 |
+| 로그인은 되는데 화면이 비어 있음 | API 오류. `journalctl -u tybot-console -n 50` |
+
+**콘솔은 `127.0.0.1:8787` 에만 열린다.** 서버 밖에서 보려면 앞단(nginx 등)이 필요하다.
+서비스 파일의 `--host` 를 오너 승인 없이 바꾸지 않는다 — 이 화면은 봇 토큰과 배포 권한을
+쥐고 있고, 평문 HTTP 로 열면 로그인 비밀번호와 세션 쿠키가 그대로 지나간다.
 
 ---
 
