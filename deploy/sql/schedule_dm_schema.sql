@@ -1,7 +1,7 @@
 -- 일정 알림 개인 DM — 스키마
 --
 -- 설계: docs/design/schedule-dm-reminders.md
--- 적용:  psql -U tybot -d tybot -f deploy/sql/schedule_dm_schema.sql
+-- 적용:  psql -U <사용자> -d tyslackai -f deploy/sql/schedule_dm_schema.sql
 --
 -- 여러 번 실행해도 안전하다(전부 IF NOT EXISTS 또는 존재 확인 후 추가).
 --

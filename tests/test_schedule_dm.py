@@ -9,8 +9,10 @@
 """
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
+from unittest.mock import Mock
 
 import pytest
 
@@ -29,6 +31,7 @@ from tybot.schedule_dm import (
     Preference,
     backoff,
     claim,
+    client_message_id,
     disable,
     enable,
     error_code,
@@ -318,7 +321,17 @@ def test_send_marks_sent_and_stores_only_the_ts():
     assert result.sent == 1
     assert client.sent[0]["channel"] == "U1"
     assert "주간회의" in client.sent[0]["text"]
+    assert client.sent[0]["client_msg_id"] == client_message_id(Due(**_due()))
     assert "slack_message_ts = %(ts)s" in conn.sql_for("status = 'sent'")
+
+
+def test_client_message_id_is_stable_for_the_delivery_key():
+    first = Due(**_due(id=1, workspace="tyit", slack_user="U1"))
+    retried = Due(**_due(id=99, workspace="mgmt", slack_user="U2", attempts=4))
+    assert client_message_id(first) == client_message_id(retried)
+    assert client_message_id(first) != client_message_id(
+        Due(**_due(reminder_minutes=10))
+    )
 
 
 def test_send_fails_only_that_row_when_the_workspace_is_unknown():
@@ -416,6 +429,10 @@ def test_render_uses_kst_for_utc_input():
     assert "14:00" in text
 
 
+def test_normalize_minutes_ignores_malformed_values():
+    assert normalize_minutes(["30", None, "invalid", 10]) == (30, 10)
+
+
 # --- 설정 화면 ----------------------------------------------------------------
 def test_panel_says_the_current_state_first():
     on = settings_blocks(Preference("E1", "tyit", "U1", (30,), True))
@@ -467,6 +484,48 @@ def test_panel_states_the_all_day_rule():
 def test_identity_message_tells_the_user_what_to_do():
     assert "계정 연결" in NEED_IDENTITY
     assert "관리자" in NEED_IDENTITY
+
+
+def test_workspace_bot_opens_the_reminder_panel(monkeypatch):
+    """슬래시 핸들러가 호출하는 메서드가 실제로 설정 화면까지 이어져야 한다."""
+    import tybot.slack.pilot as pilot_mod
+
+    bot = pilot_mod.WorkspaceBot.__new__(pilot_mod.WorkspaceBot)
+    bot.workspace = "tyit"
+    conn = FakeConn(identity=[{"emp_no": "E1"}], pref=[])
+    monkeypatch.setattr(pilot_mod, "db_connect", lambda: contextlib.nullcontext(conn))
+    respond = Mock()
+
+    bot._schedule_reminder_panel(respond, "U1")
+
+    sent = respond.call_args.kwargs
+    assert sent["response_type"] == "ephemeral"
+    assert "꺼짐" in sent["blocks"][0]["text"]["text"]
+
+
+def test_workspace_bot_moves_the_reminder_destination(monkeypatch):
+    """다른 워크스페이스에서 켜면 현재 워크스페이스가 대표 수신 위치가 된다."""
+    import tybot.slack.pilot as pilot_mod
+
+    bot = pilot_mod.WorkspaceBot.__new__(pilot_mod.WorkspaceBot)
+    bot.workspace = "tyit"
+    previous = Preference("E1", "mgmt", "U2", (30,), True)
+    current = Preference("E1", "tyit", "U1", (30,), True)
+    monkeypatch.setattr(pilot_mod, "db_connect", lambda: contextlib.nullcontext(object()))
+    monkeypatch.setattr(pilot_mod.schedule_dm, "resolve_emp_no", lambda *a, **kw: "E1")
+    monkeypatch.setattr(pilot_mod.schedule_dm, "get_preference", lambda *a, **kw: previous)
+    enable_mock = Mock(return_value=current)
+    monkeypatch.setattr(pilot_mod.schedule_dm, "enable", enable_mock)
+    respond = Mock()
+
+    bot._set_schedule_dm(
+        {"user": {"id": "U1"}}, respond, minutes=None, turn_on=True
+    )
+
+    assert enable_mock.call_args.kwargs["workspace"] == "tyit"
+    sent = respond.call_args.kwargs
+    assert sent["replace_original"] is True
+    assert "mgmt" in str(sent["blocks"])
 
 
 # --- Due 계약 -----------------------------------------------------------------

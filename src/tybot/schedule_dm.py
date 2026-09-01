@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -71,7 +72,15 @@ def normalize_minutes(values) -> tuple[int, ...]:
 
     DB 제약과 어긋나면 저장 시점에야 터진다 — 화면에서 먼저 막는다.
     """
-    picked = sorted({int(v) for v in (values or []) if int(v) in ALLOWED_MINUTES}, reverse=True)
+    picked: set[int] = set()
+    for value in values or []:
+        try:
+            minute = int(value)
+        except (TypeError, ValueError):
+            continue
+        if minute in ALLOWED_MINUTES:
+            picked.add(minute)
+    picked = sorted(picked, reverse=True)
     return tuple(picked) if picked else DEFAULT_MINUTES
 
 
@@ -482,6 +491,19 @@ def render(occurrence: dict, minutes: int) -> str:
     return "\n".join(lines)
 
 
+def client_message_id(due: Due) -> str:
+    """Slack 재시도에도 같은 메시지 ID를 사용한다.
+
+    Web API 성공 뒤 DB 커밋 전에 프로세스가 종료되면 큐는 다시 잡힌다. DB의 멱등 키를
+    UUID로 투영해 Slack에도 넘기면 그 경계에서 중복 전송될 가능성을 줄일 수 있다.
+    """
+    key = (
+        f"tybot:schedule-dm:{due.source_folder_id}:{due.date_id}:"
+        f"{due.emp_no}:{due.reminder_minutes}"
+    )
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
 def backoff(attempts: int, *, now: datetime) -> datetime:
     return now + BACKOFF_BASE * (2 ** max(attempts, 0))
 
@@ -545,6 +567,7 @@ def send_due(
             resp = client.chat_postMessage(
                 channel=due.slack_user,
                 text=render(occurrence, due.reminder_minutes),
+                client_msg_id=client_message_id(due),
             )
         except Exception as e:  # noqa: BLE001 - 한 건 실패가 나머지를 막지 않는다
             code = error_code(e)

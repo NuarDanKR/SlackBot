@@ -699,6 +699,84 @@ class WorkspaceBot:
         )
         return schedule_reply(rows, window=window, scope=scope, synced_at=synced_at)
 
+    def _schedule_reminder_panel(self, respond, user_id: str) -> None:
+        """현재 개인 일정 알림 설정을 ephemeral 화면으로 보여준다."""
+        with db_connect() as conn:
+            if conn is None:
+                respond(schedule_dm.UNAVAILABLE, response_type="ephemeral")
+                return
+            try:
+                emp_no = schedule_dm.resolve_emp_no(
+                    conn, workspace=self.workspace, slack_user=user_id
+                )
+                if not emp_no:
+                    respond(schedule_dm.NEED_IDENTITY, response_type="ephemeral")
+                    return
+                pref = schedule_dm.get_preference(conn, emp_no)
+            except Exception as e:
+                log.warning("[%s] 일정 알림 설정 조회 실패: %s", self.workspace, e)
+                respond(schedule_dm.UNAVAILABLE, response_type="ephemeral")
+                return
+
+        respond(
+            text="일정 알림 설정",
+            blocks=schedule_dm.settings_blocks(
+                pref, workspace_label=pref.workspace if pref and pref.enabled else ""
+            ),
+            response_type="ephemeral",
+        )
+
+    def _set_schedule_dm(self, body: dict, respond, *, minutes, turn_on: bool) -> None:
+        """버튼으로 개인 일정 알림 설정을 바꾸고 같은 메시지를 갱신한다."""
+        user_id = str((body.get("user") or {}).get("id") or "")
+        with db_connect() as conn:
+            if conn is None:
+                respond(text=schedule_dm.UNAVAILABLE, replace_original=True)
+                return
+            try:
+                emp_no = schedule_dm.resolve_emp_no(
+                    conn, workspace=self.workspace, slack_user=user_id
+                )
+                if not emp_no:
+                    respond(text=schedule_dm.NEED_IDENTITY, replace_original=True)
+                    return
+
+                previous = schedule_dm.get_preference(conn, emp_no)
+                if turn_on:
+                    selected = minutes or (previous.minutes if previous else schedule_dm.DEFAULT_MINUTES)
+                    pref = schedule_dm.enable(
+                        conn,
+                        emp_no=emp_no,
+                        workspace=self.workspace,
+                        slack_user=user_id,
+                        minutes=selected,
+                    )
+                else:
+                    schedule_dm.disable(conn, emp_no=emp_no, actor=user_id)
+                    pref = schedule_dm.get_preference(conn, emp_no)
+            except Exception as e:
+                log.warning("[%s] 일정 알림 설정 변경 실패: %s", self.workspace, e)
+                respond(text=schedule_dm.UNAVAILABLE, replace_original=True)
+                return
+
+        blocks = schedule_dm.settings_blocks(
+            pref, workspace_label=pref.workspace if pref and pref.enabled else ""
+        )
+        if (
+            turn_on
+            and previous
+            and previous.enabled
+            and previous.workspace != self.workspace
+        ):
+            blocks.insert(1, {
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": schedule_dm.moved_notice(previous.workspace),
+                }],
+            })
+        respond(text="일정 알림 설정", blocks=blocks, replace_original=True)
+
     def _collection_status(self, client, channel_id: str) -> str:
         """`/수집상태` 가 보여줄 문장. 사실 수집만 하고 판단은 collection_status 가 한다."""
         channel = self._channel_name(client, channel_id)

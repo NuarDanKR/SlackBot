@@ -355,7 +355,7 @@ journalctl -u tybot-schedule-sync -f
 ### 개인 DM 알림 (선택)
 
 ```bash
-psql -U tybot -d tybot -f /opt/tybot/deploy/sql/schedule_dm_schema.sql
+sudo -u postgres psql -d tyslackai -f /opt/tybot/deploy/sql/schedule_dm_schema.sql
 sudo systemctl enable --now tybot-schedule-dm.timer   # 1분 주기
 ```
 
