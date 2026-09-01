@@ -352,6 +352,17 @@ journalctl -u tybot-schedule-sync -f
 | 폴더가 `미승인폴더` 로 집계됨 | `schedule_folder` 에 승인 등록이 안 됐다. 승인 목록이 곧 허용 목록이다 |
 | `/일정` 이 "동기화 지연" 을 표시 | 타이머가 멈췄거나 Oracle 조회 실패. `systemctl status tybot-schedule-sync` |
 
+### 개인 DM 알림 (선택)
+
+```bash
+psql -U tybot -d tybot -f /opt/tybot/deploy/sql/schedule_dm_schema.sql
+sudo systemctl enable --now tybot-schedule-dm.timer   # 1분 주기
+```
+
+`schedule_folder_org` 에 폴더별 승인 조직을 넣어야 대상자가 생긴다. **비어 있으면
+아무에게도 가지 않는다** — 안전한 기본값이지만 기능이 조용히 0건으로 보인다.
+사용자는 Slack 에서 `/일정 알림` 으로 직접 켠다(기본 미수신).
+
 **시각 대조를 한 번 해야 한다** — 추출기가 그룹웨어 시각에 `+09:00` 을 붙인다.
 데이터가 들어오면 `/일정 오늘` 출력과 그룹웨어 화면의 시각이 같은지 확인한다.
 

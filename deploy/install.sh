@@ -172,7 +172,7 @@ fi
 
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
 # 타이머(자동배포·정기백필·점검)는 파일만 배치한다. enable 은 운영자가 결정한다.
-for u in tybot-update tybot-collect tybot-tidy tybot-schedule-sync; do
+for u in tybot-update tybot-collect tybot-tidy tybot-schedule-sync tybot-schedule-dm; do
   install -m 0644 "$APP_DIR/deploy/$u.service" "/etc/systemd/system/$u.service"
   install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"
 done

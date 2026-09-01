@@ -1,0 +1,26 @@
+[Unit]
+Description=TYBot 일정 알림 개인 DM (큐 생성 + 발송)
+Documentation=file:///opt/tybot/docs/design/schedule-dm-reminders.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.schedule_dm
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-schedule-dm
+# 한 회차가 이보다 오래 걸리면 다음 회차에 맡긴다. 지난 알림은 어차피 만료 처리된다.
+TimeoutStartSec=120
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tybot
+
+[Install]
+WantedBy=multi-user.target

@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from .. import heartbeat
+from .. import heartbeat, schedule_dm
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
@@ -451,6 +451,11 @@ class WorkspaceBot:
             if text in ("도움말", "help", "?"):
                 respond(SCHEDULE_HELP, response_type="ephemeral")
                 return
+            if text.replace(" ", "") in ("알림", "알림설정", "reminder", "dm"):
+                self._schedule_reminder_panel(
+                    respond, command.get("user_id", "")
+                )
+                return
             body = self._schedule_text(
                 text,
                 channel_id=command.get("channel_id", ""),
@@ -461,6 +466,24 @@ class WorkspaceBot:
                 response_type="ephemeral",
                 blocks=schedule_blocks(body, share_payload=text),
             )
+
+        @self.app.action(schedule_dm.ACTION_ENABLE)
+        def on_schedule_dm_enable(ack, body, respond):
+            ack()
+            self._set_schedule_dm(body, respond, minutes=None, turn_on=True)
+
+        @self.app.action(schedule_dm.ACTION_OFF)
+        def on_schedule_dm_off(ack, body, respond):
+            ack()
+            self._set_schedule_dm(body, respond, minutes=None, turn_on=False)
+
+        @self.app.action(re.compile(rf"^{schedule_dm.ACTION_MINUTES}:"))
+        def on_schedule_dm_minutes(ack, body, respond):
+            """분 선택은 곧 '켜기' 다. 고른 뒤 다시 켜라고 시키면 한 동작이 늘어난다."""
+            ack()
+            raw = ((body.get("actions") or [{}])[0]).get("value") or ""
+            picked = [int(x) for x in raw.split("-") if x.isdigit()]
+            self._set_schedule_dm(body, respond, minutes=picked, turn_on=True)
 
         @self.app.action("tybot_schedule_share")
         def on_schedule_share(ack, body, client):

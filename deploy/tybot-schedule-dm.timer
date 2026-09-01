@@ -1,0 +1,12 @@
+[Unit]
+Description=TYBot 일정 알림 개인 DM 주기 실행
+
+[Timer]
+# 10분/30분 전 알림을 분 단위로 맞추려면 매분 돌아야 한다.
+# 늦으면 만료 유예(10분) 안에서만 보내고 그 밖은 버린다 - 지난 알림은 신뢰만 깎는다.
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
