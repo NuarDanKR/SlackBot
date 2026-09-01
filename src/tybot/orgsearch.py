@@ -33,7 +33,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .channels import COLLECT_PREFIXES
+
 logger = logging.getLogger("tybot.orgsearch")
+
+MAX_OPTIONS = 100
+MAX_TEXT = 75
+MAX_VALUE = 150
 
 # 조직명 끝에 실제로 붙는 말 → 채널 두문자.
 # `전산팀` 의 끝은 `팀` 이지만 채널 두문자는 `본사팀` 이다(현장과 구별하려고).
@@ -176,5 +182,84 @@ def defaults_by_prefix(chain: list[OrgHit]) -> dict[str, OrgHit]:
 
 
 NO_CHAIN = (
-    "계정 연결이 없어 소속 조직을 채우지 못했습니다. 조직명과 조직코드를 직접 입력해 주세요."
+    "계정 연결이 없어 소속 조직을 자동 선택하지 못했습니다. 조직명을 검색해 선택해 주세요."
 )
+
+
+SEARCH_SQL = """
+select o.code, o.name, coalesce(p.name, '') as parent_name
+  from org_unit o
+  left join org_unit p on p.code = o.parent_code
+ where o.active
+   and (o.name ilike %(like)s or o.code ilike %(prefix)s)
+ order by
+   case when o.name ilike %(prefix)s then 0 else 1 end,
+   length(o.name),
+   o.name
+ limit %(limit)s
+"""
+
+
+def search(conn, query: str, *, limit: int = MAX_OPTIONS) -> list[OrgHit]:
+    """활성 조직을 조직명·코드로 검색한다."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(SEARCH_SQL, {
+            "like": f"%{q}%",
+            "prefix": f"{q}%",
+            "limit": max(1, min(limit, MAX_OPTIONS)),
+        })
+        rows = cur.fetchall()
+    out: list[OrgHit] = []
+    for raw in rows:
+        row = raw if isinstance(raw, dict) else dict(
+            zip(("code", "name", "parent_name"), raw, strict=False)
+        )
+        out.append(OrgHit(
+            code=str(row["code"]),
+            name=str(row["name"] or ""),
+            parent_name=str(row.get("parent_name") or ""),
+        ))
+    return out
+
+
+_VALUE_SEP = "|"
+
+
+def encode_value(hit: OrgHit) -> str:
+    return _VALUE_SEP.join((hit.code, hit.prefix, hit.base_name))
+
+
+def decode_value(value: str) -> tuple[str, str, str]:
+    """검색 선택값을 (조직코드, 구분, 채널용 조직명)으로 푼다."""
+    parts = (value or "").split(_VALUE_SEP)
+    code = parts[0].strip() if parts else ""
+    prefix = parts[1].strip() if len(parts) > 1 else ""
+    name = parts[2].strip() if len(parts) > 2 else ""
+    if prefix not in COLLECT_PREFIXES:
+        prefix = ""
+    return code, prefix, name
+
+
+def option(hit: OrgHit) -> dict:
+    label = f"{hit.name} · {hit.code}"
+    if hit.parent_name:
+        label = f"{hit.name} ({hit.parent_name}) · {hit.code}"
+    return {
+        "text": {"type": "plain_text", "text": label[:MAX_TEXT]},
+        "value": encode_value(hit)[:MAX_VALUE],
+    }
+
+
+def options(hits: list[OrgHit]) -> list[dict]:
+    return [option(hit) for hit in hits[:MAX_OPTIONS]]
+
+
+def notice_option(text: str) -> dict:
+    return {"text": {"type": "plain_text", "text": text[:MAX_TEXT]}, "value": ""}
+
+
+NO_MATCH = "선택한 구분에 맞는 조직이 없습니다"
+UNAVAILABLE = "조직도를 조회할 수 없습니다"

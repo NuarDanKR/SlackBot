@@ -13,6 +13,10 @@ cp .env.example .env      # 자리표시자 복사
 # .env 를 편집기로 열어 값 채우기 (SLACK_BOT_TOKEN / SLACK_APP_TOKEN / ANTHROPIC_API_KEY)
 ```
 
+`/일정`과 `/채널`의 소속 자동 선택은 Slack 회사 이메일과 그룹웨어 직원 이메일을
+정확히 일치시켜 사번을 연결한다. 앱에 `users:read.email` 권한을 추가한 뒤에는
+워크스페이스에 앱을 다시 설치해야 새 권한이 토큰에 반영된다.
+
 ## 1. Slack 앱 생성
 1. https://api.slack.com/apps → **Create New App → From an app manifest**
 2. 파일럿 워크스페이스 선택 → [`slack-app-manifest.yaml`](slack-app-manifest.yaml) 내용 붙여넣기
@@ -25,7 +29,7 @@ cp .env.example .env      # 자리표시자 복사
 2. 왼쪽 **App Manifest**를 열고 [`slack-app-manifest.yaml`](slack-app-manifest.yaml) 내용으로 갱신한다.
 3. **Save Changes**를 누른다. Socket Mode를 사용하므로 Request URL이나 새 인바운드 포트는 필요 없다.
 4. 왼쪽 **OAuth & Permissions** → **Reinstall to Workspace**를 누른다.
-5. 추가 권한 `commands`, `channels:manage`, `groups:write`를 승인한다.
+5. 추가 권한 `commands`, `channels:manage`, `groups:write`, `users:read.email`을 승인한다.
 6. Slack을 새로고침한 뒤 메시지 입력창 왼쪽 `+` → **업무 채널 만들기**가 보이는지 확인한다.
 
 워크스페이스마다 앱이 별도이므로 위 절차도 **각 워크스페이스 앱에서 한 번씩** 해야 한다.
@@ -51,7 +55,7 @@ python -m tybot.slack.pilot
 | (채널에 파일 업로드) | xlsx·docx·pptx·pdf·hwpx 는 **본문을 변환해 수집**(`[첨부추출:파일명]`).<br>스캔 PDF·구형 hwp·이미지·도면은 목록만 |
 | `@tybot 전체수집` | 봇이 볼 수 있고 이름 규칙에 맞는 모든 채널 백필. 공개 채널은 자가참여 |
 | `@tybot 수집` | 그 채널 최근 15건 + **스레드 답글**(최대 5개 스레드) 백필 |
-| `/채널 생성` | 구분(본부·실·본사팀·현장·업무)을 고르면 **그 층의 내 조직**이 조직명·조직코드에 자동으로 채워진다. 값은 기본값이라 고칠 수 있다 — 타 조직 협업 채널도 만들 수 있다 |
+| `/채널 생성` | 구분(본부·실·본사팀·현장·업무)을 고르면 **그 층의 내 조직**이 자동 선택된다. 다른 조직은 조직명 검색으로 고르며 조직코드는 직접 입력하지 않는다 |
 | 두문자 | 본부 > 본사팀 > 현장, 또는 실 > 본사팀. `업무` 는 조직이 아니라 **다른 팀과 협업하는 채널**이고 주관 팀의 코드를 쓴다. 옛 이름 `팀`·`프로젝트` 채널도 계속 수집된다 |
 | `/일정 알림` | 개인 DM 알림 켜기·끄기(30분/10분/둘 다). 한 사람의 수신 위치는 **한 워크스페이스**이며 다른 곳에서 켜면 옮겨진다 |
 | `/일정` · `/일정 이번주` · `/일정 9월` | 그룹웨어 팀 일정. **본인에게만** 표시되고 '채널에 공유' 버튼으로만 채널에 올라간다 |

@@ -159,8 +159,15 @@ ORG_SQL = (
         ON ui.workspace = %(workspace)s AND ui.slack_user = %(slack_user)s
       JOIN employee e ON e.emp_no = ui.emp_no AND e.active
      WHERE f.enabled
-       AND f.org_code IS NOT NULL
-       AND f.org_code = e.org_code
+       AND (
+            f.org_code = e.org_code
+            OR EXISTS (
+                SELECT 1 FROM schedule_folder_org fo
+                 WHERE fo.source_folder_id = f.source_folder_id
+                   AND fo.org_code = e.org_code
+                   AND fo.enabled
+            )
+       )
 """
     + _RANGE
 )

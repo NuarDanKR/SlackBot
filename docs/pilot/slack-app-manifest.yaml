@@ -68,6 +68,7 @@ oauth_config:
       - channels:read         # 채널 목록/멤버십 조회(ACL)
       - groups:read
       - users:read            # 발화자 실명 매핑
+      - users:read.email      # 회사 이메일로 Slack 사용자와 사번 자동 매핑
       - chat:write            # 답변
       - im:write
       - files:read            # 첨부 다운로드 — 없으면 파일 대신 로그인 HTML(조용한 고장)

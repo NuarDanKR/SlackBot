@@ -193,6 +193,13 @@ def test_no_scope_explains_both_reasons():
     assert "사번 매핑" in text
 
 
+def test_org_scope_accepts_the_approved_many_to_many_folder_acl():
+    from tybot.schedule import ORG_SQL
+
+    assert "schedule_folder_org" in ORG_SQL
+    assert "fo.org_code = e.org_code" in ORG_SQL
+
+
 def test_empty_but_authorized_says_no_events():
     text = format_reply([], window=parse_window("오늘", now=NOW), scope=SCOPE_CHANNEL,
                         synced_at=NOW, now=NOW)

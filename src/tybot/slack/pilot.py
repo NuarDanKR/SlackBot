@@ -64,6 +64,7 @@ from ..feedback import (
 from ..feedback import (
     validation_errors as feedback_errors,
 )
+from ..identity import ensure as ensure_identity
 from ..intent import (
     INGEST_ALL_RE,
     INGEST_RE,
@@ -74,7 +75,11 @@ from ..intent import (
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
-from ..orgsearch import defaults_by_prefix, my_org_chain
+from ..orgsearch import NO_MATCH as ORG_NO_MATCH
+from ..orgsearch import UNAVAILABLE as ORG_UNAVAILABLE
+from ..orgsearch import defaults_by_prefix, my_org_chain, notice_option
+from ..orgsearch import options as org_options
+from ..orgsearch import search as org_search
 from ..paths import check_paths
 from ..poll_view import (
     ACTION_CLOSE,
@@ -453,9 +458,10 @@ class WorkspaceBot:
                 return
             if text.replace(" ", "") in ("알림", "알림설정", "reminder", "dm"):
                 self._schedule_reminder_panel(
-                    respond, command.get("user_id", "")
+                    respond, command.get("user_id", ""), client=client
                 )
                 return
+            self._ensure_identity(client, command.get("user_id", ""))
             body = self._schedule_text(
                 text,
                 channel_id=command.get("channel_id", ""),
@@ -485,6 +491,11 @@ class WorkspaceBot:
             picked = [int(x) for x in raw.split("-") if x.isdigit()]
             self._set_schedule_dm(body, respond, minutes=picked, turn_on=True)
 
+        @self.app.options("org")
+        def on_org_options(ack, payload, body):
+            prefix = selected_prefix((body or {}).get("view") or {})
+            ack(options=self._org_options(payload.get("value", ""), prefix=prefix))
+
         @self.app.action("tybot_schedule_share")
         def on_schedule_share(ack, body, client):
             """사용자가 누른 경우에만 채널에 올린다.
@@ -496,6 +507,7 @@ class WorkspaceBot:
             user_id = (body.get("user") or {}).get("id", "")
             channel_id = ((body.get("channel") or {}).get("id")) or ""
             payload = ((body.get("actions") or [{}])[0]).get("value") or ""
+            self._ensure_identity(client, user_id)
             shared = self._schedule_text(payload, channel_id=channel_id, user_id=user_id)
             try:
                 client.chat_postMessage(
@@ -523,7 +535,7 @@ class WorkspaceBot:
                     view=create_modal(
                         view.get("private_metadata") or "{}",
                         prefix=selected_prefix(view),
-                        defaults=self._org_defaults(user_id),
+                        defaults=self._org_defaults(user_id, client=client),
                         task=typed_task(view),
                     ),
                 )
@@ -699,8 +711,9 @@ class WorkspaceBot:
         )
         return schedule_reply(rows, window=window, scope=scope, synced_at=synced_at)
 
-    def _schedule_reminder_panel(self, respond, user_id: str) -> None:
+    def _schedule_reminder_panel(self, respond, user_id: str, *, client=None) -> None:
         """현재 개인 일정 알림 설정을 ephemeral 화면으로 보여준다."""
+        self._ensure_identity(client, user_id)
         with db_connect() as conn:
             if conn is None:
                 respond(schedule_dm.UNAVAILABLE, response_type="ephemeral")
@@ -862,7 +875,22 @@ class WorkspaceBot:
             return {}
         return value if isinstance(value, dict) else {}
 
-    def _org_defaults(self, user_id: str) -> dict:
+    def _ensure_identity(self, client, user_id: str) -> str | None:
+        """회사 이메일로 Slack 사용자와 사번을 지연 연결한다."""
+        if client is None or not user_id:
+            return None
+        with db_connect() as conn:
+            if conn is None:
+                return None
+            try:
+                return ensure_identity(
+                    conn, client, workspace=self.workspace, slack_user=user_id
+                )
+            except Exception as e:
+                log.warning("[%s] 이메일 사번 매핑 실패 user=%s: %s", self.workspace, user_id, e)
+                return None
+
+    def _org_defaults(self, user_id: str, *, client=None) -> dict:
         """구분 → 그 층의 내 조직. 모달의 조직명·조직코드 **기본값**이다.
 
         강제하지 않는다. 조직도를 못 읽거나 계정 연결이 없으면 빈 값으로 두고,
@@ -870,6 +898,7 @@ class WorkspaceBot:
         """
         if not user_id:
             return {}
+        self._ensure_identity(client, user_id)
         with db_connect() as conn:
             if conn is None:
                 return {}
@@ -885,12 +914,31 @@ class WorkspaceBot:
             return {}
         return defaults_by_prefix(chain)
 
+    def _org_options(self, query: str, *, prefix: str) -> list[dict]:
+        """조직 검색 결과를 선택한 구분에 맞게 좁힌다."""
+        with db_connect() as conn:
+            if conn is None:
+                return [notice_option(ORG_UNAVAILABLE)]
+            try:
+                hits = org_search(conn, query)
+            except Exception as e:
+                log.warning("[%s] 조직 검색 실패: %s", self.workspace, e)
+                return [notice_option(ORG_UNAVAILABLE)]
+
+        if prefix == "업무":
+            hits = [hit for hit in hits if hit.prefix in ("본사팀", "현장")]
+        elif prefix:
+            hits = [hit for hit in hits if hit.prefix == prefix]
+        if not hits:
+            return [notice_option(ORG_NO_MATCH)]
+        return org_options(hits)
+
     def _open_create_modal(self, client, trigger_id: str, user_id: str) -> None:
         metadata = json.dumps({"user_id": user_id}, ensure_ascii=False)
         try:
             client.views_open(
                 trigger_id=trigger_id,
-                view=create_modal(metadata, defaults=self._org_defaults(user_id)),
+                view=create_modal(metadata, defaults=self._org_defaults(user_id, client=client)),
             )
         except Exception as e:
             log.warning("[%s] 채널 생성 모달 열기 실패: %s", self.workspace, e)

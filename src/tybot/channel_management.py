@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .channels import COLLECT_PREFIXES, PREFIX_ALIASES, ChannelSpec, parse
+from .orgsearch import OrgHit, decode_value, option
 
 _OWNER_LOCK = threading.Lock()
 _SPACE_RE = re.compile(r"\s+")
@@ -79,18 +80,18 @@ def _selected(state: dict, block_id: str, action_id: str) -> dict:
 
 
 def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRequest:
-    """Slack view_submission의 state.values를 ChannelRequest로 바꾼다.
+    """Slack view_submission을 채널 요청으로 바꾼다.
 
-    조직명·조직코드는 **사람이 고칠 수 있는 입력**이다. 구분을 고르면 소속 조직이
-    기본값으로 채워지지만 강제하지 않는다 — 타 조직과 협업하는 채널은 실제로 필요하고,
-    채널 생성은 사람이 확인하고 누르는 동작이다.
+    조직코드는 사용자가 입력하지 않는다. 조직 검색 선택값에서 코드와 이름을 함께 읽는다.
     """
     state = (view.get("state") or {}).get("values") or {}
     prefix = (_selected(state, "prefix", "prefix").get("selected_option") or {}).get(
         "value", ""
     )
-    org_name = _selected(state, "org_name", "org_name").get("value", "")
-    org_code = _selected(state, "org_code", "org_code").get("value", "")
+    selected_org = _selected(state, "org", "org").get("selected_option") or {}
+    org_code, _derived_prefix, org_name = decode_value(selected_org.get("value", ""))
+    if not org_code or not org_name:
+        raise ChannelNameError("조직명을 검색해 목록에서 선택해 주세요.", "org")
     task = _selected(state, "task", "task").get("value", "")
     visibility = "private"
     members: tuple[str, ...] = ()
@@ -126,14 +127,7 @@ def _name_inputs(
     defaults: dict | None = None,
     dispatch_prefix: bool = True,
 ) -> list[dict]:
-    """이름 네 조각을 받는 입력들.
-
-    구분을 고르면 그 층의 **내 조직**이 조직명·조직코드에 채워진다(`defaults`).
-    채워진 값은 그냥 기본값이라 사람이 고칠 수 있다 — 타 조직과 협업하는 채널은
-    실제로 필요하고, 채널 생성은 사람이 확인하고 누르는 동작이다.
-
-    `spec` 은 이름 변경 모달이 준다. 그때는 기존 값이 우선한다.
-    """
+    """구분·조직 검색·업무명을 받는다. 조직코드는 검색 선택값 안에 숨긴다."""
     options = [
         {"text": {"type": "plain_text", "text": p}, "value": p}
         for p in ("본부", "실", "본사팀", "현장", "업무")
@@ -144,8 +138,7 @@ def _name_inputs(
         picked = "본사팀"
 
     hit = (defaults or {}).get(picked)
-    name_value = spec.org_name if spec else (hit.base_name if hit else "")
-    code_value = spec.org_code if spec else (hit.code if hit else "")
+    selected_org = OrgHit(spec.org_code, spec.org_name) if spec else hit
 
     return [
         {
@@ -170,28 +163,18 @@ def _name_inputs(
         },
         {
             "type": "input",
-            "block_id": "org_name",
+            "block_id": "org",
             "label": {"type": "plain_text", "text": "조직명"},
             "element": {
-                "type": "plain_text_input",
-                "action_id": "org_name",
-                "placeholder": {"type": "plain_text", "text": "예: 전산"},
-                **({"initial_value": name_value} if name_value else {}),
+                "type": "external_select",
+                "action_id": "org",
+                "min_query_length": 1,
+                "placeholder": {"type": "plain_text", "text": "조직명 또는 코드로 검색"},
+                **({"initial_option": option(selected_org)} if selected_org else {}),
             },
             "hint": {
                 "type": "plain_text",
-                "text": "소속 조직이 자동으로 채워집니다. 다른 조직의 채널이면 고쳐 주세요.",
-            },
-        },
-        {
-            "type": "input",
-            "block_id": "org_code",
-            "label": {"type": "plain_text", "text": "조직코드"},
-            "element": {
-                "type": "plain_text_input",
-                "action_id": "org_code",
-                "placeholder": {"type": "plain_text", "text": "예: ABB110"},
-                **({"initial_value": code_value} if code_value else {}),
+                "text": "조직코드는 선택한 조직에서 자동으로 적용됩니다.",
             },
         },
         {

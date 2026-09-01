@@ -12,6 +12,7 @@ from tybot.channel_management import (
     create_modal,
     request_from_view,
 )
+from tybot.orgsearch import OrgHit, option
 from tybot.slack.pilot import WorkspaceBot
 
 
@@ -50,8 +51,7 @@ def test_request_from_view_reads_create_fields():
         "state": {
             "values": {
                 "prefix": {"prefix": {"selected_option": {"value": "현장"}}},
-                "org_name": {"org_name": {"value": "김해외동"}},
-                "org_code": {"org_code": {"value": "180182"}},
+                "org": {"org": {"selected_option": option(OrgHit("180182", "김해외동"))}},
                 "task": {"task": {"value": "채팅방"}},
                 "visibility": {
                     "visibility": {"selected_option": {"value": "private"}}

@@ -21,8 +21,10 @@ from tybot.orgsearch import (
     OrgHit,
     defaults_by_prefix,
     derive_prefix,
+    encode_value,
     is_site_code,
     my_org_chain,
+    search,
     split_org_name,
 )
 
@@ -193,6 +195,15 @@ def test_chain_accepts_tuple_cursor():
     assert my_org_chain(conn, workspace="pilot", slack_user="U1")[0].name == "전산팀"
 
 
+def test_search_reads_active_orgs_by_name_or_code():
+    conn = FakeConn([{"code": "ABB110", "name": "전산팀", "parent_name": "경영본부"}])
+    hits = search(conn, "전산")
+    assert hits == [OrgHit("ABB110", "전산팀", "경영본부")]
+    sql, params = conn.executed[-1]
+    assert "where o.active" in sql
+    assert params["like"] == "%전산%"
+
+
 # --- 구분별 기본값 ------------------------------------------------------------
 def _chain() -> list[OrgHit]:
     return [OrgHit("ABB110", "전산팀"), OrgHit("ABB300", "경영본부")]
@@ -227,10 +238,11 @@ def test_levels_without_a_match_are_absent():
 
 
 # --- 모달 ---------------------------------------------------------------------
-def test_modal_has_four_inputs_and_no_search():
+def test_modal_searches_org_and_hides_the_code_input():
     ids = [b["block_id"] for b in _name_inputs()]
-    assert ids == ["prefix", "org_name", "org_code", "task"]
-    assert all(b["element"]["type"] != "external_select" for b in _name_inputs())
+    assert ids == ["prefix", "org", "task"]
+    assert _name_inputs()[1]["element"]["type"] == "external_select"
+    assert "org_code" not in ids
 
 
 def test_prefix_select_dispatches_so_defaults_can_be_filled():
@@ -257,30 +269,25 @@ def test_hint_explains_the_structure_and_task_channels():
     assert "다른 팀과 협업" in hint
 
 
-def test_defaults_prefill_the_two_fields():
+def test_defaults_select_the_matching_org():
     blocks = _name_inputs(prefix="본사팀", defaults=defaults_by_prefix(_chain()))
-    assert blocks[1]["element"]["initial_value"] == "전산"
-    assert blocks[2]["element"]["initial_value"] == "ABB110"
+    assert blocks[1]["element"]["initial_option"]["value"] == "ABB110|본사팀|전산"
 
 
 def test_switching_prefix_switches_the_default():
     blocks = _name_inputs(prefix="본부", defaults=defaults_by_prefix(_chain()))
-    assert blocks[1]["element"]["initial_value"] == "경영"
-    assert blocks[2]["element"]["initial_value"] == "ABB300"
+    assert blocks[1]["element"]["initial_option"]["value"] == "ABB300|본부|경영"
 
 
-def test_fields_are_editable_so_other_orgs_are_possible():
-    """소속을 강제하지 않는다 - 협업 채널은 실제로 필요하다."""
+def test_other_orgs_are_chosen_by_search_not_by_typing_a_code():
     blocks = _name_inputs(prefix="본사팀", defaults=defaults_by_prefix(_chain()))
-    assert blocks[1]["element"]["type"] == "plain_text_input"
-    assert blocks[2]["element"]["type"] == "plain_text_input"
-    assert "고쳐 주세요" in blocks[1]["hint"]["text"]
+    assert blocks[1]["element"]["type"] == "external_select"
+    assert "자동" in blocks[1]["hint"]["text"]
 
 
 def test_no_defaults_leaves_the_fields_empty():
     blocks = _name_inputs()
-    assert "initial_value" not in blocks[1]["element"]
-    assert "initial_value" not in blocks[2]["element"]
+    assert "initial_option" not in blocks[1]["element"]
 
 
 def test_legacy_prefix_is_mapped_when_reopening():
@@ -309,6 +316,14 @@ def _text(block: str, value: str) -> dict:
     return {block: {block: {"value": value}}}
 
 
+def _org(code: str, name: str) -> dict:
+    return {
+        "org": {
+            "org": {"selected_option": {"value": encode_value(OrgHit(code, name))}}
+        }
+    }
+
+
 def test_selected_prefix_reads_the_current_choice():
     assert selected_prefix(_view(**_prefix("본부"))) == "본부"
 
@@ -326,8 +341,7 @@ def test_typed_task_survives_a_redraw():
 def test_submit_builds_the_channel_name():
     view = _view(
         **_prefix("본사팀"),
-        **_text("org_name", "전산"),
-        **_text("org_code", "abb110"),
+        **_org("ABB110", "전산팀"),
         **_text("task", "주간회의"),
     )
     assert request_from_view(view, include_channel_options=False).name == (
@@ -339,21 +353,19 @@ def test_task_channel_uses_the_owning_team_code():
     """업무 채널: 협업 이름 + 주관 팀 코드."""
     view = _view(
         **_prefix("업무"),
-        **_text("org_name", "안전점검"),
-        **_text("org_code", "ABB110"),
+        **_org("ABB110", "전산팀"),
         **_text("task", "협업"),
     )
     assert request_from_view(view, include_channel_options=False).name == (
-        "업무-안전점검_ABB110-협업"
+        "업무-전산_ABB110-협업"
     )
 
 
 def test_other_org_is_allowed():
-    """소속을 강제하지 않는다. 조직명·조직코드를 고치면 만들어진다."""
+    """소속을 강제하지 않는다. 검색에서 다른 조직을 고를 수 있다."""
     view = _view(
         **_prefix("본사팀"),
-        **_text("org_name", "자금"),
-        **_text("org_code", "ABB540"),
+        **_org("ABB540", "자금팀"),
         **_text("task", "협업"),
     )
     assert request_from_view(view, include_channel_options=False).name == (
@@ -364,22 +376,20 @@ def test_other_org_is_allowed():
 def test_legacy_prefix_cannot_be_submitted():
     """새로 만들 때는 새 이름만 쓴다. 인식만 옛 이름을 받아준다."""
     view = _view(
-        **_prefix("팀"), **_text("org_name", "전산"),
-        **_text("org_code", "ABB110"), **_text("task", "회의"),
+        **_prefix("팀"), **_org("ABB110", "전산팀"), **_text("task", "회의"),
     )
     with pytest.raises(ChannelNameError) as e:
         request_from_view(view, include_channel_options=False)
     assert e.value.block_id == "prefix"
 
 
-def test_missing_code_is_refused_on_that_block():
+def test_missing_org_selection_is_refused_on_the_search_block():
     view = _view(
-        **_prefix("본사팀"), **_text("org_name", "전산"),
-        **_text("org_code", ""), **_text("task", "회의"),
+        **_prefix("본사팀"), **_text("task", "회의"),
     )
     with pytest.raises(ChannelNameError) as e:
         request_from_view(view, include_channel_options=False)
-    assert e.value.block_id == "org_code"
+    assert e.value.block_id == "org"
 
 
 # --- 봇 쪽 ---------------------------------------------------------------------
@@ -428,3 +438,19 @@ def test_defaults_come_from_the_chain(monkeypatch):
     d = _bot()._org_defaults("U1")
     assert d["본사팀"].code == "ABB110"
     assert d["본부"].name == "경영본부"
+
+
+def test_org_search_filters_results_to_the_selected_prefix(monkeypatch):
+    import contextlib
+
+    import tybot.slack.pilot as pilot_mod
+
+    rows = [
+        {"code": "ABB110", "name": "전산팀", "parent_name": "경영본부"},
+        {"code": "ABB300", "name": "경영본부", "parent_name": ""},
+    ]
+    monkeypatch.setattr(
+        pilot_mod, "db_connect", lambda: contextlib.nullcontext(FakeConn(rows))
+    )
+    found = _bot()._org_options("경영", prefix="본사팀")
+    assert [item["value"] for item in found] == ["ABB110|본사팀|전산"]
