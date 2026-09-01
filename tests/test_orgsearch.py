@@ -173,7 +173,7 @@ def test_option_count_is_capped():
 def test_search_modal_replaces_the_two_manual_inputs():
     blocks = _name_inputs(org_search=True)
     ids = [b["block_id"] for b in blocks]
-    assert ids == ["prefix", "org", "task"]
+    assert ids == ["prefix", "org", "project_name", "task"]
     assert blocks[1]["element"]["type"] == "external_select"
 
 
@@ -186,7 +186,8 @@ def test_manual_modal_is_kept_when_db_is_unavailable():
 def test_prefix_label_explains_when_it_is_used():
     """검색으로 고르면 이 선택이 무시된다 - 안 적으면 '왜 반영이 안 되지' 가 된다."""
     label = _name_inputs(org_search=True)[0]["label"]["text"]
-    assert "자동 판단이 안 될 때만" in label
+    assert "프로젝트는 직접 선택" in label
+    assert "자동 판단" in label
 
 
 def test_org_block_states_the_code_rule():
@@ -543,3 +544,84 @@ def test_options_say_why_the_list_is_empty(monkeypatch):
     monkeypatch.setattr(pilot_mod, "db_connect", lambda: contextlib.nullcontext(FakeConn()))
     (opt,) = bot._org_options("자금", "U1")
     assert "소속 조직만" in opt["text"]["text"]
+
+
+# --- 프로젝트: 주관 조직의 코드를 빌린다 --------------------------------------
+# 프로젝트는 정식 조직이 아니라 조직코드가 없다. 채널명 규칙은 코드를 요구하므로
+# 주관 조직의 코드를 쓰고, 이름 자리에는 프로젝트명을 넣는다.
+def _project(name: str) -> dict:
+    return {"project_name": {"project_name": {"value": name}}}
+
+
+def test_project_borrows_the_owning_org_code():
+    view = _view(
+        **_prefix("프로젝트"),
+        **_picked("ABB110|팀|전산"),
+        **_project("스마트시티"),
+        **_task("주간회의"),
+    )
+    req = request_from_view(view, include_channel_options=False)
+    assert req.name == "프로젝트-스마트시티_ABB110-주간회의"
+
+
+def test_project_selection_overrides_the_derived_prefix():
+    """주관 조직이 전산팀이어도 사용자가 프로젝트를 고르면 프로젝트다."""
+    view = _view(
+        **_prefix("프로젝트"),
+        **_picked("ABB110|팀|전산"),
+        **_project("스마트시티"),
+        **_task("회의"),
+    )
+    assert request_from_view(view, include_channel_options=False).prefix == "프로젝트"
+
+
+def test_project_without_a_name_is_refused_on_that_block():
+    view = _view(
+        **_prefix("프로젝트"), **_picked("ABB110|팀|전산"), **_project("  "), **_task("회의")
+    )
+    with pytest.raises(ChannelNameError) as e:
+        request_from_view(view, include_channel_options=False)
+    assert e.value.block_id == "project_name"
+    assert "주관하는" in str(e.value)
+
+
+def test_project_name_is_ignored_when_prefix_is_not_project():
+    """프로젝트명을 적어두고 구분을 바꿔도 조직명이 오염되지 않는다."""
+    view = _view(
+        **_prefix("팀"),
+        **_picked("ABB110|팀|전산"),
+        **_project("스마트시티"),
+        **_task("회의"),
+    )
+    assert request_from_view(view, include_channel_options=False).name == (
+        "팀-전산_ABB110-회의"
+    )
+
+
+def test_project_block_is_optional_in_the_modal():
+    """구분이 프로젝트일 때만 쓰이므로 평소에는 비워 둘 수 있어야 한다."""
+    block = next(
+        b for b in _name_inputs(org_search=True) if b["block_id"] == "project_name"
+    )
+    assert block["optional"] is True
+    assert "조직코드가 없어" in block["hint"]["text"]
+
+
+def test_manual_mode_keeps_typed_org_name_for_projects():
+    """DB 없는 환경에는 프로젝트명 칸이 없다. 조직명 칸에 적은 값을 그대로 쓴다."""
+    view = _view(
+        **_prefix("프로젝트"),
+        org_name={"org_name": {"value": "스마트시티"}},
+        org_code={"org_code": {"value": "ABB110"}},
+        **_task("회의"),
+    )
+    assert request_from_view(view, include_channel_options=False).name == (
+        "프로젝트-스마트시티_ABB110-회의"
+    )
+
+
+def test_project_scope_still_checks_the_owning_org():
+    """빌린 코드가 소속 밖이면 여전히 막힌다 - 프로젝트가 우회로가 되면 안 된다."""
+    bot = _scoped_bot(allowed=["ABB110"])
+    assert bot._org_scope_error("U1", "ABB540", "자금팀") != ""
+    assert bot._org_scope_error("U1", "ABB110", "전산팀") == ""

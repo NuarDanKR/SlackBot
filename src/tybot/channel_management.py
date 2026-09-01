@@ -110,9 +110,24 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
         "value", ""
     )
     org_name, org_code, picked_prefix = _org_from_state(state)
-    # 조직명 끝에서 구분이 나오면 그것을 쓴다(경영혁신실 -> 실).
-    # `org_unit.kind` 는 추정값이라 채널명 근거로 삼지 않는다 — 조직명은 사람이 붙인 것이다.
-    if picked_prefix:
+    project = _selected(state, "project_name", "project_name").get("value", "")
+    has_project_block = "project_name" in state
+
+    if prefix == "프로젝트":
+        # 프로젝트는 정식 조직이 아니라 조직코드가 없다. **주관 조직의 코드를 빌린다.**
+        # 이름 자리에는 프로젝트명이 들어간다 - `프로젝트-스마트시티_ABB110-회의`.
+        # 그래야 주관 조직으로 추적·권한 상속이 그대로 이어진다.
+        if has_project_block:
+            if not project.strip():
+                raise ChannelNameError(
+                    "프로젝트명을 입력해 주세요. 조직 칸에는 프로젝트를 주관하는 "
+                    "조직을 고르면 됩니다.",
+                    "project_name",
+                )
+            org_name = project
+    elif picked_prefix:
+        # 조직명 끝에서 구분이 나오면 그것을 쓴다(경영혁신실 -> 실).
+        # `org_unit.kind` 는 추정값이라 채널명 근거로 삼지 않는다 — 조직명은 사람이 붙인 것이다.
         prefix = picked_prefix
     task = _selected(state, "task", "task").get("value", "")
     visibility = "private"
@@ -174,7 +189,9 @@ def _name_inputs(spec: ChannelSpec | None = None, *, org_search: bool = False) -
     # 검색으로 고르면 조직명 끝에서 구분이 나온다(경영혁신실 -> 실). 그때 이 선택은
     # 쓰이지 않으므로 언제 쓰이는지 라벨에 적는다 — 안 적으면 "골랐는데 왜 안 반영되지" 가 된다.
     prefix_label = (
-        "조직 구분 (자동 판단이 안 될 때만 사용)" if org_search else "조직 구분"
+        "조직 구분 (프로젝트는 직접 선택 · 그 외에는 자동 판단)"
+        if org_search
+        else "조직 구분"
     )
 
     prefix_block = {
@@ -212,6 +229,23 @@ def _name_inputs(spec: ChannelSpec | None = None, *, org_search: bool = False) -
             },
         },
     ]
+    # 프로젝트는 정식 조직이 아니라 조직코드가 없다. 주관 조직의 코드를 빌리고
+    # 이름 자리에는 프로젝트명을 넣는다 - `프로젝트-스마트시티_ABB110-회의`.
+    project_block = {
+        "type": "input",
+        "block_id": "project_name",
+        "optional": True,
+        "label": {"type": "plain_text", "text": "프로젝트명 (구분이 프로젝트일 때만)"},
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "project_name",
+            "placeholder": {"type": "plain_text", "text": "예: 스마트시티"},
+        },
+        "hint": {
+            "type": "plain_text",
+            "text": "프로젝트는 조직코드가 없어 위에서 고른 주관 조직의 코드를 씁니다.",
+        },
+    }
     task_block = {
         "type": "input",
         "block_id": "task",
@@ -223,8 +257,9 @@ def _name_inputs(spec: ChannelSpec | None = None, *, org_search: bool = False) -
             **({"initial_value": spec.task} if spec else {}),
         },
     }
-    org_blocks = [org_select_block()] if org_search else manual_blocks
-    return [prefix_block, *org_blocks, task_block]
+    if org_search:
+        return [prefix_block, org_select_block(), project_block, task_block]
+    return [prefix_block, *manual_blocks, task_block]
 
 
 def create_modal(private_metadata: str, *, org_search: bool = False) -> dict:
