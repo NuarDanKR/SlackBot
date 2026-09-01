@@ -172,6 +172,21 @@ ORG_SQL = (
     + _RANGE
 )
 
+# schedule_folder_org 도입 전 서버의 제한적 호환 경로. 대표 조직 하나만 허용하며
+# 다른 조직으로 범위를 넓히지 않는다.
+ORG_LEGACY_SQL = (
+    _SELECT
+    + """      JOIN user_identity ui
+        ON ui.workspace = %(workspace)s AND ui.slack_user = %(slack_user)s
+      JOIN employee e ON e.emp_no = ui.emp_no AND e.active
+     WHERE f.enabled
+       AND f.org_code = e.org_code
+"""
+    + _RANGE
+)
+
+FOLDER_ORG_EXISTS_SQL = "SELECT to_regclass('schedule_folder_org')"
+
 LAST_SYNC_SQL = """
     SELECT max(applied_at) AS applied_at
       FROM schedule_sync_run
@@ -224,6 +239,16 @@ def channel_is_registered(conn, *, workspace: str, channel_id: str) -> bool:
         return cur.fetchone() is not None
 
 
+def folder_org_table_exists(conn) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(FOLDER_ORG_EXISTS_SQL)
+        row = cur.fetchone()
+    if not row:
+        return False
+    value = row.get("to_regclass") if isinstance(row, dict) else row[0]
+    return value is not None
+
+
 def fetch(
     conn,
     *,
@@ -252,8 +277,9 @@ def fetch(
             return _rows(cur), SCOPE_CHANNEL
 
     if slack_user:
+        org_sql = ORG_SQL if folder_org_table_exists(conn) else ORG_LEGACY_SQL
         with conn.cursor() as cur:
-            cur.execute(ORG_SQL, params)
+            cur.execute(org_sql, params)
             rows = _rows(cur)
         if rows:
             return rows, SCOPE_ORG

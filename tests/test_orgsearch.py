@@ -345,7 +345,7 @@ def test_submit_builds_the_channel_name():
         **_text("task", "주간회의"),
     )
     assert request_from_view(view, include_channel_options=False).name == (
-        "본사팀-전산_ABB110-주간회의"
+        "팀-전산_ABB110-주간회의"
     )
 
 
@@ -369,7 +369,7 @@ def test_other_org_is_allowed():
         **_text("task", "협업"),
     )
     assert request_from_view(view, include_channel_options=False).name == (
-        "본사팀-자금_ABB540-협업"
+        "팀-자금_ABB540-협업"
     )
 
 

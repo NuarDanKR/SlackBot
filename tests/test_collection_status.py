@@ -77,7 +77,7 @@ def test_private_report_explains_the_slack_limitation():
 def test_mismatch_report_shows_the_expected_format():
     text = report(ChannelFacts(channel="#점심메뉴"))
     assert "조직코드" in text
-    assert "#본사팀-전산_ABB110-주간회의" in text
+    assert "#팀-전산_ABB110-주간회의" in text
     assert "소급 수집되지 않습니다" in text  # 기대치를 미리 낮춘다
 
 

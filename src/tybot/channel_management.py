@@ -19,6 +19,7 @@ from .orgsearch import OrgHit, decode_value, option
 _OWNER_LOCK = threading.Lock()
 _SPACE_RE = re.compile(r"\s+")
 _CODE_RE = re.compile(r"^[0-9A-Za-z]+$")
+_CHANNEL_PREFIX = {"본사팀": "팀"}
 
 
 class ChannelNameError(ValueError):
@@ -67,7 +68,8 @@ def build_channel_name(prefix: str, org_name: str, org_code: str, task: str) -> 
     if "#" in task:
         raise ChannelNameError("업무명에는 #을 사용할 수 없습니다.", "task")
 
-    name = f"{prefix}-{org_name}_{org_code}-{task}"
+    channel_prefix = _CHANNEL_PREFIX.get(prefix, prefix)
+    name = f"{channel_prefix}-{org_name}_{org_code}-{task}"
     if len(name) > 80:
         raise ChannelNameError("채널명이 80자를 넘습니다. 조직명이나 업무명을 줄여 주세요.", "task")
     if parse(name) is None:

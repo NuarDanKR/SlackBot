@@ -147,7 +147,7 @@ CHANNEL_CREATED_NOTICE = (
     "여기 올라오는 대화·스레드·첨부는 중앙 아카이브에 원문 그대로 쌓이고, "
     "권한이 있는 사람의 질문에 근거로 쓰입니다.\n"
     "• 수집 여부는 **채널 이름**이 정합니다. 규칙 밖 이름으로 바꾸면 그 시점부터 멈춥니다.\n"
-    "• 두문자: 본부 > 본사팀 > 현장, 또는 실 > 본사팀. "
+    "• 두문자: 본부 > 팀 > 현장, 또는 실 > 팀. "
     "`업무` 는 다른 팀과 협업할 때 쓰는 채널이며 주관 팀의 조직코드를 씁니다.\n"
     "• 비공개 채널은 봇이 스스로 들어갈 수 없습니다. "
     "`/채널` 로 만들었거나 `/invite @{bot}` 한 채널만 수집됩니다.\n"
@@ -1056,7 +1056,11 @@ class WorkspaceBot:
         if not user_id:
             return
         try:
-            client.chat_postMessage(channel=user_id, text=text)
+            opened = client.conversations_open(users=user_id)
+            dm_channel = str((opened.get("channel") or {}).get("id") or "")
+            if not dm_channel:
+                raise RuntimeError("DM channel missing")
+            client.chat_postMessage(channel=dm_channel, text=text)
         except Exception as e:
             log.warning("[%s] 채널 관리 결과 DM 실패 user=%s: %s", self.workspace, user_id, e)
 

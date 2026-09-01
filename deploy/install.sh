@@ -184,6 +184,11 @@ install -m 0644 "$APP_DIR/deploy/tybot-deploy.service" /etc/systemd/system/tybot
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.path"    /etc/systemd/system/tybot-deploy.path
 systemctl daemon-reload
 
+if [[ "${TYBOT_INSTALL_HINTS:-1}" != "1" ]]; then
+  echo "설치 파일 갱신 완료"
+  exit 0
+fi
+
 cat <<EOF
 
 설치 완료. 다음 순서로 진행하세요:

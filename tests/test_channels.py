@@ -87,5 +87,5 @@ def test_explain_gives_actionable_message():
     from tybot.channels import explain
 
     assert "수집 대상 아님" in explain("#점심메뉴")
-    assert "#본사팀-전산_ABB110-주간회의" in explain("#점심메뉴")
+    assert "#팀-전산_ABB110-주간회의" in explain("#점심메뉴")
     assert "수집 대상" in explain("#팀-전산_ABB110-주간회의")

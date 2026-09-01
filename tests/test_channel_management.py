@@ -19,7 +19,7 @@ from tybot.slack.pilot import WorkspaceBot
 def test_build_channel_name_normalizes_people_friendly_input():
     assert (
         build_channel_name("본사팀", " 전산 ", "abb110", " 주간 회의 ")
-        == "본사팀-전산_ABB110-주간-회의"
+        == "팀-전산_ABB110-주간-회의"
     )
 
 
@@ -87,15 +87,16 @@ def _bot(tmp_path) -> WorkspaceBot:
 def test_create_private_channel_records_owner_and_invites_requester(tmp_path):
     bot = _bot(tmp_path)
     client = Mock()
+    client.conversations_open.return_value = {"channel": {"id": "D1"}}
     client.conversations_create.return_value = {
-        "channel": {"id": "C1", "name": "본사팀-전산_abb110-주간회의"}
+        "channel": {"id": "C1", "name": "팀-전산_abb110-주간회의"}
     }
     request = ChannelRequest("본사팀", "전산", "ABB110", "주간회의", "private", ("U2",))
 
     bot._create_channel(client, "U1", request)
 
     client.conversations_create.assert_called_once_with(
-        name="본사팀-전산_abb110-주간회의", is_private=True
+        name="팀-전산_abb110-주간회의", is_private=True
     )
     client.conversations_invite.assert_called_once_with(channel="C1", users="U1,U2")
     assert bot.channel_owners.is_owner("it", "C1", "U1")
@@ -104,6 +105,7 @@ def test_create_private_channel_records_owner_and_invites_requester(tmp_path):
 def test_rename_rechecks_owner_before_using_bot_permission(tmp_path):
     bot = _bot(tmp_path)
     client = Mock()
+    client.conversations_open.return_value = {"channel": {"id": "D1"}}
 
     bot._rename_channel(client, "U2", "C1", "팀-전산_ABB110-변경")
 

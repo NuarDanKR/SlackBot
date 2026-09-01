@@ -255,6 +255,8 @@ class FakeCursor:
 
     def _key(self) -> str:
         sql = self._conn._last
+        if "to_regclass('schedule_folder_org')" in sql:
+            return "folder_org_exists"
         if "FROM schedule_channel" in sql and "SELECT 1" in sql:
             return "registered"
         if "FROM user_identity" in sql and "SELECT 1" in sql:
@@ -270,6 +272,7 @@ class FakeCursor:
 
 class FakeConn:
     def __init__(self, **answers):
+        answers.setdefault("folder_org_exists", {"to_regclass": "schedule_folder_org"})
         self.answers = answers
         self.executed: list[tuple] = []
         self._last = ""
@@ -326,6 +329,24 @@ def test_unregistered_channel_falls_back_to_identity():
     assert len(rows) == 1
     sql, _ = conn.executed[-1]
     assert "JOIN user_identity" in sql
+    assert "f.org_code = e.org_code" in sql
+
+
+def test_org_lookup_uses_representative_org_before_dm_schema_is_applied():
+    conn = FakeConn(
+        registered=None,
+        folder_org_exists={"to_regclass": None},
+        org_rows=[_row()],
+    )
+    rows, scope = fetch(
+        conn, workspace="pilot", channel_id="C9", slack_user="U1",
+        window=parse_window("오늘", now=NOW),
+    )
+
+    assert scope == SCOPE_ORG
+    assert len(rows) == 1
+    sql, _ = conn.executed[-1]
+    assert "schedule_folder_org" not in sql
     assert "f.org_code = e.org_code" in sql
 
 
