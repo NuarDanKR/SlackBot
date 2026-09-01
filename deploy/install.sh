@@ -22,13 +22,37 @@ command -v git   >/dev/null || dnf install -y git
 
 # 콘솔 화면을 서버에서 빌드하므로 Node 가 필요하다.
 # Rocky 8 기본 스트림은 Node 10 이고, 그 npm(6)은 lockfileVersion 3 을 읽지 못해
-# `Cannot read property 'react' of undefined` 로 죽는다. 스트림을 올려서 깐다.
-if [[ "${WITH_CONSOLE:-0}" == "1" && "${OFFLINE:-0}" != "1" ]]; then
-  if ! command -v node >/dev/null; then
-    echo "  Node 설치(nodejs:20)"
-    dnf module reset -y nodejs >/dev/null 2>&1 || true
-    dnf module enable -y nodejs:20 >/dev/null 2>&1 || true
-    dnf install -y nodejs || echo "  ! Node 설치 실패 — 화면 빌드는 건너뜁니다"
+# `Cannot read property 'react' of undefined` 로 죽는다.
+#
+# **있는지만 보면 안 된다.** Node 10 이 이미 깔려 있으면 그대로 통과해 버리고,
+# 빌드 단계에 가서야 저 오류를 만난다. 버전을 재서 낮으면 올린다.
+node_too_old() {
+  command -v node >/dev/null || return 0
+  local major minor
+  major=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null) || return 0
+  minor=$(node -p "process.versions.node.split('.')[1]" 2>/dev/null) || return 0
+  # Vite 7 이 요구하는 최소값이다. `set -e` 아래에서 && 사슬은 읽기 어렵고
+  # 마지막 항이 실패하면 스크립트가 통째로 죽을 수 있어 if 로 쓴다.
+  if (( major > 20 )); then
+    return 1
+  fi
+  if (( major == 20 )) && (( minor >= 19 )); then
+    return 1
+  fi
+  return 0
+}
+
+if [[ "${WITH_CONSOLE:-0}" == "1" && "${OFFLINE:-0}" != "1" ]] && node_too_old; then
+  echo "  Node 올리기(nodejs:20) — 현재 $(command -v node >/dev/null && node -v || echo 없음)"
+  dnf module reset -y nodejs >/dev/null 2>&1 || true
+  dnf module enable -y nodejs:20 >/dev/null 2>&1 || true
+  # 이미 낡은 Node 가 깔려 있으면 `install` 은 '이미 설치됨' 으로 끝난다.
+  # distro-sync 가 설치된 패키지를 새 스트림 버전으로 옮긴다.
+  dnf distro-sync -y nodejs npm >/dev/null 2>&1 || dnf install -y nodejs >/dev/null 2>&1 || true
+  if node_too_old; then
+    echo "  ! Node 를 올리지 못했습니다($(node -v 2>/dev/null || echo 없음)) — 화면 빌드는 건너뜁니다"
+  else
+    echo "  Node $(node -v) 준비됨"
   fi
 fi
 
@@ -87,13 +111,9 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   # **실패해도 설치를 멈추지 않는다.** 화면이 안 만들어지는 것과 봇이 못 뜨는 것은
   # 무게가 다르다. 여기서 exit 하면 프런트엔드 사정으로 봇 배포가 막힌다.
   build_console() {
-    command -v node >/dev/null || { echo "  ! node 가 없습니다 — 화면 빌드를 건너뜁니다"; return 1; }
-    local major minor
-    major=$(node -p "process.versions.node.split('.')[0]")
-    minor=$(node -p "process.versions.node.split('.')[1]")
     # Vite 7 은 Node 20.19+ 를 요구한다. 낮으면 알 수 없는 오류로 죽는다.
-    if (( major < 20 )) || { (( major == 20 )) && (( minor < 19 )); }; then
-      echo "  ! Node $(node -v) 는 너무 낮습니다(20.19+ 필요) — 화면 빌드를 건너뜁니다"
+    if node_too_old; then
+      echo "  ! Node $(node -v 2>/dev/null || echo 없음) 로는 빌드할 수 없습니다(20.19+ 필요)"
       return 1
     fi
     ( cd "$APP_DIR/console-web" && npm ci --no-audit --no-fund && npm run build ) || return 1

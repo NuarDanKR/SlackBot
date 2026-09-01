@@ -308,9 +308,19 @@ curl -sI localhost:8787/ | head -1     # HTTP/1.1 200 OK  ← 화면 파일까�
 
 | 증상 | 원인 / 조치 |
 |---|---|
-| `Cannot read property 'react' of undefined` | Node 가 낡았다(Rocky 8 기본은 10). `dnf module enable nodejs:20` |
+| `Cannot read property 'react' of undefined` | Node 가 낡았다(Rocky 8 기본은 10, npm 6 은 lockfileVersion 3 을 못 읽는다). 아래 명령으로 올린다 |
+| `node -v` 가 그대로 10.x | `dnf install` 은 '이미 설치됨' 으로 끝난다. **`distro-sync`** 를 써야 스트림 버전으로 옮겨진다 |
 | 화면은 뜨는데 고친 내용이 안 보임 | 빌드를 안 했다. `sudo WITH_CONSOLE=1 bash deploy/install.sh` 재실행 |
 | 로그인은 되는데 화면이 비어 있음 | API 오류. `journalctl -u tybot-console -n 50` |
+
+Node 를 손으로 올려야 할 때:
+
+```bash
+sudo dnf module reset -y nodejs
+sudo dnf module enable -y nodejs:20
+sudo dnf distro-sync -y nodejs npm     # install 이 아니라 distro-sync 다
+node -v                                 # v20.19 이상
+```
 
 **콘솔은 `127.0.0.1:8787` 에만 열린다.** 서버 밖에서 보려면 앞단(nginx 등)이 필요하다.
 서비스 파일의 `--host` 를 오너 승인 없이 바꾸지 않는다 — 이 화면은 봇 토큰과 배포 권한을
