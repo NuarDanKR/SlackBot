@@ -103,7 +103,7 @@ def parse_cross_read(spec: str | None, known: set[str]) -> dict[str, frozenset[s
     return out
 
 
-def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
+def _load_env_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
     """환경변수에서 워크스페이스 목록을 구성한다."""
     e = dict(os.environ if env is None else env)
 
@@ -161,3 +161,50 @@ def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
             )
         )
     return configs
+
+
+def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
+    """Load environment workspaces and merge complete DB registry entries.
+
+    Environment configuration remains the fallback during migration.  A DB row
+    overrides it only after both encrypted Slack tokens exist, so applying the
+    schema to an existing server cannot make a working bot disappear.
+    """
+    configs = _load_env_workspaces(env)
+    effective = dict(os.environ if env is None else env)
+    if not effective.get("DATABASE_URL"):
+        return configs
+    if not (
+        effective.get("WORKSPACE_SECRET_KEY")
+        or effective.get("WORKSPACE_SECRET_KEY_FILE")
+        or effective.get("CREDENTIALS_DIRECTORY")
+    ):
+        return configs
+
+    try:
+        from .console.workspace_store import runtime_workspaces
+
+        rows = runtime_workspaces()
+    except Exception as exc:  # noqa: BLE001 - registry failure must not stop existing bots
+        logger.error("DB 워크스페이스 설정을 읽지 못해 환경변수 설정만 사용합니다: %s", exc)
+        return configs
+
+    merged = {cfg.key: cfg for cfg in configs}
+    for row in rows:
+        key = str(row["key"])
+        # A row without a complete secret pair is metadata imported before the
+        # registry feature. Keep its working environment configuration.
+        if row.get("bot_token") is None or row.get("app_token") is None:
+            continue
+        if row.get("state") == "disabled":
+            merged.pop(key, None)
+            continue
+        merged[key] = WorkspaceConfig(
+            key=key,
+            label=str(row["label"]),
+            bot_token=str(row["bot_token"]),
+            app_token=str(row["app_token"]),
+            readable=frozenset(str(value) for value in (row.get("readable") or [])),
+            is_root=row.get("role") == "root",
+        )
+    return list(merged.values())

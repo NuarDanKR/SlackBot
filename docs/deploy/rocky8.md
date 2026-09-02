@@ -355,6 +355,16 @@ sudo -u tybot TYBOT_ENV_FILE=/etc/tybot/tybot.env \
 # /etc/tybot/tybot.env의 DATABASE_URL을 읽어 스키마를 적용한다
 /opt/tybot/.venv/bin/python -m tybot.console.auth init-schema
 
+# 워크스페이스 Slack 토큰용 전용 암호화 키를 한 번만 만든다. 이 파일도 백업 대상이다.
+KEY=$(/opt/tybot/.venv/bin/python -c \
+  "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+printf '%s\n' "$KEY" | sudo install -o tybot -g tybot -m 0400 /dev/stdin \
+  /etc/tybot/workspace-secret.key
+unset KEY
+# /etc/tybot/tybot.env에 키 파일 경로를 추가한다.
+printf '%s\n' 'WORKSPACE_SECRET_KEY_FILE=/etc/tybot/workspace-secret.key' | \
+  sudo tee -a /etc/tybot/tybot.env >/dev/null
+
 # 비밀번호는 터미널에서 두 번 숨김 입력한다. DB에는 scrypt 해시만 저장된다.
 /opt/tybot/.venv/bin/python -m tybot.console.auth \
   set-password dan@taeyoung.com --name dan --role admin
@@ -367,6 +377,10 @@ sudo systemctl enable --now tybot-console
 첫 관리자 생성 뒤의 계정 추가·권한 변경·비밀번호 재설정은 관리자 전용 `콘솔 사용자 관리`
 화면에서 한다. 기존 `CONSOLE_ACCOUNTS` 줄은 더 이상 사용하지 않으므로
 `/etc/tybot/tybot.env`에서 삭제한다.
+
+`workspace-secret.key`를 잃으면 DB에 저장된 Slack 토큰은 복구할 수 없다. DB 백업과 별도
+위치에 함께 백업하되 저장소에는 넣지 않는다. 키를 교체하려면 기존 키로 토큰을 복호화해
+새 키로 다시 암호화하는 마이그레이션이 먼저 필요하므로 파일만 덮어쓰면 안 된다.
 
 | 역할 | 접근 범위 |
 |---|---|

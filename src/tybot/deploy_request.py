@@ -16,12 +16,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .heartbeat import state_dir
+
+logger = logging.getLogger("tybot.deploy_request")
 
 # 연속 클릭으로 배포가 겹치지 않게 한다. 실제 직렬화는 러너의 flock 이 담당하고,
 # 이 값은 사용자에게 즉시 거절 이유를 알려주기 위한 것이다.
@@ -109,6 +112,7 @@ def console_status() -> dict:
         "requestedAt": (request or {}).get("requested_at"),
         "startedAt": None if queued else status.get("started_at"),
         "finishedAt": None if queued else status.get("finished_at"),
+        "approvalId": (request or {}).get("approval_id") or status.get("approval_id"),
     }
 
 
@@ -128,7 +132,7 @@ def seconds_since_last() -> float | None:
         return None
 
 
-def request_deploy(actor: str, *, note: str = "") -> dict:
+def request_deploy(actor: str, *, note: str = "", approval_id: int | None = None) -> dict:
     """배포를 요청한다. 거절되면 `{"ok": False, "reason": ...}` 를 돌려준다.
 
     거절 사유를 예외가 아니라 값으로 주는 이유: 콘솔이 화면에 그대로 띄우면 되고,
@@ -148,6 +152,7 @@ def request_deploy(actor: str, *, note: str = "") -> dict:
         "actor": actor,
         # 자유 입력은 기록만 한다 - 실행에 쓰이지 않는다. 길이를 잘라 로그 오염을 막는다.
         "note": (note or "")[:200],
+        "approval_id": approval_id,
     }
     _write_atomic(request_path(), payload)
     return {"ok": True, "requested_at": payload["requested_at"]}
@@ -177,10 +182,14 @@ def write_status(
     message: str = "",
     detail: str = "",
     started_at: str | None = None,
+    approval_id: int | None = None,
 ) -> dict:
     """배포 진행 상태를 남긴다. 콘솔이 읽으므로 0644 로 둔다(시크릿 없음)."""
     if started_at is None and state != "running":
         started_at = str((read_status() or {}).get("started_at") or "") or None
+    previous = read_status() or {}
+    if approval_id is None:
+        approval_id = previous.get("approval_id")
     payload = {
         "state": state,  # running | ok | failed | skipped
         "actor": actor,
@@ -191,8 +200,16 @@ def write_status(
         "message": message,
         "detail": sanitize_deploy_detail(detail),
         "started_at": started_at or _now().isoformat(timespec="seconds"),
+        "approval_id": approval_id,
     }
     if state != "running":
         payload["finished_at"] = _now().isoformat(timespec="seconds")
     _write_atomic(status_path(), payload, mode=0o644)
+    if approval_id is not None:
+        try:
+            from .console.deploy_approval_store import DeployApprovalError, mark_result
+
+            mark_result(int(approval_id), state, actor, message)
+        except (DeployApprovalError, ValueError) as exc:
+            logger.error("배포 승인 요청 결과를 DB에 기록하지 못했습니다: %s", exc)
     return payload

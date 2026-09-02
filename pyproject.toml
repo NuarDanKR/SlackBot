@@ -19,7 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
 # 관리 콘솔 백엔드. 봇만 돌릴 때는 설치하지 않아도 된다.
-console = ["fastapi>=0.115", "uvicorn>=0.30", "psycopg[binary]>=3.2"]
+console = ["fastapi>=0.115", "uvicorn>=0.30", "psycopg[binary]>=3.2", "cryptography>=43"]
 
 [tool.ruff]
 line-length = 100

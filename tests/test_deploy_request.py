@@ -20,11 +20,12 @@ def _state(monkeypatch, tmp_path):
 
 
 def test_request_creates_file_with_actor():
-    r = dr.request_deploy("dan@taeyoung.com")
+    r = dr.request_deploy("dan@taeyoung.com", approval_id=17)
     assert r["ok"] is True
     payload = json.loads(dr.request_path().read_text(encoding="utf-8"))
     assert payload["actor"] == "dan@taeyoung.com"
     assert payload["requested_at"]
+    assert payload["approval_id"] == 17
 
 
 def test_second_request_is_rejected_while_pending():

@@ -582,13 +582,13 @@ def test_admin_can_enable_timer_with_csrf_and_audit(client, monkeypatch):
     assert called["result"] == "applied"
 
 
-def test_deployment_management_is_admin_only(client):
+def test_deployment_status_is_visible_to_developers(client):
     assert client.get("/api/deployment", headers=owner(client)).status_code == 200
-    assert client.get("/api/deployment", headers=member(client)).status_code == 403
+    assert client.get("/api/deployment", headers=member(client)).status_code == 200
     assert client.get("/api/deployment", headers=guest(client)).status_code == 403
 
 
-def test_admin_can_request_deployment_with_csrf(client):
+def test_direct_admin_deployment_is_disabled(client):
     headers = owner(client)
     assert client.put("/api/deployment/request", json={}, headers=headers).status_code == 403
 
@@ -596,9 +596,70 @@ def test_admin_can_request_deployment_with_csrf(client):
         "/api/deployment/request", json={}, headers=_write_headers(headers)
     )
 
+    assert response.status_code == 409
+    assert "승인" in response.json()["detail"]
+
+
+def test_developer_can_create_deployment_approval_request(client, monkeypatch):
+    called = {}
+    monkeypatch.setattr(
+        console_app.deploy_approval_store,
+        "create_request",
+        lambda **values: called.update(values) or 17,
+    )
+    monkeypatch.setattr(console_app.deploy_approval_store, "list_requests", lambda _allowed: [])
+    headers = member(client)
+    response = client.put(
+        "/api/deploy-requests",
+        json={"workspace": "fin", "reason": "검색 오류 수정 배포"},
+        headers=_write_headers(headers),
+    )
+
     assert response.status_code == 200, response.text
-    assert response.json()["state"] == "queued"
-    assert response.json()["actor"] == "dan@taeyoung.com"
+    assert called["workspace"] == "fin"
+    assert called["requester"] == "sh.kim@taeyoung.com"
+
+
+def test_developer_cannot_request_deployment_for_other_workspace(client, monkeypatch):
+    called = False
+
+    def fake_create(**_values):
+        nonlocal called
+        called = True
+        return 1
+
+    monkeypatch.setattr(console_app.deploy_approval_store, "create_request", fake_create)
+    response = client.put(
+        "/api/deploy-requests",
+        json={"workspace": "mgmt", "reason": "다른 조직 변경 배포"},
+        headers=_write_headers(member(client)),
+    )
+    assert response.status_code == 403
+    assert called is False
+
+
+def test_admin_approval_triggers_root_runner_request(client, monkeypatch):
+    called = {}
+    monkeypatch.setattr(
+        console_app.deploy_approval_store,
+        "decide_request",
+        lambda **_values: {"approved": True, "workspace": "fin"},
+    )
+    monkeypatch.setattr(console_app.deploy_approval_store, "list_requests", lambda _allowed: [])
+    monkeypatch.setattr(
+        console_app.deploy_request,
+        "request_deploy",
+        lambda actor, **values: called.update(actor=actor, **values) or {"ok": True},
+    )
+    response = client.put(
+        "/api/deploy-requests/17/decision",
+        json={"decision": "approve", "note": "검토 완료"},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 200, response.text
+    assert called["actor"] == "dan@taeyoung.com"
+    assert called["approval_id"] == 17
 
 
 # --- 환경변수 설정 ---------------------------------------------------------
@@ -682,6 +743,82 @@ def test_env_write_rejects_unknown_or_self_read_target(client, env):
     response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
     assert response.status_code == 422
     assert not (env / "state" / "config" / "managed.env").exists()
+
+
+# --- 워크스페이스 관리 ----------------------------------------------------
+
+
+def _workspace_row() -> dict:
+    return {
+        "key": "tyit",
+        "label": "전산팀",
+        "role": "member",
+        "state": "enabled",
+        "error": None,
+        "limit_usd": 2,
+        "readable": ["mgmt"],
+        "bot_token_mask": "xoxb-1234…cdef",
+        "app_token_mask": "xapp-1234…cdef",
+        "secret_updated_at": None,
+        "secret_updated_by": "dan@taeyoung.com",
+        "archive_path": "/archive/tyit",
+        "created_at": None,
+        "created_by": "dan@taeyoung.com",
+    }
+
+
+def test_workspace_management_is_admin_only(client, monkeypatch):
+    monkeypatch.setattr(console_app.workspace_store, "list_workspaces", lambda: [])
+    assert client.get("/api/workspaces", headers=owner(client)).status_code == 200
+    assert client.get("/api/workspaces", headers=member(client)).status_code == 403
+    assert client.get("/api/workspaces", headers=guest(client)).status_code == 403
+
+
+def test_admin_can_save_workspace_without_returning_plain_tokens(client, monkeypatch):
+    saved = {}
+    monkeypatch.setattr(
+        console_app.workspace_store, "save_workspace", lambda **values: saved.update(values)
+    )
+    monkeypatch.setattr(console_app.workspace_store, "list_workspaces", lambda: [_workspace_row()])
+    headers = owner(client)
+    payload = {
+        "label": "전산팀",
+        "role": "member",
+        "state": "enabled",
+        "limitUsd": 2,
+        "readable": ["mgmt"],
+        "botToken": "xoxb-secret-value-1234",
+        "appToken": "xapp-secret-value-1234",
+    }
+
+    assert client.put("/api/workspaces/tyit", json=payload, headers=headers).status_code == 403
+    response = client.put(
+        "/api/workspaces/tyit", json=payload, headers=_write_headers(headers)
+    )
+
+    assert response.status_code == 200, response.text
+    assert saved["actor"] == "dan@taeyoung.com"
+    assert saved["key"] == "tyit"
+    assert saved["bot_token"] == payload["botToken"]
+    assert "secret-value" not in response.text
+    assert response.json()["workspaces"][0]["botTokenMask"] == "xoxb-1234…cdef"
+
+
+def test_developer_cannot_save_workspace(client, monkeypatch):
+    called = False
+
+    def fake_save(**_values):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(console_app.workspace_store, "save_workspace", fake_save)
+    response = client.put(
+        "/api/workspaces/tyit",
+        json={"label": "전산팀"},
+        headers=_write_headers(member(client)),
+    )
+    assert response.status_code == 403
+    assert called is False
 
 
 # --- 콘솔 사용자 관리 -----------------------------------------------------

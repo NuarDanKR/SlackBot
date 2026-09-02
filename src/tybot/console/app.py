@@ -28,7 +28,17 @@ from pydantic import BaseModel, Field
 
 from .. import deploy_request
 from ..archive.store import ArchiveStore
-from . import account_store, env_settings, health, reader, service_logs, timer_manager
+from ..managed_env import request_restart
+from . import (
+    account_store,
+    deploy_approval_store,
+    env_settings,
+    health,
+    reader,
+    service_logs,
+    timer_manager,
+    workspace_store,
+)
 from .auth import (
     ROLES,
     SESSION_COOKIE,
@@ -137,6 +147,26 @@ class TimerActionBody(BaseModel):
     unit: str
     action: Literal["enable", "disable", "run", "schedule"]
     preset: str | None = None
+
+
+class WorkspaceBody(BaseModel):
+    label: str
+    role: Literal["root", "member"] = "member"
+    state: Literal["enabled", "disabled"] = "enabled"
+    limitUsd: float = Field(default=2, ge=0, le=10000)
+    readable: list[str] = Field(default_factory=list)
+    botToken: str | None = None
+    appToken: str | None = None
+
+
+class DeployRequestBody(BaseModel):
+    workspace: str
+    reason: str
+
+
+class DeployDecisionBody(BaseModel):
+    decision: Literal["approve", "reject"]
+    note: str = ""
 
 
 @app.post("/api/login")
@@ -328,6 +358,70 @@ def put_env_settings(
 
 
 # ---------------------------------------------------------------------------
+# 워크스페이스 관리 — admin 전용, 시크릿 원문은 응답하지 않는다
+# ---------------------------------------------------------------------------
+
+
+def _workspace_response(row: dict) -> dict:
+    return {
+        "key": row["key"],
+        "label": row["label"],
+        "role": row["role"],
+        "state": row["state"],
+        "error": row.get("error"),
+        "limitUsd": float(row["limit_usd"]),
+        "readable": list(row.get("readable") or []),
+        "botTokenMask": row.get("bot_token_mask") or "미등록",
+        "appTokenMask": row.get("app_token_mask") or "미등록",
+        "secretUpdatedAt": row.get("secret_updated_at"),
+        "secretUpdatedBy": row.get("secret_updated_by") or "-",
+        "archivePath": row["archive_path"],
+        "createdAt": row["created_at"],
+        "createdBy": row["created_by"],
+    }
+
+
+@app.get("/api/workspaces")
+def get_workspaces(user: User) -> dict:
+    _require_admin(user)
+    try:
+        rows = workspace_store.list_workspaces()
+    except workspace_store.WorkspaceStoreError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {"workspaces": [_workspace_response(row) for row in rows]}
+
+
+@app.put("/api/workspaces/{key}")
+def put_workspace(key: str, body: WorkspaceBody, request: Request, user: User) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+    try:
+        workspace_store.save_workspace(
+            actor=user.email,
+            key=key,
+            label=body.label,
+            role=body.role,
+            state=body.state,
+            limit_usd=body.limitUsd,
+            readable=body.readable,
+            bot_token=body.botToken,
+            app_token=body.appToken,
+        )
+        request_restart(user.email, [f"WORKSPACE_REGISTRY:{key.strip().lower()}"])
+        rows = workspace_store.list_workspaces()
+    except workspace_store.WorkspaceStoreError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except OSError as e:
+        logger.exception("워크스페이스 저장 후 재시작 요청 실패")
+        raise HTTPException(
+            status_code=503,
+            detail="워크스페이스는 저장됐지만 봇 재시작을 요청하지 못했습니다.",
+        ) from e
+    logger.warning("워크스페이스 변경 — actor=%s workspace=%s", user.email, key)
+    return {"workspaces": [_workspace_response(row) for row in rows], "restartPending": True}
+
+
+# ---------------------------------------------------------------------------
 # 콘솔 사용자 관리 — admin 전용
 # ---------------------------------------------------------------------------
 
@@ -458,7 +552,7 @@ def timer_action(body: TimerActionBody, request: Request, user: User) -> dict:
 
 @app.get("/api/deployment")
 def deployment(user: User) -> dict:
-    _require_admin(user)
+    _require_developer(user)
     return deploy_request.console_status()
 
 
@@ -466,15 +560,107 @@ def deployment(user: User) -> dict:
 def request_deployment(request: Request, user: User) -> dict:
     _require_admin(user)
     _check_write_request(request)
+    raise HTTPException(
+        status_code=409,
+        detail="직접 배포는 비활성화됐습니다. 배포 요청을 등록하고 다른 관리자의 승인을 받으세요.",
+    )
+
+
+def _deploy_request_response(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "workspace": row["workspace"],
+        "workspaceLabel": row["workspace_label"],
+        "requester": row["requester"],
+        "requestedAt": row["requested_at"],
+        "repo": row["repo"],
+        "branch": row["branch"],
+        "commit": row["commit_sha"],
+        "commitTitle": row["commit_title"],
+        "author": row["author"],
+        "fastForward": row["fast_forward"],
+        "filesChanged": row.get("files") or [],
+        "checks": row.get("checks") or [],
+        "state": row["state"],
+        "approvalExpiresAt": row.get("approval_expires_at"),
+        "approver": row.get("approver"),
+        "decidedAt": row.get("decided_at"),
+    }
+
+
+@app.get("/api/deploy-requests")
+def get_deploy_requests(user: User) -> dict:
+    _require_developer(user)
     try:
-        result = deploy_request.request_deploy(user.email, note="관리 콘솔에서 요청")
-    except OSError as e:
-        logger.exception("배포 요청 파일 기록 실패")
-        raise HTTPException(status_code=500, detail="배포 요청을 기록하지 못했습니다.") from e
-    if not result.get("ok"):
-        raise HTTPException(status_code=409, detail=str(result.get("reason") or "배포 요청 거절"))
-    logger.warning("관리 콘솔 배포 요청 — actor=%s", user.email)
-    return deploy_request.console_status()
+        rows = deploy_approval_store.list_requests(None if user.all_workspaces else set(user.workspaces))
+    except deploy_approval_store.DeployApprovalError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {"requests": [_deploy_request_response(row) for row in rows]}
+
+
+@app.put("/api/deploy-requests")
+def create_deploy_request(body: DeployRequestBody, request: Request, user: User) -> dict:
+    _require_developer(user)
+    _check_write_request(request)
+    if not user.all_workspaces and not user.may_see(body.workspace):
+        raise HTTPException(status_code=403, detail="담당 워크스페이스만 배포를 요청할 수 있습니다.")
+    try:
+        request_id = deploy_approval_store.create_request(
+            workspace=body.workspace,
+            requester=user.email,
+            reason=body.reason,
+        )
+        rows = deploy_approval_store.list_requests(
+            None if user.all_workspaces else set(user.workspaces)
+        )
+    except deploy_approval_store.DeployApprovalError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    logger.warning(
+        "배포 승인 요청 등록 — actor=%s workspace=%s request=%s",
+        user.email,
+        body.workspace,
+        request_id,
+    )
+    return {"requests": [_deploy_request_response(row) for row in rows]}
+
+
+@app.put("/api/deploy-requests/{request_id}/decision")
+def decide_deploy_request(
+    request_id: int,
+    body: DeployDecisionBody,
+    request: Request,
+    user: User,
+) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+    try:
+        decision = deploy_approval_store.decide_request(
+            request_id=request_id,
+            approver=user.email,
+            decision=body.decision,
+            note=body.note,
+        )
+        if decision["approved"]:
+            result = deploy_request.request_deploy(
+                user.email,
+                note=f"승인된 배포 요청 #{request_id}",
+                approval_id=request_id,
+            )
+            if not result.get("ok"):
+                deploy_approval_store.restore_awaiting(request_id)
+                raise deploy_approval_store.DeployApprovalError(
+                    str(result.get("reason") or "배포 실행 요청을 만들지 못했습니다.")
+                )
+        rows = deploy_approval_store.list_requests(None)
+    except deploy_approval_store.DeployApprovalError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    logger.warning(
+        "배포 요청 결정 — actor=%s request=%s decision=%s",
+        user.email,
+        request_id,
+        body.decision,
+    )
+    return {"requests": [_deploy_request_response(row) for row in rows]}
 
 
 @app.get("/api/health")

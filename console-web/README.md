@@ -1,9 +1,9 @@
 # TYBot 관리 콘솔 (프론트엔드)
 
-데이터 현황 · 수집 문서 열람 · API 사용량 · 헬스 체크 · 서비스 로그 · 배치 관리 · 배포 관리 · 봇 규칙 열람.
+데이터 현황 · 수집 문서 열람 · API 사용량 · 헬스 체크 · 서비스 로그 · 배치 관리 · 배포 관리 · 워크스페이스 관리 · 봇 규칙 열람.
 
-**현재 단계: 화면에 노출된 운영 데이터는 모두 서버 API에서 읽습니다.** 워크스페이스 등록과
-규칙 변경 요청은 아직 없고, 봇 규칙은 읽기 전용입니다.
+**현재 단계: 화면에 노출된 운영 데이터는 모두 서버 API에서 읽습니다.** 워크스페이스 등록은
+PostgreSQL에 연결됐고, 규칙 변경 요청은 아직 없으며 봇 규칙은 읽기 전용입니다.
 설계 결정과 제한은 [`../docs/design/console.md`](../docs/design/console.md) 를 보세요.
 
 | 화면 | 데이터 출처 |
@@ -14,7 +14,8 @@
 | 헬스 체크 | `GET /api/health-report` |
 | 서비스 로그 | `GET /api/service-logs` |
 | 배치 관리 | `GET /api/timers` · `PUT /api/timers/action` |
-| 배포 관리 | `GET /api/deployment` · `PUT /api/deployment/request` |
+| 배포 관리 | `GET /api/deployment` · `GET/PUT /api/deploy-requests` · `PUT /api/deploy-requests/{id}/decision` |
+| 워크스페이스 관리 | `GET /api/workspaces` · `PUT /api/workspaces/{key}` |
 | 봇 규칙 열람 | `GET /api/harness` |
 | 환경변수 설정 | `GET/PUT /api/env-settings` |
 | 콘솔 사용자 관리 | `GET/PUT /api/console-users` |
@@ -161,12 +162,13 @@ uvicorn tybot.console.app:app --host 127.0.0.1 --port 8787 --app-dir src
 | `GET /api/health-report` | 헬스 체크 |
 | `GET /api/service-logs` | 서비스 로그 |
 | `GET /api/timers`, `PUT /api/timers/action` | 배치 관리 |
-| `GET /api/deployment`, `PUT /api/deployment/request` | 배포 관리 |
+| `GET /api/deployment`, `GET/PUT /api/deploy-requests`, `PUT /api/deploy-requests/{id}/decision` | 배포 관리 |
+| `GET /api/workspaces`, `PUT /api/workspaces/{key}` | 워크스페이스 관리 |
 | `GET/PUT /api/env-settings` | 환경변수 설정 |
 | `GET/PUT /api/console-users` | 콘솔 사용자 관리 |
 
 인증은 PostgreSQL `console_user`의 회사 이메일과 비밀번호를 확인한 뒤 발급하는 HttpOnly 세션
 쿠키를 사용합니다. 활성 계정이 없거나 DB에 연결할 수 없으면 임시 기본 계정으로 우회하지 않습니다.
 
-아직 없는 것: 워크스페이스 등록, 승인 큐·반려·되돌리기, 규칙 변경 요청 API. 배포 관리 버튼은
-관리자가 기존 `update.sh` 흐름을 즉시 요청하는 기능이며 승인 큐를 가장하지 않습니다.
+아직 없는 것: 배포 되돌리기와 규칙 변경 요청 API. 배포는 개발자 요청과 다른 관리자의
+승인·반려를 DB에 기록한 뒤 기존 `update.sh` 흐름을 실행합니다.

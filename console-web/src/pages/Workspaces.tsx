@@ -1,307 +1,255 @@
-/** 워크스페이스 관리 — 서버의 설정 파일을 직접 고치는 절차를 대체합니다.
- *
- * 지금은 워크스페이스를 늘릴 때 서버에 접속해 `tybot.env` 를 편집하고 프로세스를 다시 띄웁니다.
- * 그 방식에서는 토큰 한 줄만 잘못 넣어도 **모든 워크스페이스의 봇이 뜨지 않습니다.**
- * 여기서 등록하면 문제가 생긴 워크스페이스만 멈추고 나머지는 계속 동작합니다.
- *
- * 토큰은 입력만 받고 화면에는 가려서 보여 줍니다. 저장한 값을 다시 읽는 기능은 두지 않습니다.
- */
-import { useState } from 'react'
-import { registry } from '../mock/data'
+import { useEffect, useState } from 'react'
+import { ApiError, api } from '../api/client'
+import { useResource } from '../api/hooks'
 import { SetupGuide } from '../components/SetupGuide'
-import { MockBadge, PageHead, Section, fmt } from '../components/primitives'
+import { Chip, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
+type WorkspaceRole = 'root' | 'member'
+type WorkspaceState = 'enabled' | 'disabled' | 'error'
+
+interface WorkspaceEntry {
+  key: string
+  label: string
+  role: WorkspaceRole
+  state: WorkspaceState
+  error: string | null
+  limitUsd: number
+  readable: string[]
+  botTokenMask: string
+  appTokenMask: string
+  secretUpdatedAt: string | null
+  secretUpdatedBy: string
+  archivePath: string
+  createdAt: string
+  createdBy: string
+}
+
+interface WorkspaceResponse {
+  workspaces: WorkspaceEntry[]
+  restartPending?: boolean
+}
+
+interface Draft {
+  key: string
+  label: string
+  role: WorkspaceRole
+  state: 'enabled' | 'disabled'
+  limitUsd: string
+  readable: string[]
+  botToken: string
+  appToken: string
+}
+
+const EMPTY: Draft = {
+  key: '', label: '', role: 'member', state: 'enabled', limitUsd: '2',
+  readable: [], botToken: '', appToken: '',
+}
 const KEY_RE = /^[a-z][a-z0-9-]{1,23}$/
 
-export function Workspaces({ onToast }: { onToast: (m: string) => void }) {
-  const [key, setKey] = useState('')
-  const [label, setLabel] = useState('')
-  const [bot, setBot] = useState('')
-  const [app, setApp] = useState('')
-  const [limit, setLimit] = useState('2')
-  const [root, setRoot] = useState(false)
+function editDraft(row: WorkspaceEntry): Draft {
+  return {
+    key: row.key,
+    label: row.label,
+    role: row.role,
+    state: row.state === 'disabled' ? 'disabled' : 'enabled',
+    limitUsd: String(row.limitUsd),
+    readable: [...row.readable],
+    botToken: '',
+    appToken: '',
+  }
+}
 
-  const taken = registry.some((r) => r.key === key.trim())
-  const keyOk = KEY_RE.test(key.trim()) && !taken
-  const ready =
-    keyOk && label.trim().length > 0 && bot.startsWith('xoxb-') && app.startsWith('xapp-')
+function stateChip(row: WorkspaceEntry) {
+  if (row.state === 'enabled') return <Chip tone="ok">동작 중</Chip>
+  if (row.state === 'error') return <Chip tone="bad">연결 오류</Chip>
+  return <Chip tone="plain">사용 중지</Chip>
+}
 
-  const keyProblem = !key.trim()
-    ? null
-    : taken
-      ? '이미 사용 중인 키입니다. 수집을 시작한 뒤에는 키를 바꿀 수 없으니 다른 이름을 써 주세요.'
-      : !KEY_RE.test(key.trim())
-        ? '영문 소문자로 시작하고, 소문자·숫자·하이픈만 쓸 수 있습니다. 길이는 2~24자입니다.'
-        : null
+export function Workspaces({ onToast }: { onToast: (message: string) => void }) {
+  const resource = useResource<WorkspaceResponse>('/api/workspaces')
+  const [rows, setRows] = useState<WorkspaceEntry[]>([])
+  const [draft, setDraft] = useState<Draft>(EMPTY)
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (resource.data) setRows(resource.data.workspaces)
+  }, [resource.data])
+
+  if (resource.loading && !resource.data) return <Loading what="워크스페이스 목록을" />
+  if (resource.error && !resource.data) {
+    return <Failed what="워크스페이스 목록을" detail={resource.error.message} onRetry={resource.reload} />
+  }
+
+  const tokenPair = Boolean(draft.botToken) === Boolean(draft.appToken)
+  const ready = KEY_RE.test(draft.key) && draft.label.trim().length > 0 && tokenPair &&
+    (editing || (draft.botToken.startsWith('xoxb-') && draft.appToken.startsWith('xapp-')))
+
+  function reset() {
+    setDraft(EMPTY)
+    setEditing(false)
+    setError(null)
+  }
+
+  function toggleReadable(key: string, checked: boolean) {
+    setDraft((current) => ({
+      ...current,
+      readable: checked
+        ? [...new Set([...current.readable, key])]
+        : current.readable.filter((value) => value !== key),
+    }))
+  }
+
+  async function save() {
+    if (!ready || saving) return
+    if (!window.confirm(`${draft.label.trim()} 설정을 저장하고 TYBot 재시작을 요청하시겠습니까?`)) return
+    setSaving(true)
+    setError(null)
+    try {
+      const body: Record<string, unknown> = {
+        label: draft.label.trim(), role: draft.role, state: draft.state,
+        limitUsd: Number(draft.limitUsd), readable: draft.readable,
+      }
+      if (draft.botToken && draft.appToken) {
+        body.botToken = draft.botToken
+        body.appToken = draft.appToken
+      }
+      const result = await api.put<WorkspaceResponse>(
+        `/api/workspaces/${encodeURIComponent(draft.key)}`,
+        body,
+      )
+      setRows(result.workspaces)
+      onToast(`${draft.label.trim()} 설정을 저장했습니다. TYBot이 1분 안에 재시작됩니다.`)
+      reset()
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : String(caught))
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <>
       <PageHead
-        crumb="봇 관리 · 워크스페이스 관리"
+        crumb="관리자 설정 · 워크스페이스"
         title="워크스페이스 관리"
-        note="새 워크스페이스에 봇을 붙이거나 토큰을 교체합니다. 서버에 접속해 설정 파일을 고칠 필요가 없습니다. 등록에 문제가 있으면 해당 워크스페이스만 멈추고 다른 봇은 그대로 동작합니다."
-        aside={
-          <>
-            <MockBadge />
-            <span className="chip flat">등록 {registry.length}개</span>
-          </>
-        }
+        note="새 Slack 앱을 등록하고 표시 이름, 열람 범위, 사용 상태와 토큰을 관리합니다. 저장된 토큰 원문은 다시 표시되지 않습니다."
+        aside={<Chip tone="plain">등록 {rows.length}개</Chip>}
       />
 
-      <div className="section">
-        <SetupGuide />
-      </div>
+      <div className="section"><SetupGuide /></div>
+
+      {error && (
+        <div className="notice bad">
+          <div className="notice-kind">저장 실패</div>
+          <div><div className="notice-title">워크스페이스 설정을 저장하지 못했습니다</div>
+            <div className="notice-detail">{error}</div></div>
+        </div>
+      )}
 
       <Section
-        title="새 워크스페이스 등록"
-        note="등록 후 채널 초대까지 해야 수집이 시작됩니다"
-        lead="Slack 에서 앱을 만들어 받은 두 개의 토큰과, 이 워크스페이스를 가리킬 짧은 키를 입력합니다. 처음이시면 위의 안내를 먼저 펼쳐 보세요."
+        title={editing ? `${draft.label} 설정 편집` : '새 워크스페이스 등록'}
+        lead={editing
+          ? '토큰 입력란을 비워 두면 기존 토큰을 유지합니다. 교체할 때는 두 토큰을 함께 입력해야 합니다.'
+          : 'Slack 앱에서 받은 봇 토큰과 앱 토큰이 모두 있어야 등록할 수 있습니다.'}
       >
         <div className="card card-pad">
           <div className="form-grid">
             <div className="field">
-              <label className="field-label" htmlFor="ws-key">
-                키 (짧은 이름)
-              </label>
-              <input
-                id="ws-key"
-                className="input mono"
-                placeholder="site-gimhae"
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                aria-describedby="ws-key-help"
-              />
-              <span className={keyProblem ? 'hint warn' : 'field-help'} id="ws-key-help">
-                {keyProblem ??
-                  '저장 폴더 이름과 권한 판정에 함께 쓰입니다. 조직을 알 수 있게 짧게 정해 주세요. 수집을 시작한 뒤에는 바꿀 수 없습니다.'}
-              </span>
+              <label className="field-label" htmlFor="ws-key">키</label>
+              <input id="ws-key" className="input mono" value={draft.key} disabled={editing}
+                placeholder="tyit"
+                onChange={(event) => setDraft({ ...draft, key: event.target.value.trim().toLowerCase() })} />
+              <span className="field-help">소문자로 시작하는 2~24자의 소문자·숫자·하이픈</span>
             </div>
-
             <div className="field">
-              <label className="field-label" htmlFor="ws-label">
-                표시 이름
-              </label>
-              <input
-                id="ws-label"
-                className="input"
-                placeholder="현장 김해외동(180182)"
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-              />
-              <span className="field-help">
-                사람이 읽는 이름입니다. 봇 상태 안내와 답변 출처에 이 이름이 나옵니다.
-              </span>
+              <label className="field-label" htmlFor="ws-label">표시 이름</label>
+              <input id="ws-label" className="input" value={draft.label} placeholder="전산팀"
+                onChange={(event) => setDraft({ ...draft, label: event.target.value })} />
             </div>
-
             <div className="field">
-              <label className="field-label" htmlFor="ws-bot">
-                봇 토큰
-              </label>
-              <input
-                id="ws-bot"
-                className="input mono"
-                type="password"
-                placeholder="xoxb-"
-                value={bot}
-                onChange={(e) => setBot(e.target.value)}
-                autoComplete="off"
-              />
-              <span className="field-help">
-                Slack 앱을 워크스페이스에 설치하면 받는 값입니다. 저장 후에는 다시 볼 수 없습니다.
-              </span>
+              <label className="field-label" htmlFor="ws-role">등급</label>
+              <select id="ws-role" className="input" value={draft.role}
+                onChange={(event) => setDraft({ ...draft, role: event.target.value as WorkspaceRole })}>
+                <option value="member">일반 워크스페이스</option>
+                <option value="root">상위 워크스페이스</option>
+              </select>
             </div>
-
             <div className="field">
-              <label className="field-label" htmlFor="ws-app">
-                앱 토큰
-              </label>
-              <input
-                id="ws-app"
-                className="input mono"
-                type="password"
-                placeholder="xapp-"
-                value={app}
-                onChange={(e) => setApp(e.target.value)}
-                autoComplete="off"
-              />
-              <span className="field-help">
-                Slack 과 연결을 유지하는 데 쓰입니다. 앱 설정에서 connections:write 권한으로
-                발급합니다.
-              </span>
+              <label className="field-label" htmlFor="ws-state">상태</label>
+              <select id="ws-state" className="input" value={draft.state}
+                onChange={(event) => setDraft({ ...draft, state: event.target.value as Draft['state'] })}>
+                <option value="enabled">사용</option><option value="disabled">사용 중지</option>
+              </select>
             </div>
-
             <div className="field">
-              <label className="field-label" htmlFor="ws-limit">
-                하루 사용 상한 (달러)
-              </label>
-              <input
-                id="ws-limit"
-                className="input mono"
-                inputMode="decimal"
-                value={limit}
-                onChange={(e) => setLimit(e.target.value)}
-              />
-              <span className="field-help">
-                이 워크스페이스만의 상한입니다. 넘으면 이 봇의 호출만 멈추고 다른 봇은 계속
-                답합니다.
-              </span>
+              <label className="field-label" htmlFor="ws-limit">하루 사용 상한 (USD)</label>
+              <input id="ws-limit" className="input mono" type="number" min="0" max="10000"
+                step="0.1" value={draft.limitUsd}
+                onChange={(event) => setDraft({ ...draft, limitUsd: event.target.value })} />
             </div>
-
             <div className="field">
-              <span className="field-label">등급</span>
-              <label className="check-line">
-                <input
-                  type="checkbox"
-                  checked={root}
-                  onChange={(e) => setRoot(e.target.checked)}
-                  style={{ marginTop: 4 }}
-                />
-                <span className="field-help">
-                  <b>상위 워크스페이스로 지정</b> — 산하 워크스페이스의 자료를 공유 표시와 상관없이
-                  모두 볼 수 있고, 자기 워크스페이스 안에서는 채널 구성원 여부와 무관하게 조회할 수
-                  있습니다. 경영본부처럼 취합·열람이 업무인 조직에만 지정해 주세요.
-                </span>
-              </label>
+              <label className="field-label" htmlFor="ws-bot">봇 토큰</label>
+              <input id="ws-bot" className="input mono" type="password" autoComplete="off"
+                placeholder={editing ? '변경할 때만 입력' : 'xoxb-'} value={draft.botToken}
+                onChange={(event) => setDraft({ ...draft, botToken: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="ws-app">앱 토큰</label>
+              <input id="ws-app" className="input mono" type="password" autoComplete="off"
+                placeholder={editing ? '변경할 때만 입력' : 'xapp-'} value={draft.appToken}
+                onChange={(event) => setDraft({ ...draft, appToken: event.target.value })} />
             </div>
           </div>
 
-          <div className="callout" style={{ marginTop: 18 }}>
-            <span>
-              토큰은 암호화해 저장하고 <b>가려진 형태로만</b> 화면에 표시합니다. 저장한 값을 다시
-              꺼내 보는 기능은 서버에도 없습니다. 잘못 입력했다면 새 값으로 덮어써 주세요.
-            </span>
+          <div className="field" style={{ marginTop: 18 }}>
+            <span className="field-label">크로스 워크스페이스 열람 대상</span>
+            <div className="env-readable">
+              {rows.filter((row) => row.key !== draft.key).map((row) => (
+                <label className="check-line compact" key={row.key}>
+                  <input type="checkbox" checked={draft.readable.includes(row.key)}
+                    onChange={(event) => toggleReadable(row.key, event.target.checked)} />
+                  <span>{row.label}</span>
+                </label>
+              ))}
+              {!rows.length && <span className="field-help">등록된 다른 워크스페이스가 없습니다.</span>}
+            </div>
           </div>
 
           <div className="form-row">
-            <button
-              className="btn btn-primary"
-              disabled={!ready}
-              onClick={() => {
-                onToast(
-                  `${label.trim()} 워크스페이스를 등록했습니다. 채널에서 /invite @tybot 을 입력하면 수집이 시작됩니다.`,
-                )
-                setKey('')
-                setLabel('')
-                setBot('')
-                setApp('')
-              }}
-            >
-              워크스페이스 등록
+            <button className="btn btn-primary" disabled={!ready || saving} onClick={save}>
+              {saving ? '저장 중…' : editing ? '변경 저장' : '워크스페이스 등록'}
             </button>
-            <span className="field-help">
-              등록해도 채널에 봇을 초대하기 전까지는 아무것도 수집되지 않습니다.
-            </span>
+            {editing && <button className="btn btn-quiet" onClick={reset}>취소</button>}
           </div>
         </div>
       </Section>
 
-      <Section
-        title="등록된 워크스페이스"
-        note="문제가 생긴 곳만 멈춥니다"
-        lead="토큰 갱신 시각과 동작 상태를 확인합니다. 오류가 있는 워크스페이스는 그 봇만 멈추고 나머지는 계속 동작합니다."
-      >
-        <div className="card card-pad">
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>키 · 이름</th>
-                  <th>등급</th>
-                  <th>봇 토큰</th>
-                  <th>앱 토큰</th>
-                  <th>토큰 갱신</th>
-                  <th className="num">상한</th>
-                  <th>상태</th>
-                  <th className="right">관리</th>
-                </tr>
-              </thead>
-              <tbody>
-                {registry.map((r) => (
-                  <tr key={r.key}>
-                    <td>
-                      <div className="mono">{r.key}</div>
-                      <div style={{ color: 'var(--text-2)', fontSize: 12.5 }}>{r.label}</div>
-                    </td>
-                    <td>{r.role === 'root' ? '상위' : '일반'}</td>
-                    <td className="mono">{r.botTokenMask}</td>
-                    <td className="mono">{r.appTokenMask}</td>
-                    <td>
-                      <div className="mono">{fmt.dayClock(r.secretUpdatedAt)}</div>
-                      <div style={{ color: 'var(--text-3)', fontSize: 12 }}>{r.secretUpdatedBy}</div>
-                    </td>
-                    <td className="num">{fmt.usd(r.limitUsd)}</td>
-                    <td>
-                      {r.state === 'enabled' ? (
-                        <span className="chip ok">동작 중</span>
-                      ) : r.state === 'error' ? (
-                        <span className="chip bad">오류</span>
-                      ) : (
-                        <span className="chip flat">중지</span>
-                      )}
-                      {r.error && (
-                        <p className="hint warn" style={{ marginTop: 5, maxWidth: 270 }}>
-                          {r.error}
-                        </p>
-                      )}
-                    </td>
-                    <td className="right">
-                      <button
-                        className="btn btn-sm btn-quiet"
-                        onClick={() => onToast(`${r.label} 의 토큰 교체 창을 열었습니다.`)}
-                      >
-                        토큰 교체
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </Section>
-
-      <Section
-        title="워크스페이스 간 열람 설정"
-        note="기본값은 서로 볼 수 없음입니다"
-        lead="여기서 아무것도 켜지 않으면 워크스페이스끼리 자료가 넘어가지 않습니다."
-      >
-        <div className="card card-pad">
-          <p className="field-help" style={{ maxWidth: '76ch', marginBottom: 14 }}>
-            열람 허용은 <b>넘어갈 수 있는 후보</b>만 정합니다. 상위 워크스페이스는 대상 자료를 모두
-            볼 수 있고, 같은 등급끼리는 자료를 가진 쪽에서 <code>공유</code> 로 표시한 문서만
-            넘어갑니다.
-          </p>
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>보는 쪽</th>
-                  <th>열람 대상</th>
-                  <th>넘어가는 범위</th>
-                </tr>
-              </thead>
-              <tbody>
-                {registry.map((r) => (
-                  <tr key={r.key}>
-                    <td className="mono">{r.key}</td>
-                    <td className="mono">
-                      {r.readable.length
-                        ? r.readable.join(' · ')
-                        : '없음 (자기 워크스페이스만)'}
-                    </td>
-                    <td style={{ color: 'var(--text-2)', fontSize: 12.5 }}>
-                      {r.readable.length === 0
-                        ? '—'
-                        : r.role === 'root'
-                          ? '대상 워크스페이스의 자료 전체'
-                          : '공유로 표시된 문서만'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      <Section title="등록된 워크스페이스"
+        lead="토큰은 마스킹된 값과 마지막 교체 정보만 표시됩니다. 삭제 대신 사용 중지를 지원합니다.">
+        <div className="card card-pad"><div className="table-scroll"><table className="table">
+          <thead><tr><th>워크스페이스</th><th>등급</th><th>상태</th><th>토큰</th>
+            <th>열람 대상</th><th className="num">상한</th><th className="right">관리</th></tr></thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <td><div>{row.label}</div><div className="hint mono">{row.key}</div></td>
+                <td>{row.role === 'root' ? '상위' : '일반'}</td>
+                <td>{stateChip(row)}{row.error && <div className="hint warn">{row.error}</div>}</td>
+                <td><div className="mono">{row.botTokenMask}</div><div className="mono">{row.appTokenMask}</div>
+                  <div className="hint">{row.secretUpdatedAt ? fmt.dayClock(row.secretUpdatedAt) : '교체 기록 없음'} · {row.secretUpdatedBy}</div></td>
+                <td>{row.readable.length ? row.readable.join(' · ') : '-'}</td>
+                <td className="num">${row.limitUsd.toFixed(2)}</td>
+                <td className="right"><button className="btn btn-sm btn-quiet" onClick={() => {
+                  setDraft(editDraft(row)); setEditing(true); setError(null)
+                  window.scrollTo({ top: 0, behavior: 'smooth' })
+                }}>편집</button></td>
+              </tr>
+            ))}
+            {!rows.length && <tr><td colSpan={7}>등록된 워크스페이스가 없습니다.</td></tr>}
+          </tbody>
+        </table></div></div>
       </Section>
     </>
   )

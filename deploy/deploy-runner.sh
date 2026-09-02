@@ -29,10 +29,12 @@ import os
 import sys
 sys.path.insert(0, "/opt/tybot/src")
 from pathlib import Path
+from tybot.envfile import load_env_file
 from tybot.deploy_request import write_status
-state, actor, before, after, message, before_title, after_title = (
-    sys.argv[1:8] + [""] * 7
-)[:7]
+load_env_file()
+state, actor, before, after, message, before_title, after_title, approval_id = (
+    sys.argv[1:9] + [""] * 8
+)[:8]
 detail_path = Path(os.environ["DEPLOY_DETAIL_FILE"]) if os.environ.get("DEPLOY_DETAIL_FILE") else None
 detail = detail_path.read_text(encoding="utf-8", errors="replace") if detail_path else ""
 write_status(
@@ -44,6 +46,7 @@ write_status(
     after_title=after_title,
     message=message,
     detail=detail,
+    approval_id=int(approval_id) if approval_id.isdigit() else None,
 )
 PYEOF
 }
@@ -56,20 +59,23 @@ if ! flock -n 9; then
 fi
 
 # 요청을 먼저 소비한다. 여기서 지워야 실패해도 무한 재트리거가 되지 않는다.
-ACTOR=$(STATE_DIR="$STATE" "$PY" - <<'PYEOF'
+mapfile -t REQUEST_META < <(STATE_DIR="$STATE" "$PY" - <<'PYEOF'
 import sys
 sys.path.insert(0, "/opt/tybot/src")
 from tybot.deploy_request import consume_request
 req = consume_request() or {}
 print(req.get("actor", "unknown"))
+print(req.get("approval_id", ""))
 PYEOF
 )
+ACTOR=${REQUEST_META[0]:-unknown}
+APPROVAL_ID=${REQUEST_META[1]:-}
 [[ -n "$ACTOR" ]] || ACTOR=unknown
 log "배포 요청 수신 actor=$ACTOR branch=$BRANCH"
 
 BEFORE=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)
 BEFORE_TITLE=$(git -C "$SRC" log -1 --format=%s 2>/dev/null || true)
-status running "$ACTOR" "$BEFORE" "" "배포 진행 중" "$BEFORE_TITLE" ""
+status running "$ACTOR" "$BEFORE" "" "배포 진행 중" "$BEFORE_TITLE" "" "$APPROVAL_ID"
 
 # 로그 파일만 좁게 만든다. **umask 를 그대로 두면 안 된다** —
 # 아래 update.sh 가 `git reset --hard` 로 소스를 새로 쓰고 install.sh 가 /opt 에
@@ -87,15 +93,17 @@ AFTER_TITLE=$(git -C "$SRC" log -1 --format=%s 2>/dev/null || true)
 if ((UPDATE_RC == 0)); then
   if [[ "$BEFORE" == "$AFTER" ]]; then
     status skipped "$ACTOR" "$BEFORE" "$AFTER" "새 커밋이 없어 배포하지 않았습니다." \
-      "$BEFORE_TITLE" "$AFTER_TITLE"
+      "$BEFORE_TITLE" "$AFTER_TITLE" "$APPROVAL_ID"
     log "변경 없음"
   else
-    status ok "$ACTOR" "$BEFORE" "$AFTER" "배포 완료" "$BEFORE_TITLE" "$AFTER_TITLE"
+    status ok "$ACTOR" "$BEFORE" "$AFTER" "배포 완료" "$BEFORE_TITLE" "$AFTER_TITLE" \
+      "$APPROVAL_ID"
     log "배포 완료 $BEFORE -> $AFTER"
   fi
 else
   DEPLOY_DETAIL_FILE="$OUTPUT" status failed "$ACTOR" "$BEFORE" "$AFTER" \
-    "배포에 실패했습니다. 아래 실패 사유를 확인하세요." "$BEFORE_TITLE" "$AFTER_TITLE"
+    "배포에 실패했습니다. 아래 실패 사유를 확인하세요." "$BEFORE_TITLE" "$AFTER_TITLE" \
+    "$APPROVAL_ID"
   log "배포 실패"
   exit 1
 fi

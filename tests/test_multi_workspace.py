@@ -353,3 +353,71 @@ def test_truly_unrelated_question_still_refused(tmp_path):
     ans = eng.respond("내일 날씨 어때?", _ctx(ws="mgmt", channels=()), Intent("out_of_scope"))
     assert ans.reason == "out_of_scope"
     assert fake.calls == []
+
+
+def test_db_registry_adds_complete_workspace_without_replacing_env_fallback(monkeypatch):
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store,
+        "runtime_workspaces",
+        lambda: [
+            {
+                "key": "tyit",
+                "label": "전산팀",
+                "role": "member",
+                "state": "enabled",
+                "bot_token": "xoxb-db_1",
+                "app_token": "xapp-db_1",
+                "readable": ["mgmt"],
+            }
+        ],
+    )
+    configs = load_workspaces(
+        {
+            "WORKSPACES": "mgmt",
+            "SLACK_BOT_TOKEN_MGMT": "xoxb-env_1",
+            "SLACK_APP_TOKEN_MGMT": "xapp-env_1",
+            "DATABASE_URL": "postgresql://unused",
+            "WORKSPACE_SECRET_KEY": "test-key-present",
+        }
+    )
+
+    assert [config.key for config in configs] == ["mgmt", "tyit"]
+    tyit = next(config for config in configs if config.key == "tyit")
+    assert tyit.label == "전산팀"
+    assert tyit.readable == frozenset({"mgmt"})
+
+
+def test_incomplete_db_registry_row_keeps_existing_environment_workspace(monkeypatch):
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store,
+        "runtime_workspaces",
+        lambda: [
+            {
+                "key": "tyit",
+                "label": "DB 전산팀",
+                "role": "member",
+                "state": "enabled",
+                "bot_token": None,
+                "app_token": None,
+                "readable": [],
+            }
+        ],
+    )
+    configs = load_workspaces(
+        {
+            "WORKSPACES": "tyit",
+            "SLACK_BOT_TOKEN_TYIT": "xoxb-env_1",
+            "SLACK_APP_TOKEN_TYIT": "xapp-env_1",
+            "WORKSPACE_LABEL_TYIT": "환경 전산팀",
+            "DATABASE_URL": "postgresql://unused",
+            "WORKSPACE_SECRET_KEY": "test-key-present",
+        }
+    )
+
+    assert len(configs) == 1
+    assert configs[0].label == "환경 전산팀"
+    assert configs[0].bot_token == "xoxb-env_1"

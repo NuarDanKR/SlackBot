@@ -2016,8 +2016,31 @@ def main() -> int:
     bots: list[WorkspaceBot] = []
     try:
         bots = build_bots()
+        connected: list[WorkspaceBot] = []
         for bot in bots:
-            bot.connect()
+            try:
+                bot.connect()
+            except Exception as exc:
+                log.exception(
+                    "워크스페이스 연결 실패 — %s만 제외하고 나머지는 계속 기동합니다",
+                    bot.workspace,
+                )
+                if os.getenv("DATABASE_URL"):
+                    with contextlib.suppress(Exception):
+                        from ..console.workspace_store import record_runtime_result
+
+                        record_runtime_result(bot.workspace, str(exc))
+                continue
+            connected.append(bot)
+            if os.getenv("DATABASE_URL"):
+                with contextlib.suppress(Exception):
+                    from ..console.workspace_store import record_runtime_result
+
+                    record_runtime_result(bot.workspace, None)
+        if not connected:
+            log.error("연결에 성공한 워크스페이스가 없어 기동을 중단합니다")
+            return 1
+        bots = connected
         log.info("기동 완료 — 워크스페이스 %d개: %s", len(bots), [b.workspace for b in bots])
 
         # 연결은 백그라운드 스레드가 유지한다. 메인 스레드는 종료 신호를 기다리면서

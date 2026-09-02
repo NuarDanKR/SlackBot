@@ -13,3 +13,6 @@ uvicorn==0.52.4
 starlette==1.6.0
 annotated-doc==0.0.5
 click==8.5.0
+cryptography==50.0.1
+cffi==2.1.1
+pycparser==3.00
