@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
@@ -28,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from .. import deploy_request
 from ..archive.store import ArchiveStore
+from ..feedback import FeedbackLog
 from ..managed_env import request_restart
 from . import (
     account_store,
@@ -509,6 +511,47 @@ def health_report(user: User) -> dict:
     return health.report(
         allowed=None if user.all_workspaces else user.workspaces,
         store=store(),
+        # 신고 본문에는 업무 내용이 들어 있다. 관리자에게만 보낸다.
+        include_text=user.role == "admin",
+    )
+
+
+class FeedbackHandledBody(BaseModel):
+    note: str = Field(default="", max_length=500)
+
+
+@app.put("/api/health-report/feedback/{event_id}/handled")
+def mark_feedback_handled(
+    event_id: str,
+    body: FeedbackHandledBody,
+    request: Request,
+    user: User,
+) -> dict:
+    """신고를 처리했다고 표시한다.
+
+    신고가 봇에 반영됐는지 아무도 알 수 없던 것이 문제였다. 정정을 받아도 누가
+    무엇을 고쳤는지 남는 곳이 없어, 같은 신고를 두 번 보거나 아무도 안 봤다.
+
+    **신고를 고치거나 지우지 않는다.** 같은 append-only 로그에 한 줄을 더 쌓는다.
+    """
+    _require_admin(user)
+    _check_write_request(request)
+    if not re.fullmatch(r"[0-9a-f]{12}", event_id):
+        raise HTTPException(status_code=422, detail="피드백 식별자가 올바르지 않습니다.")
+    try:
+        FeedbackLog(reader.qa_log_dir()).resolve(
+            target=event_id,
+            actor=user.email,
+            note=body.note,
+        )
+    except OSError as e:
+        logger.exception("피드백 처리 표시 실패")
+        raise HTTPException(status_code=500, detail="처리 표시를 남기지 못했습니다.") from e
+    logger.warning("피드백 처리 표시 — actor=%s event=%s", user.email, event_id)
+    return health.report(
+        allowed=None if user.all_workspaces else user.workspaces,
+        store=store(),
+        include_text=user.role == "admin",
     )
 
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .access import RequestContext
@@ -96,6 +96,16 @@ def _mentioned_workspaces(question: str) -> frozenset[str]:
     return frozenset(found)
 
 
+def _euro(word: str) -> str:
+    """받침에 맞는 조사(으로/로). 한 글자 차이지만 매 답변에 보이는 문구다."""
+    ch = (word or "").strip()[-1:]
+    if not ch or not ("가" <= ch <= "힣"):
+        return "로"
+    jong = (ord(ch) - 0xAC00) % 28
+    # 받침이 없거나 ㄹ 이면 '로'.
+    return "로" if jong in (0, 8) else "으로"
+
+
 @dataclass
 class Answer:
     text: str
@@ -104,12 +114,46 @@ class Answer:
     cost_usd: float
     hit_count: int
     reason: str  # answered | advice | no_hits | no_access | smalltalk | out_of_scope | error
+    # 사용자에게 보여줄 근거 요약용 검색어. 새로 저장하는 값이 아니라 이미 쓴 값이다.
+    terms: list[str] = field(default_factory=list)
+
+    @property
+    def doc_count(self) -> int:
+        return len(dict.fromkeys(self.citations))
+
+    def evidence_note(self) -> str:
+        """무엇으로 검색해 몇 건 중 몇 줄을 썼는지 한 줄.
+
+        사내 피드백: "봇이 어떤 과정을 거쳐 이 답을 냈는지 알 수 없다." 값은 이미
+        전부 가지고 있었고 **표시만 하지 않았다.** 이 줄이 "믿을 수 있나" 를
+        "이 답이 맞나" 로 바꾼다 — 후자는 사람이 검증할 수 있는 질문이다.
+        """
+        if self.reason not in ("answered", "advice"):
+            return ""
+        bits: list[str] = []
+        if self.terms:
+            query = " ".join(self.terms)
+            bits.append(f"「{query}」{_euro(query)} 검색")
+        if self.doc_count:
+            bits.append(f"문서 {self.doc_count}건")
+        if self.hit_count:
+            bits.append(f"원문 {self.hit_count}줄 사용")
+        elif self.reason == "advice":
+            # 근거가 0건인 판단은 그 사실이 가장 중요한 정보다.
+            bits.append("아카이브 근거 없음")
+        if self.model:
+            bits.append(self.model)
+        return f"_근거: {' · '.join(bits)}_" if bits else ""
 
     def to_slack(self) -> str:
-        if not self.citations:
-            return self.text
-        srcs = "\n".join(f"• {c}" for c in dict.fromkeys(self.citations))
-        return f"{self.text}\n\n출처:\n{srcs}"
+        parts = [self.text]
+        note = self.evidence_note()
+        if note:
+            parts.append(note)
+        if self.citations:
+            srcs = "\n".join(f"• {c}" for c in dict.fromkeys(self.citations))
+            parts.append(f"출처:\n{srcs}")
+        return "\n\n".join(parts)
 
 
 def parse_model_flag(text: str) -> tuple[str | None, str]:
@@ -291,7 +335,8 @@ class AnswerEngine:
             ctx.workspace, len(hits), resp.model, resp.cost_usd, q,
         )
         return Answer(
-            head + resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits), "advice"
+            head + resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits),
+            "advice", terms=list(terms or []),
         )
 
     def classify(self, question: str) -> Intent:
@@ -436,4 +481,7 @@ class AnswerEngine:
             q,
             citations,
         )
-        return Answer(resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits), "answered")
+        return Answer(
+            resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits),
+            "answered", terms=list(terms or []),
+        )

@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
@@ -18,6 +19,10 @@ MIN_CORRECTION = 5
 # 신고 종류. `missing`(근거를 못 찾음)을 `negative`(틀린 답)와 나누는 이유:
 # 근거를 못 찾은 것은 수집·검색 문제이고, 틀린 답은 생성 문제다. 조치하는 사람이 다르다.
 KINDS = frozenset({"positive", "negative", "correction", "missing"})
+
+# `resolved` 는 신고를 지우지 않는다. **같은 로그에 한 줄 더 쌓는다.**
+# 원장을 고치면 "언제 무엇을 보고 처리했는지" 가 사라지고, 되돌릴 수도 없다.
+ACTIONS = frozenset({"added", "removed", "submitted", "resolved"})
 
 # 모달의 선택지. value 가 그대로 kind 가 된다.
 # 👍/👎 를 쓰는 이유: 예전에는 답변에 이모지를 눌러 표시하는 길이 따로 있었다.
@@ -46,6 +51,8 @@ class FeedbackEvent:
     kind: str  # positive | negative | correction | missing
     action: str  # added | removed | submitted
     text: str = ""
+    # `resolved` 한 줄이 어느 신고를 처리한 것인지. 신고 자체에는 비어 있다.
+    target: str = ""
 
 
 class FeedbackLog:
@@ -68,10 +75,11 @@ class FeedbackLog:
         kind: str,
         action: str,
         text: str = "",
+        target: str = "",
     ) -> None:
         if kind not in KINDS:
             raise ValueError(f"지원하지 않는 피드백 종류: {kind}")
-        if action not in {"added", "removed", "submitted"}:
+        if action not in ACTIONS:
             raise ValueError(f"지원하지 않는 피드백 동작: {action}")
         at = datetime.now(KST).isoformat(timespec="seconds")
         event = FeedbackEvent(
@@ -84,6 +92,7 @@ class FeedbackLog:
             kind=kind,
             action=action,
             text=text.strip()[:MAX_CORRECTION],
+            target=target,
         )
         try:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -91,6 +100,50 @@ class FeedbackLog:
                 handle.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
         except OSError as e:
             logger.error("답변 피드백 기록 실패: %s", e)
+
+
+    def resolve(
+        self,
+        *,
+        target: str,
+        actor: str,
+        note: str = "",
+        workspace: str = "",
+        qa_record_id: str = "",
+    ) -> None:
+        """신고를 처리했다고 표시한다.
+
+        신고가 봇에 반영됐는지 아무도 알 수 없던 것이 문제였다. 정정을 받아도
+        누가 무엇을 고쳤는지 남는 곳이 없어, 같은 신고를 두 번 처리하거나
+        아무도 처리하지 않았다.
+        """
+        self.write(
+            workspace=workspace,
+            channel_id="",
+            qa_record_id=qa_record_id,
+            answer_ts="",
+            actor=actor,
+            kind="correction",
+            action="resolved",
+            text=note,
+            target=target,
+        )
+
+
+def event_id(event: dict) -> str:
+    """신고 한 건을 가리키는 값.
+
+    처리 표시(`resolved`)가 무엇을 처리했는지 적어야 하는데, JSONL 에는 기본키가
+    없다. 내용에서 만든다 — 같은 사람이 같은 답변에 같은 시각으로 두 번 쓰는 일은
+    없다. 파일을 다시 읽어도 같은 값이 나와야 하므로 무작위를 쓰지 않는다.
+    """
+    raw = "|".join([
+        str(event.get("at") or ""),
+        str(event.get("actor") or ""),
+        str(event.get("qa_record_id") or ""),
+        str(event.get("kind") or ""),
+    ])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def correction_text(text: str) -> str | None:

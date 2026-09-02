@@ -2178,3 +2178,13 @@
   flex: 1 1 auto;
   min-width: 0;
 }
+
+/* 신고 본문은 길다. 열을 밀어내지 않게 폭을 잡고 어절 단위로 넘긴다. */
+.feedback-text {
+  max-width: 420px;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+.nowrap {
+  white-space: nowrap;
+}

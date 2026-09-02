@@ -1,7 +1,8 @@
 import { useState } from 'react'
+import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
 import type { ConsoleUser, HealthReport, HealthLevel } from '../types'
-import { Chip, Failed, Loading, Metric, PageHead, Section } from '../components/primitives'
+import { Chip, Failed, Loading, Metric, PageHead, Section, fmt } from '../components/primitives'
 
 /**
  * 헬스 체크 — "돌고는 있는데 제 일을 못 하는" 상태를 드러냅니다.
@@ -55,8 +56,15 @@ function Problems({ items }: { items: string[] }) {
   )
 }
 
+const KIND_LABEL: Record<string, string> = {
+  positive: '👍 정확했다', negative: '👎 틀렸다',
+  missing: '🔍 근거 못 찾음', correction: '정정 제보',
+}
+
 export function HealthCheck({ user }: { user: ConsoleUser }) {
   const [tab, setTab] = useState<HealthTab>('bot')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [failed, setFailed] = useState<string | null>(null)
   // 서버가 이미 권한 범위로 좁혀서 내려 줍니다. 화면에서 다시 거르지 않습니다.
   const res = useResource<HealthReport>('/api/health-report')
 
@@ -64,7 +72,20 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
   if (res.error || !res.data)
     return <Failed what="헬스 체크를" detail={res.error?.message ?? '데이터가 비어 있습니다'} onRetry={res.reload} />
 
+  // 신고를 처리했다고 표시합니다. 신고를 지우거나 고치지 않고 한 줄을 더 쌓습니다.
+  async function markHandled(id: string) {
+    const note = window.prompt('무엇을 고쳤는지 적어 주세요(선택).') ?? ''
+    setBusy(id); setFailed(null)
+    try {
+      await api.put(`/api/health-report/feedback/${id}/handled`, { note })
+      res.reload()
+    } catch (caught) {
+      setFailed(caught instanceof ApiError ? caught.message : String(caught))
+    } finally { setBusy(null) }
+  }
+
   const r = res.data
+  const isAdmin = user.role === 'admin'
   const { bot, archive, answers, commands, feedback } = r.sections
 
   return (
@@ -250,9 +271,60 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
           <Metric k="틀렸다" v={feedback.negative.toLocaleString()} unit="건" />
           <Metric k="근거 못 찾음" v={feedback.missing.toLocaleString()} unit="건" />
           <Metric k="정정 제보" v={feedback.corrections.toLocaleString()} unit="건" />
+          <Metric k="미처리 신고" v={feedback.openCorrections.toLocaleString()} unit="건" />
         </div>
         {feedback.note && <p className="section-lead">{feedback.note}</p>}
         <Problems items={feedback.problems} />
+          </Section>
+
+          {failed && <div className="notice bad"><div className="notice-kind">처리 실패</div><div>{failed}</div></div>}
+
+          <Section
+            title="접수된 신고"
+            lead={
+              isAdmin
+                ? "처리하지 않은 것이 위로 옵니다. [처리 표시]는 신고를 지우지 않고 처리 기록을 한 줄 더 남깁니다."
+                : "신고 본문은 관리자만 볼 수 있습니다. 업무 내용이 들어 있습니다."
+            }
+          >
+            {feedback.items.length ? (
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>접수</th><th>워크스페이스</th><th>보낸 사람</th>
+                      <th>종류</th><th>내용</th><th>처리</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {feedback.items.map((item) => (
+                      <tr key={item.id}>
+                        <td className="nowrap">{fmt.dayClock(item.at)}</td>
+                        <td className="mono">{item.workspace || "-"}</td>
+                        <td>{item.name}
+                          {item.dept && <div className="hint">{item.dept}</div>}</td>
+                        <td className="nowrap">{KIND_LABEL[item.kind] ?? item.kind}</td>
+                        <td className="feedback-text">
+                          {item.text || (item.hasText ? <span className="hint">관리자만 볼 수 있습니다</span> : <span className="hint">내용 없음</span>)}
+                          {item.handledNote && <div className="hint">처리: {item.handledNote}</div>}
+                        </td>
+                        <td className="nowrap">
+                          {item.handled
+                            ? <><Chip tone="ok">반영됨</Chip>
+                                <div className="hint">{item.handledBy}</div></>
+                            : isAdmin
+                              ? <button className="btn btn-sm" disabled={busy === item.id}
+                                  onClick={() => markHandled(item.id)}>처리 표시</button>
+                              : <Chip tone="watch">미처리</Chip>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="section-lead">아직 접수된 신고가 없습니다.</p>
+            )}
           </Section>
 
           <Section
@@ -260,7 +332,7 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
         lead={
           '정정 사항을 적어 보낸 순입니다. ' +
           '👍 개수로 줄을 세우면 많이 누른 사람이 위로 올라가고, ' +
-          '실제로 고칠 거리를 준 사람이 묻힙니다. 신고 내용은 표시하지 않습니다.'
+          '실제로 고칠 거리를 준 사람이 묻힙니다.'
         }
       >
         {feedback.contributors.length ? (
@@ -269,6 +341,8 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
               <thead>
                 <tr>
                   <th>사람</th>
+                  <th>부서</th>
+                  <th>워크스페이스</th>
                   <th>정정 사항</th>
                   <th>신고</th>
                   <th>👍</th>
@@ -277,7 +351,10 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
               <tbody>
                 {feedback.contributors.map((c) => (
                   <tr key={c.actor}>
-                    <td>{c.name}</td>
+                    <td>{c.name}
+                      {c.lastCorrection && <div className="hint">최근: {c.lastCorrection}</div>}</td>
+                    <td>{c.dept || <span className="hint">매핑 없음</span>}</td>
+                    <td className="mono">{c.workspaces.join(", ") || "-"}</td>
                     <td>{c.corrections.toLocaleString()}</td>
                     <td>{c.reports.toLocaleString()}</td>
                     <td>{c.praise.toLocaleString()}</td>

@@ -231,7 +231,25 @@ def test_corrections_are_surfaced_as_work():
     events = [_fb("positive") for _ in range(15)] + [_fb("correction")] * 2
     section = health.feedback_section(events)
     assert section["corrections"] == 2
-    assert any("정정" in p for p in section["problems"])
+    assert section["openCorrections"] == 2
+    assert section["problems"], "처리할 일감이 있으면 화면에 올라와야 한다"
+
+
+def test_handled_reports_stop_counting_as_work():
+    """처리해도 숫자가 줄지 않으면 화면은 영원히 빨갛고, 그러면 아무도 안 본다."""
+    from tybot.feedback import event_id
+
+    report = _fb("negative", text="김해외동 기성금이 아닙니다")
+    done = {"kind": "correction", "action": "resolved", "workspace": "pilot",
+            "actor": "dan@taeyoung.com", "text": "아카이브 고침",
+            "at": "2026-09-02T09:00:00+09:00", "target": event_id(report)}
+
+    before = health.feedback_section([report])
+    after = health.feedback_section([report, done])
+
+    assert before["openCorrections"] == 1
+    assert after["openCorrections"] == 0
+    assert not after["problems"]
 
 
 def test_corrections_do_not_lower_satisfaction():
@@ -367,3 +385,84 @@ def test_health_report_is_never_served_without_login():
     assert res.status_code != 200
     assert "sections" not in res.text
     assert "workspace" not in res.text
+
+
+# ---------------------------------------------------------------------------
+# 신고 상세 · 처리 표시
+# ---------------------------------------------------------------------------
+
+
+def test_report_text_is_hidden_by_default():
+    """신고 본문에는 업무 내용이 들어 있다. 권한은 막는 쪽이 기본값이다."""
+    events = [_fb("negative", text="김해외동 기성금이 아닙니다")]
+
+    hidden = health.feedback_items(events)
+    shown = health.feedback_items(events, include_text=True)
+
+    assert hidden[0]["text"] == ""
+    assert hidden[0]["hasText"] is True, "있다는 사실은 알려야 한다"
+    assert shown[0]["text"] == "김해외동 기성금이 아닙니다"
+
+
+def test_handled_state_comes_from_a_new_line_not_an_edit():
+    """append-only 를 지킨다. 원장을 고치면 언제 무엇을 보고 처리했는지 사라진다."""
+    from tybot.feedback import event_id
+
+    report = _fb("missing", text="근거를 못 찾았습니다")
+    done = {"kind": "correction", "action": "resolved", "workspace": "pilot",
+            "actor": "dan@taeyoung.com", "text": "채널 초대 누락이었음",
+            "at": "2026-09-02T10:00:00+09:00", "target": event_id(report)}
+
+    items = health.feedback_items([report, done], include_text=True)
+
+    assert len(items) == 1, "처리 표시는 별도 항목으로 세지 않는다"
+    assert items[0]["handled"] is True
+    assert items[0]["handledBy"] == "dan@taeyoung.com"
+    assert items[0]["handledNote"] == "채널 초대 누락이었음"
+
+
+def test_open_reports_come_before_handled_ones():
+    from tybot.feedback import event_id
+
+    old_open = _fb("negative", text="a")
+    old_open["at"] = "2026-09-01T09:00:00+09:00"
+    newer = _fb("negative", text="b", actor="U2")
+    newer["at"] = "2026-09-02T09:00:00+09:00"
+    done = {"kind": "correction", "action": "resolved", "workspace": "pilot",
+            "actor": "admin", "text": "", "at": "2026-09-02T11:00:00+09:00",
+            "target": event_id(newer)}
+
+    items = health.feedback_items([old_open, newer, done])
+
+    assert [i["handled"] for i in items] == [False, True]
+
+
+def test_cancelled_reports_are_not_work():
+    """사용자가 스스로 물린 것을 일감으로 두면 처리할 수 없는 항목이 쌓인다."""
+    report = _fb("negative", text="눌렀다 취소")
+    cancel = dict(report, action="removed")
+
+    assert health.feedback_items([report, cancel]) == []
+
+
+def test_contributors_carry_department_and_workspace():
+    """이름만으로는 정정이 어느 조직 자료에 관한 것인지 알 수 없다."""
+    events = [_fb("negative", text="정정 내용", workspace="civil", actor="U9")]
+
+    rows = health.contributors(
+        events, {"U9": "조민희"}, {"civil:U9": "토목사업부"}, include_text=True
+    )
+
+    assert rows[0]["name"] == "조민희"
+    assert rows[0]["dept"] == "토목사업부"
+    assert rows[0]["workspaces"] == ["civil"]
+    assert rows[0]["lastCorrection"] == "정정 내용"
+
+
+def test_contributor_text_is_hidden_without_permission():
+    events = [_fb("negative", text="업무 내용", actor="U9")]
+
+    rows = health.contributors(events, {}, {})
+
+    assert rows[0]["lastCorrection"] == ""
+    assert rows[0]["corrections"] == 1

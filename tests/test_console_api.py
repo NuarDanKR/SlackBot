@@ -999,3 +999,25 @@ def test_env_only_tokens_are_not_reported_as_missing(monkeypatch):
 
     assert response["botTokenMask"] == "환경변수 사용"
     assert response["tokenInEnv"] is True
+
+
+def test_only_admin_marks_feedback_handled(client):
+    """처리 표시는 감사 기록이다. 개발자 권한으로는 남길 수 없다."""
+    response = client.put(
+        "/api/health-report/feedback/0123456789ab/handled",
+        json={"note": "고쳤음"},
+        headers=_write_headers(member(client)),
+    )
+
+    assert response.status_code == 403
+
+
+def test_feedback_id_is_validated(client):
+    """경로 값이 그대로 로그 파일에 들어간다. 모양을 먼저 본다."""
+    response = client.put(
+        "/api/health-report/feedback/..%2Fescape/handled",
+        json={"note": ""},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code in {404, 422}

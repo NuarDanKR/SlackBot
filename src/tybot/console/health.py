@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections import Counter
 from datetime import timedelta
@@ -304,44 +305,173 @@ def _display_names(records: list[dict]) -> dict[str, str]:
     return names
 
 
-def contributors(events: list[dict], names: dict[str, str] | None = None) -> list[dict]:
+def _departments(pairs: set[tuple[str, str]]) -> dict[str, str]:
+    """(워크스페이스, Slack 사용자) → 부서명.
+
+    이름만으로는 누가 어느 팀 사람인지 몰라, 정정이 어느 조직 자료에 관한
+    것인지 판단할 수 없었다. user_identity 로 사번을 찾고 조직을 붙인다.
+
+    매핑이 없으면 빈 값이다 — 없는 것을 추측해 채우지 않는다.
+    """
+    if not pairs:
+        return {}
+    url = os.getenv("DATABASE_URL", "").strip()
+    if not url:
+        return {}
+    try:
+        import psycopg
+
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                select i.workspace, i.slack_user, o.name
+                  from user_identity i
+                  join employee e on e.emp_no = i.emp_no
+                  left join org_unit o on o.code = e.org_code
+                 where (i.workspace, i.slack_user) = any(%(pairs)s)
+                """,
+                {"pairs": list(pairs)},
+            )
+            return {
+                f"{row[0]}:{row[1]}": str(row[2] or "")
+                for row in cur.fetchall()
+            }
+    except Exception as exc:  # noqa: BLE001 - 부서를 못 붙이는 것으로 점검이 멈추면 안 된다
+        logger.debug("부서 정보를 붙이지 못했습니다: %s", exc)
+        return {}
+
+
+def contributors(
+    events: list[dict],
+    names: dict[str, str] | None = None,
+    depts: dict[str, str] | None = None,
+    *,
+    include_text: bool = False,
+) -> list[dict]:
     """정정 사항을 많이 보낸 사람 순으로.
 
     **글을 쓴 것만 기여로 센다.** 👍 는 한 번 누르면 끝이라 개수를 세면 순위가
     "많이 누른 사람" 이 되고, 실제로 아카이브를 고칠 거리를 준 사람이 묻힌다.
     그래서 정정 사항이 담긴 신고(`negative`·`missing`·`correction`)를 기준으로 센다.
 
-    본문은 담지 않는다. 이 목록은 화면에 그대로 나가고, 신고 내용에는 업무 내용이 들어 있다.
+    부서·워크스페이스를 함께 낸다. 이름만으로는 정정이 어느 조직 자료에 관한
+    것인지 알 수 없어, 순위만 있고 판단할 거리가 없었다.
+
+    마지막 정정 내용도 담는다(`include_text` 일 때만). 관리자만 보는 화면이다 —
+    신고 본문에는 업무 내용이 들어 있으므로 개발자 권한에는 건수만 나간다.
     """
     names = names or {}
+    depts = depts or {}
     tally: dict[str, Counter] = {}
+    ws_by_actor: dict[str, set[str]] = {}
+    last_text: dict[str, tuple[str, str]] = {}
     for e in events:
-        if e.get("action") == "removed":
+        if e.get("action") in {"removed", "resolved"}:
             continue
         actor = str(e.get("actor") or "")
         if not actor:
             continue
         kind = str(e.get("kind") or "")
-        has_text = bool(str(e.get("text") or "").strip())
+        text = str(e.get("text") or "").strip()
         counter = tally.setdefault(actor, Counter())
         counter[kind] += 1
-        if has_text:
+        ws_by_actor.setdefault(actor, set()).add(str(e.get("workspace") or ""))
+        if text:
             counter["with_text"] += 1
+            at = str(e.get("at") or "")
+            if at >= last_text.get(actor, ("", ""))[0]:
+                last_text[actor] = (at, text)
 
     rows = []
     for actor, c in tally.items():
         # 정정 사항이 실제로 담긴 건수. 이게 순위의 기준이다.
         useful = c["with_text"]
+        workspaces = sorted(w for w in ws_by_actor.get(actor, set()) if w)
+        dept = ""
+        for ws in workspaces:
+            dept = depts.get(f"{ws}:{actor}") or dept
         rows.append({
             "actor": actor,
             "name": names.get(actor) or actor,
+            "dept": dept,
+            "workspaces": workspaces,
             "corrections": useful,
             "reports": c["negative"] + c["missing"] + c["correction"],
             "praise": c["positive"],
             "total": sum(v for k, v in c.items() if k != "with_text"),
+            "lastCorrection": last_text.get(actor, ("", ""))[1] if include_text else "",
         })
     rows.sort(key=lambda r: (-r["corrections"], -r["reports"], r["name"]))
     return rows[:20]
+
+
+def feedback_items(
+    events: list[dict],
+    names: dict[str, str] | None = None,
+    depts: dict[str, str] | None = None,
+    *,
+    include_text: bool = False,
+    limit: int = 50,
+) -> list[dict]:
+    """신고 하나하나. 무엇이 들어왔고 처리됐는지 볼 수 있어야 한다.
+
+    건수만 보이던 것이 문제였다. "정정 제보 1건" 을 보고도 내용을 알 수 없어
+    아무 조치도 할 수 없었고, 봇에 반영됐는지도 알 수 없었다.
+
+    처리 표시는 같은 로그의 `resolved` 줄이다 — 신고를 지우거나 고치지 않는다.
+    """
+    from ..feedback import event_id
+
+    names = names or {}
+    depts = depts or {}
+    resolved: dict[str, dict] = {}
+    for e in events:
+        if e.get("action") != "resolved":
+            continue
+        target = str(e.get("target") or "")
+        if target:
+            resolved[target] = e
+
+    # 취소된 신고는 목록에 두지 않는다. 사용자가 스스로 물린 것이다.
+    cancelled = {
+        event_id(e) for e in events if e.get("action") == "removed"
+    }
+
+    out: list[dict] = []
+    for e in events:
+        if e.get("action") in {"removed", "resolved"}:
+            continue
+        eid = event_id(e)
+        if eid in cancelled:
+            continue
+        done = resolved.get(eid)
+        workspace = str(e.get("workspace") or "")
+        actor = str(e.get("actor") or "")
+        text = str(e.get("text") or "").strip()
+        out.append({
+            "id": eid,
+            "at": str(e.get("at") or ""),
+            "workspace": workspace,
+            "kind": str(e.get("kind") or ""),
+            "actor": actor,
+            "name": names.get(actor) or actor,
+            "dept": depts.get(f"{workspace}:{actor}", ""),
+            "qaRecordId": str(e.get("qa_record_id") or ""),
+            # 본문은 관리자에게만 나간다. 신고에는 업무 내용이 들어 있다.
+            "text": text if include_text else "",
+            "hasText": bool(text),
+            "handled": done is not None,
+            "handledBy": str((done or {}).get("actor") or ""),
+            "handledAt": str((done or {}).get("at") or ""),
+            "handledNote": str((done or {}).get("text") or "") if include_text else "",
+        })
+    out.sort(key=lambda r: (r["handled"], r["at"]), reverse=False)
+    # 처리 안 된 것을 위로. 처리된 것은 최근 것만 남긴다.
+    open_rows = [r for r in out if not r["handled"]]
+    done_rows = [r for r in out if r["handled"]]
+    open_rows.sort(key=lambda r: r["at"], reverse=True)
+    done_rows.sort(key=lambda r: r["handledAt"], reverse=True)
+    return (open_rows + done_rows)[:limit]
 
 
 def feedback_section(events: list[dict]) -> dict:
@@ -350,12 +480,24 @@ def feedback_section(events: list[dict]) -> dict:
     **취소(`removed`)를 빼고 센다.** 눌렀다 취소한 것을 그대로 두면 만족도가 실제보다
     좋게 나오고, 그러면 이 숫자를 보고 아무 조치도 하지 않게 된다.
     """
-    active = [e for e in events if e.get("action") != "removed"]
+    from ..feedback import event_id
+
+    active = [
+        e for e in events
+        if e.get("action") not in {"removed", "resolved"}
+    ]
     counts = Counter(str(e.get("kind") or "-") for e in active)
     positive = counts.get("positive", 0)
     negative = counts.get("negative", 0)
     missing = counts.get("missing", 0)
     corrections = counts.get("correction", 0)
+    # 처리 표시가 붙은 신고는 남은 일감이 아니다. 처리해도 숫자가 줄지 않으면
+    # 화면은 영원히 빨간색이고, 그러면 아무도 보지 않는다.
+    handled = {
+        str(e.get("target") or "")
+        for e in events
+        if e.get("action") == "resolved" and e.get("target")
+    }
 
     rated = positive + negative + missing
     if rated < MIN_SAMPLE:
@@ -369,9 +511,16 @@ def feedback_section(events: list[dict]) -> dict:
     problems = []
     if rate is not None and rate < SATISFACTION_WARN:
         problems.append(f"만족도가 {rate:.0%} 입니다 — 부정 {negative}건, 근거 없음 {missing}건")
-    if corrections:
-        # 정정은 나쁜 신호가 아니라 **처리해야 할 일감**이다.
-        problems.append(f"확인하지 않은 정정 제보 {corrections}건")
+    # 정정은 나쁜 신호가 아니라 **처리해야 할 일감**이다.
+    # 본문 유무로 세지 않는다 — 본문이 없는 신고도 누군가 올린 것이고,
+    # 그걸 조용히 빼면 아무도 처리하지 않은 채로 사라진다.
+    open_written = sum(
+        1 for e in active
+        if str(e.get("kind") or "") in {"negative", "missing", "correction"}
+        and event_id(e) not in handled
+    )
+    if open_written:
+        problems.append(f"처리하지 않은 신고 {open_written}건")
 
     return {
         "level": level,
@@ -379,6 +528,7 @@ def feedback_section(events: list[dict]) -> dict:
         "negative": negative,
         "missing": missing,
         "corrections": corrections,
+        "openCorrections": open_written,
         "rated": rated,
         "satisfaction": None if rate is None else round(rate, 3),
         "note": note,
@@ -403,8 +553,14 @@ def report(
     days: int = 7,
     allowed: frozenset[str] | set[str] | None = None,
     store=None,
+    *,
+    include_text: bool = False,
 ) -> dict:
-    """대시보드가 그대로 그릴 수 있는 모양으로 낸다."""
+    """대시보드가 그대로 그릴 수 있는 모양으로 낸다.
+
+    `include_text` 는 신고 본문을 담을지다. 기본은 담지 않는다 — 신고에는 업무
+    내용이 들어 있고, 권한은 막는 쪽이 기본값이다. 관리자에게만 켠다.
+    """
     rows = reader.workspace_status(store)
     docs = reader.collected_docs(store)
     if allowed is not None:
@@ -417,7 +573,19 @@ def report(
 
     events = _read_feedback(days, allowed)
     feedback = feedback_section(events)
-    feedback["contributors"] = contributors(events, _display_names(records))
+    names = _display_names(records)
+    pairs = {
+        (str(e.get("workspace") or ""), str(e.get("actor") or ""))
+        for e in events
+        if e.get("workspace") and e.get("actor")
+    }
+    depts = _departments(pairs)
+    feedback["contributors"] = contributors(
+        events, names, depts, include_text=include_text
+    )
+    feedback["items"] = feedback_items(
+        events, names, depts, include_text=include_text
+    )
 
     sections = {
         "bot": bot_section(rows),

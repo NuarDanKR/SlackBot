@@ -310,14 +310,36 @@ export type HealthReport = {
       satisfaction: number | null
       note?: string
       problems: string[]
-      /** 정정 사항을 많이 보낸 순. 본문은 담지 않습니다. */
+      /** 아직 처리하지 않은 신고 건수입니다. */
+      openCorrections: number
+      /** 신고 하나하나. 본문(text)은 관리자에게만 채워집니다. */
+      items: {
+        id: string
+        at: string
+        workspace: string
+        kind: string
+        actor: string
+        name: string
+        dept: string
+        qaRecordId: string
+        text: string
+        hasText: boolean
+        handled: boolean
+        handledBy: string
+        handledAt: string
+        handledNote: string
+      }[]
+      /** 정정 사항을 많이 보낸 순. 본문은 관리자에게만 채워집니다. */
       contributors: {
         actor: string
         name: string
+        dept: string
+        workspaces: string[]
         corrections: number
         reports: number
         praise: number
         total: number
+        lastCorrection: string
       }[]
     }
   }
