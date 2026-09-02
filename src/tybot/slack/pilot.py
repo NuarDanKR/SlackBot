@@ -127,7 +127,7 @@ from ..schedule import (
     parse_window,
     unknown_window,
 )
-from ..scope_report import ScopeFacts
+from ..scope_report import WELCOME, ScopeFacts
 from ..scope_report import report as scope_text
 from ..status_tree import build_tree, render_tree, totals
 from ..workspaces import ConfigError, WorkspaceConfig, load_workspaces
@@ -285,6 +285,9 @@ class WorkspaceBot:
             for u in (os.getenv("CHANNEL_ADMIN_USERS") or "").split(",")
             if u.strip()
         }
+        # 첫 사용 안내를 이미 받은 사람. 프로세스 안에서만 기억한다 -
+        # 재시작 후 한 번 더 오는 것이, 파일을 새로 만들어 관리하는 것보다 낫다.
+        self._welcomed: set[str] = set()
         self.app = App(token=cfg.bot_token)
         self.store = store
         self.engine = engine
@@ -402,6 +405,21 @@ class WorkspaceBot:
                 self._evidence_text(client, user_id, query),
                 response_type="ephemeral",
             )
+
+        @self.app.event("app_home_opened")
+        def on_home_opened(event, client):
+            """봇을 처음 여는 사람에게 예시 셋을 보낸다.
+
+            `도움말` 은 명령 목록이고, 그것만으로는 "내 업무에 왜 쓸모 있나" 가
+            답되지 않는다. 처음 만나는 사람에게 필요한 것은 예시다.
+
+            **한 사람에게 한 번만** 보낸다 - 홈 탭은 자주 열리고, 매번 오면 소음이다.
+            """
+            user_id = str(event.get("user") or "")
+            if not user_id or user_id in self._welcomed:
+                return
+            self._welcomed.add(user_id)
+            self._notify_user(client, user_id, WELCOME.format(bot=self.bot_name))
 
         @self.app.command("/권한")
         @self.app.command("/ty-scope")
