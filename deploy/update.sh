@@ -26,6 +26,19 @@ log() { echo "[$(date '+%F %T')] $*"; }
 [[ $EUID -eq 0 ]] || { echo "root 로 실행하세요 (sudo)"; exit 1; }
 [[ -d "$SRC/.git" ]] || { log "소스 클론이 없습니다: $SRC"; exit 1; }
 
+# 체크아웃은 root 소유여야 한다.
+#
+# git 은 root 가 남의 소유 저장소에서 도는 것을 거부한다(`dubious ownership`).
+# 그 방어에는 이유가 있다 — 저장소의 hook·config 가 root 권한으로 실행될 수 있어,
+# 그 디렉터리에 쓸 수 있는 사람이 서버를 가져갈 수 있다.
+# `safe.directory` 로 예외를 두는 대신 소유권을 맞춘다. 예외를 두면 방어가 사라진다.
+OWNER=$(stat -c '%u' "$SRC/.git" 2>/dev/null || echo "?")
+if [[ "$OWNER" != "0" ]]; then
+  log "소스 소유자가 root 가 아닙니다 ($SRC, uid=$OWNER)"
+  log "  고치기:  sudo chown -R root:root $SRC"
+  exit 1
+fi
+
 cd "$SRC"
 git fetch --quiet origin "$BRANCH"
 LOCAL=$(git rev-parse HEAD)

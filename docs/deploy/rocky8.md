@@ -98,7 +98,8 @@ bash deploy/wheelhouse.sh          # → wheels/ 생성
 > ```bash
 > sudo systemctl stop tybot-deploy.path
 > sudo mv /tmp/tybot-src /var/lib/tybot/src
-> sudo restorecon -Rv /var/lib/tybot/src     # SELinux 라벨 정정
+> sudo chown -R root:root /var/lib/tybot/src  # 배포는 root 로 돈다
+> sudo restorecon -Rv /var/lib/tybot/src      # SELinux 라벨 정정
 > sudo systemctl start tybot-deploy.path
 > ```
 
@@ -469,7 +470,8 @@ sudo systemctl enable --now tybot-schedule-dm.timer   # 1분 주기
 | `아카이브에 쓸 수 없어 기동하지 않습니다` | `ARCHIVE_DIR` 누락 또는 권한 문제. `sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py` 의 `=== 쓰기 경로 ===` 절 참조. 조회 전용으로 띄우려면 `ALLOW_READONLY_ARCHIVE=1` |
 | `락 디렉터리를 쓸 수 없어 임시 경로로 대체` | `ARCHIVE_DIR` 이 비어 락 경로가 코드 경로(`/opt/tybot`, 읽기 전용) 아래로 떨어진 것이다. `tybot.env` 의 `ARCHIVE_DIR=/var/lib/tybot/archive` 확인, 또는 `STATE_DIR=/var/lib/tybot` 지정 |
 | `Start request repeated too quickly` | `sudo systemctl reset-failed tybot` 후 재시작(재시작 폭주 차단이 걸린 상태) |
-| `Permission denied: /var/lib/tybot/...` | `sudo chown -R tybot:tybot /var/lib/tybot` |
+| `Permission denied: /var/lib/tybot/...` | `sudo chown -R tybot:tybot /var/lib/tybot --exclude=src` 가 안 되므로: `sudo find /var/lib/tybot -mindepth 1 -maxdepth 1 ! -name src -exec chown -R tybot:tybot {} +`. **`src` 는 제외한다** — 소스 체크아웃은 root 소유여야 한다(아래 항목) |
+| `fatal: detected dubious ownership in repository` | 소스 체크아웃이 root 소유가 아니다. `sudo chown -R root:root /var/lib/tybot/src`. `safe.directory` 로 예외를 두지 않는다 — 그 저장소의 hook 이 root 로 실행될 수 있어 디렉터리에 쓸 수 있는 사람이 서버를 가져갈 수 있다 |
 | 응답은 정상인데 **문서 0건 · 수집 0건** | `tybot.env` 에 `ARCHIVE_DIR`/`QA_LOG_DIR` 누락. 기본값(`/opt/tybot/archive`)은 봇에게 쓰기 권한이 없다. 기동 로그의 `쓸 수 없습니다` 에러 확인 |
 | SELinux 관련 거부 | `sudo ausearch -m avc -ts recent`. 표준 경로(`/var/lib`)를 쓰면 보통 발생하지 않음. **enforcing 을 끄지 말고** 원인부터 확인 |
 | `conversations.history` 실패/느림 | Slack 신규 앱 제한(분당 1요청/15건). 정상 — 백필은 느리고, 실시간 수집이 본선 |

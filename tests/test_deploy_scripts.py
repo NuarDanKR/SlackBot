@@ -105,3 +105,24 @@ def test_update_can_be_forced():
     script = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
 
     assert 'TYBOT_FORCE' in script
+
+
+def test_install_does_not_take_ownership_of_the_source_checkout():
+    """/var/lib/tybot 을 통째로 tybot 소유로 바꾸면 다음 배포가 막힌다.
+
+    git 은 root 가 남의 소유 저장소에서 도는 것을 dubious ownership 으로 거부한다.
+    소스가 그 아래로 들어왔으므로 제외해야 한다(2026-09-02 실제 발생).
+    """
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+
+    assert "! -name src" in script
+    assert 'chown -R tybot:tybot "$DATA_DIR"\n' not in script
+
+
+def test_update_refuses_a_non_root_checkout_with_a_fix():
+    """git 의 dubious ownership 오류를 그대로 만나면 무엇을 해야 할지 알기 어렵다."""
+    script = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
+
+    assert "chown -R root:root $SRC" in script
+    # safe.directory 로 방어를 끄지 않는다.
+    assert "safe.directory" not in script.replace("`safe.directory` 로 예외를 두는", "")

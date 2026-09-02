@@ -64,7 +64,13 @@ fi
 echo "== 2/6 계정·디렉터리 =="
 id tybot &>/dev/null || useradd -r -d "$DATA_DIR" -s /sbin/nologin tybot
 mkdir -p "$APP_DIR" "$CONF_DIR" "$DATA_DIR"/{archive,cache,qa-log,reports}
-chown -R tybot:tybot "$DATA_DIR"
+# 소스 체크아웃(`$DATA_DIR/src`)은 건드리지 않는다.
+#
+# 여기를 통째로 tybot 소유로 바꾸면 **다음 배포가 막힌다** — git 은 root 가 남의 소유
+# 저장소에서 도는 것을 `dubious ownership` 으로 거부한다. 그 방어에는 이유가 있어서
+# (저장소의 hook 이 root 로 실행된다) 예외를 두는 대신 소유를 나눈다.
+find "$DATA_DIR" -mindepth 1 -maxdepth 1 ! -name src -exec chown -R tybot:tybot {} +
+chown tybot:tybot "$DATA_DIR"
 chmod 750 "$DATA_DIR"
 
 echo "== 3/6 코드 배치 =="
