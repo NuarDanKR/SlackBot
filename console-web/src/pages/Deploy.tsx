@@ -1,164 +1,135 @@
-/** 배포 승인 — 이 콘솔에서 유일하게 서버를 바꾸는 화면입니다.
- *
- * 실행할 수 있는 동작은 반영 / 재기동 / 되돌리기 셋뿐입니다. 명령을 직접 입력하는 칸은
- * 두지 않습니다. 승인 권한은 관리자에게만 있습니다.
- */
-import { useState } from 'react'
-import { deployHistory, deployRequests } from '../mock/data'
-import type { ConsoleUser, DeployRequest } from '../types'
-import { ApprovalBox, Checks, statusChip } from '../components/Approval'
-import { Empty, MockBadge, PageHead, Section, fmt } from '../components/primitives'
+import { useEffect, useState } from 'react'
+import { ApiError, api } from '../api/client'
+import { useResource } from '../api/hooks'
+import { Chip, Failed, Loading, PageHead, Section } from '../components/primitives'
 
-const ACTION_CLASS: Record<string, string> = {
-  적용: 'is-apply',
-  롤백: 'is-rollback',
-  반려: 'is-reject',
+type DeployState = 'idle' | 'queued' | 'running' | 'ok' | 'failed' | 'skipped'
+
+interface DeploymentStatus {
+  state: DeployState
+  pending: boolean
+  actor: string
+  before: string
+  after: string
+  message: string
+  requestedAt: string | null
+  startedAt: string | null
+  finishedAt: string | null
 }
 
-function RequestCard({
-  r,
-  user,
-  onToast,
-}: {
-  r: DeployRequest
-  user: ConsoleUser
-  onToast: (m: string) => void
-}) {
-  const [approved, setApproved] = useState(false)
-
-  return (
-    <article className="request">
-      <div className="request-head">
-        <div>
-          <div className="request-title">{r.commitTitle}</div>
-          <div className="request-meta">
-            <span>{r.workspaceLabel}</span>
-            <span className="sep">·</span>
-            <span className="mono">{r.repo}</span>
-            <span className="sep">·</span>
-            <span className="mono">
-              {r.branch} / {r.commit}
-            </span>
-            <span className="sep">·</span>
-            <span>{r.requester} 요청</span>
-          </div>
-        </div>
-        {statusChip(r.checks, approved)}
-      </div>
-
-      <div className="request-body">
-        <div className="request-col">
-          <Checks checks={r.checks} label="자동 검사 — 네 항목이 모두 통과해야 반영할 수 있습니다" />
-
-          <div className="files">
-            <div className="col-label">변경된 파일 {r.filesChanged.length}개</div>
-            {r.filesChanged.map((f) => (
-              <div className="file-row" key={f.path}>
-                <span className="file-path">{f.path}</span>
-                <span className="file-delta">
-                  <span className="add">+{f.added}</span> <span className="del">−{f.removed}</span>
-                </span>
-              </div>
-            ))}
-            {!r.fastForward && (
-              <p className="hint bad" style={{ marginTop: 10 }}>
-                커밋 이력을 다시 쓰는 변경입니다. 이런 요청은 반영하지 않습니다. 요청자가
-                최신 코드를 받은 뒤 다시 올려야 합니다.
-              </p>
-            )}
-          </div>
-        </div>
-
-        <div className="request-col">
-          <div className="col-label">승인</div>
-          <ApprovalBox
-            user={user}
-            checks={r.checks}
-            approved={approved}
-            requester={r.requester}
-            requestedAt={fmt.dayClock(r.requestedAt)}
-            approveLabel="승인하고 반영"
-            onApprove={() => {
-              setApproved(true)
-              onToast(`${r.workspaceLabel} ${r.commit} 을 승인했습니다. 반영을 시작합니다.`)
-            }}
-            onReject={() => onToast(`${r.workspaceLabel} ${r.commit} 을 반려했습니다.`)}
-            afterNote="승인하면 코드를 받아 봇을 다시 띄우고, 90초 동안 정상 응답을 확인합니다. 확인에 실패하면 직전 상태로 자동으로 되돌립니다. 승인은 10분간 유효하며, 그 사이 새 커밋이 올라오면 다시 승인해야 합니다."
-            blockedNote="자동 검사에서 문제가 발견되어 반영할 수 없습니다. 왼쪽 검사 결과를 요청자에게 전달해 주세요."
-          />
-        </div>
-      </div>
-    </article>
-  )
+const STATE_LABEL: Record<DeployState, string> = {
+  idle: '배포 기록 없음',
+  queued: '배포 대기 중',
+  running: '배포 진행 중',
+  ok: '최근 배포 성공',
+  failed: '최근 배포 실패',
+  skipped: '새 변경 없음',
 }
 
-export function Deploy({
-  user,
-  onToast,
-}: {
-  user: ConsoleUser
-  onToast: (m: string) => void
-}) {
-  const visible = deployRequests.filter(
-    (r) => user.role === 'admin' || user.workspaces.includes(r.workspace),
-  )
+function stateChip(state: DeployState) {
+  if (state === 'ok') return <Chip tone="ok">{STATE_LABEL[state]}</Chip>
+  if (state === 'failed') return <Chip tone="bad">{STATE_LABEL[state]}</Chip>
+  if (state === 'queued' || state === 'running') {
+    return <Chip tone="watch">{STATE_LABEL[state]}</Chip>
+  }
+  return <Chip tone="plain">{STATE_LABEL[state]}</Chip>
+}
 
+export function Deploy({ onToast }: { onToast: (message: string) => void }) {
+  const resource = useResource<DeploymentStatus>('/api/deployment')
+  const [latest, setLatest] = useState<DeploymentStatus | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (resource.data) setLatest(resource.data)
+  }, [resource.data])
+
+  useEffect(() => {
+    if (latest?.state !== 'queued' && latest?.state !== 'running') return
+    const timer = window.setInterval(resource.reload, 5000)
+    return () => window.clearInterval(timer)
+  }, [latest?.state, resource.reload])
+
+  async function deploy() {
+    if (!window.confirm('새 커밋을 확인하고 테스트를 통과하면 운영 서버에 배포하시겠습니까?')) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const queued = await api.put<DeploymentStatus>('/api/deployment/request', {})
+      setLatest(queued)
+      onToast('배포를 요청했습니다. 이 화면에서 진행 결과를 확인할 수 있습니다.')
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : String(caught))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (resource.loading && !resource.data) return <Loading what="배포 상태를" />
+  if (resource.error && !resource.data) {
+    return <Failed what="배포 상태를" detail={resource.error.message} onRetry={resource.reload} />
+  }
+
+  const status = latest ?? resource.data
+  if (!status) return null
+  const busy = status.state === 'queued' || status.state === 'running'
   return (
     <>
       <PageHead
-        crumb="관리 · 배포 승인"
-        title="배포 승인"
-        note={
-          user.role === 'admin'
-            ? '워크스페이스 담당자가 봇을 수정해 올리면 이 화면에 요청으로 쌓입니다. 자동 검사를 모두 통과한 요청만 승인 버튼이 열리고, 승인하면 서버에서 코드 받기·재기동·정상 확인까지 자동으로 진행됩니다. 서버에 직접 접속하거나 명령어를 입력할 필요는 없습니다.'
-            : '수정한 봇을 올리면 이 화면에 요청으로 남습니다. 자동 검사를 통과한 뒤 관리자가 확인하면 반영되고, 결과는 Slack 으로 알려 드립니다. 반영 전까지 봇은 지금 상태로 계속 동작합니다.'
-        }
-        aside={
-          <>
-            <MockBadge />
-            <span className="chip flat">
-              {user.role === 'admin' ? '승인 권한 있음' : '요청만 가능'}
-            </span>
-          </>
-        }
+        crumb="운영 관리 · 배포"
+        title="배포 관리"
+        note="서버 터미널에서 update.sh를 실행하는 대신 새 커밋 확인, 전체 테스트, 설치, TYBot 재시작을 요청합니다. 테스트가 실패하면 운영 코드는 바뀌지 않습니다."
+        aside={stateChip(status.state)}
       />
 
-      <Section
-        title="승인 대기 중인 요청"
-        note={`${visible.length}건`}
-        lead={
-          user.role === 'admin'
-            ? '검사 항목은 테스트, 코드 형식, 아카이브 문서 형식, 시크릿 유출 네 가지입니다. 하나라도 실패하면 승인할 수 없습니다.'
-            : undefined
-        }
-      >
-        {visible.length ? (
-          visible.map((r) => <RequestCard key={r.id} r={r} user={user} onToast={onToast} />)
-        ) : (
-          <Empty
-            title="올라온 요청이 없습니다"
-            note="봇 코드를 수정해 저장소에 올리면 자동으로 이 목록에 나타납니다."
-          />
-        )}
-      </Section>
+      {error && (
+        <div className="notice bad">
+          <div className="notice-kind">요청 실패</div>
+          <div>
+            <div className="notice-title">배포를 시작하지 못했습니다</div>
+            <div className="notice-detail">{error}</div>
+          </div>
+        </div>
+      )}
 
       <Section
-        title="반영 이력"
-        note="추가만 되고 지울 수 없습니다"
-        lead="누가 언제 무엇을 승인하고 반영했는지 남습니다. 되돌린 기록도 함께 남습니다."
+        title="업데이트 확인 및 배포"
+        lead="브랜치와 서버 경로는 배포 서비스에 고정되어 있습니다. 이 화면에서는 임의 명령이나 배포 대상을 입력할 수 없습니다."
       >
         <div className="card card-pad">
-          <div className="log">
-            {deployHistory.map((e) => (
-              <div className="log-row" key={e.id}>
-                <span className="log-when">{fmt.dayClock(e.at)}</span>
-                <span className={`log-action ${ACTION_CLASS[e.action] ?? ''}`}>{e.action}</span>
-                <span className="log-text">
-                  <b>{e.workspace}</b> <span className="mono">{e.commit}</span> · {e.actor} —{' '}
-                  {e.note}
-                </span>
-              </div>
-            ))}
+          <div className="card-head">
+            <div>
+              <div className="card-title">{STATE_LABEL[status.state]}</div>
+              <p className="hint">{status.message || '아직 기록된 배포 결과가 없습니다.'}</p>
+            </div>
+            <button
+              className="btn btn-primary"
+              type="button"
+              disabled={busy || submitting}
+              onClick={deploy}
+            >
+              {busy ? '배포 진행 중' : submitting ? '요청 중' : '업데이트 확인 및 배포'}
+            </button>
+          </div>
+
+          <div className="metric-row" style={{ marginTop: 20 }}>
+            <div>
+              <div className="metric-label">요청자</div>
+              <div>{status.actor || '기록 없음'}</div>
+            </div>
+            <div>
+              <div className="metric-label">배포 전 커밋</div>
+              <div className="mono">{status.before || '-'}</div>
+            </div>
+            <div>
+              <div className="metric-label">배포 후 커밋</div>
+              <div className="mono">{status.after || '-'}</div>
+            </div>
+          </div>
+          <div className="hint" style={{ marginTop: 16 }}>
+            요청 {status.requestedAt ?? '-'} · 시작 {status.startedAt ?? '-'} · 완료{' '}
+            {status.finishedAt ?? '-'}
           </div>
         </div>
       </Section>

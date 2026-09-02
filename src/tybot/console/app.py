@@ -26,6 +26,7 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from .. import deploy_request
 from ..archive.store import ArchiveStore
 from . import account_store, env_settings, health, reader, service_logs, timer_manager
 from .auth import (
@@ -448,6 +449,32 @@ def timer_action(body: TimerActionBody, request: Request, user: User) -> dict:
         body.preset,
     )
     return {"timers": rows}
+
+
+# ---------------------------------------------------------------------------
+# 배포 관리 — admin은 요청만 만들고 root path 유닛이 update.sh를 실행한다
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/deployment")
+def deployment(user: User) -> dict:
+    _require_admin(user)
+    return deploy_request.console_status()
+
+
+@app.put("/api/deployment/request")
+def request_deployment(request: Request, user: User) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+    try:
+        result = deploy_request.request_deploy(user.email, note="관리 콘솔에서 요청")
+    except OSError as e:
+        logger.exception("배포 요청 파일 기록 실패")
+        raise HTTPException(status_code=500, detail="배포 요청을 기록하지 못했습니다.") from e
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=str(result.get("reason") or "배포 요청 거절"))
+    logger.warning("관리 콘솔 배포 요청 — actor=%s", user.email)
+    return deploy_request.console_status()
 
 
 @app.get("/api/health")

@@ -12,6 +12,7 @@ import { EnvSettings } from './pages/EnvSettings'
 import { ConsoleUsers } from './pages/ConsoleUsers'
 import { ServiceLogs } from './pages/ServiceLogs'
 import { BatchTimers } from './pages/BatchTimers'
+import { Deploy } from './pages/Deploy'
 import type { ConsoleRole } from './types'
 
 type Tab =
@@ -24,6 +25,7 @@ type Tab =
   | 'users'
   | 'logs'
   | 'timers'
+  | 'deploy'
 
 /** 메뉴 이름은 화면 제목과 똑같이 씁니다 — 어디에 있는지 헷갈리지 않게 합니다. */
 const NAV: { group: string; items: { id: Tab; label: string; minimum?: ConsoleRole }[] }[] = [
@@ -36,12 +38,21 @@ const NAV: { group: string; items: { id: Tab; label: string; minimum?: ConsoleRo
     ],
   },
   {
-    group: '봇 관리',
+    group: '운영 관리',
     items: [
       { id: 'health', label: '헬스 체크', minimum: 'developer' },
       { id: 'logs', label: '서비스 로그', minimum: 'developer' },
-      { id: 'harness', label: '봇 규칙 열람', minimum: 'developer' },
       { id: 'timers', label: '배치 관리', minimum: 'admin' },
+      { id: 'deploy', label: '배포 관리', minimum: 'admin' },
+    ],
+  },
+  {
+    group: '봇 설정',
+    items: [{ id: 'harness', label: '봇 규칙 열람', minimum: 'developer' }],
+  },
+  {
+    group: '관리자 설정',
+    items: [
       { id: 'env', label: '환경변수 설정', minimum: 'admin' },
       { id: 'users', label: '콘솔 사용자 관리', minimum: 'admin' },
     ],
@@ -274,6 +285,7 @@ export default function App() {
           {activeTab === 'health' && <HealthCheck user={user} />}
           {activeTab === 'logs' && <ServiceLogs />}
           {activeTab === 'timers' && <BatchTimers onToast={toast} />}
+          {activeTab === 'deploy' && <Deploy onToast={toast} />}
           {activeTab === 'harness' && <Harness />}
           {activeTab === 'env' && <EnvSettings onToast={toast} />}
           {activeTab === 'users' && <ConsoleUsers currentUser={user} onToast={toast} />}

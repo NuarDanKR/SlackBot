@@ -19,3 +19,10 @@ def test_install_hides_onboarding_hints_during_update():
     assert 'if [[ "${TYBOT_INSTALL_HINTS:-1}" != "1" ]]' in script
     assert 'echo "설치 파일 갱신 완료"' in script
     assert script.index('echo "설치 파일 갱신 완료"') < script.index("설치 완료. 다음 순서")
+
+
+def test_console_install_enables_fixed_deploy_path():
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+
+    assert 'if [[ "${WITH_CONSOLE:-0}" == "1" ]]' in script
+    assert "systemctl enable --now tybot-deploy.path" in script

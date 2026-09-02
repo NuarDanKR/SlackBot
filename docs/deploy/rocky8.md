@@ -249,12 +249,14 @@ systemctl list-timers tybot-update --no-pager
 업무시간(월~금 09~19시) 10분 간격. push 후 최대 10분이면 반영된다.
 야간 배포는 사람이 못 지켜보므로 돌지 않는다.
 
-### B. 콘솔 버튼 (B-25 — 콘솔 API·UI 작업 남음)
+### B. 콘솔 버튼 (B-25 — 구현됨)
 관리 콘솔에서 '지금 배포'. 콘솔은 root 권한 없이 요청 파일만 만들고,
 root 로 도는 path 유닛이 그것을 보고 배포한다.
 ```bash
 sudo systemctl enable --now tybot-deploy.path
 ```
+`WITH_CONSOLE=1` 설치·업데이트에서는 이 path 유닛을 자동으로 활성화한다. 관리자는 콘솔의
+`운영 관리 > 배포 관리`에서 `업데이트 확인 및 배포`를 누르고 진행 상태를 확인한다.
 | 흐름 | |
 |---|---|
 | 콘솔(`User=tybot`) | `/var/lib/tybot/deploy-request.json` 생성 |

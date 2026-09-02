@@ -116,3 +116,30 @@ def test_no_status_yet_is_not_an_error():
     assert dr.is_running() is False
     assert dr.seconds_since_last() is None
     assert dr.request_deploy("a@b.c")["ok"] is True
+
+
+def test_console_status_reports_queued_request_without_internal_path(monkeypatch):
+    monkeypatch.setattr(dr, "COOLDOWN_SEC", 0)
+    dr.write_status("ok", actor="previous@taeyoung.com", before="abc", after="def")
+    assert dr.request_deploy("dan@taeyoung.com")["ok"] is True
+
+    status = dr.console_status()
+
+    assert status["state"] == "queued"
+    assert status["pending"] is True
+    assert status["actor"] == "dan@taeyoung.com"
+    assert status["before"] == ""
+    assert status["after"] == ""
+    assert status["finishedAt"] is None
+    assert "path" not in status
+
+
+def test_console_status_reports_completed_deployment():
+    dr.write_status("ok", actor="dan@taeyoung.com", before="abc", after="def")
+
+    status = dr.console_status()
+
+    assert status["state"] == "ok"
+    assert status["pending"] is False
+    assert status["before"] == "abc"
+    assert status["after"] == "def"

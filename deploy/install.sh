@@ -196,6 +196,12 @@ install -m 0644 "$APP_DIR/deploy/tybot-deploy.service" /etc/systemd/system/tybot
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.path"    /etc/systemd/system/tybot-deploy.path
 systemctl daemon-reload
 
+# 콘솔의 배포 버튼은 root 권한을 받지 않고 요청 파일만 만든다. 이 path 유닛은 파일
+# 존재만 감시하며, 실제 배포는 고정된 deploy-runner.sh -> update.sh 경로로 실행한다.
+if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
+  systemctl enable --now tybot-deploy.path
+fi
+
 if [[ "${TYBOT_INSTALL_HINTS:-1}" != "1" ]]; then
   echo "설치 파일 갱신 완료"
   exit 0

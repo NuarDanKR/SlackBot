@@ -114,7 +114,7 @@ _최종 갱신: 2026-08-31_
 | [B-22](#b-22) | 캔버스 편집 실시간 반영 | 낮음 | 대기 | B-21 |
 | [B-23](#b-23) | 표준 업무 채널 생성 바로가기·명령 | 높음 | 진행중 (코드 완료·Slack 반영 대기, Codex/2026-08-27) | 없음 |
 | [B-24](#b-24) | 관리자 환경변수 설정 화면 | 높음 | 완료 (Codex/2026-08-27) | B-08 |
-| [B-25](#b-25) | 콘솔 '배포' 버튼 (요청 파일 -> root 러너) | 높음 | 준비됨 (봇측 완료) | B-08 |
+| [B-25](#b-25) | 콘솔 '배포' 버튼 (요청 파일 -> root 러너) | 높음 | 구현 완료·서버 검증 대기 | B-08 |
 | [B-26](#b-26) | 답변 파이프라인 2단계 — 도구 호출 + 모델 승급 | 높음 | 준비됨 | B-27 |
 | [B-27](#b-27) | 답변 품질 골든셋 (실제 질문 30건) | **높음** | 준비됨 | 없음 |
 | [B-28](#b-28) | Hermes 를 요약 프로바이더로 검토 | **낮음** | 보류 (병합으로 대체 → B-29) | B-29 |
@@ -909,7 +909,7 @@ inbox 하위 `notify/` 폴더. **신규 방화벽 규칙 0건.**
 
 ## B-25
 ### 콘솔 '배포' 버튼 — 서버 터미널 없이 최신 코드 반영
-**우선 높음 · 상태 준비됨 (봇측 완료, 콘솔 API·UI 남음) · 의존 B-08**
+**우선 높음 · 상태 구현 완료·서버 검증 대기 · 의존 B-08**
 
 매번 서버에 SSH 로 들어가 `git pull` + `install.sh` 를 치는 것이 번거롭다는 요청.
 
@@ -930,32 +930,33 @@ inbox 하위 `notify/` 폴더. **신규 방화벽 규칙 0건.**
 `update.sh` 가 테스트 게이트를 이미 갖고 있다 — **테스트 불통 커밋은 배포되지 않고
 운영 프로세스는 그대로 유지된다.** 자동 배포의 유일한 안전장치이므로 우회하지 말 것.
 
-### 남은 일 (콘솔 담당)
-1. `POST /api/deploy` — `role=admin` 만. 본문은 선택 `note` 뿐.
+### 구현 내용
+1. `PUT /api/deployment/request` — `role=admin` 만. CSRF 검증 후 고정된 배포 요청 파일을 생성한다.
    ```python
    from ..deploy_request import request_deploy
    result = request_deploy(actor=session.user, note=body.note or "")
    # result["ok"] 가 False 면 result["reason"] 을 그대로 화면에 띄운다
    ```
-2. `GET /api/deploy/status` — `read_status()` 결과를 그대로 반환(시크릿 없음).
-   `state` 는 `running | ok | failed | skipped | (없음)`.
+2. `GET /api/deployment` — 요청과 실행 상태를 합쳐 시크릿 없는 콘솔용 상태만 반환한다.
+   `state` 는 `idle | queued | running | ok | failed | skipped`.
 3. UI: 버튼 + 진행 표시. `running` 이면 폴링(3~5초). `failed` 면 `message` 와
    `journalctl -u tybot-deploy -n 50` 안내를 함께 보여준다.
 4. **브랜치·저장소·경로를 파라미터로 받지 않는다.** 받으면 임의 코드 실행이 된다.
 5. 감사기록: 누가 눌렀는지 남긴다(요청 파일의 `actor` 가 러너 로그에 찍힌다).
 
-### 서버 활성화 (사람이 1회)
+### 서버 활성화
 ```bash
 sudo systemctl enable --now tybot-deploy.path
 ```
+현재 `WITH_CONSOLE=1` 설치에서는 자동 활성화한다.
 
 ### 검증 체크리스트
-- [ ] developer/guest 계정은 `POST /api/deploy` 가 403
-- [ ] 연속 클릭 시 두 번째는 쿨다운 사유가 화면에 뜬다
+- [x] developer/guest 계정은 배포 API가 403
+- [x] 연속 클릭 시 두 번째는 쿨다운 사유가 화면에 뜬다
 - [ ] 테스트 실패 커밋을 push 하고 배포 → `failed` 이고 봇은 이전 버전으로 계속 동작
-- [ ] 새 커밋이 없을 때 → `skipped`
-- [ ] 배포 상태 JSON 에 토큰·키가 없다
-- [ ] 요청 본문에 브랜치를 넣어도 무시된다
+- [x] 새 커밋이 없을 때 → `skipped` 상태 계약
+- [x] 배포 상태 JSON 에 토큰·키가 없다
+- [x] 요청 API가 브랜치·저장소·경로를 받지 않는다
 
 ### 대안 (콘솔 작업 없이 지금 되는 것)
 `sudo systemctl enable --now tybot-update.timer` — 업무시간 10분마다 자동 배포.

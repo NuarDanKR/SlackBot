@@ -25,6 +25,7 @@ from .heartbeat import state_dir
 # 연속 클릭으로 배포가 겹치지 않게 한다. 실제 직렬화는 러너의 flock 이 담당하고,
 # 이 값은 사용자에게 즉시 거절 이유를 알려주기 위한 것이다.
 COOLDOWN_SEC = 60
+CONSOLE_STATES = frozenset({"idle", "queued", "running", "ok", "failed", "skipped"})
 
 
 def request_path() -> Path:
@@ -62,6 +63,30 @@ def _read(path: Path) -> dict | None:
 def read_status() -> dict | None:
     """마지막 배포 상태. 콘솔이 화면에 그대로 보여줄 수 있는 형태."""
     return _read(status_path())
+
+
+def console_status() -> dict:
+    """콘솔용 배포 상태. 내부 파일 경로는 노출하지 않는다."""
+    status = read_status() or {}
+    pending = request_path().exists()
+    request = _read(request_path()) if pending else None
+    state = str(status.get("state") or "idle")
+    if pending and state != "running":
+        state = "queued"
+    if state not in CONSOLE_STATES:
+        state = "failed"
+    queued = state == "queued"
+    return {
+        "state": state,
+        "pending": pending,
+        "actor": str((request or {}).get("actor") or status.get("actor") or ""),
+        "before": "" if queued else str(status.get("before") or ""),
+        "after": "" if queued else str(status.get("after") or ""),
+        "message": "배포 요청을 처리 대기 중입니다." if queued else str(status.get("message") or ""),
+        "requestedAt": (request or {}).get("requested_at"),
+        "startedAt": None if queued else status.get("started_at"),
+        "finishedAt": None if queued else status.get("finished_at"),
+    }
 
 
 def is_running() -> bool:

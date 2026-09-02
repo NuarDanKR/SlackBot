@@ -574,6 +574,25 @@ def test_admin_can_enable_timer_with_csrf_and_audit(client, monkeypatch):
     assert called["result"] == "applied"
 
 
+def test_deployment_management_is_admin_only(client):
+    assert client.get("/api/deployment", headers=owner(client)).status_code == 200
+    assert client.get("/api/deployment", headers=member(client)).status_code == 403
+    assert client.get("/api/deployment", headers=guest(client)).status_code == 403
+
+
+def test_admin_can_request_deployment_with_csrf(client):
+    headers = owner(client)
+    assert client.put("/api/deployment/request", json={}, headers=headers).status_code == 403
+
+    response = client.put(
+        "/api/deployment/request", json={}, headers=_write_headers(headers)
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "queued"
+    assert response.json()["actor"] == "dan@taeyoung.com"
+
+
 # --- 환경변수 설정 ---------------------------------------------------------
 
 def _write_headers(headers: dict) -> dict:
