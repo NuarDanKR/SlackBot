@@ -21,6 +21,16 @@ import pytest
 pytest.importorskip("fastapi", reason="콘솔 의존성 미설치")
 
 ROOT = Path(__file__).resolve().parent.parent
+
+def _developer():
+    """매니페스트 조회는 개발자·관리자만 볼 수 있다(스코프 구성이 드러난다).
+
+    빈 `object()` 를 넘기면 권한 속성이 하나 늘 때마다 이 파일이 깨진다.
+    실제 사용자 타입을 쓰면 권한 규칙이 바뀌어도 그대로 따라간다.
+    """
+    from tybot.console.auth import DEVELOPER, ConsoleUser
+
+    return ConsoleUser(email="dev@taeyoung.com", name="개발자", role=DEVELOPER)
 REPO_MANIFEST = ROOT / "docs" / "pilot" / "slack-app-manifest.yaml"
 CONSOLE_SRC = ROOT / "console-web" / "src"
 
@@ -54,7 +64,7 @@ def test_endpoint_returns_content_and_checksum(monkeypatch, tmp_path):
     f.write_text(body, encoding="utf-8")
     monkeypatch.setenv("MANIFEST_PATH", str(f))
 
-    out = manifest(user=object())
+    out = manifest(user=_developer())
     assert out["content"] == body
     assert out["sha256"] == hashlib.sha256(body.encode()).hexdigest()[:12]
     assert out["updated_at"]
@@ -68,7 +78,7 @@ def test_missing_file_is_reported_not_silently_empty(monkeypatch, tmp_path):
 
     monkeypatch.setenv("MANIFEST_PATH", str(tmp_path / "없는파일.yaml"))
     with pytest.raises(HTTPException) as e:
-        manifest(user=object())
+        manifest(user=_developer())
     assert e.value.status_code == 503
 
 

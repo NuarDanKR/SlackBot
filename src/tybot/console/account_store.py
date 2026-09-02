@@ -22,7 +22,7 @@ def _connect():
         import psycopg
 
         return psycopg.connect(url, row_factory=psycopg.rows.dict_row)
-    except Exception as e:  # noqa: BLE001 - DB 오류는 API용 저장소 오류로 통일한다.
+    except Exception as e:
         raise AccountStoreError(f"콘솔 사용자 DB 연결 실패: {e}") from e
 
 
@@ -45,7 +45,7 @@ def list_users() -> list[dict]:
             return [dict(row) for row in cur.fetchall()]
     except AccountStoreError:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise AccountStoreError(f"콘솔 사용자 조회 실패: {e}") from e
 
 
@@ -122,5 +122,5 @@ def save_user(
                     )
     except AccountStoreError:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise AccountStoreError(f"콘솔 사용자 저장 실패: {e}") from e

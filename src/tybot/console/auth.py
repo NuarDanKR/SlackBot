@@ -189,7 +189,7 @@ def load_accounts() -> list[Account]:
                 """
             )
             rows = cur.fetchall()
-    except Exception as e:  # noqa: BLE001 - 인증 DB 장애는 콘솔 기동 차단 오류로 통일한다.
+    except Exception as e:
         raise AuthConfigurationError(f"콘솔 계정 DB 조회 실패: {e}") from e
     return [
         account(
