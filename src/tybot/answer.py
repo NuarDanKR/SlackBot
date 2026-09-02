@@ -9,8 +9,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import documents
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
+from .attachment_review import find_approved
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -166,6 +168,46 @@ def parse_model_flag(text: str) -> tuple[str | None, str]:
     if not m:
         return None, text.strip()
     return m.group(1), (text[: m.start()] + text[m.end() :]).strip()
+
+
+# 원문 줄에 남는 첨부 표시: `[첨부:검수대기] 보고서.pdf (pdf, 240KB)`
+ATTACHMENT_RE = re.compile(r"^\[첨부:[^\]]*\]\s*(?P<name>.+?)\s*\([^)]*\)\s*$")
+
+
+def _attachment_names(hits: list[SearchHit]) -> list[tuple[str, str, str]]:
+    """검색에 걸린 줄에서 (워크스페이스, 채널ID, 파일명)을 뽑는다.
+
+    답변 근거로 이미 고른 문서의 첨부만 대상이다 - 검색과 무관한 파일을 원본으로
+    올려보내지 않는다.
+    """
+    out: list[tuple[str, str, str]] = []
+    for h in hits:
+        m = ATTACHMENT_RE.match((h.line.text or "").strip())
+        if not m:
+            continue
+        channel_id = h.doc.channel_id or ""
+        if not channel_id:
+            continue
+        key = (h.doc.workspace, channel_id, m.group("name"))
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def _originals(store: ArchiveStore, hits: list[SearchHit]) -> documents.Attached:
+    """검색에 걸린 첨부 중 **승인된** 원본만 모은다.
+
+    승인 게이트가 유일한 안전장치다: 수집 단계 PII 거절은 텍스트 기반이라 스캔본에
+    작동하지 않는다. 사람이 한 번 본 것만 벤더로 나간다.
+    """
+    approved = []
+    for workspace, channel_id, name in _attachment_names(hits):
+        item = find_approved(
+            store.root, workspace=workspace, channel_id=channel_id, name=name
+        )
+        if item is not None:
+            approved.append(item)
+    return documents.collect(approved)
 
 
 def _evidence_block(hits: list[SearchHit]) -> str:
@@ -458,9 +500,19 @@ class AnswerEngine:
                 "no_hits",
             )
 
+        # 스캔 PDF·이미지는 우리 전처리로 읽히지 않는다. 승인된 원본이 있으면 그대로
+        # 함께 보내 모델이 직접 읽게 한다. 전처리를 대체하는 게 아니라 - 어느 파일을
+        # 볼지는 위 검색이 이미 골랐다 - 그 파일의 원본을 덧붙이는 것이다.
+        attached = _originals(self._store, hits)
+        prompt = f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"
+        user_content = (
+            [*attached.blocks, {"type": "text", "text": prompt}]
+            if attached.any
+            else prompt
+        )
         messages = [
             Message("system", SYSTEM_PROMPT),
-            Message("user", f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"),
+            Message("user", user_content),
         ]
         try:
             resp = self._router.complete(
@@ -485,7 +537,14 @@ class AnswerEngine:
             q,
             citations,
         )
+        # API 가 붙인 구조화된 인용(페이지 포함). 모델이 쓴 문장이 아니라서
+        # 우리가 지어낸 출처가 아니라는 점이 중요하다.
+        citations += documents.citation_lines(getattr(resp.raw, "content", None))
+        body = resp.text.strip()
+        note = attached.note()
+        if note:
+            body = f"{body}\n\n{note}"
         return Answer(
-            resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits),
+            body, citations, resp.model, resp.cost_usd, len(hits),
             "answered", terms=list(terms or []),
         )
