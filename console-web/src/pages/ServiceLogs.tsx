@@ -29,7 +29,7 @@ export function ServiceLogs() {
       <PageHead
         crumb="봇 관리 · 운영"
         title="서비스 로그"
-        note="TYBot 서비스의 최근 로그를 레벨별로 조회합니다. 시크릿 패턴은 서버에서 마스킹됩니다."
+        note="TYBot 서비스의 최근 로그를 레벨별로 조회합니다. 오류는 traceback 전체를 함께 표시하고, 시크릿 패턴은 서버에서 마스킹합니다."
         aside={
           <button className="btn btn-sm" type="button" onClick={resource.reload}>
             새로고침

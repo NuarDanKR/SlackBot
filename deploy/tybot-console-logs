@@ -15,7 +15,36 @@ esac
 [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'invalid limit' >&2; exit 2; }
 ((LIMIT >= 1 && LIMIT <= 500)) || { echo 'invalid limit' >&2; exit 2; }
 
-# 필터 뒤에도 요청 개수가 남도록 최근 로그를 넉넉히 읽는다.
+# Python logging의 traceback은 첫 줄에만 ERROR가 있고 나머지는 별도 journal 줄이다.
+# 선택한 로그부터 다음 구조화 로그 직전까지를 한 레코드로 묶어야 스택 전체가 보인다.
+# 레코드 구분자는 ASCII RS(0x1e)이며 API가 이를 다시 JSON 항목으로 나눈다.
 /usr/bin/journalctl -u tybot.service -n 5000 --no-pager -o cat \
-  | { /usr/bin/grep -F "$PATTERN" || true; } \
-  | /usr/bin/tail -n "$LIMIT"
+  | /usr/bin/awk -v pattern="$PATTERN" -v limit="$LIMIT" '
+function is_log_start(line) {
+  return line ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9],[0-9][0-9][0-9] / \
+    && line ~ / (INFO|WARNING|ERROR) /
+}
+function save_block(  slot) {
+  if (!keep || block == "") return
+  slot = (saved % limit) + 1
+  blocks[slot] = block
+  saved++
+}
+{
+  if (is_log_start($0)) {
+    save_block()
+    keep = index($0, pattern) > 0
+    block = keep ? $0 : ""
+  } else if (keep) {
+    block = block "\n" $0
+  }
+}
+END {
+  save_block()
+  count = saved < limit ? saved : limit
+  first = saved > limit ? (saved % limit) + 1 : 1
+  for (i = 0; i < count; i++) {
+    slot = ((first - 1 + i) % limit) + 1
+    printf "%s\n%c\n", blocks[slot], 30
+  }
+}'

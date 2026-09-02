@@ -11,6 +11,7 @@ import subprocess
 
 LEVELS = ("info", "warning", "error")
 MAX_LIMIT = 500
+RECORD_SEPARATOR = "\x1e"
 _SECRET_PATTERNS = (
     re.compile(r"\b(xox[baprs]-)[A-Za-z0-9-]+"),
     re.compile(r"\b(sk-ant-[A-Za-z0-9_-]+)"),
@@ -51,8 +52,14 @@ def read(*, level: str, limit: int) -> list[dict[str, str]]:
     if result.returncode != 0:
         detail = (result.stderr or "권한 또는 journal 설정을 확인하세요.").strip()
         raise ServiceLogError(f"서비스 로그 조회 실패: {detail}")
+    # 새 헬퍼는 traceback을 포함한 로그 블록 사이에 ASCII RS를 넣는다. 배포 중
+    # 구 헬퍼와 잠시 조합되더라도 한 줄 로그 조회는 계속 동작하도록 fallback을 둔다.
+    if RECORD_SEPARATOR in result.stdout:
+        messages = result.stdout.split(RECORD_SEPARATOR)
+    else:
+        messages = result.stdout.splitlines()
     return [
-        {"level": level, "message": _redact(line.strip())}
-        for line in result.stdout.splitlines()
-        if line.strip()
+        {"level": level, "message": _redact(message.strip())}
+        for message in messages
+        if message.strip()
     ]

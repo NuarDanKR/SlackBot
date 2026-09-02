@@ -176,6 +176,25 @@ SECTION_TIP = (
 
 BLANK = chr(10) * 2  # 문단 구분
 
+# 처리한 메시지를 기억하는 개수. Slack 재전송은 몇 초 안에 오므로 이 정도면 넉넉하다.
+SEEN_EVENTS = 500
+
+
+def _slack_error(e: Exception) -> str:
+    """Slack API 가 돌려준 오류 코드만 뽑는다.
+
+    `SlackApiError` 는 문자열로 만들면 URL 과 응답 전문이 딸려 와 로그 한 줄이
+    지저분해진다. 정작 필요한 건 `restricted_action_read_only_channel` 같은
+    코드 하나다.
+    """
+    response = getattr(e, "response", None)
+    if response is None:
+        return "-"
+    try:
+        return str(response.get("error") or "-")
+    except (AttributeError, TypeError):
+        return "-"
+
 
 def _clean(text: str) -> str:
     return MENTION_RE.sub("", text or "").strip()
@@ -330,7 +349,7 @@ class WorkspaceBot:
         try:
             r = sweep(self.app.client)
         except Exception as e:
-            log.error("[%s] 자동 참여 스윕 실패: %s", self.workspace, e)
+            log.exception("[%s] 자동 참여 스윕 실패: %s", self.workspace, e)
             return
         log.info("[%s] %s", self.workspace, r.summary())
 
@@ -1262,17 +1281,55 @@ class WorkspaceBot:
             user_id,
         )
 
+    def _already_handled(self, event) -> bool:
+        """같은 메시지를 두 번 처리하지 않는다.
+
+        **Slack 은 3초 안에 응답이 없으면 같은 이벤트를 다시 보낸다.** 우리 처리에는
+        LLM 호출이 들어가 그보다 오래 걸리는 일이 흔하다. 그러면 한 번의 질문이
+        네 번 처리되어 **비용이 네 배 나가고, 답도 네 번 달린다.**
+        실제로 그렇게 돌던 기록이 있다(2026-09-02, 재시도마다 LLM 재호출).
+
+        메시지 `ts` 는 채널 안에서 유일하고 재전송에도 같은 값이 온다. 그것으로 거른다.
+        """
+        key = f"{event.get('channel') or ''}:{event.get('ts') or ''}"
+        if key == ":":
+            return False
+        seen = getattr(self, "_seen_events", None)
+        if seen is None:
+            seen = self._seen_events = {}
+            self._seen_lock = threading.Lock()
+        with self._seen_lock:
+            if key in seen:
+                return True
+            seen[key] = None
+            # 메모리를 무한정 쓰지 않는다. 재전송은 몇 초 안에 오므로 이 정도면 충분하다.
+            while len(seen) > SEEN_EVENTS:
+                seen.pop(next(iter(seen)))
+        return False
+
     def _handle(self, event, client, say, *, in_channel: bool) -> None:
         """요청 처리 진입점. 어떤 예외가 나도 **사람에게 무슨 일인지 알린다.**
 
         예전에는 예외가 여기서 조용히 사라져 👀 만 붙고 답이 없었다. 사용자는 봇이
         무시했다고 생각하고, 원인은 서버 로그를 보는 사람만 알 수 있었다.
         """
+        if self._already_handled(event):
+            log.info(
+                "[%s] 재전송 무시 ch=%s ts=%s",
+                self.workspace, event.get("channel"), event.get("ts"),
+            )
+            return
+
         started = time.monotonic()
         try:
             self._handle_request(event, client, say, in_channel=in_channel)
         except Exception as e:
-            log.exception("요청 처리 실패 ws=%s ch=%s", self.workspace, event.get("channel"))
+            # Slack 이 거부한 이유를 첫 줄에 남긴다. 트레이스백 30줄을 읽어야
+            # 'restricted_action_read_only_channel' 을 찾는 상황을 만들지 않는다.
+            log.exception(
+                "요청 처리 실패 ws=%s ch=%s slack_error=%s",
+                self.workspace, event.get("channel"), _slack_error(e),
+            )
             reply = failure_message(e)
             response_ts = ""
             with contextlib.suppress(Exception):
@@ -1448,7 +1505,7 @@ class WorkspaceBot:
                 acl=[channel],
             )
         except Exception as e:
-            log.error("실시간 수집 실패 ch=%s: %s", channel, e)
+            log.exception("실시간 수집 실패 ch=%s: %s", channel, e)
             return
         if r.written:
             self._ingested += r.written

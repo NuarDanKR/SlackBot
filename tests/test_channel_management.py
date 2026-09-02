@@ -263,3 +263,50 @@ def test_section_tip_does_not_promise_the_bot_will_do_it():
 
     for lie in ("섹션을 만들었", "섹션에 넣었", "자동으로 묶"):
         assert lie not in SECTION_TIP
+
+
+# --- Slack 재전송 --------------------------------------------------------------
+# Slack 은 3초 안에 응답이 없으면 같은 이벤트를 다시 보낸다. 우리 처리에는 LLM 호출이
+# 들어가 그보다 오래 걸리는 일이 흔하다. 2026-09-02 에 실제로 한 질문이 네 번 처리되어
+# 비용이 네 배 나갔다.
+def test_resent_message_is_not_processed_twice(tmp_path):
+    bot = _bot(tmp_path)
+    event = {"channel": "D1", "ts": "100.1"}
+
+    assert bot._already_handled(event) is False
+    assert bot._already_handled(dict(event)) is True, "재전송을 걸러야 한다"
+
+
+def test_different_messages_are_not_confused(tmp_path):
+    bot = _bot(tmp_path)
+    assert bot._already_handled({"channel": "D1", "ts": "100.1"}) is False
+    assert bot._already_handled({"channel": "D1", "ts": "100.2"}) is False
+    assert bot._already_handled({"channel": "D2", "ts": "100.1"}) is False
+
+
+def test_memory_does_not_grow_without_bound(tmp_path):
+    from tybot.slack.pilot import SEEN_EVENTS
+
+    bot = _bot(tmp_path)
+    for i in range(SEEN_EVENTS + 50):
+        bot._already_handled({"channel": "C1", "ts": f"{i}.0"})
+    assert len(bot._seen_events) <= SEEN_EVENTS + 1
+
+
+def test_events_without_ts_are_never_dropped(tmp_path):
+    """키를 만들 수 없으면 거르지 않는다. 못 거르는 것보다 답이 없는 게 나쁘다."""
+    bot = _bot(tmp_path)
+    assert bot._already_handled({}) is False
+    assert bot._already_handled({}) is False
+
+
+def test_slack_error_code_is_extracted_for_the_log():
+    """트레이스백 30줄을 읽어야 원인을 아는 상황을 만들지 않는다."""
+    from tybot.slack.pilot import _slack_error
+
+    class ApiError(Exception):
+        def __init__(self) -> None:
+            self.response = {"ok": False, "error": "restricted_action_read_only_channel"}
+
+    assert _slack_error(ApiError()) == "restricted_action_read_only_channel"
+    assert _slack_error(ValueError("boom")) == "-"
