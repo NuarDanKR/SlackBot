@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -40,12 +41,28 @@ from .auth import (
 logger = logging.getLogger("tybot.console.api")
 KST = timezone(timedelta(hours=9))
 
+
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """뜨기 전에 계정 저장소를 확인한다.
+
+    DB 계정이 없거나 DB 가 끊겼으면 **시작하지 않는다.** 그대로 뜨면 로그인 화면은
+    나오는데 아무도 못 들어가는 상태가 되고, 원인은 요청이 올 때까지 드러나지 않는다.
+
+    `@app.on_event("startup")` 대신 이걸 쓴다 — 그쪽은 FastAPI 가 폐기 예고한
+    방식이라 배포할 때마다 경고가 찍힌다. 로그가 지저분하면 사람이 로그를 안 본다.
+    """
+    authenticator()
+    yield
+
+
 app = FastAPI(
     title="TYBot 관리 콘솔 API",
     version="0.1.0",
     # 개발·운영 점검용 문서 페이지. 외부 노출 경로를 정할 때 접근 제한도 함께 검토한다.
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
 _auth: Authenticator | None = None
@@ -72,12 +89,6 @@ def reset_state() -> None:
     global _auth, _store
     _auth = None
     _store = None
-
-
-@app.on_event("startup")
-def require_console_account() -> None:
-    """DB 계정이 없거나 DB가 끊겼으면 안전하지 않은 콘솔을 시작하지 않는다."""
-    authenticator()
 
 
 def current_user(
