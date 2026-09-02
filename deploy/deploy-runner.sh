@@ -10,7 +10,10 @@ set -euo pipefail
 
 APP=/opt/tybot
 STATE=${STATE_DIR:-/var/lib/tybot}
-SRC=${TYBOT_SRC:-/tmp/tybot-src}
+# /tmp 에 두지 않는다. systemd-tmpfiles 가 오래된 파일을 지우고(체크아웃이 사라진다),
+# SELinux 가 /tmp 를 user_tmp_t 로 라벨해 서비스가 읽지 못하는 일이 생긴다.
+# 2026-09-02 콘솔 배포가 rsync Permission denied 로 실패한 것이 그 경우다.
+SRC=${TYBOT_SRC:-/var/lib/tybot/src}
 BRANCH=${TYBOT_BRANCH:-master}          # 고정. 콘솔이 바꿀 수 없다.
 PY="$APP/.venv/bin/python"
 LOCK="$STATE/.locks/deploy.lock"

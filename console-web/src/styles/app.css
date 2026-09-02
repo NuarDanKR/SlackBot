@@ -2091,3 +2091,26 @@
 .batch-meta dd.mono {
   font-size: 12px;
 }
+
+.deploy-commit-title {
+  margin-top: 4px;
+  max-width: 36ch;
+  overflow-wrap: anywhere;
+}
+.deploy-failure {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--danger);
+  background: var(--danger-soft);
+}
+.deploy-failure pre {
+  margin: 8px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -5,7 +5,7 @@
 # then the old directory is renamed to a timestamped backup.
 set -Eeuo pipefail
 
-REPO="/tmp/tybot-src"
+REPO="/var/lib/tybot/src"
 BRANCH=""
 ASSUME_YES=0
 
@@ -15,7 +15,7 @@ Usage:
   sudo bash scripts/recover_git_checkout.sh [options]
 
 Options:
-  --repo PATH       Corrupted checkout (default: /tmp/tybot-src)
+  --repo PATH       Corrupted checkout (default: /var/lib/tybot/src)
   --branch NAME     Branch to clone (default: current checkout branch)
   --yes             Do not ask for confirmation
   -h, --help        Show this help
@@ -69,7 +69,7 @@ BASENAME=$(basename -- "$REPO")
 
 # A typo must never rename a filesystem root or the entire temporary directory.
 case "$REPO" in
-    /|/tmp|/var|/opt|/home)
+    /|/tmp|/var|/opt|/home|/var/lib|/var/lib/tybot)
         die "refusing unsafe repository path: $REPO"
         ;;
 esac

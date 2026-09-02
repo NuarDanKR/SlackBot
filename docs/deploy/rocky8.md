@@ -60,7 +60,8 @@ git push -u origin master
 ```bash
 # 서버에서
 sudo dnf install -y git
-sudo git clone <저장소 URL> /tmp/tybot-src
+sudo install -d -o root -g root -m 755 /var/lib/tybot
+sudo git clone <저장소 URL> /var/lib/tybot/src
 ```
 > `.env` 와 `archive/` 는 `.gitignore` 로 빠진다 — **시크릿과 원문은 저장소에 안 올라간다.**
 
@@ -76,7 +77,7 @@ scp tybot.tar.gz <계정>@<서버>:/tmp/
 ```
 ```bash
 # 서버에서
-mkdir -p /tmp/tybot-src && tar -xzf /tmp/tybot.tar.gz -C /tmp/tybot-src
+sudo mkdir -p /var/lib/tybot/src && sudo tar -xzf /tmp/tybot.tar.gz -C /var/lib/tybot/src
 ```
 
 ### 인터넷 없는 서버라면 (추가 단계)
@@ -88,10 +89,23 @@ bash deploy/wheelhouse.sh          # → wheels/ 생성
 
 ---
 
+> **소스 클론은 `/var/lib/tybot/src` 에 둔다. `/tmp` 를 쓰지 않는다.**
+> `systemd-tmpfiles` 가 오래된 `/tmp` 파일을 지워 체크아웃이 사라지고,
+> SELinux 가 `/tmp` 를 `user_tmp_t` 로 라벨해 서비스가 읽지 못하는 일이 생긴다.
+> 2026-09-02 에 콘솔 배포가 `rsync ... Permission denied` 로 실패한 것이 그 경우다.
+>
+> 이미 `/tmp/tybot-src` 를 쓰고 있으면 한 번만 옮긴다:
+> ```bash
+> sudo systemctl stop tybot-deploy.path
+> sudo mv /tmp/tybot-src /var/lib/tybot/src
+> sudo restorecon -Rv /var/lib/tybot/src     # SELinux 라벨 정정
+> sudo systemctl start tybot-deploy.path
+> ```
+
 ## 2. 설치 (한 줄)
 
 ```bash
-cd /tmp/tybot-src
+cd /var/lib/tybot/src
 sudo bash deploy/install.sh                      # 봇만
 sudo WITH_CONSOLE=1 bash deploy/install.sh       # 봇 + 관리 콘솔
 # 또는
@@ -593,7 +607,7 @@ journalctl -u tybot-collect -n 40
 ## 9. 업데이트
 
 ```bash
-cd /tmp/tybot-src && sudo git pull      # 또는 새 tar 를 풀고
+cd /var/lib/tybot/src && sudo git pull      # 또는 새 tar 를 풀고
 sudo bash deploy/install.sh
 sudo systemctl restart tybot
 journalctl -u tybot -n 30

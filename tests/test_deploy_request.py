@@ -135,7 +135,15 @@ def test_console_status_reports_queued_request_without_internal_path(monkeypatch
 
 
 def test_console_status_reports_completed_deployment():
-    dr.write_status("ok", actor="dan@taeyoung.com", before="abc", after="def")
+    running = dr.write_status("running", actor="dan@taeyoung.com", before="abc")
+    dr.write_status(
+        "ok",
+        actor="dan@taeyoung.com",
+        before="abc",
+        after="def",
+        before_title="이전 커밋",
+        after_title="새 커밋",
+    )
 
     status = dr.console_status()
 
@@ -143,3 +151,21 @@ def test_console_status_reports_completed_deployment():
     assert status["pending"] is False
     assert status["before"] == "abc"
     assert status["after"] == "def"
+    assert status["beforeTitle"] == "이전 커밋"
+    assert status["afterTitle"] == "새 커밋"
+    assert status["startedAt"] == running["started_at"]
+
+
+def test_deploy_failure_detail_is_limited_and_redacted():
+    # 토큰 모양을 소스에 그대로 적지 않고 이어 붙인다. 커밋 가드가 시크릿 패턴을
+    # 줄 단위로 훑기 때문에, 가짜 값이라도 그대로 두면 커밋이 막힌다.
+    fake_slack = "xoxb-" + "secretvalue123"
+    detail = "\n".join(["ordinary"] * 40 + ["password=secret", fake_slack])
+
+    dr.write_status("failed", detail=detail)
+    status = dr.console_status()
+
+    assert "password=***" in status["detail"]
+    assert "xoxb-***" in status["detail"]
+    assert "secretvalue123" not in status["detail"]
+    assert len(status["detail"].splitlines()) <= dr.MAX_DETAIL_LINES

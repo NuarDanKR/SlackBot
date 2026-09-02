@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,6 +27,16 @@ from .heartbeat import state_dir
 # 이 값은 사용자에게 즉시 거절 이유를 알려주기 위한 것이다.
 COOLDOWN_SEC = 60
 CONSOLE_STATES = frozenset({"idle", "queued", "running", "ok", "failed", "skipped"})
+MAX_DETAIL_LINES = 30
+MAX_DETAIL_CHARS = 8_000
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_SECRET_PATTERNS = (
+    (re.compile(r"\b(xox[baprs]-)[A-Za-z0-9-]+"), r"\1***"),
+    (re.compile(r"\b(sk-ant-[A-Za-z0-9_-]+)"), "***"),
+    (re.compile(r"\b(ghp_[A-Za-z0-9]+)"), "***"),
+    (re.compile(r"\b(postgresql(?:\+\w+)?://[^\s]+)", re.IGNORECASE), "***"),
+    (re.compile(r"\b(password=)[^\s]+", re.IGNORECASE), r"\1***"),
+)
 
 
 def request_path() -> Path:
@@ -65,6 +76,15 @@ def read_status() -> dict | None:
     return _read(status_path())
 
 
+def sanitize_deploy_detail(text: str) -> str:
+    """배포 출력의 마지막 부분만 남기고 콘솔에 노출하면 안 되는 값을 지운다."""
+    cleaned = _ANSI_RE.sub("", text.replace("\x00", ""))
+    for pattern, replacement in _SECRET_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    lines = [line[:500] for line in cleaned.splitlines() if line.strip()]
+    return "\n".join(lines[-MAX_DETAIL_LINES:])[-MAX_DETAIL_CHARS:]
+
+
 def console_status() -> dict:
     """콘솔용 배포 상태. 내부 파일 경로는 노출하지 않는다."""
     status = read_status() or {}
@@ -82,7 +102,10 @@ def console_status() -> dict:
         "actor": str((request or {}).get("actor") or status.get("actor") or ""),
         "before": "" if queued else str(status.get("before") or ""),
         "after": "" if queued else str(status.get("after") or ""),
+        "beforeTitle": "" if queued else str(status.get("before_title") or ""),
+        "afterTitle": "" if queued else str(status.get("after_title") or ""),
         "message": "배포 요청을 처리 대기 중입니다." if queued else str(status.get("message") or ""),
+        "detail": "" if queued else str(status.get("detail") or ""),
         "requestedAt": (request or {}).get("requested_at"),
         "startedAt": None if queued else status.get("started_at"),
         "finishedAt": None if queued else status.get("finished_at"),
@@ -149,16 +172,24 @@ def write_status(
     actor: str = "",
     before: str = "",
     after: str = "",
+    before_title: str = "",
+    after_title: str = "",
     message: str = "",
+    detail: str = "",
     started_at: str | None = None,
 ) -> dict:
     """배포 진행 상태를 남긴다. 콘솔이 읽으므로 0644 로 둔다(시크릿 없음)."""
+    if started_at is None and state != "running":
+        started_at = str((read_status() or {}).get("started_at") or "") or None
     payload = {
         "state": state,  # running | ok | failed | skipped
         "actor": actor,
         "before": before,
         "after": after,
+        "before_title": before_title,
+        "after_title": after_title,
         "message": message,
+        "detail": sanitize_deploy_detail(detail),
         "started_at": started_at or _now().isoformat(timespec="seconds"),
     }
     if state != "running":

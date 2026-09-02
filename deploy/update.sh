@@ -5,7 +5,9 @@
 #   systemd timer 로 주기 실행 (tybot-update.timer)
 set -euo pipefail
 
-SRC=${TYBOT_SRC:-/tmp/tybot-src}
+# 소스 클론 위치. /tmp 는 쓰지 않는다 — tmpfiles 청소와 SELinux 라벨 때문에
+# 배포가 조용히 깨진다(deploy-runner.sh 주석 참고).
+SRC=${TYBOT_SRC:-/var/lib/tybot/src}
 APP=/opt/tybot
 BRANCH=${TYBOT_BRANCH:-master}
 

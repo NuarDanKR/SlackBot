@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
-import { Chip, Failed, Loading, PageHead, Section } from '../components/primitives'
+import { Chip, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
 type DeployState = 'idle' | 'queued' | 'running' | 'ok' | 'failed' | 'skipped'
 
@@ -11,7 +11,10 @@ interface DeploymentStatus {
   actor: string
   before: string
   after: string
+  beforeTitle: string
+  afterTitle: string
   message: string
+  detail: string
   requestedAt: string | null
   startedAt: string | null
   finishedAt: string | null
@@ -121,15 +124,24 @@ export function Deploy({ onToast }: { onToast: (message: string) => void }) {
             <div>
               <div className="metric-label">배포 전 커밋</div>
               <div className="mono">{status.before || '-'}</div>
+              {status.beforeTitle && <div className="hint deploy-commit-title">{status.beforeTitle}</div>}
             </div>
             <div>
-              <div className="metric-label">배포 후 커밋</div>
+              <div className="metric-label">배포 대상 커밋</div>
               <div className="mono">{status.after || '-'}</div>
+              {status.afterTitle && <div className="hint deploy-commit-title">{status.afterTitle}</div>}
             </div>
           </div>
+          {status.state === 'failed' && status.detail && (
+            <div className="deploy-failure">
+              <div className="metric-label">실패 사유</div>
+              <pre>{status.detail}</pre>
+            </div>
+          )}
           <div className="hint" style={{ marginTop: 16 }}>
-            요청 {status.requestedAt ?? '-'} · 시작 {status.startedAt ?? '-'} · 완료{' '}
-            {status.finishedAt ?? '-'}
+            요청 {status.requestedAt ? fmt.dayClock(status.requestedAt) : '-'} · 시작{' '}
+            {status.startedAt ? fmt.dayClock(status.startedAt) : '-'} · 완료{' '}
+            {status.finishedAt ? fmt.dayClock(status.finishedAt) : '-'}
           </div>
         </div>
       </Section>
