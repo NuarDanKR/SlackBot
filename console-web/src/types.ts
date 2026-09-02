@@ -81,6 +81,8 @@ export interface WorkspaceSpend {
 /** 최근 호출 — 질문 본문은 담지 않는다. */
 export interface CallRow {
   at: string
+  /** 같은 시각대의 서비스 로그를 찾기 위한 전체 타임스탬프. */
+  logAt: string
   workspace: string
   intent: string
   source: 'llm' | 'regex' | 'cmd'

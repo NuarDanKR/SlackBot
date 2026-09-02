@@ -11,6 +11,7 @@ import { HealthCheck } from './pages/HealthCheck'
 import { EnvSettings } from './pages/EnvSettings'
 import { ConsoleUsers } from './pages/ConsoleUsers'
 import { ServiceLogs } from './pages/ServiceLogs'
+import type { ErrorLogContext } from './pages/ServiceLogs'
 import { BatchTimers } from './pages/BatchTimers'
 import { Deploy } from './pages/Deploy'
 import type { ConsoleRole } from './types'
@@ -170,6 +171,7 @@ export default function App() {
   const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([])
   const { theme, setTheme } = useTheme()
   const [authTick, setAuthTick] = useState(0)
+  const [errorLogContext, setErrorLogContext] = useState<ErrorLogContext | null>(null)
 
   const me = useResource<Me>('/api/me', [authTick])
 
@@ -233,7 +235,10 @@ export default function App() {
                 <button
                   key={t.id}
                   className={`nav-item ${activeTab === t.id ? 'is-active' : ''}`}
-                  onClick={() => setTab(t.id)}
+                  onClick={() => {
+                    if (t.id === 'logs') setErrorLogContext(null)
+                    setTab(t.id)
+                  }}
                   aria-current={activeTab === t.id ? 'page' : undefined}
                 >
                   <span>{t.label}</span>
@@ -281,9 +286,17 @@ export default function App() {
         <div className="main-inner">
           {activeTab === 'status' && <Dashboard />}
           {activeTab === 'collected' && <Collected user={user} onToast={toast} />}
-          {activeTab === 'usage' && <Usage />}
+          {activeTab === 'usage' && (
+            <Usage
+              canViewLogs={rank[user.role] >= rank.developer}
+              onOpenErrorLogs={(context) => {
+                setErrorLogContext(context)
+                setTab('logs')
+              }}
+            />
+          )}
           {activeTab === 'health' && <HealthCheck user={user} />}
-          {activeTab === 'logs' && <ServiceLogs />}
+          {activeTab === 'logs' && <ServiceLogs context={errorLogContext} />}
           {activeTab === 'timers' && <BatchTimers onToast={toast} />}
           {activeTab === 'deploy' && <Deploy onToast={toast} />}
           {activeTab === 'harness' && <Harness />}

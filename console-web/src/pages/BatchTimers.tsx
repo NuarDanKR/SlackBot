@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
-import { Chip, Failed, Loading, PageHead, Section } from '../components/primitives'
+import { Chip, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
 interface TimerPreset {
   value: string
@@ -94,7 +94,7 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
   return (
     <>
       <PageHead
-        crumb="봇 관리 · 운영"
+        crumb="운영 관리"
         title="배치 관리"
         note="TYBot의 정기 작업을 확인하고 관리합니다. 변경과 즉시 실행은 관리자 감사 기록에 남습니다."
         aside={
@@ -141,20 +141,24 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
                 </div>
                 <p className="hint">{timer.description}</p>
 
-                <div className="metric-row" style={{ marginTop: 16 }}>
+                <dl className="batch-meta">
                   <div>
-                    <div className="metric-label">실행 주기</div>
-                    <div className="metric-value" style={{ fontSize: 15 }}>{timer.scheduleLabel}</div>
+                    <dt>실행 주기</dt>
+                    <dd>{timer.scheduleLabel}</dd>
                   </div>
                   <div>
-                    <div className="metric-label">다음 실행</div>
-                    <div className="mono" style={{ fontSize: 12 }}>{timer.nextRun ?? '예약 없음'}</div>
+                    <dt>다음 실행</dt>
+                    <dd className="mono">
+                      {timer.nextRun ? fmt.systemdTime(timer.nextRun) : '예약 없음'}
+                    </dd>
                   </div>
                   <div>
-                    <div className="metric-label">마지막 실행</div>
-                    <div className="mono" style={{ fontSize: 12 }}>{timer.lastRun ?? '기록 없음'}</div>
+                    <dt>마지막 실행</dt>
+                    <dd className="mono">
+                      {timer.lastRun ? fmt.systemdTime(timer.lastRun) : '기록 없음'}
+                    </dd>
                   </div>
-                </div>
+                </dl>
 
                 {timer.scheduleEditable && (
                   <div className="form-row" style={{ marginTop: 18 }}>

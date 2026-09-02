@@ -100,6 +100,8 @@ export const fmt = {
   clock: (iso: string) => iso.slice(11, 16),
   dayClock: (iso: string) => `${iso.slice(5, 10).replace('-', '.')} ${iso.slice(11, 16)}`,
   day: (iso: string) => iso.slice(0, 10).replace(/-/g, '.'),
+  systemdTime: (value: string) =>
+    value.replace(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+/, ''),
 }
 
 /** 화면 기준 시각. 목데이터라 고정값입니다 — 배선할 때 서버 시각으로 바꿉니다. */

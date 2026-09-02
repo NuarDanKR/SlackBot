@@ -2,7 +2,18 @@ import { useResource } from '../api/hooks'
 import type { UsageSnapshot } from '../types'
 import { Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
-export function Usage() {
+interface ErrorLogContext {
+  at: string
+  workspace: string
+}
+
+export function Usage({
+  canViewLogs,
+  onOpenErrorLogs,
+}: {
+  canViewLogs: boolean
+  onOpenErrorLogs: (context: ErrorLogContext) => void
+}) {
   const res = useResource<UsageSnapshot>('/api/usage')
   if (res.loading) return <Loading what="사용량을" />
   if (res.error || !res.data)
@@ -247,21 +258,38 @@ export function Usage() {
                 </tr>
               </thead>
               <tbody>
-                {recent.map((r, i) => (
-                  <tr key={i}>
-                    <td className="mono">{r.at}</td>
-                    <td>{r.workspace}</td>
-                    <td className="mono">
-                      {r.intent}
-                      <span style={{ color: 'var(--text-3)' }}>/{r.source}</span>
-                    </td>
-                    <td className="mono">{r.reason}</td>
-                    <td className="num">{r.hits || '—'}</td>
-                    <td className="mono">{r.model}</td>
-                    <td className="num">{r.costUsd ? fmt.usd(r.costUsd) : '—'}</td>
-                    <td className="num">{fmt.ms(r.ms)}</td>
-                  </tr>
-                ))}
+                {recent.map((r, i) => {
+                  const failed = r.intent === 'error' || r.reason === 'error'
+                  return (
+                    <tr key={i} className={failed ? 'is-error-row' : undefined}>
+                      <td className="mono">{r.at}</td>
+                      <td>{r.workspace}</td>
+                      <td className="mono">
+                        {r.intent}
+                        <span style={{ color: 'var(--text-3)' }}>/{r.source}</span>
+                      </td>
+                      <td>
+                        {failed && canViewLogs ? (
+                          <button
+                            className="table-link"
+                            type="button"
+                            onClick={() =>
+                              onOpenErrorLogs({ at: r.logAt, workspace: r.workspace })
+                            }
+                          >
+                            ERROR 로그 보기
+                          </button>
+                        ) : (
+                          <span className="mono">{r.reason}</span>
+                        )}
+                      </td>
+                      <td className="num">{r.hits || '—'}</td>
+                      <td className="mono">{r.model}</td>
+                      <td className="num">{r.costUsd ? fmt.usd(r.costUsd) : '—'}</td>
+                      <td className="num">{fmt.ms(r.ms)}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>

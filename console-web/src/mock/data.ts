@@ -218,14 +218,14 @@ export const usage: UsageSnapshot = {
     { key: 'safety', label: '안전관리팀', calls: 0, costUsd: 0, limitUsd: 2 },
   ],
   recent: [
-    { at: '14:28', workspace: 'mgmt', intent: 'summary', source: 'llm', reason: 'answered', hits: 62, model: 'claude-sonnet-5', costUsd: 0.041, ms: 4120 },
-    { at: '14:24', workspace: 'fin', intent: 'search', source: 'llm', reason: 'no_hits', hits: 0, model: '-', costUsd: 0.0003, ms: 640 },
-    { at: '14:19', workspace: 'mgmt', intent: 'advice', source: 'llm', reason: 'advice', hits: 12, model: 'claude-sonnet-5', costUsd: 0.028, ms: 3380 },
-    { at: '14:11', workspace: 'pilot', intent: 'status', source: 'regex', reason: 'status', hits: 0, model: '-', costUsd: 0, ms: 88 },
-    { at: '14:02', workspace: 'fin', intent: 'search', source: 'llm', reason: 'answered', hits: 8, model: 'claude-sonnet-5', costUsd: 0.019, ms: 2740 },
-    { at: '13:51', workspace: 'mgmt', intent: 'ingest', source: 'cmd', reason: 'ingest', hits: 0, model: '-', costUsd: 0, ms: 9210 },
-    { at: '13:44', workspace: 'pilot', intent: 'out_of_scope', source: 'llm', reason: 'out_of_scope', hits: 0, model: '-', costUsd: 0.0003, ms: 520 },
-    { at: '13:36', workspace: 'fin', intent: 'summary', source: 'llm', reason: 'answered', hits: 48, model: 'claude-opus-4-8', costUsd: 0.214, ms: 7860 },
+    { at: '14:28', logAt: '2026-08-21T14:28:00+09:00', workspace: 'mgmt', intent: 'summary', source: 'llm', reason: 'answered', hits: 62, model: 'claude-sonnet-5', costUsd: 0.041, ms: 4120 },
+    { at: '14:24', logAt: '2026-08-21T14:24:00+09:00', workspace: 'fin', intent: 'search', source: 'llm', reason: 'no_hits', hits: 0, model: '-', costUsd: 0.0003, ms: 640 },
+    { at: '14:19', logAt: '2026-08-21T14:19:00+09:00', workspace: 'mgmt', intent: 'advice', source: 'llm', reason: 'advice', hits: 12, model: 'claude-sonnet-5', costUsd: 0.028, ms: 3380 },
+    { at: '14:11', logAt: '2026-08-21T14:11:00+09:00', workspace: 'pilot', intent: 'status', source: 'regex', reason: 'status', hits: 0, model: '-', costUsd: 0, ms: 88 },
+    { at: '14:02', logAt: '2026-08-21T14:02:00+09:00', workspace: 'fin', intent: 'search', source: 'llm', reason: 'answered', hits: 8, model: 'claude-sonnet-5', costUsd: 0.019, ms: 2740 },
+    { at: '13:51', logAt: '2026-08-21T13:51:00+09:00', workspace: 'mgmt', intent: 'ingest', source: 'cmd', reason: 'ingest', hits: 0, model: '-', costUsd: 0, ms: 9210 },
+    { at: '13:44', logAt: '2026-08-21T13:44:00+09:00', workspace: 'pilot', intent: 'out_of_scope', source: 'llm', reason: 'out_of_scope', hits: 0, model: '-', costUsd: 0.0003, ms: 520 },
+    { at: '13:36', logAt: '2026-08-21T13:36:00+09:00', workspace: 'fin', intent: 'summary', source: 'llm', reason: 'answered', hits: 48, model: 'claude-opus-4-8', costUsd: 0.214, ms: 7860 },
   ],
 }
 

@@ -379,6 +379,14 @@ def test_usage_never_returns_question_text(client):
     assert "김수현" not in body
 
 
+def test_usage_recent_includes_timestamp_for_error_log_lookup(client):
+    recent = client.get("/api/usage", headers=owner(client)).json()["recent"]
+
+    assert recent
+    for row in recent:
+        assert datetime.fromisoformat(row["logAt"]).tzinfo is not None
+
+
 def test_usage_is_scoped_for_member(client):
     u = client.get("/api/usage", headers=member(client)).json()
     assert {w["key"] for w in u["byWorkspace"]} == {"fin"}

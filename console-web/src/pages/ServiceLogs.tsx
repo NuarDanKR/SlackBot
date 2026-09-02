@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useResource } from '../api/hooks'
-import { Failed, Loading, PageHead, Section } from '../components/primitives'
+import { Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
 type Level = 'info' | 'warning' | 'error'
 
@@ -11,7 +11,12 @@ interface LogResponse {
 
 const LABEL: Record<Level, string> = { info: 'INFO', warning: 'WARNING', error: 'ERROR' }
 
-export function ServiceLogs() {
+export interface ErrorLogContext {
+  at: string
+  workspace: string
+}
+
+export function ServiceLogs({ context }: { context?: ErrorLogContext | null }) {
   const [level, setLevel] = useState<Level>('error')
   const [limit, setLimit] = useState(200)
   const resource = useResource<LogResponse>(`/api/service-logs?level=${level}&limit=${limit}`, [
@@ -27,7 +32,7 @@ export function ServiceLogs() {
   return (
     <>
       <PageHead
-        crumb="봇 관리 · 운영"
+        crumb="운영 관리"
         title="서비스 로그"
         note="TYBot 서비스의 최근 로그를 레벨별로 조회합니다. 오류는 traceback 전체를 함께 표시하고, 시크릿 패턴은 서버에서 마스킹합니다."
         aside={
@@ -36,6 +41,20 @@ export function ServiceLogs() {
           </button>
         }
       />
+      {context && (
+        <div className="notice watch">
+          <div className="notice-kind">질문 오류</div>
+          <div>
+            <div className="notice-title">
+              {context.workspace} 워크스페이스 · {fmt.dayClock(context.at)} 질문 기록에서
+              이동했습니다
+            </div>
+            <div className="notice-detail">
+              아래 ERROR 로그에서 같은 시각대의 traceback을 확인하세요.
+            </div>
+          </div>
+        </div>
+      )}
       <Section
         title="최근 기록"
         note={`${resource.data?.entries.length ?? 0}건`}

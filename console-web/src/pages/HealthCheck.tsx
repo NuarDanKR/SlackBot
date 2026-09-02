@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useResource } from '../api/hooks'
 import type { ConsoleUser, HealthReport, HealthLevel } from '../types'
 import { Chip, Failed, Loading, Metric, PageHead, Section } from '../components/primitives'
@@ -24,6 +25,16 @@ const LEVEL_TONE: Record<HealthLevel, 'ok' | 'watch' | 'bad' | 'plain'> = {
   unknown: 'plain',
 }
 
+type HealthTab = 'bot' | 'archive' | 'answers' | 'commands' | 'feedback'
+
+const HEALTH_TABS: { id: HealthTab; label: string }[] = [
+  { id: 'bot', label: '봇 연결' },
+  { id: 'archive', label: '아카이브' },
+  { id: 'answers', label: '답변 품질' },
+  { id: 'commands', label: '슬래시 명령' },
+  { id: 'feedback', label: '피드백' },
+]
+
 function levelChip(level: HealthLevel) {
   return <Chip tone={LEVEL_TONE[level]}>{LEVEL_LABEL[level]}</Chip>
 }
@@ -45,6 +56,7 @@ function Problems({ items }: { items: string[] }) {
 }
 
 export function HealthCheck({ user }: { user: ConsoleUser }) {
+  const [tab, setTab] = useState<HealthTab>('bot')
   // 서버가 이미 권한 범위로 좁혀서 내려 줍니다. 화면에서 다시 거르지 않습니다.
   const res = useResource<HealthReport>('/api/health-report')
 
@@ -58,7 +70,7 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
   return (
     <>
       <PageHead
-        crumb="봇 관리"
+        crumb="운영 관리"
         title="헬스 체크"
         note={
           `최근 ${r.days}일 기준입니다. ` +
@@ -83,11 +95,28 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
         </Section>
       )}
 
-      <Section
-        title="봇 연결"
-        aside={levelChip(bot.level)}
-        lead="Slack 에 붙어 있는지, 원문을 저장할 수 있는지, 초대되지 않아 수집에서 빠진 채널이 있는지 봅니다."
-      >
+      <div className="subtabs" role="tablist" aria-label="헬스 체크 항목">
+        {HEALTH_TABS.map((item) => (
+          <button
+            className={`subtab ${tab === item.id ? 'is-active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={tab === item.id}
+            key={item.id}
+            onClick={() => setTab(item.id)}
+          >
+            {item.label}
+            {levelChip(r.sections[item.id].level)}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'bot' && (
+        <Section
+          title="봇 연결"
+          aside={levelChip(bot.level)}
+          lead="Slack 에 붙어 있는지, 원문을 저장할 수 있는지, 초대되지 않아 수집에서 빠진 채널이 있는지 봅니다."
+        >
         <div className="table-wrap">
           <table className="table">
             <thead>
@@ -115,26 +144,30 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
             </tbody>
           </table>
         </div>
-      </Section>
+        </Section>
+      )}
 
-      <Section
-        title="아카이브"
-        aside={levelChip(archive.level)}
-        lead="스키마가 깨진 문서는 검색에서 조용히 빠집니다. 답이 '없다' 로 바뀌는 흔한 원인입니다."
-      >
+      {tab === 'archive' && (
+        <Section
+          title="아카이브"
+          aside={levelChip(archive.level)}
+          lead="스키마가 깨진 문서는 검색에서 조용히 빠집니다. 답이 '없다' 로 바뀌는 흔한 원인입니다."
+        >
         <div className="metrics">
           <Metric k="수집 문서" v={archive.documents.toLocaleString()} unit="건" />
           <Metric k="깨진 문서" v={archive.brokenDocuments.toLocaleString()} unit="건" />
           <Metric k="수집 밀린 워크스페이스" v={archive.staleWorkspaces.toLocaleString()} unit="개" />
         </div>
         <Problems items={archive.problems} />
-      </Section>
+        </Section>
+      )}
 
-      <Section
-        title="답변 품질"
-        aside={levelChip(answers.level)}
-        lead="근거를 찾아 답했는지를 봅니다. 답이 나가는 것과 쓸모 있는 것은 다릅니다."
-      >
+      {tab === 'answers' && (
+        <Section
+          title="답변 품질"
+          aside={levelChip(answers.level)}
+          lead="근거를 찾아 답했는지를 봅니다. 답이 나가는 것과 쓸모 있는 것은 다릅니다."
+        >
         <div className="metrics">
           <Metric k="질문" v={answers.questions.toLocaleString()} unit="건" />
           <Metric k="근거 찾음" v={pct(answers.groundedRate)} />
@@ -163,16 +196,18 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
             </table>
           </div>
         )}
-      </Section>
+        </Section>
+      )}
 
-      <Section
-        title="슬래시 명령"
-        aside={levelChip(commands.level)}
-        lead={
-          '코드와 매니페스트가 어긋나면 오류가 나지 않습니다. ' +
-          '매니페스트에 없으면 Slack 이 명령을 모르고, 코드에 없으면 봇이 응답하지 않습니다.'
-        }
-      >
+      {tab === 'commands' && (
+        <Section
+          title="슬래시 명령"
+          aside={levelChip(commands.level)}
+          lead={
+            '코드와 매니페스트가 어긋나면 오류가 나지 않습니다. ' +
+            '매니페스트에 없으면 Slack 이 명령을 모르고, 코드에 없으면 봇이 응답하지 않습니다.'
+          }
+        >
         <div className="table-wrap">
           <table className="table">
             <thead>
@@ -199,9 +234,12 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
           </table>
         </div>
         <Problems items={commands.problems} />
-      </Section>
+        </Section>
+      )}
 
-      <Section
+      {tab === 'feedback' && (
+        <>
+          <Section
         title="답변 만족도"
         aside={levelChip(feedback.level)}
         lead="👍 / 👎 반응과 /피드백 명령을 합쳐 셉니다. 눌렀다 취소한 것은 빼고 셉니다."
@@ -215,9 +253,9 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
         </div>
         {feedback.note && <p className="section-lead">{feedback.note}</p>}
         <Problems items={feedback.problems} />
-      </Section>
+          </Section>
 
-      <Section
+          <Section
         title="기여도"
         lead={
           '정정 사항을 적어 보낸 순입니다. ' +
@@ -251,7 +289,9 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
         ) : (
           <p className="section-lead">아직 접수된 피드백이 없습니다.</p>
         )}
-      </Section>
+          </Section>
+        </>
+      )}
 
       <p className="page-note">
         점검 시각 {new Date(r.checkedAt).toLocaleString('ko-KR')}

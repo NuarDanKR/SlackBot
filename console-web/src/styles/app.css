@@ -723,6 +723,21 @@
 .table-scroll {
   overflow-x: auto;
 }
+.table tr.is-error-row td {
+  background: color-mix(in srgb, var(--danger) 4%, transparent);
+}
+.table-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--danger);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.table-link:hover {
+  text-decoration: underline;
+}
 .bar-cell {
   display: flex;
   align-items: center;
@@ -2010,4 +2025,69 @@
 }
 .health-problems li::marker {
   color: var(--warn);
+}
+
+.subtabs {
+  display: flex;
+  gap: 0;
+  margin: 28px 0 6px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line-2);
+}
+.subtab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.subtab:hover {
+  color: var(--text);
+  background: var(--sunk);
+}
+.subtab.is-active {
+  border-bottom-color: var(--brand);
+  color: var(--brand);
+}
+.subtab .chip {
+  font-size: 10.5px;
+}
+
+.batch-meta {
+  display: grid;
+  gap: 0;
+  margin: 16px 0 0;
+  border-top: 1px solid var(--line);
+}
+.batch-meta > div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.batch-meta dt {
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 700;
+}
+.batch-meta dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.batch-meta dd.mono {
+  font-size: 12px;
 }

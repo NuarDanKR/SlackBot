@@ -349,6 +349,7 @@ def usage_snapshot(allowed: frozenset[str] | set[str] | None = None) -> dict:
         "recent": [
             {
                 "at": str(r.get("ts", ""))[11:16],
+                "logAt": str(r.get("ts", "")),
                 "workspace": r.get("workspace", ""),
                 "intent": r.get("intent_kind", ""),
                 "source": r.get("intent_source", "llm"),
