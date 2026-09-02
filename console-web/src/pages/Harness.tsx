@@ -183,7 +183,7 @@ export function Harness({
 
   // 승인 요청은 아직 서버 API 가 없습니다(BACKLOG B-11).
   const requests = harnessRequests.filter(
-    (r) => user.role === 'owner' || user.workspaces.includes(r.workspace),
+    (r) => user.role === 'admin' || user.workspaces.includes(r.workspace),
   )
 
   const byWorkspace = files.reduce<Record<string, HarnessFile[]>>((acc, f) => {
@@ -250,7 +250,7 @@ export function Harness({
         title="승인 대기 중인 수정안"
         aside={<MockBadge />}
         lead={
-          user.role === 'owner'
+          user.role === 'admin'
             ? '규칙 문서는 봇의 답변을 직접 바꿉니다. 반영 전에 무엇이 어떻게 달라지는지 확인해 주세요.'
             : '올린 수정안이 관리자 확인을 기다리는 중입니다.'
         }

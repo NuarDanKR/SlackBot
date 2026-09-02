@@ -9,7 +9,7 @@
 - 응답에 담지 않는 것: 사용자 질문·답변 본문, 시크릿 원문.
 - 아카이브 원문 본문은 **관리자에게만**, 그리고 **열람 기록을 남기며** 내려보낸다.
 
-환경설정 쓰기는 owner 전용 허용 목록만 제공한다. 원문·시크릿·임의 파일 편집 경로는 없다.
+환경설정 쓰기는 admin 전용 허용 목록만 제공한다. 원문·시크릿·임의 파일 편집 경로는 없다.
 """
 from __future__ import annotations
 
@@ -19,15 +19,23 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..archive.store import ArchiveStore
-from . import env_settings, health, reader
-from .auth import SESSION_COOKIE, SESSION_HOURS, Authenticator, AuthError, ConsoleUser
+from . import account_store, env_settings, health, reader, service_logs
+from .auth import (
+    ROLES,
+    SESSION_COOKIE,
+    SESSION_HOURS,
+    AuthConfigurationError,
+    Authenticator,
+    AuthError,
+    ConsoleUser,
+)
 
 logger = logging.getLogger("tybot.console.api")
 KST = timezone(timedelta(hours=9))
@@ -66,6 +74,12 @@ def reset_state() -> None:
     _store = None
 
 
+@app.on_event("startup")
+def require_console_account() -> None:
+    """DB 계정이 없거나 DB가 끊겼으면 안전하지 않은 콘솔을 시작하지 않는다."""
+    authenticator()
+
+
 def current_user(
     # Depends 로 받아야 테스트에서 `dependency_overrides` 로 갈아끼울 수 있다.
     # 함수 안에서 authenticator() 를 직접 부르면 오버라이드가 무시된다.
@@ -80,7 +94,7 @@ def current_user(
 
 
 class LoginBody(BaseModel):
-    username: str
+    email: str
     password: str
 
 
@@ -98,22 +112,31 @@ class EnvSettingsBody(BaseModel):
     replyInThread: bool
 
 
+class ConsoleAccountBody(BaseModel):
+    email: str
+    name: str
+    role: Literal["guest", "developer", "admin"]
+    active: bool = True
+    workspaces: list[str] = Field(default_factory=list)
+    password: str | None = None
+
+
 @app.post("/api/login")
 def login(
     body: LoginBody,
     response: Response,
     auth: Annotated[Authenticator, Depends(authenticator)],
 ) -> dict:
-    """아이디·비밀번호로 로그인하고 세션 쿠키를 받는다.
+    """회사 이메일·비밀번호로 로그인하고 세션 쿠키를 받는다.
 
     쿠키를 쓰는 이유: 화면이 토큰을 들고 있으면 localStorage 에 남고, 화면 스크립트가
     읽을 수 있는 값이 된다. HttpOnly 쿠키는 스크립트가 읽지 못한다.
     `SameSite=strict` 로 두어 다른 사이트에서 이 콘솔로 요청을 보낼 수 없게 한다.
     """
     try:
-        session = auth.login(body.username, body.password)
+        session = auth.login(body.email, body.password)
     except AuthError as e:
-        logger.warning("로그인 실패 — 아이디 %r", body.username)
+        logger.warning("로그인 실패 — 이메일 %r", body.email)
         raise HTTPException(status_code=401, detail=str(e)) from e
 
     response.set_cookie(
@@ -127,10 +150,10 @@ def login(
         secure=os.getenv("CONSOLE_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes"),
         path="/",
     )
-    user = auth.by_username(body.username)
+    user = auth.account_by_email(body.email)
     assert user is not None  # login() 이 성공했으면 반드시 있다
-    logger.info("로그인 — %s (%s)", body.username, user.user.email)
-    return _me(user.user, auth)
+    logger.info("로그인 — %s", user.user.email)
+    return _me(user.user)
 
 
 @app.post("/api/logout")
@@ -153,21 +176,19 @@ def _visible(user: ConsoleUser, rows: list[dict], key: str = "workspace") -> lis
 # 읽기 엔드포인트
 # ---------------------------------------------------------------------------
 
-def _me(user: ConsoleUser, auth: Authenticator) -> dict:
+def _me(user: ConsoleUser) -> dict:
     return {
         "name": user.display(),
         "email": user.email,
         "role": user.role,
         "workspaces": sorted(user.workspaces),
         "allWorkspaces": user.all_workspaces,
-        # 임시 계정으로 열려 있으면 화면에도 경고를 띄운다.
-        "usingDefaultAccount": auth.using_default,
     }
 
 
 @app.get("/api/me")
-def me(user: User, auth: Annotated[Authenticator, Depends(authenticator)]) -> dict:
-    return _me(user, auth)
+def me(user: User) -> dict:
+    return _me(user)
 
 
 @app.get("/api/status")
@@ -203,7 +224,7 @@ def collected_content(
     관리자에게만 내려보내고, **열람 사실을 기록으로 남긴다.** 이 문서들은 Slack 채널
     구성원만 볼 수 있던 대화라, 콘솔에서 조용히 열리는 경로를 만들면 채널 권한이 무의미해진다.
     """
-    if not user.is_owner:
+    if not user.is_admin:
         raise HTTPException(
             status_code=403,
             detail="대화 원문은 관리자만 열 수 있습니다. 내용 확인이 필요하면 해당 Slack 채널에서 확인해 주세요.",
@@ -220,7 +241,7 @@ def collected_content(
 @app.get("/api/collected/audit")
 def collected_audit(user: User) -> dict:
     """원문 열람 기록. 관리자만 본다."""
-    if not user.is_owner:
+    if not user.is_admin:
         raise HTTPException(status_code=403, detail="관리자만 볼 수 있습니다.")
     return {"entries": read_audit_entries()}
 
@@ -228,21 +249,22 @@ def collected_audit(user: User) -> dict:
 @app.get("/api/harness")
 def harness(user: User) -> dict:
     """봇 규칙 문서 목록과 내용."""
+    _require_developer(user)
     return {"files": _visible(user, reader.harness_files())}
 
 
-def _require_owner(user: ConsoleUser) -> None:
-    if not user.is_owner:
+def _require_admin(user: ConsoleUser) -> None:
+    if not user.is_admin:
         raise HTTPException(status_code=403, detail="관리자만 환경변수 설정을 볼 수 있습니다.")
 
 
-def _check_write_request(request: Request, auth: Authenticator) -> None:
-    """쿠키 인증 쓰기 요청의 CSRF와 임시 관리자 계정 사용을 차단한다."""
-    if auth.using_default:
-        raise HTTPException(
-            status_code=403,
-            detail="임시 admin/1111 계정에서는 환경설정을 변경할 수 없습니다. CONSOLE_ACCOUNTS를 먼저 설정하세요.",
-        )
+def _require_developer(user: ConsoleUser) -> None:
+    if not user.may_manage_bot:
+        raise HTTPException(status_code=403, detail="개발자 또는 관리자 권한이 필요합니다.")
+
+
+def _check_write_request(request: Request) -> None:
+    """쿠키 인증 쓰기 요청의 CSRF를 검사한다."""
     if request.headers.get("x-tybot-csrf") != "1":
         raise HTTPException(status_code=403, detail="CSRF 확인 헤더가 없습니다.")
 
@@ -259,7 +281,7 @@ def _check_write_request(request: Request, auth: Authenticator) -> None:
 
 @app.get("/api/env-settings")
 def get_env_settings(user: User) -> dict:
-    _require_owner(user)
+    _require_admin(user)
     return env_settings.snapshot()
 
 
@@ -268,10 +290,9 @@ def put_env_settings(
     body: EnvSettingsBody,
     request: Request,
     user: User,
-    auth: Annotated[Authenticator, Depends(authenticator)],
 ) -> dict:
-    _require_owner(user)
-    _check_write_request(request, auth)
+    _require_admin(user)
+    _check_write_request(request)
     try:
         result, changed = env_settings.save(body.model_dump(), actor=user.display())
     except ValueError as e:
@@ -288,6 +309,58 @@ def put_env_settings(
     return {**result, "changed": changed}
 
 
+# ---------------------------------------------------------------------------
+# 콘솔 사용자 관리 — admin 전용
+# ---------------------------------------------------------------------------
+
+@app.get("/api/console-users")
+def console_users(user: User) -> dict:
+    _require_admin(user)
+    try:
+        rows = account_store.list_users()
+    except account_store.AccountStoreError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {"users": rows, "roles": list(ROLES)}
+
+
+@app.put("/api/console-users")
+def put_console_user(
+    body: ConsoleAccountBody,
+    request: Request,
+    user: User,
+    auth: Annotated[Authenticator, Depends(authenticator)],
+) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+    try:
+        account_store.save_user(
+            actor_email=user.email,
+            email=body.email,
+            name=body.name,
+            role=body.role,
+            active=body.active,
+            workspaces=body.workspaces,
+            password=body.password,
+        )
+        auth.reload()
+    except account_store.AccountStoreError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except AuthConfigurationError as e:
+        logger.error("콘솔 사용자 저장 후 인증 계정 재조회 실패: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="계정은 저장됐지만 현재 프로세스에 다시 읽지 못했습니다. 콘솔을 재시작해 주세요.",
+        ) from e
+    logger.warning(
+        "콘솔 사용자 변경 — actor=%s target=%s role=%s active=%s",
+        user.email,
+        body.email.strip().lower(),
+        body.role,
+        body.active,
+    )
+    return {"ok": True}
+
+
 @app.get("/api/health-report")
 def health_report(user: User) -> dict:
     """헬스 체크 — 봇이 "돌고는 있는데 제 일을 못 하는" 상태를 드러낸다.
@@ -296,10 +369,25 @@ def health_report(user: User) -> dict:
     이쪽은 수집·답변 품질·명령 정합·피드백까지 본다. 담당자에게는 자기 워크스페이스
     몫만 보인다 — 범위는 `health.report` 안에서 거른다(합계가 섞이지 않게).
     """
+    _require_developer(user)
     return health.report(
         allowed=None if user.all_workspaces else user.workspaces,
         store=store(),
     )
+
+
+@app.get("/api/service-logs")
+def service_log_entries(
+    user: User,
+    level: Annotated[str, Query(pattern="^(info|warning|error)$")] = "info",
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> dict:
+    _require_developer(user)
+    try:
+        entries = service_logs.read(level=level, limit=limit)
+    except service_logs.ServiceLogError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {"level": level.lower(), "entries": entries}
 
 
 @app.get("/api/health")
@@ -327,6 +415,7 @@ def manifest(user: User) -> dict:
 
     내용에 시크릿은 없다(설치 템플릿). 그래도 스코프 구성이 드러나므로 로그인은 요구한다.
     """
+    _require_developer(user)
     path = manifest_path()
     try:
         content = path.read_text(encoding="utf-8")

@@ -76,13 +76,32 @@ COMMENT ON TABLE workspace_secret IS
 CREATE TABLE IF NOT EXISTS console_user (
     email       text PRIMARY KEY,
     name        text NOT NULL,
-    -- owner 만 승인할 수 있다. member 는 요청만 올린다.
-    role        text NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'member')),
+    password_hash text NOT NULL,
+    -- admin만 승인한다. developer는 변경 요청, guest는 데이터 조회만 한다.
+    role        text NOT NULL DEFAULT 'guest'
+                CHECK (role IN ('guest', 'developer', 'admin')),
+    active      boolean NOT NULL DEFAULT true,
     created_at  timestamptz NOT NULL DEFAULT now(),
     last_seen   timestamptz
 );
 
--- member 가 다룰 수 있는 워크스페이스. owner 는 이 표와 무관하게 전체를 본다.
+-- 초기 스키마로 이미 만든 운영 DB도 이 파일을 다시 적용하면 업그레이드된다.
+-- 기존 행은 비밀번호를 설정하기 전까지 로그인 대상에서 제외한다.
+ALTER TABLE console_user ADD COLUMN IF NOT EXISTS password_hash text;
+ALTER TABLE console_user ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+
+-- owner/member로 운영한 초기 버전을 3단계 역할로 올린다.
+ALTER TABLE console_user DROP CONSTRAINT IF EXISTS console_user_role_check;
+UPDATE console_user SET role = 'admin' WHERE role = 'owner';
+UPDATE console_user SET role = 'developer' WHERE role = 'member';
+ALTER TABLE console_user ALTER COLUMN role SET DEFAULT 'guest';
+ALTER TABLE console_user ADD CONSTRAINT console_user_role_check
+    CHECK (role IN ('guest', 'developer', 'admin'));
+
+COMMENT ON COLUMN console_user.password_hash IS
+    'scrypt$salt$digest 형식. 평문 비밀번호 저장 금지.';
+
+-- guest/developer가 접근할 수 있는 워크스페이스. admin은 이 표와 무관하게 전체를 본다.
 CREATE TABLE IF NOT EXISTS console_user_workspace (
     email      text NOT NULL REFERENCES console_user(email) ON DELETE CASCADE,
     workspace  text NOT NULL REFERENCES workspace(key) ON DELETE CASCADE,

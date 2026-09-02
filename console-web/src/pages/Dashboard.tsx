@@ -34,7 +34,7 @@ export function Dashboard({
   const list = res.data?.workspaces ?? []
   // 이상 감지는 아직 서버 API 가 없습니다(BACKLOG B-13).
   const open = anomalies.filter(
-    (a) => a.state === 'open' && (user.role === 'owner' || user.workspaces.includes(a.workspace)),
+    (a) => a.state === 'open' && (user.role === 'admin' || user.workspaces.includes(a.workspace)),
   )
   const totalLines = list.reduce((a, w) => a + w.rawLines, 0)
   const totalDocs = list.reduce((a, w) => a + w.docs, 0)

@@ -1,7 +1,7 @@
 /** 배포 승인 — 이 콘솔에서 유일하게 서버를 바꾸는 화면입니다.
  *
  * 실행할 수 있는 동작은 반영 / 재기동 / 되돌리기 셋뿐입니다. 명령을 직접 입력하는 칸은
- * 두지 않습니다. 승인 권한은 관리자 한 사람에게만 있습니다.
+ * 두지 않습니다. 승인 권한은 관리자에게만 있습니다.
  */
 import { useState } from 'react'
 import { deployHistory, deployRequests } from '../mock/data'
@@ -100,7 +100,7 @@ export function Deploy({
   onToast: (m: string) => void
 }) {
   const visible = deployRequests.filter(
-    (r) => user.role === 'owner' || user.workspaces.includes(r.workspace),
+    (r) => user.role === 'admin' || user.workspaces.includes(r.workspace),
   )
 
   return (
@@ -109,7 +109,7 @@ export function Deploy({
         crumb="관리 · 배포 승인"
         title="배포 승인"
         note={
-          user.role === 'owner'
+          user.role === 'admin'
             ? '워크스페이스 담당자가 봇을 수정해 올리면 이 화면에 요청으로 쌓입니다. 자동 검사를 모두 통과한 요청만 승인 버튼이 열리고, 승인하면 서버에서 코드 받기·재기동·정상 확인까지 자동으로 진행됩니다. 서버에 직접 접속하거나 명령어를 입력할 필요는 없습니다.'
             : '수정한 봇을 올리면 이 화면에 요청으로 남습니다. 자동 검사를 통과한 뒤 관리자가 확인하면 반영되고, 결과는 Slack 으로 알려 드립니다. 반영 전까지 봇은 지금 상태로 계속 동작합니다.'
         }
@@ -117,7 +117,7 @@ export function Deploy({
           <>
             <MockBadge />
             <span className="chip flat">
-              {user.role === 'owner' ? '승인 권한 있음' : '요청만 가능'}
+              {user.role === 'admin' ? '승인 권한 있음' : '요청만 가능'}
             </span>
           </>
         }
@@ -127,7 +127,7 @@ export function Deploy({
         title="승인 대기 중인 요청"
         note={`${visible.length}건`}
         lead={
-          user.role === 'owner'
+          user.role === 'admin'
             ? '검사 항목은 테스트, 코드 형식, 아카이브 문서 형식, 시크릿 유출 네 가지입니다. 하나라도 실패하면 승인할 수 없습니다.'
             : undefined
         }

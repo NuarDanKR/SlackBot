@@ -1101,6 +1101,41 @@
   white-space: pre;
 }
 
+.service-log {
+  max-height: 620px;
+  overflow: auto;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.service-log-line {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.service-log-line:last-child {
+  border-bottom: 0;
+}
+.service-log-line > span {
+  font-weight: 700;
+  color: var(--text-3);
+}
+.service-log-line.warning > span {
+  color: var(--warn);
+}
+.service-log-line.error > span {
+  color: var(--danger);
+}
+.service-log-line code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 840px) {
   .env-toggle-grid {
     grid-template-columns: 1fr;

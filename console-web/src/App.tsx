@@ -11,6 +11,9 @@ import { Harness } from './pages/Harness'
 import { Collected } from './pages/Collected'
 import { HealthCheck } from './pages/HealthCheck'
 import { EnvSettings } from './pages/EnvSettings'
+import { ConsoleUsers } from './pages/ConsoleUsers'
+import { ServiceLogs } from './pages/ServiceLogs'
+import type { ConsoleRole } from './types'
 
 type Tab =
   | 'status'
@@ -21,9 +24,11 @@ type Tab =
   | 'deploy'
   | 'workspaces'
   | 'env'
+  | 'users'
+  | 'logs'
 
 /** 메뉴 이름은 화면 제목과 똑같이 씁니다 — 어디에 있는지 헷갈리지 않게 합니다. */
-const NAV: { group: string; items: { id: Tab; label: string; ownerOnly?: boolean }[] }[] = [
+const NAV: { group: string; items: { id: Tab; label: string; minimum?: ConsoleRole }[] }[] = [
   {
     group: '데이터',
     items: [
@@ -35,11 +40,13 @@ const NAV: { group: string; items: { id: Tab; label: string; ownerOnly?: boolean
   {
     group: '봇 관리',
     items: [
-      { id: 'health', label: '헬스 체크' },
-      { id: 'harness', label: '봇 규칙 편집' },
-      { id: 'deploy', label: '배포 승인' },
-      { id: 'workspaces', label: '워크스페이스 관리', ownerOnly: true },
-      { id: 'env', label: '환경변수 설정', ownerOnly: true },
+      { id: 'health', label: '헬스 체크', minimum: 'developer' },
+      { id: 'logs', label: '서비스 로그', minimum: 'developer' },
+      { id: 'harness', label: '봇 규칙 편집', minimum: 'developer' },
+      { id: 'deploy', label: '배포 승인', minimum: 'developer' },
+      { id: 'workspaces', label: '워크스페이스 관리', minimum: 'admin' },
+      { id: 'env', label: '환경변수 설정', minimum: 'admin' },
+      { id: 'users', label: '콘솔 사용자 관리', minimum: 'admin' },
     ],
   },
 ]
@@ -64,20 +71,20 @@ function toUser(me: Me): ConsoleUser {
   return { name: me.name, email: me.email, role: me.role, workspaces: me.workspaces }
 }
 
-/** 로그인 화면. 아이디·비밀번호를 받아 세션 쿠키를 발급받습니다. */
+/** 로그인 화면. 회사 이메일·비밀번호를 받아 세션 쿠키를 발급받습니다. */
 function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
-  const [username, setUsername] = useState('')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
-    if (!username.trim() || !password) return
+    if (!email.trim() || !password) return
     setBusy(true)
     setError(null)
     try {
-      await apiLogin(username.trim(), password)
+      await apiLogin(email.trim(), password)
       onSignedIn()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err))
@@ -105,16 +112,18 @@ function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 
         <form onSubmit={submit}>
           <div className="field">
-            <label className="field-label" htmlFor="username">
-              아이디
+            <label className="field-label" htmlFor="email">
+              회사 이메일
             </label>
             <input
-              id="username"
+              id="email"
               className="input"
+              type="email"
               autoComplete="username"
+              inputMode="email"
               autoFocus
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
             />
           </div>
           <div className="field" style={{ marginTop: 14 }}>
@@ -187,14 +196,15 @@ export default function App() {
   }
 
   const user = toUser(me.data)
-  const isOwner = user.role === 'owner'
+  const rank: Record<ConsoleRole, number> = { guest: 0, developer: 1, admin: 2 }
 
   const visibleNav = NAV.map((g) => ({
     ...g,
-    items: g.items.filter((i) => !i.ownerOnly || isOwner),
+    items: g.items.filter((i) => rank[user.role] >= rank[i.minimum ?? 'guest']),
   })).filter((g) => g.items.length)
 
-  const activeTab: Tab = !isOwner && (tab === 'workspaces' || tab === 'env') ? 'status' : tab
+  const allowedTabs = new Set(visibleNav.flatMap((group) => group.items.map((item) => item.id)))
+  const activeTab: Tab = allowedTabs.has(tab) ? tab : 'status'
 
   return (
     <div className="shell">
@@ -233,7 +243,11 @@ export default function App() {
             <div>
               <div className="who-name">{user.name}</div>
               <div className="who-role">
-                {isOwner ? '관리자 · 승인 권한' : '담당자 · 요청 권한'}
+                {user.role === 'admin'
+                  ? '관리자 · 승인 권한'
+                  : user.role === 'developer'
+                    ? '개발자 · 변경 요청'
+                    : '게스트 · 읽기 전용'}
               </div>
             </div>
           </div>
@@ -257,26 +271,16 @@ export default function App() {
 
       <main className="main">
         <div className="main-inner">
-          {me.data.usingDefaultAccount && (
-            <div className="notice bad" style={{ marginBottom: 20 }}>
-              <div className="notice-kind">임시 계정</div>
-              <div>
-                <div className="notice-title">기본 계정으로 접속 중입니다</div>
-                <div className="notice-detail">
-                  이 콘솔은 봇 토큰과 배포 권한을 다루는 화면입니다. 콘솔에 접속할 수 있는 누구나
-                  같은 계정으로 들어올 수 있으니, 운영 전에 계정을 교체해 주세요.
-                </div>
-              </div>
-            </div>
-          )}
           {activeTab === 'status' && <Dashboard user={user} onToast={toast} />}
           {activeTab === 'collected' && <Collected user={user} onToast={toast} />}
           {activeTab === 'usage' && <Usage user={user} onToast={toast} />}
           {activeTab === 'health' && <HealthCheck user={user} />}
+          {activeTab === 'logs' && <ServiceLogs />}
           {activeTab === 'harness' && <Harness user={user} onToast={toast} />}
           {activeTab === 'deploy' && <Deploy user={user} onToast={toast} />}
           {activeTab === 'workspaces' && <Workspaces onToast={toast} />}
           {activeTab === 'env' && <EnvSettings onToast={toast} />}
+          {activeTab === 'users' && <ConsoleUsers currentUser={user} onToast={toast} />}
         </div>
       </main>
 

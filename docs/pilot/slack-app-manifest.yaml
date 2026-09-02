@@ -3,7 +3,7 @@
 display_information:
   name: TYBot
   description: 태영건설 사내 아카이브 봇 (파일럿). 아카이브 원문만 근거로 답합니다.
-  background_color: "#1a3a5c"
+  background_color: "#800020"
 features:
   bot_user:
     display_name: tybot    # ASCII 만 허용(봇 핸들). 변경: App Home → Your App's Presence → Edit

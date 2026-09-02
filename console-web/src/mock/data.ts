@@ -401,21 +401,27 @@ export const registry: RegistryEntry[] = [
 
 /** 콘솔 로그인 사용자.
  *
- * 승인 권한은 owner 한 사람(어드민)에게만 있습니다. 현업은 요청만 올립니다.
+ * 승인 권한은 관리자(admin)에게만 있습니다. 개발자는 요청만 올립니다.
  * `member` 쪽은 실제 운영에서 현업이 보게 되는 화면을 확인하려고 함께 넣어 뒀습니다 —
  * 레일 아래 '보기 전환' 으로 두 화면을 비교할 수 있습니다.
  */
 export const users: Record<ConsoleRole, ConsoleUser> = {
-  owner: {
+  admin: {
     name: '류대안',
     email: 'dan@taeyoung.com',
-    role: 'owner',
+    role: 'admin',
     workspaces: ['mgmt', 'fin', 'pilot', 'site-gimhae', 'safety'],
   },
-  member: {
+  developer: {
     name: '김수현',
     email: 'sh.kim@taeyoung.com',
-    role: 'member',
+    role: 'developer',
+    workspaces: ['fin'],
+  },
+  guest: {
+    name: '조회 사용자',
+    email: 'guest@taeyoung.com',
+    role: 'guest',
     workspaces: ['fin'],
   },
 }

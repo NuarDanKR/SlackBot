@@ -61,7 +61,7 @@ export function Collected({
 }) {
   // 서버가 이미 권한 범위로 좁혀서 내려 줍니다.
   const res = useResource<{ docs: CollectedDoc[] }>('/api/collected')
-  const isOwner = user.role === 'owner'
+  const isOwner = user.role === 'admin'
   const audit = useResource<{ entries: ReadAuditEntry[] }>(isOwner ? '/api/collected/audit' : null)
 
   const docs = res.data?.docs ?? []

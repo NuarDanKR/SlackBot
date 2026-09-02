@@ -20,6 +20,7 @@ Options:
   --yes             Do not ask for confirmation
   -h, --help        Show this help
 
+
 The script preserves only a regular, non-symlink .env file. The corrupted
 checkout remains next to the restored checkout as PATH.corrupt-TIMESTAMP.
 EOF

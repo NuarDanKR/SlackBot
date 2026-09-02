@@ -246,3 +246,20 @@ def test_create_modal_takes_several_tasks_but_rename_takes_one():
         b for b in rename_modal("{}", spec)["blocks"] if b.get("block_id") == "task"
     )
     assert "multiline" not in rename_task["element"]
+
+
+def test_section_tip_is_only_for_batches():
+    """섹션은 봇이 만들어 줄 수 없다. 한 개 만들 때 붙이면 잔소리만 된다."""
+    from tybot.slack.pilot import SECTION_TIP
+
+    assert "섹션으로 이동" in SECTION_TIP
+    # 사람마다 따로라는 점을 빠뜨리면, 한 사람이 정리하면 다 되는 줄 안다.
+    assert "사람마다 따로" in SECTION_TIP
+
+
+def test_section_tip_does_not_promise_the_bot_will_do_it():
+    """할 수 없는 것을 할 수 있다고 적으면 문의가 늘어난다."""
+    from tybot.slack.pilot import SECTION_TIP
+
+    for lie in ("섹션을 만들었", "섹션에 넣었", "자동으로 묶"):
+        assert lie not in SECTION_TIP

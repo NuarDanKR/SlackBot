@@ -178,7 +178,11 @@ for u in tybot-update tybot-collect tybot-tidy tybot-schedule-sync tybot-schedul
   install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"
 done
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
+  visudo -cf "$APP_DIR/deploy/tybot-console-logs.sudoers" >/dev/null
   install -m 0644 "$APP_DIR/deploy/tybot-console.service" /etc/systemd/system/tybot-console.service
+  install -d -m 0755 /usr/local/libexec
+  install -m 0755 "$APP_DIR/deploy/tybot-console-logs" /usr/local/libexec/tybot-console-logs
+  install -m 0440 "$APP_DIR/deploy/tybot-console-logs.sudoers" /etc/sudoers.d/tybot-console-logs
 fi
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.service" /etc/systemd/system/tybot-deploy.service
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.path"    /etc/systemd/system/tybot-deploy.path
@@ -201,11 +205,11 @@ EOF
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
 cat <<EOF
 관리 콘솔:
-  5) 계정을 만드세요(안 만들면 admin/1111 임시 계정으로 열립니다):
-       $APP_DIR/.venv/bin/python -m tybot.console.auth <새비밀번호>
-       → 나온 해시를 $CONF_DIR/tybot.env 의 CONSOLE_ACCOUNTS 에 넣습니다
+  5) PostgreSQL 스키마를 적용하고 DB 계정을 만드세요:
+       $APP_DIR/.venv/bin/python -m tybot.console.auth init-schema
+       $APP_DIR/.venv/bin/python -m tybot.console.auth set-password <회사이메일> --role admin
   6) sudo systemctl enable --now tybot-console
-  7) 127.0.0.1:8787 에만 열립니다. 외부에서 보려면 앞단(nginx 등)을 두세요.
+  7) 8787 포트는 사내망/VPN 출발지에만 허용하세요.
 EOF
 if [[ "${CONSOLE_BUILD_FAILED:-0}" == "1" ]]; then
   echo "  ! 화면 빌드가 실패했습니다. 콘솔 API 는 뜨지만 브라우저에는 404 가 나옵니다."

@@ -255,7 +255,7 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
 
       <p className="page-note">
         점검 시각 {new Date(r.checkedAt).toLocaleString('ko-KR')}
-        {user.role !== 'owner' && ' · 담당 워크스페이스 범위로만 집계했습니다'}
+        {user.role !== 'admin' && ' · 담당 워크스페이스 범위로만 집계했습니다'}
       </p>
     </>
   )

@@ -38,7 +38,7 @@ export function Usage({ user, onToast }: { user: ConsoleUser; onToast: (m: strin
   const recent = usage.recent
   // 이상 감지는 아직 서버 API 가 없습니다(BACKLOG B-13).
   const alerts = anomalies.filter(
-    (a) => user.role === 'owner' || user.workspaces.includes(a.workspace),
+    (a) => user.role === 'admin' || user.workspaces.includes(a.workspace),
   )
 
   return (
@@ -140,7 +140,7 @@ export function Usage({ user, onToast }: { user: ConsoleUser; onToast: (m: strin
         title="이상 사용량 감지"
         aside={<MockBadge />}
         lead={
-          user.role === 'owner'
+          user.role === 'admin'
             ? '사용량이 평소보다 크게 뛰면 여기에 표시됩니다. 감지만 하고 두면 요금은 이미 발생하므로, 필요하면 해당 워크스페이스의 호출을 바로 멈출 수 있습니다.'
             : '담당 워크스페이스에서 사용량이 평소보다 크게 뛰면 여기에 표시됩니다.'
         }
@@ -163,7 +163,7 @@ export function Usage({ user, onToast }: { user: ConsoleUser; onToast: (m: strin
               </div>
             </div>
             <div className="notice-actions">
-              {user.role === 'owner' && a.kind === 'spike' && a.state !== 'breaker' && (
+              {user.role === 'admin' && a.kind === 'spike' && a.state !== 'breaker' && (
                 <button
                   className="btn btn-sm btn-danger"
                   onClick={() =>

@@ -1,10 +1,8 @@
 /** 승인 영역 — 배포 요청과 규칙 편집 요청이 함께 씁니다.
  *
- * 승인자는 어드민(owner) 한 사람입니다. 그래서 화면을 두 갈래로만 나눕니다.
- *   - 어드민:  검사가 통과했으면 [승인하고 반영] · [반려] 버튼이 보입니다.
- *   - 현업:    버튼 없이 "승인 대기 중" 상태만 보입니다.
- * 예전처럼 요청·검사·승인 세 칸을 도장으로 그리지 않습니다. 승인 주체가 한 명이면
- * 그 형식은 정보를 주지 않고 화면만 무겁게 만듭니다.
+ * 승인자는 관리자(admin)입니다. 그래서 화면을 승인 가능 여부로 나눕니다.
+ *   - 관리자: 검사가 통과했으면 [승인하고 반영] · [반려] 버튼이 보입니다.
+ *   - 개발자: 버튼 없이 "승인 대기 중" 상태만 보입니다.
  */
 import type { Check, ConsoleUser } from '../types'
 
@@ -74,7 +72,7 @@ export function ApprovalBox({
   blockedNote: string
 }) {
   const { failed, running, passed } = gate(checks)
-  const isOwner = user.role === 'owner'
+  const isAdmin = user.role === 'admin'
 
   if (approved) {
     return (
@@ -85,8 +83,8 @@ export function ApprovalBox({
     )
   }
 
-  // 현업(member) 화면 — 버튼 없이 상태만 보여 줍니다.
-  if (!isOwner) {
+  // 개발자 화면 — 버튼 없이 상태만 보여 줍니다.
+  if (!isAdmin) {
     return (
       <div className="approve-box">
         <div className="approve-status wait">
@@ -111,7 +109,7 @@ export function ApprovalBox({
     )
   }
 
-  // 어드민(owner) 화면 — 검사를 통과한 요청만 승인 버튼이 열립니다.
+  // 관리자(admin) 화면 — 검사를 통과한 요청만 승인 버튼이 열립니다.
   return (
     <div className="approve-box">
       <button className="btn btn-primary btn-block" disabled={!passed} onClick={onApprove}>

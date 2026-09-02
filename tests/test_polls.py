@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,6 +24,7 @@ from tybot.polls import (
     create_poll,
     parse_options,
 )
+from tybot.slack.pilot import WorkspaceBot
 
 NOW = datetime(2026, 8, 25, 10, 0, tzinfo=UTC)
 
@@ -385,3 +387,61 @@ def test_poll_id_cannot_escape_state_dir(tmp_path, monkeypatch):
     path = polls.poll_path("fin", "../../etc/passwd")
     assert path.parent == tmp_path / "polls" / "fin"
     assert ".." not in path.name
+
+
+# --- Slack 채널 접근 -------------------------------------------------------
+
+def poll_workspace_bot():
+    bot = WorkspaceBot.__new__(WorkspaceBot)
+    bot.workspace = "pilot"
+    bot.bot_name = "tybot"
+    return bot
+
+
+def test_poll_joins_public_channel_before_opening_modal():
+    bot = poll_workspace_bot()
+    client = Mock()
+    client.conversations_info.return_value = {
+        "channel": {"is_member": False, "is_private": False}
+    }
+
+    assert bot._ensure_poll_channel(client, "C-PUBLIC") == ""
+    client.conversations_join.assert_called_once_with(channel="C-PUBLIC")
+
+
+def test_poll_requires_invite_for_private_channel():
+    bot = poll_workspace_bot()
+    client = Mock()
+    client.conversations_info.return_value = {
+        "channel": {"is_member": False, "is_private": True}
+    }
+
+    message = bot._ensure_poll_channel(client, "G-PRIVATE")
+
+    assert "/invite @tybot" in message
+    client.conversations_join.assert_not_called()
+
+
+def test_poll_can_post_to_private_channel_after_bot_is_invited():
+    bot = poll_workspace_bot()
+    client = Mock()
+    client.conversations_info.return_value = {
+        "channel": {"is_member": True, "is_private": True}
+    }
+
+    assert bot._ensure_poll_channel(client, "G-PRIVATE") == ""
+    client.conversations_join.assert_not_called()
+
+
+def test_poll_publish_failure_notifies_user_by_dm():
+    bot = poll_workspace_bot()
+    bot._notify_user = Mock()
+    client = Mock()
+    client.chat_postMessage.side_effect = RuntimeError("channel_not_found")
+    poll = make()
+
+    bot._publish_poll(client, poll)
+
+    bot._notify_user.assert_called_once()
+    assert bot._notify_user.call_args.args[1] == poll.creator
+    client.chat_postEphemeral.assert_not_called()

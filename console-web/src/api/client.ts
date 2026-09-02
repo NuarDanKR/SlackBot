@@ -5,7 +5,7 @@
  * 상대 경로 그대로 동작합니다.
  *
  * ## 로그인
- * 아이디·비밀번호로 `POST /api/login` 하면 서버가 **HttpOnly 세션 쿠키**를 내려줍니다.
+ * 회사 이메일·비밀번호로 `POST /api/login` 하면 서버가 **HttpOnly 세션 쿠키**를 내려줍니다.
  * 이후 요청은 브라우저가 그 쿠키를 자동으로 붙입니다.
  *
  * 화면 코드가 세션 값을 들고 있지 않습니다. localStorage 에 토큰을 두면 화면에서 실행되는
@@ -109,15 +109,13 @@ export async function fetchManifest(): Promise<Manifest> {
 export interface Me {
   name: string
   email: string
-  role: 'owner' | 'member'
+  role: 'guest' | 'developer' | 'admin'
   workspaces: string[]
   allWorkspaces: boolean
-  /** 임시 계정(admin/1111)으로 열려 있으면 true — 화면에 경고를 띄웁니다. */
-  usingDefaultAccount: boolean
 }
 
-export function login(username: string, password: string): Promise<Me> {
-  return api.post<Me>('/api/login', { username, password })
+export function login(email: string, password: string): Promise<Me> {
+  return api.post<Me>('/api/login', { email, password })
 }
 
 export function logout(): Promise<{ ok: boolean }> {

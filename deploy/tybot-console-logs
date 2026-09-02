@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# 관리 콘솔이 tybot.service 로그만 읽도록 제한하는 root 소유 헬퍼.
+set -euo pipefail
+
+LEVEL=${1:-info}
+LIMIT=${2:-200}
+
+case "$LEVEL" in
+  info) PATTERN=' INFO ' ;;
+  warning) PATTERN=' WARNING ' ;;
+  error) PATTERN=' ERROR ' ;;
+  *) echo 'invalid level' >&2; exit 2 ;;
+esac
+
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'invalid limit' >&2; exit 2; }
+((LIMIT >= 1 && LIMIT <= 500)) || { echo 'invalid limit' >&2; exit 2; }
+
+# 필터 뒤에도 요청 개수가 남도록 최근 로그를 넉넉히 읽는다.
+/usr/bin/journalctl -u tybot.service -n 5000 --no-pager -o cat \
+  | { /usr/bin/grep -F "$PATTERN" || true; } \
+  | /usr/bin/tail -n "$LIMIT"

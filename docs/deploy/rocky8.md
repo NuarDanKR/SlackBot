@@ -285,17 +285,27 @@ sudo bash /opt/tybot/deploy/update.sh
 `WITH_CONSOLE=1` 로 설치했으면 계정을 만들고 켠다.
 
 ```bash
-# 비밀번호 해시 생성 — 출력된 해시를 복사한다
-/opt/tybot/.venv/bin/python -m tybot.console.auth <새비밀번호>
+# /etc/tybot/tybot.env의 DATABASE_URL을 읽어 스키마를 적용한다
+/opt/tybot/.venv/bin/python -m tybot.console.auth init-schema
 
-sudo vi /etc/tybot/tybot.env
-#   CONSOLE_ACCOUNTS=dan:<해시>:dan@taeyoung.com:owner:*
+# 비밀번호는 터미널에서 두 번 숨김 입력한다. DB에는 scrypt 해시만 저장된다.
+/opt/tybot/.venv/bin/python -m tybot.console.auth \
+  set-password dan@taeyoung.com --name dan --role admin
 
 sudo systemctl enable --now tybot-console
 ```
 
-**계정을 만들지 않으면 `admin`/`1111` 임시 계정으로 열린다.** 화면 상단에 빨간 경고가
-뜨고, 운영 전에 반드시 제거해야 한다(BACKLOG B-20).
+로그인 ID는 회사 이메일이다. 위 `set-password`로 만든 최초 관리자의 이메일과 비밀번호로
+로그인한다. 활성 DB 계정이 없거나 PostgreSQL에 연결할 수 없으면 콘솔은 기동하지 않는다.
+첫 관리자 생성 뒤의 계정 추가·권한 변경·비밀번호 재설정은 관리자 전용 `콘솔 사용자 관리`
+화면에서 한다. 기존 `CONSOLE_ACCOUNTS` 줄은 더 이상 사용하지 않으므로
+`/etc/tybot/tybot.env`에서 삭제한다.
+
+| 역할 | 접근 범위 |
+|---|---|
+| 게스트 | 데이터 현황·수집 문서 목록·API 사용량 읽기 전용. 아카이브 원문은 열 수 없음 |
+| 개발자 | 게스트 범위 + 헬스 체크·서비스 로그·봇 규칙·배포 요청 |
+| 관리자 | 전체 메뉴 + 환경변수·워크스페이스·사용자 관리 및 변경 요청 승인 |
 
 확인:
 
@@ -335,7 +345,7 @@ nginx + TLS 로 옮기는 일이 BACKLOG **B-35** 에 있다.
 
 | | |
 |---|---|
-| **B-20** | `admin`/`1111` 임시 계정을 제거한다. 안 하면 사내 누구나 들어온다 |
+| 계정 | `console_user`의 활성 admin 계정을 최소 1개 유지한다 |
 | 방화벽 | 8787 출발지를 필요한 대역으로 좁힌다 |
 | 쿠키 | `CONSOLE_COOKIE_SECURE=1` 은 **TLS 를 붙인 뒤에** 켠다. 먼저 켜면 로그인이 안 된다 |
 

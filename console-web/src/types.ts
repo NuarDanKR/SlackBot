@@ -10,7 +10,7 @@
  * ## 조건부로만 받는 것 — 아카이브 원문 본문 (`CollectedDoc.content`)
  *   수집이 제대로 되는지 눈으로 확인해야 하므로 열람 화면을 둡니다. 다만 원문은
  *   Slack 채널 멤버십(권한 3층)으로 보호되던 자료이므로 다음 세 조건을 함께 겁니다.
- *     1. `role === 'owner'` 인 사용자에게만 `content` 를 내려줍니다. member 는 목록·메타데이터만 봅니다.
+ *     1. `role === 'admin'` 인 사용자에게만 `content` 를 내려줍니다. 나머지는 목록·메타데이터만 봅니다.
  *     2. 열람 자체를 감사 기록에 남깁니다(누가·어느 문서를·언제).
  *     3. 화면에도 그 사실을 표시합니다 — 조용히 열리는 경로를 만들지 않습니다.
  */
@@ -181,14 +181,14 @@ export interface RegistryEntry {
 
 /* ===== 콘솔 사용자 ===== */
 
-/** owner 만 승인할 수 있습니다. member(현업)는 요청만 올립니다. */
-export type ConsoleRole = 'owner' | 'member'
+/** guest는 조회, developer는 변경 요청, admin은 승인과 전체 설정을 담당합니다. */
+export type ConsoleRole = 'guest' | 'developer' | 'admin'
 
 export interface ConsoleUser {
   name: string
   email: string
   role: ConsoleRole
-  /** 이 사용자가 다룰 수 있는 워크스페이스. owner 는 전체입니다. */
+  /** 이 사용자가 다룰 수 있는 워크스페이스. admin은 전체입니다. */
   workspaces: string[]
 }
 

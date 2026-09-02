@@ -25,17 +25,20 @@ pytest.importorskip("httpx", reason="fastapi TestClient 가 httpx 를 쓴다")
 from fastapi.testclient import TestClient
 
 from tybot.console import app as console_app
-from tybot.console.auth import Authenticator, hash_password
+from tybot.console.auth import AuthConfigurationError, Authenticator, account, hash_password
 
 KST = timezone(timedelta(hours=9))
 
 OWNER_PW = "owner-pass"
 MEMBER_PW = "member-pass"
-# 아이디:비밀번호해시:이메일:역할[:워크스페이스]
-ACCOUNTS = (
-    f"dan:{hash_password(OWNER_PW)}:dan@taeyoung.com:owner:*, "
-    f"sukhyun:{hash_password(MEMBER_PW)}:sh.kim@taeyoung.com:member:fin"
-)
+GUEST_PW = "guest-pass"
+ACCOUNTS = [
+    account("dan@taeyoung.com", hash_password(OWNER_PW), "dan", "admin"),
+    account(
+        "sh.kim@taeyoung.com", hash_password(MEMBER_PW), "sukhyun", "developer", ["fin"]
+    ),
+    account("guest@taeyoung.com", hash_password(GUEST_PW), "guest", "guest", ["fin"]),
+]
 
 DOC_FIN = """---
 workspace: fin
@@ -152,7 +155,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
     console_app.reset_state()
-    auth = Authenticator(accounts_spec=ACCOUNTS, secret="test-secret")
+    auth = Authenticator(accounts=ACCOUNTS, secret="test-secret")
     console_app.app.dependency_overrides[console_app.authenticator] = lambda: auth
     yield tmp_path
     console_app.app.dependency_overrides.clear()
@@ -164,13 +167,13 @@ def client(env):
     return TestClient(console_app.app)
 
 
-def _login(client, username: str, password: str) -> dict:
+def _login(client, email: str, password: str) -> dict:
     """로그인하고 세션 쿠키를 헤더로 돌려준다.
 
     TestClient 는 쿠키를 자동으로 들고 다니지만, 테스트마다 어느 계정으로 보내는지
     분명히 보이도록 헤더를 직접 만든다.
     """
-    r = client.post("/api/login", json={"username": username, "password": password})
+    r = client.post("/api/login", json={"email": email, "password": password})
     assert r.status_code == 200, r.text
     cookie = r.cookies.get("tybot_console")
     assert cookie
@@ -179,11 +182,15 @@ def _login(client, username: str, password: str) -> dict:
 
 
 def owner(client):
-    return _login(client, "dan", OWNER_PW)
+    return _login(client, "dan@taeyoung.com", OWNER_PW)
 
 
 def member(client):
-    return _login(client, "sukhyun", MEMBER_PW)
+    return _login(client, "sh.kim@taeyoung.com", MEMBER_PW)
+
+
+def guest(client):
+    return _login(client, "guest@taeyoung.com", GUEST_PW)
 
 
 # --- 인증 -----------------------------------------------------------------
@@ -200,20 +207,24 @@ def test_tampered_session_is_rejected(client):
 
 
 def test_wrong_password_is_rejected(client):
-    r = client.post("/api/login", json={"username": "dan", "password": "틀린비번"})
+    r = client.post(
+        "/api/login", json={"email": "dan@taeyoung.com", "password": "틀린비번"}
+    )
     assert r.status_code == 401
-    # 아이디가 있는지 없는지 알려 주지 않는다
-    assert r.json()["detail"] == "아이디 또는 비밀번호가 맞지 않습니다."
+    # 이메일이 등록됐는지 알려 주지 않는다.
+    assert r.json()["detail"] == "이메일 또는 비밀번호가 맞지 않습니다."
 
 
 def test_unknown_user_gives_same_message(client):
-    r = client.post("/api/login", json={"username": "없는사람", "password": "아무거나"})
+    r = client.post("/api/login", json={"email": "nobody@example.com", "password": "아무거나"})
     assert r.status_code == 401
-    assert r.json()["detail"] == "아이디 또는 비밀번호가 맞지 않습니다."
+    assert r.json()["detail"] == "이메일 또는 비밀번호가 맞지 않습니다."
 
 
 def test_login_sets_httponly_cookie(client):
-    r = client.post("/api/login", json={"username": "dan", "password": OWNER_PW})
+    r = client.post(
+        "/api/login", json={"email": "dan@taeyoung.com", "password": OWNER_PW}
+    )
     assert r.status_code == 200
     raw = r.headers["set-cookie"]
     assert "HttpOnly" in raw  # 화면 스크립트가 읽지 못하게
@@ -236,20 +247,21 @@ def test_health_needs_no_token(client):
 
 
 def test_me_reports_role(client):
-    assert client.get("/api/me", headers=owner(client)).json()["role"] == "owner"
+    assert client.get("/api/me", headers=owner(client)).json()["role"] == "admin"
     m = client.get("/api/me", headers=member(client)).json()
-    assert m["role"] == "member"
+    assert m["role"] == "developer"
     assert m["workspaces"] == ["fin"]
+    assert client.get("/api/me", headers=guest(client)).json()["role"] == "guest"
 
 
 def test_proxy_mode_uses_forwarded_email(env):
     console_app.app.dependency_overrides[console_app.authenticator] = lambda: Authenticator(
-        mode="proxy", accounts_spec=ACCOUNTS, secret="test-secret"
+        mode="proxy", accounts=ACCOUNTS, secret="test-secret"
     )
     c = TestClient(console_app.app)
     r = c.get("/api/me", headers={"X-Forwarded-Email": "dan@taeyoung.com"})
     assert r.status_code == 200
-    assert r.json()["role"] == "owner"
+    assert r.json()["role"] == "admin"
     assert c.get("/api/me", headers={"X-Forwarded-Email": "nobody@x.com"}).status_code == 401
 
 
@@ -332,6 +344,21 @@ def test_stale_heartbeat_is_not_trusted(client, env):
 def test_member_sees_only_own_workspace(client):
     rows = client.get("/api/status", headers=member(client)).json()["workspaces"]
     assert {r["key"] for r in rows} == {"fin"}
+
+
+def test_guest_can_read_only_scoped_data_views(client):
+    headers = guest(client)
+    status = client.get("/api/status", headers=headers)
+    usage = client.get("/api/usage", headers=headers)
+    collected = client.get("/api/collected", headers=headers)
+    assert status.status_code == usage.status_code == collected.status_code == 200
+    assert {row["key"] for row in status.json()["workspaces"]} == {"fin"}
+    assert {row["workspace"] for row in collected.json()["docs"]} == {"fin"}
+    path = collected.json()["docs"][0]["path"]
+    assert (
+        client.get("/api/collected/content", params={"path": path}, headers=headers).status_code
+        == 403
+    )
 
 
 # --- 사용량 ---------------------------------------------------------------
@@ -487,6 +514,27 @@ def test_harness_is_scoped_for_member(client):
     assert {f["workspace"] for f in files} == {"fin"}
 
 
+def test_guest_cannot_open_bot_management_apis(client):
+    headers = guest(client)
+    assert client.get("/api/harness", headers=headers).status_code == 403
+    assert client.get("/api/health-report", headers=headers).status_code == 403
+    assert client.get("/api/manifest", headers=headers).status_code == 403
+    assert client.get("/api/service-logs", headers=headers).status_code == 403
+
+
+def test_developer_can_read_redacted_service_logs(client, monkeypatch):
+    monkeypatch.setattr(
+        console_app.service_logs,
+        "read",
+        lambda *, level, limit: [{"level": level, "message": f"최근 {limit}건"}],
+    )
+    response = client.get(
+        "/api/service-logs?level=warning&limit=100", headers=member(client)
+    )
+    assert response.status_code == 200
+    assert response.json()["entries"] == [{"level": "warning", "message": "최근 100건"}]
+
+
 # --- 환경변수 설정 ---------------------------------------------------------
 
 def _write_headers(headers: dict) -> dict:
@@ -506,6 +554,7 @@ def _env_payload(client, headers: dict) -> dict:
 def test_env_settings_are_owner_only(client):
     assert client.get("/api/env-settings", headers=member(client)).status_code == 403
     assert client.get("/api/env-settings", headers=owner(client)).status_code == 200
+    assert client.get("/api/env-settings", headers=guest(client)).status_code == 403
 
 
 def test_env_settings_never_return_secrets(client, monkeypatch):
@@ -569,62 +618,97 @@ def test_env_write_rejects_unknown_or_self_read_target(client, env):
     assert not (env / "state" / "config" / "managed.env").exists()
 
 
-def test_default_admin_cannot_write_env_settings(env):
-    auth = Authenticator(accounts_spec="", secret="test-secret")
-    console_app.app.dependency_overrides[console_app.authenticator] = lambda: auth
-    c = TestClient(console_app.app)
-    login = c.post("/api/login", json={"username": "admin", "password": "1111"})
-    payload = _env_payload(c, {"Cookie": f"tybot_console={login.cookies.get('tybot_console')}"})
-    response = c.put(
-        "/api/env-settings",
-        json=payload,
-        headers={"Origin": "http://testserver", "X-TYBot-CSRF": "1"},
+# --- 콘솔 사용자 관리 -----------------------------------------------------
+
+def test_console_users_are_admin_only(client, monkeypatch):
+    monkeypatch.setattr(console_app.account_store, "list_users", lambda: [])
+    assert client.get("/api/console-users", headers=owner(client)).status_code == 200
+    assert client.get("/api/console-users", headers=member(client)).status_code == 403
+    assert client.get("/api/console-users", headers=guest(client)).status_code == 403
+
+
+def test_admin_can_save_console_user_without_exposing_hash(client, monkeypatch):
+    saved = {}
+
+    def fake_list():
+        return [
+            {
+                "email": "guest@taeyoung.com",
+                "name": "guest",
+                "role": "guest",
+                "active": True,
+                "workspaces": ["fin"],
+                "created_at": None,
+                "last_seen": None,
+            }
+        ]
+
+    def fake_save(**values):
+        saved.update(values)
+
+    monkeypatch.setattr(console_app.account_store, "list_users", fake_list)
+    monkeypatch.setattr(console_app.account_store, "save_user", fake_save)
+    headers = owner(client)
+    listing = client.get("/api/console-users", headers=headers)
+    assert listing.status_code == 200
+    assert "password" not in listing.text
+
+    response = client.put(
+        "/api/console-users",
+        json={
+            "email": "new@taeyoung.com",
+            "name": "new",
+            "role": "developer",
+            "active": True,
+            "workspaces": ["fin"],
+            "password": "initial-pass-123",
+        },
+        headers=_write_headers(headers),
+    )
+    assert response.status_code == 200, response.text
+    assert saved["actor_email"] == "dan@taeyoung.com"
+    assert saved["role"] == "developer"
+
+
+def test_developer_cannot_save_console_user(client, monkeypatch):
+    called = False
+
+    def fake_save(**_values):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(console_app.account_store, "save_user", fake_save)
+    response = client.put(
+        "/api/console-users",
+        json={
+            "email": "new@taeyoung.com",
+            "name": "new",
+            "role": "developer",
+            "active": True,
+            "workspaces": ["fin"],
+            "password": "initial-pass-123",
+        },
+        headers=_write_headers(member(client)),
     )
     assert response.status_code == 403
-    assert "임시" in response.json()["detail"]
+    assert called is False
 
 
-# --- 임시 기본 계정 ---------------------------------------------------------
+# --- 계정 미설정 차단 -------------------------------------------------------
 
-def test_default_account_opens_when_unconfigured():
-    """`CONSOLE_ACCOUNTS` 가 없으면 임시 계정 admin/1111 로 들어갈 수 있다.
-
-    파일럿에서 화면을 보기 위한 편의값이다. 운영에서 이 상태로 두면 VPN 에 들어온 누구나
-    관리자가 되므로, 아래 테스트가 '기본값이 쓰이고 있다'는 표시가 함께 나오는지 확인한다.
-    """
-    auth = Authenticator(accounts_spec="", secret="test-secret")
-    assert auth.using_default is True
-    session = auth.login("admin", "1111")
-    user = auth.verify(session)
-    assert user.role == "owner"
-    assert user.all_workspaces is True
-
-
-def test_default_account_is_replaced_by_config():
-    auth = Authenticator(accounts_spec=ACCOUNTS, secret="test-secret")
-    assert auth.using_default is False
-    with pytest.raises(Exception):
-        auth.login("admin", "1111")
-
-
-def test_me_flags_default_account(monkeypatch):
-    """화면이 경고를 띄울 수 있게 `/api/me` 가 기본 계정 사용 여부를 알려 준다."""
-    monkeypatch.delenv("CONSOLE_ACCOUNTS", raising=False)
-    console_app.reset_state()
-    console_app.app.dependency_overrides.clear()
-    c = TestClient(console_app.app)
-    r = c.post("/api/login", json={"username": "admin", "password": "1111"})
-    assert r.status_code == 200
-    assert r.json()["usingDefaultAccount"] is True
-    console_app.reset_state()
+def test_console_refuses_to_open_without_active_accounts():
+    with pytest.raises(AuthConfigurationError):
+        Authenticator(accounts=[], secret="test-secret")
 
 
 def test_session_expires(monkeypatch):
     """만료된 세션은 거절한다."""
     import time as _time
 
-    auth = Authenticator(accounts_spec=ACCOUNTS, secret="test-secret")
-    session = auth.issue("dan", now=_time.time() - 13 * 3600)  # 12시간 유효, 13시간 전 발급
+    auth = Authenticator(accounts=ACCOUNTS, secret="test-secret")
+    session = auth.issue(
+        "dan@taeyoung.com", now=_time.time() - 13 * 3600
+    )  # 12시간 유효, 13시간 전 발급
     with pytest.raises(Exception) as err:
         auth.verify(session)
     assert "만료" in str(err.value)
@@ -632,7 +716,7 @@ def test_session_expires(monkeypatch):
 
 def test_session_from_other_secret_is_rejected():
     """다른 키로 서명한 세션은 통하지 않는다."""
-    mine = Authenticator(accounts_spec=ACCOUNTS, secret="secret-a")
-    theirs = Authenticator(accounts_spec=ACCOUNTS, secret="secret-b")
+    mine = Authenticator(accounts=ACCOUNTS, secret="secret-a")
+    theirs = Authenticator(accounts=ACCOUNTS, secret="secret-b")
     with pytest.raises(Exception):
-        mine.verify(theirs.issue("dan"))
+        mine.verify(theirs.issue("dan@taeyoung.com"))
