@@ -16,6 +16,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tybot import schedule_dm as dm
 from tybot.schedule_dm import (
     ACTION_ENABLE,
     ACTION_MINUTES,
@@ -104,6 +105,8 @@ class FakeConn:
             return "claim"
         if "from schedule_occurrence" in s and "select subject" in s:
             return "occurrence"
+        if "as upcoming" in s:
+            return "diagnose"
         return "?"
 
     def sql_for(self, needle: str) -> str:
@@ -535,3 +538,56 @@ def test_due_carries_no_body_fields():
     assert "subject" not in fields
     assert "place" not in fields
     assert {"emp_no", "workspace", "slack_user", "reminder_minutes"} <= fields
+
+
+# --- 큐가 빈 이유 --------------------------------------------------------------
+# queued=0 은 정상일 때가 많다(앞으로 2시간에 회의가 없으면 당연히 0이다).
+# 문제는 **정상과 고장을 구별할 수 없다**는 것이었다. 실제로 폴더-조직 매핑이 비어
+# 영원히 0건인 상태를 '오늘은 회의가 없나 보다' 로 넘길 뻔했다(2026-09-02).
+def _diag(caplog, **counts):
+    row = {
+        "upcoming": 0, "folders": 0, "folder_orgs": 0, "prefs": 0, "identities": 0,
+    }
+    row.update(counts)
+    conn = FakeConn(diagnose=[row])
+    with caplog.at_level("INFO", logger="tybot.schedule_dm"):
+        dm._log_why_empty(conn, NOW)
+    return caplog.text
+
+
+def test_empty_queue_reports_missing_folder_org_mapping(caplog):
+    text = _diag(caplog, folders=2, identities=3, prefs=1)
+    assert "schedule_folder_org" in text
+    assert "DM 이 나가지 않습니다" in text
+
+
+def test_empty_queue_reports_nobody_opted_in(caplog):
+    text = _diag(caplog, folders=2, folder_orgs=1, identities=3)
+    assert "/일정 알림" in text
+
+
+def test_quiet_period_is_not_reported_as_a_problem(caplog):
+    """설정이 다 갖춰졌고 단지 회의가 없는 것은 고장이 아니다."""
+    text = _diag(caplog, folders=2, folder_orgs=1, identities=3, prefs=1, upcoming=0)
+    assert "정상" in text
+    assert "DM 이 나가지 않습니다" not in text
+
+
+def test_settings_gap_wins_over_quiet_period(caplog):
+    """일정이 없어도 설정이 비어 있으면 그쪽을 알려야 한다.
+
+    '지금 일정 없음' 으로 끝내면 영원히 0건인 상태를 눈치채지 못한다.
+    """
+    text = _diag(caplog, folders=2, upcoming=0)
+    assert "DM 이 나가지 않습니다" in text
+    assert "정상" not in text
+
+
+def test_diagnosis_failure_does_not_break_planning(caplog):
+    class Broken(FakeConn):
+        def cursor(self):
+            raise RuntimeError("db down")
+
+    with caplog.at_level("WARNING", logger="tybot.schedule_dm"):
+        dm._log_why_empty(Broken(), NOW)
+    assert "확인하지 못했습니다" in caplog.text

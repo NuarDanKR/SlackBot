@@ -231,6 +231,22 @@ def disable(conn, *, emp_no: str, actor: str) -> None:
 #
 # 조직 트리를 부모·자식으로 넓히지 않는다. Oracle 폴더 ACL 에서 승인된 **정확한**
 # 조직코드만 쓴다. 넓히면 승인 절차가 무의미해진다.
+# `queued=0` 이 왜 0인지 로그가 말해주지 않으면 사람이 원인을 찾을 수 없다.
+# 0건은 **정상일 때가 많다**(앞으로 2시간에 회의가 없으면 당연히 0이다). 그래서
+# 고장과 구별이 안 되는 것이 문제다. 조건 사슬의 단계별 건수를 함께 남긴다.
+#
+# 본문(제목·장소)은 세지 않는다 — 건수만 본다.
+DIAGNOSE_SQL = """
+select
+  (select count(*) from schedule_occurrence
+    where source_deleted_at is null and not is_all_day
+      and starts_at > %(now)s and starts_at <= %(horizon)s)      as upcoming,
+  (select count(*) from schedule_folder where enabled)            as folders,
+  (select count(*) from schedule_folder_org where enabled)        as folder_orgs,
+  (select count(*) from schedule_dm_preference where enabled)     as prefs,
+  (select count(*) from user_identity)                            as identities
+"""
+
 PLAN_SQL = """
 insert into schedule_dm_delivery (
     source_folder_id, date_id, emp_no, workspace, slack_user,
@@ -357,7 +373,52 @@ def plan(conn, *, now: datetime | None = None) -> PlanResult:
         "일정 DM 계획 queued=%d cancelled=%d expired=%d released=%d",
         result.queued, result.cancelled, result.expired, result.released,
     )
+    if result.queued == 0:
+        _log_why_empty(conn, now)
     return result
+
+
+def _log_why_empty(conn, now: datetime) -> None:
+    """큐가 빈 이유를 단계별 건수로 남긴다.
+
+    0건은 정상일 때가 많다. 문제는 **정상과 고장을 구별할 수 없다**는 것이다.
+    앞으로 2시간에 회의가 없어서 0인지, 아무도 알림을 켜지 않아서 0인지,
+    사번 매핑이 없어서 0인지가 이 한 줄로 갈린다.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(DIAGNOSE_SQL, {"now": now, "horizon": now + PLAN_HORIZON})
+            row = cur.fetchone()
+    except Exception as e:  # noqa: BLE001 - 진단이 본 작업을 막아서는 안 된다
+        logger.warning("큐가 빈 이유를 확인하지 못했습니다: %s", e)
+        return
+    if row is None:
+        return
+
+    counts = dict(row) if not isinstance(row, tuple) else dict(
+        zip(("upcoming", "folders", "folder_orgs", "prefs", "identities"), row, strict=True)
+    )
+    logger.info(
+        "큐가 빈 이유 판단용 — 2시간내일정=%s 승인폴더=%s 폴더조직=%s 알림켠사람=%s 사번매핑=%s",
+        counts.get("upcoming"), counts.get("folders"), counts.get("folder_orgs"),
+        counts.get("prefs"), counts.get("identities"),
+    )
+    # **설정이 빈 것을 먼저 알린다.** "지금 일정이 없다" 로 끝내면, 설정이 비어 있어
+    # 앞으로도 영원히 0건인 상태를 '오늘은 회의가 없나 보다' 로 넘기게 된다.
+    blockers = []
+    if counts.get("folders") == 0:
+        blockers.append("승인된 일정 폴더가 없습니다(schedule_folder)")
+    if counts.get("folder_orgs") == 0:
+        blockers.append("폴더에 연결된 조직이 없습니다(schedule_folder_org)")
+    if counts.get("identities") == 0:
+        blockers.append("사번↔Slack 매핑이 없습니다. 이메일이 맞아야 이어집니다")
+    if counts.get("prefs") == 0:
+        blockers.append("알림을 켠 사람이 없습니다. Slack 에서 `/일정 알림` 으로 켭니다")
+
+    for item in blockers:
+        logger.warning("  ! %s — 이대로면 일정이 생겨도 DM 이 나가지 않습니다", item)
+    if not blockers and counts.get("upcoming") == 0:
+        logger.info("  → 앞으로 %s 안에 알릴 일정이 없습니다(정상).", PLAN_HORIZON)
 
 
 # --- 발송 -------------------------------------------------------------------
