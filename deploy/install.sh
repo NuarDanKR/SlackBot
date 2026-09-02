@@ -82,7 +82,10 @@ if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   # 하면 SELinux/임시 디렉터리 정책에서 거부될 수 있다. 전송 루트 안에서 ./를 복사한다.
   (
     cd "$SRC_DIR"
-    rsync -a --delete \
+    # `-a` 는 소유자·그룹까지 보존하려 한다. 그런데 **바로 다음 단계에서 소유권을
+    # 직접 설정**하므로 보존할 이유가 없고, 실패만 만든다(chgrp Permission denied).
+    # 권한·시각·심볼릭링크만 가져오고 소유는 건드리지 않는다.
+    rsync -a --no-owner --no-group --delete \
       --exclude '/.git' --exclude '/.venv' --exclude '/.env' --exclude '/archive' \
       --exclude '/wheels' \
       --exclude '/console-web/node_modules' --exclude '/console-web/dist' \

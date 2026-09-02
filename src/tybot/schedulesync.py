@@ -391,6 +391,57 @@ def _scalar(cur):
     return row[next(iter(row))] if isinstance(row, dict) else row[0]
 
 
+CANDIDATE_BY = "자동수집(미승인)"
+
+# 폴더는 후보로만 넣는다. `enabled=false` 라 **승인 전에는 아무것도 발송되지 않는다.**
+# 이미 있는 행은 건드리지 않는다 — 사람이 켠 것을 동기화가 되돌리면 안 된다.
+FOLDER_CANDIDATE_SQL = """
+insert into schedule_folder (source_folder_id, label, enabled, approved_by)
+values (%(folder_id)s, %(label)s, false, %(by)s)
+on conflict (source_folder_id) do nothing
+"""
+
+# 조직 코드가 org_unit 에 없으면 넣지 않는다. 외래키 위반이 나면 스냅샷 반영이
+# 통째로 롤백되어, 폴더 하나 때문에 일정 동기화 전체가 멈춘다.
+FOLDER_ORG_CANDIDATE_SQL = """
+insert into schedule_folder_org (source_folder_id, org_code, enabled, approved_by)
+select %(folder_id)s, %(org_code)s, false, %(by)s
+ where exists (select 1 from org_unit where code = %(org_code)s)
+on conflict (source_folder_id, org_code) do nothing
+"""
+
+
+def _register_folder_candidates(cur, snapshot: Snapshot) -> int:
+    """manifest 의 폴더↔조직을 후보로 등록한다. **승인하지는 않는다.**
+
+    이 매핑은 Oracle 폴더 ACL 에서 온 사실이다(누가 그 폴더를 볼 수 있는가).
+    반면 "그 팀에 DM 을 보낼 것인가" 는 정책이라 사람이 정한다. 그래서 값은 자동으로
+    채우되 `enabled=false` 로 둔다 — 관리자는 SQL 을 쓰는 대신 스위치만 켜면 된다.
+
+    자동 승인하지 않는 이유: 폴더 하나가 여러 조직에 열려 있을 수 있고, 그대로 켜면
+    관계없는 팀에 남의 일정이 DM 으로 나간다.
+    """
+    rows = snapshot.manifest.get("folders") or []
+    added = 0
+    for row in rows:
+        try:
+            folder_id = int(row["folder_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        org_code = str(row.get("org_code") or "").strip()
+        label = str(row.get("folder_name") or "").strip() or f"폴더 {folder_id}"
+        cur.execute(FOLDER_CANDIDATE_SQL,
+                    {"folder_id": folder_id, "label": label, "by": CANDIDATE_BY})
+        if not org_code:
+            continue
+        cur.execute(FOLDER_ORG_CANDIDATE_SQL,
+                    {"folder_id": folder_id, "org_code": org_code, "by": CANDIDATE_BY})
+        added += max(cur.rowcount or 0, 0)
+    if added:
+        log.info("폴더↔조직 후보 %d건 등록(미승인). 콘솔에서 켜야 발송된다.", added)
+    return added
+
+
 def apply_snapshot(
     conn, snapshot: Snapshot, *, dry_run: bool = False, force: bool = False
 ) -> SyncResult:
@@ -447,6 +498,9 @@ def apply_snapshot(
                     _parse_ts(r.get("source_modified_at")),
                     content_sha256(r),
                 ))
+
+        # manifest 의 폴더↔조직을 **후보로만** 등록한다(자동 승인하지 않는다).
+        _register_folder_candidates(cur, snapshot)
 
         # 승인되지 않은 폴더는 넣지 않는다. schedule_folder 가 허용 목록이다.
         cur.execute(UNKNOWN_FOLDER_SQL)

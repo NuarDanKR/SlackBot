@@ -1,7 +1,7 @@
 /** 수집 추이 그래프.
  *
  * 하루에 쌓인 원문 줄 수를 한 칸으로 두고 최근 30일을 나란히 보여 줍니다.
- * 수집이 없던 날은 채우지 않고 점선 칸으로 남깁니다.
+ * 수집이 없던 날은 날짜 간격만 유지하고 화면에는 표시하지 않습니다.
  *
  * 총 줄 수만 크게 보여 주면 "최근에 멈췄다"는 사실이 드러나지 않습니다. 수집이 멈춘 봇은
  * 오류 없이 옛 자료로 답하기 때문에, 최근 며칠이 비었는지가 가장 중요한 정보입니다.
@@ -28,14 +28,10 @@ function Courses({ courses, label }: { courses: DailyCourse[]; label: string }) 
           key={c.date}
           className={`course ${level(c.lines, peak)}`}
           style={{
-            height: c.lines === 0 ? '100%' : `${Math.max(16, (c.lines / peak) * 100)}%`,
+            height: c.lines === 0 ? '0' : `${Math.max(16, (c.lines / peak) * 100)}%`,
             animationDelay: `${i * 9}ms`,
           }}
-          title={
-            c.lines === 0
-              ? `${c.date} · 수집된 대화가 없습니다`
-              : `${c.date} · 원문 ${fmt.int(c.lines)}줄`
-          }
+          title={c.lines > 0 ? `${c.date} · 원문 ${fmt.int(c.lines)}줄` : undefined}
         />
       ))}
     </div>
@@ -50,10 +46,6 @@ export function Strata({ items }: { items: WorkspaceStatus[] }) {
         <span className="legend-item">
           <span className="legend-swatch" />
           쌓인 대화량
-        </span>
-        <span className="legend-item">
-          <span className="legend-swatch is-void" />
-          수집 없음
         </span>
         <span style={{ marginLeft: 'auto' }}>진한 칸일수록 그날 많이 쌓였습니다</span>
       </div>

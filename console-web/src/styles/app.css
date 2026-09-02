@@ -204,7 +204,6 @@
 }
 .page-note {
   margin-top: 10px;
-  max-width: 74ch;
   font-size: 14px;
   line-height: 1.7;
   color: var(--text-2);
@@ -241,7 +240,6 @@
 }
 .section-lead {
   margin-top: 5px;
-  max-width: 78ch;
   font-size: 13px;
   line-height: 1.65;
   color: var(--text-2);
@@ -308,11 +306,6 @@
   border-radius: 2px;
   background: var(--data-3);
 }
-.legend-swatch.is-void {
-  background: var(--warn-soft);
-  border: 1px dashed var(--warn);
-}
-
 .band {
   display: grid;
   grid-template-columns: 178px minmax(0, 1fr) 132px;
@@ -370,12 +363,10 @@
 .course.q4 {
   background: var(--data-4);
 }
-/* 수집이 없는 날 — 채우지 않고 빈 칸으로 남깁니다 */
+/* 날짜 간격은 유지하되 수집이 없는 날에는 어떤 표식도 그리지 않습니다. */
 .course.is-void {
-  height: 100% !important;
-  background: var(--warn-soft);
-  border: 1px dashed var(--warn);
-  border-radius: 2px;
+  height: 0 !important;
+  visibility: hidden;
   animation: none;
 }
 @keyframes rise {
@@ -2113,4 +2104,14 @@
   line-height: 1.65;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* 설명은 임의 글자 수에서 끊지 않고 우측 상태 영역을 제외한 가용 폭을 사용합니다. */
+.page-head > div:first-child {
+  flex: 1 1 640px;
+  min-width: 0;
+}
+.section-head > div:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
 }

@@ -12,9 +12,11 @@ import hashlib
 import json
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from tybot import schedulesync as ss
 from tybot.schedulesync import (
     DETAIL_RETENTION,
     KST,
@@ -481,3 +483,69 @@ def test_dir_without_manifest_is_skipped(tmp_path):
 def test_missing_inbox_is_not_an_error(tmp_path):
     assert pending_snapshots(tmp_path / "없음") == []
     assert newest_snapshot(tmp_path / "없음") is None
+
+
+# --- 폴더↔조직 후보 등록 ------------------------------------------------------
+# 매핑은 Oracle 폴더 ACL 에서 온 사실이고, "그 팀에 DM 을 보낼 것인가" 는 정책이다.
+# 값은 자동으로 채우되 승인은 사람이 켠다.
+class RecordingCursor:
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+        self.rowcount = 1
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params or {}))
+
+
+def _snapshot_with(folders):
+    return ss.Snapshot(rows=[], manifest={"folders": folders}, source=Path("x"))
+
+
+def test_candidates_are_registered_but_never_enabled():
+    cur = RecordingCursor()
+    ss._register_folder_candidates(
+        cur, _snapshot_with([{"folder_id": 654, "folder_name": "업무", "org_code": "ABB155"}])
+    )
+
+    for sql, params in cur.calls:
+        assert "false" in sql, "승인된 상태로 넣으면 안 된다"
+        assert params.get("by") == ss.CANDIDATE_BY
+
+
+def test_existing_rows_are_not_overwritten():
+    """사람이 켠 것을 동기화가 되돌리면 안 된다."""
+    cur = RecordingCursor()
+    ss._register_folder_candidates(
+        cur, _snapshot_with([{"folder_id": 654, "org_code": "ABB155"}])
+    )
+
+    assert all("do nothing" in sql for sql, _ in cur.calls)
+    assert not any("do update" in sql for sql, _ in cur.calls)
+
+
+def test_unknown_org_code_cannot_abort_the_whole_snapshot():
+    """org_unit 에 없는 코드로 외래키가 터지면 일정 동기화 전체가 롤백된다."""
+    cur = RecordingCursor()
+    ss._register_folder_candidates(
+        cur, _snapshot_with([{"folder_id": 654, "org_code": "없는코드"}])
+    )
+
+    org_sql = [sql for sql, _ in cur.calls if "schedule_folder_org" in sql]
+    assert org_sql and "exists (select 1 from org_unit" in org_sql[0]
+
+
+def test_rows_without_org_still_register_the_folder():
+    """조직이 안 붙은 폴더도 목록에는 남아야 사람이 보고 판단한다."""
+    cur = RecordingCursor()
+    ss._register_folder_candidates(cur, _snapshot_with([{"folder_id": 8}]))
+
+    assert any("schedule_folder " in sql for sql, _ in cur.calls)
+    assert not any("schedule_folder_org" in sql for sql, _ in cur.calls)
+
+
+def test_malformed_rows_are_skipped_not_fatal():
+    cur = RecordingCursor()
+    ss._register_folder_candidates(
+        cur, _snapshot_with([{"folder_name": "id 없음"}, {"folder_id": "숫자아님"}])
+    )
+    assert cur.calls == []

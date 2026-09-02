@@ -62,7 +62,7 @@ export function Dashboard() {
         note={
           stalled.length ? `수집이 멈춘 워크스페이스 ${stalled.length}개` : '모두 정상 수집 중'
         }
-        lead="한 칸이 하루입니다. 오른쪽으로 갈수록 최근이고, 점선 칸은 그날 수집된 대화가 없다는 뜻입니다."
+        lead="한 칸이 하루입니다. 오른쪽으로 갈수록 최근이며, 막대는 대화가 수집된 날에만 표시됩니다."
       >
         <Strata items={list} />
       </Section>
