@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..archive.store import ArchiveStore
-from . import account_store, env_settings, health, reader, service_logs
+from . import account_store, env_settings, health, reader, service_logs, timer_manager
 from .auth import (
     ROLES,
     SESSION_COOKIE,
@@ -130,6 +130,12 @@ class ConsoleAccountBody(BaseModel):
     active: bool = True
     workspaces: list[str] = Field(default_factory=list)
     password: str | None = None
+
+
+class TimerActionBody(BaseModel):
+    unit: str
+    action: Literal["enable", "disable", "run", "schedule"]
+    preset: str | None = None
 
 
 @app.post("/api/login")
@@ -399,6 +405,49 @@ def service_log_entries(
     except service_logs.ServiceLogError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return {"level": level.lower(), "entries": entries}
+
+
+# ---------------------------------------------------------------------------
+# 배치 관리 — admin 전용, 고정된 TYBot 타이머만
+# ---------------------------------------------------------------------------
+
+@app.get("/api/timers")
+def timers(user: User) -> dict:
+    _require_admin(user)
+    try:
+        return {"timers": timer_manager.snapshot()}
+    except timer_manager.TimerManagerError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.put("/api/timers/action")
+def timer_action(body: TimerActionBody, request: Request, user: User) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+    try:
+        rows = timer_manager.apply(body.unit, body.action, body.preset)
+    except timer_manager.TimerManagerError as e:
+        try:
+            timer_manager.audit(
+                user.display(), user.email, body.unit, body.action, body.preset, "failed"
+            )
+        except OSError:
+            logger.exception("배치 작업 실패 감사 로그 기록 실패")
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    try:
+        timer_manager.audit(
+            user.display(), user.email, body.unit, body.action, body.preset, "applied"
+        )
+    except OSError:
+        logger.exception("배치 작업 감사 로그 기록 실패")
+    logger.warning(
+        "배치 작업 변경 — actor=%s unit=%s action=%s preset=%s",
+        user.email,
+        body.unit,
+        body.action,
+        body.preset,
+    )
+    return {"timers": rows}
 
 
 @app.get("/api/health")

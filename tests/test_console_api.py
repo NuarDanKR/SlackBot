@@ -520,6 +520,7 @@ def test_guest_cannot_open_bot_management_apis(client):
     assert client.get("/api/health-report", headers=headers).status_code == 403
     assert client.get("/api/manifest", headers=headers).status_code == 403
     assert client.get("/api/service-logs", headers=headers).status_code == 403
+    assert client.get("/api/timers", headers=headers).status_code == 403
 
 
 def test_developer_can_read_redacted_service_logs(client, monkeypatch):
@@ -533,6 +534,44 @@ def test_developer_can_read_redacted_service_logs(client, monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["entries"] == [{"level": "warning", "message": "최근 100건"}]
+
+
+def test_timer_management_is_admin_only(client, monkeypatch):
+    monkeypatch.setattr(console_app.timer_manager, "snapshot", lambda: [])
+    assert client.get("/api/timers", headers=owner(client)).status_code == 200
+    assert client.get("/api/timers", headers=member(client)).status_code == 403
+    assert client.get("/api/timers", headers=guest(client)).status_code == 403
+
+
+def test_admin_can_enable_timer_with_csrf_and_audit(client, monkeypatch):
+    called = {}
+    monkeypatch.setattr(
+        console_app.timer_manager,
+        "apply",
+        lambda unit, action, preset: called.update(
+            unit=unit, action=action, preset=preset
+        )
+        or [],
+    )
+    monkeypatch.setattr(
+        console_app.timer_manager,
+        "audit",
+        lambda actor, email, unit, action, preset, result: called.update(
+            actor=actor, email=email, result=result
+        ),
+    )
+    headers = owner(client)
+    payload = {"unit": "tybot-collect.timer", "action": "enable"}
+    assert client.put("/api/timers/action", json=payload, headers=headers).status_code == 403
+
+    response = client.put(
+        "/api/timers/action", json=payload, headers=_write_headers(headers)
+    )
+    assert response.status_code == 200, response.text
+    assert called["unit"] == "tybot-collect.timer"
+    assert called["action"] == "enable"
+    assert called["email"] == "dan@taeyoung.com"
+    assert called["result"] == "applied"
 
 
 # --- 환경변수 설정 ---------------------------------------------------------

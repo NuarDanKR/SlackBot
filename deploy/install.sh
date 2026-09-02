@@ -172,7 +172,7 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]] && ! grep -qE "^CONSOLE_DIST=.+" "$CONF_DIR
 fi
 
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
-# 타이머는 파일만 배치한다. enable 은 운영자가 결정한다.
+# 타이머는 파일만 배치한다. enable은 운영자가 직접 하거나 관리자 콘솔의 배치 관리에서 결정한다.
 #
 # 다만 **꺼져 있다는 사실을 아무도 모르는 것**이 실제 문제였다. 타이머가 안 켜져 있으면
 # 일정 동기화·DM 알림·백필이 통째로 돌지 않는데, 오류가 나지 않으니 몇 주가 지나도
@@ -184,10 +184,13 @@ for u in "${TIMERS[@]}"; do
 done
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   visudo -cf "$APP_DIR/deploy/tybot-console-logs.sudoers" >/dev/null
+  visudo -cf "$APP_DIR/deploy/tybot-console-timers.sudoers" >/dev/null
   install -m 0644 "$APP_DIR/deploy/tybot-console.service" /etc/systemd/system/tybot-console.service
   install -d -m 0755 /usr/local/libexec
   install -m 0755 "$APP_DIR/deploy/tybot-console-logs" /usr/local/libexec/tybot-console-logs
+  install -m 0755 "$APP_DIR/deploy/tybot-console-timers" /usr/local/libexec/tybot-console-timers
   install -m 0440 "$APP_DIR/deploy/tybot-console-logs.sudoers" /etc/sudoers.d/tybot-console-logs
+  install -m 0440 "$APP_DIR/deploy/tybot-console-timers.sudoers" /etc/sudoers.d/tybot-console-timers
 fi
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.service" /etc/systemd/system/tybot-deploy.service
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.path"    /etc/systemd/system/tybot-deploy.path

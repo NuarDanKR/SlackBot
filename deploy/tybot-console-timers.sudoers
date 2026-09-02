@@ -1,0 +1,1 @@
+tybot ALL=(root) NOPASSWD: /usr/local/libexec/tybot-console-timers *

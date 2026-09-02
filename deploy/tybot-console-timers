@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# 관리 콘솔이 허용된 TYBot 타이머만 조회·제어하도록 제한하는 root 헬퍼.
+set -euo pipefail
+
+UNITS=(
+  tybot-collect.timer
+  tybot-schedule-dm.timer
+  tybot-schedule-sync.timer
+  tybot-tidy.timer
+  tybot-update.timer
+)
+
+allowed_unit() {
+  local wanted=$1 unit
+  for unit in "${UNITS[@]}"; do
+    [[ "$wanted" == "$unit" ]] && return 0
+  done
+  return 1
+}
+
+show_value() {
+  /usr/bin/systemctl show "$1" --property="$2" --value 2>/dev/null || true
+}
+
+list_timers() {
+  local unit service enabled active sub next last result preset dropin
+  for unit in "${UNITS[@]}"; do
+    service=${unit%.timer}.service
+    enabled=$(/usr/bin/systemctl is-enabled "$unit" 2>/dev/null || true)
+    active=$(show_value "$unit" ActiveState)
+    sub=$(show_value "$unit" SubState)
+    next=$(show_value "$unit" NextElapseUSecRealtime)
+    last=$(show_value "$unit" LastTriggerUSec)
+    result=$(show_value "$service" Result)
+    dropin="/etc/systemd/system/${unit}.d/console-schedule.conf"
+    preset=default
+    if [[ -f "$dropin" ]]; then
+      preset=$(/usr/bin/sed -n 's/^# TYBOT_PRESET=//p' "$dropin" | /usr/bin/head -n 1)
+      [[ -n "$preset" ]] || preset=default
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$unit" "${enabled:-not-found}" "${active:-inactive}" "${sub:-dead}" \
+      "${next:--}" "${last:--}" "${result:-unknown}" "$preset"
+  done
+}
+
+write_schedule() {
+  local unit=$1 preset=$2 calendar
+  case "$unit:$preset" in
+    tybot-collect.timer:business-hourly) calendar='*-*-* 07..19:00:00' ;;
+    tybot-collect.timer:business-30m) calendar='*-*-* 07..19:00/30:00' ;;
+    tybot-collect.timer:all-hours-hourly) calendar='*-*-* *:00:00' ;;
+    tybot-tidy.timer:5m) calendar='*:0/5' ;;
+    tybot-tidy.timer:15m) calendar='*:0/15' ;;
+    tybot-tidy.timer:30m) calendar='*:0/30' ;;
+    tybot-tidy.timer:60m) calendar='hourly' ;;
+    tybot-update.timer:business-10m) calendar='Mon..Fri 09,10,11,12,13,14,15,16,17,18,19:00/10' ;;
+    tybot-update.timer:business-30m) calendar='Mon..Fri 09,10,11,12,13,14,15,16,17,18,19:00/30' ;;
+    tybot-update.timer:business-hourly) calendar='Mon..Fri 09,10,11,12,13,14,15,16,17,18,19:00:00' ;;
+    *) echo 'invalid schedule preset' >&2; exit 2 ;;
+  esac
+
+  /usr/bin/systemd-analyze calendar "$calendar" >/dev/null
+  /usr/bin/mkdir -p "/etc/systemd/system/${unit}.d"
+  printf '# TYBOT_PRESET=%s\n[Timer]\nOnCalendar=\nOnCalendar=%s\n' "$preset" "$calendar" \
+    > "/etc/systemd/system/${unit}.d/console-schedule.conf"
+  /usr/bin/chmod 0644 "/etc/systemd/system/${unit}.d/console-schedule.conf"
+  /usr/bin/systemctl daemon-reload
+  if /usr/bin/systemctl is-active --quiet "$unit"; then
+    /usr/bin/systemctl restart "$unit"
+  fi
+}
+
+ACTION=${1:-list}
+if [[ "$ACTION" == "list" ]]; then
+  [[ $# -eq 1 ]] || { echo 'invalid arguments' >&2; exit 2; }
+  list_timers
+  exit 0
+fi
+
+UNIT=${2:-}
+allowed_unit "$UNIT" || { echo 'invalid timer unit' >&2; exit 2; }
+case "$ACTION" in
+  enable)
+    [[ $# -eq 2 ]] || { echo 'invalid arguments' >&2; exit 2; }
+    /usr/bin/systemctl enable --now "$UNIT"
+    ;;
+  disable)
+    [[ $# -eq 2 ]] || { echo 'invalid arguments' >&2; exit 2; }
+    /usr/bin/systemctl disable --now "$UNIT"
+    ;;
+  run)
+    [[ $# -eq 2 ]] || { echo 'invalid arguments' >&2; exit 2; }
+    /usr/bin/systemctl start --no-block "${UNIT%.timer}.service"
+    ;;
+  schedule)
+    [[ $# -eq 3 ]] || { echo 'invalid arguments' >&2; exit 2; }
+    write_schedule "$UNIT" "$3"
+    ;;
+  *) echo 'invalid action' >&2; exit 2 ;;
+esac

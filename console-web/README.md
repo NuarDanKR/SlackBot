@@ -1,6 +1,6 @@
 # TYBot 관리 콘솔 (프론트엔드)
 
-데이터 현황 · 수집 문서 열람 · API 사용량 · 헬스 체크 · 서비스 로그 · 봇 규칙 열람.
+데이터 현황 · 수집 문서 열람 · API 사용량 · 헬스 체크 · 서비스 로그 · 배치 관리 · 봇 규칙 열람.
 
 **현재 단계: 화면에 노출된 운영 데이터는 모두 서버 API에서 읽습니다.** 쓰기 API가 없는
 배포 승인·워크스페이스 관리 화면은 메뉴에서 숨겼고, 봇 규칙은 읽기 전용입니다.
@@ -13,6 +13,7 @@
 | API 사용량 | `GET /api/usage` |
 | 헬스 체크 | `GET /api/health-report` |
 | 서비스 로그 | `GET /api/service-logs` |
+| 배치 관리 | `GET /api/timers` · `PUT /api/timers/action` |
 | 봇 규칙 열람 | `GET /api/harness` |
 | 환경변수 설정 | `GET/PUT /api/env-settings` |
 | 콘솔 사용자 관리 | `GET/PUT /api/console-users` |
@@ -61,6 +62,7 @@ src/
 │   ├── Usage.tsx            # API 사용량 — 상한 대비 · 모델별
 │   ├── HealthCheck.tsx      # 아카이브·답변 품질·봇 연결 진단
 │   ├── ServiceLogs.tsx      # tybot.service 로그 열람
+│   ├── BatchTimers.tsx      # TYBot systemd 타이머 조회·제어 (관리자 전용)
 │   ├── Harness.tsx          # 서버에 배포된 봇 규칙 읽기 전용 열람
 │   ├── EnvSettings.tsx      # 허용된 환경변수 관리 (관리자 전용)
 │   └── ConsoleUsers.tsx     # 콘솔 계정·권한 관리 (관리자 전용)
@@ -157,6 +159,7 @@ uvicorn tybot.console.app:app --host 127.0.0.1 --port 8787 --app-dir src
 | `GET /api/harness` | 봇 규칙 열람 |
 | `GET /api/health-report` | 헬스 체크 |
 | `GET /api/service-logs` | 서비스 로그 |
+| `GET /api/timers`, `PUT /api/timers/action` | 배치 관리 |
 | `GET/PUT /api/env-settings` | 환경변수 설정 |
 | `GET/PUT /api/console-users` | 콘솔 사용자 관리 |
 
