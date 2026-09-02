@@ -90,6 +90,20 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
     } finally { setSubmitting(false) }
   }
 
+  // 관리자의 직접 배포. 서버에 root 로 들어가 update.sh 를 칠 수 있는 사람에게
+  // 승인 절차를 강제하면 콘솔을 놔두고 SSH 로 도는 길만 열린다 — 그쪽은 기록이 없다.
+  async function deployNow() {
+    if (!window.confirm('승인 절차 없이 지금 배포합니다. 계속하시겠습니까?')) return
+    setSubmitting(true); setError(null)
+    try {
+      await api.put('/api/deployment/request', {})
+      runtime.reload()
+      onToast('배포를 시작했습니다. 진행 상황이 아래에 표시됩니다.')
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : String(caught))
+    } finally { setSubmitting(false) }
+  }
+
   async function decide(id: string, decision: 'approve' | 'reject') {
     const action = decision === 'approve' ? '승인' : '반려'
     if (!window.confirm(`이 배포 요청을 ${action}하시겠습니까?`)) return
@@ -110,6 +124,8 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
   if (runtime.error && !runtime.data) return <Failed what="배포 상태를" detail={runtime.error.message} onRetry={runtime.reload} />
   if (queue.error && !queue.data) return <Failed what="배포 요청을" detail={queue.error.message} onRetry={queue.reload} />
   const current = runtime.data
+  const isAdmin = user.role === 'admin'
+  const busy = current?.state === 'queued' || current?.state === 'running'
 
   return (
     <>
@@ -158,7 +174,10 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
 
       {current && <Section title="최근 서버 배포" lead="실제 root 배포 러너의 상태와 결과입니다.">
         <div className="card card-pad"><div className="card-head"><div><div className="card-title">{RUNTIME_LABEL[current.state]}</div>
-          <p className="hint">{current.message || '아직 기록된 배포 결과가 없습니다.'}</p></div>{runtimeChip(current.state)}</div>
+          <p className="hint">{current.message || '아직 기록된 배포 결과가 없습니다.'}</p></div>
+          <div className="deploy-head-actions">{runtimeChip(current.state)}
+            {isAdmin && <button className="btn btn-primary" disabled={submitting || busy}
+              onClick={deployNow}>{busy ? '배포 중…' : '지금 배포'}</button>}</div></div>
           <div className="deploy-actor"><span className="metric-label">실행 승인자</span> {current.actor || '-'}</div>
           <div className="deploy-diff">
             <div className="deploy-diff-side is-before">

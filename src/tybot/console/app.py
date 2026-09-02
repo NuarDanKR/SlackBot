@@ -558,12 +558,26 @@ def deployment(user: User) -> dict:
 
 @app.put("/api/deployment/request")
 def request_deployment(request: Request, user: User) -> dict:
+    """관리자의 직접 배포. 승인 절차를 거치지 않는다.
+
+    승인 절차는 **개발자가 올린 코드를 다른 사람이 본다**는 데 뜻이 있다.
+    서버에 root 로 들어가 `update.sh` 를 칠 수 있는 관리자에게 같은 절차를
+    강제하면, 콘솔을 놔두고 SSH 로 도는 길만 열린다 — 그쪽은 기록도 안 남는다.
+    막는 대신 남긴다: 실행자를 배포 상태와 감사 로그에 기록한다.
+
+    개발자(role=developer)는 여전히 요청→승인을 거친다.
+    """
     _require_admin(user)
     _check_write_request(request)
-    raise HTTPException(
-        status_code=409,
-        detail="직접 배포는 비활성화됐습니다. 배포 요청을 등록하고 다른 관리자의 승인을 받으세요.",
-    )
+    try:
+        result = deploy_request.request_deploy(user.email, note="관리자 직접 배포")
+    except OSError as e:
+        logger.exception("배포 요청 파일 기록 실패")
+        raise HTTPException(status_code=500, detail="배포 요청을 기록하지 못했습니다.") from e
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=str(result.get("reason") or "배포 요청 거절"))
+    logger.warning("관리자 직접 배포 — actor=%s (승인 절차 없음)", user.email)
+    return deploy_request.console_status()
 
 
 def _deploy_request_response(row: dict) -> dict:

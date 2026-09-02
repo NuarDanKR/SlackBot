@@ -2083,6 +2083,12 @@
   font-size: 12px;
 }
 
+.deploy-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .deploy-actor {
   margin-top: 20px;
   font-size: 13px;

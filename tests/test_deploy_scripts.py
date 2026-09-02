@@ -207,3 +207,23 @@ def test_install_says_why_it_cannot_set_permissions():
     assert 'chmod u+rwx "$APP_DIR" 2>/dev/null' in script
     for hint in ("getenforce", "root_squash", "lsattr"):
         assert hint in script, hint
+
+
+def test_install_creates_the_workspace_secret_key():
+    """문서에만 있던 수동 절차라 실제로 빠져 있었다.
+
+    키가 없으면 콘솔의 워크스페이스 관리가 아무것도 저장하지 못한다.
+    """
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+
+    assert "Fernet.generate_key()" in script
+    assert "WORKSPACE_SECRET_KEY_FILE=$WS_KEY_FILE" in script
+    # 봇만 읽을 수 있어야 한다. 넓으면 workspace_store 가 거부한다(0400 요구).
+    assert 'install -o tybot -g tybot -m 0400 /dev/stdin "$WS_KEY_FILE"' in script
+
+
+def test_install_never_overwrites_an_existing_workspace_key():
+    """키가 바뀌면 저장된 Slack 토큰을 영영 못 푼다."""
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+
+    assert '! -f "$WS_KEY_FILE"' in script

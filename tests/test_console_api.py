@@ -588,16 +588,43 @@ def test_deployment_status_is_visible_to_developers(client):
     assert client.get("/api/deployment", headers=guest(client)).status_code == 403
 
 
-def test_direct_admin_deployment_is_disabled(client):
+def test_admin_can_deploy_without_approval(client, monkeypatch):
+    """서버에 root 로 들어가 update.sh 를 칠 수 있는 사람이다.
+
+    막으면 콘솔을 놔두고 SSH 로 도는 길만 열린다 — 그쪽은 기록이 남지 않는다.
+    막는 대신 실행자를 남긴다.
+    """
+    seen = {}
+    monkeypatch.setattr(
+        console_app.deploy_request,
+        "request_deploy",
+        lambda actor, **kw: seen.update(actor=actor, **kw) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        console_app.deploy_request, "console_status", lambda: {"state": "queued"}
+    )
     headers = owner(client)
-    assert client.put("/api/deployment/request", json={}, headers=headers).status_code == 403
 
     response = client.put(
         "/api/deployment/request", json={}, headers=_write_headers(headers)
     )
 
-    assert response.status_code == 409
-    assert "승인" in response.json()["detail"]
+    assert response.status_code == 200
+    assert seen["actor"], "누가 배포했는지 남아야 한다"
+
+
+def test_direct_deployment_still_needs_a_write_token(client):
+    """CSRF 로 남의 브라우저가 배포를 시킬 수 있으면 안 된다."""
+    assert client.put("/api/deployment/request", json={}, headers=owner(client)).status_code == 403
+
+
+def test_developer_cannot_deploy_without_approval(client):
+    """직접 배포는 관리자만이다. 개발자는 요청→승인을 거친다."""
+    response = client.put(
+        "/api/deployment/request", json={}, headers=_write_headers(member(client))
+    )
+
+    assert response.status_code == 403
 
 
 def test_developer_can_create_deployment_approval_request(client, monkeypatch):

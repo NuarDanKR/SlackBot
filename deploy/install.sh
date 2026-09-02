@@ -236,6 +236,25 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]] && ! grep -qE "^CONSOLE_DIST=.+" "$CONF_DIR
   echo "  → CONSOLE_DIST 를 추가했습니다: $APP_DIR/console-web/dist"
 fi
 
+# 워크스페이스 Slack 토큰 암호화 키. 콘솔의 워크스페이스 관리가 이것 없이는
+# 아무것도 저장하지 못한다("WORKSPACE_SECRET_KEY 또는 ...가 필요합니다").
+# 문서에만 있던 수동 절차라 실제로 빠져 있었다.
+#
+# **이미 있으면 절대 덮지 않는다.** 키가 바뀌면 저장된 토큰을 영영 못 푼다.
+WS_KEY_FILE="$CONF_DIR/workspace-secret.key"
+if [[ "${WITH_CONSOLE:-0}" == "1" && ! -f "$WS_KEY_FILE" ]]; then
+  "$APP_DIR/.venv/bin/python" \
+    -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" \
+    | install -o tybot -g tybot -m 0400 /dev/stdin "$WS_KEY_FILE"
+  echo "  → 워크스페이스 암호화 키 생성: $WS_KEY_FILE (백업 대상입니다)"
+fi
+if [[ "${WITH_CONSOLE:-0}" == "1" ]] \
+   && ! grep -qE "^WORKSPACE_SECRET_KEY(_FILE)?=.+" "$CONF_DIR/tybot.env"; then
+  sed -i -E "/^WORKSPACE_SECRET_KEY_FILE=[[:space:]]*$/d" "$CONF_DIR/tybot.env"
+  echo "WORKSPACE_SECRET_KEY_FILE=$WS_KEY_FILE" >> "$CONF_DIR/tybot.env"
+  echo "  → WORKSPACE_SECRET_KEY_FILE 을 추가했습니다: $WS_KEY_FILE"
+fi
+
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
 # 타이머는 파일만 배치한다. enable은 운영자가 직접 하거나 관리자 콘솔의 배치 관리에서 결정한다.
 #
