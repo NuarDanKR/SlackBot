@@ -1,16 +1,8 @@
 import { useResource } from '../api/hooks'
-import { anomalies } from '../mock/data'
-import type { ConsoleUser, UsageSnapshot } from '../types'
-import { Failed, Loading, MockBadge, PageHead, Section, fmt } from '../components/primitives'
+import type { UsageSnapshot } from '../types'
+import { Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
-const KIND_LABEL: Record<string, string> = {
-  spike: '사용량 급증',
-  limit: '상한 임박',
-  loop: '반복 호출',
-  stalled: '수집 중단',
-}
-
-export function Usage({ user, onToast }: { user: ConsoleUser; onToast: (m: string) => void }) {
+export function Usage() {
   const res = useResource<UsageSnapshot>('/api/usage')
   if (res.loading) return <Loading what="사용량을" />
   if (res.error || !res.data)
@@ -36,10 +28,6 @@ export function Usage({ user, onToast }: { user: ConsoleUser; onToast: (m: strin
   // 서버가 이미 권한 범위로 좁혀서 내려 줍니다(모든 집계가 같은 행 집합에서 나옵니다).
   const rows = usage.byWorkspace
   const recent = usage.recent
-  // 이상 감지는 아직 서버 API 가 없습니다(BACKLOG B-13).
-  const alerts = anomalies.filter(
-    (a) => user.role === 'admin' || user.workspaces.includes(a.workspace),
-  )
 
   return (
     <>
@@ -136,50 +124,6 @@ export function Usage({ user, onToast }: { user: ConsoleUser; onToast: (m: strin
         </div>
       </Section>
 
-      <Section
-        title="이상 사용량 감지"
-        aside={<MockBadge />}
-        lead={
-          user.role === 'admin'
-            ? '사용량이 평소보다 크게 뛰면 여기에 표시됩니다. 감지만 하고 두면 요금은 이미 발생하므로, 필요하면 해당 워크스페이스의 호출을 바로 멈출 수 있습니다.'
-            : '담당 워크스페이스에서 사용량이 평소보다 크게 뛰면 여기에 표시됩니다.'
-        }
-      >
-        {alerts.map((a) => (
-          <div
-            className={`notice ${a.state === 'open' ? 'warn' : ''}`}
-            key={a.id}
-            style={{ marginBottom: 10 }}
-          >
-            <div className="notice-kind">
-              {a.factor >= 2 ? `평소의 ${a.factor.toFixed(1)}배` : KIND_LABEL[a.kind]}
-            </div>
-            <div>
-              <div className="notice-title">{a.headline}</div>
-              <div className="notice-detail">{a.detail}</div>
-              <div className="notice-meta">
-                {fmt.dayClock(a.detectedAt)} · {a.workspace} ·{' '}
-                {a.state === 'open' ? '아직 처리하지 않음' : a.state === 'ack' ? '확인함' : '차단됨'}
-              </div>
-            </div>
-            <div className="notice-actions">
-              {user.role === 'admin' && a.kind === 'spike' && a.state !== 'breaker' && (
-                <button
-                  className="btn btn-sm btn-danger"
-                  onClick={() =>
-                    onToast(
-                      `${a.workspace} 워크스페이스의 호출을 멈췄습니다. 해제는 이 화면에서만 할 수 있습니다.`,
-                    )
-                  }
-                >
-                  이 워크스페이스 호출 멈추기
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-      </Section>
-
       <div className="grid grid-2" style={{ marginTop: 34 }}>
         <div>
           <div className="section-head">
@@ -203,7 +147,7 @@ export function Usage({ user, onToast }: { user: ConsoleUser; onToast: (m: strin
                 </thead>
                 <tbody>
                   {rows.map((w) => {
-                    const p = (w.costUsd / w.limitUsd) * 100
+                    const p = w.limitUsd > 0 ? (w.costUsd / w.limitUsd) * 100 : 0
                     return (
                       <tr key={w.key}>
                         <td>
@@ -218,7 +162,9 @@ export function Usage({ user, onToast }: { user: ConsoleUser; onToast: (m: strin
                                 style={{ width: `${Math.min(100, p)}%` }}
                               />
                             </div>
-                            <span className="mono">{p.toFixed(0)}%</span>
+                            <span className="mono">
+                              {w.limitUsd > 0 ? `${p.toFixed(0)}%` : '미설정'}
+                            </span>
                           </div>
                         </td>
                         <td className="num">{fmt.int(w.calls)}</td>

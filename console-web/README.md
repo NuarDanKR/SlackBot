@@ -1,8 +1,9 @@
 # TYBot 관리 콘솔 (프론트엔드)
 
-데이터 현황 · 수집 문서 열람 · API 사용량 · 봇 규칙 편집 · 배포 승인 · 워크스페이스 관리.
+데이터 현황 · 수집 문서 열람 · API 사용량 · 헬스 체크 · 서비스 로그 · 봇 규칙 열람.
 
-**현재 단계: 읽기 경로는 서버에 붙었습니다.** 쓰기(등록·승인·반영)는 아직입니다.
+**현재 단계: 화면에 노출된 운영 데이터는 모두 서버 API에서 읽습니다.** 쓰기 API가 없는
+배포 승인·워크스페이스 관리 화면은 메뉴에서 숨겼고, 봇 규칙은 읽기 전용입니다.
 설계 결정과 제한은 [`../docs/design/console.md`](../docs/design/console.md) 를 보세요.
 
 | 화면 | 데이터 출처 |
@@ -10,14 +11,14 @@
 | 데이터 현황 | `GET /api/status` |
 | 수집 문서 열람 | `GET /api/collected` · `/content` · `/audit` |
 | API 사용량 | `GET /api/usage` |
-| 봇 규칙 편집 (파일 목록) | `GET /api/harness` |
-| 봇 규칙 편집 (승인 요청) | 예시 데이터 — BACKLOG B-16 |
-| 배포 승인 | 예시 데이터 — BACKLOG B-16 |
-| 워크스페이스 관리 | 예시 데이터 — BACKLOG B-16 |
-| 이상 사용량 감지 | 예시 데이터 — BACKLOG B-19 |
+| 헬스 체크 | `GET /api/health-report` |
+| 서비스 로그 | `GET /api/service-logs` |
+| 봇 규칙 열람 | `GET /api/harness` |
+| 환경변수 설정 | `GET/PUT /api/env-settings` |
+| 콘솔 사용자 관리 | `GET/PUT /api/console-users` |
 
-아직 서버에 붙지 않은 구역에는 화면에 **`예시 데이터`** 배지가 붙습니다. 진짜 값과 섞여
-보이지 않게 하려는 표시입니다.
+예시 데이터는 운영 라우트에서 사용하지 않습니다. API가 없는 기능은 동작하는 것처럼 보이는
+화면을 제공하지 않습니다.
 
 ## 함께 띄우기
 
@@ -57,27 +58,25 @@ src/
 ├── pages/
 │   ├── Dashboard.tsx        # 데이터 현황 — 수집 추이 + 워크스페이스 상태
 │   ├── Collected.tsx        # 수집 문서 열람 — MD 미리보기 (관리자 전용 + 열람 기록)
-│   ├── Usage.tsx            # API 사용량 — 상한 대비 · 이상 감지 · 모델별
-│   ├── Harness.tsx          # 봇 규칙 편집 — MD 편집 → 승인 요청
-│   ├── Deploy.tsx           # 배포 승인 — 자동 검사 → 승인 → 반영
-│   └── Workspaces.tsx       # 워크스페이스 관리 (관리자 전용)
+│   ├── Usage.tsx            # API 사용량 — 상한 대비 · 모델별
+│   ├── HealthCheck.tsx      # 아카이브·답변 품질·봇 연결 진단
+│   ├── ServiceLogs.tsx      # tybot.service 로그 열람
+│   ├── Harness.tsx          # 서버에 배포된 봇 규칙 읽기 전용 열람
+│   ├── EnvSettings.tsx      # 허용된 환경변수 관리 (관리자 전용)
+│   └── ConsoleUsers.tsx     # 콘솔 계정·권한 관리 (관리자 전용)
 ├── components/
 │   ├── Strata.tsx           # 수집 추이 그래프
 │   ├── Markdown.tsx         # 마크다운 렌더러 (직접 구현, 이스케이프 우선)
 │   ├── Approval.tsx         # 승인 영역 (배포·규칙 편집 공용)
 │   └── primitives.tsx       # 배지·지표·머리글·수치 표기
-├── mock/
-│   ├── types.ts             # 화면이 받는 데이터 모양 = 붙일 API 응답 모양
-│   ├── data.ts              # 워크스페이스·사용량·배포·레지스트리
-│   ├── harness.ts           # 규칙 MD 파일과 편집 요청
-│   └── archive.ts           # 수집된 문서와 열람 기록
+├── mock/                    # 미구현 화면 설계 참고용. 운영 라우트에서는 import 금지
 └── styles/
     ├── tokens.css           # 서체(@font-face)·색·형태 토큰 (라이트/다크)
     └── app.css              # 레이아웃·컴포넌트
 ```
 
-`mock/types.ts` 의 필드 이름은 다음 단계에 붙일 API 응답과 1:1로 맞춰 뒀습니다. 배선할 때
-컴포넌트를 고치지 않고 데이터 출처만 바꾸는 것이 목표입니다.
+`mock/`은 과거 화면 설계 참고 자료입니다. 실제 메뉴에 다시 연결하려면 대응하는 서버 API와
+권한 검사를 먼저 구현해야 합니다.
 
 ## 콘솔 역할
 
@@ -141,8 +140,7 @@ CI 컬러 `#800020` 는 **강조·포인트 전용**입니다. 브랜드 표식,
 
 ## 백엔드 연결
 
-읽기 API 는 `src/tybot/console/` 에 있습니다. 화면이 쓰는 필드 이름과 API 응답이 같은 모양이라,
-`src/mock/*` 를 `fetch` 로 바꾸면 컴포넌트는 고칠 것이 없습니다.
+콘솔 API는 `src/tybot/console/`에 있습니다. 화면은 아래 API 응답만 운영 데이터로 표시합니다.
 
 ```bash
 # 저장소 루트에서
@@ -150,17 +148,20 @@ pip install -e ".[console]"
 uvicorn tybot.console.app:app --host 127.0.0.1 --port 8787 --app-dir src
 ```
 
-| 엔드포인트 | 화면 | 대응하는 목데이터 |
-|---|---|---|
-| `GET /api/me` | 셸(역할·이름) | `mock/data.ts` `users` |
-| `GET /api/status` | 데이터 현황 | `workspaces` |
-| `GET /api/usage` | API 사용량 | `usage` |
-| `GET /api/collected` | 수집 문서 열람(목록) | `mock/archive.ts` `collectedDocs` |
-| `GET /api/collected/content?path=` | 수집 문서 열람(본문) | `CollectedDoc.content` |
-| `GET /api/collected/audit` | 원문 열람 기록 | `readAudit` |
-| `GET /api/harness` | 봇 규칙 편집 | `mock/harness.ts` `harnessFiles` |
+| 엔드포인트 | 화면 |
+|---|---|
+| `POST /api/login`, `POST /api/logout`, `GET /api/me` | 로그인·세션·현재 사용자 |
+| `GET /api/status` | 데이터 현황 |
+| `GET /api/usage` | API 사용량 |
+| `GET /api/collected`, `/content`, `/audit` | 수집 문서 목록·본문·감사 기록 |
+| `GET /api/harness` | 봇 규칙 열람 |
+| `GET /api/health-report` | 헬스 체크 |
+| `GET /api/service-logs` | 서비스 로그 |
+| `GET/PUT /api/env-settings` | 환경변수 설정 |
+| `GET/PUT /api/console-users` | 콘솔 사용자 관리 |
 
-인증은 `Authorization: Bearer <토큰>` 입니다. 토큰은 서버의 `CONSOLE_USERS` 에서 관리합니다.
+인증은 PostgreSQL `console_user`의 회사 이메일과 비밀번호를 확인한 뒤 발급하는 HttpOnly 세션
+쿠키를 사용합니다. 활성 계정이 없거나 DB에 연결할 수 없으면 임시 기본 계정으로 우회하지 않습니다.
 
-아직 없는 것: 쓰기 엔드포인트(워크스페이스 등록, 승인·반려, 되돌리기). 화면의 해당 버튼은
-지금은 알림만 띄웁니다.
+아직 없는 것: 워크스페이스 등록, 배포 승인·반려·되돌리기, 규칙 변경 요청 API. 대응 메뉴와
+실행 버튼은 노출하지 않습니다.

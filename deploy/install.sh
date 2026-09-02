@@ -172,8 +172,13 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]] && ! grep -qE "^CONSOLE_DIST=.+" "$CONF_DIR
 fi
 
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
-# 타이머(자동배포·정기백필·점검)는 파일만 배치한다. enable 은 운영자가 결정한다.
-for u in tybot-update tybot-collect tybot-tidy tybot-schedule-sync tybot-schedule-dm; do
+# 타이머는 파일만 배치한다. enable 은 운영자가 결정한다.
+#
+# 다만 **꺼져 있다는 사실을 아무도 모르는 것**이 실제 문제였다. 타이머가 안 켜져 있으면
+# 일정 동기화·DM 알림·백필이 통째로 돌지 않는데, 오류가 나지 않으니 몇 주가 지나도
+# 모른다. 그래서 설치 끝에 어떤 것이 꺼져 있는지 이름을 대고 알린다.
+TIMERS=(tybot-update tybot-collect tybot-tidy tybot-schedule-sync tybot-schedule-dm)
+for u in "${TIMERS[@]}"; do
   install -m 0644 "$APP_DIR/deploy/$u.service" "/etc/systemd/system/$u.service"
   install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"
 done
@@ -191,6 +196,21 @@ systemctl daemon-reload
 if [[ "${TYBOT_INSTALL_HINTS:-1}" != "1" ]]; then
   echo "설치 파일 갱신 완료"
   exit 0
+fi
+
+# 꺼진 타이머를 이름과 함께 알린다. 목록만 보여주면 사람이 대조해야 하고, 대조는 안 한다.
+OFF=()
+for u in "${TIMERS[@]}"; do
+  systemctl is-enabled --quiet "$u.timer" 2>/dev/null || OFF+=("$u.timer")
+done
+if ((${#OFF[@]})); then
+cat <<EOF
+
+! 꺼져 있는 타이머 ${#OFF[@]}개 — 이 작업들은 지금 전혀 돌지 않습니다:
+$(printf '    %s
+' "${OFF[@]}")
+  켜기:  sudo systemctl enable --now ${OFF[*]}
+EOF
 fi
 
 cat <<EOF

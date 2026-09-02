@@ -280,6 +280,46 @@ sudo bash /opt/tybot/deploy/update.sh
 
 ---
 
+## 6-A1. 타이머 켜기 — **설치가 켜 주지 않는다**
+
+`install.sh` 는 타이머 파일을 배치만 하고 `enable` 은 하지 않는다. 운영자가 무엇을
+돌릴지 정하게 하려는 것인데, **꺼져 있다는 사실을 아무도 모르는 것**이 실제로 문제였다.
+타이머가 안 켜져 있으면 일정 동기화·DM 알림·백필이 통째로 돌지 않는데, 오류가 나지
+않으니 몇 주가 지나도 모른다.
+
+설치 마지막에 꺼진 타이머를 이름과 함께 알린다. 그 줄이 보이면 켠다.
+
+```bash
+systemctl list-timers 'tybot-*' --no-pager     # 지금 도는 것
+```
+
+| 타이머 | 주기 | 없으면 |
+|---|---|---|
+| `tybot-schedule-sync` | 1분 | Oracle 일정이 안 들어와 `/일정` 이 옛 자료를 보여준다 |
+| `tybot-schedule-dm` | 1분 | **일정 DM 알림이 아예 안 간다** |
+| `tybot-collect` | 정기 | 과거 대화 백필이 안 돈다 |
+| `tybot-update` | 정기 | push 해도 서버가 안 따라온다 |
+| `tybot-tidy` | 정기 | 스키마 점검·수집 밀림 경보가 안 돈다 |
+
+```bash
+sudo systemctl enable --now tybot-schedule-sync.timer tybot-schedule-dm.timer \
+  tybot-collect.timer tybot-update.timer tybot-tidy.timer
+```
+
+**일정 DM 은 켜기 전에 손으로 한 번 돌려 본다.** 타이머로 돌면 실패가 조용히 지나간다.
+
+```bash
+sudo -u tybot TYBOT_ENV_FILE=/etc/tybot/tybot.env \
+  /opt/tybot/.venv/bin/python -m tybot.schedule_dm --plan-only
+```
+
+끝에 `일정 DM 발송 sent=N retry=N failed=N skipped=N` 이 나온다.
+`sent=0` 이고 아무것도 없으면 큐가 빈 것이고, 원인은 대개 셋이다 —
+일정이 동기화되지 않았거나(`schedule_occurrence` 가 비었거나),
+사용자가 `/일정 알림` 으로 DM 을 켜지 않았거나, 사번↔Slack 매핑이 없다.
+
+---
+
 ## 6-A2. 관리 콘솔 (선택)
 
 `WITH_CONSOLE=1` 로 설치했으면 계정을 만들고 켠다.

@@ -1,13 +1,11 @@
 import { useResource } from '../api/hooks'
-import { anomalies } from '../mock/data'
-import type { ConsoleUser, WorkspaceStatus } from '../types'
+import type { WorkspaceStatus } from '../types'
 import { Strata } from '../components/Strata'
 import {
   Chip,
   Failed,
   Loading,
   Metric,
-  MockBadge,
   PageHead,
   Section,
   agoLabel,
@@ -15,40 +13,36 @@ import {
   healthChip,
 } from '../components/primitives'
 
-const KIND_LABEL: Record<string, string> = {
-  spike: '사용량 급증',
-  limit: '상한 임박',
-  loop: '반복 호출',
-  stalled: '수집 중단',
-}
-
-export function Dashboard({
-  user,
-  onToast,
-}: {
-  user: ConsoleUser
-  onToast: (m: string) => void
-}) {
+export function Dashboard() {
   // 서버가 이미 권한 범위로 좁혀서 내려 줍니다. 화면에서 다시 거르지 않습니다.
   const res = useResource<{ workspaces: WorkspaceStatus[] }>('/api/status')
   const list = res.data?.workspaces ?? []
-  // 이상 감지는 아직 서버 API 가 없습니다(BACKLOG B-13).
-  const open = anomalies.filter(
-    (a) => a.state === 'open' && (user.role === 'admin' || user.workspaces.includes(a.workspace)),
-  )
   const totalLines = list.reduce((a, w) => a + w.rawLines, 0)
   const totalDocs = list.reduce((a, w) => a + w.docs, 0)
   const stalled = list.filter((w) => w.health === 'stalled')
+  const needsAttention = list.some(
+    (w) => w.health !== 'ok' || w.connected !== true || Boolean(w.writeProblem),
+  )
 
   return (
     <>
       <PageHead
-        crumb={`데이터 · 데이터 현황 · ${fmt.dayClock('2026-08-21T14:30:00+09:00')} 기준`}
+        crumb="데이터 · 데이터 현황"
         title="데이터 현황"
         note="봇은 아카이브에 쌓인 대화만 근거로 답합니다. 수집이 멈추면 오류 없이 예전 자료로 답하게 되므로, 워크스페이스마다 대화가 지금도 쌓이고 있는지 이 화면에서 확인합니다."
         aside={
           <>
-            <Chip tone="ok">봇 정상 동작</Chip>
+            {res.loading ? (
+              <Chip tone="plain">현황 확인 중</Chip>
+            ) : res.error ? (
+              <Chip tone="bad">현황 조회 실패</Chip>
+            ) : !list.length ? (
+              <Chip tone="watch">등록된 워크스페이스 없음</Chip>
+            ) : needsAttention ? (
+              <Chip tone="watch">확인 필요</Chip>
+            ) : (
+              <Chip tone="ok">봇 정상 동작</Chip>
+            )}
             <Chip tone="plain">
               문서 {fmt.int(totalDocs)}건 · 원문 {fmt.int(totalLines)}줄
             </Chip>
@@ -61,32 +55,6 @@ export function Dashboard({
         <div className="section">
           <Failed what="수집 현황을" detail={res.error.message} onRetry={res.reload} />
         </div>
-      )}
-
-      {open.length > 0 && (
-        <Section
-          title="확인이 필요한 항목"
-          aside={<MockBadge />}
-          lead="정상 범위를 벗어난 상태입니다. 처리하거나 확인 표시를 하면 목록에서 내려갑니다."
-        >
-          {open.map((a) => (
-            <div className="notice warn" key={a.id} style={{ marginBottom: 10 }}>
-              <div className="notice-kind">{KIND_LABEL[a.kind]}</div>
-              <div>
-                <div className="notice-title">{a.headline}</div>
-                <div className="notice-detail">{a.detail}</div>
-              </div>
-              <div className="notice-actions">
-                <button
-                  className="btn btn-sm"
-                  onClick={() => onToast(`확인 표시했습니다 — ${a.headline}`)}
-                >
-                  확인 표시
-                </button>
-              </div>
-            </div>
-          ))}
-        </Section>
       )}
 
       <Section
@@ -178,7 +146,8 @@ export function Dashboard({
                 </p>
               )}
 
-              {!w.connected && <Chip tone="stalled">Slack 연결이 끊겼습니다</Chip>}
+              {w.connected === false && <Chip tone="stalled">Slack 연결이 끊겼습니다</Chip>}
+              {w.connected === null && <Chip tone="watch">Slack 연결 상태를 확인할 수 없습니다</Chip>}
             </article>
           ))}
         </div>

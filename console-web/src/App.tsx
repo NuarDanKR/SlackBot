@@ -5,8 +5,6 @@ import { useResource } from './api/hooks'
 import type { ConsoleUser } from './types'
 import { Dashboard } from './pages/Dashboard'
 import { Usage } from './pages/Usage'
-import { Deploy } from './pages/Deploy'
-import { Workspaces } from './pages/Workspaces'
 import { Harness } from './pages/Harness'
 import { Collected } from './pages/Collected'
 import { HealthCheck } from './pages/HealthCheck'
@@ -21,8 +19,6 @@ type Tab =
   | 'usage'
   | 'health'
   | 'harness'
-  | 'deploy'
-  | 'workspaces'
   | 'env'
   | 'users'
   | 'logs'
@@ -42,9 +38,7 @@ const NAV: { group: string; items: { id: Tab; label: string; minimum?: ConsoleRo
     items: [
       { id: 'health', label: '헬스 체크', minimum: 'developer' },
       { id: 'logs', label: '서비스 로그', minimum: 'developer' },
-      { id: 'harness', label: '봇 규칙 편집', minimum: 'developer' },
-      { id: 'deploy', label: '배포 승인', minimum: 'developer' },
-      { id: 'workspaces', label: '워크스페이스 관리', minimum: 'admin' },
+      { id: 'harness', label: '봇 규칙 열람', minimum: 'developer' },
       { id: 'env', label: '환경변수 설정', minimum: 'admin' },
       { id: 'users', label: '콘솔 사용자 관리', minimum: 'admin' },
     ],
@@ -271,14 +265,12 @@ export default function App() {
 
       <main className="main">
         <div className="main-inner">
-          {activeTab === 'status' && <Dashboard user={user} onToast={toast} />}
+          {activeTab === 'status' && <Dashboard />}
           {activeTab === 'collected' && <Collected user={user} onToast={toast} />}
-          {activeTab === 'usage' && <Usage user={user} onToast={toast} />}
+          {activeTab === 'usage' && <Usage />}
           {activeTab === 'health' && <HealthCheck user={user} />}
           {activeTab === 'logs' && <ServiceLogs />}
-          {activeTab === 'harness' && <Harness user={user} onToast={toast} />}
-          {activeTab === 'deploy' && <Deploy user={user} onToast={toast} />}
-          {activeTab === 'workspaces' && <Workspaces onToast={toast} />}
+          {activeTab === 'harness' && <Harness />}
           {activeTab === 'env' && <EnvSettings onToast={toast} />}
           {activeTab === 'users' && <ConsoleUsers currentUser={user} onToast={toast} />}
         </div>
