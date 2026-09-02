@@ -19,6 +19,8 @@ interface WorkspaceEntry {
   appTokenMask: string
   secretUpdatedAt: string | null
   secretUpdatedBy: string
+  /** 토큰이 환경변수에 있어 콘솔에서 교체할 수 없습니다. */
+  tokenInEnv: boolean
   archivePath: string
   createdAt: string
   createdBy: string
@@ -238,7 +240,9 @@ export function Workspaces({ onToast }: { onToast: (message: string) => void }) 
                 <td>{row.role === 'root' ? '상위' : '일반'}</td>
                 <td>{stateChip(row)}{row.error && <div className="hint warn">{row.error}</div>}</td>
                 <td><div className="mono">{row.botTokenMask}</div><div className="mono">{row.appTokenMask}</div>
-                  <div className="hint">{row.secretUpdatedAt ? fmt.dayClock(row.secretUpdatedAt) : '교체 기록 없음'} · {row.secretUpdatedBy}</div></td>
+                  <div className="hint">{row.tokenInEnv
+                    ? '서버 설정 파일에 있습니다. 콘솔에서 교체하려면 위에서 토큰을 등록하세요.'
+                    : `${row.secretUpdatedAt ? fmt.dayClock(row.secretUpdatedAt) : '교체 기록 없음'} · ${row.secretUpdatedBy}`}</div></td>
                 <td>{row.readable.length ? row.readable.join(' · ') : '-'}</td>
                 <td className="num">${row.limitUsd.toFixed(2)}</td>
                 <td className="right"><button className="btn btn-sm btn-quiet" onClick={() => {

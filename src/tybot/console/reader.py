@@ -68,11 +68,35 @@ def _now() -> datetime:
 # 워크스페이스 현황
 # ---------------------------------------------------------------------------
 
+def _registry_labels() -> dict[str, str]:
+    """DB 레지스트리에 등록된 워크스페이스. 환경변수에는 없다.
+
+    콘솔에서 새로 등록한 워크스페이스가 **다른 화면에 하나도 안 나오던** 이유다
+    (배포 관리의 담당 워크스페이스 선택, 데이터 현황 모두 이 목록을 쓴다).
+    레지스트리를 못 읽는 것으로 화면 전체가 죽으면 안 되므로 조용히 비운다 —
+    암호화 키가 없는 서버에서도 환경변수 목록은 보여야 한다.
+    """
+    try:
+        from .workspace_store import list_workspaces
+
+        return {
+            str(row["key"]): str(row.get("label") or row["key"])
+            for row in list_workspaces()
+            if row.get("state") != "disabled"
+        }
+    except Exception as exc:  # noqa: BLE001 - 레지스트리 실패가 화면을 막지 않는다
+        logger.debug("워크스페이스 레지스트리를 읽지 못했습니다: %s", exc)
+        return {}
+
+
 def _workspace_labels() -> dict[str, str]:
-    """환경변수에서 표시 이름을 모은다. 토큰이 없어도 읽을 수 있어야 한다.
+    """표시 이름을 모은다. 토큰이 없어도 읽을 수 있어야 한다.
 
     `load_workspaces()` 는 토큰이 없으면 예외를 던진다(봇이 반쪽으로 뜨는 걸 막으려고).
     콘솔은 토큰 없이도 목록을 보여 줘야 하므로 라벨만 따로 읽는다.
+
+    환경변수와 DB 레지스트리를 합친다. **레지스트리를 나중에 얹는다** — 콘솔에서
+    이름을 고쳤으면 그게 사람이 마지막으로 정한 값이다.
     """
     import re
 
@@ -80,10 +104,11 @@ def _workspace_labels() -> dict[str, str]:
     keys = [k.strip() for k in (os.getenv("WORKSPACES") or "").split(",") if k.strip()]
     if not keys:
         key = os.getenv("PILOT_WORKSPACE", "pilot")
-        return {key: os.getenv("WORKSPACE_LABEL", key)}
+        return {key: os.getenv("WORKSPACE_LABEL", key), **_registry_labels()}
     for key in keys:
         sfx = re.sub(r"[^A-Z0-9]+", "_", key.upper()).strip("_")
         labels[key] = os.getenv(f"WORKSPACE_LABEL_{sfx}", key)
+    labels.update(_registry_labels())
     return labels
 
 

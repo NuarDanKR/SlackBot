@@ -950,3 +950,52 @@ def test_session_from_other_secret_is_rejected():
     theirs = Authenticator(accounts=ACCOUNTS, secret="secret-b")
     with pytest.raises(Exception):
         mine.verify(theirs.issue("dan@taeyoung.com"))
+
+
+def test_registry_workspaces_appear_in_the_shared_list(monkeypatch):
+    """콘솔에서 등록한 워크스페이스가 다른 화면에 하나도 안 나왔다.
+
+    배포 관리의 담당 워크스페이스 선택과 데이터 현황이 같은 목록을 쓴다.
+    """
+    from tybot.console import reader
+
+    monkeypatch.setenv("WORKSPACES", "pilot")
+    monkeypatch.setenv("WORKSPACE_LABEL_PILOT", "파일럿")
+    monkeypatch.setattr(reader, "_registry_labels", lambda: {"civil": "토목"})
+
+    labels = reader._workspace_labels()
+
+    assert labels["civil"] == "토목"
+    assert labels["pilot"] == "파일럿"
+
+
+def test_registry_failure_does_not_empty_the_workspace_list(monkeypatch):
+    """암호화 키가 없는 서버에서도 환경변수 목록은 보여야 한다.
+
+    레지스트리를 못 읽는 것으로 화면 전체가 비면, 원인이 목록인지 데이터인지
+    구분할 수 없다.
+    """
+    from tybot.console import reader, workspace_store
+
+    monkeypatch.setenv("WORKSPACES", "pilot")
+
+    def explode() -> list[dict]:
+        raise workspace_store.WorkspaceStoreError("암호화 키가 없습니다")
+
+    monkeypatch.setattr(workspace_store, "list_workspaces", explode)
+
+    assert "pilot" in reader._workspace_labels()
+
+
+def test_env_only_tokens_are_not_reported_as_missing(monkeypatch):
+    """동작 중인 봇의 토큰이 '미등록' 으로 보이면 고장난 것처럼 읽힌다."""
+    monkeypatch.setenv("TYIT_BOT_TOKEN", "xoxb-" + "1" * 20)
+    row = {
+        "key": "tyit", "label": "전산팀", "role": "member", "state": "active",
+        "limit_usd": 2, "archive_path": "/x", "created_at": None, "created_by": "-",
+    }
+
+    response = console_app._workspace_response(row, console_app._env_token_keys())
+
+    assert response["botTokenMask"] == "환경변수 사용"
+    assert response["tokenInEnv"] is True

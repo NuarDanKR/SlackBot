@@ -362,7 +362,27 @@ def put_env_settings(
 # ---------------------------------------------------------------------------
 
 
-def _workspace_response(row: dict) -> dict:
+def _env_token_keys() -> set[str]:
+    """Slack 토큰이 환경변수에 있는 워크스페이스.
+
+    레지스트리 이전에 만든 워크스페이스는 토큰이 /etc/tybot/tybot.env 에 있다.
+    그걸 그냥 "미등록" 으로 보이면 **동작 중인 봇이 고장난 것처럼 읽힌다.**
+    어디에 있는지를 말한다.
+    """
+    keys: set[str] = set()
+    for name, value in os.environ.items():
+        if not value.strip() or not name.endswith("_BOT_TOKEN"):
+            continue
+        keys.add(name[: -len("_BOT_TOKEN")].lower())
+    if os.getenv("SLACK_BOT_TOKEN", "").strip():
+        keys.add(os.getenv("PILOT_WORKSPACE", "pilot").lower())
+    return keys
+
+
+def _workspace_response(row: dict, env_keys: set[str] | None = None) -> dict:
+    env_keys = env_keys or set()
+    in_env = str(row["key"]).lower() in env_keys
+    missing = "환경변수 사용" if in_env else "미등록"
     return {
         "key": row["key"],
         "label": row["label"],
@@ -371,13 +391,15 @@ def _workspace_response(row: dict) -> dict:
         "error": row.get("error"),
         "limitUsd": float(row["limit_usd"]),
         "readable": list(row.get("readable") or []),
-        "botTokenMask": row.get("bot_token_mask") or "미등록",
-        "appTokenMask": row.get("app_token_mask") or "미등록",
+        "botTokenMask": row.get("bot_token_mask") or missing,
+        "appTokenMask": row.get("app_token_mask") or missing,
         "secretUpdatedAt": row.get("secret_updated_at"),
         "secretUpdatedBy": row.get("secret_updated_by") or "-",
         "archivePath": row["archive_path"],
         "createdAt": row["created_at"],
         "createdBy": row["created_by"],
+        # 토큰이 환경변수에 있으면 콘솔에서 교체할 수 없다 — 그걸 화면이 알아야 한다.
+        "tokenInEnv": in_env and not row.get("bot_token_mask"),
     }
 
 
@@ -388,7 +410,8 @@ def get_workspaces(user: User) -> dict:
         rows = workspace_store.list_workspaces()
     except workspace_store.WorkspaceStoreError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
-    return {"workspaces": [_workspace_response(row) for row in rows]}
+    env_keys = _env_token_keys()
+    return {"workspaces": [_workspace_response(row, env_keys) for row in rows]}
 
 
 @app.put("/api/workspaces/{key}")
@@ -418,7 +441,8 @@ def put_workspace(key: str, body: WorkspaceBody, request: Request, user: User) -
             detail="워크스페이스는 저장됐지만 봇 재시작을 요청하지 못했습니다.",
         ) from e
     logger.warning("워크스페이스 변경 — actor=%s workspace=%s", user.email, key)
-    return {"workspaces": [_workspace_response(row) for row in rows], "restartPending": True}
+    env_keys = _env_token_keys()
+    return {"workspaces": [_workspace_response(row, env_keys) for row in rows], "restartPending": True}
 
 
 # ---------------------------------------------------------------------------
