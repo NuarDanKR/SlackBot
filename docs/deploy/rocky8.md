@@ -148,7 +148,7 @@ sudo OFFLINE=1 bash deploy/install.sh            # wheels/ 사용
 | 시크릿 | `/etc/tybot/tybot.env` | 설정은 `/etc`. `0640 root:tybot`, 저장소와 물리 분리 |
 | | | 앱이 python-dotenv 로 직접 읽는다(유닛의 `EnvironmentFile=` 미사용) |
 | **원문 아카이브** | `/var/lib/tybot/archive` | **코드와 분리** — `git pull`·재클론이 원문을 건드리면 안 된다 |
-| 첨부 검수대기 | `/var/lib/tybot/staging` | 추출본. 사람 승인 전 검색 금지 |
+| 첨부 처리 메타데이터 | `/var/lib/tybot/staging` | 로컬 변환본·PII 거부 상태·원본 승인 상태 |
 | 첨부 원본 | `/var/lib/tybot/objects` | 바이너리 원본. 검색 금지·접근권한 최소화 |
 | 로그 | journald | 로테이션 자동 |
 

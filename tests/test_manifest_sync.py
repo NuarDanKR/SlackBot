@@ -106,6 +106,7 @@ def test_manifest_has_the_scopes_the_bot_actually_needs():
         "groups:history",
         "channels:join",
         "files:read",
+        "canvases:write",
         "chat:write",
         "commands",
         "reactions:read",
@@ -119,5 +120,6 @@ def test_manifest_has_the_scopes_the_bot_actually_needs():
         "channel_rename",
         "reaction_added",
         "reaction_removed",
+        "app_home_opened",
     ):
         assert event in text, f"이벤트 누락: {event}"

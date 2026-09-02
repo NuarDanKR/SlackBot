@@ -29,6 +29,7 @@ from typing import ClassVar
 from .files import DownloadError, SlackFile, download_bytes
 
 logger = logging.getLogger("tybot.canvas")
+GENERATED_TITLE = "TYBot 정식 답변"
 
 MAX_CANVAS_BYTES = 1024 * 1024  # 캔버스 마크다운 상한(Slack 문서상 1 MiB)
 MAX_LINES = 300
@@ -178,6 +179,9 @@ def canvas_lines(client, channel_id: str, bot_token: str | None) -> CanvasCaptur
 
     f = SlackFile.from_event(info.get("file") or {})
     title = f.name or file_id
+    if title.startswith(GENERATED_TITLE):
+        logger.info("봇이 만든 답변 Canvas 수집 제외 %s", file_id)
+        return CanvasCapture([], [])
     try:
         raw = download_bytes(f, bot_token, MAX_CANVAS_BYTES)
         lines = _to_lines(raw, f.mimetype)

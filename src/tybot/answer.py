@@ -170,8 +170,12 @@ def parse_model_flag(text: str) -> tuple[str | None, str]:
     return m.group(1), (text[: m.start()] + text[m.end() :]).strip()
 
 
-# 원문 줄에 남는 첨부 표시: `[첨부:검수대기] 보고서.pdf (pdf, 240KB)`
-ATTACHMENT_RE = re.compile(r"^\[첨부:[^\]]*\]\s*(?P<name>.+?)\s*\([^)]*\)\s*$")
+# 원문 줄에 남는 첨부 표시. Slack 원본 링크가 있으면 함께 보존한다.
+ATTACHMENT_RE = re.compile(
+    r"^\[첨부:[^\]]*\]\s*(?P<name>.+?)\s*\([^)]*\)"
+    r"(?:\s*·\s*<(?P<url>[^>|]+)\|[^>]+>)?\s*$"
+)
+EXTRACTED_ATTACHMENT_RE = re.compile(r"^\[첨부(?:본문|추출):(?P<name>[^\]]+)\]")
 
 
 def _attachment_names(hits: list[SearchHit]) -> list[tuple[str, str, str]]:
@@ -192,6 +196,31 @@ def _attachment_names(hits: list[SearchHit]) -> list[tuple[str, str, str]]:
         if key not in out:
             out.append(key)
     return out
+
+
+def _attachment_source_links(hits: list[SearchHit]) -> list[str]:
+    """추출문을 근거로 쓴 답변에 같은 문서의 Slack 원본 링크를 붙인다."""
+    links: list[str] = []
+    for hit in hits:
+        hit_text = (hit.line.text or "").strip()
+        direct = ATTACHMENT_RE.match(hit_text)
+        if direct and direct.group("url"):
+            citation = f"📎<{direct.group('url')}|{direct.group('name')} 원본>"
+            if citation not in links:
+                links.append(citation)
+            continue
+        extracted = EXTRACTED_ATTACHMENT_RE.match(hit_text)
+        if not extracted:
+            continue
+        name = extracted.group("name")
+        for line in hit.doc.raw_lines:
+            marker = ATTACHMENT_RE.match((line.text or "").strip())
+            if marker and marker.group("name") == name and marker.group("url"):
+                citation = f"📎<{marker.group('url')}|{name} 원본>"
+                if citation not in links:
+                    links.append(citation)
+                break
+    return links
 
 
 def _originals(store: ArchiveStore, hits: list[SearchHit]) -> documents.Attached:
@@ -370,8 +399,9 @@ class AnswerEngine:
         if hits:
             head = f"💬 판단 요청으로 답합니다. 아카이브 원문 {len(hits)}건을 근거로 참고했습니다.\n\n"
             citations = [
-            h.citation(with_workspace=h.doc.workspace != ctx.workspace) for h in hits[:5]
-        ]
+                h.citation(with_workspace=h.doc.workspace != ctx.workspace) for h in hits[:5]
+            ]
+            citations += _attachment_source_links(hits)
         else:
             head = "💬 판단 요청으로 답합니다. *아카이브에 관련 원문이 없어 일반적인 판단입니다* — 사내 사실 확인이 필요하면 원문을 따로 확인하세요.\n\n"
             citations = []
@@ -526,6 +556,7 @@ class AnswerEngine:
         citations = [
             h.citation(with_workspace=h.doc.workspace != ctx.workspace) for h in hits[:5]
         ]
+        citations += _attachment_source_links(hits)
         # 4겹: 질문·답변·근거를 전부 남긴다.
         logger.info(
             "answer ok ws=%s user=%s model=%s hits=%d cost=$%.4f q=%r srcs=%s",

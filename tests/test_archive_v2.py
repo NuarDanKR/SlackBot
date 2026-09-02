@@ -125,12 +125,42 @@ def test_staged_attachment_is_outside_search_archive(tmp_path, monkeypatch):
         "filetype": "txt",
         "size": 14,
         "url_private_download": "https://example.invalid/file",
+        "permalink": "https://example.slack.com/files/F123",
     }
 
     lines, warnings = stage_files([raw_file], "xoxb-test", storage)
     assert warnings == []
-    assert lines[0].startswith("[첨부:검수대기]")
+    assert lines[0].startswith("[첨부:변환·원본검수대기]")
+    assert "<https://example.slack.com/files/F123|원본 파일>" in lines[0]
+    assert lines[1] == "[첨부본문:회의.txt] approved later"
     metadata = json.loads((storage.staging_dir / "F123" / "metadata.json").read_text("utf-8"))
     assert metadata["status"] == "pending_review"
+    assert metadata["permalink"] == "https://example.slack.com/files/F123"
     assert (storage.objects_dir / "F123" / "회의.txt").read_bytes() == b"approved later"
     assert ArchiveStore(archive).docs() == []
+
+
+def test_staged_attachment_rejects_all_extracted_lines_when_any_line_contains_pii(
+    tmp_path, monkeypatch
+):
+    archive = tmp_path / "archive"
+    storage = attachment_storage(archive, "pilot", "C123")
+    monkeypatch.setattr(
+        "tybot.archive.files.download_bytes", lambda *_: "일반 내용\n계약자 명단".encode()
+    )
+    raw_file = {
+        "id": "F-PII",
+        "name": "자료.txt",
+        "filetype": "txt",
+        "size": 30,
+        "url_private_download": "https://example.invalid/file",
+    }
+
+    lines, warnings = stage_files([raw_file], "xoxb-test", storage)
+
+    assert lines == ["[첨부:수집제외] 자료.txt (txt, 1KB)"]
+    assert warnings and "계약자 명단" in warnings[0]
+    metadata = json.loads(
+        (storage.staging_dir / "F-PII" / "metadata.json").read_text("utf-8")
+    )
+    assert metadata["status"] == "pii_refused"

@@ -51,6 +51,12 @@ def test_cross_workspace_is_explicit_either_way():
     assert "없음 (이 워크스페이스 자료만)" in report(_facts(readable=[]))
 
 
+def test_root_scope_says_all_workspaces_without_readable_list():
+    text = report(_facts(is_root=True, readable=[]))
+    assert "모든 등록 워크스페이스" in text
+    assert "멤버가 아닌 채널" not in text
+
+
 def test_uncollected_channels_explain_why():
     text = report(_facts(uncollected_channels=3))
     assert "표준 규칙과 달라" in text

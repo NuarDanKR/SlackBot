@@ -79,6 +79,7 @@ oauth_config:
       - im:write
       - files:read            # 첨부 다운로드 — 없으면 파일 대신 로그인 HTML(조용한 고장)
       - canvases:read         # 채널 캔버스 본문 수집(없으면 캔버스는 '미변환' 으로만 남음)
+      - canvases:write        # 사용자가 명시한 경우 독립 Canvas 답변 생성
       - reactions:read        # TYBot 답변의 👍/👎 반응 이벤트 수신
       - reactions:write       # 👀 수신 표시
       - channels:join         # 채널 자가참여 — 없으면 일부 채널만 보임(조용한 고장)
@@ -96,6 +97,7 @@ settings:
       - channel_rename     # 이름을 규칙에 맞게 고치면 그때부터 수집
       - reaction_added     # TYBot 답변 👍/👎 피드백
       - reaction_removed   # 피드백 취소도 append-only 이벤트로 기록
+      - app_home_opened    # 첫 사용 안내를 App Home에서 한 번 표시
   interactivity:
     is_enabled: true          # 전역 바로가기·모달. Socket Mode라 인바운드 Request URL은 없음
   org_deploy_enabled: false

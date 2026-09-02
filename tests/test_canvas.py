@@ -62,6 +62,13 @@ def test_markdown_canvas_is_collected():
     assert "[캔버스본문:회의록 캔버스] - 기성금 3억 청구" in capture.lines
 
 
+def test_tybot_answer_canvas_is_not_reingested():
+    c = FakeClient(canvas_id="F1", file_obj=_file(name="TYBot 정식 답변"))
+    capture = canvas_lines(c, "C1", "xoxb-t")
+    assert capture.lines == []
+    assert capture.warnings == []
+
+
 def test_html_canvas_text_is_extracted_without_tags():
     c = FakeClient(canvas_id="F1", file_obj=_file(mime="text/html"))
     body = b"<html><body><h1>\xed\x9a\x8c\xec\x9d\x98</h1><p>3\xec\x96\xb5</p></body></html>"

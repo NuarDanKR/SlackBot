@@ -233,3 +233,5 @@ def test_thanks_names_what_was_recorded():
 
     assert "근거를 못 찾은 사례로 접수" in thanks("missing", linked="연결됨")
     assert "정확했다는 의견으로 접수" in thanks("positive", linked="연결됨")
+    assert "영업일" not in thanks("missing", linked="연결됨")
+    assert "회신" not in thanks("missing", linked="연결됨")

@@ -57,6 +57,17 @@ def test_blocks_without_terms_have_no_action():
     assert [b["type"] for b in out] == ["section"]
 
 
+def test_long_blocks_preserve_sources_in_a_later_section():
+    body = "본문 " * 1000 + "\n\n출처:\n• #전산팀, 문서(2026-09-02)"
+    out = blocks(body, ["전산팀"])
+    rendered = "\n".join(
+        block["text"]["text"] for block in out if block["type"] == "section"
+    )
+    assert "출처:" in rendered
+    assert "#전산팀" in rendered
+    assert all(len(block["text"]["text"]) <= 2900 for block in out if block["type"] == "section")
+
+
 def test_button_value_is_capped():
     assert len(button(["가" * 3000])["elements"][0]["value"]) <= 1900
 

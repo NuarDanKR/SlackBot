@@ -98,6 +98,12 @@ def test_root_workspace_reads_subordinate_regardless_of_flags():
     assert can_access(root, visibility=None, acl=frozenset({"#남의채널"}), owner_workspace="pilot")
 
 
+def test_root_workspace_reaches_every_workspace_without_cross_read_entries():
+    root = _ctx(ws="mgmt", channels=(), readable=(), is_root=True)
+    assert can_access(root, visibility="private", acl=None, owner_workspace="pilot")
+    assert can_access(root, visibility="private", acl=None, owner_workspace="tyit")
+
+
 def test_peer_workspace_needs_explicit_share_with():
     """동등 워크스페이스는 화이트리스트만으로 부족하다 - 문서가 지목해야 넘어간다."""
     peer = _ctx(ws="team_b", channels=(), readable=("pilot",))

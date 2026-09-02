@@ -12,7 +12,7 @@ from tybot.gateway import (
     Sensitivity,
     UnknownModel,
 )
-from tybot.gateway.router import DEFAULT_REGISTRY
+from tybot.gateway.router import DEFAULT_REGISTRY, _content_size
 
 
 class FakeProvider:
@@ -86,6 +86,14 @@ def test_cost_guard_blocks_over_limit():
     r = make_router(daily_limit=0.001)
     with pytest.raises(CostLimitExceeded):
         r.complete([Message("user", "x" * 10_000)], model="claude-opus-4-8")
+
+
+def test_content_size_counts_document_and_image_payloads():
+    content = [
+        {"type": "text", "text": "질문"},
+        {"type": "document", "source": {"type": "base64", "data": "x" * 1000}},
+    ]
+    assert _content_size(content) >= 1002
 
 
 def test_registry_specs_have_valid_sensitivity():

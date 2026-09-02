@@ -41,12 +41,19 @@ HEAD = "*내 질문이 근거로 삼는 범위*"
 # 사람이 오해하기 쉬운 두 가지를 못 박는다.
 # 1) 봇은 학습하지 않는다 - 매 질문마다 원문을 다시 찾는다
 # 2) 내가 못 보는 채널은 봇도 나에게 안 보여준다
-FOOTER = (
+COMMON_FOOTER = (
     "• 답변은 *매번 아카이브 원문을 다시 찾아* 만듭니다. 이전 대화나 제 답변을 "
     "학습하거나 근거로 쓰지 않습니다.\n"
-    "• 회원님이 멤버가 아닌 채널의 내용은 답변에 쓰이지 않습니다.\n"
     "• 특정 채널이 왜 수집되지 않는지는 그 채널에서 `/수집상태` 로 확인하세요."
 )
+
+
+def _footer(f: ScopeFacts) -> str:
+    if f.is_exec or f.is_root:
+        access = "• 임원용 최상위 권한으로 수집된 모든 워크스페이스 자료를 조회합니다.\n"
+    else:
+        access = "• 회원님이 멤버가 아닌 채널의 내용은 답변에 쓰이지 않습니다.\n"
+    return COMMON_FOOTER.replace("• 특정", access + "• 특정")
 
 
 def report(f: ScopeFacts) -> str:
@@ -55,7 +62,7 @@ def report(f: ScopeFacts) -> str:
         return (
             f"{HEAD}\n"
             "채널 목록을 조회하지 못해 정확한 건수를 보여드리지 못했습니다.\n\n"
-            f"{FOOTER}"
+            f"{_footer(f)}"
         )
 
     role = "일반 — 내가 속한 채널만"
@@ -75,7 +82,9 @@ def report(f: ScopeFacts) -> str:
             f"*수집되지 않는 채널*: {f.uncollected_channels}개 "
             "(이름이 표준 규칙과 달라 아카이브에 쌓이지 않습니다)"
         )
-    if f.readable:
+    if f.is_exec or f.is_root:
+        lines.append("*함께 열람되는 워크스페이스*: 모든 등록 워크스페이스")
+    elif f.readable:
         lines.append(f"*함께 열람되는 워크스페이스*: {', '.join(f.readable)}")
     else:
         lines.append("*함께 열람되는 워크스페이스*: 없음 (이 워크스페이스 자료만)")
@@ -85,12 +94,12 @@ def report(f: ScopeFacts) -> str:
             f"*지금 근거가 될 수 있는 자료*: 문서 {f.visible_docs}건 · 원문 {f.visible_lines}줄"
         )
     else:
-        lines.append(
-            "*지금 근거가 될 수 있는 자료*: 없음 — 아직 수집된 원문이 없거나 "
-            "회원님이 그 채널의 멤버가 아닙니다"
+        reason = "아직 수집된 원문이 없습니다" if (f.is_exec or f.is_root) else (
+            "아직 수집된 원문이 없거나 회원님이 그 채널의 멤버가 아닙니다"
         )
+        lines.append(f"*지금 근거가 될 수 있는 자료*: 없음 — {reason}")
 
-    lines += ["", FOOTER]
+    lines += ["", _footer(f)]
     return "\n".join(lines)
 
 # --- 첫 사용 안내 --------------------------------------------------------------

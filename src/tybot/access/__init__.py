@@ -15,7 +15,8 @@
   Slack 에서 그 채널에 들어가 있지 않은 사람은 봇을 통해 우회 열람할 수 없다.
 - **동등(peer) 워크스페이스로는 문서에 명시된 것만 넘어간다**(`share_with`).
   화이트리스트(`CROSS_WS_READ`)는 '넘어갈 수 있는 후보'를 정하고, 무엇을 넘길지는 소유 쪽이 정한다.
-- **root 워크스페이스**(경영본부 등)는 산하 자료를 문서 표시와 무관하게 열람하고,
+- **root 워크스페이스**(임원용 최상위 워크스페이스)는 모든 워크스페이스 자료를
+  문서 표시와 무관하게 열람하고,
   자기 워크스페이스 안에서 채널 멤버십 필터를 받지 않는다.
 - `visibility: public` 은 **자기 워크스페이스 안에서만** 멤버십을 면제하는 표시다.
   크로스 워크스페이스 권한과는 무관하다(예전에는 이 하나가 둘 다 열어서 위험했다).
@@ -39,7 +40,7 @@ class RequestContext:
 
     def may_reach(self, owner_workspace: str) -> bool:
         """워크스페이스 경계 판정. 답변 생성 이전 1차 필터."""
-        if self.role == "exec":
+        if self.role == "exec" or self.is_root:
             return True
         return owner_workspace == self.workspace or owner_workspace in self.readable_workspaces
 
@@ -54,7 +55,7 @@ def can_access(
 ) -> bool:
     """막는 쪽이 기본값. 판정 순서를 바꾸지 말 것.
 
-    1. 워크스페이스 경계 — 화이트리스트에 없으면 여기서 끝.
+    1. 워크스페이스 경계 — exec/root 가 아니면 화이트리스트에 없을 때 여기서 끝.
     2. 다른 워크스페이스 자료: root 는 전량, 동등 워크스페이스는 `share_with` 명시분만.
     3. 자기 워크스페이스 자료: root 는 전량, 그 외는 **채널 멤버십**(또는 명시적 public).
     """

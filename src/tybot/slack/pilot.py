@@ -33,6 +33,10 @@ from ..archive.store import ArchiveStore
 from ..archive.writer import KST
 from ..audit import QALog, QARecord
 from ..autojoin import on_channel_event, sweep
+from ..canvas_answer import create as create_answer_canvas
+from ..canvas_answer import grant_channel as grant_canvas_channel
+from ..canvas_answer import grant_user as grant_canvas_user
+from ..canvas_answer import parse_request as parse_canvas_request
 from ..channel_management import (
     ChannelNameError,
     ChannelOwnerStore,
@@ -1479,7 +1483,10 @@ class WorkspaceBot:
             self.qa_log.write(rec)
 
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
-        text = _clean(event.get("text", ""))
+        raw_text = _clean(event.get("text", ""))
+        canvas_requested, text = parse_canvas_request(raw_text)
+        if canvas_requested and not text:
+            text = "최근 업무 내용을 정리해줘"
         user_id = event.get("user", "")
         channel_id = event.get("channel", "")
         # 스레드 안에서 부른 경우에는 설정과 무관하게 그 스레드에 답한다(대화 맥락 유지).
@@ -1499,21 +1506,45 @@ class WorkspaceBot:
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
             # 아카이브 근거로 답한 경우에만 '근거 보기' 를 붙인다. 버튼이 있는데
             # 눌러도 아무것도 안 나오면 없는 것만 못하다.
-            kw = {"text": reply}
+            fallback_kw = {"text": reply}
             if thread_ts:
-                kw["thread_ts"] = thread_ts
-            if ans is not None and ans.terms:
+                fallback_kw["thread_ts"] = thread_ts
+            kw = dict(fallback_kw)
+            canvas = None
+            if canvas_requested and ans is not None:
+                try:
+                    canvas = create_answer_canvas(client, reply)
+                    kw = {
+                        "text": f"정식 답변을 Canvas로 작성했습니다: <{canvas.permalink}|Canvas 열기>"
+                    }
+                    if thread_ts:
+                        kw["thread_ts"] = thread_ts
+                    if not channel_id.startswith("D"):
+                        grant_canvas_channel(client, canvas.canvas_id, channel_id)
+                except Exception as exc:
+                    log.exception("[%s] Canvas 답변 생성 실패: %s", self.workspace, exc)
+                    canvas = None
+                    kw = fallback_kw
+            elif ans is not None and ans.terms:
                 kw["blocks"] = evidence_view.blocks(
                     reply, ans.terms, workspace=self.workspace
                 )
             response = say(**kw)
+            if canvas is not None and channel_id.startswith("D"):
+                try:
+                    # Slack은 Canvas를 먼저 DM으로 보낸 뒤 사용자 접근을 부여하도록 요구한다.
+                    grant_canvas_user(client, canvas.canvas_id, user_id)
+                except Exception as exc:
+                    log.exception("[%s] Canvas DM 권한 부여 실패: %s", self.workspace, exc)
+                    # 접근할 수 없는 링크만 남기지 않고 원래 메시지 답변도 전달한다.
+                    response = say(**fallback_kw)
             rec = QARecord.build(
                 workspace=self.workspace,
                 channel=self._chan_cache.get(channel_id, channel_id),
                 channel_id=channel_id,
                 user=user_id,
                 user_name=self._user_name(client, user_id) if user_id else "unknown",
-                question=text,
+                question=raw_text,
                 intent_kind=intent.kind,
                 intent_source=intent.source,
                 reason=ans.reason if ans else intent.kind,
@@ -1585,7 +1616,7 @@ class WorkspaceBot:
         merged = Intent(
             kind="+".join(dict.fromkeys(x.kind for x in tasks)),
             source=first.source,
-            question=text,
+            question=raw_text,
         )
         finish(join_sections(sections), intent=merged, ans=last, ctx=ctx)
 

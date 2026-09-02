@@ -60,11 +60,33 @@ def button(terms: list[str], *, workspace: str = "") -> dict | None:
 
 def blocks(body: str, terms: list[str], *, workspace: str = "") -> list[dict]:
     """답변 본문 + 근거 보기 버튼."""
-    out: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": body[:2900]}}]
+    out: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": part}}
+        for part in _split_sections(body)
+    ]
     btn = button(terms, workspace=workspace)
     if btn:
         out.append(btn)
     return out
+
+
+def _split_sections(body: str, *, limit: int = 2900, max_sections: int = 45) -> list[str]:
+    """Slack section 한도를 지키면서 출처를 포함한 답변 전체를 보존한다."""
+    remaining = body.strip() or "답변 내용이 없습니다."
+    parts: list[str] = []
+    while remaining and len(parts) < max_sections:
+        if len(remaining) <= limit:
+            parts.append(remaining)
+            remaining = ""
+            break
+        cut = remaining.rfind("\n", 0, limit + 1)
+        if cut <= 0:
+            cut = limit
+        parts.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        parts.append("_답변이 Slack 표시 한도를 초과했습니다. `근거 보기`에서 원문을 확인하세요._")
+    return parts
 
 
 def _stamp(ts: str) -> str:

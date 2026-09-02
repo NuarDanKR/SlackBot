@@ -123,8 +123,8 @@ class Router:
         temperature: float = 0.0,
     ) -> LLMResponse:
         spec = self.resolve(model, sensitivity)
-        # 러프 사전 견적(입력 토큰 근사 = 문자수/4, 출력은 max_tokens 로 상한 가정)
-        approx_in = sum(len(m.content) for m in messages) // 4
+        # 러프 사전 견적(입력 토큰 근사 = 콘텐츠 크기/4). 문서·이미지 블록도 누락하지 않는다.
+        approx_in = sum(_content_size(m.content) for m in messages) // 4
         self._cost.check(spec.cost(approx_in, max_tokens))
 
         provider = self._providers[spec.provider]
@@ -142,3 +142,16 @@ class Router:
             self._cost.spent_today,
         )
         return resp
+
+
+def _content_size(content: str | list[dict]) -> int:
+    if isinstance(content, str):
+        return len(content)
+    total = 0
+    for block in content:
+        for value in block.values():
+            if isinstance(value, str):
+                total += len(value)
+            elif isinstance(value, dict):
+                total += _content_size([value])
+    return total

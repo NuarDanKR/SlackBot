@@ -15,6 +15,8 @@ import json
 import pytest
 
 from tybot import documents
+from tybot.answer import _attachment_source_links
+from tybot.archive.store import ArchiveDoc, RawLine, SearchHit
 from tybot.attachment_review import (
     APPROVED,
     PENDING,
@@ -262,3 +264,30 @@ def test_attachment_line_pattern_extracts_the_name():
     m = ATTACHMENT_RE.match("[첨부:검수대기] 김해외동 기성금.pdf (pdf, 240KB)")
     assert m and m.group("name") == "김해외동 기성금.pdf"
     assert ATTACHMENT_RE.match("그냥 대화입니다") is None
+
+
+def test_extracted_attachment_source_includes_original_slack_link(tmp_path):
+    marker = RawLine(
+        "2026-09-02 09:00",
+        "사용자",
+        "[첨부:변환·원본검수대기] 보고서.xlsx (xlsx, 10KB) · "
+        "<https://example.slack.com/files/F1|원본 파일>",
+        1,
+    )
+    extracted = RawLine(
+        "2026-09-02 09:00", "사용자", "[첨부추출:보고서.xlsx] 기성금 3억", 2
+    )
+    doc = ArchiveDoc(
+        tmp_path / "doc.md",
+        "pilot",
+        "#업무",
+        "private",
+        frozenset({"#업무"}),
+        frozenset(),
+        None,
+        channel_id="C1",
+        raw_lines=[marker, extracted],
+    )
+
+    links = _attachment_source_links([SearchHit(doc, extracted, 10)])
+    assert links == ["📎<https://example.slack.com/files/F1|보고서.xlsx 원본>"]

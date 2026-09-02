@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from tybot.answer import Answer
+from tybot.canvas_answer import CanvasResult
 from tybot.intent import Intent
 from tybot.slack.pilot import WorkspaceBot
 
@@ -172,6 +173,31 @@ def test_exception_still_reaches_the_user():
     bot.engine.respond = boom
     (reply,) = _handle(bot, "요약해줘")
     assert "ANTHROPIC_API_KEY" in reply
+
+
+def test_explicit_canvas_request_posts_canvas_link(monkeypatch):
+    ans = Answer(
+        "전산팀 주간 현황", ["#업무, 📄doc(2026-09-02)"], "m", 0.0, 1, "answered"
+    )
+    bot = _bot([Intent("summary", question="주간 현황")], [ans])
+    created = Mock(return_value=CanvasResult("F-CANVAS", "https://example.slack.com/F-CANVAS"))
+    monkeypatch.setattr("tybot.slack.pilot.create_answer_canvas", created)
+    client = Mock()
+    sent: list[str] = []
+
+    bot._handle(
+        {"text": "주간 현황을 캔버스로 답변해", "user": "U1", "channel": "C1", "ts": "1.0"},
+        client,
+        lambda **kw: sent.append(kw["text"]),
+        in_channel=True,
+    )
+
+    assert "Canvas 열기" in sent[0]
+    assert "출처:" in created.call_args.args[1]
+    assert bot.engine.asked == ["주간 현황"]
+    client.canvases_access_set.assert_called_once_with(
+        canvas_id="F-CANVAS", access_level="read", channel_ids=["C1"]
+    )
 
 
 @pytest.mark.parametrize("kind", ["status", "help", "smalltalk", "out_of_scope"])

@@ -52,6 +52,7 @@ class SlackFile:
     size: int
     url_private_download: str | None
     mimetype: str = ""
+    permalink: str = ""
 
     @classmethod
     def from_event(cls, f: dict) -> SlackFile:
@@ -62,6 +63,7 @@ class SlackFile:
             size=int(f.get("size") or 0),
             url_private_download=f.get("url_private_download") or f.get("url_private"),
             mimetype=str(f.get("mimetype") or ""),
+            permalink=str(f.get("permalink") or f.get("permalink_public") or ""),
         )
 
     @property
@@ -77,7 +79,10 @@ class SlackFile:
         kb = max(1, self.size // 1024)
         if state is None:
             state = "본문 수집" if self.is_text else ("변환" if self.is_convertible else "미변환")
-        return f"[첨부:{state}] {self.name} ({self.filetype or self.mimetype or '?'}, {kb}KB)"
+        text = f"[첨부:{state}] {self.name} ({self.filetype or self.mimetype or '?'}, {kb}KB)"
+        if self.permalink:
+            text += f" · <{self.permalink}|원본 파일>"
+        return text
 
 
 @dataclass(frozen=True)
@@ -162,10 +167,10 @@ def stage_files(
     bot_token: str | None,
     storage: AttachmentStorage,
 ) -> tuple[list[str], list[str]]:
-    """원본과 추출본을 격리 저장하고 원문에는 검수대기 표지만 반환한다.
+    """원본을 격리 저장하고, 로컬 추출 텍스트는 검색 가능한 원문으로 반환한다.
 
-    ``staging``과 ``objects``는 ArchiveStore 검색 범위 밖이다. 추출 결과는 사람이
-    검수해 별도 승인 절차로 등록하기 전까지 답변 근거가 되지 않는다.
+    원본은 승인 전까지 ArchiveStore 밖에 둔다. 변환 텍스트는 호출자가 기존 PII 검사를
+    적용한 뒤 아카이브에 기록하므로 외부 LLM에 원본을 보내는 승인과는 별개다.
     """
     lines: list[str] = []
     warnings: list[str] = []
@@ -209,6 +214,17 @@ def stage_files(
             warnings.append(error)
             logger.exception("첨부 격리 저장 중 예외 %s", f.name)
 
+        if extracted is not None:
+            # 한 줄만 거부하고 나머지를 넣으면 금지 문서가 부분 수집된다. 첨부 단위로 막는다.
+            from .writer import screen
+
+            refused = next((reason for line in extracted.splitlines() if (reason := screen(line))), None)
+            if refused:
+                state = "pii_refused"
+                error = f"{f.name}: 수집 제외 대상({refused})"
+                warnings.append(error)
+                extracted = None
+
         try:
             staged.mkdir(parents=True, exist_ok=True)
             metadata = {
@@ -218,6 +234,7 @@ def stage_files(
                 "name": f.name,
                 "filetype": f.filetype,
                 "mimetype": f.mimetype,
+                "permalink": f.permalink or None,
                 "declared_size": f.size,
                 "sha256": digest,
                 "object_path": str(object_path) if object_path else None,
@@ -230,18 +247,35 @@ def stage_files(
             )
             if extracted is not None:
                 (staged / "extracted.md").write_text(
-                    "<!-- 승인 전 검색 금지 -->\n"
+                    "<!-- 로컬 변환본. 아카이브 기록 시 PII 검사 적용 -->\n"
                     f"# {f.name}\n\n"
                     f"{extracted.rstrip()}\n",
                     encoding="utf-8",
                 )
+            else:
+                (staged / "extracted.md").unlink(missing_ok=True)
         except OSError as exc:
             warning = f"{f.name}: 검수 메타데이터 저장 실패: {exc}"
             warnings.append(warning)
             logger.warning(warning)
 
-        label = "검수대기" if state == "pending_review" else "처리실패"
+        if extracted is not None:
+            label = "변환·원본검수대기"
+        elif state == "pending_review":
+            label = "검수대기"
+        elif state == "pii_refused":
+            label = "수집제외"
+        else:
+            label = "처리실패"
         lines.append(f.describe(label))
+        if extracted is not None:
+            tag = "첨부본문" if f.is_text else "첨부추출"
+            body_lines = [line.strip() for line in extracted.splitlines() if line.strip()]
+            truncated = len(body_lines) > MAX_TEXT_LINES
+            for line in body_lines[:MAX_TEXT_LINES]:
+                lines.append(f"[{tag}:{f.name}] {line}")
+            if truncated:
+                lines.append(f"[{tag}:{f.name}] …(이하 생략, 원본 링크에서 확인)")
     return lines, warnings
 
 
