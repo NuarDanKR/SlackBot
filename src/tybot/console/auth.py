@@ -40,6 +40,7 @@ GUEST = "guest"
 DEVELOPER = "developer"
 ADMIN = "admin"
 ROLES = (GUEST, DEVELOPER, ADMIN)
+MIN_PASSWORD_LENGTH = 8
 
 SESSION_COOKIE = "tybot_console"
 # 세션 유효 시간. 업무 중 다시 로그인하지 않을 만큼 길고, 자리를 비운 사이에는 끊길 만큼 짧게.
@@ -343,8 +344,8 @@ def _set_password(
     if password != confirm:
         print("두 비밀번호가 다릅니다.", file=sys.stderr)
         return 2
-    if len(password) < 12:
-        print("비밀번호는 12자 이상이어야 합니다.", file=sys.stderr)
+    if len(password) < MIN_PASSWORD_LENGTH:
+        print(f"비밀번호는 {MIN_PASSWORD_LENGTH}자 이상이어야 합니다.", file=sys.stderr)
         return 2
     url = os.getenv("DATABASE_URL")
     if not url:

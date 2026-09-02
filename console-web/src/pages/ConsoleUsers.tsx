@@ -196,7 +196,7 @@ export function ConsoleUsers({
               <input
                 className="input"
                 type="password"
-                minLength={12}
+                minLength={8}
                 placeholder="기존 사용자는 비워 두면 유지"
                 value={draft.password}
                 onChange={(e) => setDraft({ ...draft, password: e.target.value })}

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-from .auth import ADMIN, ROLES, hash_password
+from .auth import ADMIN, MIN_PASSWORD_LENGTH, ROLES, hash_password
 
 
 class AccountStoreError(RuntimeError):
@@ -63,8 +63,8 @@ def save_user(
     actor_email = actor_email.strip().lower()
     if "@" not in email or role not in ROLES:
         raise AccountStoreError("이메일 또는 역할 값이 올바르지 않습니다.")
-    if password is not None and len(password) < 12:
-        raise AccountStoreError("비밀번호는 12자 이상이어야 합니다.")
+    if password is not None and len(password) < MIN_PASSWORD_LENGTH:
+        raise AccountStoreError(f"비밀번호는 {MIN_PASSWORD_LENGTH}자 이상이어야 합니다.")
     if email == actor_email and (not active or role != ADMIN):
         raise AccountStoreError("현재 로그인한 관리자 자신의 권한을 낮추거나 비활성화할 수 없습니다.")
 
