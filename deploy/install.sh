@@ -72,12 +72,17 @@ if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   # .env·아카이브·git 메타는 옮기지 않는다(시크릿은 /etc, 데이터는 /var/lib)
   # 주의: 패턴 앞의 '/' 는 전송 루트 고정이다. 'archive' 로 쓰면 하위의
   # src/tybot/archive/ 까지 제외되어 봇이 ModuleNotFoundError 로 죽는다.
-  rsync -a --delete \
-    --exclude '/.git' --exclude '/.venv' --exclude '/.env' --exclude '/archive' \
-    --exclude '/wheels' \
-    --exclude '/console-web/node_modules' --exclude '/console-web/dist' \
-    --exclude '__pycache__' --exclude '.pytest_cache' --exclude '*.egg-info' \
-    "$SRC_DIR"/ "$APP_DIR"/
+  # 배포 서비스가 이미 소스 디렉터리에 진입한 뒤 rsync가 절대경로로 다시 change_dir
+  # 하면 SELinux/임시 디렉터리 정책에서 거부될 수 있다. 전송 루트 안에서 ./를 복사한다.
+  (
+    cd "$SRC_DIR"
+    rsync -a --delete \
+      --exclude '/.git' --exclude '/.venv' --exclude '/.env' --exclude '/archive' \
+      --exclude '/wheels' \
+      --exclude '/console-web/node_modules' --exclude '/console-web/dist' \
+      --exclude '__pycache__' --exclude '.pytest_cache' --exclude '*.egg-info' \
+      ./ "$APP_DIR"/
+  )
 
   # 배치 결과를 검증한다 — 조용히 빠진 모듈이 가장 잡기 어렵다.
   for m in answer.py intent.py archive/store.py archive/writer.py slack/pilot.py; do
@@ -139,9 +144,20 @@ echo "== 5/6 권한 (코드는 봇이 수정 불가) =="
 # 빌드 산출물(dist)만 봇이 읽을 수 있으면 된다.
 find "$APP_DIR" -path "$APP_DIR/console-web/node_modules" -prune -o -print0 |
   xargs -0 -r chown root:tybot
+# `g+rX` 로 **읽기를 명시적으로 준다.** 예전에는 `g-w,o-rwx` 만 있었는데 그건 비트를
+# 빼기만 한다. 배포가 umask 077 로 돌면 파일이 600 으로 만들어지고, 그 뒤 이 줄을
+# 지나도 그대로 600 이라 봇이 자기 코드를 못 읽는다. 오류는 기동할 때야 난다.
 find "$APP_DIR" -path "$APP_DIR/console-web/node_modules" -prune -o -print0 |
-  xargs -0 -r chmod g-w,o-rwx
+  xargs -0 -r chmod g+rX,g-w,o-rwx
 chmod -R u+w "$APP_DIR/.venv"
+
+# 봇 계정이 실제로 읽을 수 있는지 확인한다. 여기서 막히면 서비스가 기동에 실패하는데,
+# 그때는 원인이 권한인지 코드인지 로그만 보고는 알기 어렵다.
+if ! sudo -u tybot test -r "$APP_DIR/src/tybot/slack/pilot.py"; then
+  echo "  ! 봇 계정이 코드를 읽지 못합니다: $APP_DIR/src/tybot/slack/pilot.py"
+  echo "    권한을 확인하세요:  ls -l $APP_DIR/src/tybot/slack/pilot.py"
+  exit 1
+fi
 
 echo "== 6/6 설정 파일·서비스 =="
 if [[ ! -f "$CONF_DIR/tybot.env" ]]; then

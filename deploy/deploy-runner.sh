@@ -14,6 +14,7 @@ SRC=${TYBOT_SRC:-/tmp/tybot-src}
 BRANCH=${TYBOT_BRANCH:-master}          # 고정. 콘솔이 바꿀 수 없다.
 PY="$APP/.venv/bin/python"
 LOCK="$STATE/.locks/deploy.lock"
+OUTPUT="$STATE/deploy-last.log"
 
 log() { echo "[$(date '+%F %T')] $*"; }
 
@@ -21,11 +22,26 @@ log() { echo "[$(date '+%F %T')] $*"; }
 # 포맷이 두 군데로 갈라지면 콘솔 화면이 조용히 깨진다.
 status() {
   STATE_DIR="$STATE" "$PY" - "$@" <<'PYEOF'
+import os
 import sys
 sys.path.insert(0, "/opt/tybot/src")
+from pathlib import Path
 from tybot.deploy_request import write_status
-state, actor, before, after, message = (sys.argv[1:6] + [""] * 5)[:5]
-write_status(state, actor=actor, before=before, after=after, message=message)
+state, actor, before, after, message, before_title, after_title = (
+    sys.argv[1:8] + [""] * 7
+)[:7]
+detail_path = Path(os.environ["DEPLOY_DETAIL_FILE"]) if os.environ.get("DEPLOY_DETAIL_FILE") else None
+detail = detail_path.read_text(encoding="utf-8", errors="replace") if detail_path else ""
+write_status(
+    state,
+    actor=actor,
+    before=before,
+    after=after,
+    before_title=before_title,
+    after_title=after_title,
+    message=message,
+    detail=detail,
+)
 PYEOF
 }
 
@@ -49,21 +65,34 @@ PYEOF
 log "배포 요청 수신 actor=$ACTOR branch=$BRANCH"
 
 BEFORE=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)
-status running "$ACTOR" "$BEFORE" "" "배포 진행 중"
+BEFORE_TITLE=$(git -C "$SRC" log -1 --format=%s 2>/dev/null || true)
+status running "$ACTOR" "$BEFORE" "" "배포 진행 중" "$BEFORE_TITLE" ""
 
-if TYBOT_SRC="$SRC" TYBOT_BRANCH="$BRANCH" bash "$APP/deploy/update.sh"; then
-  AFTER=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)
+# 로그 파일만 좁게 만든다. **umask 를 그대로 두면 안 된다** —
+# 아래 update.sh 가 `git reset --hard` 로 소스를 새로 쓰고 install.sh 가 /opt 에
+# 배치하는데, umask 077 이 걸려 있으면 그 파일들이 전부 600/700 으로 만들어진다.
+# 그러면 봇 계정(tybot)이 자기 코드를 못 읽고, 다음 배포의 rsync 도 막힌다.
+: > "$OUTPUT"
+chmod 600 "$OUTPUT"
+set +e
+TYBOT_SRC="$SRC" TYBOT_BRANCH="$BRANCH" bash "$APP/deploy/update.sh" 2>&1 | tee "$OUTPUT"
+UPDATE_RC=${PIPESTATUS[0]}
+set -e
+
+AFTER=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)
+AFTER_TITLE=$(git -C "$SRC" log -1 --format=%s 2>/dev/null || true)
+if ((UPDATE_RC == 0)); then
   if [[ "$BEFORE" == "$AFTER" ]]; then
-    status skipped "$ACTOR" "$BEFORE" "$AFTER" "새 커밋이 없어 배포하지 않았습니다."
+    status skipped "$ACTOR" "$BEFORE" "$AFTER" "새 커밋이 없어 배포하지 않았습니다." \
+      "$BEFORE_TITLE" "$AFTER_TITLE"
     log "변경 없음"
   else
-    status ok "$ACTOR" "$BEFORE" "$AFTER" "배포 완료"
+    status ok "$ACTOR" "$BEFORE" "$AFTER" "배포 완료" "$BEFORE_TITLE" "$AFTER_TITLE"
     log "배포 완료 $BEFORE -> $AFTER"
   fi
 else
-  AFTER=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)
-  status failed "$ACTOR" "$BEFORE" "$AFTER" \
-    "배포 실패. 테스트 불통 또는 기동 실패 — journalctl -u tybot-deploy 를 확인하세요. 운영 프로세스는 이전 상태입니다."
+  DEPLOY_DETAIL_FILE="$OUTPUT" status failed "$ACTOR" "$BEFORE" "$AFTER" \
+    "배포에 실패했습니다. 아래 실패 사유를 확인하세요." "$BEFORE_TITLE" "$AFTER_TITLE"
   log "배포 실패"
   exit 1
 fi
