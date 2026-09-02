@@ -161,3 +161,25 @@ def test_reconcile_timer_is_installed_and_switchable():
     assert "tybot-schedule-reconcile" in install
     # 콘솔에서 켜고 끌 수 있어야 한다 — 없으면 SSH 로만 만질 수 있다.
     assert "tybot-schedule-reconcile.timer" in wrapper
+
+
+def test_rsync_does_not_set_destination_attributes():
+    """`-a` 가 디렉터리 권한·시각까지 맞추려다 Permission denied 로 죽었다.
+
+    5단계에서 소유권과 권한을 직접 설정하므로 보존할 이유가 없다.
+    파일 mtime(-t)만 남긴다 — 없으면 매번 전부를 다시 보낸다.
+    """
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+
+    assert "--no-perms" in script
+    assert "--omit-dir-times" in script
+    assert "rsync -a " not in script
+
+
+def test_install_says_why_it_cannot_set_permissions():
+    """권한을 못 바꾸는 환경이면 find 가 수천 줄 오류를 쏟고서야 멈춘다."""
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+
+    assert 'chmod u+rwx "$APP_DIR" 2>/dev/null' in script
+    for hint in ("getenforce", "root_squash", "lsattr"):
+        assert hint in script, hint

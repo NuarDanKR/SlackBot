@@ -82,10 +82,13 @@ if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   # 하면 SELinux/임시 디렉터리 정책에서 거부될 수 있다. 전송 루트 안에서 ./를 복사한다.
   (
     cd "$SRC_DIR"
-    # `-a` 는 소유자·그룹까지 보존하려 한다. 그런데 **바로 다음 단계에서 소유권을
-    # 직접 설정**하므로 보존할 이유가 없고, 실패만 만든다(chgrp Permission denied).
-    # 권한·시각·심볼릭링크만 가져오고 소유는 건드리지 않는다.
-    rsync -a --no-owner --no-group --delete \
+    # `-a` 는 소유자·그룹·권한·디렉터리 시각까지 destination 에 맞추려 든다.
+    # 그런데 **5단계에서 소유권과 권한을 직접 설정**하므로 보존할 이유가 하나도 없고,
+    # 실패만 만든다(chgrp / set permissions / set times: Permission denied).
+    # 실제로 실패한 경로는 전부 디렉터리였다 — 파일은 문제없이 넘어갔다.
+    #
+    # 파일의 mtime(-t)은 남긴다. 그게 없으면 rsync 가 매번 전부를 다시 보낸다.
+    rsync -rlDt --delete --no-owner --no-group --no-perms --omit-dir-times \
       --exclude '/.git' --exclude '/.venv' --exclude '/.env' --exclude '/archive' \
       --exclude '/wheels' \
       --exclude '/console-web/node_modules' --exclude '/console-web/dist' \
@@ -149,6 +152,16 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
 fi
 
 echo "== 5/6 권한 (코드는 봇이 수정 불가) =="
+# 여기서부터 소유권·권한을 직접 설정한다. 그럴 수 없는 환경이면(읽기전용 마운트,
+# NFS root_squash, SELinux) 아래 find 가 수천 줄 오류를 쏟고서야 멈춘다.
+# 한 번 재보고 무엇이 막는지 말한다.
+if ! chmod u+rwx "$APP_DIR" 2>/dev/null; then
+  echo "  ! $APP_DIR 의 권한을 바꿀 수 없습니다 (실행자: $(id -un))"
+  echo "    확인:  mount | grep ' /opt '   # 읽기전용·NFS 인지"
+  echo "           getenforce                 # SELinux 가 막는지"
+  echo "           lsattr -d $APP_DIR         # 불변 속성(i)이 붙었는지"
+  exit 1
+fi
 # node_modules 는 건너뛴다 — 파일이 수만 개라 매 배포마다 수십 초가 든다.
 # 빌드 산출물(dist)만 봇이 읽을 수 있으면 된다.
 find "$APP_DIR" -path "$APP_DIR/console-web/node_modules" -prune -o -print0 |

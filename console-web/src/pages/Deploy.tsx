@@ -159,9 +159,20 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
       {current && <Section title="최근 서버 배포" lead="실제 root 배포 러너의 상태와 결과입니다.">
         <div className="card card-pad"><div className="card-head"><div><div className="card-title">{RUNTIME_LABEL[current.state]}</div>
           <p className="hint">{current.message || '아직 기록된 배포 결과가 없습니다.'}</p></div>{runtimeChip(current.state)}</div>
-          <div className="metric-row" style={{ marginTop: 20 }}><div><div className="metric-label">실행 승인자</div><div>{current.actor || '-'}</div></div>
-            <div><div className="metric-label">배포 전</div><div className="mono">{current.before || '-'}</div><div className="hint">{current.beforeTitle}</div></div>
-            <div><div className="metric-label">배포 후</div><div className="mono">{current.after || '-'}</div><div className="hint">{current.afterTitle}</div></div></div>
+          <div className="deploy-actor"><span className="metric-label">실행 승인자</span> {current.actor || '-'}</div>
+          <div className="deploy-diff">
+            <div className="deploy-diff-side is-before">
+              <div className="metric-label">배포 전</div>
+              <div className="mono deploy-diff-sha">{current.before || '-'}</div>
+              <div className="deploy-commit-title" title={current.beforeTitle}>{current.beforeTitle || '-'}</div>
+            </div>
+            <div className="deploy-diff-arrow" aria-hidden="true">→</div>
+            <div className="deploy-diff-side is-after">
+              <div className="metric-label">배포 후</div>
+              <div className="mono deploy-diff-sha">{current.after || '-'}</div>
+              <div className="deploy-commit-title" title={current.afterTitle}>{current.afterTitle || '-'}</div>
+            </div>
+          </div>
           {current.state === 'failed' && current.detail && <div className="deploy-failure"><div className="metric-label">실패 사유</div><pre>{current.detail}</pre></div>}
           <div className="hint" style={{ marginTop: 16 }}>요청 {current.requestedAt ? fmt.dayClock(current.requestedAt) : '-'} · 시작 {current.startedAt ? fmt.dayClock(current.startedAt) : '-'} · 완료 {current.finishedAt ? fmt.dayClock(current.finishedAt) : '-'}</div>
         </div>
