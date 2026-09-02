@@ -135,13 +135,6 @@ def _load_env_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceCon
             f"ROOT_WORKSPACES 의 {sorted(unknown)} 는 WORKSPACES 에 없습니다. "
             f"사용 가능한 키: {sorted(keys)}"
         )
-    for r in roots:
-        if not cross.get(r):
-            logger.warning(
-                "'%s' 가 root 로 지정됐지만 CROSS_WS_READ 에 열람 대상이 없습니다 - "
-                "자기 워크스페이스만 보게 됩니다.", r
-            )
-
     configs: list[WorkspaceConfig] = []
     for key in keys:
         sfx = env_suffix(key)
@@ -164,40 +157,52 @@ def _load_env_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceCon
 
 
 def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
-    """Load environment workspaces and merge complete DB registry entries.
+    """Load DB-managed workspaces, retaining environment fallback for migration.
 
-    Environment configuration remains the fallback during migration.  A DB row
-    overrides it only after both encrypted Slack tokens exist, so applying the
-    schema to an existing server cannot make a working bot disappear.
+    A complete DB row is authoritative. An incomplete DB row can temporarily
+    use the matching environment entry while its tokens are being migrated.
     """
-    configs = _load_env_workspaces(env)
     effective = dict(os.environ if env is None else env)
-    if not effective.get("DATABASE_URL"):
-        return configs
-    if not (
+    registry_configured = bool(effective.get("DATABASE_URL")) and bool(
         effective.get("WORKSPACE_SECRET_KEY")
         or effective.get("WORKSPACE_SECRET_KEY_FILE")
         or effective.get("CREDENTIALS_DIRECTORY")
-    ):
-        return configs
+    )
+    if not registry_configured:
+        return _load_env_workspaces(env)
+
+    env_configs: list[WorkspaceConfig] = []
+    env_error: ConfigError | None = None
+    try:
+        env_configs = _load_env_workspaces(env)
+    except ConfigError as exc:
+        env_error = exc
 
     try:
         from .console.workspace_store import runtime_workspaces
 
         rows = runtime_workspaces()
-    except Exception as exc:  # noqa: BLE001 - registry failure must not stop existing bots
-        logger.error("DB 워크스페이스 설정을 읽지 못해 환경변수 설정만 사용합니다: %s", exc)
-        return configs
+    except Exception as exc:
+        if env_configs:
+            logger.error("DB 워크스페이스 설정을 읽지 못해 환경변수 대체 설정을 사용합니다: %s", exc)
+            return env_configs
+        detail = f"DB 워크스페이스 설정 조회 실패: {exc}"
+        if env_error is not None:
+            detail += f"; 환경변수 대체 설정도 사용할 수 없음: {env_error}"
+        raise ConfigError(detail) from exc
 
-    merged = {cfg.key: cfg for cfg in configs}
+    merged = {cfg.key: cfg for cfg in env_configs}
+    incomplete: list[str] = []
     for row in rows:
         key = str(row["key"])
+        if row.get("state") == "disabled":
+            merged.pop(key, None)
+            continue
         # A row without a complete secret pair is metadata imported before the
         # registry feature. Keep its working environment configuration.
         if row.get("bot_token") is None or row.get("app_token") is None:
-            continue
-        if row.get("state") == "disabled":
-            merged.pop(key, None)
+            if key not in merged:
+                incomplete.append(key)
             continue
         merged[key] = WorkspaceConfig(
             key=key,
@@ -207,4 +212,16 @@ def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
             readable=frozenset(str(value) for value in (row.get("readable") or [])),
             is_root=row.get("role") == "root",
         )
+    if incomplete:
+        raise ConfigError(
+            "DB에 Slack 토큰이 모두 등록되지 않았고 환경변수 대체 설정도 없는 "
+            f"워크스페이스: {', '.join(sorted(incomplete))}"
+        )
+    if not merged:
+        if not rows and env_configs:
+            return env_configs
+        detail = "활성화된 워크스페이스 설정이 없습니다."
+        if env_error is not None:
+            detail += f" 환경변수 대체 설정 오류: {env_error}"
+        raise ConfigError(detail)
     return list(merged.values())

@@ -698,7 +698,6 @@ def _write_headers(headers: dict) -> dict:
 def _env_payload(client, headers: dict) -> dict:
     data = client.get("/api/env-settings", headers=headers).json()
     return {
-        "workspaces": data["workspaces"],
         "realtimeIngest": data["realtimeIngest"],
         "autojoinChannels": data["autojoinChannels"],
         "replyInThread": data["replyInThread"],
@@ -724,22 +723,23 @@ def test_env_settings_never_return_secrets(client, monkeypatch):
 def test_owner_saves_validated_env_overlay_and_restart_request(client, env):
     headers = owner(client)
     payload = _env_payload(client, headers)
-    mgmt = next(row for row in payload["workspaces"] if row["key"] == "mgmt")
-    mgmt["readable"] = ["fin"]
     payload["replyInThread"] = False
 
     response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
     assert response.status_code == 200, response.text
-    assert {"CROSS_WS_READ", "REPLY_IN_THREAD"} <= set(response.json()["changed"])
+    assert "REPLY_IN_THREAD" in response.json()["changed"]
 
     managed = (env / "state" / "config" / "managed.env").read_text(encoding="utf-8")
-    assert 'CROSS_WS_READ="mgmt:fin"' in managed
     assert 'REPLY_IN_THREAD="0"' in managed
+    assert "WORKSPACES=" not in managed
+    assert "ROOT_WORKSPACES=" not in managed
+    assert "CROSS_WS_READ=" not in managed
+    assert "WORKSPACE_LABEL_" not in managed
     assert "SLACK_BOT_TOKEN" not in managed
     assert (env / "state" / "restart-request.json").is_file()
 
     audit = (env / "qa-log" / "env-settings.jsonl").read_text(encoding="utf-8")
-    assert "CROSS_WS_READ" in audit
+    assert "REPLY_IN_THREAD" in audit
     assert "xoxb-" not in audit
 
 
@@ -763,13 +763,23 @@ def test_env_write_requires_owner_origin_and_csrf(client):
     )
 
 
-def test_env_write_rejects_unknown_or_self_read_target(client, env):
+def test_env_save_removes_legacy_workspace_overlay_values(client, env):
     headers = owner(client)
+    managed = env / "state" / "config" / "managed.env"
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    managed.write_text(
+        'WORKSPACES="pilot,mgmt"\nROOT_WORKSPACES="mgmt"\n'
+        'CROSS_WS_READ="mgmt:pilot"\nWORKSPACE_LABEL_PILOT="파일럿"\n',
+        encoding="utf-8",
+    )
     payload = _env_payload(client, headers)
-    payload["workspaces"][0]["readable"] = [payload["workspaces"][0]["key"]]
     response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
-    assert response.status_code == 422
-    assert not (env / "state" / "config" / "managed.env").exists()
+    assert response.status_code == 200
+    saved = managed.read_text(encoding="utf-8")
+    assert "WORKSPACES=" not in saved
+    assert "ROOT_WORKSPACES=" not in saved
+    assert "CROSS_WS_READ=" not in saved
+    assert "WORKSPACE_LABEL_" not in saved
 
 
 # --- 워크스페이스 관리 ----------------------------------------------------
@@ -969,6 +979,16 @@ def test_registry_workspaces_appear_in_the_shared_list(monkeypatch):
     assert labels["pilot"] == "파일럿"
 
 
+def test_db_only_workspace_list_does_not_add_legacy_pilot(monkeypatch):
+    from tybot.console import reader
+
+    monkeypatch.delenv("WORKSPACES", raising=False)
+    monkeypatch.delenv("PILOT_WORKSPACE", raising=False)
+    monkeypatch.setattr(reader, "_registry_labels", lambda: {"civil": "토목"})
+
+    assert reader._workspace_labels() == {"civil": "토목"}
+
+
 def test_registry_failure_does_not_empty_the_workspace_list(monkeypatch):
     """암호화 키가 없는 서버에서도 환경변수 목록은 보여야 한다.
 
@@ -987,9 +1007,36 @@ def test_registry_failure_does_not_empty_the_workspace_list(monkeypatch):
     assert "pilot" in reader._workspace_labels()
 
 
+def test_console_access_metadata_prefers_workspace_registry(monkeypatch):
+    from tybot.console import reader, workspace_store
+
+    monkeypatch.setenv("ROOT_WORKSPACES", "legacy")
+    monkeypatch.setenv("CROSS_WS_READ", "legacy:pilot")
+    monkeypatch.setattr(
+        workspace_store,
+        "list_workspaces",
+        lambda: [
+            {
+                "key": "mgmt",
+                "label": "경영본부",
+                "role": "root",
+                "state": "enabled",
+                "readable": ["pilot", "tyit"],
+            }
+        ],
+    )
+
+    assert reader._readable_map({"mgmt", "pilot", "tyit"}) == {
+        "mgmt": ["pilot", "tyit"]
+    }
+    assert reader._root_keys() == {"mgmt"}
+
+
 def test_env_only_tokens_are_not_reported_as_missing(monkeypatch):
     """동작 중인 봇의 토큰이 '미등록' 으로 보이면 고장난 것처럼 읽힌다."""
-    monkeypatch.setenv("TYIT_BOT_TOKEN", "xoxb-" + "1" * 20)
+    monkeypatch.setenv("WORKSPACES", "tyit")
+    monkeypatch.setenv("SLACK_BOT_TOKEN_TYIT", "xoxb-" + "1" * 20)
+    monkeypatch.setenv("SLACK_APP_TOKEN_TYIT", "xapp-" + "2" * 20)
     row = {
         "key": "tyit", "label": "전산팀", "role": "member", "state": "active",
         "limit_usd": 2, "archive_path": "/x", "created_at": None, "created_by": "-",
@@ -999,6 +1046,14 @@ def test_env_only_tokens_are_not_reported_as_missing(monkeypatch):
 
     assert response["botTokenMask"] == "환경변수 사용"
     assert response["tokenInEnv"] is True
+
+
+def test_incomplete_env_token_pair_is_not_reported_as_migratable(monkeypatch):
+    monkeypatch.setenv("WORKSPACES", "tyit")
+    monkeypatch.setenv("SLACK_BOT_TOKEN_TYIT", "xoxb-" + "1" * 20)
+    monkeypatch.delenv("SLACK_APP_TOKEN_TYIT", raising=False)
+
+    assert "tyit" not in console_app._env_token_keys()
 
 
 def test_only_admin_marks_feedback_handled(client):

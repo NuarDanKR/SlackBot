@@ -19,7 +19,7 @@ interface WorkspaceEntry {
   appTokenMask: string
   secretUpdatedAt: string | null
   secretUpdatedBy: string
-  /** 토큰이 환경변수에 있어 콘솔에서 교체할 수 없습니다. */
+  /** DB 토큰이 없고 이전 가능한 환경변수 토큰이 있습니다. */
   tokenInEnv: boolean
   archivePath: string
   createdAt: string
@@ -85,6 +85,7 @@ export function Workspaces({ onToast }: { onToast: (message: string) => void }) 
   }
 
   const tokenPair = Boolean(draft.botToken) === Boolean(draft.appToken)
+  const editingRow = editing ? rows.find((row) => row.key === draft.key) : undefined
   const ready = KEY_RE.test(draft.key) && draft.label.trim().length > 0 && tokenPair &&
     (editing || (draft.botToken.startsWith('xoxb-') && draft.appToken.startsWith('xapp-')))
 
@@ -153,7 +154,9 @@ export function Workspaces({ onToast }: { onToast: (message: string) => void }) 
       <Section
         title={editing ? `${draft.label} 설정 편집` : '새 워크스페이스 등록'}
         lead={editing
-          ? '토큰 입력란을 비워 두면 기존 토큰을 유지합니다. 교체할 때는 두 토큰을 함께 입력해야 합니다.'
+          ? editingRow?.tokenInEnv
+            ? '저장하면 현재 서버 설정 파일의 두 토큰을 암호화해 DB로 이전합니다. 새 토큰으로 교체하려면 두 토큰을 함께 입력하세요.'
+            : '토큰 입력란을 비워 두면 기존 DB 토큰을 유지합니다. 교체할 때는 두 토큰을 함께 입력해야 합니다.'
           : 'Slack 앱에서 받은 봇 토큰과 앱 토큰이 모두 있어야 등록할 수 있습니다.'}
       >
         <div className="card card-pad">
@@ -221,7 +224,7 @@ export function Workspaces({ onToast }: { onToast: (message: string) => void }) 
 
           <div className="form-row">
             <button className="btn btn-primary" disabled={!ready || saving} onClick={save}>
-              {saving ? '저장 중…' : editing ? '변경 저장' : '워크스페이스 등록'}
+              {saving ? '저장 중…' : editingRow?.tokenInEnv ? 'DB로 이전 및 저장' : editing ? '변경 저장' : '워크스페이스 등록'}
             </button>
             {editing && <button className="btn btn-quiet" onClick={reset}>취소</button>}
           </div>
@@ -241,7 +244,7 @@ export function Workspaces({ onToast }: { onToast: (message: string) => void }) 
                 <td>{stateChip(row)}{row.error && <div className="hint warn">{row.error}</div>}</td>
                 <td><div className="mono">{row.botTokenMask}</div><div className="mono">{row.appTokenMask}</div>
                   <div className="hint">{row.tokenInEnv
-                    ? '서버 설정 파일에 있습니다. 콘솔에서 교체하려면 위에서 토큰을 등록하세요.'
+                    ? '환경변수 사용 중 · 편집 후 저장하면 암호화 DB로 이전됩니다.'
                     : `${row.secretUpdatedAt ? fmt.dayClock(row.secretUpdatedAt) : '교체 기록 없음'} · ${row.secretUpdatedBy}`}</div></td>
                 <td>{row.readable.length ? row.readable.join(' · ') : '-'}</td>
                 <td className="num">${row.limitUsd.toFixed(2)}</td>

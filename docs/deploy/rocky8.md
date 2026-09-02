@@ -462,7 +462,8 @@ journalctl -u tybot-schedule-sync -f
 그대로 따라다니며, 누가 언제 바꿨는지 남지 않는다. DB 에는 암호화해서 넣는다.
 
 ```bash
-sudo -u postgres psql -d tyslackai -f /opt/tybot/deploy/sql/llm_secret_schema.sql
+sudo cat /opt/tybot/deploy/sql/llm_secret_schema.sql | \
+  sudo -u postgres psql -p 55432 -d tyslackai -v ON_ERROR_STOP=1
 ```
 
 그 다음 콘솔의 **환경변수 설정 → LLM API 키** 에서 키를 붙여 넣는다.

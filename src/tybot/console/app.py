@@ -123,15 +123,7 @@ class LoginBody(BaseModel):
     password: str
 
 
-class EnvWorkspaceBody(BaseModel):
-    key: str
-    label: str
-    root: bool
-    readable: list[str]
-
-
 class EnvSettingsBody(BaseModel):
-    workspaces: list[EnvWorkspaceBody]
     realtimeIngest: bool
     autojoinChannels: bool
     replyInThread: bool
@@ -372,12 +364,25 @@ def _env_token_keys() -> set[str]:
     그걸 그냥 "미등록" 으로 보이면 **동작 중인 봇이 고장난 것처럼 읽힌다.**
     어디에 있는지를 말한다.
     """
+    from ..workspaces import env_suffix
+
     keys: set[str] = set()
-    for name, value in os.environ.items():
-        if not value.strip() or not name.endswith("_BOT_TOKEN"):
-            continue
-        keys.add(name[: -len("_BOT_TOKEN")].lower())
-    if os.getenv("SLACK_BOT_TOKEN", "").strip():
+    configured = [
+        key.strip().lower()
+        for key in (os.getenv("WORKSPACES") or "").split(",")
+        if key.strip()
+    ]
+    for key in configured:
+        suffix = env_suffix(key)
+        if (
+            os.getenv(f"SLACK_BOT_TOKEN_{suffix}", "").strip()
+            and os.getenv(f"SLACK_APP_TOKEN_{suffix}", "").strip()
+        ):
+            keys.add(key)
+    if (
+        os.getenv("SLACK_BOT_TOKEN", "").strip()
+        and os.getenv("SLACK_APP_TOKEN", "").strip()
+    ):
         keys.add(os.getenv("PILOT_WORKSPACE", "pilot").lower())
     return keys
 
@@ -401,7 +406,7 @@ def _workspace_response(row: dict, env_keys: set[str] | None = None) -> dict:
         "archivePath": row["archive_path"],
         "createdAt": row["created_at"],
         "createdBy": row["created_by"],
-        # 토큰이 환경변수에 있으면 콘솔에서 교체할 수 없다 — 그걸 화면이 알아야 한다.
+        # DB 토큰이 아직 없고 환경변수 대체 토큰이 있으면 이전 동작을 안내한다.
         "tokenInEnv": in_env and not row.get("bot_token_mask"),
     }
 

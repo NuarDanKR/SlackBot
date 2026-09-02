@@ -89,6 +89,25 @@ def _registry_labels() -> dict[str, str]:
         return {}
 
 
+def _registry_access() -> tuple[dict[str, list[str]], set[str]] | None:
+    """Return DB-managed readable targets and root keys without decrypting tokens."""
+    try:
+        from .workspace_store import list_workspaces
+
+        rows = [row for row in list_workspaces() if row.get("state") != "disabled"]
+        if not rows:
+            return None
+        readable = {
+            str(row["key"]): sorted(str(value) for value in (row.get("readable") or []))
+            for row in rows
+        }
+        roots = {str(row["key"]) for row in rows if row.get("role") == "root"}
+        return readable, roots
+    except Exception as exc:  # noqa: BLE001 - environment metadata remains the fallback
+        logger.debug("워크스페이스 접근 설정을 읽지 못했습니다: %s", exc)
+        return None
+
+
 def _workspace_labels() -> dict[str, str]:
     """표시 이름을 모은다. 토큰이 없어도 읽을 수 있어야 한다.
 
@@ -103,8 +122,11 @@ def _workspace_labels() -> dict[str, str]:
     labels: dict[str, str] = {}
     keys = [k.strip() for k in (os.getenv("WORKSPACES") or "").split(",") if k.strip()]
     if not keys:
+        registry = _registry_labels()
+        if registry:
+            return registry
         key = os.getenv("PILOT_WORKSPACE", "pilot")
-        return {key: os.getenv("WORKSPACE_LABEL", key), **_registry_labels()}
+        return {key: os.getenv("WORKSPACE_LABEL", key)}
     for key in keys:
         sfx = re.sub(r"[^A-Z0-9]+", "_", key.upper()).strip("_")
         labels[key] = os.getenv(f"WORKSPACE_LABEL_{sfx}", key)
@@ -113,6 +135,10 @@ def _workspace_labels() -> dict[str, str]:
 
 
 def _readable_map(known: set[str]) -> dict[str, list[str]]:
+    registry = _registry_access()
+    if registry is not None:
+        return registry[0]
+
     from ..workspaces import parse_cross_read
 
     try:
@@ -124,6 +150,9 @@ def _readable_map(known: set[str]) -> dict[str, list[str]]:
 
 
 def _root_keys() -> set[str]:
+    registry = _registry_access()
+    if registry is not None:
+        return registry[1]
     return {k.strip() for k in (os.getenv("ROOT_WORKSPACES") or "").split(",") if k.strip()}
 
 

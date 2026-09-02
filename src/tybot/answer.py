@@ -81,15 +81,30 @@ TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 
 
 def _mentioned_workspaces(question: str) -> frozenset[str]:
-    """질문에 명시된 워크스페이스 키·표시 이름을 비시크릿 환경설정에서 찾는다."""
+    """질문에 명시된 워크스페이스 키·표시 이름을 DB 메타데이터에서 찾는다."""
     import os
 
     from .workspaces import env_suffix
 
-    found: set[str] = set()
+    labels: dict[str, str] = {}
     keys = [key.strip() for key in (os.getenv("WORKSPACES") or "").split(",") if key.strip()]
     for key in keys:
-        label = (os.getenv(f"WORKSPACE_LABEL_{env_suffix(key)}") or "").strip()
+        labels[key] = (os.getenv(f"WORKSPACE_LABEL_{env_suffix(key)}") or key).strip()
+    try:
+        from .console.workspace_store import list_workspaces
+
+        db_rows = list_workspaces()
+        if db_rows:
+            labels = {
+                str(row["key"]): str(row.get("label") or row["key"])
+                for row in db_rows
+                if row.get("state") != "disabled"
+            }
+    except Exception:  # noqa: BLE001 - environment metadata remains the emergency fallback
+        pass
+
+    found: set[str] = set()
+    for key, label in labels.items():
         if label and label in question:
             found.add(key)
             continue

@@ -19,7 +19,7 @@ ENV_SOURCE = load_env_file()
 
 OPTIONAL = [
     "DEFAULT_MODEL", "DAILY_COST_LIMIT_USD", "STATE_DIR",
-    "BOT_NAME", "REALTIME_INGEST", "EXEC_USERS", "CROSS_WS_READ",
+    "BOT_NAME", "REALTIME_INGEST", "EXEC_USERS",
 ]
 
 
@@ -66,9 +66,11 @@ def check_llm_live() -> bool:
     import urllib.error
     import urllib.request
 
-    key = os.getenv("ANTHROPIC_API_KEY", "")
+    from tybot.console.llm_secret_store import resolve_key
+
+    key = resolve_key("anthropic") or ""
     if not key:
-        print("  [MISS] ANTHROPIC_API_KEY 가 없어 실호출을 건너뜁니다")
+        print("  [MISS] Anthropic 키를 DB 또는 환경변수에서 찾지 못해 실호출을 건너뜁니다")
         return False
     model = os.getenv("DEFAULT_MODEL", "claude-haiku-4-5-20251001")
     req = urllib.request.Request(
@@ -117,11 +119,12 @@ def check_workspaces() -> bool:
     except ConfigError as e:
         print(f"  [MISS] 워크스페이스 설정 오류: {e}")
         if not os.getenv("WORKSPACES"):
-            print("         힌트: tybot.env 의 'WORKSPACES=' 줄이 없거나 '#' 으로 주석 처리돼 "
-                  "있는지 확인하세요(.env.example 에서는 주석 상태입니다).")
+            print("         힌트: 관리 콘솔의 워크스페이스 관리에서 활성 상태와 두 Slack 토큰을 확인하세요.")
         return False
 
-    mode = "멀티" if os.getenv("WORKSPACES") else "단일"
+    mode = "DB 우선" if os.getenv("DATABASE_URL") else (
+        "환경변수 멀티" if os.getenv("WORKSPACES") else "환경변수 단일"
+    )
     print(f"  [OK]   워크스페이스 {len(cfgs)}개 ({mode} 설정)")
     ok = True
     for c in cfgs:
@@ -143,18 +146,21 @@ def main() -> int:
     ok = True
     print(f"환경변수 출처: {ENV_SOURCE}")
     print("=== 워크스페이스 ===")
-    print(f"  [ .. ] WORKSPACES: {os.getenv('WORKSPACES') or '(미설정 -> 단일 워크스페이스 모드)'}")
+    print(f"  [ .. ] 환경변수 대체 설정: {os.getenv('WORKSPACES') or '(없음)'}")
     ok = check_workspaces() and ok
     print("=== LLM ===")
-    v = os.getenv("ANTHROPIC_API_KEY", "")
+    from tybot.console.llm_secret_store import resolve_key
+
+    v = resolve_key("anthropic") or ""
     if not v or "REPLACE_ME" in v:
-        print("  [MISS] ANTHROPIC_API_KEY: 미설정")
+        print("  [MISS] Anthropic 키: DB와 환경변수 모두 미설정")
         ok = False
     elif not v.startswith("sk-ant-"):
-        print(f"  [WARN] ANTHROPIC_API_KEY: 접두사가 'sk-ant-' 가 아님 -> {mask(v)}")
+        print(f"  [WARN] Anthropic 키: 접두사가 'sk-ant-' 가 아님 -> {mask(v)}")
         ok = False
     else:
-        print(f"  [OK]   ANTHROPIC_API_KEY: {mask(v)}")
+        source = "환경변수" if os.getenv("ANTHROPIC_API_KEY", "").strip() == v else "암호화 DB"
+        print(f"  [OK]   Anthropic 키 ({source}): {mask(v)}")
     print("=== 쓰기 경로 ===")
     ok = check_write_paths() and ok
     print("=== 선택 ===")

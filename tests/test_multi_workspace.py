@@ -335,6 +335,24 @@ def test_summary_named_workspace_excludes_other_visible_workspaces(tmp_path, mon
     assert all(c.startswith("[tyit] ") for c in ans.citations)
 
 
+def test_named_workspace_filter_uses_db_metadata_without_workspace_env(monkeypatch):
+    from tybot.answer import _mentioned_workspaces
+    from tybot.console import workspace_store
+
+    monkeypatch.delenv("WORKSPACES", raising=False)
+    monkeypatch.setattr(
+        workspace_store,
+        "list_workspaces",
+        lambda: [
+            {"key": "tyit", "label": "전산팀", "state": "enabled"},
+            {"key": "old", "label": "폐쇄 조직", "state": "disabled"},
+        ],
+    )
+
+    assert _mentioned_workspaces("전산팀 자료만 알려줘") == frozenset({"tyit"})
+    assert not _mentioned_workspaces("폐쇄 조직 자료")
+
+
 def test_scope_question_is_not_refused(tmp_path):
     """'다른 워크스페이스 내용 알려줘' 를 외부 정보 질문으로 거절하지 않는다."""
     from tybot.intent import Intent
@@ -427,3 +445,61 @@ def test_incomplete_db_registry_row_keeps_existing_environment_workspace(monkeyp
     assert len(configs) == 1
     assert configs[0].label == "환경 전산팀"
     assert configs[0].bot_token == "xoxb-env_1"
+
+
+def test_complete_db_registry_starts_without_workspace_environment(monkeypatch):
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store,
+        "runtime_workspaces",
+        lambda: [
+            {
+                "key": "tyit",
+                "label": "전산팀",
+                "role": "member",
+                "state": "enabled",
+                "bot_token": "xoxb-db_1",
+                "app_token": "xapp-db_1",
+                "readable": [],
+            }
+        ],
+    )
+
+    configs = load_workspaces(
+        {
+            "DATABASE_URL": "postgresql://unused",
+            "WORKSPACE_SECRET_KEY": "test-key-present",
+        }
+    )
+
+    assert [(config.key, config.label) for config in configs] == [("tyit", "전산팀")]
+    assert configs[0].bot_token == "xoxb-db_1"
+
+
+def test_incomplete_db_registry_without_environment_fails(monkeypatch):
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store,
+        "runtime_workspaces",
+        lambda: [
+            {
+                "key": "tyit",
+                "label": "전산팀",
+                "role": "member",
+                "state": "enabled",
+                "bot_token": None,
+                "app_token": None,
+                "readable": [],
+            }
+        ],
+    )
+
+    with pytest.raises(ConfigError, match="tyit"):
+        load_workspaces(
+            {
+                "DATABASE_URL": "postgresql://unused",
+                "WORKSPACE_SECRET_KEY": "test-key-present",
+            }
+        )

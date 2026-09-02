@@ -27,4 +27,13 @@ CREATE TABLE IF NOT EXISTS llm_secret (
 COMMENT ON TABLE llm_secret IS
     'LLM API 키. 평문 저장 금지, 복호화 조회 API 금지. 콘솔은 mask 만 읽는다.';
 
+-- 표준 운영 DB 역할이 있으면 별도 수동 GRANT 없이 콘솔과 봇이 사용할 수 있게 한다.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON TABLE llm_secret TO tyslackai';
+    END IF;
+END
+$$;
+
 COMMIT;
