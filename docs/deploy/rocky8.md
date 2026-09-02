@@ -19,7 +19,7 @@ curl -sI https://pypi.org  | head -1     # 안 되면 1절 오프라인 경로
 
 ### 0-2. 필요한 시스템 패키지 — 이것뿐이다
 ```bash
-sudo dnf install -y python3.11 python3.11-pip git rsync
+sudo dnf install -y python3.11 python3.11-pip git
 ```
 
 | 패키지 | 왜 |
@@ -27,7 +27,7 @@ sudo dnf install -y python3.11 python3.11-pip git rsync
 | `python3.11` | RL8 기본 `python3` 은 3.6. 우리 코드는 3.11+ |
 | `python3.11-pip` | venv 안에서 의존성 설치 |
 | `git` | 저장소 clone / 업데이트 |
-| `rsync` | `install.sh` 가 코드를 `/opt/tybot` 으로 동기화 |
+| `tar` | `install.sh` 가 코드를 `/opt/tybot` 으로 배치 (rsync 는 SELinux 가 갇힌 도메인으로 전이시켜 쓰지 않는다) |
 
 **필요 없는 것**: Node.js(순수 Python 스택), gcc·python3.11-devel(`pydantic_core`·`jiter` 는 리눅스 휠 제공 → 컴파일 없음),
 DB(이 단계는 MD 파일만), nginx·httpd(인바운드 없음).

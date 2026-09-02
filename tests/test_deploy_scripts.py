@@ -28,12 +28,21 @@ def test_console_install_enables_fixed_deploy_path():
     assert "systemctl enable --now tybot-deploy.path" in script
 
 
-def test_install_rsyncs_from_inside_source_directory():
-    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+def test_install_does_not_use_rsync_at_all():
+    """SELinux 가 rsync 를 갇힌 도메인(rsync_t)으로 전이시켜 root 여도 막힌다.
 
-    assert 'cd "$SRC_DIR"' in script
-    assert './ "$APP_DIR"/' in script
-    assert '"$SRC_DIR"/ "$APP_DIR"/' not in script
+    rsync_t 는 var_lib_t 를 읽지 못하는데 소스 체크아웃이 거기 있다.
+    SSH 로 직접 돌리면 전이가 없어 되고, 콘솔 배포에서만 실패했다(2026-09-02).
+    정책으로 뚫으면 rsync_t 가 다른 서비스의 var_lib_t 까지 읽게 된다.
+    """
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    commands = [
+        line for line in script.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    assert not any("rsync" in line for line in commands)
+    assert "rsync_t" in script, "왜 안 쓰는지가 남아 있어야 한다"
 
 
 def test_deploy_runner_records_output_and_commit_titles():
@@ -163,17 +172,32 @@ def test_reconcile_timer_is_installed_and_switchable():
     assert "tybot-schedule-reconcile.timer" in wrapper
 
 
-def test_rsync_does_not_set_destination_attributes():
-    """`-a` 가 디렉터리 권한·시각까지 맞추려다 Permission denied 로 죽었다.
+def test_copy_keeps_nested_archive_but_drops_the_top_level_one():
+    """`archive` 로만 제외하면 src/tybot/archive/ 까지 빠져 봇이 죽는다."""
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
 
-    5단계에서 소유권과 권한을 직접 설정하므로 보존할 이유가 없다.
-    파일 mtime(-t)만 남긴다 — 없으면 매번 전부를 다시 보낸다.
+    assert "--exclude=./archive" in script
+    assert "--exclude=archive " not in script
+
+
+def test_copy_removes_files_that_vanished_from_the_source():
+    """tar 에는 --delete 가 없다.
+
+    지워진 모듈이 /opt 에 남으면 파이썬이 그걸 계속 import 한다.
     """
     script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
 
-    assert "--no-perms" in script
-    assert "--omit-dir-times" in script
-    assert "rsync -a " not in script
+    assert "comm -13" in script
+    assert 'rm -f "$APP_DIR/$rel"' in script
+
+
+def test_copy_never_deletes_what_only_the_server_builds():
+    """.venv·console-web/dist·.deployed-commit 은 소스에 없다. 지우면 자기 발을 밟는다."""
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    keep = script[script.index("KEEP_IN_DEST="):]
+
+    assert "--exclude=./.deployed-commit" in keep
+    assert "TREE_EXCLUDES[@]" in keep, ".venv·dist 는 공통 목록에서 물려받는다"
 
 
 def test_install_says_why_it_cannot_set_permissions():

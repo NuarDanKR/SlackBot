@@ -17,7 +17,6 @@ PY=python3.11
 
 echo "== 1/6 시스템 패키지 =="
 command -v $PY >/dev/null || dnf install -y python3.11 python3.11-pip
-command -v rsync >/dev/null || dnf install -y rsync
 command -v git   >/dev/null || dnf install -y git
 
 # 콘솔 화면을 서버에서 빌드하므로 Node 가 필요하다.
@@ -74,27 +73,55 @@ chown tybot:tybot "$DATA_DIR"
 chmod 750 "$DATA_DIR"
 
 echo "== 3/6 코드 배치 =="
+
+# 코드를 옮기는 데 **rsync 를 쓰지 않는다.**
+#
+# SELinux 가 `/usr/bin/rsync` 를 `rsync_exec_t` 로 라벨해 두어서, systemd 서비스
+# (`init_t`)가 실행하면 갇힌 도메인 `rsync_t` 로 전이된다. 그 도메인은 `var_lib_t`
+# 를 읽지 못한다 — 소스 체크아웃이 거기 있다. root 인데도 EACCES 가 난다:
+#
+#   avc: denied { getattr } comm="rsync" path="/var/lib/tybot/src/tests/..."
+#   scontext=system_r:rsync_t:s0 tcontext=object_r:var_lib_t:s0 uid=0 euid=0
+#
+# 사람이 SSH 로 돌리면 전이가 없어 잘 된다. **콘솔 배포에서만** 실패했다.
+# 정책으로 뚫으면 rsync_t 가 다른 모든 서비스의 var_lib_t 까지 읽게 되므로,
+# 갇히지 않는 도구(tar)로 옮긴다.
+#
+# 제외 패턴의 `./` 는 전송 루트 최상위만 가리킨다. `archive` 로만 쓰면 하위의
+# src/tybot/archive/ 까지 빠져 봇이 ModuleNotFoundError 로 죽는다.
+TREE_EXCLUDES=(
+  --exclude=./.git --exclude=./.venv --exclude=./.env --exclude=./archive
+  --exclude=./wheels
+  --exclude=./console-web/node_modules --exclude=./console-web/dist
+  --exclude=__pycache__ --exclude=.pytest_cache --exclude='*.egg-info'
+)
+# 목적지에만 있고 지우면 안 되는 것. 소스에 없다고 지우면 배포가 자기 발을 밟는다.
+# (.venv 는 파이썬 환경, console-web/dist 는 서버에서 빌드한 화면,
+#  .deployed-commit 은 무엇이 배포됐는지 남긴 기록)
+KEEP_IN_DEST=("${TREE_EXCLUDES[@]}" --exclude=./.deployed-commit)
+
 if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
-  # .env·아카이브·git 메타는 옮기지 않는다(시크릿은 /etc, 데이터는 /var/lib)
-  # 주의: 패턴 앞의 '/' 는 전송 루트 고정이다. 'archive' 로 쓰면 하위의
-  # src/tybot/archive/ 까지 제외되어 봇이 ModuleNotFoundError 로 죽는다.
-  # 배포 서비스가 이미 소스 디렉터리에 진입한 뒤 rsync가 절대경로로 다시 change_dir
-  # 하면 SELinux/임시 디렉터리 정책에서 거부될 수 있다. 전송 루트 안에서 ./를 복사한다.
-  (
-    cd "$SRC_DIR"
-    # `-a` 는 소유자·그룹·권한·디렉터리 시각까지 destination 에 맞추려 든다.
-    # 그런데 **5단계에서 소유권과 권한을 직접 설정**하므로 보존할 이유가 하나도 없고,
-    # 실패만 만든다(chgrp / set permissions / set times: Permission denied).
-    # 실제로 실패한 경로는 전부 디렉터리였다 — 파일은 문제없이 넘어갔다.
-    #
-    # 파일의 mtime(-t)은 남긴다. 그게 없으면 rsync 가 매번 전부를 다시 보낸다.
-    rsync -rlDt --delete --no-owner --no-group --no-perms --omit-dir-times \
-      --exclude '/.git' --exclude '/.venv' --exclude '/.env' --exclude '/archive' \
-      --exclude '/wheels' \
-      --exclude '/console-web/node_modules' --exclude '/console-web/dist' \
-      --exclude '__pycache__' --exclude '.pytest_cache' --exclude '*.egg-info' \
-      ./ "$APP_DIR"/
-  )
+  # 소유·권한은 가져오지 않는다 — 5단계에서 직접 설정한다.
+  tar -cf - -C "$SRC_DIR" "${TREE_EXCLUDES[@]}" . \
+    | tar -xf - -C "$APP_DIR" --no-same-owner --no-same-permissions
+
+  # tar 에는 --delete 가 없다. 지워진 파일이 /opt 에 남으면 파이썬이 그걸 계속
+  # import 한다 — 삭제한 모듈이 살아 있는, 가장 헷갈리는 고장이다.
+  # 목적지에만 있는 **파일**을 지운다. 디렉터리는 두어도 무해하므로 건드리지 않는다.
+  src_list=$(mktemp)
+  dst_list=$(mktemp)
+  tar -cf /dev/null -v -C "$SRC_DIR" "${TREE_EXCLUDES[@]}" . 2>/dev/null \
+    | sed 's:/$::' | sort > "$src_list"
+  tar -cf /dev/null -v -C "$APP_DIR" "${KEEP_IN_DEST[@]}" . 2>/dev/null \
+    | sed 's:/$::' | sort > "$dst_list"
+  stale=0
+  while IFS= read -r rel; do
+    [[ -f "$APP_DIR/$rel" ]] || continue
+    rm -f "$APP_DIR/$rel"
+    stale=$((stale + 1))
+  done < <(comm -13 "$src_list" "$dst_list")
+  rm -f "$src_list" "$dst_list"
+  if [[ $stale -gt 0 ]]; then echo "  소스에서 사라진 파일 ${stale}건 정리"; fi
 
   # 배치 결과를 검증한다 — 조용히 빠진 모듈이 가장 잡기 어렵다.
   for m in answer.py intent.py archive/store.py archive/writer.py slack/pilot.py; do
