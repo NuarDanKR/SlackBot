@@ -146,7 +146,11 @@ class Answer:
         return f"_근거: {' · '.join(bits)}_" if bits else ""
 
     def to_slack(self) -> str:
-        parts = [self.text]
+        # Slack 에는 표 문법이 없다. 모델이 마크다운 표를 뱉으면 파이프가 그대로 보이고
+        # 열이 어긋난다 - 프롬프트로 금지해도 새는 경우가 있어 여기서 다시 그린다.
+        from .evidence_view import fix_markdown_tables
+
+        parts = [fix_markdown_tables(self.text)]
         note = self.evidence_note()
         if note:
             parts.append(note)

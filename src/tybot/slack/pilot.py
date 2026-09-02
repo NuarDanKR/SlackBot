@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from .. import heartbeat, schedule_dm
+from .. import evidence_view, heartbeat, schedule_dm
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
@@ -384,6 +384,22 @@ class WorkspaceBot:
             respond(
                 "사용법: `/채널 생성`, `/채널 이름변경`, `/채널 도움말`\n"
                 "명령어 없이 `/채널`만 입력해도 생성 화면이 열립니다.",
+                response_type="ephemeral",
+            )
+
+        @self.app.action(evidence_view.ACTION_SHOW)
+        def on_show_evidence(ack, body, client, respond):
+            """답변이 실제로 읽은 원문 줄을 보여준다.
+
+            저장해 둔 것을 꺼내는 게 아니라 **같은 검색어로 지금 다시 찾는다.**
+            그래서 권한도 지금 다시 판정된다 - 답변 뒤에 채널에서 나간 사람에게는
+            근거가 보이지 않는다. 저장 방식이었다면 그대로 보였을 것이다.
+            """
+            ack()
+            query = ((body.get("actions") or [{}])[0]).get("value") or ""
+            user_id = (body.get("user") or {}).get("id", "")
+            respond(
+                self._evidence_text(client, user_id, query),
                 response_type="ephemeral",
             )
 
@@ -857,6 +873,36 @@ class WorkspaceBot:
                 }],
             })
         respond(text="일정 알림 설정", blocks=blocks, replace_original=True)
+
+    def _evidence_lines(self, client, user_id: str, query: str):
+        """지금 이 사람 권한으로 다시 찾은 근거 줄."""
+        ctx = self._context(client, user_id)
+        return [
+            evidence_view.EvidenceLine(
+                channel=h.doc.channel,
+                ts=h.line.ts,
+                speaker=h.line.speaker,
+                text=h.line.text,
+                workspace=h.doc.workspace,
+            )
+            for h in self.store.search(query, ctx, limit=40)
+        ]
+
+    def _evidence_text(self, client, user_id: str, query: str) -> str:
+        """`근거 보기` 본문. 원문은 손대지 않고 그대로 보여준다."""
+        if not (query or "").strip():
+            return evidence_view.NO_EVIDENCE
+        try:
+            lines = self._evidence_lines(client, user_id, query)
+        except Exception as e:
+            log.warning("[%s] 근거 조회 실패: %s", self.workspace, e)
+            return "근거를 다시 찾지 못했습니다. 잠시 뒤 다시 시도해 주세요."
+        # 검색어와 건수만 남긴다. 원문 줄은 로그에 넣지 않는다.
+        log.info(
+            "[%s] 근거 보기 user=%s q=%r lines=%d",
+            self.workspace, user_id, query[:40], len(lines),
+        )
+        return evidence_view.report(lines, query=query, own_workspace=self.workspace)
 
     def _scope_report(self, client, user_id: str) -> str:
         """`/권한` 본문. 범위와 건수만 보여주고 채널 이름은 보여주지 않는다.
@@ -1433,9 +1479,16 @@ class WorkspaceBot:
 
         def finish(reply: str, *, intent: Intent, ans: Answer | None, ctx: RequestContext | None):
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
-            response = (
-                say(text=reply, thread_ts=thread_ts) if thread_ts else say(text=reply)
-            )
+            # 아카이브 근거로 답한 경우에만 '근거 보기' 를 붙인다. 버튼이 있는데
+            # 눌러도 아무것도 안 나오면 없는 것만 못하다.
+            kw = {"text": reply}
+            if thread_ts:
+                kw["thread_ts"] = thread_ts
+            if ans is not None and ans.terms:
+                kw["blocks"] = evidence_view.blocks(
+                    reply, ans.terms, workspace=self.workspace
+                )
+            response = say(**kw)
             rec = QARecord.build(
                 workspace=self.workspace,
                 channel=self._chan_cache.get(channel_id, channel_id),
