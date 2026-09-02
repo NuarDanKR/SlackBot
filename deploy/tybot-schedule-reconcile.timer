@@ -1,0 +1,13 @@
+[Unit]
+Description=TYBot 일정 장기 대조 타이머 (매시간)
+
+[Timer]
+# live 는 48시간만 본다. 그 너머 일정은 이 대조가 채운다 —
+# 없으면 `/일정 이번주` 가 이틀 뒤부터 비어 보인다.
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

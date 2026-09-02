@@ -126,3 +126,38 @@ def test_update_refuses_a_non_root_checkout_with_a_fix():
     assert "chown -R root:root $SRC" in script
     # safe.directory 로 방어를 끄지 않는다.
     assert "safe.directory" not in script.replace("`safe.directory` 로 예외를 두는", "")
+
+
+def test_schedule_sync_also_runs_the_exporter():
+    """받는 쪽만 돌면 inbox 가 영원히 비어 있다.
+
+    방식 A(봇 서버가 Oracle 을 직접 조회)로 바꾸면서, 스냅샷을 **만드는** 쪽이
+    어느 유닛에도 없었다. 로그에는 '반영할 스냅샷이 없다' 만 남아 정상처럼 보였다.
+    """
+    unit = (ROOT / "deploy" / "tybot-schedule-sync.service").read_text(encoding="utf-8")
+
+    assert "schedule_export.py" in unit
+    assert "--mode live" in unit
+    # 추출이 먼저다. 반대로면 늘 한 주기 늦은 자료를 반영한다.
+    assert unit.index("schedule_export.py") < unit.index("-m tybot.schedulesync")
+
+
+def test_reconcile_uses_a_separate_inbox():
+    """live 와 한 폴더를 쓰면 이름 정렬에서 'reconcile' 이 'live' 를 항상 이긴다.
+
+    newest_snapshot 이 이름 최대값을 고르므로, 낡은 reconcile 이 새 live 를 가린다.
+    """
+    unit = (ROOT / "deploy" / "tybot-schedule-reconcile.service").read_text(encoding="utf-8")
+
+    assert "Environment=SCHEDULE_INBOX=/var/lib/tybot/inbox-schedule-reconcile" in unit
+    assert "--mode reconcile" in unit
+    assert "/var/lib/tybot/inbox-schedule " not in unit
+
+
+def test_reconcile_timer_is_installed_and_switchable():
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    wrapper = (ROOT / "deploy" / "tybot-console-timers").read_text(encoding="utf-8")
+
+    assert "tybot-schedule-reconcile" in install
+    # 콘솔에서 켜고 끌 수 있어야 한다 — 없으면 SSH 로만 만질 수 있다.
+    assert "tybot-schedule-reconcile.timer" in wrapper

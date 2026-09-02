@@ -9,6 +9,11 @@ Type=oneshot
 User=tybot
 Group=tybot
 WorkingDirectory=/opt/tybot
+# 방식 A(봇 서버가 Oracle 을 직접 조회)라 **추출도 여기서 한다.**
+# 예전에는 받는 쪽만 돌아서 inbox 가 늘 비어 있었고, 로그에는
+# '반영할 스냅샷이 없다' 만 남아 고장으로 보이지 않았다.
+ExecStart=/opt/tybot/.venv/bin/python /opt/tybot/scripts/schedule_export.py \
+    --out /var/lib/tybot/inbox-schedule --mode live --horizon-hours 48
 ExecStart=/opt/tybot/.venv/bin/python -m tybot.schedulesync
 StandardOutput=journal
 StandardError=journal

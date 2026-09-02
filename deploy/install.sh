@@ -202,7 +202,7 @@ install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.servic
 # 다만 **꺼져 있다는 사실을 아무도 모르는 것**이 실제 문제였다. 타이머가 안 켜져 있으면
 # 일정 동기화·DM 알림·백필이 통째로 돌지 않는데, 오류가 나지 않으니 몇 주가 지나도
 # 모른다. 그래서 설치 끝에 어떤 것이 꺼져 있는지 이름을 대고 알린다.
-TIMERS=(tybot-update tybot-collect tybot-tidy tybot-schedule-sync tybot-schedule-dm)
+TIMERS=(tybot-update tybot-collect tybot-tidy tybot-schedule-sync tybot-schedule-reconcile tybot-schedule-dm)
 for u in "${TIMERS[@]}"; do
   install -m 0644 "$APP_DIR/deploy/$u.service" "/etc/systemd/system/$u.service"
   install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"

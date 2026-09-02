@@ -1,0 +1,29 @@
+[Unit]
+Description=TYBot 일정 장기 대조 (향후 30일)
+Documentation=file:///opt/tybot/docs/design/schedule-command.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+# live(48시간)와 **inbox 를 나눈다.** 한 폴더에 섞으면 이름 정렬에서
+# 'reconcile' 이 'live' 를 항상 이겨, 최신 live 스냅샷이 무시된다.
+Environment=SCHEDULE_INBOX=/var/lib/tybot/inbox-schedule-reconcile
+ExecStart=/opt/tybot/.venv/bin/python /opt/tybot/scripts/schedule_export.py \
+    --out /var/lib/tybot/inbox-schedule-reconcile --mode reconcile --horizon-days 30
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.schedulesync
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-schedule-reconcile
+TimeoutStartSec=600
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tybot
+
+[Install]
+WantedBy=multi-user.target
