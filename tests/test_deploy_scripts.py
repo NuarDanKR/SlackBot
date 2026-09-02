@@ -83,3 +83,25 @@ def test_install_grants_group_read_not_just_removes_bits():
 
     assert "g+rX,g-w,o-rwx" in script
     assert 'sudo -u tybot test -r "$APP_DIR/src/tybot/slack/pilot.py"' in script
+
+
+def test_update_deploys_when_source_is_current_but_opt_is_stale():
+    """손으로 git pull 한 뒤 update.sh 를 돌리면 '변경 없음' 으로 끝나던 문제.
+
+    소스와 원격이 같아져 새 커밋이 없다고 판단하는데, 정작 /opt 에는 아무것도
+    들어가지 않는다. 운영자는 배포됐다고 믿고 넘어간다(2026-09-02 실제 발생).
+    배포된 커밋을 따로 기록해 두고 그것과 비교한다.
+    """
+    script = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
+
+    assert '.deployed-commit' in script
+    assert 'git rev-parse HEAD > "$APP/.deployed-commit"' in script
+    # 건너뛰기 조건에 '배포본도 같은가' 가 들어가야 한다.
+    assert '"$DEPLOYED" == "$LOCAL"' in script
+
+
+def test_update_can_be_forced():
+    """설치 옵션만 바뀌었을 때(WITH_CONSOLE 등) 같은 커밋을 다시 배포할 길이 필요하다."""
+    script = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
+
+    assert 'TYBOT_FORCE' in script

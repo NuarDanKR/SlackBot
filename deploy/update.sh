@@ -31,13 +31,30 @@ git fetch --quiet origin "$BRANCH"
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse "origin/$BRANCH")
 
-if [[ "$LOCAL" == "$REMOTE" ]]; then
+# 배포된 커밋. 소스와 다르면 새 커밋이 없어도 배포해야 한다.
+#
+# **여기서 걸려 넘어지기 쉽다.** 손으로 `git pull` 을 먼저 하면 소스와 원격이 같아져
+# "변경 없음" 으로 끝나는데, 정작 /opt 에는 아직 아무것도 안 들어가 있다. 운영자는
+# 배포됐다고 믿고 넘어간다. 실제로 그렇게 한 번 지나갔다(2026-09-02).
+DEPLOYED=$(cat "$APP/.deployed-commit" 2>/dev/null || echo "")
+
+if [[ "$LOCAL" == "$REMOTE" && "$DEPLOYED" == "$LOCAL" && "${TYBOT_FORCE:-0}" != "1" ]]; then
   log "변경 없음 ($(git rev-parse --short HEAD))"
   exit 0
 fi
 
-log "새 커밋 발견: $(git rev-parse --short "$LOCAL") -> $(git rev-parse --short "$REMOTE")"
-git log --oneline "$LOCAL..$REMOTE" | sed 's/^/  /'
+if [[ "$LOCAL" == "$REMOTE" ]]; then
+  if [[ "${TYBOT_FORCE:-0}" == "1" ]]; then
+    log "강제 재배포 ($(git rev-parse --short HEAD))"
+  else
+    log "새 커밋은 없지만 배포본이 다릅니다 (배포됨=${DEPLOYED:0:7} 소스=$(git rev-parse --short HEAD)) — 배포합니다"
+  fi
+fi
+
+if [[ "$LOCAL" != "$REMOTE" ]]; then
+  log "새 커밋 발견: $(git rev-parse --short "$LOCAL") -> $(git rev-parse --short "$REMOTE")"
+  git log --oneline "$LOCAL..$REMOTE" | sed 's/^/  /'
+fi
 git reset --hard --quiet "origin/$BRANCH"
 
 log "테스트 실행"
@@ -53,6 +70,12 @@ fi
 
 log "배포"
 TYBOT_INSTALL_HINTS=0 bash "$SRC/deploy/install.sh"
+
+# 무엇이 배포됐는지 남긴다. 다음 회차가 이 값으로 "소스는 최신인데 /opt 는 옛것"
+# 상태를 알아채고, 새 커밋이 없어도 배포한다.
+git rev-parse HEAD > "$APP/.deployed-commit"
+chmod 644 "$APP/.deployed-commit"
+
 systemctl restart tybot
 
 # 콘솔은 별도 프로세스이므로 따로 재시작한다.

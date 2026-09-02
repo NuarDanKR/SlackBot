@@ -294,6 +294,16 @@ cat /var/lib/tybot/deploy-status.json
 sudo bash /opt/tybot/deploy/update.sh
 ```
 
+**"변경 없음" 이 떠도 배포가 안 된 것일 수 있다.** 손으로 `git pull` 을 먼저 하면
+소스와 원격이 같아져 새 커밋이 없다고 판단한다. 그래서 배포된 커밋을 따로 기록해
+두고 그것과 비교한다 — `/opt` 가 뒤처져 있으면 새 커밋이 없어도 배포한다.
+
+설치 옵션만 바꿔 다시 돌리고 싶으면(예: `WITH_CONSOLE=1` 을 처음 켤 때):
+
+```bash
+sudo TYBOT_FORCE=1 WITH_CONSOLE=1 bash /opt/tybot/deploy/update.sh
+```
+
 ---
 
 ## 6-A1. 타이머 켜기 — **설치가 켜 주지 않는다**
