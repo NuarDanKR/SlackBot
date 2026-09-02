@@ -36,6 +36,7 @@ from . import (
     deploy_approval_store,
     env_settings,
     health,
+    llm_secret_store,
     reader,
     service_logs,
     timer_manager,
@@ -497,6 +498,48 @@ def put_console_user(
         body.active,
     )
     return {"ok": True}
+
+
+class LlmSecretBody(BaseModel):
+    provider: str
+    key: str = Field(default="", max_length=400)
+    enabled: bool = True
+
+
+@app.get("/api/llm-secrets")
+def get_llm_secrets(user: User) -> dict:
+    """LLM 키 상태. **가린 값만 나간다 — 복호화해서 돌려주는 길은 없다.**"""
+    _require_admin(user)
+    try:
+        return {"secrets": llm_secret_store.list_secrets()}
+    except workspace_store.WorkspaceStoreError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.put("/api/llm-secrets")
+def put_llm_secret(body: LlmSecretBody, request: Request, user: User) -> dict:
+    """키를 등록·교체하거나 사용을 중지한다.
+
+    삭제는 없다. 지우면 언제 무엇을 쓰고 있었는지가 사라진다.
+    """
+    _require_admin(user)
+    _check_write_request(request)
+    try:
+        if body.key.strip():
+            llm_secret_store.save_secret(body.provider, body.key, actor=user.email)
+        else:
+            llm_secret_store.set_enabled(body.provider, body.enabled, actor=user.email)
+        secrets = llm_secret_store.list_secrets()
+    except workspace_store.WorkspaceStoreError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    # 키 값은 절대 로그에 남기지 않는다. 무엇을 했는지만 남긴다.
+    logger.warning(
+        "LLM 키 변경 — actor=%s provider=%s action=%s",
+        user.email,
+        body.provider,
+        "rotate" if body.key.strip() else ("enable" if body.enabled else "disable"),
+    )
+    return {"secrets": secrets}
 
 
 @app.get("/api/health-report")

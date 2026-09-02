@@ -7,11 +7,28 @@ from collections.abc import Sequence
 from ..base import LLMResponse, Message, ModelSpec
 
 
+def _resolve_key() -> str | None:
+    """키를 DB 에서 먼저 찾고, 없으면 환경변수로 되돌아간다.
+
+    `.env` 는 평문이라 서버에 들어갈 수 있는 사람이면 누구나 읽는다. DB 에는
+    암호화해 넣고 암호화 키는 DB 밖 파일에 둔다.
+
+    **콘솔을 안 쓰는 설치에서도 그대로 떠야 하므로** 환경변수 경로를 남긴다.
+    콘솔 모듈이 없거나 DB 가 없으면 조용히 환경변수를 쓴다.
+    """
+    try:
+        from ...console.llm_secret_store import resolve_key
+
+        return resolve_key("anthropic")
+    except Exception:  # noqa: BLE001 - 키 조회가 답변 경로를 끊으면 안 된다
+        return os.getenv("ANTHROPIC_API_KEY")
+
+
 class AnthropicProvider:
     name = "anthropic"
 
     def __init__(self, api_key: str | None = None) -> None:
-        self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        self._api_key = api_key or _resolve_key()
         self._client = None
 
     def _get_client(self):

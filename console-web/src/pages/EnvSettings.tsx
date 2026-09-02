@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
-import { Chip, Failed, Loading, PageHead, Section } from '../components/primitives'
+import { Chip, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
 interface EnvWorkspace {
   key: string
@@ -42,7 +42,24 @@ function preview(data: EnvSettingsData): string {
   ].join('\n')
 }
 
+interface LlmSecret {
+  provider: string
+  envName: string
+  mask: string
+  enabled: boolean
+  updatedAt: string | null
+  updatedBy: string
+  /** DB 에 없고 아직 환경변수를 쓰고 있습니다. */
+  inEnv: boolean
+}
+
+const PROVIDER_LABEL: Record<string, string> = { anthropic: 'Claude (Anthropic)', openai: 'GPT (OpenAI)' }
+
 export function EnvSettings({ onToast }: { onToast: (message: string) => void }) {
+  const secrets = useResource<{ secrets: LlmSecret[] }>('/api/llm-secrets')
+  const [keyDraft, setKeyDraft] = useState<Record<string, string>>({})
+  const [keyBusy, setKeyBusy] = useState<string | null>(null)
+  const [keyError, setKeyError] = useState<string | null>(null)
   const resource = useResource<EnvSettingsData>('/api/env-settings')
   const [draft, setDraft] = useState<EnvSettingsData | null>(null)
   const [saving, setSaving] = useState(false)
@@ -51,6 +68,32 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
   useEffect(() => {
     if (resource.data) setDraft(copySettings(resource.data))
   }, [resource.data])
+
+  // 키 값은 화면 상태에만 잠깐 머문다. 보낸 뒤 지운다 — 남겨 두면 다른 탭으로
+  // 옮겼다 돌아왔을 때도 입력칸에 평문이 남아 있다.
+  async function saveKey(provider: string) {
+    const key = (keyDraft[provider] ?? "").trim()
+    if (!key) return
+    setKeyBusy(provider); setKeyError(null)
+    try {
+      await api.put('/api/llm-secrets', { provider, key })
+      setKeyDraft((prev) => ({ ...prev, [provider]: "" }))
+      secrets.reload()
+      onToast('키를 저장했습니다. 다음 답변부터 적용됩니다.')
+    } catch (caught) {
+      setKeyError(caught instanceof ApiError ? caught.message : String(caught))
+    } finally { setKeyBusy(null) }
+  }
+
+  async function toggleKey(provider: string, enabled: boolean) {
+    setKeyBusy(provider); setKeyError(null)
+    try {
+      await api.put('/api/llm-secrets', { provider, key: '', enabled })
+      secrets.reload()
+    } catch (caught) {
+      setKeyError(caught instanceof ApiError ? caught.message : String(caught))
+    } finally { setKeyBusy(null) }
+  }
 
   const renderedPreview = useMemo(() => (draft ? preview(draft) : ''), [draft])
 
@@ -215,6 +258,52 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
               </tbody>
             </table>
           </div>
+        </div>
+      </Section>
+
+      <Section
+        title="LLM API 키"
+        lead={
+          '키는 암호화해서 DB 에 저장합니다. 암호화 키는 DB 밖 파일에 있어 DB 백업만으로는 풀 수 없습니다. ' +
+          '저장한 값은 다시 볼 수 없고 가린 값만 보입니다. 삭제 대신 사용 중지를 지원합니다.'
+        }
+      >
+        {keyError && <div className="notice bad"><div className="notice-kind">저장 실패</div><div>{keyError}</div></div>}
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>프로바이더</th><th>현재 키</th><th>새 키</th><th>관리</th></tr></thead>
+            <tbody>
+              {(secrets.data?.secrets ?? []).map((s) => (
+                <tr key={s.provider}>
+                  <td>{PROVIDER_LABEL[s.provider] ?? s.provider}
+                    <div className="hint mono">{s.envName}</div></td>
+                  <td>
+                    {s.mask
+                      ? <><div className="mono">{s.mask}</div>
+                          <div className="hint">{s.updatedAt ? fmt.dayClock(s.updatedAt) : "-"} · {s.updatedBy}</div></>
+                      : s.inEnv
+                        ? <Chip tone="watch">환경변수 사용</Chip>
+                        : <Chip tone="bad">없음</Chip>}
+                  </td>
+                  <td>
+                    <input className="input mono" type="password" autoComplete="new-password"
+                      placeholder="새 키를 붙여 넣으면 교체됩니다"
+                      value={keyDraft[s.provider] ?? ""}
+                      onChange={(e) => setKeyDraft((p) => ({ ...p, [s.provider]: e.target.value }))} />
+                  </td>
+                  <td className="nowrap">
+                    <button className="btn btn-sm btn-primary" disabled={keyBusy === s.provider || !(keyDraft[s.provider] ?? "").trim()}
+                      onClick={() => saveKey(s.provider)}>저장</button>{" "}
+                    {s.mask && (
+                      <button className="btn btn-sm" disabled={keyBusy === s.provider}
+                        onClick={() => toggleKey(s.provider, !s.enabled)}>
+                        {s.enabled ? "사용 중지" : "사용"}</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </Section>
 

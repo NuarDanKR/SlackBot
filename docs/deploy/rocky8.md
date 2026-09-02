@@ -456,6 +456,26 @@ journalctl -u tybot-schedule-sync -f
 | 폴더가 `미승인폴더` 로 집계됨 | `schedule_folder` 에 승인 등록이 안 됐다. 승인 목록이 곧 허용 목록이다 |
 | `/일정` 이 "동기화 지연" 을 표시 | 타이머가 멈췄거나 Oracle 조회 실패. `systemctl status tybot-schedule-sync` |
 
+### LLM API 키를 DB 로 옮기기
+
+`.env` 는 **평문**이다. 서버에 들어갈 수 있는 사람은 누구나 읽고, 백업·복사본에
+그대로 따라다니며, 누가 언제 바꿨는지 남지 않는다. DB 에는 암호화해서 넣는다.
+
+```bash
+sudo -u postgres psql -d tyslackai -f /opt/tybot/deploy/sql/llm_secret_schema.sql
+```
+
+그 다음 콘솔의 **환경변수 설정 → LLM API 키** 에서 키를 붙여 넣는다.
+저장하면 다음 답변부터 DB 값을 쓴다.
+
+암호화 키는 `/etc/tybot/workspace-secret.key`(0400) 다. **DB 안에 두지 않는다** —
+DB 백업만으로 풀 수 있으면 평문과 다를 바 없다. 이 파일은 백업 대상이고,
+DB 백업과 **다른 곳에** 둬야 한다.
+
+확인이 끝나면 `/etc/tybot/tybot.env` 의 `ANTHROPIC_API_KEY`·`OPENAI_API_KEY` 를
+지운다. 남겨 두어도 DB 값이 이기지만, 지워야 평문이 실제로 사라진다.
+DB 를 못 읽을 때 되돌아갈 자리로 잠시 남겨 두는 것도 방법이다.
+
 ### 개인 DM 알림 (선택)
 
 ```bash

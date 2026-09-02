@@ -1021,3 +1021,37 @@ def test_feedback_id_is_validated(client):
     )
 
     assert response.status_code in {404, 422}
+
+
+def test_llm_secrets_are_admin_only(client):
+    """키는 콘솔에서 가린 값으로만 보인다. 개발자에게는 그것도 안 보인다."""
+    assert client.get("/api/llm-secrets", headers=member(client)).status_code == 403
+
+
+def test_llm_secret_write_needs_a_write_token(client):
+    response = client.put(
+        "/api/llm-secrets", json={"provider": "anthropic", "key": ""},
+        headers=owner(client),
+    )
+
+    assert response.status_code == 403
+
+
+def test_llm_secret_value_never_reaches_the_log(client, monkeypatch, caplog):
+    """로그는 사람이 보고 붙여 넣는다. 키가 거기 있으면 .env 보다 나쁘다."""
+    secret = "sk-ant-" + "7" * 40
+    monkeypatch.setattr(
+        console_app.llm_secret_store, "save_secret", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        console_app.llm_secret_store, "list_secrets", lambda: []
+    )
+
+    with caplog.at_level("WARNING"):
+        client.put(
+            "/api/llm-secrets",
+            json={"provider": "anthropic", "key": secret},
+            headers=_write_headers(owner(client)),
+        )
+
+    assert secret not in caplog.text
