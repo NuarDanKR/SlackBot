@@ -35,6 +35,12 @@ features:
       description: /투표 명령의 영문 예비 명령입니다.
       usage_hint: 질문 | 도움말
       should_escape: false
+    - command: /권한
+      description: 내 질문이 근거로 삼는 범위를 보여줍니다. 본인에게만 표시됩니다.
+      should_escape: false
+    - command: /ty-scope
+      description: /권한 명령의 영문 예비 명령입니다.
+      should_escape: false
     - command: /수집상태
       description: 이 채널이 수집 대상인지, 아니면 왜 아닌지 알려줍니다.
       should_escape: false

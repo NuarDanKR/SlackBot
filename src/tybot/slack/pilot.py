@@ -127,6 +127,8 @@ from ..schedule import (
     parse_window,
     unknown_window,
 )
+from ..scope_report import ScopeFacts
+from ..scope_report import report as scope_text
 from ..status_tree import build_tree, render_tree, totals
 from ..workspaces import ConfigError, WorkspaceConfig, load_workspaces
 
@@ -382,6 +384,20 @@ class WorkspaceBot:
             respond(
                 "사용법: `/채널 생성`, `/채널 이름변경`, `/채널 도움말`\n"
                 "명령어 없이 `/채널`만 입력해도 생성 화면이 열립니다.",
+                response_type="ephemeral",
+            )
+
+        @self.app.command("/권한")
+        @self.app.command("/ty-scope")
+        def on_scope_command(ack, command, client, respond):
+            """"내가 받는 답은 무엇을 근거로 하나" 를 사용자가 직접 확인한다.
+
+            `/수집상태` 는 채널 하나를 답한다. 이건 사람 기준의 범위다.
+            ephemeral 로만 답한다 - 남의 권한 범위가 채널에 보일 이유가 없다.
+            """
+            ack()
+            respond(
+                self._scope_report(client, command.get("user_id", "")),
                 response_type="ephemeral",
             )
 
@@ -841,6 +857,44 @@ class WorkspaceBot:
                 }],
             })
         respond(text="일정 알림 설정", blocks=blocks, replace_original=True)
+
+    def _scope_report(self, client, user_id: str) -> str:
+        """`/권한` 본문. 범위와 건수만 보여주고 채널 이름은 보여주지 않는다.
+
+        채널명에는 조직·업무·현장이 들어 있어 그 자체가 노출이다. 여기서 필요한 것은
+        "얼마나 넓은가" 이지 "무엇이 있나" 가 아니다.
+        """
+        facts = ScopeFacts(
+            workspace_label=self.cfg.label,
+            workspace_key=self.workspace,
+            is_root=bool(self.cfg.is_root),
+            is_exec=user_id in self.exec_users,
+            readable=sorted(self.cfg.readable or ()),
+        )
+        try:
+            res = client.users_conversations(
+                user=user_id, types="public_channel,private_channel", limit=1000
+            )
+            names = ["#" + c["name"] for c in res.get("channels", [])]
+        except Exception as e:
+            log.warning("[%s] 권한 범위 조회 실패: %s", self.workspace, e)
+            facts.lookup_failed = True
+            return scope_text(facts)
+
+        facts.collected_channels = sum(1 for n in names if should_collect(n))
+        facts.uncollected_channels = len(names) - facts.collected_channels
+
+        # 실제로 답변 근거가 될 수 있는 양. 권한 필터를 그대로 통과시킨다 -
+        # 여기 숫자와 실제 답변의 근거가 다르면 이 화면이 거짓말이 된다.
+        ctx = self._context(client, user_id)
+        docs = self.store.visible_docs(ctx)
+        facts.visible_docs = len(docs)
+        facts.visible_lines = sum(len(d.raw_lines) for d in docs)
+        log.info(
+            "[%s] 권한 범위 조회 user=%s 채널=%d 문서=%d",
+            self.workspace, user_id, facts.collected_channels, facts.visible_docs,
+        )
+        return scope_text(facts)
 
     def _collection_status(self, client, channel_id: str) -> str:
         """`/수집상태` 가 보여줄 문장. 사실 수집만 하고 판단은 collection_status 가 한다."""
@@ -1808,6 +1862,7 @@ class WorkspaceBot:
                 "• `상태` — 연결·수집 상태 / `도움말` — 이 안내",
                 "• `/일정` — 그룹웨어 팀 일정 (본인에게만 표시)",
                 "• `/수집상태` — 지금 이 채널이 수집되는지, 아니면 왜 아닌지",
+                "• `/권한` — 내 질문이 근거로 삼는 범위",
                 "• `/피드백` — 답변 품질 신고. 선택 화면이 열립니다 "
                 "(`/피드백 <내용>` 으로 바로 보내거나, 답변에 :+1:/:-1: 도 가능)",
                 "• `이전 답변 기억나?` — 기억 여부와 그 이유(매번 원문에서 다시 찾습니다)",
