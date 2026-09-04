@@ -54,9 +54,11 @@ function DocMeta({ doc }: { doc: CollectedDoc }) {
 
 export function Collected({
   user,
+  query,
   onToast,
 }: {
   user: ConsoleUser
+  query?: URLSearchParams
   onToast: (m: string) => void
 }) {
   // 서버가 이미 권한 범위로 좁혀서 내려 줍니다.
@@ -64,7 +66,11 @@ export function Collected({
   const isOwner = user.role === 'admin'
   const audit = useResource<{ entries: ReadAuditEntry[] }>(isOwner ? '/api/collected/audit' : null)
 
-  const docs = res.data?.docs ?? []
+  const workspace = query?.get('workspace') ?? ''
+  const state = query?.get('state') ?? ''
+  const docs = (res.data?.docs ?? []).filter(
+    (row) => (!workspace || row.workspace === workspace) && (!state || (state === 'broken' && Boolean(row.schemaError))),
+  )
   const [selected, setSelected] = useState('')
   // 연 문서의 본문. 목록에는 본문이 없고, 열 때만 따로 받아 옵니다.
   const [opened, setOpened] = useState<Record<string, string>>({})

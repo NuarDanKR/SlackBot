@@ -67,7 +67,7 @@ function stateChip(row: WorkspaceEntry) {
   return <Chip tone="plain">사용 중지</Chip>
 }
 
-export function Workspaces({ onToast }: { onToast: (message: string) => void }) {
+export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | null; onToast: (message: string) => void }) {
   const resource = useResource<WorkspaceResponse>('/api/workspaces')
   const [rows, setRows] = useState<WorkspaceEntry[]>([])
   const [draft, setDraft] = useState<Draft>(EMPTY)
@@ -78,6 +78,15 @@ export function Workspaces({ onToast }: { onToast: (message: string) => void }) 
   useEffect(() => {
     if (resource.data) setRows(resource.data.workspaces)
   }, [resource.data])
+
+  useEffect(() => {
+    if (!selectedKey || !resource.data) return
+    const selected = resource.data.workspaces.find((row) => row.key === selectedKey)
+    if (selected) {
+      setDraft(editDraft(selected))
+      setEditing(true)
+    }
+  }, [resource.data, selectedKey])
 
   if (resource.loading && !resource.data) return <Loading what="워크스페이스 목록을" />
   if (resource.error && !resource.data) {

@@ -23,6 +23,7 @@
   flex-direction: column;
   gap: 22px;
   padding: 22px 16px 18px;
+  overflow-y: auto;
 }
 
 /* 브랜드 표식 — 로고의 형태(둥근 버건디 블록 + 흰 레터마크)를 따릅니다 */
@@ -70,6 +71,18 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--text-3);
+}
+.nav-group-link {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.nav-group-link:hover,
+.nav-group-link.is-active {
+  color: var(--brand);
 }
 .nav-item {
   position: relative;
@@ -243,6 +256,57 @@
   font-size: 13px;
   line-height: 1.65;
   color: var(--text-2);
+}
+
+.overview-metrics {
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface);
+}
+
+.action-list {
+  border-top: 1px solid var(--line);
+}
+.action-row {
+  width: 100%;
+  min-height: 66px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 13px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.action-row:hover {
+  background: var(--sunk);
+}
+.action-row strong,
+.action-row small {
+  display: block;
+}
+.action-row small {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.filter-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.specialist-form {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+.audit-target {
+  max-width: 280px;
+  overflow-wrap: anywhere;
 }
 
 .card {
@@ -1870,13 +1934,14 @@
 .signin {
   min-height: 100vh;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 24px;
   background: var(--bg);
 }
 .signin-card {
   width: 100%;
-  max-width: 420px;
+  max-width: min(420px, 100%);
   padding: 28px 26px 26px;
   background: var(--surface);
   border: 1px solid var(--line);

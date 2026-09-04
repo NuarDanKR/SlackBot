@@ -109,6 +109,69 @@ export interface UsageSnapshot {
   recent: CallRow[]
 }
 
+export interface Capabilities {
+  specialists: boolean
+  approvedSummaries: boolean
+  summaryReview: boolean
+}
+
+export interface AuditEvent {
+  id: string
+  at: string
+  actor: string
+  category: string
+  action: string
+  targetType: string
+  targetId: string
+  workspace: string | null
+  outcome: 'requested' | 'succeeded' | 'failed' | string
+  source: 'database' | 'legacy'
+  metadata: Record<string, unknown>
+}
+
+export interface Specialist {
+  key: string
+  name: string
+  domain: string
+  adapter: string
+  adapterAvailable: boolean
+  state: 'draft' | 'enabled' | 'disabled' | 'error'
+  version: string
+  contractVersion: string
+  health: 'unknown' | 'ok' | 'error'
+  errorCode: string
+  lastCheckedAt: string | null
+  workspaces: string[]
+  updatedAt: string
+  updatedBy: string
+}
+
+export interface SpecialistCall {
+  id: string
+  at: string
+  workspace: string
+  specialist: string
+  routingReason: string
+  confidence: number | null
+  result: 'success' | 'fallback' | 'error' | 'contract_violation'
+  elapsedMs: number
+  costUsd: number
+  errorCode: string
+}
+
+export interface SpecialistRequest {
+  id: string
+  specialist: string
+  proposal: Record<string, unknown>
+  checks: Check[]
+  requester: string
+  requestedAt: string
+  state: 'awaiting_approval' | 'approved' | 'rejected'
+  approver: string | null
+  decidedAt: string | null
+  note: string
+}
+
 export type CheckId = 'pytest' | 'ruff' | 'schema' | 'secrets'
 export type CheckState = 'pass' | 'fail' | 'running' | 'pending'
 

@@ -1110,3 +1110,90 @@ def test_llm_secret_value_never_reaches_the_log(client, monkeypatch, caplog):
         )
 
     assert secret not in caplog.text
+
+
+def test_lifecycle_capabilities_follow_role(client, monkeypatch):
+    monkeypatch.setattr(console_app.specialist_store, "is_ready", lambda: True)
+    guest_response = client.get("/api/capabilities", headers=guest(client))
+    developer_response = client.get("/api/capabilities", headers=member(client))
+
+    assert guest_response.status_code == 200
+    assert guest_response.json()["specialists"] is False
+    assert developer_response.json()["specialists"] is True
+    assert developer_response.json()["summaryReview"] is False
+
+
+def test_specialist_capability_fails_closed_without_schema(client, monkeypatch):
+    monkeypatch.setattr(console_app.specialist_store, "is_ready", lambda: False)
+
+    response = client.get("/api/capabilities", headers=member(client))
+
+    assert response.status_code == 200
+    assert response.json()["specialists"] is False
+
+
+def test_questions_are_developer_only_and_workspace_scoped(client):
+    assert client.get("/api/questions", headers=guest(client)).status_code == 403
+
+    response = client.get("/api/questions", headers=member(client))
+    assert response.status_code == 200
+    assert {row["workspace"] for row in response.json()["questions"]} <= {"fin"}
+
+
+def test_diagnostics_follow_read_and_developer_permissions(client):
+    assert client.get("/api/diagnostics/archive", headers=guest(client)).status_code == 200
+    assert client.get("/api/diagnostics/answers", headers=guest(client)).status_code == 403
+    assert client.get("/api/diagnostics/slack", headers=member(client)).status_code == 200
+
+
+def test_specialist_registry_is_developer_only(client, monkeypatch):
+    monkeypatch.setattr(console_app.specialist_store, "list_specialists", lambda: [])
+    monkeypatch.setattr(console_app.specialist_store, "list_requests", lambda: [])
+
+    assert client.get("/api/specialists", headers=guest(client)).status_code == 403
+    response = client.get("/api/specialists", headers=member(client))
+    assert response.status_code == 200
+    assert response.json()["specialists"] == []
+
+
+def test_specialist_change_requires_csrf(client):
+    response = client.post(
+        "/api/specialists/requests",
+        headers=member(client),
+        json={
+            "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+            "adapter": "hermes", "state": "draft", "workspaces": ["fin"],
+        },
+    )
+    assert response.status_code == 403
+
+
+def test_developer_cannot_request_specialist_outside_workspace(client, monkeypatch):
+    called = False
+
+    def create_request(**_kwargs):
+        nonlocal called
+        called = True
+        return 1
+
+    monkeypatch.setattr(console_app.specialist_store, "create_request", create_request)
+    response = client.post(
+        "/api/specialists/requests",
+        headers=_write_headers(member(client)),
+        json={
+            "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+            "adapter": "hermes", "state": "draft", "workspaces": ["tyit"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert called is False
+
+
+def test_audit_events_are_admin_only(client, monkeypatch):
+    monkeypatch.setattr(console_app.audit_store, "list_events", lambda **_kwargs: [])
+
+    assert client.get("/api/audit-events", headers=member(client)).status_code == 403
+    response = client.get("/api/audit-events", headers=owner(client))
+    assert response.status_code == 200
+    assert response.json() == {"events": []}

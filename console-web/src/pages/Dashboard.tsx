@@ -13,10 +13,14 @@ import {
   healthChip,
 } from '../components/primitives'
 
-export function Dashboard() {
+export function Dashboard({ query }: { query?: URLSearchParams }) {
   // 서버가 이미 권한 범위로 좁혀서 내려 줍니다. 화면에서 다시 거르지 않습니다.
   const res = useResource<{ workspaces: WorkspaceStatus[] }>('/api/status')
-  const list = res.data?.workspaces ?? []
+  const workspace = query?.get('workspace') ?? ''
+  const state = query?.get('state') ?? ''
+  const list = (res.data?.workspaces ?? []).filter(
+    (row) => (!workspace || row.key === workspace) && (!state || row.health === state),
+  )
   const totalLines = list.reduce((a, w) => a + w.rawLines, 0)
   const totalDocs = list.reduce((a, w) => a + w.docs, 0)
   const stalled = list.filter((w) => w.health === 'stalled')

@@ -10,9 +10,11 @@ interface ErrorLogContext {
 export function Usage({
   canViewLogs,
   onOpenErrorLogs,
+  showRecent = true,
 }: {
   canViewLogs: boolean
   onOpenErrorLogs: (context: ErrorLogContext) => void
+  showRecent?: boolean
 }) {
   const res = useResource<UsageSnapshot>('/api/usage')
   if (res.loading) return <Loading what="사용량을" />
@@ -237,7 +239,7 @@ export function Usage({
         </div>
       </div>
 
-      <Section
+      {showRecent && <Section
         title="최근 질문 처리 기록"
         note="질문 내용은 표시되지 않습니다"
         lead="질문 문장은 콘솔로 내려오지 않습니다. 어떤 종류의 질문이었는지, 근거를 몇 건 찾았는지, 얼마가 들었는지만 남습니다."
@@ -294,7 +296,7 @@ export function Usage({
             </table>
           </div>
         </div>
-      </Section>
+      </Section>}
     </>
   )
 }

@@ -33,12 +33,14 @@ from ..feedback import FeedbackLog
 from ..managed_env import request_restart
 from . import (
     account_store,
+    audit_store,
     deploy_approval_store,
     env_settings,
     health,
     llm_secret_store,
     reader,
     service_logs,
+    specialist_store,
     timer_manager,
     workspace_store,
 )
@@ -164,6 +166,29 @@ class DeployDecisionBody(BaseModel):
     note: str = ""
 
 
+class SpecialistProposalBody(BaseModel):
+    key: str
+    name: str
+    domain: str
+    adapter: str
+    state: Literal["draft", "enabled", "disabled"] = "draft"
+    version: str = ""
+    contractVersion: str = "v1"
+    workspaces: list[str] = Field(default_factory=list)
+
+
+class SpecialistDecisionBody(BaseModel):
+    note: str = Field(default="", max_length=500)
+
+
+def _audit_event(**kwargs) -> None:
+    """Record an audit event without exposing operational writes to DB rollout races."""
+    try:
+        audit_store.record(**kwargs)
+    except audit_store.AuditStoreError:
+        logger.exception("통합 감사 기록 실패")
+
+
 @app.post("/api/login")
 def login(
     body: LoginBody,
@@ -249,6 +274,357 @@ def usage(user: User) -> dict:
     시간대별·모델별·기준선 같은 합계에 다른 워크스페이스 값이 남는다.
     """
     return reader.usage_snapshot(None if user.all_workspaces else user.workspaces)
+
+
+@app.get("/api/capabilities")
+def capabilities(user: User) -> dict:
+    """Features are advertised only when their backend contract exists."""
+    return {
+        "specialists": user.may_manage_bot and specialist_store.is_ready(),
+        "approvedSummaries": False,
+        "summaryReview": False,
+    }
+
+
+def _scoped_health(user: ConsoleUser, *, include_text: bool = False) -> dict:
+    return health.report(
+        allowed=None if user.all_workspaces else user.workspaces,
+        store=store(),
+        include_text=include_text and user.is_admin,
+    )
+
+
+@app.get("/api/dashboards/collection")
+def collection_dashboard(user: User) -> dict:
+    workspaces = _visible(user, reader.workspace_status(store()), key="key")
+    return {
+        "documents": sum(int(row.get("docs") or 0) for row in workspaces),
+        "rawLines": sum(int(row.get("rawLines") or 0) for row in workspaces),
+        "stalled": [row for row in workspaces if row.get("health") == "stalled"],
+        "brokenDocuments": sum(int(row.get("brokenDocs") or 0) for row in workspaces),
+        "uninvitedChannels": sum(int(row.get("uninvitedChannels") or 0) for row in workspaces),
+        "workspaces": workspaces,
+        "summaryReview": {"available": False, "pending": 0},
+    }
+
+
+@app.get("/api/dashboards/answers")
+def answers_dashboard(user: User) -> dict:
+    usage_data = reader.usage_snapshot(None if user.all_workspaces else user.workspaces)
+    report = _scoped_health(user)
+    answers = report["sections"]["answers"]
+    feedback = report["sections"]["feedback"]
+    specialist_calls: list[dict] = []
+    with contextlib.suppress(specialist_store.SpecialistStoreError):
+        specialist_calls = specialist_store.list_calls(
+            allowed=None if user.all_workspaces else user.workspaces,
+            limit=500,
+        )
+    return {
+        "callsToday": usage_data["callsToday"],
+        "spentUsd": usage_data["spentUsd"],
+        "limitUsd": usage_data["limitUsd"],
+        "answers": {key: value for key, value in answers.items() if key != "problems"},
+        "feedback": {
+            key: value for key, value in feedback.items()
+            if key not in {"items", "contributors", "problems"}
+        },
+        "specialists": {
+            "calls": len(specialist_calls),
+            "success": sum(1 for row in specialist_calls if row.get("result") == "success"),
+            "fallback": sum(1 for row in specialist_calls if row.get("result") == "fallback"),
+        },
+    }
+
+
+@app.get("/api/dashboards/operations")
+def operations_dashboard(user: User) -> dict:
+    _require_developer(user)
+    report = _scoped_health(user)
+    specialist_errors = 0
+    with contextlib.suppress(specialist_store.SpecialistStoreError):
+        specialist_errors = sum(
+            1 for row in specialist_store.list_specialists()
+            if row.get("health") == "error" or row.get("state") == "error"
+        )
+    timer_rows = []
+    if user.is_admin:
+        with contextlib.suppress(timer_manager.TimerManagerError):
+            timer_rows = timer_manager.snapshot()
+    deployment_state = deploy_request.console_status()
+    return {
+        "slack": report["sections"]["bot"],
+        "commands": report["sections"]["commands"],
+        "disabledTimers": sum(1 for row in timer_rows if not row.get("enabled")),
+        "deployment": deployment_state,
+        "specialistErrors": specialist_errors,
+    }
+
+
+@app.get("/api/dashboards/console")
+def console_dashboard(user: User) -> dict:
+    _require_admin(user)
+    try:
+        users = account_store.list_users()
+    except account_store.AccountStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        requests = deploy_approval_store.list_requests(None)
+    except deploy_approval_store.DeployApprovalError:
+        requests = []
+    events = audit_store.list_events(qa_log_dir=reader.qa_log_dir(), limit=20)
+    return {
+        "users": len(users),
+        "admins": sum(1 for row in users if row.get("role") == "admin" and row.get("active")),
+        "pendingApprovals": sum(1 for row in requests if row.get("state") == "awaiting_approval"),
+        "recentAudit": events[:10],
+    }
+
+
+@app.get("/api/questions")
+def questions(
+    user: User,
+    workspace: str = "",
+    result: str = "",
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> dict:
+    _require_developer(user)
+    rows = reader.usage_snapshot(None if user.all_workspaces else user.workspaces)["recent"]
+    if workspace:
+        rows = [row for row in rows if row.get("workspace") == workspace]
+    if result:
+        rows = [
+            row for row in rows
+            if row.get("reason") == result or row.get("intent") == result
+        ]
+    return {"questions": rows[:limit]}
+
+
+@app.get("/api/diagnostics/archive")
+def archive_diagnostics(user: User) -> dict:
+    report = _scoped_health(user)
+    return {"checkedAt": report["checkedAt"], "section": report["sections"]["archive"]}
+
+
+@app.get("/api/diagnostics/answers")
+def answer_diagnostics(user: User) -> dict:
+    _require_developer(user)
+    report = _scoped_health(user)
+    return {"checkedAt": report["checkedAt"], "section": report["sections"]["answers"]}
+
+
+@app.get("/api/diagnostics/slack")
+def slack_diagnostics(user: User) -> dict:
+    _require_developer(user)
+    report = _scoped_health(user)
+    return {
+        "checkedAt": report["checkedAt"],
+        "bot": report["sections"]["bot"],
+        "commands": report["sections"]["commands"],
+    }
+
+
+@app.get("/api/feedback")
+def feedback_report(user: User) -> dict:
+    _require_developer(user)
+    report = _scoped_health(user, include_text=True)
+    return {"checkedAt": report["checkedAt"], "section": report["sections"]["feedback"]}
+
+
+def _specialist_response(row: dict) -> dict:
+    return {
+        "key": row["key"],
+        "name": row["name"],
+        "domain": row["domain"],
+        "adapter": row["adapter"],
+        "adapterAvailable": bool(row.get("adapterAvailable")),
+        "state": row["state"],
+        "version": row.get("version") or "",
+        "contractVersion": row.get("contract_version") or "v1",
+        "health": row.get("health") or "unknown",
+        "errorCode": row.get("error_code") or "",
+        "lastCheckedAt": row.get("last_checked_at"),
+        "workspaces": list(row.get("workspaces") or []),
+        "updatedAt": row.get("updated_at"),
+        "updatedBy": row.get("updated_by") or "-",
+    }
+
+
+def _specialist_request_response(row: dict) -> dict:
+    return {
+        "id": str(row["id"]),
+        "specialist": row["specialist"],
+        "proposal": row.get("proposal") or {},
+        "checks": row.get("checks") or [],
+        "requester": row["requester"],
+        "requestedAt": row["requested_at"],
+        "state": row["state"],
+        "approver": row.get("approver"),
+        "decidedAt": row.get("decided_at"),
+        "note": row.get("note") or "",
+    }
+
+
+def _visible_specialists(user: ConsoleUser, rows: list[dict]) -> list[dict]:
+    if user.all_workspaces:
+        return rows
+    return [row for row in rows if set(row.get("workspaces") or []) & set(user.workspaces)]
+
+
+def _visible_specialist_requests(user: ConsoleUser, rows: list[dict]) -> list[dict]:
+    if user.all_workspaces:
+        return rows
+    return [
+        row for row in rows
+        if set((row.get("proposal") or {}).get("workspaces") or []) & set(user.workspaces)
+    ]
+
+
+@app.get("/api/specialists")
+def specialists(user: User) -> dict:
+    _require_developer(user)
+    try:
+        rows = specialist_store.list_specialists()
+        requests = specialist_store.list_requests()
+    except specialist_store.SpecialistStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "specialists": [_specialist_response(row) for row in _visible_specialists(user, rows)],
+        "requests": [
+            _specialist_request_response(row)
+            for row in _visible_specialist_requests(user, requests)
+        ],
+        "adapters": specialist_store.adapters(),
+    }
+
+
+@app.get("/api/specialists/{key}")
+def specialist(key: str, user: User) -> dict:
+    _require_developer(user)
+    try:
+        row = specialist_store.get_specialist(key)
+    except specialist_store.SpecialistStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="전문 봇을 찾을 수 없습니다.")
+    if not _visible_specialists(user, [row]):
+        raise HTTPException(status_code=403, detail="이 전문 봇을 볼 권한이 없습니다.")
+    return _specialist_response(row)
+
+
+@app.get("/api/specialist-calls")
+def specialist_calls(
+    user: User,
+    specialist: str = "",
+    result: str = "",
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> dict:
+    _require_developer(user)
+    try:
+        rows = specialist_store.list_calls(
+            allowed=None if user.all_workspaces else user.workspaces,
+            specialist=specialist.strip().lower(),
+            result=result.strip().lower(),
+            limit=limit,
+        )
+    except specialist_store.SpecialistStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "calls": [
+            {
+                "id": str(row["id"]), "at": row["at"], "workspace": row["workspace"],
+                "specialist": row["specialist"], "routingReason": row["routing_reason"],
+                "confidence": float(row["confidence"]) if row["confidence"] is not None else None,
+                "result": row["result"], "elapsedMs": row["elapsed_ms"],
+                "costUsd": float(row["cost_usd"]), "errorCode": row["error_code"],
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/specialists/requests")
+def create_specialist_request(
+    body: SpecialistProposalBody,
+    request: Request,
+    user: User,
+) -> dict:
+    _require_developer(user)
+    _check_write_request(request)
+    requested_workspaces = set(body.workspaces)
+    if not user.all_workspaces and (
+        not requested_workspaces or not requested_workspaces <= set(user.workspaces)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="담당 워크스페이스 범위의 전문 봇만 요청할 수 있습니다.",
+        )
+    try:
+        request_id = specialist_store.create_request(actor=user.email, proposal=body.model_dump())
+        rows = specialist_store.list_requests()
+    except specialist_store.SpecialistStoreError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="specialist", action="change-request",
+        target_type="specialist", target_id=body.key, outcome="requested",
+        metadata={"requestId": request_id, "state": body.state, "adapter": body.adapter},
+    )
+    return {
+        "requests": [
+            _specialist_request_response(row)
+            for row in _visible_specialist_requests(user, rows)
+        ]
+    }
+
+
+@app.post("/api/specialists/requests/{request_id}/{decision}")
+def decide_specialist_request(
+    request_id: int,
+    decision: Literal["approve", "reject"],
+    body: SpecialistDecisionBody,
+    request: Request,
+    user: User,
+) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+    try:
+        specialist_store.decide_request(
+            request_id=request_id, actor=user.email, decision=decision, note=body.note
+        )
+        rows = specialist_store.list_specialists()
+        requests = specialist_store.list_requests()
+    except specialist_store.SpecialistStoreError as exc:
+        _audit_event(
+            actor=user.email, category="specialist", action=decision,
+            target_type="specialist-request", target_id=str(request_id), outcome="failed",
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="specialist", action=decision,
+        target_type="specialist-request", target_id=str(request_id), outcome="succeeded",
+    )
+    return {
+        "specialists": [_specialist_response(row) for row in rows],
+        "requests": [_specialist_request_response(row) for row in requests],
+        "adapters": specialist_store.adapters(),
+    }
+
+
+@app.get("/api/audit-events")
+def audit_events(
+    user: User,
+    category: str = "",
+    workspace: str = "",
+    actor: str = "",
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> dict:
+    _require_admin(user)
+    return {
+        "events": audit_store.list_events(
+            qa_log_dir=reader.qa_log_dir(), category=category.strip(),
+            workspace=workspace.strip(), actor=actor.strip(), limit=limit,
+        )
+    }
 
 
 @app.get("/api/collected")
@@ -349,6 +725,15 @@ def put_env_settings(
     except OSError as e:
         logger.error("환경변수 설정 감사 로그 실패: %s", e)
     logger.warning("환경변수 설정 변경 — actor=%s changed=%s", user.email, changed)
+    _audit_event(
+        actor=user.email,
+        category="environment",
+        action="change",
+        target_type="settings",
+        target_id="console-managed.env",
+        outcome="succeeded",
+        metadata={"changed": changed},
+    )
     return {**result, "changed": changed}
 
 
@@ -449,6 +834,16 @@ def put_workspace(key: str, body: WorkspaceBody, request: Request, user: User) -
             detail="워크스페이스는 저장됐지만 봇 재시작을 요청하지 못했습니다.",
         ) from e
     logger.warning("워크스페이스 변경 — actor=%s workspace=%s", user.email, key)
+    _audit_event(
+        actor=user.email,
+        category="workspace",
+        action="save",
+        target_type="workspace",
+        target_id=key.strip().lower(),
+        workspace=key.strip().lower(),
+        outcome="succeeded",
+        metadata={"role": body.role, "state": body.state},
+    )
     env_keys = _env_token_keys()
     return {"workspaces": [_workspace_response(row, env_keys) for row in rows], "restartPending": True}
 
@@ -502,6 +897,15 @@ def put_console_user(
         body.role,
         body.active,
     )
+    _audit_event(
+        actor=user.email,
+        category="console-user",
+        action="save",
+        target_type="console-user",
+        target_id=body.email.strip().lower(),
+        outcome="succeeded",
+        metadata={"role": body.role, "active": body.active},
+    )
     return {"ok": True}
 
 
@@ -543,6 +947,15 @@ def put_llm_secret(body: LlmSecretBody, request: Request, user: User) -> dict:
         user.email,
         body.provider,
         "rotate" if body.key.strip() else ("enable" if body.enabled else "disable"),
+    )
+    _audit_event(
+        actor=user.email,
+        category="llm",
+        action="rotate" if body.key.strip() else "state-change",
+        target_type="llm-provider",
+        target_id=body.provider,
+        outcome="succeeded",
+        metadata={"enabled": body.enabled},
     )
     return {"secrets": secrets}
 
@@ -596,6 +1009,14 @@ def mark_feedback_handled(
         logger.exception("피드백 처리 표시 실패")
         raise HTTPException(status_code=500, detail="처리 표시를 남기지 못했습니다.") from e
     logger.warning("피드백 처리 표시 — actor=%s event=%s", user.email, event_id)
+    _audit_event(
+        actor=user.email,
+        category="feedback",
+        action="handled",
+        target_type="feedback",
+        target_id=event_id,
+        outcome="succeeded",
+    )
     return health.report(
         allowed=None if user.all_workspaces else user.workspaces,
         store=store(),
@@ -657,6 +1078,15 @@ def timer_action(body: TimerActionBody, request: Request, user: User) -> dict:
         body.action,
         body.preset,
     )
+    _audit_event(
+        actor=user.email,
+        category="timer",
+        action=body.action,
+        target_type="systemd-timer",
+        target_id=body.unit,
+        outcome="succeeded",
+        metadata={"preset": body.preset},
+    )
     return {"timers": rows}
 
 
@@ -692,6 +1122,14 @@ def request_deployment(request: Request, user: User) -> dict:
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=str(result.get("reason") or "배포 요청 거절"))
     logger.warning("관리자 직접 배포 — actor=%s (승인 절차 없음)", user.email)
+    _audit_event(
+        actor=user.email,
+        category="deployment",
+        action="direct-deploy",
+        target_type="deployment",
+        target_id=str(result.get("request_id") or "current"),
+        outcome="requested",
+    )
     return deploy_request.console_status()
 
 
@@ -750,6 +1188,15 @@ def create_deploy_request(body: DeployRequestBody, request: Request, user: User)
         body.workspace,
         request_id,
     )
+    _audit_event(
+        actor=user.email,
+        category="deployment",
+        action="request",
+        target_type="deploy-request",
+        target_id=str(request_id),
+        workspace=body.workspace,
+        outcome="requested",
+    )
     return {"requests": [_deploy_request_response(row) for row in rows]}
 
 
@@ -788,6 +1235,14 @@ def decide_deploy_request(
         user.email,
         request_id,
         body.decision,
+    )
+    _audit_event(
+        actor=user.email,
+        category="deployment",
+        action=body.decision,
+        target_type="deploy-request",
+        target_id=str(request_id),
+        outcome="succeeded",
     )
     return {"requests": [_deploy_request_response(row) for row in rows]}
 
@@ -865,6 +1320,14 @@ def record_read(user: ConsoleUser, path: str) -> None:
     except OSError as e:
         logger.error("원문 열람 기록 실패 (%s): %s", path, e)
     logger.info("원문 열람 — %s (%s) %s", user.display(), user.email, path)
+    _audit_event(
+        actor=user.email,
+        category="archive",
+        action="read",
+        target_type="document",
+        target_id=path,
+        outcome="succeeded",
+    )
 
 
 def read_audit_entries(limit: int = 100) -> list[dict]:

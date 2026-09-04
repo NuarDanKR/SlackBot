@@ -302,6 +302,89 @@ CREATE INDEX IF NOT EXISTS archive_read_audit_recent ON archive_read_audit (at D
 COMMENT ON TABLE archive_read_audit IS
     '원문 열람 기록. 콘솔 DB 역할에 UPDATE/DELETE 를 주지 않는다.';
 
+-- ===========================================================================
+-- 7. 전문 봇 레지스트리와 콘솔 통합 감사
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS specialist_bot (
+    key              text PRIMARY KEY CHECK (key ~ '^[a-z][a-z0-9-]{1,31}$'),
+    name             text NOT NULL CHECK (btrim(name) <> ''),
+    domain           text NOT NULL CHECK (btrim(domain) <> ''),
+    adapter          text NOT NULL,
+    state            text NOT NULL DEFAULT 'draft'
+                     CHECK (state IN ('draft', 'enabled', 'disabled', 'error')),
+    version          text NOT NULL DEFAULT '',
+    contract_version text NOT NULL DEFAULT 'v1',
+    health           text NOT NULL DEFAULT 'unknown'
+                     CHECK (health IN ('unknown', 'ok', 'error')),
+    error_code       text,
+    last_checked_at  timestamptz,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    created_by       text NOT NULL,
+    updated_at       timestamptz NOT NULL DEFAULT now(),
+    updated_by       text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS specialist_workspace (
+    specialist text NOT NULL REFERENCES specialist_bot(key) ON DELETE CASCADE,
+    workspace  text NOT NULL REFERENCES workspace(key) ON DELETE CASCADE,
+    PRIMARY KEY (specialist, workspace)
+);
+
+CREATE TABLE IF NOT EXISTS specialist_change_request (
+    id          bigserial PRIMARY KEY,
+    specialist  text NOT NULL,
+    proposal    jsonb NOT NULL,
+    checks      jsonb NOT NULL DEFAULT '[]'::jsonb,
+    requester   text NOT NULL,
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    state       text NOT NULL DEFAULT 'awaiting_approval'
+                CHECK (state IN ('awaiting_approval', 'approved', 'rejected')),
+    approver    text,
+    decided_at  timestamptz,
+    note        text NOT NULL DEFAULT '',
+    CONSTRAINT specialist_request_decision
+        CHECK ((state = 'awaiting_approval') = (approver IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS specialist_change_request_recent
+    ON specialist_change_request (requested_at DESC);
+
+CREATE TABLE IF NOT EXISTS specialist_call (
+    id              bigserial PRIMARY KEY,
+    at              timestamptz NOT NULL DEFAULT now(),
+    workspace       text NOT NULL,
+    specialist      text NOT NULL,
+    routing_reason  text NOT NULL DEFAULT '',
+    confidence      numeric(5, 4),
+    result          text NOT NULL
+                    CHECK (result IN ('success', 'fallback', 'error', 'contract_violation')),
+    elapsed_ms      integer NOT NULL DEFAULT 0 CHECK (elapsed_ms >= 0),
+    cost_usd        numeric(12, 6) NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),
+    error_code      text NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS specialist_call_recent ON specialist_call (at DESC);
+CREATE INDEX IF NOT EXISTS specialist_call_scope
+    ON specialist_call (workspace, specialist, at DESC);
+
+CREATE TABLE IF NOT EXISTS console_audit_event (
+    id          bigserial PRIMARY KEY,
+    at          timestamptz NOT NULL DEFAULT now(),
+    actor       text NOT NULL,
+    category    text NOT NULL,
+    action      text NOT NULL,
+    target_type text NOT NULL,
+    target_id   text NOT NULL,
+    workspace   text,
+    outcome     text NOT NULL CHECK (outcome IN ('requested', 'succeeded', 'failed')),
+    metadata    jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS console_audit_event_recent ON console_audit_event (at DESC);
+CREATE INDEX IF NOT EXISTS console_audit_event_filter
+    ON console_audit_event (category, workspace, at DESC);
+
 COMMIT;
 
 -- ===========================================================================
@@ -312,7 +395,8 @@ COMMIT;
 --   CREATE ROLE tybot_console LOGIN PASSWORD '...';
 --   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO tybot_console;
 --   -- 추가만 되는 표에서 수정·삭제를 회수한다
---   REVOKE UPDATE, DELETE ON deploy_event, archive_read_audit FROM tybot_console;
+--   REVOKE UPDATE, DELETE ON deploy_event, archive_read_audit,
+--       specialist_call, console_audit_event FROM tybot_console;
 --   GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO tybot_console;
 --
 -- 봇 프로세스는 별도 역할로 돌린다. 시크릿을 읽어야 하지만 승인 관련 표는 건드릴 필요가 없다.
