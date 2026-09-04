@@ -290,6 +290,8 @@ export type HealthReport = {
       errorRate?: number
       slowAnswers?: number
       topReasons?: { reason: string; count: number }[]
+      /** 어떤 예외로 실패했는지. 예외 클래스명만 담깁니다(업무 내용 없음). */
+      topErrors?: { kind: string; count: number }[]
       note?: string
       problems: string[]
     }

@@ -197,6 +197,21 @@ export function HealthCheck({ user }: { user: ConsoleUser }) {
         </div>
         {answers.note && <p className="section-lead">{answers.note}</p>}
         <Problems items={answers.problems} />
+        {!!answers.topErrors?.length && (
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr><th>실패한 예외</th><th>건수</th></tr></thead>
+              <tbody>
+                {answers.topErrors.map((e) => (
+                  <tr key={e.kind}>
+                    <td className="mono">{e.kind}</td>
+                    <td>{e.count.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
         {!!answers.topReasons?.length && (
           <div className="table-wrap">
             <table className="table">

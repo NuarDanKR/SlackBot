@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Sequence
 
 from .base import LLMResponse, Message, ModelSpec, Provider, Sensitivity
@@ -52,11 +53,15 @@ class Router:
         cost_guard: CostGuard,
         *,
         default_model: str = "claude-sonnet-5",
+        fallback_models: Sequence[str] = (),
     ) -> None:
         self._providers = providers
         self._registry = registry
         self._cost = cost_guard
         self._default_model = default_model
+        # 장애 때 순서대로 시도할 모델. **비어 있으면 폴백하지 않는다** —
+        # 어느 모델이 대체 가능한지는 우리가 짐작할 일이 아니다.
+        self._fallback_models = tuple(fallback_models)
 
     @classmethod
     def from_default_registry(
@@ -66,6 +71,7 @@ class Router:
         default_model: str = "claude-sonnet-5",
         providers: dict[str, Provider] | None = None,
         cost_state_path: str | None = None,
+        fallback_models: Sequence[str] | None = None,
     ) -> Router:
         """기본 레지스트리로 라우터 생성.
 
@@ -78,11 +84,18 @@ class Router:
             from .providers import build_default_providers
 
             providers = build_default_providers()
+        if fallback_models is None:
+            fallback_models = [
+                name.strip()
+                for name in os.getenv("LLM_FALLBACK_MODELS", "").split(",")
+                if name.strip()
+            ]
         return cls(
             providers=providers,
             registry=dict(DEFAULT_REGISTRY),
             cost_guard=CostGuard(daily_limit_usd, state_path=cost_state_path),
             default_model=default_model,
+            fallback_models=fallback_models,
         )
 
     @property
@@ -113,6 +126,26 @@ class Router:
             raise UnknownModel(f"프로바이더 미등록: {spec.provider}")
         return spec
 
+    def _candidates(
+        self, spec: ModelSpec, sensitivity: Sensitivity
+    ) -> list[ModelSpec]:
+        """처음 고른 모델 + 허용된 폴백. 순서가 곧 우선순위다.
+
+        폴백도 **민감도 검사를 다시 통과해야 한다.** 장애 때만 조건이 느슨해지면,
+        가장 급할 때 기밀 자료가 허용되지 않은 모델로 나간다.
+        """
+        out = [spec]
+        for name in self._fallback_models:
+            if name == spec.model:
+                continue
+            candidate = self._registry.get(name)
+            if candidate is None or candidate.provider not in self._providers:
+                continue
+            if sensitivity.rank() > candidate.max_sensitivity.rank():
+                continue
+            out.append(candidate)
+        return out
+
     def complete(
         self,
         messages: Sequence[Message],
@@ -127,10 +160,39 @@ class Router:
         approx_in = sum(_content_size(m.content) for m in messages) // 4
         self._cost.check(spec.cost(approx_in, max_tokens))
 
-        provider = self._providers[spec.provider]
-        resp = provider.complete(
-            spec, messages, max_tokens=max_tokens, temperature=temperature
-        )
+        # 프로바이더가 죽으면 **다른 모델로 한 번 더** 시도한다.
+        # 폴백이 없던 동안 모델 장애 하나가 곧 답변 실패였고, qa-log 의 오류율이
+        # 그만큼 올라갔다(2026-09-02 실측 22%). 라우팅(B-36)이 앞에 서면 실패 지점이
+        # 하나 더 늘어나므로 여기서 받쳐 둔다.
+        #
+        # **후보를 우리가 짐작하지 않는다.** 어느 모델이 대체 가능한지는 정책이라
+        # 설정으로 받는다(`fallback_models`). 비어 있으면 폴백하지 않는다 —
+        # 조용히 다른 벤더로 보내는 것이 더 나쁘다.
+        last_error: Exception | None = None
+        for candidate in self._candidates(spec, sensitivity):
+            provider = self._providers[candidate.provider]
+            try:
+                resp = provider.complete(
+                    candidate, messages, max_tokens=max_tokens, temperature=temperature
+                )
+            except Exception as exc:  # noqa: BLE001 - 다음 후보로 넘긴다
+                last_error = exc
+                logger.warning(
+                    "llm_call 실패 model=%s provider=%s error=%s — 다음 후보로",
+                    candidate.model,
+                    candidate.provider,
+                    type(exc).__name__,
+                )
+                continue
+            if candidate.model != spec.model:
+                # 어느 모델이 실제로 답했는지 남는다. 남지 않으면 "왜 답이 달라졌나" 를
+                # 되짚을 수 없다(qa-log 는 resp.model 을 기록한다).
+                logger.warning(
+                    "llm_call 폴백 %s -> %s", spec.model, candidate.model
+                )
+            break
+        else:
+            raise last_error if last_error else UnknownModel("호출할 모델이 없습니다")
         self._cost.record(resp.cost_usd)
         logger.info(
             "llm_call model=%s provider=%s in=%d out=%d cost=$%.4f spent_today=$%.2f",

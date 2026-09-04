@@ -169,12 +169,22 @@ def answer_section(records: list[dict]) -> dict:
             f"근거를 찾은 답변이 {grounded_rate:.0%} 입니다 — "
             "아카이브에 자료가 없거나 검색이 못 찾고 있습니다"
         )
+    # 어떤 예외였는지 함께 낸다. 비율만 있으면 고칠 수 없다 —
+    # "22% 가 실패" 는 볼 때마다 같은 조사를 처음부터 다시 하게 만든다.
+    # qa-log 의 `error` 는 예외 클래스명뿐이라(업무 내용이 없다) 그대로 보여도 된다.
+    error_kinds = Counter(
+        str(r.get("error") or "").strip()
+        for r in records
+        if str(r.get("error") or "").strip()
+    )
+    top_error = error_kinds.most_common(1)
+    detail = f" — 가장 많은 것은 {top_error[0][0]} {top_error[0][1]}건" if top_error else ""
     if error_rate >= ERROR_BAD:
         level = "bad"
-        problems.append(f"오류로 끝난 질문이 {error_rate:.0%} 입니다")
+        problems.append(f"오류로 끝난 질문이 {error_rate:.0%} 입니다{detail}")
     elif error_rate >= ERROR_WARN:
         level = _worst(level, "warn")
-        problems.append(f"오류로 끝난 질문이 {errors}건 있습니다")
+        problems.append(f"오류로 끝난 질문이 {errors}건 있습니다{detail}")
     if slow:
         level = _worst(level, "warn")
         problems.append(f"{SLOW_MS // 1000}초를 넘긴 답변 {slow}건")
@@ -190,6 +200,7 @@ def answer_section(records: list[dict]) -> dict:
         "errorRate": round(error_rate, 3),
         "slowAnswers": slow,
         "topReasons": [{"reason": k, "count": v} for k, v in reasons.most_common(5)],
+        "topErrors": [{"kind": k, "count": v} for k, v in error_kinds.most_common(5)],
         "problems": problems,
     }
 
