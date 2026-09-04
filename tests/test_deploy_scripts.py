@@ -238,3 +238,21 @@ def test_index_timer_is_installed_and_switchable():
     assert "tybot-index" in install
     assert "tybot-index.timer" in wrapper
     assert "-m tybot.search_index" in unit
+
+
+def test_docs_never_call_psql_without_the_port():
+    """우리 PostgreSQL 은 55432 다. 포트를 빼면 5432 소켓을 찾아 실패한다.
+
+    그 오류 문구가 「DB 가 안 돌고 있다」 로 읽혀서, 실제로 여러 번 헤맸다.
+    """
+
+    bad: list[str] = []
+    for folder in ("docs", "deploy"):
+        for path in (ROOT / folder).rglob("*"):
+            if path.suffix not in {".md", ".sql", ".sh"} or not path.is_file():
+                continue
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "postgres psql" in line and "-p " not in line:
+                    bad.append(f"{path.relative_to(ROOT)}:{i}")
+
+    assert not bad, f"psql 호출에 포트가 없다: {bad}"

@@ -4,7 +4,7 @@
 -- 여러 번 실행해도 안전하다(IF NOT EXISTS).
 --
 -- 먼저 슈퍼유저로 한 번 실행해야 하는 것:
---     sudo -u postgres psql -d tyslackai -c "CREATE EXTENSION pg_bigm;"
+--     sudo -u postgres psql -p 55432 -d tyslackai -c "CREATE EXTENSION pg_bigm;"
 -- pg_bigm 은 trusted 확장이 아니라 일반 계정이 만들 수 없다.
 --
 -- ## 대전제 — DB 는 진실이 아니다
@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS raw_line (
 -- 이 파일 전체가 그 줄에서 멈추므로, 없으면 pg_trgm 으로 **일단 깔고 넘어간다**.
 -- 대체 인덱스는 3글자 이상만 덮는다 — 2글자 검색은 여전히 전체 스캔이다.
 -- 그래서 임시방편이고, 슈퍼유저로 아래를 실행한 뒤 이 파일을 다시 돌려야 한다.
---     sudo -u postgres psql -d tyslackai -c "CREATE EXTENSION pg_bigm;"
+--     sudo -u postgres psql -p 55432 -d tyslackai -c "CREATE EXTENSION pg_bigm;"
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_bigm') THEN

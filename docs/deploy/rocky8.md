@@ -347,6 +347,27 @@ sudo -u tybot TYBOT_ENV_FILE=/etc/tybot/tybot.env \
 
 ---
 
+## 6-A1. psql 을 부를 때 — **포트를 반드시 붙인다**
+
+우리 PostgreSQL 은 **55432** 를 쓴다. `psql` 은 5432 를 기본값으로 보므로 포트를
+빼면 이렇게 나온다 — DB 가 죽은 것처럼 보이지만 포트만 틀린 것이다.
+
+```
+psql: error: connection to server on socket "/run/postgresql/.s.PGSQL.5432" failed:
+        No such file or directory
+```
+
+```bash
+# 슈퍼유저 작업(확장 설치·스키마 적용)
+sudo -u postgres psql -p 55432 -d tyslackai -f <파일>
+
+# 봇 계정으로 확인만 할 때는 설정 파일의 DATABASE_URL 을 쓴다 — 포트가 들어 있다
+sudo -u tybot bash -c 'set -a; . /etc/tybot/tybot.env; set +a; psql "$DATABASE_URL" -c "\dt"'
+```
+
+`tyslackai` 계정으로 소켓에 붙으면 `Peer authentication failed` 가 난다.
+그때는 `-h 127.0.0.1` 을 붙여 TCP 로 간다.
+
 ## 6-A2. 관리 콘솔 (선택)
 
 `WITH_CONSOLE=1` 로 설치했으면 계정을 만들고 켠다.
@@ -476,13 +497,13 @@ sudo journalctl -u tybot-index -n 20 --no-pager
 pg_bigm 이 없으면 2글자 검색이 전체 스캔이 된다(3글자 이상만 인덱스). 확인:
 
 ```bash
-sudo -u postgres psql -d tyslackai -c "\dx" | grep bigm
+sudo -u postgres psql -p 55432 -d tyslackai -c "\dx" | grep bigm
 ```
 
 ### 요약 검토자 (B-37)
 
 ```bash
-sudo -u postgres psql -d tyslackai -f /opt/tybot/deploy/sql/reviewer_schema.sql
+sudo -u postgres psql -p 55432 -d tyslackai -f /opt/tybot/deploy/sql/reviewer_schema.sql
 ```
 
 채널에서 `/채널 검토자 @사람 09:00`. **채널 소유자만** 정할 수 있다.
@@ -512,7 +533,7 @@ DB 를 못 읽을 때 되돌아갈 자리로 잠시 남겨 두는 것도 방법�
 ### 개인 DM 알림 (선택)
 
 ```bash
-sudo -u postgres psql -d tyslackai -f /opt/tybot/deploy/sql/schedule_dm_schema.sql
+sudo -u postgres psql -p 55432 -d tyslackai -f /opt/tybot/deploy/sql/schedule_dm_schema.sql
 sudo systemctl enable --now tybot-schedule-dm.timer   # 1분 주기
 ```
 

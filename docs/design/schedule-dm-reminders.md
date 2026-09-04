@@ -301,7 +301,7 @@ Oracle -> schedule_export.py -> schedulesync -> PostgreSQL
 
 ### 운영
 ```bash
-sudo -u postgres psql -d tyslackai -f deploy/sql/schedule_dm_schema.sql
+sudo -u postgres psql -p 55432 -d tyslackai -f deploy/sql/schedule_dm_schema.sql
 sudo systemctl enable --now tybot-schedule-dm.timer
 journalctl -u tybot-schedule-dm -f
 # 큐만 만들어 보기(발송 없음)
