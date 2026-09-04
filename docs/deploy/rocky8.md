@@ -477,6 +477,27 @@ journalctl -u tybot-schedule-sync -f
 | 폴더가 `미승인폴더` 로 집계됨 | `schedule_folder` 에 승인 등록이 안 됐다. 승인 목록이 곧 허용 목록이다 |
 | `/일정` 이 "동기화 지연" 을 표시 | 타이머가 멈췄거나 Oracle 조회 실패. `systemctl status tybot-schedule-sync` |
 
+### 전문 봇 라우팅 · MCP (B-36/B-39)
+
+```bash
+sudo -u postgres psql -p 55432 -d tyslackai \
+  -f /opt/tybot/deploy/sql/specialist_routing_schema.sql
+```
+
+`specialist_bot` 에 세 컬럼을 더한다 — `routing_hint`(라우터가 읽는 설명),
+`model`(이 전문가가 쓸 모델), `min_confidence`(부를 최소 신뢰도). 그리고
+`specialist_mcp`(외부 MCP 허용 목록)를 만든다.
+
+**전문가가 하나도 `enabled` 가 아니면 라우팅은 아무것도 하지 않는다** — 마스터가
+직접 답한다. 그래서 이 스키마를 올려도 답변 동작은 바뀌지 않는다.
+
+MCP 는 스키마에서 두 가지를 막는다.
+
+| 막는 것 | 이유 |
+|---|---|
+| `http://` · localhost | 사내 질문이 그 URL 로 나간다. 평문이면 도중에 읽힌다 |
+| 승인 없이 `enabled` | 코드가 한 곳을 빼먹어도 새지 않게 |
+
 ### 검색 색인 (B-40)
 
 원문은 MD 에 그대로 두고, **색인만** Postgres 에 넣는다. 색인은 버려도 되는 사본이라
