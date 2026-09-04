@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from .. import evidence_view, heartbeat, schedule_dm
+from .. import evidence_view, heartbeat, reviewers, schedule_dm
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
@@ -137,6 +137,46 @@ from ..status_tree import build_tree, render_tree, totals
 from ..workspaces import ConfigError, WorkspaceConfig, load_workspaces
 
 log = logging.getLogger("tybot.slack")
+
+# 응답 문구를 여러 줄로 잇는다. 소스에 `\n` 을 직접 쓰면 이 파일을 다루는
+# 스크립트·heredoc 에서 자꾸 망가진다(실제로 여러 번 깨졌다).
+NEWLINE = chr(10)
+
+# 슬래시 명령 본문의 사람 멘션. Slack 은 `<@U123>` 또는 `<@U123|이름>` 으로 보낸다.
+# **이름으로 받지 않는다** — 동명이인이 있고, 이름은 바뀐다.
+#
+# 아래 `MENTION_RE` 와 이름을 달리 둔다. 그쪽은 본문에서 봇 멘션을 지우는 용도라
+# 캡처 그룹이 없다 — 같은 이름을 쓰면 **나중 정의가 이겨서** 여기서 사용자 ID 대신
+# 멘션 전체가 잡히고, 검토자 저장이 조용히 엉뚱한 값을 넣는다. 실제로 그랬다.
+SLASH_MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>")
+# `09:00`·`9시`·`0900`. 멘션 안의 숫자를 집지 않도록 멘션을 먼저 지운 뒤 찾는다.
+SLASH_TIME_RE = re.compile(r"(?<![\d:])(\d{1,2}:\d{2}|\d{4}|\d{1,2})(?:시)?(?![\d:])")
+
+
+def _mentioned_users(text: str) -> list[str]:
+    """멘션된 사용자 ID. 순서를 지키고 중복은 없앤다."""
+    out: list[str] = []
+    for uid in SLASH_MENTION_RE.findall(text or ""):
+        if uid not in out:
+            out.append(uid)
+    return out
+
+
+def _asks_to_clear(text: str) -> bool:
+    """검토자를 없애겠다는 뜻인가. 인수 없이 부른 것과 구별해야 한다 —
+
+    인수가 없으면 **현재 상태를 보여주는 것**이 맞고, 해제는 명시해야 한다.
+    실수로 `/채널 검토자` 만 쳐서 검토가 멈추면 아무 표시도 없이 요약이 안 된다.
+    """
+    return (text or "").strip() in {"없음", "해제", "없애", "삭제", "none"}
+
+
+def _time_token(text: str) -> str:
+    """인수에서 시각만 꺼낸다. 멘션 안의 숫자를 시각으로 읽으면 안 된다."""
+    stripped = SLASH_MENTION_RE.sub(" ", text or "")
+    found = SLASH_TIME_RE.search(stripped)
+    return found.group(1) if found else ""
+
 
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
 HISTORY_LIMIT = 15  # 신규 앱 conversations.history / replies 요청당 상한
@@ -375,7 +415,11 @@ class WorkspaceBot:
         @self.app.command("/ty-channel")
         def on_channel_command(ack, command, client, respond):
             ack()
-            action = (command.get("text") or "").strip().replace(" ", "")
+            raw = (command.get("text") or "").strip()
+            action = raw.replace(" ", "")
+            # 인수를 받는 하위 명령은 **첫 낱말로** 판정한다. 공백을 지운 `action` 으로는
+            # `검토자 @홍길동 09:00` 이 `검토자@홍길동09:00` 이 되어 맞지 않는다.
+            head, _, args = raw.partition(" ")
             if action in ("", "생성", "만들기"):
                 self._open_create_modal(client, command["trigger_id"], command["user_id"])
                 return
@@ -388,8 +432,11 @@ class WorkspaceBot:
                     respond,
                 )
                 return
+            if head in ("검토자", "검토자지정", "요약검토자"):
+                self._handle_reviewer_command(command, args, respond)
+                return
             respond(
-                "사용법: `/채널 생성`, `/채널 이름변경`, `/채널 도움말`\n"
+                "사용법: `/채널 생성`, `/채널 이름변경`, `/채널 검토자`, `/채널 도움말`\n"
                 "명령어 없이 `/채널`만 입력해도 생성 화면이 열립니다.",
                 response_type="ephemeral",
             )
@@ -1225,6 +1272,85 @@ class WorkspaceBot:
     def _can_manage_channel(self, channel_id: str, user_id: str) -> bool:
         return user_id in self.channel_admin_users or self.channel_owners.is_owner(
             self.workspace, channel_id, user_id
+        )
+
+    def _handle_reviewer_command(self, command: dict, args: str, respond) -> None:
+        """`/채널 검토자 @사람 [@사람2] [09:00]` — 이 채널의 요약 검토자를 정한다.
+
+        요약은 봇이 후보만 만들고 이 사람이 확정한다.
+        설계: docs/design/summary-review.md
+
+        **채널 소유자만** 바꿀 수 있다. 아무나 자기를 검토자로 넣으면, 요약 반영이
+        곧 그 사람 재량이 된다 — 이름변경과 같은 권한선이다.
+        """
+        channel_id = str(command.get("channel_id") or "")
+        user_id = str(command.get("user_id") or "")
+        if not channel_id:
+            respond("채널 안에서 실행해 주세요.", response_type="ephemeral")
+            return
+
+        users = _mentioned_users(args)
+        if not users and not _asks_to_clear(args):
+            self._show_reviewers(channel_id, respond)
+            return
+
+        if not self._can_manage_channel(channel_id, user_id):
+            respond(
+                "이 채널의 최초 생성 요청자 또는 TYBot 채널 관리자만 검토자를 정할 수 있습니다.",
+                response_type="ephemeral",
+            )
+            return
+
+        try:
+            send_at = reviewers.parse_send_at(_time_token(args))
+            rows = reviewers.set_reviewers(
+                workspace=self.workspace,
+                channel_id=channel_id,
+                channel_name=str(command.get("channel_name") or ""),
+                reviewer_users=users,
+                send_at=send_at,
+                set_by=user_id,
+            )
+        except reviewers.ReviewerError as e:
+            respond(f"검토자를 저장하지 못했습니다: {e}", response_type="ephemeral")
+            return
+
+        if not rows:
+            respond(
+                "검토자를 모두 해제했습니다. **이 채널은 요약을 반영하지 않습니다.**"
+                + NEWLINE
+                + "원문 수집은 그대로 계속됩니다.",
+                response_type="ephemeral",
+            )
+            return
+        names = ", ".join(f"<@{r.reviewer_user}>" for r in rows)
+        respond(
+            f"검토자: {names}" + NEWLINE
+            + f"매일 {send_at.strftime('%H:%M')} 에 요약 후보를 DM 으로 보냅니다." + NEWLINE
+            + "검토자가 확인한 것만 요약에 반영됩니다.",
+            response_type="ephemeral",
+        )
+
+    def _show_reviewers(self, channel_id: str, respond) -> None:
+        """지금 누가 검토자인지. 인수 없이 부르면 이것이 나온다."""
+        try:
+            rows = reviewers.reviewers_for(self.workspace, channel_id)
+        except reviewers.ReviewerError as e:
+            respond(f"검토자를 읽지 못했습니다: {e}", response_type="ephemeral")
+            return
+        if not rows:
+            respond(
+                "이 채널에는 요약 검토자가 없습니다 — **요약을 반영하지 않습니다.**" + NEWLINE
+                + "정하기: `/채널 검토자 @사람 09:00`" + NEWLINE
+                + "여러 명도 됩니다. 해제: `/채널 검토자 없음`",
+                response_type="ephemeral",
+            )
+            return
+        names = ", ".join(f"<@{r.reviewer_user}>" for r in rows)
+        respond(
+            f"검토자: {names} (매일 {rows[0].send_at.strftime('%H:%M')})" + NEWLINE
+            + "바꾸기: `/채널 검토자 @사람 09:00`",
+            response_type="ephemeral",
         )
 
     def _open_rename_modal(

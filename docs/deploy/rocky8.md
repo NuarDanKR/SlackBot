@@ -456,6 +456,15 @@ journalctl -u tybot-schedule-sync -f
 | 폴더가 `미승인폴더` 로 집계됨 | `schedule_folder` 에 승인 등록이 안 됐다. 승인 목록이 곧 허용 목록이다 |
 | `/일정` 이 "동기화 지연" 을 표시 | 타이머가 멈췄거나 Oracle 조회 실패. `systemctl status tybot-schedule-sync` |
 
+### 요약 검토자 (B-37)
+
+```bash
+sudo -u postgres psql -d tyslackai -f /opt/tybot/deploy/sql/reviewer_schema.sql
+```
+
+채널에서 `/채널 검토자 @사람 09:00`. **채널 소유자만** 정할 수 있다.
+검토자가 없는 채널은 요약을 반영하지 않는다 — 헬스 체크에 목록으로 올라온다.
+
 ### LLM API 키를 DB 로 옮기기
 
 `.env` 는 **평문**이다. 서버에 들어갈 수 있는 사람은 누구나 읽고, 백업·복사본에
