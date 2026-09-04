@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from tybot.console import health
+from tybot.console import health, reader
 
 
 def _ws(key="pilot", *, connected=True, broken=0, uninvited=0,
@@ -466,3 +466,52 @@ def test_contributor_text_is_hidden_without_permission():
 
     assert rows[0]["lastCorrection"] == ""
     assert rows[0]["corrections"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 검색 색인 지연
+# ---------------------------------------------------------------------------
+
+
+def test_no_database_is_not_an_index_problem(monkeypatch):
+    """DB 를 안 쓰는 설치도 정상이다 — 그쪽은 파일 스캔이 제 동작이다.
+
+    여기서 경고를 내면 「고칠 수 없는 경고」가 늘 켜져 있고, 그러면 아무도 안 본다.
+    """
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    assert health._index_freshness() == ("", "ok")
+
+
+def test_an_empty_index_says_how_to_start_it(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nowhere/none")
+    monkeypatch.setattr("tybot.search_index.indexed_at", lambda: None)
+
+    note, level = health._index_freshness()
+
+    assert "tybot-index" in note, "무엇을 돌려야 하는지 말해야 한다"
+    assert level == "warn"
+
+
+def test_a_stale_index_is_bad_not_a_warning(monkeypatch):
+    """색인이 멈추면 답변은 정상적으로 나가고 **근거만 낡는다.**
+
+    오류도 경고도 안 나므로, 이 자리가 아니면 알 방법이 없다.
+    """
+    from datetime import timedelta
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nowhere/none")
+    old = reader._now() - timedelta(hours=5)
+    monkeypatch.setattr("tybot.search_index.indexed_at", lambda: old.isoformat())
+
+    note, level = health._index_freshness()
+
+    assert level == "bad"
+    assert "밀렸습니다" in note
+
+
+def test_a_fresh_index_says_nothing(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nowhere/none")
+    monkeypatch.setattr("tybot.search_index.indexed_at", lambda: reader._now().isoformat())
+
+    assert health._index_freshness() == ("", "ok")

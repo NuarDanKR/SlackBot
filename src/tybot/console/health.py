@@ -143,6 +143,47 @@ def archive_section(rows: list[dict], docs: list[dict]) -> dict:
 # 3. 답변 품질
 # ---------------------------------------------------------------------------
 
+# 색인이 이만큼 밀리면 검색이 옛 자료를 본다. 타이머 주기(10분)의 몇 배로 잡는다 —
+# 한 번 늦은 것과 멈춘 것은 다르다.
+INDEX_STALE_MINUTES = 60
+
+
+def _index_freshness() -> tuple[str, str]:
+    """(문제 문구, 등급). 문제가 없으면 빈 문구."""
+    from datetime import datetime
+
+    from ..search_index import indexed_at
+
+    # DB 를 안 쓰는 설치도 정상이다 — 그쪽은 파일 스캔이 제 동작이다.
+    # 여기서 경고를 내면 「고칠 수 없는 경고」가 늘 켜져 있고, 그러면 아무도 안 본다.
+    if not os.getenv("DATABASE_URL", "").strip():
+        return ("", "ok")
+
+    at = indexed_at()
+    if at is None:
+        # DB 는 설정돼 있는데 색인이 비었다. 색인기가 한 번도 안 돈 것이다.
+        return (
+            "검색 색인이 비어 있습니다 — 검색이 파일 스캔으로 돕니다"
+            " (systemctl start tybot-index)",
+            "warn",
+        )
+    try:
+        stamp = datetime.fromisoformat(at)
+    except ValueError:
+        return ("검색 색인 시각을 읽지 못했습니다", "warn")
+    now = reader._now()
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=now.tzinfo)
+    minutes = (now - stamp).total_seconds() / 60
+    if minutes > INDEX_STALE_MINUTES:
+        return (
+            f"검색 색인이 {int(minutes)}분 밀렸습니다 — 답변 근거가 낡습니다"
+            " (systemctl status tybot-index.timer)",
+            "bad",
+        )
+    return ("", "ok")
+
+
 def answer_section(records: list[dict]) -> dict:
     """감사기록(qa-log)으로 답변이 실제로 쓸모 있었는지 본다."""
     total = len(records)
@@ -188,6 +229,13 @@ def answer_section(records: list[dict]) -> dict:
     if slow:
         level = _worst(level, "warn")
         problems.append(f"{SLOW_MS // 1000}초를 넘긴 답변 {slow}건")
+
+    # 색인이 멈추면 검색이 **조용히 옛 자료만** 본다. 오류도 경고도 안 난다 —
+    # 답변은 정상적으로 나가고 근거만 낡는다. 그걸 알 자리가 여기뿐이다.
+    index_note, index_level = _index_freshness()
+    if index_note:
+        level = _worst(level, index_level)
+        problems.append(index_note)
 
     reasons = Counter(str(r.get("reason") or "-") for r in records)
     return {

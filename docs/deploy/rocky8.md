@@ -456,6 +456,29 @@ journalctl -u tybot-schedule-sync -f
 | 폴더가 `미승인폴더` 로 집계됨 | `schedule_folder` 에 승인 등록이 안 됐다. 승인 목록이 곧 허용 목록이다 |
 | `/일정` 이 "동기화 지연" 을 표시 | 타이머가 멈췄거나 Oracle 조회 실패. `systemctl status tybot-schedule-sync` |
 
+### 검색 색인 (B-40)
+
+원문은 MD 에 그대로 두고, **색인만** Postgres 에 넣는다. 색인은 버려도 되는 사본이라
+`content_sha` 로 언제든 재빌드된다.
+
+```bash
+# 스키마는 index_schema.sql 에 이미 있다(raw_line + pg_bigm).
+sudo systemctl enable --now tybot-index.timer     # 10분 주기
+sudo systemctl start tybot-index                  # 지금 한 번
+sudo journalctl -u tybot-index -n 20 --no-pager
+```
+
+`검색 색인 문서=N 줄=M` 이 나오면 된다.
+
+**색인이 비거나 밀려도 검색은 돌아간다** — 파일 스캔으로 되돌아간다. 그래서 고장이
+눈에 안 띈다. 헬스 체크의 답변 품질 절에 「검색 색인이 N분 밀렸습니다」 로 올라온다.
+
+pg_bigm 이 없으면 2글자 검색이 전체 스캔이 된다(3글자 이상만 인덱스). 확인:
+
+```bash
+sudo -u postgres psql -d tyslackai -c "\dx" | grep bigm
+```
+
 ### 요약 검토자 (B-37)
 
 ```bash

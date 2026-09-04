@@ -1,0 +1,13 @@
+[Unit]
+Description=TYBot 검색 색인 타이머 (10분)
+
+[Timer]
+# 색인이 밀리면 검색이 **조용히 옛 자료만** 본다 — 오류도 경고도 안 난다.
+# 그래서 자주 돈다. 멱등이라 겹쳐도 행이 늘지 않는다.
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -17,8 +17,9 @@ RAW_HEADING_RE = re.compile(r"^##\s*원문", re.MULTILINE)
 SUMMARY_HEADING_RE = re.compile(r"^##\s*요약", re.MULTILINE)
 # > [2026-08-12 09:15] 홍길동: 내용
 RAW_LINE_RE = re.compile(r"^>\s*\[(?P<ts>[^\]]+)\]\s*(?P<speaker>[^:]+):\s*(?P<text>.*)$")
-# 검색어 토큰: 2자 이상 한글/영숫자
-TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+# 검색어 토큰 규칙은 `search_index.TOKEN_RE` 하나뿐이다.
+# 여기에 또 적으면 색인 후보와 파일 스캔이 다른 토큰으로 찾게 되고,
+# 그건 에러가 아니라 **같은 질문에 다른 답**으로 나타난다.
 
 
 def workspace_from_path(path: Path, root: Path | str) -> str:
@@ -350,15 +351,71 @@ class ArchiveStore:
         return [d.title for d in self.visible_docs(ctx)]
 
     def search(self, query: str, ctx: RequestContext, *, limit: int = 20) -> list[SearchHit]:
-        tokens = [t.lower() for t in TOKEN_RE.findall(query)]
+        """근거 줄 찾기. 색인(DB)을 먼저 보고, 못 보면 파일을 훑는다.
+
+        **권한은 여기서, 코드가 판정한다**(`visible_docs`). 색인에는 이미 통과한
+        채널 목록만 넘긴다 — 판정을 SQL 로 옮기면 ACL 이 두 곳으로 갈라진다(원칙 3).
+
+        **DB 를 못 읽는 것과 색인에 없는 것을 구별한다.** 섞으면 DB 장애가
+        「자료를 찾지 못했습니다」 로 나가고, 그건 장애가 아니라 정상 답으로 보인다.
+        """
+        from .. import search_index
+
+        tokens = search_index.tokens_of(query)
         if not tokens:
             return []
+
+        docs = self.visible_docs(ctx)
+        found = search_index.candidates(query, sorted({d.channel for d in docs if d.channel}))
+        if found is None:
+            return self._scan(query, tokens, docs, limit)
+
+        # 색인이 넣은 것과 **같은 함수로** 키를 만든다. 한쪽만 절대 경로면 매칭이
+        # 전부 실패하고, 오류 없이 파일 스캔으로 되돌아간다.
+        by_path = {search_index.rel_path(d.path, self.root): d for d in docs}
         hits: list[SearchHit] = []
-        for doc in self.visible_docs(ctx):
-            for line in doc.raw_lines:
-                hay = f"{line.speaker} {line.text}".lower()
-                score = sum(1 for t in tokens if t in hay)
-                if score:
-                    hits.append(SearchHit(doc=doc, line=line, score=score))
-        hits.sort(key=lambda h: (-h.score, h.doc.path.name, h.line.lineno))
+        for cand in found:
+            doc = by_path.get(cand.doc_path)
+            # 색인에 있으나 지금 권한으로는 안 보이는 문서 — 조용히 건너뛴다.
+            # 색인이 낡아 문서가 사라진 경우도 같은 자리로 떨어진다.
+            if doc is None:
+                continue
+            line = next((ln for ln in doc.raw_lines if ln.lineno == cand.line_no), None)
+            if line is None:
+                continue
+            score = search_index.score_line(tokens, query, line.speaker, line.text)
+            if score:
+                hits.append(SearchHit(doc=doc, line=line, score=score))
+        if not hits:
+            # 색인이 아직 안 돌았을 수 있다. 0건으로 답하기 전에 파일을 한 번 본다 —
+            # 「색인 없음」이 「자료 없음」으로 보이는 것이 이 기능의 가장 나쁜 실패다.
+            return self._scan(query, tokens, docs, limit)
+        return self._rank(hits, limit)
+
+    def _scan(
+        self, query: str, tokens: list[str], docs: list[ArchiveDoc], limit: int
+    ) -> list[SearchHit]:
+        """파일 스캔 폴백. 색인 경로와 **같은 점수 함수**를 쓴다."""
+        from .. import search_index
+
+        hits = [
+            SearchHit(doc=doc, line=line, score=score)
+            for doc in docs
+            for line in doc.raw_lines
+            if (score := search_index.score_line(tokens, query, line.speaker, line.text))
+        ]
+        return self._rank(hits, limit)
+
+    @staticmethod
+    def _rank(hits: list[SearchHit], limit: int) -> list[SearchHit]:
+        """점수 → **최근순** → 경로. 예전에는 점수 다음이 파일명이었다.
+
+        같은 점수면 오래된 줄이 먼저 올라와, 바뀐 숫자를 묻는 질문에 옛 값이 근거로
+        붙었다. 시각 표기가 없는 줄은 뒤로 보낸다(판정할 수 없는 것을 앞세우지 않는다).
+        """
+        # 파이썬 정렬은 안정적이라, **덜 중요한 것부터 차례로** 정렬하면 된다.
+        # 문자열을 음수화할 수 없으니 이 방식이 보수(complement) 트릭보다 읽기 쉽다.
+        hits.sort(key=lambda h: (h.doc.path.name, h.line.lineno))
+        hits.sort(key=lambda h: h.line.ts or "", reverse=True)   # 최근순
+        hits.sort(key=lambda h: -h.score)
         return hits[:limit]

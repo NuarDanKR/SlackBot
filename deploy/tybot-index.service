@@ -1,0 +1,25 @@
+[Unit]
+Description=TYBot 검색 색인 (MD -> raw_line)
+Documentation=file:///opt/tybot/BACKLOG.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.search_index
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-index
+# 전체 재색인이 오래 걸릴 수 있다. 멱등하므로 다음 회차에 이어진다.
+TimeoutStartSec=1800
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tybot
+
+[Install]
+WantedBy=multi-user.target

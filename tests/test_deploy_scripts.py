@@ -227,3 +227,14 @@ def test_install_never_overwrites_an_existing_workspace_key():
     script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
 
     assert '! -f "$WS_KEY_FILE"' in script
+
+
+def test_index_timer_is_installed_and_switchable():
+    """색인이 멈추면 검색이 조용히 옛 자료만 본다. 켜고 끌 자리가 있어야 한다."""
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    wrapper = (ROOT / "deploy" / "tybot-console-timers").read_text(encoding="utf-8")
+    unit = (ROOT / "deploy" / "tybot-index.service").read_text(encoding="utf-8")
+
+    assert "tybot-index" in install
+    assert "tybot-index.timer" in wrapper
+    assert "-m tybot.search_index" in unit

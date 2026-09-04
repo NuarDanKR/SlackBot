@@ -5,6 +5,7 @@ set -euo pipefail
 UNITS=(
   tybot-collect.timer
   tybot-schedule-dm.timer
+  tybot-index.timer
   tybot-schedule-reconcile.timer
   tybot-schedule-sync.timer
   tybot-tidy.timer
