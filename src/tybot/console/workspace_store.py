@@ -269,12 +269,18 @@ def runtime_workspaces() -> list[dict]:
                         item["bot_token"] = cipher.decrypt(bytes(item["bot_token"])).decode()
                         item["app_token"] = cipher.decrypt(bytes(item["app_token"])).decode()
                     except (InvalidToken, UnicodeDecodeError) as exc:
+                        # 행을 버리면 **DB 에는 등록돼 있는데 봇만 안 뜨는** 상태가
+                        # 되고, 그건 "등록 안 됨" 과 구별되지 않는다. 담당자는
+                        # 토큰을 다시 넣으러 가고 원인(암호화 키 불일치)은 그대로다.
+                        # 그래서 행은 남기고 사유를 붙여 호출측이 판정하게 한다.
                         logger.error(
-                            "%s 토큰을 현재 암호화 키로 복호화하지 못해 제외합니다: %s",
+                            "%s 토큰을 현재 암호화 키로 복호화하지 못했습니다: %s",
                             item["key"],
                             exc,
                         )
-                        continue
+                        item["bot_token"] = None
+                        item["app_token"] = None
+                        item["secret_error"] = "현재 암호화 키로 복호화 실패"
                 rows.append(item)
             return rows
     except WorkspaceStoreError:

@@ -503,3 +503,81 @@ def test_incomplete_db_registry_without_environment_fails(monkeypatch):
                 "WORKSPACE_SECRET_KEY": "test-key-present",
             }
         )
+
+
+# --- 복호화 실패는 '토큰 미등록' 이 아니다 -------------------------------------
+#
+# 콘솔에서 토큰을 등록하면 DB 에는 두 개가 다 들어간다. 그런데 등록 당시의
+# WORKSPACE_SECRET_KEY 와 지금 키가 다르면 읽지 못한다. 예전에는 그 행을 조용히
+# 버려서 **DB 에는 O 로 보이고 봇만 안 뜨는** 상태가 됐다.
+#
+# 그 상태가 "등록 안 됨" 과 같은 메시지로 나가면 담당자는 토큰을 다시 넣으러 가고,
+# 원인인 키 불일치는 그대로 남는다. 조치가 다르면 메시지도 달라야 한다.
+def _db_row(key="tyit", **over):
+    row = {
+        "key": key,
+        "label": "전산팀",
+        "role": "member",
+        "state": "enabled",
+        "bot_token": None,
+        "app_token": None,
+        "readable": [],
+    }
+    row.update(over)
+    return row
+
+
+def _registry_env(**over):
+    env = {"DATABASE_URL": "postgresql://unused", "WORKSPACE_SECRET_KEY": "test-key-present"}
+    env.update(over)
+    return env
+
+
+def test_undecryptable_token_blocks_startup_with_its_own_reason(monkeypatch):
+    """반쪽만 뜨면 그 본부 대화는 영구 유실된다. 백필은 분당 1회다."""
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store, "runtime_workspaces",
+        lambda: [_db_row(secret_error="현재 암호화 키로 복호화 실패")],
+    )
+    with pytest.raises(ConfigError) as caught:
+        load_workspaces(_registry_env())
+    message = str(caught.value)
+    assert "복호화" in message
+    assert "WORKSPACE_SECRET_KEY" in message
+    # 잘못된 조치를 안내하지 않는다.
+    assert "등록되지 않" not in message
+
+
+def test_missing_token_keeps_the_registration_message(monkeypatch):
+    """사유가 없으면 정말 등록이 안 된 것이다. 그때는 등록을 안내해야 한다."""
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(workspace_store, "runtime_workspaces", lambda: [_db_row()])
+    with pytest.raises(ConfigError) as caught:
+        load_workspaces(_registry_env())
+    assert "등록되지 않" in str(caught.value)
+    assert "복호화" not in str(caught.value)
+
+
+def test_environment_fallback_survives_but_says_so(monkeypatch, caplog):
+    """환경변수로 떠 있으면 콘솔에 보이는 값과 실제 사용 값이 다르다."""
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store, "runtime_workspaces",
+        lambda: [_db_row(secret_error="현재 암호화 키로 복호화 실패")],
+    )
+    env = _registry_env(
+        WORKSPACES="tyit",
+        SLACK_BOT_TOKEN_TYIT="xoxb-env_1",
+        SLACK_APP_TOKEN_TYIT="xapp-env_1",
+    )
+    with caplog.at_level("WARNING"):
+        configs = load_workspaces(env)
+    assert [c.key for c in configs] == ["tyit"]
+    assert configs[0].bot_token == "xoxb-env_1"
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "복호화" in logged
+    assert "xoxb-env_1" not in logged  # 토큰은 로그에 남기지 않는다

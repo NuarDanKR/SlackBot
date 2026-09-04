@@ -193,6 +193,9 @@ def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
 
     merged = {cfg.key: cfg for cfg in env_configs}
     incomplete: list[str] = []
+    # 토큰이 있는데 읽지 못한 경우. `incomplete` 와 섞으면 "다시 등록하라" 는
+    # 엉뚱한 조치를 안내하게 된다 — 조치가 다르면 메시지도 달라야 한다.
+    undecryptable: list[str] = []
     for row in rows:
         key = str(row["key"])
         if row.get("state") == "disabled":
@@ -202,7 +205,14 @@ def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
         # registry feature. Keep its working environment configuration.
         if row.get("bot_token") is None or row.get("app_token") is None:
             if key not in merged:
-                incomplete.append(key)
+                (undecryptable if row.get("secret_error") else incomplete).append(key)
+            elif row.get("secret_error"):
+                # 환경변수 덕분에 떠 있는 상태. 담당자는 콘솔(DB)이 실제 설정이라고
+                # 믿고 있을 텐데 봇은 다른 값으로 돌고 있다. 그 간극을 말해 둔다.
+                logger.warning(
+                    "%s 는 DB 토큰을 복호화하지 못해 환경변수 설정으로 기동합니다 — "
+                    "콘솔에서 보이는 값과 실제 사용 값이 다릅니다", key,
+                )
             continue
         merged[key] = WorkspaceConfig(
             key=key,
@@ -211,6 +221,15 @@ def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
             app_token=str(row["app_token"]),
             readable=frozenset(str(value) for value in (row.get("readable") or [])),
             is_root=row.get("role") == "root",
+        )
+    if undecryptable:
+        # 조용히 뜨지 않는다. 워크스페이스 하나가 빠진 채로 돌면 그 본부의 대화는
+        # **영구히 유실된다** — Slack 백필은 분당 1회라 지난 기간을 되찾을 수 없다.
+        raise ConfigError(
+            "DB에 토큰은 있으나 현재 WORKSPACE_SECRET_KEY 로 복호화하지 못한 "
+            f"워크스페이스: {', '.join(sorted(undecryptable))}. "
+            "토큰을 다시 등록하는 것으로는 해결되지 않는다 — 등록 당시의 키와 "
+            "지금 키가 다른지 먼저 확인하라."
         )
     if incomplete:
         raise ConfigError(

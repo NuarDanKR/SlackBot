@@ -63,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
     configured, config_error = _load_workspaces()
     if config_error:
         print(f"⚠️  워크스페이스 설정을 읽지 못했다 — {config_error}")
-        print("    이것 자체가 원인일 수 있다. 봇이 뜨지 못하면 아무것도 수집되지 않는다.\n")
+        print("    이것 자체가 원인일 수 있다. 봇이 뜨지 못하면 아무것도 수집되지 않는다.")
+        if "복호화" in config_error:
+            print("    콘솔에 토큰이 O 로 보이더라도 소용없다 — 등록 당시의 "
+                  "WORKSPACE_SECRET_KEY 와 지금 키가 같은지 확인하라.")
+        print()
 
     by_ws: dict[str, list] = defaultdict(list)
     for doc in docs:
@@ -97,7 +101,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n🟡 {key}: 문서는 {len(ws_docs)}개인데 **원문 줄이 0이다.** "
                   "문서는 만들어졌고 대화만 안 쌓였다 — 이벤트 구독 누락이 가장 흔하다.")
 
-    if not configured:
+    if not configured and not config_error:
+        # 설정 오류가 이미 원인을 밝혔으면 여기서 다른 조치를 겹쳐 말하지 않는다.
+        # 조치가 둘이면 담당자는 틀린 쪽을 먼저 시도한다.
         print("\n🔴 설정된 워크스페이스가 0개다. 워크스페이스마다 Slack 앱을 따로 만들고 "
               "봇/앱 토큰 두 개를 각각 등록해야 한다(docs/multi-workspace.md).")
 
