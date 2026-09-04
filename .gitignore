@@ -34,3 +34,8 @@ console-web/node_modules/
 console-web/dist/
 # 스크린샷·브라우저 자동화 산출물
 .playwright-mcp/
+
+# 참고용으로 내려받은 남의 저장소. 커밋하지 않는다 —
+# 낡은 사본이 남고, 그쪽 비공개 채널명·사업장명이 우리 저장소로 새어 들어온다.
+# 가져올 것은 코드가 아니라 판정 규칙이고, 그건 docs/design/ 에 옮겨 적는다.
+ref/
