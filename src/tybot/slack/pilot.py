@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from .. import evidence_view, heartbeat, reviewers, schedule_dm
+from .. import evidence_view, heartbeat, reviewers, schedule_dm, specialist_router
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
@@ -1608,6 +1608,19 @@ class WorkspaceBot:
             )
             self.qa_log.write(rec)
 
+    def _observe_routing(self, question: str) -> None:
+        """전문 봇 라우팅 판정을 기록한다. 답변에는 아직 영향을 주지 않는다.
+
+        **이 호출이 답변을 막는 일은 없어야 한다.** 라우팅은 없어도 되는 기능이고,
+        관찰 단계에서는 더욱 그렇다. 그래서 예외를 여기서 통째로 삼킨다.
+        """
+        try:
+            specialist_router.observe(question, self.workspace, self.engine.router)
+        except Exception as e:
+            # 관찰이 답변을 막으면 안 된다. 라우팅은 없어도 되는 기능이고,
+            # 관찰 단계에서는 더욱 그렇다.
+            log.warning("[%s] 라우팅 관찰 실패: %s", self.workspace, e)
+
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
         raw_text = _clean(event.get("text", ""))
         canvas_requested, text = parse_canvas_request(raw_text)
@@ -1731,6 +1744,10 @@ class WorkspaceBot:
             # 문장을 다시 만들면 본문과 출처가 어긋날 수 있다(원칙 2).
             if ctx is None:
                 ctx = self._context(client, user_id)
+            # 라우팅 판정만 남긴다 — 어댑터는 아직 부르지 않는다(B-36).
+            # 어댑터를 만들기 전에 판정이 실제 질문에서 맞는지 봐야 한다.
+            # 전문가가 하나도 켜져 있지 않으면 아무것도 하지 않는다(DB 조회조차).
+            self._observe_routing(q)
             ans = self.engine.respond(q, ctx, task)
             last = ans
             sections.append(ans.to_slack())

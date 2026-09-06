@@ -49,6 +49,14 @@ UNKNOWN_CONFIDENCE = 0.0
 
 MASTER = "none"
 
+# 전문가 목록을 이만큼 캐시한다. 질문마다 DB 를 열면 답변 경로에 연결이 하나 늘고,
+# 그 연결이 막히는 순간 라우팅이 아니라 **답변이** 느려진다.
+# 대가는 지연이다 — 콘솔에서 전문가를 켜도 최대 이 시간만큼 늦게 반영된다.
+AVAILABLE_TTL_SECONDS = 60
+
+# {워크스페이스: (만료 시각, 목록)}. 프로세스 안에서만 산다.
+_cache: dict[str, tuple[float, list]] = {}
+
 SYSTEM = """너는 사내 질문을 어느 전문가에게 넘길지 고르는 분류기다.
 
 규칙:
@@ -104,10 +112,20 @@ def available(workspace: str) -> list[Specialist]:
     메시지가 후보 목록을 바꾸면 안 된다.
 
     읽지 못하면 빈 목록이다. 그러면 마스터가 직접 답한다.
+
+    결과를 짧게 캐시한다(`AVAILABLE_TTL_SECONDS`). 질문마다 DB 를 열면 답변 경로에
+    연결이 하나 늘고, 그것이 막히는 순간 라우팅이 아니라 **답변이** 느려진다.
     """
+    import time
+
     url = os.getenv("DATABASE_URL", "").strip()
     if not url:
         return []
+
+    now = time.monotonic()
+    cached = _cache.get(workspace)
+    if cached and cached[0] > now:
+        return cached[1]
     try:
         import psycopg
 
@@ -125,7 +143,7 @@ def available(workspace: str) -> list[Specialist]:
                 """,
                 (workspace,),
             )
-            return [
+            rows = [
                 Specialist(
                     key=str(r["key"]),
                     name=str(r["name"]),
@@ -139,7 +157,13 @@ def available(workspace: str) -> list[Specialist]:
             ]
     except Exception as exc:  # noqa: BLE001 - 라우터 실패가 답변을 막으면 안 된다
         log.warning("전문가 목록을 읽지 못해 마스터가 답합니다: %s", exc)
+        # 실패도 캐시한다. 안 하면 DB 가 죽은 동안 질문마다 연결을 다시 시도해
+        # 답변이 그만큼 늦어진다.
+        _cache[workspace] = (now + AVAILABLE_TTL_SECONDS, [])
         return []
+
+    _cache[workspace] = (now + AVAILABLE_TTL_SECONDS, rows)
+    return rows
 
 
 def prompt_for(question: str, specialists: list[Specialist]) -> str:
@@ -283,3 +307,63 @@ def mcp_servers(specialist: str) -> list[McpServer]:
     except Exception as exc:  # noqa: BLE001 - 못 읽으면 붙이지 않는다
         log.warning("MCP 허용 목록을 읽지 못해 외부 연결 없이 갑니다: %s", exc)
         return []
+
+
+# --- 판정 기록 --------------------------------------------------------------
+def record(decision: Decision, *, workspace: str, elapsed_ms: int, cost_usd: float = 0.0) -> None:
+    """라우팅 판정을 남긴다. **실패해도 답변을 막지 않는다.**
+
+    어댑터가 아직 없어도 **판정만 먼저 쌓는다.** 어댑터를 만들기 전에 라우팅이
+    실제 질문에서 맞는지 봐야 하기 때문이다 — 판정이 엉망이면 어댑터를 만들어도
+    엉뚱한 데로 간다.
+
+    마스터가 답한 것도 판정이다. 그것을 안 남기면 "왜 전문가에게 안 갔나" 를
+    되짚을 수 없다. `specialist` 에 `none` 이 들어간다(외래키가 없어 가능하다).
+
+    **질문 본문은 남기지 않는다.** 여기 들어가는 것은 건수·이유·신뢰도뿐이다.
+    이유는 모델이 쓴 한 문장이라 업무 내용이 섞일 수 있어 200자로 자른다.
+    """
+    try:
+        from .console.specialist_store import record_call
+
+        record_call(
+            workspace=workspace,
+            specialist=decision.specialist.key if decision.specialist else MASTER,
+            routing_reason=decision.reason,
+            confidence=decision.confidence,
+            # 어댑터를 아직 부르지 않았으므로 성공이 아니다. `fallback` 이 맞다 —
+            # 마스터가 답했다는 뜻이다.
+            result="fallback",
+            elapsed_ms=elapsed_ms,
+            cost_usd=cost_usd,
+            error_code="no-adapter" if decision.specialist else "",
+        )
+    except Exception as exc:  # noqa: BLE001 - 기록 실패가 답변을 막으면 안 된다
+        log.warning("라우팅 판정을 남기지 못했습니다: %s", exc)
+
+
+def observe(question: str, workspace: str, router) -> Decision | None:
+    """판정만 하고 기록한다. 어댑터는 아직 부르지 않는다.
+
+    후보가 없으면 **아무것도 하지 않고 `None`** 을 돌려준다 — 전문가가 하나도
+    없는 동안 질문마다 `none` 행을 쌓으면 표가 잡음으로 가득 차고, 정작 라우팅을
+    켰을 때 무엇이 새 판정인지 구별할 수 없다.
+    """
+    import time
+
+    # 캐시가 있으므로 `route()` 안에서 다시 불려도 연결이 늘지 않는다.
+    if not available(workspace):
+        return None
+    started = time.monotonic()
+    decision = route(question, workspace, router)
+    record(
+        decision,
+        workspace=workspace,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
+    return decision
+
+
+def clear_cache() -> None:
+    """전문가 목록 캐시를 비운다. 콘솔에서 켠 것을 즉시 반영할 때 쓴다."""
+    _cache.clear()

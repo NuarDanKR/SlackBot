@@ -256,3 +256,24 @@ def test_docs_never_call_psql_without_the_port():
                     bad.append(f"{path.relative_to(ROOT)}:{i}")
 
     assert not bad, f"psql 호출에 포트가 없다: {bad}"
+
+
+def test_docs_never_hand_a_locked_path_to_psql():
+    """`psql -f` 는 **psql 프로세스가** 읽는다. 그 프로세스는 postgres 계정이다.
+
+    `/opt/tybot` 은 설치가 `root:tybot`·`o-rwx` 로 잠그므로 postgres 는 읽지 못한다.
+    권한을 풀면 봇이 자기 코드를 고칠 수 있게 되므로, root 로 읽어 stdin 으로 넘긴다.
+    """
+    bad: list[str] = []
+    for folder in ("docs", "deploy"):
+        for path in (ROOT / folder).rglob("*"):
+            if path.suffix not in {".md", ".sql", ".sh"} or not path.is_file():
+                continue
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "psql" not in line or "-f /opt/tybot" not in line:
+                    continue
+                if line.lstrip().startswith("#") or line.lstrip().startswith("###"):
+                    continue  # 설명 문구는 예외
+                bad.append(f"{path.relative_to(ROOT)}:{i}")
+
+    assert not bad, f"postgres 계정이 읽을 수 없는 경로를 psql 에 넘긴다: {bad}"

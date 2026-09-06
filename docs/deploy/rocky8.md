@@ -349,6 +349,9 @@ sudo -u tybot TYBOT_ENV_FILE=/etc/tybot/tybot.env \
 
 ## 6-A1. psql 을 부를 때 — **포트를 반드시 붙인다**
 
+두 가지가 걸린다 — **포트**와 **파일 읽기 권한**.
+
+### 포트: 55432
 우리 PostgreSQL 은 **55432** 를 쓴다. `psql` 은 5432 를 기본값으로 보므로 포트를
 빼면 이렇게 나온다 — DB 가 죽은 것처럼 보이지만 포트만 틀린 것이다.
 
@@ -363,6 +366,23 @@ sudo -u postgres psql -p 55432 -d tyslackai -f <파일>
 
 # 봇 계정으로 확인만 할 때는 설정 파일의 DATABASE_URL 을 쓴다 — 포트가 들어 있다
 sudo -u tybot bash -c 'set -a; . /etc/tybot/tybot.env; set +a; psql "$DATABASE_URL" -c "\dt"'
+```
+
+### 파일 권한: `-f /opt/tybot/...` 는 못 읽는다
+
+`psql` 파일은 **psql 프로세스가** 읽는다. 그 프로세스는 `postgres` 계정이고,
+`/opt/tybot` 은 설치 스크립트가 `root:tybot` · `o-rwx` 로 잠근다. 그래서 이렇게 난다.
+
+```
+psql: error: /opt/tybot/deploy/sql/....sql: Permission denied
+```
+
+**권한을 풀지 않는다** — 그 잠금은 봇 코드를 봇이 못 고치게 하려고 있는 것이다.
+root 로 읽어서 표준입력으로 넘긴다.
+
+```bash
+sudo cat /opt/tybot/deploy/sql/<파일>.sql \
+  | sudo -u postgres psql -p 55432 -d tyslackai -f -
 ```
 
 `tyslackai` 계정으로 소켓에 붙으면 `Peer authentication failed` 가 난다.
@@ -480,8 +500,8 @@ journalctl -u tybot-schedule-sync -f
 ### 전문 봇 라우팅 · MCP (B-36/B-39)
 
 ```bash
-sudo -u postgres psql -p 55432 -d tyslackai \
-  -f /opt/tybot/deploy/sql/specialist_routing_schema.sql
+sudo cat /opt/tybot/deploy/sql/specialist_routing_schema.sql \
+  | sudo -u postgres psql -p 55432 -d tyslackai -f -
 ```
 
 `specialist_bot` 에 세 컬럼을 더한다 — `routing_hint`(라우터가 읽는 설명),
@@ -524,7 +544,7 @@ sudo -u postgres psql -p 55432 -d tyslackai -c "\dx" | grep bigm
 ### 요약 검토자 (B-37)
 
 ```bash
-sudo -u postgres psql -p 55432 -d tyslackai -f /opt/tybot/deploy/sql/reviewer_schema.sql
+sudo cat /opt/tybot/deploy/sql/reviewer_schema.sql | sudo -u postgres psql -p 55432 -d tyslackai -f -
 ```
 
 채널에서 `/채널 검토자 @사람 09:00`. **채널 소유자만** 정할 수 있다.
@@ -536,8 +556,8 @@ sudo -u postgres psql -p 55432 -d tyslackai -f /opt/tybot/deploy/sql/reviewer_sc
 그대로 따라다니며, 누가 언제 바꿨는지 남지 않는다. DB 에는 암호화해서 넣는다.
 
 ```bash
-sudo cat /opt/tybot/deploy/sql/llm_secret_schema.sql | \
-  sudo -u postgres psql -p 55432 -d tyslackai -v ON_ERROR_STOP=1
+sudo cat /opt/tybot/deploy/sql/llm_secret_schema.sql \
+  | sudo -u postgres psql -p 55432 -d tyslackai -v ON_ERROR_STOP=1 -f -
 ```
 
 그 다음 콘솔의 **환경변수 설정 → LLM API 키** 에서 키를 붙여 넣는다.
@@ -554,7 +574,7 @@ DB 를 못 읽을 때 되돌아갈 자리로 잠시 남겨 두는 것도 방법�
 ### 개인 DM 알림 (선택)
 
 ```bash
-sudo -u postgres psql -p 55432 -d tyslackai -f /opt/tybot/deploy/sql/schedule_dm_schema.sql
+sudo cat /opt/tybot/deploy/sql/schedule_dm_schema.sql | sudo -u postgres psql -p 55432 -d tyslackai -f -
 sudo systemctl enable --now tybot-schedule-dm.timer   # 1분 주기
 ```
 

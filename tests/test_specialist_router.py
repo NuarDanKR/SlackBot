@@ -224,3 +224,67 @@ def test_schema_refuses_plain_http_and_unapproved_servers():
     assert "^https://" in sql
     assert "localhost" in sql, "서버 안에서 도는 것은 MCP 가 아니라 우리 코드로 한다"
     assert "specialist_mcp_enabled_needs_approval" in sql
+
+
+# --- 5. 관찰 단계 — 판정만 쌓는다 --------------------------------------------
+def test_no_specialists_records_nothing(monkeypatch):
+    """전문가가 하나도 없는 동안 질문마다 `none` 행을 쌓으면 표가 잡음으로 찬다.
+
+    정작 라우팅을 켰을 때 무엇이 새 판정인지 구별할 수 없다.
+    """
+    written: list[dict] = []
+    monkeypatch.setattr(sr, "available", lambda ws: [])
+    monkeypatch.setattr(sr, "record", lambda *a, **k: written.append(k))
+
+    assert sr.observe("아무 질문", "pilot", _router(Fake("{}"))) is None
+    assert written == []
+
+
+def test_a_master_decision_is_still_recorded(monkeypatch):
+    """마스터가 답한 것도 판정이다.
+
+    안 남기면 「왜 전문가에게 안 갔나」 를 되짚을 수 없다.
+    """
+    seen: list[sr.Decision] = []
+    monkeypatch.setattr(sr, "available", lambda ws: [LEGAL])
+    monkeypatch.setattr(sr, "record", lambda d, **k: seen.append(d))
+    provider = Fake('{"specialist": "none", "confidence": 0.2, "why": "사내 자료로 충분"}')
+
+    decision = sr.observe("기성금 얼마야", "pilot", _router(provider))
+
+    assert decision is not None and decision.went_to_master
+    assert seen and seen[0].reason, "왜 마스터로 갔는지 남아야 한다"
+
+
+def test_recording_failure_does_not_break_the_answer(monkeypatch):
+    """기록은 부가 기능이다. 실패해도 답변 경로를 끊지 않는다."""
+    monkeypatch.setattr(sr, "available", lambda ws: [HERMES])
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nowhere/none")
+    provider = Fake('{"specialist": "hermes", "confidence": 0.9, "why": "회의록"}')
+
+    decision = sr.observe("회의록 정리", "pilot", _router(provider))
+
+    assert decision is not None, "기록이 실패해도 판정은 돌아와야 한다"
+
+
+def test_the_cache_stops_a_database_hit_per_question(monkeypatch):
+    """질문마다 DB 를 열면 답변 경로에 연결이 하나 늘고,
+
+    그것이 막히는 순간 라우팅이 아니라 **답변이** 느려진다.
+    """
+    calls = {"n": 0}
+
+    def counting_connect(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("연결 실패")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nowhere/none")
+    sr.clear_cache()
+    monkeypatch.setattr("psycopg.connect", counting_connect)
+
+    sr.available("pilot")
+    sr.available("pilot")
+    sr.available("pilot")
+
+    assert calls["n"] == 1, "실패도 캐시한다 — 안 하면 DB 가 죽은 동안 매 질문 재시도한다"
+    sr.clear_cache()
