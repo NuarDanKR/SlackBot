@@ -339,8 +339,21 @@ class AnswerEngine:
             # 다른 워크스페이스 자료임을 근거와 출처 양쪽에 밝힌다.
             ws_tag = "" if doc.workspace == ctx.workspace else f"[{doc.workspace}] "
             blocks.append(f"### {ws_tag}채널 {doc.channel}\n{body}")
-            date = recent[-1].ts.split()[0]
-            citations.append(f"{ws_tag}{doc.channel}, 📄{doc.path.name}({date})")
+            # **줄이 실제로 온 파일**을 가리킨다.
+            #
+            # `doc.path` 를 쓰면 안 된다. `_merge()` 가 여러 일자 파일을 한 논리
+            # 채널로 합칠 때 `path` 에는 **대표 파일 하나**만 남기고, `raw_lines` 는
+            # 모든 파일에서 온다. 그래서 파일명과 날짜가 서로 다른 것을 가리켰다 —
+            # `📄2026-09-03.md(2026-09-07)` 처럼(2026-09-07 실제 발생).
+            # 3일 자 문서를 찾으러 가면 없다. 오류는 안 난다.
+            last = recent[-1]
+            source = last.source_path or doc.path
+            date = last.ts.split()[0]
+            # 여러 날에 걸쳤으면 그 사실을 밝힌다. 한 파일만 적으면 근거가 실제보다
+            # 좁아 보이고, 읽는 사람이 나머지를 찾을 방법이 없다.
+            spans = len({str(ln.source_path) for ln in recent if ln.source_path})
+            more = f" 외 {spans - 1}일" if spans > 1 else ""
+            citations.append(f"{ws_tag}{doc.channel}, 📄{source.name}({date}){more}")
 
         if not blocks:
             titles = [doc.channel for doc in visible_docs]
