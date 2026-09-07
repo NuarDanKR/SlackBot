@@ -239,6 +239,25 @@ def due(send_at: time, now: datetime) -> bool:
 
 
 # --- 하루에 한 번 -------------------------------------------------------------
+SCHEMA_MISSING = (
+    "review_digest_sent 테이블이 없습니다. 스키마를 먼저 적용하세요:\n"
+    "  sudo cat /opt/tybot/deploy/sql/review_digest_schema.sql "
+    "| sudo -u postgres psql -p 55432 -d tyslackai -f -"
+)
+
+
+def schema_ready(conn) -> bool:
+    """이력 테이블이 있는가.
+
+    없으면 회차마다 **채널 수만큼 트레이스백**이 쌓이고, 무엇을 해야 하는지는
+    어디에도 안 적힌다. 시작할 때 한 번 보고 할 일을 말한다.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.review_digest_sent') AS t")
+        row = cur.fetchone()
+    return bool(row and row.get("t"))
+
+
 def already_sent(conn, digest: Digest, *, kind: str = KIND_ATTACHMENT) -> bool:
     with conn.cursor() as cur:
         cur.execute(
@@ -448,6 +467,9 @@ def main(argv: list[str] | None = None) -> int:
     with psycopg.connect(
         os.environ["DATABASE_URL"], row_factory=psycopg.rows.dict_row
     ) as conn:
+        if not schema_ready(conn):
+            logger.error("%s", SCHEMA_MISSING)
+            return 2
         channels = _channels(conn)
         if args.dry_run:
             clients = {}

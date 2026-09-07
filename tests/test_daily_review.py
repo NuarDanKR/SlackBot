@@ -377,3 +377,40 @@ def test_the_dm_never_carries_file_content():
 
     for leaked in ("read_bytes", "read_text", "object_path"):
         assert leaked not in source, f"하루치가 파일 내용을 만진다: {leaked}"
+
+
+def test_a_missing_schema_says_what_to_run():
+    """스키마를 안 적용하고 타이머를 켜면 회차마다 채널 수만큼 트레이스백이 쌓인다.
+
+    그 로그 어디에도 무엇을 해야 하는지는 안 적힌다.
+    """
+    assert "review_digest_schema.sql" in dr.SCHEMA_MISSING
+    assert "-p 55432" in dr.SCHEMA_MISSING, "포트를 빠뜨리면 psql 이 소켓을 찾는다"
+
+
+def test_schema_check_reads_the_catalog():
+    class Conn:
+        def __init__(self, value):
+            self.value = value
+
+        class _Cur:
+            def __init__(self, outer):
+                self.outer = outer
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql):
+                assert "review_digest_sent" in sql
+
+            def fetchone(self):
+                return {"t": self.outer.value}
+
+        def cursor(self):
+            return self._Cur(self)
+
+    assert dr.schema_ready(Conn("review_digest_sent"))
+    assert not dr.schema_ready(Conn(None))
