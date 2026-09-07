@@ -96,11 +96,20 @@ def test_oversized_document_is_not_converted():
     assert "[첨부:미변환]" in lines[0] and warns == []
 
 
-def test_long_text_is_truncated():
-    payload = ("줄\n" * 500).encode()
+def test_long_text_folds_the_middle_not_the_tail(monkeypatch):
+    """예전에는 앞 200줄만 남겼다. csv 의 합계는 마지막 줄에 있다."""
+    import tybot.archive.files as fl
+
+    monkeypatch.setattr(fl, "MAX_TEXT_LINES", 10)
+    monkeypatch.setattr(fl, "TEXT_FOLD_HEAD", 4)
+    monkeypatch.setattr(fl, "TEXT_FOLD_TAIL", 3)
+    payload = (("줄" + chr(10)) * 500 + "합계,19000").encode()
+
     with patch("tybot.archive.files.urlopen", return_value=_Resp(payload)):
-        body = download_text(SlackFile.from_event(_f("큰파일.txt", "txt")), "xoxb-t")
-    assert body.count("\n") <= 201 and "이하 생략" in body
+        body = download_text(SlackFile.from_event(_f("큰파일.csv", "csv")), "xoxb-t")
+
+    assert "가운데" in body and "생략" in body
+    assert body.splitlines()[-1] == "합계,19000", "합계가 잘려 나갔다"
 
 
 def test_missing_url_raises():

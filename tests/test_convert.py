@@ -122,14 +122,28 @@ def test_convertible_set():
         assert not can_convert(ext)
 
 
-def test_large_sheet_is_truncated():
+def test_large_sheet_folds_the_middle_not_the_tail(monkeypatch):
+    """예전에는 앞 400줄만 남기고 뒤를 버렸다(2026-09-07 이전).
+
+    표의 합계는 **뒤에** 있어서, 그러면 정작 사람이 묻는 값이 사라진다. 그런데도
+    답변은 정상적으로 나가므로 「숫자를 못 읽는다」 로만 보였다.
+    """
     from openpyxl import Workbook
 
+    import tybot.archive.convert as cv
+
+    monkeypatch.setattr(cv, "MAX_LINES", 10)
+    monkeypatch.setattr(cv, "FOLD_HEAD", 4)
+    monkeypatch.setattr(cv, "FOLD_TAIL", 3)
     wb = Workbook()
     for i in range(600):
         wb.active.append([f"행 {i}"])
+    wb.active.append(["합계"])
     buf = io.BytesIO()
     wb.save(buf)
+
     lines = convert("xlsx", buf.getvalue())
-    assert len(lines) <= 402
-    assert any("이하 생략" in ln for ln in lines)
+
+    assert len(lines) <= 4 + 1 + 3 + 1  # 머리 + 접기표시 + 꼬리 + 시트머리
+    assert any("가운데" in ln and "생략" in ln for ln in lines)
+    assert lines[-1] == "합계", f"합계가 잘려 나갔다: {lines[-3:]}"

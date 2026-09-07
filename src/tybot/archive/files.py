@@ -36,7 +36,16 @@ UNCONVERTED_EXTS = {
 
 MAX_TEXT_BYTES = 256 * 1024  # 원문에 넣는 텍스트 상한
 MAX_DOC_BYTES = 20 * 1024 * 1024  # 변환 시도 상한(20MB)
-MAX_TEXT_LINES = 200
+# 텍스트 파일에서 원문에 넣는 줄 수.
+#
+# 200 이던 것을 올렸다(2026-09-07). `csv`·`tsv` 가 여기로 오는데, 표는 **뒤에 합계가
+# 있어서** 앞 200줄만 남으면 정작 필요한 값이 빠진다. 문서 변환(`convert.MAX_LINES`)과
+# 같은 이유·같은 값으로 맞춘다 — 두 경로가 갈리면 「csv 는 되는데 xlsx 는 안 된다」
+# 같은 설명할 수 없는 차이가 생긴다.
+MAX_TEXT_LINES = 20_000
+# 접을 때 남길 머리와 꼬리. 꼬리가 합계다.
+TEXT_FOLD_HEAD = 12_000
+TEXT_FOLD_TAIL = 4_000
 DOWNLOAD_TIMEOUT = 20
 
 
@@ -112,13 +121,34 @@ def _safe_component(value: str) -> str:
     return safe or "unnamed"
 
 
+def _fold_lines(lines: list[str]) -> tuple[list[str], bool]:
+    """상한을 넘으면 **가운데를 접는다.** 뒤를 자르지 않는다.
+
+    표는 머리(헤더)와 꼬리(합계)가 둘 다 필요하다. 앞에서 잘라 내면 헤더는 남고
+    합계가 사라지는데, 사람이 묻는 값은 대개 합계다.
+
+    접었으면 그 사실을 줄에 적으므로, 호출부는 「이하 생략」 을 또 붙이지 않는다
+    (같은 말을 두 번 하면 어느 쪽이 진짜 상한인지 알 수 없다).
+    """
+    if len(lines) <= MAX_TEXT_LINES:
+        return lines, False
+    dropped = len(lines) - TEXT_FOLD_HEAD - TEXT_FOLD_TAIL
+    return (
+        [
+            *lines[:TEXT_FOLD_HEAD],
+            f"…(가운데 {dropped}줄 생략, 총 {len(lines)}줄)",
+            *lines[-TEXT_FOLD_TAIL:],
+        ],
+        True,
+    )
+
+
 def _decode_text(raw: bytes, declared_size: int) -> str:
     truncated = len(raw) > MAX_TEXT_BYTES
     text = raw[:MAX_TEXT_BYTES].decode("utf-8", errors="replace")
     lines = text.splitlines()
-    if len(lines) > MAX_TEXT_LINES:
-        lines = lines[:MAX_TEXT_LINES]
-        truncated = True
+    lines, folded = _fold_lines(lines)
+    truncated = truncated and not folded
     out = "\n".join(lines)
     if truncated:
         out += f"\n…(이하 생략, 원본 {max(1, declared_size // 1024)}KB)"
@@ -153,9 +183,8 @@ def download_text(f: SlackFile, bot_token: str) -> str:
     truncated = len(raw) > MAX_TEXT_BYTES
     text = raw[:MAX_TEXT_BYTES].decode("utf-8", errors="replace")
     lines = text.splitlines()
-    if len(lines) > MAX_TEXT_LINES:
-        lines = lines[:MAX_TEXT_LINES]
-        truncated = True
+    lines, folded = _fold_lines(lines)
+    truncated = truncated and not folded
     out = "\n".join(lines)
     if truncated:
         out += f"\n…(이하 생략, 원본 {max(1, f.size // 1024)}KB)"
