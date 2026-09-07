@@ -136,6 +136,12 @@ class Answer:
     reason: str  # answered | advice | no_hits | no_access | smalltalk | out_of_scope | error
     # 사용자에게 보여줄 근거 요약용 검색어. 새로 저장하는 값이 아니라 이미 쓴 값이다.
     terms: list[str] = field(default_factory=list)
+    # 어느 전문가가 문장을 만들었나. 비면 마스터다.
+    #
+    # **모델명으로는 구별할 수 없다.** 전문가에게 지정한 모델이 마스터 기본 모델과
+    # 같으면 화면에 같은 이름이 뜨고, 그러면 「누가 답했나」 를 물어도 알 수 없다
+    # (2026-09-07 실제로 그랬다). 값은 이미 가지고 있었고 표시만 안 했다.
+    specialist: str = ""
 
     @property
     def doc_count(self) -> int:
@@ -163,6 +169,8 @@ class Answer:
             bits.append("아카이브 근거 없음")
         if self.model:
             bits.append(self.model)
+        if self.specialist:
+            bits.append(f"{self.specialist} 전문봇")
         return f"_근거: {' · '.join(bits)}_" if bits else ""
 
     def to_slack(self) -> str:
@@ -403,6 +411,7 @@ class AnswerEngine:
                     special.cost_usd,
                     total,
                     "answered",
+                    specialist=special.specialist,
                 )
 
         messages = [
@@ -632,6 +641,7 @@ class AnswerEngine:
                     special.cost_usd,
                     len(hits),
                     "answered",
+                    specialist=special.specialist,
                 )
 
         messages = [

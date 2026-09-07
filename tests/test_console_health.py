@@ -515,3 +515,30 @@ def test_a_fresh_index_says_nothing(monkeypatch):
     monkeypatch.setattr("tybot.search_index.indexed_at", lambda: reader._now().isoformat())
 
     assert health._index_freshness() == ("", "ok")
+
+
+def test_a_registered_but_unused_specialist_is_surfaced(monkeypatch):
+    """`state` 가 `enabled` 가 아니면 라우터가 후보로 올리지 않는다.
+
+    그런데 화면에는 「등록됨」 으로 보이고 답변은 정상적으로 나가므로, 전문가가 한
+    번도 안 불렸다는 사실이 어디에도 드러나지 않는다 — 2026-09-07 에 `draft` 로 남아
+    있던 Hermes 가 그랬다. 모델명이 마스터와 같아서 화면으로도 구별되지 않았다.
+    """
+    monkeypatch.setattr(health, "_idle_specialists", lambda: ["hermes(draft)"])
+    monkeypatch.setattr(health, "_index_freshness", lambda: ("", "ok"))
+    records = [
+        {"reason": "answered", "hits": 3, "elapsed_ms": 100, "error": ""}
+        for _ in range(20)
+    ]
+
+    section = health.answer_section(records)
+
+    assert any("hermes(draft)" in p for p in section["problems"])
+    assert any("마스터가 답합니다" in p for p in section["problems"])
+
+
+def test_no_database_means_no_idle_warning(monkeypatch):
+    """DB 를 안 쓰는 설치에 「고칠 수 없는 경고」 를 켜 두지 않는다."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    assert health._idle_specialists() == []

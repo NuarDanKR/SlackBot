@@ -184,6 +184,34 @@ def _index_freshness() -> tuple[str, str]:
     return ("", "ok")
 
 
+def _idle_specialists() -> list[str]:
+    """등록만 되고 **라우팅 후보가 아닌** 전문가.
+
+    `state` 가 `enabled` 가 아니면 라우터가 아예 후보로 올리지 않는다. 그런데 화면에는
+    「등록됨」 으로 보이고 답변은 정상적으로 나가므로, 전문가가 한 번도 안 불렸다는
+    사실이 어디에도 드러나지 않는다 — 2026-09-07 에 `draft` 로 남아 있던 Hermes 가
+    그랬다. 모델명이 마스터와 같아서 화면으로도 구별되지 않았다.
+    """
+    url = os.getenv("DATABASE_URL", "").strip()
+    if not url:
+        return []
+    try:
+        import psycopg
+
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT key, state FROM specialist_bot
+                 WHERE state <> 'enabled'
+                 ORDER BY key
+                """
+            )
+            return [f"{row[0]}({row[1]})" for row in cur.fetchall()]
+    except Exception as exc:  # noqa: BLE001 - 점검이 이것으로 멈추면 안 된다
+        logger.debug("전문가 상태를 읽지 못했습니다: %s", exc)
+        return []
+
+
 def answer_section(records: list[dict]) -> dict:
     """감사기록(qa-log)으로 답변이 실제로 쓸모 있었는지 본다."""
     total = len(records)
@@ -236,6 +264,16 @@ def answer_section(records: list[dict]) -> dict:
     if index_note:
         level = _worst(level, index_level)
         problems.append(index_note)
+
+    # 등록만 되고 라우팅 후보가 아닌 전문가. 답변은 정상적으로 나가고 전문가만
+    # 한 번도 안 불린다 — 그 사실이 여기 말고는 드러나는 자리가 없다.
+    idle = _idle_specialists()
+    if idle:
+        level = _worst(level, "warn")
+        problems.append(
+            f"등록됐지만 사용 상태가 아닌 전문 봇: {', '.join(idle)}"
+            " — 라우팅 후보에서 빠져 마스터가 답합니다"
+        )
 
     reasons = Counter(str(r.get("reason") or "-") for r in records)
     return {

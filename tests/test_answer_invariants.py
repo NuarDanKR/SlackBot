@@ -383,3 +383,25 @@ def test_the_summary_prompt_does_not_refuse_subjective_asks():
 
     assert "주관적인 요청도 원문으로 답한다" in SUMMARY_PROMPT
     assert "아카이브 원문으로 답할 수 있는 질문이 아닙니다" not in SUMMARY_PROMPT
+
+
+def test_the_footer_says_who_wrote_the_answer(tmp_path):
+    """모델명으로는 마스터와 전문가를 구별할 수 없다.
+
+    전문가에게 지정한 모델이 마스터 기본 모델과 같으면 화면에 같은 이름이 뜨고,
+    그러면 「누가 답했나」 를 물어도 알 수 없다(2026-09-07 실제로 그랬다).
+    """
+    engine = _engine_with(tmp_path, _Special("콘솔 배포는 끝났습니다."))
+
+    answer = engine.answer("콘솔 배포 어떻게 됐어", _ctx(MINE))
+
+    assert "hermes 전문봇" in answer.to_slack()
+
+
+def test_a_master_answer_claims_no_specialist(tmp_path):
+    """마스터가 답했으면 전문가 이름이 붙지 않아야 한다 — 붙으면 거짓이 된다."""
+    engine = _engine_with(tmp_path, _Special(""))
+
+    answer = engine.answer("콘솔 배포 어떻게 됐어", _ctx(MINE))
+
+    assert "전문봇" not in answer.to_slack()
