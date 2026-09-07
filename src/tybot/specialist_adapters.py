@@ -122,6 +122,10 @@ class PromptSpecialist:
         self._router = router
         # 비면 게이트웨이 기본 모델. 간단한 분야에 무거운 모델을 쓸 이유가 없다.
         self._model = model or ""
+        # 계약(`SpecialistAdapter`)은 문장만 돌려준다. 어느 모델이 얼마에 답했는지는
+        # 감사기록과 사용량에 남아야 하므로 여기에 둔다 — 호출부가 뒤에 읽는다.
+        self.last_model = ""
+        self.last_cost_usd = 0.0
 
     def complete(self, request) -> str:
         from .gateway.base import Message, Sensitivity
@@ -148,6 +152,8 @@ class PromptSpecialist:
             sensitivity=Sensitivity.CONFIDENTIAL,
             max_tokens=1024,
         )
+        self.last_model = response.model
+        self.last_cost_usd = response.cost_usd
         return response.text
 
 

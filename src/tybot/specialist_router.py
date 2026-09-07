@@ -84,6 +84,8 @@ class Specialist:
     adapter: str
     model: str
     min_confidence: float
+    # 콘솔에서 넣은 답변 규칙. 비면 어댑터가 저장소 프롬프트를 쓴다.
+    rules: str = ""
 
 
 @dataclass(frozen=True)
@@ -133,7 +135,7 @@ def available(workspace: str) -> list[Specialist]:
             cur.execute(
                 """
                 SELECT s.key, s.name, s.domain, s.routing_hint, s.adapter,
-                       s.model, s.min_confidence
+                       s.model, s.min_confidence, s.rules
                   FROM specialist_bot s
                   JOIN specialist_workspace w ON w.specialist = s.key
                  WHERE s.state = 'enabled'
@@ -152,6 +154,7 @@ def available(workspace: str) -> list[Specialist]:
                     adapter=str(r["adapter"]),
                     model=str(r["model"] or ""),
                     min_confidence=float(r["min_confidence"]),
+                    rules=str(r["rules"] or ""),
                 )
                 for r in cur.fetchall()
             ]
@@ -264,6 +267,16 @@ def route(question: str, workspace: str, router) -> Decision:
 
 
 # --- MCP 연결 ---------------------------------------------------------------
+@dataclass(frozen=True)
+class SpecialistAnswer:
+    """전문가가 만든 문장. **출처는 없다** — 그 자리는 마스터 몫이다."""
+
+    text: str
+    specialist: str
+    model: str
+    cost_usd: float
+
+
 @dataclass(frozen=True)
 class McpServer:
     name: str
@@ -379,7 +392,7 @@ def ask(
     router,
     fallback,
     authorization_id: str,
-) -> str | None:
+) -> SpecialistAnswer | None:
     """고른 전문가에게 묻는다. 마스터가 답할 자리면 `None`.
 
     **근거는 이미 권한을 통과한 것만 들어온다.** 이 함수는 판정하지 않는다 —
@@ -406,9 +419,10 @@ def ask(
 
     started = time.monotonic()
     result = None
+    adapter = None
     try:
         adapter = specialist_adapters.build(
-            chosen.adapter, router, model=chosen.model
+            chosen.adapter, router, model=chosen.model, rules=chosen.rules
         )
         request = SpecialistRequest(
             question=question,
@@ -441,13 +455,19 @@ def ask(
             confidence=decision.confidence,
             result=result.result if result else "error",
             elapsed_ms=elapsed_ms,
-            # 프롬프트 방식은 우리 게이트웨이가 부르므로 비용이 그쪽에 이미 잡힌다.
-            # 여기서 또 더하면 이중 계산이 된다.
-            cost_usd=0.0,
+            cost_usd=getattr(adapter, "last_cost_usd", 0.0),
             error_code=result.error_code if result else "adapter-build",
         )
     except Exception as exc:  # noqa: BLE001 - 기록 실패가 답변을 막으면 안 된다
         log.warning("전문가 호출을 남기지 못했습니다: %s", exc)
 
     # 계약을 못 지켰거나 만들지 못했으면 마스터가 답한다.
-    return result.text if result else None
+    # `fallback` 이 빈 문자열을 주므로, 빈 답도 곧 「마스터가 답한다」 다.
+    if result is None or not result.text.strip():
+        return None
+    return SpecialistAnswer(
+        text=result.text,
+        specialist=chosen.key,
+        model=getattr(adapter, "last_model", "") or chosen.model,
+        cost_usd=getattr(adapter, "last_cost_usd", 0.0),
+    )

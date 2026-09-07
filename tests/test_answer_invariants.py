@@ -257,3 +257,88 @@ def test_the_source_check_is_caused_by_citations_not_by_boilerplate(tmp_path):
     assert "출처:" not in ungrounded.to_slack(), (
         "근거가 없는데도 출처 줄이 붙는다 — 위의 검사는 아무것도 지키지 않는다"
     )
+
+
+# --- 전문가가 답할 때도 선은 그대로 --------------------------------------
+class _Special:
+    """전문가 훅 흉내. 엔진은 전문가를 모르고 결과만 받는다."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.seen: list[tuple[str, str]] = []
+
+    def __call__(self, question, ctx, evidence):
+        from tybot.specialist_router import SpecialistAnswer
+
+        self.seen.append((question, evidence))
+        if not self.text:
+            return None
+        return SpecialistAnswer(self.text, "hermes", "claude-haiku-4-5", 0.0002)
+
+
+def _engine_with(tmp_path, hook):
+    router = Router(
+        providers={"anthropic": Fake()},
+        registry={
+            "claude-sonnet-5": ModelSpec(
+                "claude-sonnet-5", "anthropic", 3.0, 15.0, Sensitivity.CONFIDENTIAL
+            )
+        },
+        cost_guard=CostGuard(10.0),
+    )
+    for name, body in (("전산.md", DOC_MINE), ("김해외동.md", DOC_NOT_MINE)):
+        p = tmp_path / "channels" / "pilot" / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+    return AnswerEngine(ArchiveStore(tmp_path), router, specialist=hook)
+
+
+def test_a_specialist_answer_still_carries_our_sources(tmp_path):
+    """전문가는 문장만 준다. 출처는 마스터가 붙인다(원칙 2)."""
+    hook = _Special("콘솔 배포는 끝났습니다.")
+    engine = _engine_with(tmp_path, hook)
+
+    answer = engine.answer("콘솔 배포 어떻게 됐어", _ctx(MINE))
+
+    assert answer.text == "콘솔 배포는 끝났습니다."
+    assert "출처:" in answer.to_slack(), "전문가가 답해도 출처는 붙는다"
+    assert answer.reason == "answered"
+
+
+def test_the_specialist_only_sees_permitted_evidence(tmp_path):
+    """훅에 넘어가는 근거는 이미 `visible_docs` 를 통과한 것뿐이다(원칙 3)."""
+    hook = _Special("답")
+    engine = _engine_with(tmp_path, hook)
+
+    # 근거가 잡히는 질문을 쓴다. 0건이면 전문가를 아예 부르지 않으므로
+    # (아래 테스트가 그것을 고정한다) 여기서는 새는지를 볼 수 없다.
+    engine.answer("콘솔 배포 어떻게 됐어", _ctx(MINE))
+
+    assert hook.seen, "훅이 불리지 않았다 — 배선이 끊겼다"
+    _, evidence = hook.seen[0]
+    for leak in ("김해외동", "3억 2천", "180182"):
+        assert leak not in evidence, f"권한 밖 근거가 전문가에게 갔다: {leak}"
+
+
+def test_a_silent_specialist_falls_back_to_the_master(tmp_path):
+    """전문가가 못 답하면 마스터가 답한다. 답이 아예 안 나가면 안 된다."""
+    engine = _engine_with(tmp_path, _Special(""))
+
+    answer = engine.answer("콘솔 배포 어떻게 됐어", _ctx(MINE))
+
+    assert answer.text.strip()
+    assert "출처:" in answer.to_slack()
+
+
+def test_no_evidence_means_the_specialist_is_never_asked(tmp_path):
+    """근거가 0건이면 전문가에게도 묻지 않는다.
+
+    물으면 전문가가 근거 없이 문장을 만들고, 거기에 우리 출처가 붙는다.
+    """
+    hook = _Special("아마 5억쯤 됩니다.")
+    engine = _engine_with(tmp_path, hook)
+
+    answer = engine.answer("아무데도 없는 이야기 알려줘", _ctx(MINE))
+
+    assert hook.seen == [], "근거 0건인데 전문가를 불렀다"
+    assert "5억" not in answer.to_slack()

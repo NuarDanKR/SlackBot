@@ -1608,19 +1608,6 @@ class WorkspaceBot:
             )
             self.qa_log.write(rec)
 
-    def _observe_routing(self, question: str) -> None:
-        """전문 봇 라우팅 판정을 기록한다. 답변에는 아직 영향을 주지 않는다.
-
-        **이 호출이 답변을 막는 일은 없어야 한다.** 라우팅은 없어도 되는 기능이고,
-        관찰 단계에서는 더욱 그렇다. 그래서 예외를 여기서 통째로 삼킨다.
-        """
-        try:
-            specialist_router.observe(question, self.workspace, self.engine.router)
-        except Exception as e:
-            # 관찰이 답변을 막으면 안 된다. 라우팅은 없어도 되는 기능이고,
-            # 관찰 단계에서는 더욱 그렇다.
-            log.warning("[%s] 라우팅 관찰 실패: %s", self.workspace, e)
-
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
         raw_text = _clean(event.get("text", ""))
         canvas_requested, text = parse_canvas_request(raw_text)
@@ -1744,10 +1731,6 @@ class WorkspaceBot:
             # 문장을 다시 만들면 본문과 출처가 어긋날 수 있다(원칙 2).
             if ctx is None:
                 ctx = self._context(client, user_id)
-            # 라우팅 판정만 남긴다 — 어댑터는 아직 부르지 않는다(B-36).
-            # 어댑터를 만들기 전에 판정이 실제 질문에서 맞는지 봐야 한다.
-            # 전문가가 하나도 켜져 있지 않으면 아무것도 하지 않는다(DB 조회조차).
-            self._observe_routing(q)
             ans = self.engine.respond(q, ctx, task)
             last = ans
             sections.append(ans.to_slack())
@@ -2249,6 +2232,53 @@ def enforce_archive_writable(problems: dict[str, str]) -> None:
     )
 
 
+def specialist_hook(router):
+    """엔진이 근거를 모은 뒤 부를 훅을 만든다. 전문가 문장 또는 `None`.
+
+    **엔진은 전문가를 모른다.** 라우팅·DB·계약이 여기 있고 엔진은 결과만 받는다.
+    `None` 이면 마스터가 그대로 답한다.
+
+    워크스페이스는 `ctx` 에서 읽는다 — 엔진은 워크스페이스마다 하나가 아니라
+    **전체에 하나**라, 봇 인스턴스에 매어 두면 마지막 봇의 것만 남는다.
+
+    **이 호출이 답변을 막는 일은 없어야 한다.** 라우팅도 전문가도 없어도 되는
+    기능이라, 예외를 통째로 삼키고 마스터로 넘긴다.
+    """
+
+    def hook(question: str, ctx, evidence: str):
+        workspace = getattr(ctx, "workspace", "") or ""
+        if not workspace:
+            return None
+        try:
+            decision = specialist_router.route(question, workspace, router)
+            if decision.went_to_master:
+                # 후보가 아예 없으면 기록하지 않는다 — 질문마다 `none` 행을 쌓으면
+                # 표가 잡음으로 차고, 정작 라우팅을 켰을 때 무엇이 새 판정인지
+                # 구별할 수 없다.
+                if specialist_router.available(workspace):
+                    specialist_router.record(decision, workspace=workspace, elapsed_ms=0)
+                return None
+            # 근거는 이미 `visible_docs` 를 통과한 것뿐이다(원칙 3).
+            # `authorization_id` 는 그 판정을 가리키고, 나중에 「무엇이 전문가에게
+            # 갔나」 를 되짚는 근거가 된다.
+            return specialist_router.ask(
+                decision,
+                question=question,
+                workspace=workspace,
+                evidence=[evidence],
+                router=router,
+                # 전문가가 못 답하면 빈 문자열. 호출부가 그것을 「마스터가 답한다」
+                # 로 읽는다 — 여기서 마스터 답변을 만들면 답이 두 번 만들어진다.
+                fallback=lambda: "",
+                authorization_id=f"{workspace}:{getattr(ctx, 'role', '-') or '-'}",
+            )
+        except Exception as e:
+            log.warning("[%s] 전문가 호출 실패: %s", workspace, e)
+            return None
+
+    return hook
+
+
 def build_bots() -> list[WorkspaceBot]:
     """설정을 읽어 워크스페이스별 봇을 만든다. 공유 자원은 한 번만 생성한다."""
     from ..gateway.router import Router
@@ -2261,15 +2291,13 @@ def build_bots() -> list[WorkspaceBot]:
     enforce_archive_writable(problems)
 
     store = ArchiveStore(archive_dir)
-    engine = AnswerEngine(
-        store,
-        Router.from_default_registry(
-            daily_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
-            default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
-            # 재시작해도 당일 누적이 유지되어야 상한이 실제로 상한 역할을 한다.
-            cost_state_path=cost_state_path(str(qa_log.root)),
-        ),
+    router = Router.from_default_registry(
+        daily_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
+        default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
+        # 재시작해도 당일 누적이 유지되어야 상한이 실제로 상한 역할을 한다.
+        cost_state_path=cost_state_path(str(qa_log.root)),
     )
+    engine = AnswerEngine(store, router, specialist=specialist_hook(router))
 
     configs = load_workspaces()
     # 상태 트리가 다른 워크스페이스 이름을 표시하려면 키만으로는 부족하다.

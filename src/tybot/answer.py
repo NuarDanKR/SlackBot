@@ -269,9 +269,16 @@ class AnswerEngine:
         sensitivity: Sensitivity = Sensitivity.CONFIDENTIAL,
         max_hits: int = 20,
         max_lines_per_channel: int = 60,
+        specialist=None,
     ) -> None:
         self._store = store
         self._router = router
+        # 전문가 훅. `(question, ctx, evidence) -> SpecialistAnswer | None`.
+        #
+        # **엔진은 전문가를 모른다.** 라우팅·DB·계약은 호출부(`slack/pilot.py`)가
+        # 넣어 준다. 그래야 엔진 테스트가 DB 없이 돌고, 전문가가 없는 설치에서도
+        # 이 파일이 그대로 쓰인다.
+        self._specialist = specialist
         self._sensitivity = sensitivity
         self._max_hits = max_hits
         self._max_lines_per_channel = max_lines_per_channel
@@ -555,6 +562,36 @@ class AnswerEngine:
             if attached.any
             else prompt
         )
+        # 전문가에게 먼저 묻는다. **근거는 이미 권한을 통과한 것뿐**이고(위 검색이
+        # `visible_docs` 로 걸렀다), 출처는 아래에서 우리가 붙인다 — 전문가는
+        # 문장만 돌려준다(원칙 2·3).
+        #
+        # 전문가가 없거나 못 답하면 `None` 이고, 그때 마스터가 그대로 답한다.
+        if self._specialist is not None:
+            special = self._specialist(q, ctx, _evidence_block(hits))
+            if special is not None and special.text.strip():
+                citations = [
+                    h.citation(with_workspace=h.doc.workspace != ctx.workspace)
+                    for h in hits[:5]
+                ]
+                citations += _attachment_source_links(hits)
+                logger.info(
+                    "answer ok(전문가) ws=%s specialist=%s model=%s hits=%d srcs=%s",
+                    ctx.workspace,
+                    special.specialist,
+                    special.model,
+                    len(hits),
+                    citations,
+                )
+                return Answer(
+                    special.text,
+                    citations,
+                    special.model,
+                    special.cost_usd,
+                    len(hits),
+                    "answered",
+                )
+
         messages = [
             Message("system", SYSTEM_PROMPT),
             Message("user", user_content),
