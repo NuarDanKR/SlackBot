@@ -71,6 +71,10 @@ JSON 하나만 출력한다:
 {"specialist": "키 또는 none", "confidence": 0.0~1.0, "why": "한 문장"}"""
 
 
+class _SkipRecord(Exception):
+    """기록을 건너뛴다(측정용). 밖으로 새지 않는다."""
+
+
 class RouterError(Exception):
     """라우터를 쓸 수 없다. 호출부는 마스터 답변으로 넘어간다."""
 
@@ -392,6 +396,7 @@ def ask(
     router,
     fallback,
     authorization_id: str,
+    record_call_row: bool = True,
 ) -> SpecialistAnswer | None:
     """고른 전문가에게 묻는다. 마스터가 답할 자리면 `None`.
 
@@ -447,7 +452,11 @@ def ask(
         log.warning("전문가 호출 실패 key=%s: %s", chosen.key, exc)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    # 측정 스크립트는 기록하지 않는다. 재생한 질문이 운영 통계에 섞이면
+    # 「전문가가 실제로 몇 번 답했나」 가 부풀고, 그 표를 믿을 수 없게 된다.
     try:
+        if not record_call_row:
+            raise _SkipRecord
         record_call(
             workspace=workspace,
             specialist=chosen.key,
@@ -458,6 +467,8 @@ def ask(
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
             error_code=result.error_code if result else "adapter-build",
         )
+    except _SkipRecord:
+        pass
     except Exception as exc:  # noqa: BLE001 - 기록 실패가 답변을 막으면 안 된다
         log.warning("전문가 호출을 남기지 못했습니다: %s", exc)
 
