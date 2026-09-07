@@ -20,6 +20,21 @@ RAW_HEADING_RE = re.compile(r"^##\s*원문", re.MULTILINE)
 SUMMARY_HEADING_RE = re.compile(r"^##\s*요약", re.MULTILINE)
 # > [2026-08-12 09:15] 홍길동: 내용
 RAW_LINE_RE = re.compile(r"^>\s*\[(?P<ts>[^\]]+)\]\s*(?P<speaker>[^:]+):\s*(?P<text>.*)$")
+
+# 만들어 낸 channel_id 의 접두사. `writer._stable_channel_id()` 가 Slack ID 를 모를 때
+# 붙인다. **여기서 다시 적는 이유는 순환 import 때문이다** — `writer` 가 이 모듈을
+# 쓰므로 반대 방향으로 끌어올 수 없다. 값이 갈리면 같은 채널이 다시 둘로 갈리므로
+# `tests/test_originals.py` 가 양쪽이 같은지 본다.
+SYNTHETIC_ID_PREFIX = "legacy-"
+
+
+def is_synthetic_channel_id(value: str | None) -> bool:
+    """Slack 이 준 ID 가 아니라 우리가 만든 자리표시자인가.
+
+    이 값을 신원으로 쓰면 같은 채널의 v1·v2 문서가 서로 다른 채널이 되고,
+    출처가 두 줄 나오고 **권한 메타가 따로 계산된다**(2026-09-07 실제 발생).
+    """
+    return bool(value) and str(value).startswith(SYNTHETIC_ID_PREFIX)
 # 검색어 토큰 규칙은 `search_index.TOKEN_RE` 하나뿐이다.
 # 여기에 또 적으면 색인 후보와 파일 스캔이 다른 토큰으로 찾게 되고,
 # 그건 에러가 아니라 **같은 질문에 다른 답**으로 나타난다.
@@ -280,14 +295,30 @@ class ArchiveStore:
     def docs(self) -> list[ArchiveDoc]:
         loaded = self.source_docs()
 
-        # v1에는 channel_id가 없다. 같은 이름의 v2 문서가 있으면 그 ID로 묶어
-        # 마이그레이션 전후 원문이 답변에 중복으로 들어가지 않게 한다.
-        ids_by_name = {
-            (doc.workspace, doc.channel): doc.channel_id for doc in loaded if doc.channel_id
+        # 같은 이름의 문서에 **진짜 Slack ID** 가 있으면 그 ID 로 묶는다.
+        # 마이그레이션 전후 원문이 답변에 두 벌로 들어가지 않게 하는 장치다.
+        #
+        # **만들어 낸 ID(`legacy-…`)를 신원으로 쓰지 않는다.** 그건 디렉터리 이름용
+        # 자리표시자인데, 프론트매터에 실려 여기까지 오면 같은 채널이 둘로 갈린다.
+        # 갈리면 출처가 두 줄 나오고, 더 나쁘게는 **권한 메타가 따로 계산된다** —
+        # `visibility`·`acl`·`share_with` 를 그룹마다 정하므로 같은 채널이 한쪽으로는
+        # 보이고 다른 쪽으로는 안 보일 수 있다(2026-09-07 실제 발생).
+        real_ids = {
+            (doc.workspace, doc.channel): doc.channel_id
+            for doc in loaded
+            if doc.channel_id and not is_synthetic_channel_id(doc.channel_id)
         }
         grouped: dict[tuple[str, str], list[ArchiveDoc]] = {}
         for doc in loaded:
-            identity = doc.channel_id or ids_by_name.get((doc.workspace, doc.channel)) or doc.channel
+            own = doc.channel_id
+            if own and is_synthetic_channel_id(own):
+                own = None
+            identity = (
+                own
+                or real_ids.get((doc.workspace, doc.channel))
+                or doc.channel_id
+                or doc.channel
+            )
             grouped.setdefault((doc.workspace, identity), []).append(doc)
         return [self._merge(parts) for parts in grouped.values()]
 
@@ -337,7 +368,17 @@ class ArchiveStore:
             acl=frozenset(acl),
             share_with=frozenset(share_with),
             last_ingested=max((d.last_ingested or "" for d in parts), default="") or None,
-            channel_id=next((d.channel_id for d in parts if d.channel_id), None),
+            # **진짜 Slack ID 를 앞세운다.** 첫 번째 값을 그냥 쓰면 파일 이름 순서에
+            # 따라 `legacy-…` 가 대표 ID 가 되고, 그 값이 콘솔·색인·조직 매핑으로
+            # 흘러가 같은 채널이 또 둘로 보인다.
+            channel_id=next(
+                (
+                    d.channel_id
+                    for d in parts
+                    if d.channel_id and not is_synthetic_channel_id(d.channel_id)
+                ),
+                next((d.channel_id for d in parts if d.channel_id), None),
+            ),
             schema_version=max(d.schema_version for d in parts),
             org_code=newest.org_code,
             org_kind=newest.org_kind,

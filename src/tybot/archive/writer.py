@@ -13,7 +13,12 @@ from pathlib import Path
 
 from ..channels import parse as parse_channel
 from ..lock import archive_write_lock
-from .store import RAW_HEADING_RE, SchemaError, validate
+from .store import (
+    RAW_HEADING_RE,
+    SYNTHETIC_ID_PREFIX,
+    SchemaError,
+    validate,
+)
 
 KST = timezone(timedelta(hours=9))
 
@@ -59,7 +64,9 @@ def _stable_channel_id(channel: str, channel_id: str | None) -> str:
         if cleaned:
             return cleaned
     digest = hashlib.sha256(channel.encode("utf-8")).hexdigest()[:12]
-    return f"legacy-{digest}"
+    # 접두사는 `store.SYNTHETIC_ID_PREFIX` 하나뿐이다 —
+    # 신원 판정이 그 값을 보고 「진짜 ID 가 아니다」 로 다룬다.
+    return f"{SYNTHETIC_ID_PREFIX}{digest}"
 
 
 def channel_dir(

@@ -291,3 +291,92 @@ def test_extracted_attachment_source_includes_original_slack_link(tmp_path):
 
     links = _attachment_source_links([SearchHit(doc, extracted, 10)])
     assert links == ["📎<https://example.slack.com/files/F1|보고서.xlsx 원본>"]
+
+
+# ---------------------------------------------------------------------------
+# 만들어 낸 channel_id 가 같은 채널을 둘로 가르던 것
+# ---------------------------------------------------------------------------
+
+
+def _doc_with_id(channel: str, channel_id: str, date: str, text: str) -> str:
+    return (
+        "---\n"
+        "workspace: tyit\n"
+        f'channel: "{channel}"\n'
+        f"channel_id: {channel_id}\n"
+        "visibility: private\n"
+        f'acl: ["{channel}"]\n'
+        f"last_ingested: {date}T17:00+09:00\n"
+        "---\n\n"
+        "## 요약 (사람이 관리, 봇은 수정 금지)\n-\n\n"
+        "## 원문 (자동 취합, 편집 금지)\n"
+        f"> [{date} 09:00] 홍길동: {text}\n"
+    )
+
+
+def test_a_synthetic_channel_id_does_not_split_one_channel(tmp_path):
+    """`legacy-…` 는 **디렉터리 이름용 자리표시자**다.
+
+    그 값이 프론트매터에 실려 신원으로 쓰이면 같은 채널의 v1·v2 문서가 서로 다른
+    채널이 된다. 2026-09-07 실측:
+
+        '#팀-전산_abb155-공지' C0BS5HTLE2E     tyit 2026-09-03.md 200줄
+        '#팀-전산_abb155-공지' legacy-a219b21… tyit 2026-09-07.md  60줄
+
+    출처가 두 줄 나오고, 더 나쁘게는 **권한 메타가 따로 계산된다** —
+    `visibility`·`acl`·`share_with` 를 그룹마다 정하므로 같은 채널이 한쪽으로는
+    보이고 다른 쪽으로는 안 보일 수 있다.
+    """
+    from tybot.archive.store import ArchiveStore
+
+    channel = "#팀-전산_abb155-공지"
+    base = tmp_path / "channels" / "tyit"
+    base.mkdir(parents=True)
+    (base / "real.md").write_text(
+        _doc_with_id(channel, "C0BS5HTLE2E", "2026-09-03", "예산 편성"), encoding="utf-8"
+    )
+    (base / "legacy.md").write_text(
+        _doc_with_id(channel, "legacy-a219b21337d5", "2026-09-07", "예산 확정"),
+        encoding="utf-8",
+    )
+
+    docs = ArchiveStore(tmp_path).docs()
+    same = [d for d in docs if d.channel == channel]
+
+    assert len(same) == 1, f"한 채널이 {len(same)}개 문서로 갈렸다"
+    assert same[0].channel_id == "C0BS5HTLE2E", "진짜 Slack ID 로 묶여야 한다"
+    assert len(same[0].raw_lines) == 2, "두 파일의 원문이 함께 들어와야 한다"
+
+
+def test_two_real_ids_are_still_separate_channels(tmp_path):
+    """진짜 ID 가 다르면 다른 채널이다. 이름이 같아도 합치지 않는다 —
+
+    개명 이력으로 이름이 겹칠 수 있고, 그때 합치면 서로 다른 채널의 원문이 한 답변에
+    섞인다(권한이 넘어간다).
+    """
+    from tybot.archive.store import ArchiveStore
+
+    channel = "#팀-전산_abb155-공지"
+    base = tmp_path / "channels" / "tyit"
+    base.mkdir(parents=True)
+    (base / "a.md").write_text(
+        _doc_with_id(channel, "C111", "2026-09-03", "가"), encoding="utf-8"
+    )
+    (base / "b.md").write_text(
+        _doc_with_id(channel, "C222", "2026-09-07", "나"), encoding="utf-8"
+    )
+
+    docs = [d for d in ArchiveStore(tmp_path).docs() if d.channel == channel]
+
+    assert len(docs) == 2, "진짜 ID 가 다르면 다른 채널이다"
+
+
+def test_the_synthetic_prefix_lives_where_it_is_minted():
+    """판정과 생성이 두 곳에 있으면 한쪽만 고쳐져 조용히 어긋난다."""
+    from tybot.archive.store import SYNTHETIC_ID_PREFIX, is_synthetic_channel_id
+    from tybot.archive.writer import SYNTHETIC_ID_PREFIX as MINTED
+
+    assert MINTED == SYNTHETIC_ID_PREFIX, "생성과 판정의 접두사가 갈렸다"
+    assert is_synthetic_channel_id(f"{SYNTHETIC_ID_PREFIX}abc123")
+    assert not is_synthetic_channel_id("C0BS5HTLE2E")
+    assert not is_synthetic_channel_id(None)
