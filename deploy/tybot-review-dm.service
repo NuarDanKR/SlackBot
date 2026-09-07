@@ -1,0 +1,27 @@
+[Unit]
+Description=TYBot 검토자 하루치 DM (첨부 검수)
+Documentation=file:///opt/tybot/docs/design/summary-review.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.daily_review
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-review-dm
+# 채널이 많아도 한 회차는 짧다. 오래 걸리면 다음 회차에 맡긴다 - 발송 이력이
+# 남아 있어 이어서 보내도 같은 사람에게 두 번 가지 않는다.
+TimeoutStartSec=300
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tybot
+
+[Install]
+WantedBy=multi-user.target

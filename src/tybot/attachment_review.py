@@ -52,6 +52,9 @@ class Attachment:
     approved_by: str = ""
     approved_at: str = ""
     note: str = ""
+    # 언제 올라온 것인가. **하루치를 밀어 주려면 필요하다** — 오늘 올라온 것과
+    # 밀린 것을 한 목록에 섞으면 오늘 것이 묻힌다.
+    staged_at: str = ""
 
     @property
     def is_approved(self) -> bool:
@@ -87,6 +90,7 @@ def _from_meta(meta: dict, meta_path: Path, workspace: str, channel_id: str) -> 
         approved_by=str(meta.get("approved_by") or ""),
         approved_at=str(meta.get("approved_at") or ""),
         note=str(meta.get("review_note") or ""),
+        staged_at=str(meta.get("staged_at") or ""),
     )
 
 

@@ -416,6 +416,29 @@ class ChannelOwnerStore:
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self.path)
 
+    def owner_of(self, workspace: str, channel_id: str) -> str:
+        """이 채널을 만든 사람. 없으면 빈 문자열.
+
+        검토자를 안 정한 채널의 **대체 수신자**다. 여기서 빈 값을 받은 쪽은
+        조용히 넘어가지 말고 그 사실을 남겨야 한다 — 그 채널의 첨부는 아무도
+        확인하지 않는 상태가 된다.
+        """
+        with _OWNER_LOCK:
+            row = self._read()["channels"].get(f"{workspace}:{channel_id}") or {}
+        return str(row.get("owner_user_id") or "")
+
+    def owners(self) -> dict[tuple[str, str], str]:
+        """`{(워크스페이스, 채널ID): 개설자}` — 한 번 읽어 여러 채널에 쓴다."""
+        with _OWNER_LOCK:
+            rows = self._read()["channels"]
+        out: dict[tuple[str, str], str] = {}
+        for key, row in rows.items():
+            workspace, _, channel_id = str(key).partition(":")
+            owner = str((row or {}).get("owner_user_id") or "")
+            if channel_id and owner:
+                out[(workspace, channel_id)] = owner
+        return out
+
     def is_owner(self, workspace: str, channel_id: str, user_id: str) -> bool:
         with _OWNER_LOCK:
             row = self._read()["channels"].get(f"{workspace}:{channel_id}") or {}

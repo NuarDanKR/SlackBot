@@ -277,3 +277,27 @@ def test_docs_never_hand_a_locked_path_to_psql():
                 bad.append(f"{path.relative_to(ROOT)}:{i}")
 
     assert not bad, f"postgres 계정이 읽을 수 없는 경로를 psql 에 넘긴다: {bad}"
+
+
+# --- 타이머를 안 걸면 아무 일도 안 일어난다 ----------------------------------
+def test_every_timer_unit_is_actually_enabled():
+    """`deploy/*.timer` 를 만들고 `install.sh` 의 `TIMERS` 에 안 넣은 적이 있다.
+
+    파일은 설치되고 유닛도 유효한데 **아무도 켜지 않는다.** 오류가 없어서
+    「돌고 있다」 고 믿게 되고, 몇 주 뒤에 결과물이 비어 있는 것으로 알게 된다.
+    (실제로 아카이브 내보내기가 그렇게 몇 주를 놀았다.)
+    """
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    line = next(row for row in install.splitlines() if row.startswith("TIMERS="))
+
+    for timer in sorted((ROOT / "deploy").glob("*.timer")):
+        # `tybot-deploy.path` 처럼 path 유닛은 따로 켠다. 타이머만 본다.
+        assert timer.stem in line, f"{timer.name} 을 켜는 코드가 없다"
+
+
+def test_every_timer_can_be_switched_from_the_console():
+    """콘솔에서 못 끄면 SSH 로만 만질 수 있다. 사고 날 때 그 시간이 없다."""
+    wrapper = (ROOT / "deploy" / "tybot-console-timers").read_text(encoding="utf-8")
+
+    for timer in sorted((ROOT / "deploy").glob("*.timer")):
+        assert timer.name in wrapper, f"{timer.name} 을 콘솔에서 켜고 끌 수 없다"

@@ -10,10 +10,14 @@
 
 | 원인 | 무슨 일이 나는가 | 사람이 할 일 |
 |---|---|---|
-| 변환 대상이 아니다 | 이미지·스캔·구형 hwp 는 애초에 텍스트가 안 나온다 | 원본 검수 승인 |
-| 변환됐지만 잘렸다 | 400줄을 넘으면 뒤가 없다. 표는 뒤에 합계가 있다 | 상한 조정 판단 |
-| 원본이 검수 대기다 | 승인 전에는 모델에 안 간다(설계) | 검수 승인 |
+| 변환 대상이 아니다 | 이미지·스캔·구형 hwp 는 애초에 텍스트가 안 나온다 | 검토자 확인 |
+| 변환됐지만 잘렸다 | 상한을 넘으면 가운데를 접는다. 그전에는 뒤를 잘랐다 | 재수집 판단 |
+| 수집 당시 상한이 낮았다 | 상한을 올려도 이미 쌓인 문서는 그대로다 | 그 채널 재수집 |
 | 변환이 실패했다 | 라이브러리 없음·파일 손상 | 설치·원본 확인 |
+
+검수 대기는 더 이상 원인이 아니다. 변환된 파일은 사람을 기다리지 않는다
+(2026-09-08). 남는 것은 **글자가 없어 PII 검사가 돌지 않은 파일**뿐이고, 그건
+채널 검토자에게 정해진 시각에 DM 으로 간다.
 
 이 스크립트는 **판정만 한다.** 아무것도 승인하지 않고 아무 파일도 바꾸지 않는다.
 
@@ -34,7 +38,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tybot.archive.convert import MAX_LINES, can_convert
 from tybot.archive.store import ArchiveStore
-from tybot.attachment_review import APPROVED, PENDING, REJECTED, scan
+from tybot.attachment_review import (
+    APPROVED,
+    PENDING,
+    REJECTED,
+    find_sendable,
+    scan,
+)
 from tybot.envfile import load_env_file
 from tybot.paths import archive_dir
 
@@ -105,39 +115,50 @@ def main() -> int:
     rejected = scan(root, status=REJECTED)
     print(f"  대기 {len(pending)} · 승인 {len(approved)} · 반려 {len(rejected)}")
 
-    if pending:
+    # **답변 경로와 같은 판정을 쓴다.** 여기서 따로 세면 진단이 "승인 필요 15건" 이라
+    # 말하는데 봇은 이미 그 파일들을 쓰고 있는, 서로 어긋난 두 사실이 생긴다.
+    waiting = [
+        item
+        for item in pending
+        if not find_sendable(
+            root,
+            workspace=item.workspace,
+            channel_id=item.channel_id,
+            name=item.name,
+            text_extracted=item.name in extracted,
+        )
+    ]
+
+    if waiting:
         print()
-        print("=== 승인해야 원본을 읽는 것")
-        print("  변환이 안 되는 형식은 **승인 없이는 내용을 알 방법이 없다.**")
-        for item in pending[:30]:
-            kind = "변환됨" if item.name in extracted else "변환 안 됨"
+        print("=== 사람이 봐야 원본을 읽는 것")
+        print("  글자가 없어 수집 단계 PII 검사가 **아예 돌지 않은** 파일이다.")
+        for item in waiting[:30]:
             able = "변환가능" if can_convert(_suffix(item.name)) else "변환대상아님"
-            mark = "  ← 승인 필요" if kind == "변환 안 됨" else ""
-            print(f"  - {item.name} [{able}/{kind}]{mark}")
-        if len(pending) > 30:
-            print(f"  … 외 {len(pending) - 30}건")
+            print(f"  - {item.name} [{able}] {item.workspace}/{item.channel_id}")
+        if len(waiting) > 30:
+            print(f"  … 외 {len(waiting) - 30}건")
 
     print()
     print("=== 판정")
-    blind = [
-        item.name
-        for item in pending
-        if item.name not in extracted and not can_convert(_suffix(item.name))
-    ]
-    if blind:
-        print(f"  승인 없이는 내용을 알 수 없는 파일 {len(blind)}건.")
+    used = len(pending) - len(waiting)
+    if used:
+        print(f"  대기 상태지만 **이미 답변에 쓰이는** 파일 {used}건.")
+        print("  변환본이 아카이브에 들어갔다는 것은 PII 검사를 통과했다는 뜻이다 —")
+        print("  이런 파일은 사람을 기다리지 않는다(2026-09-08).")
+    if waiting:
+        print(f"  사람이 봐야 하는 파일 {len(waiting)}건.")
         print("  이미지·스캔 PDF·구형 hwp 는 변환하지 않는다(OCR 오류가 사실처럼 굳는다).")
         print("")
-        print("  승인하는 법 — Slack 에서 그 채널에 `/첨부`.")
-        print("  파일을 올린 채널에서 보고 승인하는 것이 맞다. 서버에서 이름만 보고")
-        print("  판단하면 무엇을 벤더에 보내는지 모르는 채로 승인하게 된다.")
-        print("")
-        print("  서버에서 해야 한다면:")
-        print("    python -m tybot.attachment_review list")
-        print("    python -m tybot.attachment_review approve <file_id> --actor <이름>")
+        print("  **찾아가서 승인할 필요는 없다.** 채널 검토자에게 정해진 시각에")
+        print("  그날 몫이 DM 으로 간다(`tybot-review-dm.timer`). 검토자를 안 정한")
+        print("  채널은 개설자에게 간다.")
+        print("    - 검토자 지정: Slack 에서 `/채널 검토자`")
+        print("    - 지금 보이기: 그 채널에서 `/첨부`")
+        print("    - 서버에서: python -m tybot.attachment_review list")
         print("  → 표·스캔을 읽으려면 상위 모델이 필요하다(PDF 페이지 상한도 커진다).")
-    else:
-        print("  변환으로 내용이 확보되지 않은 대기 파일은 없다.")
+    if not waiting:
+        print("  사람을 기다리는 파일은 없다.")
     return 0
 
 

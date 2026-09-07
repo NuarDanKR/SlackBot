@@ -1,0 +1,13 @@
+[Unit]
+Description=TYBot 검토자 하루치 DM 주기 실행
+
+[Timer]
+# 채널마다 보낼 시각이 다르다(`channel_reviewer.send_at`). 그 시각을 분 단위로
+# 맞추려면 자주 돌아야 한다. 하루에 한 번만 나가는 것은 발송 이력이 보장한다 -
+# 타이머 주기가 아니다.
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

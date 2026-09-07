@@ -64,6 +64,33 @@ class Row:
         return "변환 불가 — 승인해야 읽습니다"
 
 
+# 버튼 `value` 는 **어느 채널의 어느 파일인지**를 함께 실어야 한다.
+#
+# 채널에서 누를 때는 Slack 이 `body["channel"]["id"]` 로 채널을 알려 준다. 그런데
+# 같은 버튼을 **DM 으로 보내면** 그 값은 DM 채널(`D…`)이 되고, 처리부는 원본을
+# 그 DM 채널에서 찾다가 0건으로 끝난다 — 오류가 아니라 「대상을 특정하지 못했습니다」다.
+# 검토자에게 하루치를 밀어 주는 경로가 생기면서 이게 실제 경로가 됐다.
+VALUE_SEP = "/"
+
+
+def pack_value(channel_id: str, file_id: str) -> str:
+    """버튼 값. **비우지 않는다** — 비면 Slack 이 메시지를 통째로 거부한다."""
+    return f"{channel_id}{VALUE_SEP}{file_id}"
+
+
+def unpack_value(raw: str) -> tuple[str, str]:
+    """`(채널ID, 파일ID)`. 옛 형식(파일 ID 만)은 채널을 빈 문자열로 준다.
+
+    이미 사람의 DM·채널에 떠 있는 옛 메시지의 버튼이 눌릴 수 있다. 그때 채널은
+    호출부가 아는 값(`body`)으로 메운다.
+    """
+    text = (raw or "").strip()
+    if VALUE_SEP in text:
+        channel, _, file_id = text.partition(VALUE_SEP)
+        return channel.strip(), file_id.strip()
+    return "", text
+
+
 def _kb(size: int) -> str:
     return f"{max(1, size // 1024):,}KB"
 
@@ -90,7 +117,7 @@ def rows_for(items, extracted: set[str]) -> list[Row]:
     return out
 
 
-def blocks(rows: list[Row], *, channel_name: str = "") -> list[dict]:
+def blocks(rows: list[Row], *, channel_name: str = "", channel_id: str = "") -> list[dict]:
     """검수 목록 Block Kit.
 
     **버튼 `value` 를 비우지 않는다.** 비면 Slack 이 메시지를 통째로 거부하고,
@@ -132,7 +159,7 @@ def blocks(rows: list[Row], *, channel_name: str = "") -> list[dict]:
                         "text": {"type": "plain_text", "text": "승인"},
                         "style": "primary",
                         "action_id": ACTION_APPROVE,
-                        "value": row.file_id,
+                        "value": pack_value(channel_id, row.file_id),
                         "confirm": {
                             "title": {"type": "plain_text", "text": "원본을 내보냅니다"},
                             "text": {
@@ -151,7 +178,7 @@ def blocks(rows: list[Row], *, channel_name: str = "") -> list[dict]:
                         "type": "button",
                         "text": {"type": "plain_text", "text": "반려"},
                         "action_id": ACTION_REJECT,
-                        "value": row.file_id,
+                        "value": pack_value(channel_id, row.file_id),
                     },
                 ],
             }

@@ -1360,7 +1360,9 @@ class WorkspaceBot:
         rows = attachment_view.rows_for(items, extracted)
         respond(
             blocks=attachment_view.blocks(
-                rows, channel_name=str(command.get("channel_name") or "")
+                rows,
+                channel_name=str(command.get("channel_name") or ""),
+                channel_id=channel_id,
             ),
             text=f"검수 대기 첨부 {len(rows)}건",
             response_type="ephemeral",
@@ -1376,10 +1378,15 @@ class WorkspaceBot:
         from ..attachment_review import reject as do_reject
         from ..attachment_review import scan
 
-        channel_id = str((body.get("channel") or {}).get("id") or "")
         user_id = str((body.get("user") or {}).get("id") or "")
         actions = body.get("actions") or [{}]
-        file_id = str(actions[0].get("value") or "")
+        # 버튼 값이 채널을 함께 싣는다. **DM 에서 누르면** `body["channel"]["id"]` 는
+        # DM 채널(`D…`)이라, 그것으로 찾으면 0건이 된다 — 하루치를 검토자 DM 으로
+        # 밀어 주면서 이게 실제 경로가 됐다.
+        packed_channel, file_id = attachment_view.unpack_value(
+            str(actions[0].get("value") or "")
+        )
+        channel_id = packed_channel or str((body.get("channel") or {}).get("id") or "")
         if not file_id:
             respond("어떤 파일인지 알 수 없습니다.", response_type="ephemeral")
             return
