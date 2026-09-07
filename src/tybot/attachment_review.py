@@ -147,6 +147,51 @@ def reject(item: Attachment, *, actor: str, note: str = "") -> Attachment:
     return _write_status(item, REJECTED, actor=actor, note=note)
 
 
+def find_sendable(
+    archive_dir: Path | str,
+    *,
+    workspace: str,
+    channel_id: str,
+    name: str,
+    text_extracted: bool,
+) -> Attachment | None:
+    """이 원본을 LLM 제공자에게 보내도 되는가. 안 되면 `None`.
+
+    ## 게이트를 좁힌 이유 (2026-09-08)
+
+    처음에는 **모든** 첨부가 사람 승인을 기다렸다. 그래서 대기 31건·승인 0건이
+    되었고, 사용자는 승인이 필요한지조차 몰랐다. 게이트가 아니라 정체였다.
+
+    막으려던 것은 하나다 — **텍스트가 없어 PII 검사가 돌지 않는 파일.**
+    수집 단계 PII 검사(`writer.PII_PATTERNS`)는 주민번호·등기부등본·계약자 명단을
+    글자로 찾는다. 스캔본·이미지에는 글자가 없어 그 검사가 아예 작동하지 않는다.
+
+    변환된 파일은 다르다. 추출 텍스트가 아카이브에 들어갔다는 것이 곧 **그 검사를
+    통과했다는 뜻**이다. 그런 파일까지 승인을 기다리게 하면, 정작 사람이 봐야 할
+    스캔본이 목록에 묻힌다.
+
+    **반려는 변환 여부와 무관하게 이긴다.** 사람이 한 번 안 된다고 한 것을 자동
+    판정이 되돌리면 그 판단이 의미를 잃는다.
+    """
+    target = (name or "").strip()
+    if not target:
+        return None
+    matches = [
+        a for a in scan(archive_dir)
+        if a.workspace == workspace and a.channel_id == channel_id and a.name == target
+    ]
+    # 같은 이름이 여럿이면 **찾지 못한 것으로 본다** — 어느 것인지 모르는 채로
+    # 원본을 벤더에 보내지 않는다.
+    if len(matches) != 1:
+        return None
+    item = matches[0]
+    if item.status == REJECTED:
+        return None
+    if item.status == APPROVED:
+        return item
+    return item if text_extracted else None
+
+
 def find_approved(
     archive_dir: Path | str, *, workspace: str, channel_id: str, name: str
 ) -> Attachment | None:

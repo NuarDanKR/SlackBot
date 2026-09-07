@@ -23,6 +23,7 @@ from tybot.attachment_review import (
     REJECTED,
     approve,
     find_approved,
+    find_sendable,
     pending,
     reject,
     scan,
@@ -139,6 +140,80 @@ def test_review_log_has_no_filename(tmp_path, caplog):
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert "김해외동_기성금.pdf" not in logged
     assert "actor=dan" in logged
+
+
+# --- 무엇이 사람을 기다리는가 (2026-09-08) -----------------------------------
+#
+# 처음에는 **모든** 첨부가 승인을 기다렸다. 그래서 대기 31건·승인 0건이 되었고,
+# 사용자는 승인이 필요한지조차 몰랐다. 게이트가 아니라 정체였다.
+#
+# 막으려던 것은 하나다 — 텍스트가 없어 PII 검사가 돌지 않는 파일.
+def test_a_converted_file_does_not_wait_for_a_human(tmp_path):
+    """변환본이 아카이브에 들어갔다 = 수집 단계 PII 검사를 통과했다.
+
+    그 파일까지 대기시키면 정작 사람이 봐야 할 스캔본이 목록에 묻힌다.
+    """
+    archive = _stage(tmp_path, name="가정산서.xlsx", status=PENDING)
+
+    got = find_sendable(archive, workspace="mgmt", channel_id="C1",
+                        name="가정산서.xlsx", text_extracted=True)
+
+    assert got is not None, "변환된 파일이 승인을 기다린다"
+
+
+def test_a_scan_still_waits(tmp_path):
+    """이미지·스캔본에는 글자가 없어 PII 검사가 **아예 작동하지 않는다.**
+
+    우리가 못 읽어서 못 걸러낸 것이 벤더로 가는 유일한 경로가 여기다.
+    """
+    archive = _stage(tmp_path, name="스캔본.png", status=PENDING)
+
+    got = find_sendable(archive, workspace="mgmt", channel_id="C1",
+                        name="스캔본.png", text_extracted=False)
+
+    assert got is None
+
+
+def test_a_rejection_beats_the_conversion(tmp_path):
+    """사람이 안 된다고 한 것을 자동 판정이 되돌리면 그 판단이 의미를 잃는다."""
+    archive = _stage(tmp_path, name="명단.xlsx", status=REJECTED)
+
+    got = find_sendable(archive, workspace="mgmt", channel_id="C1",
+                        name="명단.xlsx", text_extracted=True)
+
+    assert got is None
+
+
+def test_an_approval_beats_the_missing_conversion(tmp_path):
+    """사람이 보고 승인한 스캔본은 변환이 안 됐어도 나간다 — 그게 승인의 쓸모다."""
+    archive = _stage(tmp_path, name="도면.png", status=APPROVED)
+
+    got = find_sendable(archive, workspace="mgmt", channel_id="C1",
+                        name="도면.png", text_extracted=False)
+
+    assert got is not None
+
+
+def test_an_ambiguous_name_is_never_sent(tmp_path):
+    """같은 이름이 둘이면 어느 것인지 모른다. 모르는 채로 원본을 벤더에 보내지 않는다."""
+    _stage(tmp_path, name="보고서.pdf", status=PENDING, file_id="F1")
+    archive = _stage(tmp_path, name="보고서.pdf", status=PENDING, file_id="F2")
+
+    got = find_sendable(archive, workspace="mgmt", channel_id="C1",
+                        name="보고서.pdf", text_extracted=True)
+
+    assert got is None
+
+
+def test_the_answer_path_uses_one_verdict(tmp_path):
+    """`_originals` 와 `_withheld_attachments` 가 갈리면 보낸 파일을 「안 읽었다」 고
+    적거나 그 반대가 된다. 둘 다 사람을 엉뚱한 조사로 보낸다."""
+    import inspect
+
+    from tybot import answer
+
+    for fn in (answer._originals, answer._withheld_attachments):
+        assert "find_sendable" in inspect.getsource(fn), f"{fn.__name__} 이 따로 판정한다"
 
 
 # --- 형식 --------------------------------------------------------------------

@@ -12,7 +12,7 @@ from pathlib import Path
 from . import documents
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
-from .attachment_review import find_approved
+from .attachment_review import find_sendable
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -255,42 +255,68 @@ def _attachment_source_links(hits: list[SearchHit]) -> list[str]:
     return links
 
 
-def _originals(store: ArchiveStore, hits: list[SearchHit]) -> documents.Attached:
-    """검색에 걸린 첨부 중 **승인된** 원본만 모은다.
+def _extracted_names(hits: list[SearchHit]) -> set[str]:
+    """근거 문서에 **변환본이 들어간** 첨부 이름.
 
-    승인 게이트가 유일한 안전장치다: 수집 단계 PII 거절은 텍스트 기반이라 스캔본에
-    작동하지 않는다. 사람이 한 번 본 것만 벤더로 나간다.
+    변환본이 아카이브에 있다는 것은 그 텍스트가 수집 단계 PII 검사를 통과했다는
+    뜻이다(`writer.PII_PATTERNS`). 그 사실이 원본을 보내도 되는지의 근거가 된다.
     """
+    out: set[str] = set()
+    for hit in hits:
+        for line in hit.doc.raw_lines:
+            got = EXTRACTED_ATTACHMENT_RE.match((line.text or "").strip())
+            if got:
+                out.add(got.group("name"))
+    return out
+
+
+def _originals(store: ArchiveStore, hits: list[SearchHit]) -> documents.Attached:
+    """검색에 걸린 첨부 중 **보내도 되는** 원본만 모은다.
+
+    막는 것은 **텍스트가 없어 PII 검사가 돌지 않는 파일**이다 — 스캔본·이미지.
+    변환된 파일은 그 검사를 이미 통과했으므로 사람을 기다리지 않는다.
+    판정은 `attachment_review.find_sendable` 한 곳에 있다.
+    """
+    extracted = _extracted_names(hits)
     approved = []
     for workspace, channel_id, name in _attachment_names(hits):
-        item = find_approved(
-            store.root, workspace=workspace, channel_id=channel_id, name=name
+        item = find_sendable(
+            store.root,
+            workspace=workspace,
+            channel_id=channel_id,
+            name=name,
+            text_extracted=name in extracted,
         )
         if item is not None:
             approved.append(item)
     return documents.collect(approved)
 
-
 def _withheld_attachments(store: ArchiveStore, hits: list[SearchHit]) -> list[str]:
     """근거에 언급됐는데 **원본을 읽지 않은** 첨부 이름.
 
-    승인 게이트가 안전장치라 승인 전 원본은 모델에 가지 않는다. 그건 설계지만,
-    그 상태로 답하면 사용자에게는 **「봇이 파일을 못 읽는다」** 로만 보인다.
-    실제 사내 피드백이 그렇게 쌓였다(2026-09-07) — 파일 이해 성능 문제로 읽혔는데,
-    상당수는 검수 대기라 원본이 아예 전달되지 않은 것이었다.
+    텍스트가 없어 PII 검사가 돌지 않는 파일은 사람이 볼 때까지 보내지 않는다.
+    그건 설계지만, 그 상태로 답하면 사용자에게는 **「봇이 파일을 못 읽는다」** 로만
+    보인다. 실제 사내 피드백이 그렇게 쌓였다(2026-09-07).
 
-    무엇이 왜 빠졌는지 말한다. 사람이 할 수 있는 다음 행동(검수 승인)이 생긴다.
+    무엇이 왜 빠졌는지 말한다. 사람이 할 수 있는 다음 행동이 생긴다.
+
+    **`_originals` 와 같은 판정을 쓴다.** 갈리면 보낸 파일을 「안 읽었다」 고 적거나
+    그 반대가 되고, 둘 다 사람을 엉뚱한 조사로 보낸다.
     """
-    from .attachment_review import find_approved
-
+    extracted = _extracted_names(hits)
     out: list[str] = []
     for workspace, channel_id, name in _attachment_names(hits):
-        if find_approved(store.root, workspace=workspace, channel_id=channel_id, name=name):
+        if find_sendable(
+            store.root,
+            workspace=workspace,
+            channel_id=channel_id,
+            name=name,
+            text_extracted=name in extracted,
+        ):
             continue
         if name not in out:
             out.append(name)
     return out
-
 
 def _evidence_block(hits: list[SearchHit]) -> str:
     return "\n".join(
