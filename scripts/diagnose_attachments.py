@@ -90,8 +90,11 @@ def main() -> int:
 
     if truncated:
         print()
-        print(f"=== 변환본이 잘린 문서 {len(truncated)}건 (상한 {MAX_LINES}줄)")
+        print(f"=== 변환본이 잘린 문서 {len(truncated)}건")
         print("  표는 뒤에 합계가 있다. 잘리면 그 값을 답변이 볼 수 없다.")
+        print(f"  지금 상한은 {MAX_LINES:,}줄이다. 그런데 이 표시는 **수집 당시**")
+        print("  상한으로 잘린 흔적이라, 상한을 올려도 이미 쌓인 문서는 그대로다 —")
+        print("  그 채널을 다시 수집해야 새 상한이 적용된다.")
         for name in sorted(set(truncated))[:10]:
             print(f"  - {name}")
 
@@ -124,7 +127,14 @@ def main() -> int:
     if blind:
         print(f"  승인 없이는 내용을 알 수 없는 파일 {len(blind)}건.")
         print("  이미지·스캔 PDF·구형 hwp 는 변환하지 않는다(OCR 오류가 사실처럼 굳는다).")
-        print("  → 콘솔 첨부 검수에서 승인하면 원본이 모델에 전달된다.")
+        print("")
+        print("  승인하는 법 — Slack 에서 그 채널에 `/첨부`.")
+        print("  파일을 올린 채널에서 보고 승인하는 것이 맞다. 서버에서 이름만 보고")
+        print("  판단하면 무엇을 벤더에 보내는지 모르는 채로 승인하게 된다.")
+        print("")
+        print("  서버에서 해야 한다면:")
+        print("    python -m tybot.attachment_review list")
+        print("    python -m tybot.attachment_review approve <file_id> --actor <이름>")
         print("  → 표·스캔을 읽으려면 상위 모델이 필요하다(PDF 페이지 상한도 커진다).")
     else:
         print("  변환으로 내용이 확보되지 않은 대기 파일은 없다.")

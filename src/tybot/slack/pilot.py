@@ -23,7 +23,14 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from .. import evidence_view, heartbeat, reviewers, schedule_dm, specialist_router
+from .. import (
+    attachment_view,
+    evidence_view,
+    heartbeat,
+    reviewers,
+    schedule_dm,
+    specialist_router,
+)
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
@@ -498,6 +505,27 @@ class WorkspaceBot:
                 self._collection_status(client, command.get("channel_id", "")),
                 response_type="ephemeral",
             )
+
+        @self.app.command("/첨부")
+        @self.app.command("/ty-attachment")
+        def on_attachment_command(ack, command, client, respond):
+            """이 채널의 검수 대기 첨부를 보이고 승인·반려한다.
+
+            승인은 **원본을 벤더에 보내도 되는가** 를 정하는 일이다. 그러려면 파일을
+            봐야 하고, 파일이 보이는 자리는 그것이 올라온 채널이다.
+            """
+            ack()
+            self._show_attachments(command, respond)
+
+        @self.app.action(attachment_view.ACTION_APPROVE)
+        def on_attachment_approve(ack, body, respond):
+            ack()
+            self._decide_attachment(body, respond, approve=True)
+
+        @self.app.action(attachment_view.ACTION_REJECT)
+        def on_attachment_reject(ack, body, respond):
+            ack()
+            self._decide_attachment(body, respond, approve=False)
 
         @self.app.command("/피드백")
         @self.app.command("/ty-feedback")
@@ -1272,6 +1300,121 @@ class WorkspaceBot:
     def _can_manage_channel(self, channel_id: str, user_id: str) -> bool:
         return user_id in self.channel_admin_users or self.channel_owners.is_owner(
             self.workspace, channel_id, user_id
+        )
+
+    def _may_review_attachments(self, channel_id: str, user_id: str) -> bool:
+        """승인 권한. 채널 소유자 또는 그 채널의 요약 검토자.
+
+        아무나 승인하면 「승인 게이트」 가 이름만 남는다. 검토자를 포함하는 이유는,
+        그 사람이 이미 그 채널의 판단을 맡고 있기 때문이다.
+
+        검토자 목록을 못 읽으면 **소유자만** 허용한다 — DB 장애가 권한을 넓히면 안 된다.
+        """
+        if self._can_manage_channel(channel_id, user_id):
+            return True
+        try:
+            return any(
+                r.reviewer_user == user_id
+                for r in reviewers.reviewers_for(self.workspace, channel_id)
+            )
+        except reviewers.ReviewerError as e:
+            log.warning("[%s] 검토자를 확인하지 못했습니다: %s", self.workspace, e)
+            return False
+
+    def _pending_attachments(self, channel_id: str):
+        """이 채널의 검수 대기 목록과, 변환본이 들어간 파일 이름."""
+        from ..answer import EXTRACTED_ATTACHMENT_RE as extracted_re
+        from ..attachment_review import PENDING, scan
+
+        items = [
+            a for a in scan(self.archive_dir, status=PENDING)
+            if a.workspace == self.workspace and a.channel_id == channel_id
+        ]
+        extracted = {
+            m.group("name")
+            for doc in self.store.docs()
+            if doc.channel_id == channel_id
+            for line in doc.raw_lines
+            if (m := extracted_re.match((line.text or "").strip()))
+        }
+        return items, extracted
+
+    def _show_attachments(self, command: dict, respond) -> None:
+        channel_id = str(command.get("channel_id") or "")
+        user_id = str(command.get("user_id") or "")
+        if not channel_id:
+            respond("채널 안에서 실행해 주세요.", response_type="ephemeral")
+            return
+        if not self._may_review_attachments(channel_id, user_id):
+            respond(attachment_view.DENIED, response_type="ephemeral")
+            return
+        try:
+            items, extracted = self._pending_attachments(channel_id)
+        except Exception as e:
+            log.warning("[%s] 첨부 목록 실패: %s", self.workspace, e)
+            respond("첨부 목록을 읽지 못했습니다.", response_type="ephemeral")
+            return
+        if not items:
+            respond(attachment_view.EMPTY, response_type="ephemeral")
+            return
+        rows = attachment_view.rows_for(items, extracted)
+        respond(
+            blocks=attachment_view.blocks(
+                rows, channel_name=str(command.get("channel_name") or "")
+            ),
+            text=f"검수 대기 첨부 {len(rows)}건",
+            response_type="ephemeral",
+        )
+
+    def _decide_attachment(self, body: dict, respond, *, approve: bool) -> None:
+        """버튼 처리. **권한을 여기서 다시 본다.**
+
+        목록을 열 때 확인했더라도, 그 메시지는 남아 있고 버튼은 나중에도 눌린다.
+        그 사이에 권한이 바뀌었을 수 있다.
+        """
+        from ..attachment_review import approve as do_approve
+        from ..attachment_review import reject as do_reject
+        from ..attachment_review import scan
+
+        channel_id = str((body.get("channel") or {}).get("id") or "")
+        user_id = str((body.get("user") or {}).get("id") or "")
+        actions = body.get("actions") or [{}]
+        file_id = str(actions[0].get("value") or "")
+        if not file_id:
+            respond("어떤 파일인지 알 수 없습니다.", response_type="ephemeral")
+            return
+        if not self._may_review_attachments(channel_id, user_id):
+            respond(attachment_view.DENIED, response_type="ephemeral")
+            return
+
+        try:
+            found = [
+                a for a in scan(self.archive_dir)
+                if a.file_id == file_id
+                and a.workspace == self.workspace
+                and a.channel_id == channel_id
+            ]
+            # 하나여야 한다. 여럿이면 어느 것을 내보내는지 모르는 채로 승인하게 된다.
+            if len(found) != 1:
+                respond(
+                    f"대상을 특정하지 못했습니다({len(found)}건).",
+                    response_type="ephemeral",
+                )
+                return
+            if approve:
+                done = do_approve(found[0], actor=user_id, note="Slack 검수")
+            else:
+                done = do_reject(found[0], actor=user_id, note="Slack 검수")
+        except Exception as e:
+            log.warning("[%s] 첨부 검수 실패 file=%s: %s", self.workspace, file_id, e)
+            respond("처리하지 못했습니다.", response_type="ephemeral")
+            return
+
+        word = "승인" if approve else "반려"
+        respond(
+            f"*{done.name}* 을 {word}했습니다."
+            + (NEWLINE + "다음 질문부터 이 원본을 근거로 씁니다." if approve else ""),
+            response_type="ephemeral",
         )
 
     def _handle_reviewer_command(self, command: dict, args: str, respond) -> None:
