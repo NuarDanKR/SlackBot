@@ -53,3 +53,11 @@ testpaths = ["tests"]
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+# 전문가 프롬프트(`specialist_prompts/*.md`)를 패키지에 넣는다.
+#
+# 지금 배포는 `pip install -e` 라 소스 트리를 그대로 보므로 없어도 돈다. 그런데
+# 언젠가 wheel 을 만들면 `.md` 는 **조용히 빠지고**, 그때 증상은 배포 실패가 아니라
+# 「전문가 프롬프트가 없습니다」 로 답변 경로에서 나타난다.
+[tool.setuptools.package-data]
+tybot = ["specialist_prompts/*.md"]

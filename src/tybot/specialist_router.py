@@ -367,3 +367,87 @@ def observe(question: str, workspace: str, router) -> Decision | None:
 def clear_cache() -> None:
     """전문가 목록 캐시를 비운다. 콘솔에서 켠 것을 즉시 반영할 때 쓴다."""
     _cache.clear()
+
+
+# --- 실제 호출 --------------------------------------------------------------
+def ask(
+    decision: Decision,
+    *,
+    question: str,
+    workspace: str,
+    evidence: list[str],
+    router,
+    fallback,
+    authorization_id: str,
+) -> str | None:
+    """고른 전문가에게 묻는다. 마스터가 답할 자리면 `None`.
+
+    **근거는 이미 권한을 통과한 것만 들어온다.** 이 함수는 판정하지 않는다 —
+    `authorization_id` 는 그 판정을 가리키는 값이고, 나중에 "무엇이 전문가에게
+    갔나" 를 되짚는 근거가 된다(원칙 3).
+
+    실패는 전부 `fallback()` 으로 접힌다. 계약 위반·타임아웃·어댑터 오류 모두
+    `specialist_contract.execute()` 안에서 처리되고, 우리는 결과만 기록한다.
+    """
+    import time
+
+    from . import specialist_adapters
+    from .console.specialist_store import record_call
+    from .specialist_contract import (
+        AuthorizedEvidence,
+        ContractViolation,
+        SpecialistRequest,
+        execute,
+    )
+
+    if decision.specialist is None:
+        return None
+    chosen = decision.specialist
+
+    started = time.monotonic()
+    result = None
+    try:
+        adapter = specialist_adapters.build(
+            chosen.adapter, router, model=chosen.model
+        )
+        request = SpecialistRequest(
+            question=question,
+            evidence=tuple(
+                AuthorizedEvidence.from_acl_filter(
+                    workspace=workspace, text=text, authorization_id=authorization_id
+                )
+                for text in evidence
+                if text.strip()
+            ),
+        )
+        result = execute(
+            adapter,
+            request,
+            fallback=fallback,
+            confidence=decision.confidence,
+            minimum_confidence=chosen.min_confidence,
+        )
+    except (specialist_adapters.AdapterError, ContractViolation) as exc:
+        log.warning("전문가 호출을 준비하지 못했습니다 key=%s: %s", chosen.key, exc)
+    except Exception as exc:  # noqa: BLE001 - 전문가 하나가 답변을 막으면 안 된다
+        log.warning("전문가 호출 실패 key=%s: %s", chosen.key, exc)
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    try:
+        record_call(
+            workspace=workspace,
+            specialist=chosen.key,
+            routing_reason=decision.reason,
+            confidence=decision.confidence,
+            result=result.result if result else "error",
+            elapsed_ms=elapsed_ms,
+            # 프롬프트 방식은 우리 게이트웨이가 부르므로 비용이 그쪽에 이미 잡힌다.
+            # 여기서 또 더하면 이중 계산이 된다.
+            cost_usd=0.0,
+            error_code=result.error_code if result else "adapter-build",
+        )
+    except Exception as exc:  # noqa: BLE001 - 기록 실패가 답변을 막으면 안 된다
+        log.warning("전문가 호출을 남기지 못했습니다: %s", exc)
+
+    # 계약을 못 지켰거나 만들지 못했으면 마스터가 답한다.
+    return result.text if result else None

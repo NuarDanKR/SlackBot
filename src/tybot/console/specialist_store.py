@@ -12,12 +12,25 @@ import re
 from .workspace_store import WorkspaceStoreError
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+# `available` 은 여기 적지 않는다. **프롬프트 파일이 있으면 배포된 것**이다
+# (`specialist_adapters.available_keys()`). 손으로 적으면 프롬프트를 지워도 화면은
+# 「배포됨」 이라고 말하고, 그 어긋남은 눌러 봐야 드러난다.
 ALLOWED_ADAPTERS = {
-    "hermes": {"name": "Hermes", "domain": "내부 문서", "available": False, "contracts": ("v1",)},
-    "legal": {"name": "법률 전문 봇", "domain": "법률", "available": False, "contracts": ("v1",)},
-    "tax": {"name": "세무 전문 봇", "domain": "세무", "available": False, "contracts": ("v1",)},
-    "construction": {"name": "건설 전문 봇", "domain": "건설", "available": False, "contracts": ("v1",)},
+    "hermes": {"name": "Hermes", "domain": "내부 문서", "contracts": ("v1",)},
+    "legal": {"name": "법률 전문 봇", "domain": "법률", "contracts": ("v1",)},
+    "tax": {"name": "세무 전문 봇", "domain": "세무", "contracts": ("v1",)},
+    "construction": {"name": "건설 전문 봇", "domain": "건설", "contracts": ("v1",)},
 }
+
+
+def _deployed() -> set[str]:
+    """런타임이 실제로 있는 어댑터. 읽지 못하면 빈 집합 — 없다고 본다."""
+    try:
+        from ..specialist_adapters import available_keys
+
+        return available_keys()
+    except Exception:  # noqa: BLE001 - 배포 여부를 못 읽는 것이 화면을 막지 않는다
+        return set()
 VALID_STATES = {"draft", "enabled", "disabled"}
 
 
@@ -38,7 +51,11 @@ def _connect():
 
 
 def adapters() -> list[dict]:
-    return [{"key": key, **value} for key, value in ALLOWED_ADAPTERS.items()]
+    deployed = _deployed()
+    return [
+        {"key": key, **value, "available": key in deployed}
+        for key, value in ALLOWED_ADAPTERS.items()
+    ]
 
 
 def is_ready() -> bool:
@@ -54,7 +71,7 @@ def is_ready() -> bool:
 def _row(row: dict) -> dict:
     item = dict(row)
     item["workspaces"] = list(item.get("workspaces") or [])
-    item["adapterAvailable"] = bool(ALLOWED_ADAPTERS.get(str(item["adapter"]), {}).get("available"))
+    item["adapterAvailable"] = str(item["adapter"]) in _deployed()
     return item
 
 
