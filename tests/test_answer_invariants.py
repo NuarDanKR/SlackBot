@@ -342,3 +342,44 @@ def test_no_evidence_means_the_specialist_is_never_asked(tmp_path):
 
     assert hook.seen == [], "근거 0건인데 전문가를 불렀다"
     assert "5억" not in answer.to_slack()
+
+
+# --- 요약 경로에도 전문가가 닿아야 한다 -------------------------------------
+def test_the_summary_path_also_asks_the_specialist(tmp_path):
+    """Hermes 의 본업이 회의록·업무 진행 요약이다.
+
+    그런데 요약 경로에만 훅이 없어서, 등록해도 전문가가 요약 질문을 받지 못했다
+    (2026-09-07 실제 발생 — 근거 152줄을 쥐고도 마스터가 "판단할 수 없다"고 답했다).
+    """
+    hook = _Special("전산팀 진행 상황을 정리했습니다.")
+    engine = _engine_with(tmp_path, hook)
+
+    answer = engine.summarize(_ctx(MINE), days=3650)
+
+    assert hook.seen, "요약 경로가 전문가를 부르지 않았다"
+    assert answer.text == "전산팀 진행 상황을 정리했습니다."
+    assert "출처:" in answer.to_slack(), "요약도 출처는 마스터가 붙인다"
+
+
+def test_the_summary_specialist_only_sees_permitted_docs(tmp_path):
+    """요약은 여러 채널을 묶는다. 그만큼 권한이 새기 쉬운 자리다."""
+    hook = _Special("정리")
+    engine = _engine_with(tmp_path, hook)
+
+    engine.summarize(_ctx(MINE), days=3650)
+
+    _, evidence = hook.seen[0]
+    for leak in ("김해외동", "3억 2천", "180182"):
+        assert leak not in evidence, f"권한 밖 자료가 전문가에게 갔다: {leak}"
+
+
+def test_the_summary_prompt_does_not_refuse_subjective_asks():
+    """「중요한 내용을 알려줘」 에 "판단할 수 없다"고 답하던 것.
+
+    그 규칙은 정당한 아카이브 질문을 거부하는 탈출구가 됐다 — 무엇이 중요한지는
+    읽는 사람이 정하고, 봇은 원문에 있는 것을 정리해 보이면 된다.
+    """
+    from tybot.answer import SUMMARY_PROMPT
+
+    assert "주관적인 요청도 원문으로 답한다" in SUMMARY_PROMPT
+    assert "아카이브 원문으로 답할 수 있는 질문이 아닙니다" not in SUMMARY_PROMPT

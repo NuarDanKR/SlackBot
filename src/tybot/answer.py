@@ -52,7 +52,10 @@ SUMMARY_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것�
 6. 한국어, 간결. 출처 줄은 시스템이 붙이므로 쓰지 않는다.
 7. 출력은 Slack 메시지다. `#` 제목·`**굵게**`·`---` 구분선은 Slack에서 글자 그대로 보이니 금지.
    채널 이름은 `*#채널명*`, 하위 항목은 `• `, 들여쓰기는 공백 2칸으로만 표현한다.
-8. 질문이 아카이브 내용과 무관하면(봇 설정·연결 상태 등) 정리하지 말고 "아카이브 원문으로 답할 수 있는 질문이 아닙니다"라고만 답한다.
+8. **주관적인 요청도 원문으로 답한다.** "중요한 내용", "핵심만" 같은 요청에
+   "판단할 수 없다"고 답하지 않는다. 중요도를 임의로 매기지 말고, 원문에 있는 것을
+   그대로 정리해 보인다 — 무엇이 중요한지는 읽는 사람이 정한다.
+9. 정리를 거부하는 것은 **원문이 이 기간에 하나도 없을 때뿐**이다. 그때는 5번을 따른다.
 """
 
 ADVICE_PROMPT = """너는 태영건설 사내 Slack 아카이브 봇 'TYBot'이다.
@@ -362,6 +365,32 @@ class AnswerEngine:
                 + hint,
                 [], None, 0.0, 0, "no_hits",
             )
+
+        # **요약도 전문가에게 먼저 묻는다.** Hermes 의 본업이 회의록·업무 진행 요약인데
+        # 이 경로에만 훅이 없어서, 등록해도 전문가가 요약 질문을 받지 못했다
+        # (2026-09-07 실제 발생). 근거는 아래 blocks 뿐이고 출처는 우리가 붙인다.
+        if self._specialist is not None:
+            special = self._specialist(
+                question or f"최근 {days}일 진행 상황을 정리해 주세요.",
+                ctx,
+                (chr(10) * 2).join(blocks),
+            )
+            if special is not None and special.text.strip():
+                logger.info(
+                    "summary ok(전문가) ws=%s specialist=%s model=%s docs=%d",
+                    ctx.workspace,
+                    special.specialist,
+                    special.model,
+                    len(blocks),
+                )
+                return Answer(
+                    special.text,
+                    citations,
+                    special.model,
+                    special.cost_usd,
+                    total,
+                    "answered",
+                )
 
         messages = [
             Message("system", SUMMARY_PROMPT),
