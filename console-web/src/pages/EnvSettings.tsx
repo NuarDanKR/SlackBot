@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Chip, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
 interface EnvSettingsData {
@@ -48,6 +49,7 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
   const [draft, setDraft] = useState<EnvSettingsData | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [confirmSave, setConfirmSave] = useState(false)
 
   useEffect(() => {
     if (resource.data) setDraft(copySettings(resource.data))
@@ -89,7 +91,6 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
 
   async function save() {
     if (!draft || !draft.editable || saving) return
-    if (!window.confirm('설정을 저장하고 TYBot 재시작을 요청하시겠습니까?')) return
     setSaving(true)
     setSaveError(null)
     try {
@@ -211,12 +212,16 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
       <Section title="저장될 값" lead="시크릿은 포함되지 않습니다. 이 값만 관리 오버레이 파일에 기록됩니다.">
         <pre className="code-block env-preview">{renderedPreview}</pre>
         <div className="form-row">
-          <button className="btn btn-primary" disabled={!draft.editable || saving} onClick={save}>
+          <button className="btn btn-primary" disabled={!draft.editable || saving} onClick={() => setConfirmSave(true)}>
             {saving ? '저장 중…' : '저장하고 봇 재시작'}
           </button>
           <span className="field-help mono">{draft.path}</span>
         </div>
       </Section>
+      <ConfirmDialog open={confirmSave} title="환경 설정을 저장하고 봇을 재시작할까요?"
+        detail="변경된 공통 동작 설정을 저장한 뒤 TYBot이 1분 안에 재시작됩니다. 기존 아카이브 원문은 변경되지 않으며 실행자는 감사 기록에 남습니다."
+        confirmLabel="저장하고 재시작" busy={saving} onCancel={() => setConfirmSave(false)}
+        onConfirm={() => { void save().finally(() => setConfirmSave(false)) }} />
     </>
   )
 }

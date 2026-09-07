@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Chip, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
 interface TimerPreset {
@@ -29,6 +30,7 @@ interface TimerResponse {
 }
 
 type TimerAction = 'enable' | 'disable' | 'run' | 'schedule'
+interface PendingAction { timer: BatchTimer; action: TimerAction; preset?: string; description: string }
 
 function statusChip(timer: BatchTimer) {
   if (!timer.enabled) return <Chip tone="stalled">사용 안 함</Chip>
@@ -48,6 +50,7 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [working, setWorking] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [pending, setPending] = useState<PendingAction | null>(null)
 
   useEffect(() => {
     if (!resource.data) return
@@ -66,7 +69,6 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
           : action === 'run'
             ? '지금 한 번 실행'
             : `실행 주기를 ${timer.presets.find((item) => item.value === preset)?.label ?? preset}로 변경`
-    if (!window.confirm(`${timer.label}: ${description}하시겠습니까?`)) return
     setWorking(`${timer.unit}:${action}`)
     setError(null)
     try {
@@ -83,6 +85,14 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
     } finally {
       setWorking(null)
     }
+  }
+
+  function ask(timer: BatchTimer, action: TimerAction, preset?: string) {
+    const description = action === 'enable' ? '활성화하고 예약 실행을 시작합니다'
+      : action === 'disable' ? '중지하고 자동 실행을 해제합니다'
+        : action === 'run' ? '예약과 별개로 지금 한 번 실행합니다'
+          : `실행 주기를 ${timer.presets.find((item) => item.value === preset)?.label ?? preset}로 변경합니다`
+    setPending({ timer, action, preset, description })
   }
 
   if (resource.loading && !resource.data) return <Loading what="배치 상태를" />
@@ -164,6 +174,7 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
                   <div className="form-row" style={{ marginTop: 18 }}>
                     <select
                       className="input"
+                      aria-label={`${timer.label} 실행 주기`}
                       style={{ flex: 1 }}
                       value={selected}
                       disabled={busy}
@@ -179,7 +190,7 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
                       className="btn btn-sm"
                       type="button"
                       disabled={busy || selected === timer.preset}
-                      onClick={() => apply(timer, 'schedule', selected)}
+                      onClick={() => ask(timer, 'schedule', selected)}
                     >
                       주기 적용
                     </button>
@@ -188,15 +199,15 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
 
                 <div className="form-row" style={{ marginTop: 14 }}>
                   {timer.enabled ? (
-                    <button className="btn btn-sm btn-danger" type="button" disabled={busy} onClick={() => apply(timer, 'disable')}>
+                    <button className="btn btn-sm btn-danger" type="button" disabled={busy} onClick={() => ask(timer, 'disable')}>
                       사용 중지
                     </button>
                   ) : (
-                    <button className="btn btn-sm btn-primary" type="button" disabled={busy} onClick={() => apply(timer, 'enable')}>
+                    <button className="btn btn-sm btn-primary" type="button" disabled={busy} onClick={() => ask(timer, 'enable')}>
                       사용 시작
                     </button>
                   )}
-                  <button className="btn btn-sm" type="button" disabled={busy} onClick={() => apply(timer, 'run')}>
+                  <button className="btn btn-sm" type="button" disabled={busy} onClick={() => ask(timer, 'run')}>
                     지금 실행
                   </button>
                 </div>
@@ -205,6 +216,14 @@ export function BatchTimers({ onToast }: { onToast: (message: string) => void })
           })}
         </div>
       </Section>
+      <ConfirmDialog open={pending !== null} title={`${pending?.timer.label ?? ''} 설정을 변경할까요?`}
+        detail={`${pending?.description ?? ''}. 이 작업과 실행자는 감사 기록에 남습니다.`}
+        confirmLabel={pending?.action === 'disable' ? '사용 중지' : pending?.action === 'run' ? '지금 실행' : '변경 적용'}
+        danger={pending?.action === 'disable'} busy={working !== null}
+        onCancel={() => setPending(null)} onConfirm={() => {
+          if (!pending) return
+          void apply(pending.timer, pending.action, pending.preset).finally(() => setPending(null))
+        }} />
     </>
   )
 }

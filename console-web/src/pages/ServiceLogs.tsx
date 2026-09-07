@@ -72,6 +72,7 @@ export function ServiceLogs({ context }: { context?: ErrorLogContext | null }) {
             ))}
             <select
               className="input"
+              aria-label="표시할 로그 개수"
               style={{ width: 92 }}
               value={limit}
               onChange={(e) => setLimit(Number(e.target.value))}

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Chip, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 import type { ConsoleUser, DeployRequest } from '../types'
 
@@ -24,6 +25,7 @@ interface DeploymentStatus {
 
 interface RequestResponse { requests: DeployRequest[] }
 interface StatusResponse { workspaces: { key: string; label: string }[] }
+type Confirmation = { kind: 'now' } | { kind: 'decision'; id: string; decision: 'approve' | 'reject'; workspace: string; requester: string }
 
 const RUNTIME_LABEL: Record<RuntimeState, string> = {
   idle: '배포 기록 없음', queued: '배포 대기 중', running: '배포 진행 중',
@@ -61,6 +63,7 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
   const [reason, setReason] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
 
   useEffect(() => { if (queue.data) setRequests(queue.data.requests) }, [queue.data])
   useEffect(() => {
@@ -93,7 +96,6 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
   // 관리자의 직접 배포. 서버에 root 로 들어가 update.sh 를 칠 수 있는 사람에게
   // 승인 절차를 강제하면 콘솔을 놔두고 SSH 로 도는 길만 열린다 — 그쪽은 기록이 없다.
   async function deployNow() {
-    if (!window.confirm('승인 절차 없이 지금 배포합니다. 계속하시겠습니까?')) return
     setSubmitting(true); setError(null)
     try {
       await api.put('/api/deployment/request', {})
@@ -106,7 +108,6 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
 
   async function decide(id: string, decision: 'approve' | 'reject') {
     const action = decision === 'approve' ? '승인' : '반려'
-    if (!window.confirm(`이 배포 요청을 ${action}하시겠습니까?`)) return
     setSubmitting(true); setError(null)
     try {
       const result = await api.put<RequestResponse>(`/api/deploy-requests/${id}/decision`, {
@@ -163,8 +164,8 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
               <td>{item.workspaceLabel}<div className="hint mono">{item.workspace}</div></td>
               <td><span className="mono">{item.commit.slice(0, 8)}</span><div className="hint mono">{item.branch}</div></td>
               <td>{item.requester}</td><td>{requestChip(item.state)}</td><td className="right">
-                {canDecide ? <><button className="btn btn-sm btn-primary" disabled={submitting} onClick={() => decide(item.id, 'approve')}>승인</button>{' '}
-                  <button className="btn btn-sm btn-danger" disabled={submitting} onClick={() => decide(item.id, 'reject')}>반려</button></>
+                {canDecide ? <><button className="btn btn-sm btn-primary" disabled={submitting} onClick={() => setConfirmation({ kind: 'decision', id: item.id, decision: 'approve', workspace: item.workspaceLabel, requester: item.requester })}>승인</button>{' '}
+                  <button className="btn btn-sm btn-danger" disabled={submitting} onClick={() => setConfirmation({ kind: 'decision', id: item.id, decision: 'reject', workspace: item.workspaceLabel, requester: item.requester })}>반려</button></>
                   : item.state === 'awaiting_approval' && item.requester.toLowerCase() === user.email.toLowerCase()
                     ? <span className="hint">본인 요청</span> : '-'}</td></tr>
           })}
@@ -177,7 +178,7 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
           <p className="hint">{current.message || '아직 기록된 배포 결과가 없습니다.'}</p></div>
           <div className="deploy-head-actions">{runtimeChip(current.state)}
             {isAdmin && <button className="btn btn-primary" disabled={submitting || busy}
-              onClick={deployNow}>{busy ? '배포 중…' : '지금 배포'}</button>}</div></div>
+              onClick={() => setConfirmation({ kind: 'now' })}>{busy ? '배포 중…' : '지금 배포'}</button>}</div></div>
           <div className="deploy-actor"><span className="metric-label">실행 승인자</span> {current.actor || '-'}</div>
           <div className="deploy-diff">
             <div className="deploy-diff-side is-before">
@@ -196,6 +197,18 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
           <div className="hint" style={{ marginTop: 16 }}>요청 {current.requestedAt ? fmt.dayClock(current.requestedAt) : '-'} · 시작 {current.startedAt ? fmt.dayClock(current.startedAt) : '-'} · 완료 {current.finishedAt ? fmt.dayClock(current.finishedAt) : '-'}</div>
         </div>
       </Section>}
+      <ConfirmDialog open={confirmation !== null}
+        title={confirmation?.kind === 'now' ? '승인 절차 없이 지금 배포할까요?' : `배포 요청을 ${confirmation?.decision === 'approve' ? '승인' : '반려'}할까요?`}
+        detail={confirmation?.kind === 'now'
+          ? '서버의 전체 테스트와 fast-forward 검사를 통과한 코드만 반영되며, 실행 결과는 감사 기록에 남습니다.'
+          : `${confirmation?.workspace ?? ''} · 요청자 ${confirmation?.requester ?? ''}. 처리 결과와 승인자는 감사 기록에 남습니다.`}
+        confirmLabel={confirmation?.kind === 'now' ? '지금 배포' : confirmation?.decision === 'approve' ? '승인하고 배포' : '요청 반려'}
+        danger={confirmation?.kind === 'now' || confirmation?.decision === 'reject'} busy={submitting}
+        onCancel={() => setConfirmation(null)} onConfirm={() => {
+          if (!confirmation) return
+          const action = confirmation.kind === 'now' ? deployNow() : decide(confirmation.id, confirmation.decision)
+          void action.finally(() => setConfirmation(null))
+        }} />
     </>
   )
 }

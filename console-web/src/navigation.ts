@@ -6,7 +6,7 @@ export interface HashLocation {
 }
 
 function readHash(): HashLocation {
-  const raw = window.location.hash.replace(/^#/, '') || '/collect'
+  const raw = window.location.hash.replace(/^#/, '') || '/home'
   const [path, search = ''] = raw.split('?', 2)
   return { path: path.startsWith('/') ? path : `/${path}`, query: new URLSearchParams(search) }
 }

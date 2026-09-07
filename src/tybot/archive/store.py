@@ -5,12 +5,15 @@ v1 평면 파일과 v2 ``workspaces/<ws>/channels/<id>__<name>/raw/<date>.md``�
 """
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..access import RequestContext, can_access
+
+logger = logging.getLogger("tybot.archive.store")
 
 FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 RAW_HEADING_RE = re.compile(r"^##\s*원문", re.MULTILINE)
@@ -224,6 +227,8 @@ class ArchiveStore:
         # path -> (stat 지문, 파싱 결과 또는 SchemaError 메시지)
         self._cache: dict[Path, tuple[tuple[int, int], ArchiveDoc | str]] = {}
         self._lock = threading.Lock()
+        # v1 경고는 한 번만. `_files()` 는 질문마다 여러 번 불린다.
+        self._warned_legacy = False
 
     def _files(self) -> list[Path]:
         v2 = self.root / "workspaces"
@@ -231,7 +236,19 @@ class ArchiveStore:
         # v2를 먼저 읽어 v1과 같은 라인이 있으면 새 경로를 출처로 남긴다.
         files = sorted(v2.glob("*/channels/*/raw/*.md")) if v2.is_dir() else []
         if legacy.is_dir():
-            files.extend(sorted(legacy.glob("*/*.md")))
+            legacy_files = sorted(legacy.glob("*/*.md"))
+            files.extend(legacy_files)
+            # 수집은 v2 로만 쓴다(`writer.py`). v1 은 전환 전 원문이 남아 있는 동안만
+            # 읽는다. 이 글롭을 떼는 날 **파일은 그대로 있고 근거만 사라진다** —
+            # 그 조용함을 막으려고, 아직 남아 있다는 사실을 기동 로그에 남긴다.
+            if legacy_files and not self._warned_legacy:
+                self._warned_legacy = True
+                logger.warning(
+                    "v1 아카이브 %d개 파일이 아직 답변 근거로 쓰인다 (%s). "
+                    "`scripts/diagnose_collection.py` 로 v2 이전 여부를 확인하라 — "
+                    "이 경로를 떼기 전에 옮겨야 근거가 줄지 않는다.",
+                    len(legacy_files), legacy,
+                )
         return files
 
     def source_files(self) -> list[Path]:

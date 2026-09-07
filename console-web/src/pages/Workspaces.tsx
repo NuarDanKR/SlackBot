@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
 import { SetupGuide } from '../components/SetupGuide'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Chip, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 
 type WorkspaceRole = 'root' | 'member'
@@ -74,6 +75,7 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirmSave, setConfirmSave] = useState(false)
 
   useEffect(() => {
     if (resource.data) setRows(resource.data.workspaces)
@@ -115,7 +117,6 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
 
   async function save() {
     if (!ready || saving) return
-    if (!window.confirm(`${draft.label.trim()} 설정을 저장하고 TYBot 재시작을 요청하시겠습니까?`)) return
     setSaving(true)
     setError(null)
     try {
@@ -232,7 +233,7 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
           </div>
 
           <div className="form-row">
-            <button className="btn btn-primary" disabled={!ready || saving} onClick={save}>
+            <button className="btn btn-primary" disabled={!ready || saving} onClick={() => setConfirmSave(true)}>
               {saving ? '저장 중…' : editingRow?.tokenInEnv ? 'DB로 이전 및 저장' : editing ? '변경 저장' : '워크스페이스 등록'}
             </button>
             {editing && <button className="btn btn-quiet" onClick={reset}>취소</button>}
@@ -267,6 +268,10 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
           </tbody>
         </table></div></div>
       </Section>
+      <ConfirmDialog open={confirmSave} title={`${draft.label.trim()} 설정을 저장할까요?`}
+        detail="워크스페이스 설정과 토큰 변경 사항을 저장한 뒤 TYBot 재시작을 요청합니다. 저장된 토큰 원문은 다시 표시되지 않으며 실행자는 감사 기록에 남습니다."
+        confirmLabel={editing ? '변경 저장' : '워크스페이스 등록'} busy={saving}
+        onCancel={() => setConfirmSave(false)} onConfirm={() => { void save().finally(() => setConfirmSave(false)) }} />
     </>
   )
 }
