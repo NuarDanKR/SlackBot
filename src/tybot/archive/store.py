@@ -303,10 +303,14 @@ class ArchiveStore:
         # 갈리면 출처가 두 줄 나오고, 더 나쁘게는 **권한 메타가 따로 계산된다** —
         # `visibility`·`acl`·`share_with` 를 그룹마다 정하므로 같은 채널이 한쪽으로는
         # 보이고 다른 쪽으로는 안 보일 수 있다(2026-09-07 실제 발생).
+        real_id_sets: dict[tuple[str, str], set[str]] = {}
+        for doc in loaded:
+            if doc.channel_id and not is_synthetic_channel_id(doc.channel_id):
+                real_id_sets.setdefault((doc.workspace, doc.channel), set()).add(doc.channel_id)
+        # A display name is only a safe migration alias when it identifies exactly one
+        # real Slack channel. Renamed channels can share a historical display name.
         real_ids = {
-            (doc.workspace, doc.channel): doc.channel_id
-            for doc in loaded
-            if doc.channel_id and not is_synthetic_channel_id(doc.channel_id)
+            key: next(iter(ids)) for key, ids in real_id_sets.items() if len(ids) == 1
         }
         grouped: dict[tuple[str, str], list[ArchiveDoc]] = {}
         for doc in loaded:

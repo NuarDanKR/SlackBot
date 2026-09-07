@@ -185,12 +185,10 @@ def _index_freshness() -> tuple[str, str]:
 
 
 def _idle_specialists() -> list[str]:
-    """등록만 되고 **라우팅 후보가 아닌** 전문가.
+    """등록은 됐지만 아직 활성화 결정이 나지 않은 전문가.
 
-    `state` 가 `enabled` 가 아니면 라우터가 아예 후보로 올리지 않는다. 그런데 화면에는
-    「등록됨」 으로 보이고 답변은 정상적으로 나가므로, 전문가가 한 번도 안 불렸다는
-    사실이 어디에도 드러나지 않는다 — 2026-09-07 에 `draft` 로 남아 있던 Hermes 가
-    그랬다. 모델명이 마스터와 같아서 화면으로도 구별되지 않았다.
+    `disabled` 는 관리자가 의도적으로 사용 중지한 정상 상태이므로 경고하지 않는다.
+    활성화를 기다리는 `draft` 만 조용히 라우팅에서 빠지는 상태로 취급한다.
     """
     url = os.getenv("DATABASE_URL", "").strip()
     if not url:
@@ -202,7 +200,7 @@ def _idle_specialists() -> list[str]:
             cur.execute(
                 """
                 SELECT key, state FROM specialist_bot
-                 WHERE state <> 'enabled'
+                 WHERE state = 'draft'
                  ORDER BY key
                 """
             )

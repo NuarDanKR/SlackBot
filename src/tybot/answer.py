@@ -136,6 +136,8 @@ class Answer:
     reason: str  # answered | advice | no_hits | no_access | smalltalk | out_of_scope | error
     # 사용자에게 보여줄 근거 요약용 검색어. 새로 저장하는 값이 아니라 이미 쓴 값이다.
     terms: list[str] = field(default_factory=list)
+    # 근거에 언급됐지만 원본을 읽지 않은 첨부. 검수 대기이면 여기에 들어온다.
+    withheld: list[str] = field(default_factory=list)
     # 어느 전문가가 문장을 만들었나. 비면 마스터다.
     #
     # **모델명으로는 구별할 수 없다.** 전문가에게 지정한 모델이 마스터 기본 모델과
@@ -171,6 +173,10 @@ class Answer:
             bits.append(self.model)
         if self.specialist:
             bits.append(f"{self.specialist} 전문봇")
+        if self.withheld:
+            names = ", ".join(self.withheld[:3])
+            more = f" 외 {len(self.withheld) - 3}건" if len(self.withheld) > 3 else ""
+            bits.append(f"검수 대기로 원본을 읽지 않은 첨부: {names}{more}")
         return f"_근거: {' · '.join(bits)}_" if bits else ""
 
     def to_slack(self) -> str:
@@ -265,6 +271,27 @@ def _originals(store: ArchiveStore, hits: list[SearchHit]) -> documents.Attached
     return documents.collect(approved)
 
 
+def _withheld_attachments(store: ArchiveStore, hits: list[SearchHit]) -> list[str]:
+    """근거에 언급됐는데 **원본을 읽지 않은** 첨부 이름.
+
+    승인 게이트가 안전장치라 승인 전 원본은 모델에 가지 않는다. 그건 설계지만,
+    그 상태로 답하면 사용자에게는 **「봇이 파일을 못 읽는다」** 로만 보인다.
+    실제 사내 피드백이 그렇게 쌓였다(2026-09-07) — 파일 이해 성능 문제로 읽혔는데,
+    상당수는 검수 대기라 원본이 아예 전달되지 않은 것이었다.
+
+    무엇이 왜 빠졌는지 말한다. 사람이 할 수 있는 다음 행동(검수 승인)이 생긴다.
+    """
+    from .attachment_review import find_approved
+
+    out: list[str] = []
+    for workspace, channel_id, name in _attachment_names(hits):
+        if find_approved(store.root, workspace=workspace, channel_id=channel_id, name=name):
+            continue
+        if name not in out:
+            out.append(name)
+    return out
+
+
 def _evidence_block(hits: list[SearchHit]) -> str:
     return "\n".join(
         f"[{h.line.ts}] ({h.doc.channel}) {h.line.speaker}: {h.line.text}" for h in hits
@@ -330,6 +357,8 @@ class AnswerEngine:
 
         cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
         blocks: list[str] = []
+        specialist_parts: list[tuple[str, list[str], list[SearchHit]]] = []
+        summary_hits: list[SearchHit] = []
         citations: list[str] = []
         total = 0
         visible_docs = [
@@ -343,25 +372,26 @@ class AnswerEngine:
                 continue
             recent = recent[-self._max_lines_per_channel :]
             total += len(recent)
+            recent_hits = [SearchHit(doc=doc, line=line, score=1) for line in recent]
+            summary_hits.extend(recent_hits)
             body = "\n".join(f"[{ln.ts}] {ln.speaker}: {ln.text}" for ln in recent)
             # 다른 워크스페이스 자료임을 근거와 출처 양쪽에 밝힌다.
             ws_tag = "" if doc.workspace == ctx.workspace else f"[{doc.workspace}] "
-            blocks.append(f"### {ws_tag}채널 {doc.channel}\n{body}")
-            # **줄이 실제로 온 파일**을 가리킨다.
-            #
-            # `doc.path` 를 쓰면 안 된다. `_merge()` 가 여러 일자 파일을 한 논리
-            # 채널로 합칠 때 `path` 에는 **대표 파일 하나**만 남기고, `raw_lines` 는
-            # 모든 파일에서 온다. 그래서 파일명과 날짜가 서로 다른 것을 가리켰다 —
-            # `📄2026-09-03.md(2026-09-07)` 처럼(2026-09-07 실제 발생).
-            # 3일 자 문서를 찾으러 가면 없다. 오류는 안 난다.
-            last = recent[-1]
-            source = last.source_path or doc.path
-            date = last.ts.split()[0]
-            # 여러 날에 걸쳤으면 그 사실을 밝힌다. 한 파일만 적으면 근거가 실제보다
-            # 좁아 보이고, 읽는 사람이 나머지를 찾을 방법이 없다.
-            spans = len({str(ln.source_path) for ln in recent if ln.source_path})
-            more = f" 외 {spans - 1}일" if spans > 1 else ""
-            citations.append(f"{ws_tag}{doc.channel}, 📄{source.name}({date}){more}")
+            block = f"### {ws_tag}채널 {doc.channel}\n{body}"
+            blocks.append(block)
+
+            doc_citations: list[str] = []
+            seen_sources: set[tuple[str, str]] = set()
+            for line in recent:
+                source = line.source_path or doc.path
+                date = line.ts.split()[0]
+                source_key = (str(source), date)
+                if source_key in seen_sources:
+                    continue
+                seen_sources.add(source_key)
+                doc_citations.append(f"{ws_tag}{doc.channel}, 📄{source.name}({date})")
+            citations.extend(doc_citations)
+            specialist_parts.append((block, doc_citations, recent_hits))
 
         if not blocks:
             titles = [doc.channel for doc in visible_docs]
@@ -387,14 +417,46 @@ class AnswerEngine:
                 [], None, 0.0, 0, "no_hits",
             )
 
+        # 요약 경로에도 **승인된 원본을 함께 보낸다.** 예전에는 원문 라인만 보냈고,
+        # 그래서 「가정산서 내용 요약해줘」 같은 질문에 표·스캔 PDF 를 아예 못 읽었다.
+        # 근거로 고른 문서의 첨부만 대상이다 — 검색과 무관한 파일을 올려보내지 않는다.
+        attached = _originals(self._store, summary_hits)
+        withheld = _withheld_attachments(self._store, summary_hits)
+        citations.extend(_attachment_source_links(summary_hits))
+
         # **요약도 전문가에게 먼저 묻는다.** Hermes 의 본업이 회의록·업무 진행 요약인데
         # 이 경로에만 훅이 없어서, 등록해도 전문가가 요약 질문을 받지 못했다
         # (2026-09-07 실제 발생). 근거는 아래 blocks 뿐이고 출처는 우리가 붙인다.
         if self._specialist is not None:
-            special = self._specialist(
-                question or f"최근 {days}일 진행 상황을 정리해 주세요.",
-                ctx,
-                (chr(10) * 2).join(blocks),
+            from .specialist_adapters import MAX_EVIDENCE_CHARS
+
+            selected_blocks: list[str] = []
+            selected_citations: list[str] = []
+            selected_hits: list[SearchHit] = []
+            selected_lines = 0
+            used_chars = 0
+            for block, block_citations, block_hits in specialist_parts:
+                separator = 2 if selected_blocks else 0
+                if used_chars + separator + len(block) > MAX_EVIDENCE_CHARS:
+                    break
+                selected_blocks.append(block)
+                selected_citations.extend(block_citations)
+                selected_hits.extend(block_hits)
+                selected_lines += len(block_hits)
+                used_chars += separator + len(block)
+            selected_citations.extend(_attachment_source_links(selected_hits))
+
+            # The adapter's final size guard must not silently cut a channel in half.
+            # If no complete channel fits, the master handles the full evidence.
+            specialist_evidence = "\n\n".join(selected_blocks)
+            special = (
+                self._specialist(
+                    question or f"최근 {days}일 진행 상황을 정리해 주세요.",
+                    ctx,
+                    specialist_evidence,
+                )
+                if specialist_evidence
+                else None
             )
             if special is not None and special.text.strip():
                 logger.info(
@@ -406,22 +468,28 @@ class AnswerEngine:
                 )
                 return Answer(
                     special.text,
-                    citations,
+                    selected_citations,
                     special.model,
                     special.cost_usd,
-                    total,
+                    selected_lines,
                     "answered",
+                    withheld=withheld,
                     specialist=special.specialist,
                 )
 
+        summary_prompt = (
+            "<원문>\n"
+            + "\n\n".join(blocks)
+            + f"\n</원문>\n\n질문: {question or f'최근 {days}일 진행 상황을 정리해 주세요.'}"
+        )
+        user_content = (
+            [*attached.blocks, {"type": "text", "text": summary_prompt}]
+            if attached.any
+            else summary_prompt
+        )
         messages = [
             Message("system", SUMMARY_PROMPT),
-            Message(
-                "user",
-                "<원문>\n"
-                + "\n\n".join(blocks)
-                + f"\n</원문>\n\n질문: {question or f'최근 {days}일 진행 상황을 정리해 주세요.'}",
-            ),
+            Message("user", user_content),
         ]
         try:
             resp = self._router.complete(
@@ -436,7 +504,10 @@ class AnswerEngine:
             "summary ws=%s days=%d channels=%d lines=%d model=%s cost=$%.4f",
             ctx.workspace, days, len(blocks), total, resp.model, resp.cost_usd,
         )
-        return Answer(resp.text.strip(), citations, resp.model, resp.cost_usd, total, "answered")
+        return Answer(
+            resp.text.strip(), citations, resp.model, resp.cost_usd, total,
+            "answered", withheld=withheld,
+        )
 
     def advise(
         self, question: str, ctx: RequestContext, *, terms: list[str] | None = None
@@ -607,6 +678,9 @@ class AnswerEngine:
         # 함께 보내 모델이 직접 읽게 한다. 전처리를 대체하는 게 아니라 - 어느 파일을
         # 볼지는 위 검색이 이미 골랐다 - 그 파일의 원본을 덧붙이는 것이다.
         attached = _originals(self._store, hits)
+        # 승인 전 원본은 모델에 가지 않는다(설계). 그 사실을 답변이 말해야
+        # 「봇이 파일을 못 읽는다」 로 읽히지 않는다.
+        withheld = _withheld_attachments(self._store, hits)
         prompt = f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"
         user_content = (
             [*attached.blocks, {"type": "text", "text": prompt}]
@@ -642,6 +716,7 @@ class AnswerEngine:
                     len(hits),
                     "answered",
                     specialist=special.specialist,
+                    withheld=withheld,
                 )
 
         messages = [
@@ -681,5 +756,5 @@ class AnswerEngine:
             body = f"{body}\n\n{note}"
         return Answer(
             body, citations, resp.model, resp.cost_usd, len(hits),
-            "answered", terms=list(terms or []),
+            "answered", terms=list(terms or []), withheld=withheld,
         )

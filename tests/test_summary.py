@@ -194,11 +194,11 @@ def test_the_citation_names_the_file_the_line_came_from(tmp_path):
     )
 
     assert answer.citations, "출처가 비었다"
-    citation = answer.citations[0]
-    # 파일명과 날짜가 같은 날을 가리켜야 한다.
-    assert f"{new_day}.md({new_day})" in citation, citation
-    # 여러 날에 걸쳤으면 밝힌다 — 한 파일만 적으면 근거가 실제보다 좁아 보인다.
-    assert "외 1일" in citation, citation
+    assert len(answer.citations) == 2
+    # 사용한 파일을 생략하지 않고 파일명과 날짜가 같은 날을 가리켜야 한다.
+    assert any(f"{old_day}.md({old_day})" in item for item in answer.citations)
+    assert any(f"{new_day}.md({new_day})" in item for item in answer.citations)
+    assert all("외" not in item for item in answer.citations)
 
 
 def test_a_single_day_citation_has_no_span_suffix(tmp_path):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -99,6 +100,36 @@ def test_the_replay_scope_comes_from_the_citations(mod):
         "#현장_김해외동(180182)_채팅방",
     ]
 
+    assert mod.scope_from(
+        [
+            "#팀_전산(ABB155)_주간보고, 📄t.md(2026-08-20)",
+            "[mgmt] #현장_김해외동(180182)_채팅방, 📄x.md(2026-08-01)",
+        ],
+        "pilot",
+    ) == {
+        "pilot": ["#팀_전산(ABB155)_주간보고"],
+        "mgmt": ["#현장_김해외동(180182)_채팅방"],
+    }
+
+
+def test_the_replay_store_keeps_only_exact_workspace_channel_pairs(mod, tmp_path):
+    docs = [
+        SimpleNamespace(workspace="pilot", channel="#공통", title="pilot/common"),
+        SimpleNamespace(workspace="mgmt", channel="#공통", title="mgmt/common"),
+        SimpleNamespace(workspace="mgmt", channel="#인용됨", title="mgmt/cited"),
+    ]
+
+    class Store:
+        root = tmp_path
+
+        @staticmethod
+        def docs():
+            return docs
+
+    scoped = mod.CitationScopedStore(Store(), {"mgmt": ["#인용됨"]})
+
+    assert [doc.title for doc in scoped.visible_docs(None)] == ["mgmt/cited"]
+
 
 def test_a_question_without_citations_is_skipped(mod, monkeypatch):
     """인용이 없으면 재생 범위를 만들 수 없다. **짐작하지 않는다** —
@@ -165,5 +196,23 @@ def test_the_output_file_carries_no_answer_text(mod):
     source = SCRIPT.read_text(encoding="utf-8")
     payload = source[source.index('payload = {'):source.index('Path(args.out)')]
 
-    for leaked in ('"masterText"', '"specialistText"', "r.master_text", "r.special_text"):
+    for leaked in (
+        '"question"',
+        '"masterText"',
+        '"specialistText"',
+        "r.question,",
+        "r.master_text",
+        "r.special_text",
+    ):
         assert leaked not in payload, f"결과 파일에 답변 본문이 담긴다: {leaked}"
+
+    assert '"questionId"' in payload
+
+
+def test_question_ids_are_stable_but_workspace_specific(mod):
+    first = mod.Row("착공일 알려줘", "pilot", [], 1).question_id
+    again = mod.Row("착공일 알려줘", "pilot", [], 1).question_id
+    other_workspace = mod.Row("착공일 알려줘", "mgmt", [], 1).question_id
+
+    assert first == again
+    assert first != other_workspace

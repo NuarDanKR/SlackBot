@@ -542,3 +542,12 @@ def test_no_database_means_no_idle_warning(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
     assert health._idle_specialists() == []
+
+
+def test_intentionally_disabled_specialists_are_not_health_warnings():
+    import inspect
+
+    source = inspect.getsource(health._idle_specialists)
+
+    assert "state = 'draft'" in source
+    assert "state <> 'enabled'" not in source

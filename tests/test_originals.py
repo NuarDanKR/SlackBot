@@ -371,6 +371,30 @@ def test_two_real_ids_are_still_separate_channels(tmp_path):
     assert len(docs) == 2, "진짜 ID 가 다르면 다른 채널이다"
 
 
+def test_a_synthetic_id_is_not_assigned_when_two_real_channels_share_a_name(tmp_path):
+    """이름이 모호하면 합성 문서를 실제 채널 어느 쪽에도 섞지 않는다."""
+    from tybot.archive.store import ArchiveStore, is_synthetic_channel_id
+
+    channel = "#팀_전산(ABB155)_공지"
+    base = tmp_path / "channels" / "tyit"
+    base.mkdir(parents=True)
+    for name, channel_id, text in (
+        ("a.md", "C111", "첫 채널"),
+        ("b.md", "C222", "둘째 채널"),
+        ("legacy.md", "legacy-ambiguous", "옛 문서"),
+    ):
+        (base / name).write_text(
+            _doc_with_id(channel, channel_id, "2026-09-07", text), encoding="utf-8"
+        )
+
+    docs = [d for d in ArchiveStore(tmp_path).docs() if d.channel == channel]
+
+    assert len(docs) == 3
+    legacy = next(d for d in docs if is_synthetic_channel_id(d.channel_id))
+    assert [line.text for line in legacy.raw_lines] == ["옛 문서"]
+    assert all(len(doc.raw_lines) == 1 for doc in docs)
+
+
 def test_the_synthetic_prefix_lives_where_it_is_minted():
     """판정과 생성이 두 곳에 있으면 한쪽만 고쳐져 조용히 어긋난다."""
     from tybot.archive.store import SYNTHETIC_ID_PREFIX, is_synthetic_channel_id

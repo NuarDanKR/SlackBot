@@ -373,6 +373,24 @@ def test_the_summary_specialist_only_sees_permitted_docs(tmp_path):
         assert leak not in evidence, f"권한 밖 자료가 전문가에게 갔다: {leak}"
 
 
+def test_summary_sources_only_name_complete_blocks_sent_to_specialist(tmp_path, monkeypatch):
+    """크기 제한으로 빠진 채널을 Hermes가 사용한 출처처럼 표시하지 않는다."""
+    from tybot import specialist_adapters
+
+    monkeypatch.setattr(specialist_adapters, "MAX_EVIDENCE_CHARS", 100)
+    hook = _Special("정리")
+    engine = _engine_with(tmp_path, hook)
+
+    answer = engine.summarize(RequestContext(workspace="pilot", role="exec"), days=3650)
+
+    assert len(hook.seen) == 1
+    _, evidence = hook.seen[0]
+    assert answer.hit_count == 1
+    assert len(answer.citations) == 1
+    for channel in (MINE, NOT_MINE):
+        assert (channel in evidence) == (channel in answer.citations[0])
+
+
 def test_the_summary_prompt_does_not_refuse_subjective_asks():
     """「중요한 내용을 알려줘」 에 "판단할 수 없다"고 답하던 것.
 
@@ -405,3 +423,28 @@ def test_a_master_answer_claims_no_specialist(tmp_path):
     answer = engine.answer("콘솔 배포 어떻게 됐어", _ctx(MINE))
 
     assert "전문봇" not in answer.to_slack()
+
+
+# --- 검수 대기 첨부를 왜 못 읽었는지 말한다 ---------------------------------
+def test_a_pending_attachment_is_named_not_silently_dropped(tmp_path):
+    """승인 전 원본은 모델에 가지 않는다 — 그건 설계다(스캔본에는 PII 검사가 안 먹는다).
+
+    그런데 그 상태로 답하면 사용자에게는 **「봇이 파일을 못 읽는다」** 로만 보인다.
+    사내 피드백이 실제로 그렇게 쌓였다(2026-09-07). 무엇이 왜 빠졌는지 말하면
+    사람이 할 수 있는 다음 행동(검수 승인)이 생긴다.
+    """
+    doc = DOC_MINE.replace(
+        "> [2026-08-12 09:15] 홍길동: 콘솔 배포 자동화를 끝냈습니다",
+        "> [2026-08-12 09:15] 홍길동: 콘솔 배포 자동화를 끝냈습니다\n"
+        "> [2026-08-12 09:16] 홍길동: [첨부:검수대기] 가정산서.pdf (pdf, 240KB)",
+    ).replace("acl:", "channel_id: C1\nacl:")
+    # `_engine_with()` writes its baseline to `전산.md`; keep this fixture separate.
+    path = tmp_path / "channels" / "pilot" / "첨부.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(doc, encoding="utf-8")
+
+    engine = _engine_with(tmp_path, _Special(""))
+    answer = engine.answer("가정산서 내용 알려줘", _ctx(MINE))
+
+    assert "가정산서.pdf" in answer.to_slack()
+    assert "검수 대기" in answer.to_slack(), "왜 원본을 안 읽었는지 말해야 한다"

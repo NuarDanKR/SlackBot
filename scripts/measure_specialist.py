@@ -34,8 +34,8 @@
 ## 권한을 넓히지 않는다
 
 `qa-log` 의 `scope` 는 「채널 N개」 같은 요약이라 **원래 권한을 복원할 수 없다.**
-그래서 그때 실제로 인용된 채널로만 범위를 만든다 — 원래 범위의 부분집합이므로
-넓어지는 일이 없다. 대신 근거가 그때보다 줄 수 있고, 그 차이를 함께 보고한다.
+그래서 그때 실제로 인용된 워크스페이스·채널 쌍만 별도 읽기 뷰에 넣는다. 원래 범위의
+부분집합이므로 넓어지는 일이 없다. 대신 근거가 그때보다 줄 수 있고 그 차이를 함께 본다.
 
 ## 돈이 든다
 
@@ -45,6 +45,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -98,6 +99,7 @@ class Row:
     workspace: str
     channels: list[str]
     recorded_hits: int
+    scope: dict[str, list[str]] = field(default_factory=dict)
     hits: int = 0
     master_text: str = ""
     special_text: str = ""
@@ -114,6 +116,11 @@ class Row:
     special_has_source: bool = False
     note: str = ""
 
+    @property
+    def question_id(self) -> str:
+        value = f"{self.workspace}\0{self.question}".encode()
+        return hashlib.sha256(value).hexdigest()[:16]
+
 
 def load_questions(days: int, limit: int) -> list[dict]:
     """`qa-log` 에서 다시 돌릴 질문. 근거를 찾은 것만 고른다.
@@ -124,11 +131,12 @@ def load_questions(days: int, limit: int) -> list[dict]:
 
     records = reader._read_qa_records(days)
     out = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for rec in records:
         question = str(rec.get("question") or "").strip()
         citations = list(rec.get("citations") or [])
-        if not question or question in seen:
+        key = (str(rec.get("workspace") or ""), question)
+        if not question or key in seen:
             continue
         if str(rec.get("reason")) != "answered" or int(rec.get("hits") or 0) <= 0:
             continue
@@ -136,7 +144,7 @@ def load_questions(days: int, limit: int) -> list[dict]:
             # 인용이 없으면 재생 범위를 만들 수 없다. **짐작하지 않는다** —
             # 범위를 넓게 잡으면 그 사람이 볼 수 없던 자료로 답을 만든다.
             continue
-        seen.add(question)
+        seen.add(key)
         out.append(rec)
         if len(out) >= limit:
             break
@@ -152,6 +160,50 @@ def channels_from(citations: list[str]) -> list[str]:
         if head.startswith("#") and head not in out:
             out.append(head)
     return out
+
+
+def scope_from(citations: list[str], default_workspace: str) -> dict[str, list[str]]:
+    """Build the exact workspace/channel allowlist represented by citations."""
+    out: dict[str, list[str]] = {}
+    for text in citations:
+        head = str(text).split(",")[0].strip()
+        match = re.match(r"^\[([^\]]+)\]\s*(.*)$", head)
+        workspace = match.group(1).strip() if match else default_workspace
+        channel = match.group(2).strip() if match else head
+        if channel.startswith("#") and channel not in out.setdefault(workspace, []):
+            out[workspace].append(channel)
+    return out
+
+
+class CitationScopedStore:
+    """Archive view restricted to the channels proven by recorded citations."""
+
+    def __init__(self, store: ArchiveStore, scope: dict[str, list[str]]) -> None:
+        self._store = store
+        self._scope = {
+            (workspace, channel)
+            for workspace, channels in scope.items()
+            for channel in channels
+        }
+        self.root = store.root
+
+    def visible_docs(self, _ctx: RequestContext):
+        return [
+            doc
+            for doc in self._store.docs()
+            if (doc.workspace, doc.channel) in self._scope
+        ]
+
+    def titles(self, ctx: RequestContext) -> list[str]:
+        return [doc.title for doc in self.visible_docs(ctx)]
+
+    def search(self, query: str, ctx: RequestContext, *, limit: int = 20):
+        from tybot import search_index
+
+        tokens = search_index.tokens_of(query)
+        if not tokens:
+            return []
+        return self._store._scan(query, tokens, self.visible_docs(ctx), limit)
 
 
 class Probe:
@@ -194,10 +246,10 @@ class Probe:
 
 
 def run(rows: list[Row], store, router, hook) -> None:
-    master = AnswerEngine(store, router)
-    special = AnswerEngine(store, router, specialist=hook)
-
     for row in rows:
+        scoped_store = CitationScopedStore(store, row.scope)
+        master = AnswerEngine(scoped_store, router)
+        special = AnswerEngine(scoped_store, router, specialist=hook)
         ctx = RequestContext(
             workspace=row.workspace, channels=frozenset(row.channels)
         )
@@ -293,6 +345,9 @@ def main(argv: list[str] | None = None) -> int:
             workspace=str(rec.get("workspace") or ""),
             channels=channels_from(list(rec.get("citations") or [])),
             recorded_hits=int(rec.get("hits") or 0),
+            scope=scope_from(
+                list(rec.get("citations") or []), str(rec.get("workspace") or "")
+            ),
         )
         for rec in records
     ]
@@ -305,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
             "질문 하나에 라우팅·전문가·마스터로 최소 3번 부릅니다 — 실제 비용이 듭니다."
         )
         for row in rows[:10]:
-            print(f"  [{row.workspace}] {row.question[:60]} · 채널 {len(row.channels)}개")
+            print(f"  [{row.workspace}] {row.question_id} · 채널 {len(row.channels)}개")
         return 0
 
     router = Router.from_default_registry(
@@ -333,14 +388,14 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         print("\n=== 근거에 없는 값이 전문가 답변에 들어간 건")
         for row in bad:
-            print(f"  {row.question[:50]} → {row.special_unsupported}")
+            print(f"  {row.question_id} → {row.special_unsupported}")
 
     if args.out:
         payload = {
             "summary": summary,
             "rows": [
                 {
-                    "question": r.question,
+                    "questionId": r.question_id,
                     "workspace": r.workspace,
                     "hits": r.hits,
                     "recordedHits": r.recorded_hits,
@@ -360,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"\n결과를 적었습니다: {args.out}")
-        print("**답변 본문은 담지 않습니다** — 업무 내용이 파일로 새지 않게.")
+        print("**질문·답변 본문은 담지 않습니다** — 업무 내용이 파일로 새지 않게.")
     return 0
 
 
