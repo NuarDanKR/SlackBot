@@ -85,7 +85,7 @@ export function Home({ user }: { user: ConsoleUser }) {
 
     <Section title="지금 조치할 항목" note={issueAreas ? `${issueAreas}개 영역 확인 필요` : '확인할 문제 없음'}>
       <div className="action-list">
-        <HomeAction href="/collect/status" title="수집 상태" detail={`중단 ${c?.stalled.length ?? 0}개 · 형식 오류 문서 ${c?.brokenDocuments ?? 0}건`} tone={collectionIssues ? 'bad' : 'ok'} />
+        <HomeAction href="/collect" title="수집 상태" detail={`중단 ${c?.stalled.length ?? 0}개 · 형식 오류 문서 ${c?.brokenDocuments ?? 0}건`} tone={collectionIssues ? 'bad' : 'ok'} />
         <HomeAction href={user.role === 'guest' ? '/answer' : '/answer/quality'} title={user.role === 'guest' ? '답변 현황' : '답변 품질'} detail={`오류 ${a?.answers.errors ?? 0}건 · 느린 답변 ${a?.answers.slowAnswers ?? 0}건`} tone={answerIssues ? 'watch' : 'ok'} />
         {user.role !== 'guest' && <HomeAction href="/manage/slack" title="서비스와 Slack" detail={`연결 끊김 ${disconnected}개 · 명령 문제 ${o?.commands.problems.length ?? 0}건`} tone={operationIssues ? 'bad' : 'ok'} />}
         {user.role === 'admin' && <HomeAction href="/console/audit" title="승인과 감사" detail={`승인 대기 ${admin?.pendingApprovals ?? 0}건 · 사용자 ${admin?.users ?? 0}명`} tone={admin?.pendingApprovals ? 'watch' : 'plain'} />}

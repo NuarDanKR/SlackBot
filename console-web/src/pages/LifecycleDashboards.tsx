@@ -1,6 +1,6 @@
 import { useResource } from '../api/hooks'
 import { Chip, Failed, Loading, Metric, PageHead, Section, fmt } from '../components/primitives'
-import type { AuditEvent, ConsoleUser, WorkspaceStatus } from '../types'
+import type { AuditEvent, ConsoleUser } from '../types'
 import { withQuery } from '../navigation'
 
 type Navigate = (path: string) => void
@@ -14,39 +14,6 @@ function ActionRow({ title, detail, tone = 'plain', onClick }: {
       <Chip tone={tone}>{tone === 'ok' ? '정상' : tone === 'plain' ? '보기' : '확인 필요'}</Chip>
     </button>
   )
-}
-
-interface CollectionData {
-  documents: number
-  rawLines: number
-  stalled: WorkspaceStatus[]
-  brokenDocuments: number
-  uninvitedChannels: number
-  workspaces: WorkspaceStatus[]
-  summaryReview: { available: boolean; pending: number }
-}
-
-export function CollectionDashboard({ user, navigate }: { user: ConsoleUser; navigate: Navigate }) {
-  const res = useResource<CollectionData>('/api/dashboards/collection')
-  if (res.loading) return <Loading what="수집 대시보드를" />
-  if (res.error || !res.data) return <Failed what="수집 대시보드를" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
-  const d = res.data
-  return <>
-    <PageHead crumb="수집" title="수집 개요" note="원문이 들어오고 검색 가능한 상태로 유지되는 과정을 한곳에서 확인합니다."
-      aside={<Chip tone={d.stalled.length || d.brokenDocuments ? 'watch' : 'ok'}>{d.stalled.length || d.brokenDocuments ? '확인 필요' : '수집 정상'}</Chip>} />
-    <Section title="현재 수집량" lead="허용된 워크스페이스 범위만 합산합니다.">
-      <div className="metrics overview-metrics"><Metric k="문서" v={fmt.int(d.documents)} unit="건" /><Metric k="원문" v={fmt.int(d.rawLines)} unit="줄" /><Metric k="워크스페이스" v={fmt.int(d.workspaces.length)} unit="개" /></div>
-    </Section>
-    <Section title="조치할 항목" note={`${d.stalled.length + (d.brokenDocuments ? 1 : 0) + (d.uninvitedChannels ? 1 : 0)}건`}>
-      <div className="action-list">
-        {d.stalled.map((w) => <ActionRow key={w.key} title={`${w.label} 수집 중단`} detail="최근 수집 시각과 연결 상태를 확인합니다." tone="bad"
-          onClick={() => navigate(user.role === 'admin' ? withQuery('/manage/workspaces', { workspace: w.key }) : withQuery('/collect/status', { workspace: w.key, state: 'stalled' }))} />)}
-        {d.brokenDocuments > 0 && <ActionRow title={`형식이 깨진 문서 ${fmt.int(d.brokenDocuments)}건`} detail="검색 근거에서 제외될 수 있는 문서입니다." tone="watch" onClick={() => navigate(withQuery('/collect/documents', { state: 'broken' }))} />}
-        {d.uninvitedChannels > 0 && <ActionRow title={`미초대 채널 ${fmt.int(d.uninvitedChannels)}개`} detail="Slack 연결·명령 진단에서 워크스페이스별 원인을 확인합니다." tone="watch" onClick={() => navigate('/manage/slack')} />}
-        {!d.stalled.length && !d.brokenDocuments && !d.uninvitedChannels && <ActionRow title="조치할 수집 문제가 없습니다" detail="모든 워크스페이스가 정상 범위입니다." tone="ok" onClick={() => navigate('/collect/status')} />}
-      </div>
-    </Section>
-  </>
 }
 
 interface AnswerData {

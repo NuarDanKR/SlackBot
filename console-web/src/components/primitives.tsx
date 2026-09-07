@@ -104,6 +104,32 @@ export const fmt = {
     value.replace(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+/, ''),
 }
 
+export function MiniBars({
+  items,
+  label,
+}: {
+  items: { label: string; value: number; tone?: 'brand' | 'warn' | 'bad' | 'ok' }[]
+  label: string
+}) {
+  const max = Math.max(1, ...items.map((item) => item.value))
+  return (
+    <div className="mini-bars" aria-label={label}>
+      {items.map((item) => (
+        <div className="mini-bar-row" key={item.label}>
+          <span className="mini-bar-label">{item.label}</span>
+          <span className="mini-bar-track" aria-hidden="true">
+            <span
+              className={`mini-bar-fill ${item.tone ?? 'brand'}`}
+              style={{ width: `${item.value ? Math.max(3, (item.value / max) * 100) : 0}%` }}
+            />
+          </span>
+          <strong className="mini-bar-value">{fmt.int(item.value)}</strong>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** 화면 기준 시각. 목데이터라 고정값입니다 — 배선할 때 서버 시각으로 바꿉니다. */
 export const NOW = '2026-08-21T14:30:00+09:00'
 

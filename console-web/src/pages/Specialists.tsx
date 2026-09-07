@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { Chip, Failed, Loading, Metric, PageHead, Section, fmt } from '../components/primitives'
+import { Chip, Failed, Loading, Metric, MiniBars, PageHead, Section, fmt } from '../components/primitives'
 import type { ConsoleUser, Specialist, SpecialistCall, SpecialistRequest } from '../types'
 import { withQuery } from '../navigation'
 
@@ -28,9 +28,12 @@ export function SpecialistAnalytics({ query, navigate }: { query: URLSearchParam
   const calls = res.data.calls
   const success = calls.filter((c) => c.result === 'success').length
   const fallback = calls.filter((c) => c.result === 'fallback').length
+  const errors = calls.filter((c) => c.result === 'error').length
+  const violations = calls.filter((c) => c.result === 'contract_violation').length
   const avg = calls.length ? calls.reduce((sum, c) => sum + c.elapsedMs, 0) / calls.length : 0
   return <><PageHead crumb="답변 · 전문 봇 분석" title="전문 봇 분석" note="마스터 봇의 라우팅 결정과 전문 봇 호출 결과를 업무 본문 없이 분석합니다." />
     <Section title="호출 현황"><div className="metrics overview-metrics"><Metric k="호출" v={fmt.int(calls.length)} unit="건" /><Metric k="성공" v={fmt.int(success)} unit="건" /><Metric k="폴백" v={fmt.int(fallback)} unit="건" /><Metric k="평균 응답" v={fmt.ms(avg)} /></div></Section>
+    <Section title="호출 결과 분포" lead="성공, 마스터 봇 폴백, 오류와 계약 위반 건수를 비교합니다."><MiniBars label="전문 봇 호출 결과" items={[{ label: '성공', value: success, tone: 'ok' }, { label: '마스터 폴백', value: fallback, tone: 'warn' }, { label: '오류', value: errors, tone: 'bad' }, { label: '계약 위반', value: violations, tone: 'bad' }]} /></Section>
     <Section title="최근 호출"><form className="filter-row" onSubmit={(event) => { event.preventDefault(); navigate(withQuery('/answer/specialists', { specialist: specialistDraft.trim(), result: resultDraft })) }}>
       <div className="field"><label className="field-label" htmlFor="specialist-key">전문 봇</label><input id="specialist-key" className="input" placeholder="예: hermes" value={specialistDraft} onChange={(e) => setSpecialistDraft(e.target.value)} /></div>
       <div className="field"><label className="field-label" htmlFor="specialist-result">호출 결과</label><select id="specialist-result" className="input" value={resultDraft} onChange={(e) => setResultDraft(e.target.value)}><option value="">모든 결과</option><option value="success">성공</option><option value="fallback">마스터 폴백</option><option value="error">오류</option><option value="contract_violation">계약 위반</option></select></div>

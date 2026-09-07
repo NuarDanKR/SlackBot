@@ -12,6 +12,8 @@ interface EnvSettingsData {
   realtimeIngest: boolean
   autojoinChannels: boolean
   replyInThread: boolean
+  defaultModel: string
+  models: { id: string; provider: string; maxSensitivity: 'public' | 'internal' | 'confidential' }[]
   changed?: string[]
 }
 
@@ -24,6 +26,7 @@ function preview(data: EnvSettingsData): string {
     `REALTIME_INGEST=${data.realtimeIngest ? '1' : '0'}`,
     `AUTOJOIN_CHANNELS=${data.autojoinChannels ? '1' : '0'}`,
     `REPLY_IN_THREAD=${data.replyInThread ? '1' : '0'}`,
+    `DEFAULT_MODEL=${data.defaultModel}`,
   ].join('\n')
 }
 
@@ -98,6 +101,7 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
         realtimeIngest: draft.realtimeIngest,
         autojoinChannels: draft.autojoinChannels,
         replyInThread: draft.replyInThread,
+        defaultModel: draft.defaultModel,
       })
       setDraft(copySettings(saved))
       const count = saved.changed?.length ?? 0
@@ -160,6 +164,18 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
             />
             <span><b>스레드로 답변</b><span className="field-help">채널 본문 대신 질문 메시지의 스레드에 답합니다.</span></span>
           </label>
+        </div>
+        <div className="card card-pad model-setting">
+          <div className="field">
+            <label className="field-label" htmlFor="default-answer-model">기본 답변 모델</label>
+            <select id="default-answer-model" className="input" value={draft.defaultModel} disabled={!draft.editable}
+              onChange={(event) => setDraft({ ...draft, defaultModel: event.target.value })}>
+              {draft.models.map((model) => <option key={model.id} value={model.id}>{model.id} · {PROVIDER_LABEL[model.provider] ?? model.provider}</option>)}
+            </select>
+            <span className="field-help">새 질문의 검색 근거를 바탕으로 최종 답변을 작성할 모델입니다. 저장 후 재시작부터 적용됩니다.</span>
+          </div>
+          {draft.models.find((model) => model.id === draft.defaultModel)?.maxSensitivity !== 'confidential' &&
+            <div className="notice watch model-warning"><div><div className="notice-title">기밀 자료에는 사용할 수 없는 모델입니다</div><div className="notice-detail">이 모델의 최대 허용 범위는 사내 일반 자료입니다. 기밀 질문은 게이트웨이가 차단하므로, 전체 자료에 답하려면 기밀 허용 모델을 선택하세요.</div></div></div>}
         </div>
       </Section>
 

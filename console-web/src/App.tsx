@@ -12,7 +12,7 @@ import { Deploy } from './pages/Deploy'
 import { EnvSettings } from './pages/EnvSettings'
 import { Harness } from './pages/Harness'
 import { Home } from './pages/Home'
-import { CollectionDashboard, AnswerDashboard, OperationsDashboard, ConsoleDashboard } from './pages/LifecycleDashboards'
+import { AnswerDashboard, OperationsDashboard, ConsoleDashboard } from './pages/LifecycleDashboards'
 import { Questions } from './pages/Questions'
 import { ServiceLogs } from './pages/ServiceLogs'
 import type { ErrorLogContext } from './pages/ServiceLogs'
@@ -28,8 +28,7 @@ type NavGroup = { label: string; path: string; minimum?: ConsoleRole; items: Nav
 
 const NAV: NavGroup[] = [
   { label: '수집', path: '/collect', items: [
-    { path: '/collect', label: '수집 개요' },
-    { path: '/collect/status', label: '수집 현황' },
+    { path: '/collect', label: '수집 현황' },
     { path: '/collect/archive', label: '아카이브 진단' },
     { path: '/collect/documents', label: '원문 문서' },
     { path: '/collect/summaries', label: '승인 요약 문서', capability: 'approvedSummaries' },
@@ -61,7 +60,7 @@ const NAV: NavGroup[] = [
   ] },
 ]
 
-const ALL_PATHS = new Set(['/home', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
+const ALL_PATHS = new Set(['/home', '/collect/status', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
 
 const RANK: Record<ConsoleRole, number> = { guest: 0, developer: 1, admin: 2 }
 const THEME_LABEL: Record<Theme, string> = { system: '시스템 설정', light: '밝게', dark: '어둡게' }
@@ -99,6 +98,7 @@ function roleUser(me: Me): ConsoleUser { return { name: me.name, email: me.email
 
 export default function App() {
   const { location, navigate } = useHashNavigation()
+  const path = location.path === '/collect/status' ? '/collect' : location.path
   const [authTick, setAuthTick] = useState(0)
   const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([])
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -109,10 +109,10 @@ export default function App() {
   })
   const { theme, setTheme } = useTheme()
   useEffect(() => {
-    const group = NAV.find((item) => item.items.some((child) => child.path === location.path))
+    const group = NAV.find((item) => item.items.some((child) => child.path === path))
     if (group) setOpenGroups(new Set([group.path]))
     setMobileOpen(false)
-  }, [location.path])
+  }, [path])
   const me = useResource<Me>('/api/me', [authTick])
   const capabilities = useResource<Capabilities>(me.data ? '/api/capabilities' : null)
   function toast(msg: string) { const id = Date.now(); setToasts((rows) => [...rows, { id, msg }]); window.setTimeout(() => setToasts((rows) => rows.filter((row) => row.id !== id)), 4600) }
@@ -124,9 +124,8 @@ export default function App() {
   const caps = capabilities.data ?? { specialists: false, approvedSummaries: false, summaryReview: false }
   const groups = NAV.filter((group) => RANK[user.role] >= RANK[group.minimum ?? 'guest']).map((group) => ({ ...group, items: group.items.filter((item) => RANK[user.role] >= RANK[item.minimum ?? 'guest'] && (!item.capability || caps[item.capability])) })).filter((group) => group.items.length)
   const allowed = new Set(['/home', ...groups.flatMap((group) => group.items.map((item) => item.path))])
-  const path = location.path
   const canRender = allowed.has(path)
-  const knownPath = ALL_PATHS.has(path)
+  const knownPath = ALL_PATHS.has(location.path)
   const logContext: ErrorLogContext | null = location.query.get('at') ? { at: location.query.get('at')!, workspace: location.query.get('workspace') ?? '' } : null
   function toggleGroup(groupPath: string) {
     setOpenGroups((current) => { const next = new Set(current); if (next.has(groupPath)) next.delete(groupPath); else next.add(groupPath); return next })
@@ -144,8 +143,7 @@ export default function App() {
     {!canRender && <><div className="page-head"><div><div className="crumb">관리 콘솔</div><h1 className="page-title">{knownPath ? '접근할 수 없는 화면입니다' : '페이지를 찾을 수 없습니다'}</h1><p className="page-note">{knownPath ? '현재 계정의 역할이나 활성화된 기능 범위를 확인해 주세요.' : '주소가 바뀌었거나 존재하지 않는 메뉴입니다.'}</p></div></div><div className="section"><a className="btn btn-primary" href="#/home">오늘의 현황으로 이동</a></div></>}
     {canRender && <>
       {path === '/home' && <Home user={user} />}
-      {path === '/collect' && <CollectionDashboard user={user} navigate={navigate} />}
-      {path === '/collect/status' && <Dashboard query={location.query} />}
+      {path === '/collect' && <Dashboard user={user} query={location.query} />}
       {path === '/collect/archive' && <ArchiveDiagnostics />}
       {path === '/collect/documents' && <Collected user={user} query={location.query} onToast={toast} />}
       {(path === '/collect/summaries' || path === '/collect/reviews') && <><div className="page-head"><div><div className="crumb">수집</div><h1 className="page-title">화면을 준비하고 있습니다</h1><p className="page-note">기능이 활성화되었지만 이 버전의 콘솔에는 화면이 연결되지 않았습니다. 관리자에게 콘솔 배포 상태를 알려 주세요.</p></div></div></>}
@@ -153,7 +151,7 @@ export default function App() {
       {path === '/answer/questions' && <Questions query={location.query} navigate={navigate} />}
       {path === '/answer/usage' && <Usage canViewLogs={user.role !== 'guest'} showRecent={false} onOpenErrorLogs={(context) => navigate(withQuery('/manage/logs', { workspace: context.workspace, at: context.at, level: 'error' }))} />}
       {path === '/answer/specialists' && <SpecialistAnalytics query={location.query} navigate={navigate} />}
-      {path === '/answer/quality' && <AnswerQuality />}
+      {path === '/answer/quality' && <AnswerQuality user={user} />}
       {path === '/answer/feedback' && <FeedbackPage user={user} onToast={toast} />}
       {path === '/answer/rules' && <Harness />}
       {path === '/manage' && <OperationsDashboard user={user} navigate={navigate} />}

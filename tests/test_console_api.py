@@ -379,6 +379,49 @@ def test_usage_never_returns_question_text(client):
     assert "김수현" not in body
 
 
+def test_answer_quality_evidence_is_admin_only_and_audited(client, monkeypatch):
+    captured = []
+    monkeypatch.setattr(console_app, "_audit_event", lambda **kw: captured.append(kw))
+    monkeypatch.setattr(
+        console_app.reader,
+        "_read_qa_records",
+        lambda _days: [
+            {
+                "ts": "2026-09-07T09:00:00+09:00",
+                "workspace": "fin",
+                "question": "기성금 얼마야?",
+                "hits": 4,
+                "citations": ["#finance"],
+                "model": "claude-sonnet-5",
+                "elapsed_ms": 800,
+                "error": "",
+            },
+            {
+                "ts": "2026-09-07T10:00:00+09:00",
+                "workspace": "fin",
+                "question": "검색 결과가 왜 없지?",
+                "hits": 0,
+                "citations": [],
+                "model": "claude-sonnet-5",
+                "elapsed_ms": 900,
+                "error": "",
+            },
+        ],
+    )
+
+    assert client.get("/api/diagnostics/answers/evidence", headers=member(client)).status_code == 403
+    response = client.get("/api/diagnostics/answers/evidence", headers=owner(client))
+
+    assert response.status_code == 200
+    assert any(item["question"] == "기성금 얼마야?" for item in response.json()["items"]) is False
+    assert response.json()["items"][0]["question"] == "검색 결과가 왜 없지?"
+    assert response.json()["items"][0]["reason"] == "no_hits"
+    # 정상·빠른·근거 있는 질문은 상세 원인 목록에 포함하지 않는다.
+    assert all(item["hits"] == 0 or item["error"] or item["elapsedMs"] > 15_000 for item in response.json()["items"])
+    assert captured and captured[0]["action"] == "read-evidence"
+    assert "question" not in captured[0]["metadata"]
+
+
 def test_usage_recent_includes_timestamp_for_error_log_lookup(client):
     recent = client.get("/api/usage", headers=owner(client)).json()["recent"]
 
@@ -701,6 +744,7 @@ def _env_payload(client, headers: dict) -> dict:
         "realtimeIngest": data["realtimeIngest"],
         "autojoinChannels": data["autojoinChannels"],
         "replyInThread": data["replyInThread"],
+        "defaultModel": data["defaultModel"],
     }
 
 
@@ -731,6 +775,7 @@ def test_owner_saves_validated_env_overlay_and_restart_request(client, env):
 
     managed = (env / "state" / "config" / "managed.env").read_text(encoding="utf-8")
     assert 'REPLY_IN_THREAD="0"' in managed
+    assert 'DEFAULT_MODEL="claude-sonnet-5"' in managed
     assert "WORKSPACES=" not in managed
     assert "ROOT_WORKSPACES=" not in managed
     assert "CROSS_WS_READ=" not in managed
@@ -741,6 +786,30 @@ def test_owner_saves_validated_env_overlay_and_restart_request(client, env):
     audit = (env / "qa-log" / "env-settings.jsonl").read_text(encoding="utf-8")
     assert "REPLY_IN_THREAD" in audit
     assert "xoxb-" not in audit
+
+
+def test_owner_can_select_registered_default_model(client, env):
+    headers = owner(client)
+    payload = _env_payload(client, headers)
+    payload["defaultModel"] = "gpt-4o"
+
+    response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["defaultModel"] == "gpt-4o"
+    managed = (env / "state" / "config" / "managed.env").read_text(encoding="utf-8")
+    assert 'DEFAULT_MODEL="gpt-4o"' in managed
+    assert "DEFAULT_MODEL" in response.json()["changed"]
+
+
+def test_owner_cannot_select_unregistered_default_model(client):
+    headers = owner(client)
+    payload = _env_payload(client, headers)
+    payload["defaultModel"] = "invented-model"
+
+    response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
+
+    assert response.status_code == 422
 
 
 def test_env_write_requires_owner_origin_and_csrf(client):

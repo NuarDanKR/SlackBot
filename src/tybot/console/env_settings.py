@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import dotenv_values
 
+from ..gateway.router import DEFAULT_REGISTRY
 from ..managed_env import managed_env_path, request_restart, restart_request_path
 from . import reader
 
@@ -19,6 +20,7 @@ MANAGED_STATIC_KEYS = {
     "REALTIME_INGEST",
     "AUTOJOIN_CHANNELS",
     "REPLY_IN_THREAD",
+    "DEFAULT_MODEL",
 }
 
 
@@ -40,6 +42,7 @@ def _effective_env() -> dict[str, str]:
 
 def snapshot() -> dict:
     values = _effective_env()
+    default_model = values.get("DEFAULT_MODEL", "claude-sonnet-5")
     return {
         "path": str(managed_env_path()),
         "editable": True,
@@ -48,14 +51,28 @@ def snapshot() -> dict:
         "realtimeIngest": _truthy(values.get("REALTIME_INGEST"), True),
         "autojoinChannels": _truthy(values.get("AUTOJOIN_CHANNELS"), True),
         "replyInThread": _truthy(values.get("REPLY_IN_THREAD"), True),
+        "defaultModel": default_model,
+        "models": [
+            {
+                "id": spec.model,
+                "provider": spec.provider,
+                "maxSensitivity": spec.max_sensitivity.value,
+            }
+            for spec in DEFAULT_REGISTRY.values()
+        ],
     }
 
 
 def _validate(payload: dict) -> dict[str, str]:
+    current = _effective_env()
+    model = str(payload.get("defaultModel") or current.get("DEFAULT_MODEL") or "claude-sonnet-5")
+    if model not in DEFAULT_REGISTRY:
+        raise ValueError(f"지원하지 않는 답변 모델입니다: {model}")
     return {
         "REALTIME_INGEST": "1" if payload.get("realtimeIngest") else "0",
         "AUTOJOIN_CHANNELS": "1" if payload.get("autojoinChannels") else "0",
         "REPLY_IN_THREAD": "1" if payload.get("replyInThread") else "0",
+        "DEFAULT_MODEL": model,
     }
 
 

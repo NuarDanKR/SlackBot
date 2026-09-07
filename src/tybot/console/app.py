@@ -129,6 +129,7 @@ class EnvSettingsBody(BaseModel):
     realtimeIngest: bool
     autojoinChannels: bool
     replyInThread: bool
+    defaultModel: str | None = None
 
 
 class ConsoleAccountBody(BaseModel):
@@ -411,6 +412,60 @@ def answer_diagnostics(user: User) -> dict:
     _require_developer(user)
     report = _scoped_health(user)
     return {"checkedAt": report["checkedAt"], "section": report["sections"]["answers"]}
+
+
+@app.get("/api/diagnostics/answers/evidence")
+def answer_diagnostic_evidence(
+    user: User,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> dict:
+    """품질 집계의 원인이 된 질문 문장과 출처를 관리자에게만 보여준다.
+
+    질문 본문은 업무 내용을 포함하므로 일반 품질 API에는 절대 섞지 않는다. 관리자가 명시적으로
+    상세 보기를 눌렀을 때만 내려주고, 열람 사실은 본문 없이 감사 기록에 남긴다.
+    """
+    _require_admin(user)
+    rows = reader._read_qa_records(7)
+    if not user.all_workspaces:
+        rows = [row for row in rows if str(row.get("workspace", "")) in user.workspaces]
+    rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
+    notable = [
+        row for row in rows
+        if str(row.get("error") or "").strip()
+        or int(row.get("hits") or 0) == 0
+        or int(row.get("elapsed_ms") or 0) > health.SLOW_MS
+    ][:limit]
+    _audit_event(
+        actor=user.email,
+        category="answer-quality",
+        action="read-evidence",
+        target_type="qa-records",
+        target_id="recent-notable",
+        outcome="succeeded",
+        metadata={"count": len(notable)},
+    )
+    return {
+        "items": [
+            {
+                "at": row.get("ts", ""),
+                "workspace": row.get("workspace", ""),
+                "question": row.get("question", ""),
+                  "reason": (
+                      "error"
+                      if str(row.get("error") or "").strip()
+                      else "no_hits"
+                      if int(row.get("hits") or 0) == 0
+                      else "slow"
+                  ),
+                "hits": int(row.get("hits") or 0),
+                "citations": list(row.get("citations") or []),
+                "model": row.get("model") or "-",
+                "elapsedMs": int(row.get("elapsed_ms") or 0),
+                "error": row.get("error") or "",
+            }
+            for row in notable
+        ]
+    }
 
 
 @app.get("/api/diagnostics/slack")
