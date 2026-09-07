@@ -3,7 +3,7 @@ import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Chip, Failed, Loading, Metric, MiniBars, PageHead, Section, fmt } from '../components/primitives'
-import type { ConsoleUser, Specialist, SpecialistCall, SpecialistRequest } from '../types'
+import type { ConsoleUser, GatewayModel, Specialist, SpecialistCall, SpecialistRequest } from '../types'
 import { withQuery } from '../navigation'
 
 const RESULT_LABEL: Record<SpecialistCall['result'], string> = { success: '성공', fallback: '마스터 폴백', error: '오류', contract_violation: '계약 위반' }
@@ -44,10 +44,22 @@ export function SpecialistAnalytics({ query, navigate }: { query: URLSearchParam
 }
 
 interface SpecialistResponse { specialists: Specialist[]; requests: SpecialistRequest[]; adapters: { key: string; name: string; domain: string; available: boolean }[] }
+interface ModelResponse { models: GatewayModel[] }
+interface WorkspaceOptions { workspaces: { key: string; label: string }[] }
 export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUser; query: URLSearchParams; onToast: (message: string) => void }) {
   const resource = useResource<SpecialistResponse>('/api/specialists')
+  // 모델 목록과 워크스페이스 목록은 **서버가 사실이다.** 화면이 따로 들고 있으면
+  // 없는 값을 고를 수 있고, 그건 저장할 때가 아니라 질문할 때 조용히 실패한다.
+  const models = useResource<ModelResponse>('/api/models')
+  const workspaces = useResource<WorkspaceOptions>('/api/status')
   const [data, setData] = useState<SpecialistResponse | null>(null)
-  const [draft, setDraft] = useState({ key: '', name: '', domain: '', adapter: 'hermes', state: 'draft', version: '', contractVersion: 'v1', workspaces: '' })
+  const [draft, setDraft] = useState({
+    key: '', name: '', domain: '', adapter: 'hermes', state: 'draft',
+    version: '', contractVersion: 'v1', model: '', routingHint: '',
+    minConfidence: 0.6, rules: '',
+  })
+  // 워크스페이스는 쉼표 문자열이 아니라 **고른 목록**으로 다룬다.
+  const [picked, setPicked] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [decisionPending, setDecisionPending] = useState<{ id: string; decision: 'approve' | 'reject'; specialist: string; requester: string } | null>(null)
@@ -62,7 +74,7 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
   async function requestChange() {
     setBusy(true); setError(null)
     try {
-      const result = await api.securePost<{ requests: SpecialistRequest[] }>('/api/specialists/requests', { ...draft, workspaces: draft.workspaces.split(',').map((v) => v.trim()).filter(Boolean) })
+      const result = await api.securePost<{ requests: SpecialistRequest[] }>('/api/specialists/requests', { ...draft, workspaces: picked })
       setData((current) => current ? { ...current, requests: result.requests } : current)
       onToast('전문 봇 변경 요청을 등록했습니다.')
     } catch (caught) { setError(caught instanceof ApiError ? caught.message : String(caught)) }
@@ -83,22 +95,69 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
       state: row.state === 'error' ? 'disabled' : row.state,
       version: row.version,
       contractVersion: row.contractVersion,
-      workspaces: row.workspaces.join(', '),
+      model: row.model,
+      routingHint: row.routingHint,
+      minConfidence: row.minConfidence,
+      rules: '',
     })
+    setPicked(row.workspaces)
+    // 규칙 본문은 목록에 없다(8000자가 표마다 실리면 화면이 무거워진다).
+    // 편집을 누른 뒤 상세에서 받아 채운다.
+    void api.get<Specialist>(`/api/specialists/${row.key}`)
+      .then((full) => setDraft((d) => ({ ...d, rules: full.rules ?? '' })))
+      .catch(() => undefined)
   }
-  return <><PageHead crumb="관리 · 전문 봇" title="전문 봇 관리" note="코드에 등록된 어댑터의 상태와 승인된 버전만 관리합니다. 프롬프트와 실행 경로는 배포 절차에서 검토합니다." />
+  return <><PageHead crumb="관리 · 전문 봇" title="전문 봇 관리" note="어댑터·모델·답변 규칙·적용 범위를 관리합니다. 변경은 승인을 거치고 감사 기록에 남습니다." />
     {error && <div className="notice bad"><div><div className="notice-title">처리하지 못했습니다.</div><div className="notice-detail">{error}</div></div></div>}
-    <Section title="등록된 전문 봇" note={`${filtered.length}개`}><div className="table-wrap"><table className="table"><thead><tr><th>전문 봇</th><th>분야</th><th>어댑터</th><th>버전</th><th>적용 범위</th><th>상태</th><th>관리</th></tr></thead><tbody>{filtered.map((row) => <tr key={row.key}><td>{row.name}<div className="ws-key">{row.key}</div></td><td>{row.domain}</td><td className="mono">{row.adapter}{!row.adapterAvailable && <div className="hint">런타임 미배포</div>}</td><td>{row.version || '-'}<div className="hint">계약 {row.contractVersion}</div></td><td>{row.workspaces.join(', ') || '미지정'}</td><td>{stateChip(row.state, row.health)}{row.errorCode && <div className="hint mono">{row.errorCode}</div>}</td><td><button className="btn btn-sm" type="button" onClick={() => edit(row)}>변경 요청</button></td></tr>)}</tbody></table></div></Section>
-    <Section title="변경 요청" note={`${data?.requests.length ?? 0}건`}><div className="table-wrap"><table className="table"><thead><tr><th>요청</th><th>전문 봇</th><th>요청자</th><th>상태</th><th>처리</th></tr></thead><tbody>{(data?.requests ?? []).map((row) => <tr key={row.id}><td>#{row.id}<div className="hint">{fmt.dayClock(row.requestedAt)}</div></td><td className="mono">{row.specialist}</td><td>{row.requester}</td><td>{REQUEST_STATE_LABEL[row.state]}</td><td>{user.role === 'admin' && row.state === 'awaiting_approval' ? <div className="form-row"><button className="btn btn-sm btn-primary" disabled={busy || row.requester === user.email} onClick={() => setDecisionPending({ id: row.id, decision: 'approve', specialist: row.specialist, requester: row.requester })}>승인</button><button className="btn btn-sm" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'reject', specialist: row.specialist, requester: row.requester })}>반려</button></div> : '-'}</td></tr>)}</tbody></table></div></Section>
-    <Section title="변경 요청 등록" lead="개발자는 요청을 등록하고 다른 관리자가 승인합니다. 활성화는 런타임 어댑터가 배포된 뒤에만 가능합니다."><div className="card card-pad"><div className="form-grid specialist-form">
+    <Section title="등록된 전문 봇" note={`${filtered.length}개`}><div className="table-wrap"><table className="table"><thead><tr><th>전문 봇</th><th>분야</th><th>어댑터</th><th>모델</th><th>버전</th><th>적용 범위</th><th>상태</th><th>관리</th></tr></thead><tbody>{filtered.map((row) => <tr key={row.key}><td>{row.name}<div className="ws-key">{row.key}</div></td><td>{row.domain}</td><td className="mono">{row.adapter}{!row.adapterAvailable && <div className="hint">런타임 미배포</div>}</td><td className="mono">{row.model || '기본'}{row.hasRules && <div className="hint">규칙 v{row.rulesVersion}</div>}</td><td>{row.version || '-'}<div className="hint">계약 {row.contractVersion}</div></td><td>{row.workspaces.join(', ') || '미지정'}</td><td>{stateChip(row.state, row.health)}{row.errorCode && <div className="hint mono">{row.errorCode}</div>}</td><td><button className="btn btn-sm" type="button" onClick={() => edit(row)}>변경 요청</button></td></tr>)}</tbody></table></div></Section>
+    <Section title="변경 요청" note={`${data?.requests.length ?? 0}건`}><div className="table-wrap"><table className="table"><thead><tr><th>요청</th><th>전문 봇</th><th>요청자</th><th>상태</th><th>처리</th></tr></thead><tbody>{(data?.requests ?? []).map((row) => <tr key={row.id}><td>#{row.id}<div className="hint">{fmt.dayClock(row.requestedAt)}</div></td><td className="mono">{row.specialist}</td><td>{row.requester}</td><td>{REQUEST_STATE_LABEL[row.state]}</td><td>{user.role === 'admin' && row.state === 'awaiting_approval' ? <div className="form-row"><button className="btn btn-sm btn-primary" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'approve', specialist: row.specialist, requester: row.requester })}>승인</button><button className="btn btn-sm" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'reject', specialist: row.specialist, requester: row.requester })}>반려</button></div> : '-'}</td></tr>)}</tbody></table></div></Section>
+    <Section title="변경 요청 등록" lead="개발자는 요청을 등록하고 다른 관리자가 승인합니다. 관리자는 자기 요청을 직접 승인할 수 있습니다. 활성화는 런타임 어댑터가 배포된 뒤에만 가능합니다."><div className="card card-pad"><div className="form-grid specialist-form">
       <div className="field"><label className="field-label" htmlFor="specialist-draft-key">키</label><input id="specialist-draft-key" className="input" placeholder="예: hermes" value={draft.key} onChange={(e) => setDraft({ ...draft, key: e.target.value })} /></div>
       <div className="field"><label className="field-label" htmlFor="specialist-draft-name">표시 이름</label><input id="specialist-draft-name" className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
       <div className="field"><label className="field-label" htmlFor="specialist-draft-domain">담당 분야</label><input id="specialist-draft-domain" className="input" value={draft.domain} onChange={(e) => setDraft({ ...draft, domain: e.target.value })} /></div>
       <div className="field"><label className="field-label" htmlFor="specialist-draft-adapter">어댑터</label><select id="specialist-draft-adapter" className="input" value={draft.adapter} onChange={(e) => setDraft({ ...draft, adapter: e.target.value })}>{(data?.adapters ?? []).map((a) => <option key={a.key} value={a.key}>{a.name} ({a.available ? '배포됨' : '미배포'})</option>)}</select></div>
       <div className="field"><label className="field-label" htmlFor="specialist-draft-state">상태</label><select id="specialist-draft-state" className="input" value={draft.state} onChange={(e) => setDraft({ ...draft, state: e.target.value })}><option value="draft">초안</option><option value="enabled">사용</option><option value="disabled">사용 중지</option></select></div>
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-version">배포 버전</label><input id="specialist-draft-version" className="input" value={draft.version} onChange={(e) => setDraft({ ...draft, version: e.target.value })} /></div>
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-contract">계약 버전</label><input id="specialist-draft-contract" className="input" value={draft.contractVersion} onChange={(e) => setDraft({ ...draft, contractVersion: e.target.value })} /></div>
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-workspaces">적용 워크스페이스</label><input id="specialist-draft-workspaces" className="input" placeholder="키를 쉼표로 구분" value={draft.workspaces} onChange={(e) => setDraft({ ...draft, workspaces: e.target.value })} /></div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-model">모델</label>
+        <select id="specialist-draft-model" className="input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })}>
+          <option value="">기본 모델 (게이트웨이 설정)</option>
+          {(models.data?.models ?? []).map((m) => (
+            <option key={m.model} value={m.model}>
+              {m.provider} · {m.model} · ${m.inputPer1M}/{m.outputPer1M}{m.usable ? "" : " (키 미등록)"}
+            </option>
+          ))}
+        </select>
+        <div className="field-help">간단한 분야는 싼 모델로 충분합니다. 키가 없는 모델을 고르면 질문할 때 마스터가 답합니다.</div>
+      </div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-hint">라우팅 설명</label>
+        <input id="specialist-draft-hint" className="input" maxLength={300} placeholder="예: 회의록·업무 진행 상황·기간별 요약" value={draft.routingHint} onChange={(e) => setDraft({ ...draft, routingHint: e.target.value })} />
+        <div className="field-help">라우터가 이 글을 읽고 어느 전문가에게 물을지 정합니다. 질문마다 실리므로 300자까지입니다.</div>
+      </div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-confidence">최소 신뢰도</label>
+        <input id="specialist-draft-confidence" className="input" type="number" min={0} max={1} step={0.05} value={draft.minConfidence} onChange={(e) => setDraft({ ...draft, minConfidence: Number(e.target.value) })} />
+        <div className="field-help">라우터 판정이 이보다 낮으면 마스터가 직접 답합니다. 틀렸을 때 손해가 큰 분야는 높게 둡니다.</div>
+      </div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-version">배포 버전</label><input id="specialist-draft-version" className="input" placeholder="예: 1.4.2" value={draft.version} onChange={(e) => setDraft({ ...draft, version: e.target.value })} />
+        <div className="field-help">그 팀이 배포한 전문 봇의 버전입니다. 표시용이고 동작에 쓰이지 않습니다.</div>
+      </div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-contract">계약 버전</label><input id="specialist-draft-contract" className="input" value={draft.contractVersion} onChange={(e) => setDraft({ ...draft, contractVersion: e.target.value })} />
+        <div className="field-help">주고받는 형식의 판(현재 v1). 우리 코드가 검사할 수 있는 값만 승인됩니다 — 배포 버전과 달리 <strong>동작을 바꿉니다</strong>.</div>
+      </div>
+      <div className="field field-wide"><label className="field-label">적용 워크스페이스</label>
+        <div className="checkbox-row">
+          {(workspaces.data?.workspaces ?? []).map((ws) => (
+            <label key={ws.key} className="checkbox">
+              <input type="checkbox" checked={picked.includes(ws.key)}
+                onChange={(e) => setPicked((cur) => e.target.checked ? [...cur, ws.key] : cur.filter((k) => k !== ws.key))} />
+              {ws.label} <span className="ws-key">{ws.key}</span>
+            </label>
+          ))}
+        </div>
+        <div className="field-help">고르지 않으면 이 전문가는 어디에서도 호출되지 않습니다.</div>
+      </div>
+      <div className="field field-wide"><label className="field-label" htmlFor="specialist-draft-rules">답변 규칙</label>
+        <textarea id="specialist-draft-rules" className="input" rows={8} maxLength={8000} placeholder="비워 두면 저장소의 기본 규칙을 씁니다." value={draft.rules} onChange={(e) => setDraft({ ...draft, rules: e.target.value })} />
+        <div className="field-help">이 전문가가 답할 때의 지시문입니다. 승인 뒤 다음 답변부터 적용되고, 바뀔 때마다 규칙 버전이 오릅니다. 비우면 저장소 기본값으로 돌아갑니다.</div>
+      </div>
     </div><div className="form-row"><button className="btn btn-primary" disabled={busy || !draft.key || !draft.name || !draft.domain} onClick={requestChange}>승인 요청</button></div></div></Section>
     <ConfirmDialog open={decisionPending !== null} title={`전문 봇 변경 요청을 ${decisionPending?.decision === 'approve' ? '승인' : '반려'}할까요?`}
       detail={`${decisionPending?.specialist ?? ''} · 요청자 ${decisionPending?.requester ?? ''}. 처리 결과와 승인자는 감사 기록에 남습니다.`}

@@ -142,8 +142,30 @@ export interface Specialist {
   errorCode: string
   lastCheckedAt: string | null
   workspaces: string[]
+  /** 이 전문가가 쓸 모델. 비면 게이트웨이 기본값입니다. */
+  model: string
+  /** 라우터가 읽는 설명. 300자까지. */
+  routingHint: string
+  /** 이 전문가를 부를 최소 신뢰도. */
+  minConfidence: number
+  /** 콘솔에서 넣은 답변 규칙이 있는지. 본문은 상세 조회에서만 옵니다. */
+  hasRules: boolean
+  rulesVersion: number
+  /** 상세 조회에서만 채워집니다. */
+  rules?: string
   updatedAt: string
   updatedBy: string
+}
+
+/** 게이트웨이에 등록된 모델. 화면이 목록을 따로 들지 않습니다. */
+export interface GatewayModel {
+  model: string
+  provider: string
+  inputPer1M: number
+  outputPer1M: number
+  maxSensitivity: string
+  /** 프로바이더 키가 등록돼 있는지. false 여도 목록에 보입니다. */
+  usable: boolean
 }
 
 export interface SpecialistCall {

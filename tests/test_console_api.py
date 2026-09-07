@@ -1266,3 +1266,74 @@ def test_audit_events_are_admin_only(client, monkeypatch):
     response = client.get("/api/audit-events", headers=owner(client))
     assert response.status_code == 200
     assert response.json() == {"events": []}
+
+
+# ---------------------------------------------------------------------------
+# 전문 봇 관리 — 관리자 셀프 승인 · 모델 목록
+# ---------------------------------------------------------------------------
+
+
+def test_models_come_from_the_gateway_registry(client):
+    """화면이 목록을 따로 들면 없는 모델을 고를 수 있다.
+
+    그건 저장할 때가 아니라 **질문할 때** 실패하고(UnknownModel → 마스터 폴백),
+    실패가 조용해서 「전문가가 왜 안 답하나」 로만 보인다.
+    """
+    from tybot.gateway.router import DEFAULT_REGISTRY
+
+    response = client.get("/api/models", headers=owner(client))
+
+    assert response.status_code == 200
+    models = {row["model"] for row in response.json()["models"]}
+    assert models <= set(DEFAULT_REGISTRY), "레지스트리에 없는 모델을 내보낸다"
+    assert models, "목록이 비어 있다"
+
+
+def test_models_keep_unusable_ones_visible(client):
+    """키가 없는 모델을 목록에서 빼면 「왜 안 보이나」 를 알 길이 없다."""
+    rows = client.get("/api/models", headers=owner(client)).json()["models"]
+
+    assert all("usable" in row for row in rows)
+
+
+def test_the_router_default_model_is_registered():
+    """레지스트리에 없으면 라우팅이 **항상** 마스터로 떨어진다 — 조용히."""
+    from tybot.gateway.router import DEFAULT_REGISTRY
+    from tybot.specialist_router import DEFAULT_ROUTER_MODEL
+
+    assert DEFAULT_ROUTER_MODEL in DEFAULT_REGISTRY
+
+
+def test_admin_may_approve_their_own_specialist_request(client, monkeypatch):
+    """root 로 SQL 을 칠 수 있는 사람에게 두 명을 강제하면,
+
+    콘솔을 놔두고 그쪽으로 도는 길만 열리고 그쪽은 기록이 없다.
+    """
+    seen: dict = {}
+    monkeypatch.setattr(
+        console_app.specialist_store,
+        "decide_request",
+        lambda **kw: seen.update(kw),
+    )
+    monkeypatch.setattr(console_app.specialist_store, "list_specialists", lambda: [])
+    monkeypatch.setattr(console_app.specialist_store, "list_requests", lambda: [])
+
+    response = client.post(
+        "/api/specialists/requests/1/approve",
+        json={"note": "테스트"},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 200
+    assert seen["allow_self"] is True
+
+
+def test_a_developer_still_needs_someone_else(client):
+    """개발자는 그대로 다른 사람의 승인을 받는다."""
+    response = client.post(
+        "/api/specialists/requests/1/approve",
+        json={"note": "테스트"},
+        headers=_write_headers(member(client)),
+    )
+
+    assert response.status_code == 403

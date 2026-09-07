@@ -31,8 +31,16 @@ DEFAULT_REGISTRY: dict[str, ModelSpec] = {
     ),
     # 민감도는 모델 티어가 아니라 **벤더 계약(DPA/zero-retention)** 단위로 정한다.
     # Anthropic 계약 하나로 묶이므로 haiku 도 confidential 허용.
+    "claude-opus-5": ModelSpec(
+        "claude-opus-5", "anthropic", 5.0, 25.0, Sensitivity.CONFIDENTIAL
+    ),
+    "claude-haiku-4-5": ModelSpec(
+        "claude-haiku-4-5", "anthropic", 1.0, 5.0, Sensitivity.CONFIDENTIAL
+    ),
+    # 날짜 꼬리를 붙인 옛 표기. **모델 ID 에 날짜를 붙이지 않는다** — 위가 맞는 값이다.
+    # 설정에 이 값이 남아 있을 수 있어 지우지 않고 같은 자리를 가리키게 둔다.
     "claude-haiku-4-5-20251001": ModelSpec(
-        "claude-haiku-4-5-20251001", "anthropic", 1.0, 5.0, Sensitivity.CONFIDENTIAL
+        "claude-haiku-4-5", "anthropic", 1.0, 5.0, Sensitivity.CONFIDENTIAL
     ),
     # OpenAI 모델 ID/단가는 배포 시 확정. 기본은 사내(internal) 이하로 제한.
     "gpt-4o": ModelSpec("gpt-4o", "openai", 2.5, 10.0, Sensitivity.INTERNAL),

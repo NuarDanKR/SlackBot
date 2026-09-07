@@ -176,6 +176,15 @@ class SpecialistProposalBody(BaseModel):
     version: str = ""
     contractVersion: str = "v1"
     workspaces: list[str] = Field(default_factory=list)
+    # 이 전문가가 쓸 모델. 비면 게이트웨이 기본값 —
+    # 간단한 분야에 무거운 모델을 쓸 이유가 없다.
+    model: str = Field(default="", max_length=64)
+    # 라우터가 읽는 설명. 질문마다 프롬프트에 실리므로 짧게 묶는다.
+    routingHint: str = Field(default="", max_length=300)
+    # 이 전문가를 부를 최소 신뢰도. 오답의 값이 분야마다 다르다.
+    minConfidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    # 답변 규칙. 비면 저장소의 프롬프트 파일을 쓴다.
+    rules: str = Field(default="", max_length=8000)
 
 
 class SpecialistDecisionBody(BaseModel):
@@ -500,6 +509,13 @@ def _specialist_response(row: dict) -> dict:
         "errorCode": row.get("error_code") or "",
         "lastCheckedAt": row.get("last_checked_at"),
         "workspaces": list(row.get("workspaces") or []),
+        "model": row.get("model") or "",
+        "routingHint": row.get("routing_hint") or "",
+        "minConfidence": float(row.get("min_confidence") or 0.6),
+        # 규칙 본문은 목록에 담지 않는다 — 8000자가 표마다 실리면 화면이 무거워진다.
+        # 편집 화면이 상세 조회로 따로 받는다.
+        "hasRules": bool((row.get("rules") or "").strip()),
+        "rulesVersion": int(row.get("rules_version") or 0),
         "updatedAt": row.get("updated_at"),
         "updatedBy": row.get("updated_by") or "-",
     }
@@ -535,6 +551,48 @@ def _visible_specialist_requests(user: ConsoleUser, rows: list[dict]) -> list[di
     ]
 
 
+@app.get("/api/models")
+def models(user: User) -> dict:
+    """쓸 수 있는 모델. **레지스트리가 사실이다.**
+
+    화면이 목록을 따로 들고 있으면, 레지스트리에 없는 모델을 고를 수 있게 되고
+    그건 저장할 때가 아니라 **질문할 때** 실패한다(UnknownModel → 마스터 폴백).
+    실패가 조용해서 "전문가가 왜 안 답하나" 로만 보인다.
+
+    프로바이더 키가 없는 모델은 `usable=false` 로 표시한다 — 목록에서 빼지 않는다.
+    빼 버리면 "왜 안 보이나" 를 알 길이 없다.
+    """
+    _require_developer(user)
+    from ..gateway.router import DEFAULT_REGISTRY
+
+    configured = set()
+    try:
+        for row in llm_secret_store.list_secrets():
+            if row.get("enabled") or row.get("inEnv"):
+                configured.add(str(row["provider"]))
+    except workspace_store.WorkspaceStoreError:
+        # 키 상태를 못 읽어도 목록은 보여야 한다.
+        configured = set()
+
+    out = []
+    seen: set[str] = set()
+    for key, spec in DEFAULT_REGISTRY.items():
+        # 옛 표기(날짜 꼬리)는 같은 모델을 가리키므로 한 번만 보인다.
+        if spec.model in seen:
+            continue
+        seen.add(spec.model)
+        out.append({
+            "model": key,
+            "provider": spec.provider,
+            "inputPer1M": spec.input_price_per_mtok,
+            "outputPer1M": spec.output_price_per_mtok,
+            "maxSensitivity": spec.max_sensitivity.value,
+            "usable": spec.provider in configured,
+        })
+    out.sort(key=lambda row: (row["provider"], row["inputPer1M"]))
+    return {"models": out}
+
+
 @app.get("/api/specialists")
 def specialists(user: User) -> dict:
     _require_developer(user)
@@ -564,7 +622,10 @@ def specialist(key: str, user: User) -> dict:
         raise HTTPException(status_code=404, detail="전문 봇을 찾을 수 없습니다.")
     if not _visible_specialists(user, [row]):
         raise HTTPException(status_code=403, detail="이 전문 봇을 볼 권한이 없습니다.")
-    return _specialist_response(row)
+    # 상세 조회에서만 규칙 본문을 준다. 편집 화면이 이것을 받아 고친다.
+    detail = _specialist_response(row)
+    detail["rules"] = row.get("rules") or ""
+    return detail
 
 
 @app.get("/api/specialist-calls")
@@ -644,7 +705,15 @@ def decide_specialist_request(
     _check_write_request(request)
     try:
         specialist_store.decide_request(
-            request_id=request_id, actor=user.email, decision=decision, note=body.note
+            request_id=request_id,
+            actor=user.email,
+            decision=decision,
+            note=body.note,
+            # **관리자는 자기 요청을 승인할 수 있다.** 서버에 root 로 들어가 SQL 을
+            # 칠 수 있는 사람에게 두 명을 강제하면, 콘솔을 놔두고 그쪽으로 도는 길만
+            # 열리고 그쪽은 기록이 없다. 막는 대신 감사 기록에 남긴다.
+            # 개발자는 그대로 다른 사람의 승인을 받는다.
+            allow_self=user.is_admin,
         )
         rows = specialist_store.list_specialists()
         requests = specialist_store.list_requests()

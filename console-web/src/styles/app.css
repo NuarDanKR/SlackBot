@@ -2506,3 +2506,26 @@
 .nowrap {
   white-space: nowrap;
 }
+
+/* 전문 봇 폼 — 여러 줄짜리 입력은 칸을 가로질러 놓는다.
+   좁은 칸에 8000자 텍스트를 넣으면 읽으면서 고치는 것이 불가능하다. */
+.field-wide {
+  grid-column: 1 / -1;
+}
+
+/* 적용 워크스페이스. 쉼표로 키를 타이핑하게 하면 오타가 조용히 통과하고,
+   그 전문가는 어디에서도 호출되지 않는다 — 오류가 아니라 "안 뜬다" 로 나타난다. */
+.checkbox-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.checkbox input {
+  margin: 0;
+}

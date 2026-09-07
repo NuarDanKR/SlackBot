@@ -132,6 +132,28 @@ def _validate_proposal(proposal: dict) -> dict:
         raise SpecialistStoreError("버전 값이 너무 깁니다.")
     if contract not in ALLOWED_ADAPTERS[adapter]["contracts"]:
         raise SpecialistStoreError("코드에서 계약 검사를 통과한 계약 버전이 아닙니다.")
+
+    model = str(proposal.get("model") or "").strip()
+    if model:
+        # **레지스트리에 있는 모델만.** 없는 값을 저장하면 저장할 때가 아니라
+        # 질문할 때 실패하고(UnknownModel → 마스터 폴백), 그 실패는 조용하다.
+        from ..gateway.router import DEFAULT_REGISTRY
+
+        if model not in DEFAULT_REGISTRY:
+            raise SpecialistStoreError(f"게이트웨이에 등록되지 않은 모델입니다: {model}")
+    hint = str(proposal.get("routingHint") or "").strip()
+    if len(hint) > 300:
+        raise SpecialistStoreError("라우팅 설명은 300자를 넘을 수 없습니다.")
+    rules = str(proposal.get("rules") or "").strip()
+    if len(rules) > 8000:
+        raise SpecialistStoreError("답변 규칙은 8000자를 넘을 수 없습니다.")
+    try:
+        min_confidence = float(proposal.get("minConfidence", 0.6))
+    except (TypeError, ValueError) as exc:
+        raise SpecialistStoreError("최소 신뢰도를 읽지 못했습니다.") from exc
+    if not 0.0 <= min_confidence <= 1.0:
+        raise SpecialistStoreError("최소 신뢰도는 0과 1 사이여야 합니다.")
+
     return {
         "key": key,
         "name": name,
@@ -141,6 +163,10 @@ def _validate_proposal(proposal: dict) -> dict:
         "version": version,
         "contractVersion": contract,
         "workspaces": workspaces,
+        "model": model,
+        "routingHint": hint,
+        "minConfidence": round(min_confidence, 2),
+        "rules": rules,
     }
 
 
@@ -173,7 +199,16 @@ def create_request(*, actor: str, proposal: dict) -> int:
         raise SpecialistStoreError(f"전문 봇 변경 요청 저장 실패: {exc}") from exc
 
 
-def decide_request(*, request_id: int, actor: str, decision: str, note: str = "") -> None:
+def decide_request(
+    *, request_id: int, actor: str, decision: str, note: str = "", allow_self: bool = False
+) -> None:
+    """변경 요청을 승인·반려한다.
+
+    `allow_self` — **관리자 자기 승인.** 서버에 root 로 들어가 SQL 을 칠 수 있는
+    사람에게 두 명을 강제하면, 콘솔을 놔두고 그쪽으로 도는 길만 열린다.
+    그쪽은 기록이 남지 않는다. 막는 대신 남긴다(감사 기록에 실행자가 남는다).
+    개발자는 그대로 다른 사람의 승인을 받는다.
+    """
     if decision not in {"approve", "reject"}:
         raise SpecialistStoreError("승인 또는 반려만 선택할 수 있습니다.")
     try:
@@ -182,14 +217,14 @@ def decide_request(*, request_id: int, actor: str, decision: str, note: str = ""
             row = cur.fetchone()
             if row is None or row["state"] != "awaiting_approval":
                 raise SpecialistStoreError("처리할 수 있는 전문 봇 변경 요청이 아닙니다.")
-            if str(row["requester"]).lower() == actor.lower():
+            if not allow_self and str(row["requester"]).lower() == actor.lower():
                 raise SpecialistStoreError("자신이 만든 요청은 직접 승인할 수 없습니다.")
             state = "approved" if decision == "approve" else "rejected"
             if decision == "approve":
                 p = dict(row["proposal"])
                 adapter = str(p["adapter"])
                 requested_state = str(p["state"])
-                if requested_state == "enabled" and not ALLOWED_ADAPTERS[adapter]["available"]:
+                if requested_state == "enabled" and adapter not in _deployed():
                     raise SpecialistStoreError("런타임 어댑터가 아직 배포되지 않아 활성화할 수 없습니다.")
                 if p["contractVersion"] not in ALLOWED_ADAPTERS[adapter]["contracts"]:
                     raise SpecialistStoreError("승인된 계약 검사 버전이 아닙니다.")
@@ -197,17 +232,29 @@ def decide_request(*, request_id: int, actor: str, decision: str, note: str = ""
                     """
                     INSERT INTO specialist_bot
                         (key, name, domain, adapter, state, version, contract_version,
+                         model, routing_hint, min_confidence, rules, rules_version,
                          created_by, updated_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s)
                     ON CONFLICT (key) DO UPDATE SET
                         name = excluded.name, domain = excluded.domain,
                         adapter = excluded.adapter, state = excluded.state,
                         version = excluded.version,
                         contract_version = excluded.contract_version,
+                        model = excluded.model,
+                        routing_hint = excluded.routing_hint,
+                        min_confidence = excluded.min_confidence,
+                        rules = excluded.rules,
+                        -- 규칙이 실제로 바뀔 때만 올린다. 이름만 고친 승인에도
+                        -- 버전이 오르면 「무엇이 돌고 있나」 의 뜻이 사라진다.
+                        rules_version = specialist_bot.rules_version
+                            + CASE WHEN specialist_bot.rules = excluded.rules
+                                   THEN 0 ELSE 1 END,
                         updated_at = now(), updated_by = excluded.updated_by
                     """,
                     (p["key"], p["name"], p["domain"], adapter, requested_state,
-                     p["version"], p["contractVersion"], actor, actor),
+                     p["version"], p["contractVersion"], p.get("model", ""),
+                     p.get("routingHint", ""), p.get("minConfidence", 0.6),
+                     p.get("rules", ""), actor, actor),
                 )
                 cur.execute("DELETE FROM specialist_workspace WHERE specialist = %s", (p["key"],))
                 for workspace in p["workspaces"]:
