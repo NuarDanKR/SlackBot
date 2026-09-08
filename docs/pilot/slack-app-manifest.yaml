@@ -20,7 +20,7 @@ features:
       description: TYBot 수집 규칙에 맞는 공개 또는 비공개 업무 채널을 만듭니다.
   slash_commands:
     - command: /채널
-      description: 업무 채널을 만들거나 이름을 변경합니다.
+      description: 업무 채널을 점검·수정·생성합니다. 상태는 수집·검토자·첨부까지 봅니다.
       usage_hint: 상태 | 수정 | 생성 | 도움말
       should_escape: false
     - command: /ty-channel
