@@ -59,6 +59,11 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(description="전문 봇이 왜 답하지 않는지 판정한다")
     ap.add_argument("--workspace", default="", help="한 워크스페이스만 본다")
+    ap.add_argument(
+        "--probe", action="store_true",
+        help="그 모델로 **최소 호출 한 번**을 실제로 해 본다(사내 근거는 안 보낸다). "
+             "400/403 의 실제 이유가 여기서 그대로 나온다.",
+    )
     args = ap.parse_args(argv)
 
     load_env_file()
@@ -100,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             print("    journalctl -u tybot | grep '전문가 목록'")
             continue
         found += len(rows)
-        problems += _check_rows(rows, providers)
+        problems += _check_rows(rows, providers, probe=args.probe)
 
     print()
     print("=== 판정")
@@ -119,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _check_rows(rows, providers: set[str]) -> int:
+def _check_rows(rows, providers: set[str], *, probe: bool = False) -> int:
     """전문가 한 줄씩 설정을 맞춰 본다. 막힌 건수를 돌려준다."""
     problems = 0
     for row in rows:
@@ -160,7 +165,38 @@ def _check_rows(rows, providers: set[str]) -> int:
             print("      → confidential 을 허용하는 모델로 바꾼다.")
         else:
             print(f"    모델: OK ({spec.provider})")
+        if probe and spec is not None:
+            _probe(row.model)
     return problems
+
+
+def _probe(model: str) -> None:
+    """그 모델로 최소 호출 한 번. **사내 근거는 싣지 않는다.**
+
+    설정이 다 맞는데도 폴백이 나오는 경우가 있다 — 벤더가 그 모델에 400/403 을
+    돌려주는 것이다. 이유는 응답 본문에 있고, 그것을 보는 가장 짧은 길이 이 호출이다.
+    질문은 상수 한 줄이라 비용이 사실상 0 이고, 아카이브 내용이 나가지 않는다.
+    """
+    from tybot.gateway.base import Message, Sensitivity, error_reason
+    from tybot.gateway.router import Router
+
+    try:
+        router = Router.from_default_registry()
+    except Exception as exc:  # noqa: BLE001 - 구성 실패도 답이다
+        print(f"      호출 시험: 🔴 라우터를 만들지 못했다 — {error_reason(exc)}")
+        return
+    try:
+        resp = router.complete(
+            [Message("user", "1+1은?")],
+            model=model,
+            sensitivity=Sensitivity.CONFIDENTIAL,
+            max_tokens=16,
+        )
+    except Exception as exc:  # noqa: BLE001 - 이유를 그대로 보여 주는 것이 목적이다
+        print(f"      호출 시험: 🔴 {error_reason(exc)}")
+        print("      → 이 줄이 폴백의 실제 이유다. 모델 이름·계정 권한을 확인한다.")
+        return
+    print(f"      호출 시험: OK ({resp.model} · ${resp.cost_usd:.6f})")
 
 
 if __name__ == "__main__":

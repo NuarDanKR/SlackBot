@@ -5,7 +5,14 @@ import logging
 import os
 from collections.abc import Sequence
 
-from .base import LLMResponse, Message, ModelSpec, Provider, Sensitivity
+from .base import (
+    LLMResponse,
+    Message,
+    ModelSpec,
+    Provider,
+    Sensitivity,
+    error_reason,
+)
 from .cost import CostGuard
 
 logger = logging.getLogger("tybot.gateway")
@@ -185,11 +192,14 @@ class Router:
                 )
             except Exception as exc:  # noqa: BLE001 - 다음 후보로 넘긴다
                 last_error = exc
+                # **예외 종류만 찍으면 원인을 못 가린다.** 400 의 이유는 응답
+                # 본문에 있다(2026-09-08 실측: `error=BadRequestError` 한 줄뿐이라
+                # 모델 이름 문제인지 입력 길이 문제인지 알 수 없었다).
                 logger.warning(
                     "llm_call 실패 model=%s provider=%s error=%s — 다음 후보로",
                     candidate.model,
                     candidate.provider,
-                    type(exc).__name__,
+                    error_reason(exc),
                 )
                 continue
             if candidate.model != spec.model:

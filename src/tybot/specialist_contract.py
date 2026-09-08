@@ -30,6 +30,20 @@ def error_code_for(exc: BaseException) -> str:
     return _ERROR_CODES.get(type(exc).__name__, "adapter-error")
 
 
+def _reason(exc: BaseException) -> str:
+    """로그에 남길 한 줄. 게이트웨이 헬퍼를 쓰되 없어도 돌아간다.
+
+    계약 모듈은 게이트웨이에 의존하지 않는 것이 원칙이라 늦게 가져온다 —
+    전문가가 HTTP 전송으로 바뀌어도 이 모듈은 그대로여야 한다.
+    """
+    try:
+        from .gateway.base import error_reason
+
+        return error_reason(exc)
+    except Exception:  # noqa: BLE001 - 로그 문구가 답변을 막으면 안 된다
+        return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
 class ContractViolation(RuntimeError):
     pass
 
@@ -113,8 +127,8 @@ def execute(
         # 말하지 못했다. 예외 메시지에 근거 본문은 들어가지 않는다(모델 이름·
         # 프로바이더·상태 코드뿐).
         log.warning(
-            "전문가 호출 실패 code=%s %s: %s",
-            error_code_for(exc), type(exc).__name__, exc,
+            "전문가 호출 실패 code=%s %s",
+            error_code_for(exc), _reason(exc),
         )
         return SpecialistCallResult(fallback(), "fallback", error_code_for(exc))
     finally:
