@@ -614,6 +614,15 @@
   font-size: 10.5px;
   color: var(--text-3);
 }
+.text-link {
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.text-link:hover {
+  text-decoration: underline;
+}
 .metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -648,6 +657,37 @@
 }
 .ws-foot .mono {
   font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.workspace-health-list {
+  display: grid;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.workspace-health-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 43px;
+  color: var(--text-2);
+  text-decoration: none;
+}
+.workspace-health-row + .workspace-health-row {
+  border-top: 1px solid var(--line);
+}
+.workspace-health-row:hover {
+  color: var(--text);
+  background: var(--sunk);
+}
+.workspace-live-card .metrics {
+  border-top: 0;
+  padding-top: 2px;
+}
+.workspace-live-times {
+  display: grid;
+  gap: 4px;
+  color: var(--text-3);
   font-size: 11.5px;
 }
 

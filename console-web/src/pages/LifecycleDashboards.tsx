@@ -43,7 +43,6 @@ export function AnswerDashboard({ user, navigate }: { user: ConsoleUser; navigat
 }
 
 interface OperationsData {
-  slack: { level: 'ok' | 'warn' | 'bad' | 'unknown'; workspaces: { workspace: string; label: string; level: string; connected: boolean | null; problems: string[] }[] }
   commands: { level: string; problems: string[] }
   disabledTimers: number
   deployment: { state: string; message?: string }
@@ -55,14 +54,13 @@ export function OperationsDashboard({ user, navigate }: { user: ConsoleUser; nav
   if (res.loading) return <Loading what="운영 대시보드를" />
   if (res.error || !res.data) return <Failed what="운영 대시보드를" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
   const d = res.data
-  const disconnected = d.slack.workspaces.filter((w) => w.connected === false).length
   return <>
-    <PageHead crumb="운영" title="운영 현황" note="서비스, Slack, 배치, 배포와 전문 봇의 운영 상태를 확인합니다." />
+    <PageHead crumb="운영" title="운영 현황" note="서비스, 명령, 배치, 배포와 전문 봇의 운영 상태를 확인합니다." />
     <Section title="운영 상태"><div className="action-list">
-      <ActionRow title="Slack 연결·명령" detail={`연결 끊김 ${disconnected}개 · 명령 문제 ${d.commands.problems.length}건`} tone={disconnected || d.commands.problems.length ? 'bad' : 'ok'} onClick={() => navigate('/manage/slack')} />
+      <ActionRow title="Slack 명령" detail={`등록 불일치 ${d.commands.problems.length}건`} tone={d.commands.problems.length ? 'bad' : 'ok'} onClick={() => navigate('/manage/commands')} />
       <ActionRow title="전문 봇" detail={`장애 ${d.specialistErrors}개`} tone={d.specialistErrors ? 'bad' : 'plain'} onClick={() => navigate(withQuery('/manage/specialists', { state: d.specialistErrors ? 'error' : null }))} />
       {user.role === 'admin' && <ActionRow title="배치" detail={`사용 중지 ${d.disabledTimers}개`} tone={d.disabledTimers ? 'watch' : 'ok'} onClick={() => navigate(withQuery('/manage/batches', { state: d.disabledTimers ? 'disabled' : null }))} />}
-      <ActionRow title="배포" detail={d.deployment.message || d.deployment.state} tone={d.deployment.state === 'failed' ? 'bad' : 'plain'} onClick={() => navigate(withQuery('/manage/deploy', { state: d.deployment.state === 'failed' ? 'failed' : null }))} />
+      {user.role === 'admin' && <ActionRow title="배포" detail={d.deployment.message || d.deployment.state} tone={d.deployment.state === 'failed' ? 'bad' : 'plain'} onClick={() => navigate(withQuery('/manage/deploy', { state: d.deployment.state === 'failed' ? 'failed' : null }))} />}
     </div></Section>
   </>
 }

@@ -3,7 +3,7 @@ import type { Me } from './api/client'
 import { ApiError, login as apiLogin, logout as apiLogout } from './api/client'
 import { useResource } from './api/hooks'
 import { AuditEvents } from './pages/AuditEvents'
-import { ArchiveDiagnostics, AnswerQuality, FeedbackPage, SlackDiagnostics } from './pages/Diagnostics'
+import { ArchiveDiagnostics, AnswerQuality, CommandDiagnostics, FeedbackPage } from './pages/Diagnostics'
 import { BatchTimers } from './pages/BatchTimers'
 import { Collected } from './pages/Collected'
 import { ConsoleUsers } from './pages/ConsoleUsers'
@@ -45,11 +45,11 @@ const NAV: NavGroup[] = [
   ] },
   { label: '운영', path: '/manage', minimum: 'developer', items: [
     { path: '/manage', label: '운영 현황', minimum: 'developer' },
-    { path: '/manage/specialists', label: '전문 봇 등록·승인', minimum: 'developer', capability: 'specialists' },
-    { path: '/manage/slack', label: 'Slack 연결·명령 진단', minimum: 'developer' },
+    { path: '/manage/specialists', label: '전문 봇 관리', minimum: 'developer', capability: 'specialists' },
+    { path: '/manage/commands', label: '명령 진단', minimum: 'developer' },
     { path: '/manage/logs', label: '서비스 로그', minimum: 'developer' },
     { path: '/manage/batches', label: '배치 관리', minimum: 'admin' },
-    { path: '/manage/deploy', label: '배포 관리', minimum: 'developer' },
+    { path: '/manage/deploy', label: '배포 관리', minimum: 'admin' },
   ] },
   { label: '설정·권한', path: '/console', minimum: 'admin', items: [
     { path: '/console', label: '권한 현황', minimum: 'admin' },
@@ -60,7 +60,7 @@ const NAV: NavGroup[] = [
   ] },
 ]
 
-const ALL_PATHS = new Set(['/home', '/collect/status', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
+const ALL_PATHS = new Set(['/home', '/collect/status', '/manage/slack', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
 
 const RANK: Record<ConsoleRole, number> = { guest: 0, developer: 1, admin: 2 }
 const THEME_LABEL: Record<Theme, string> = { system: '시스템 설정', light: '밝게', dark: '어둡게' }
@@ -98,7 +98,11 @@ function roleUser(me: Me): ConsoleUser { return { name: me.name, email: me.email
 
 export default function App() {
   const { location, navigate } = useHashNavigation()
-  const path = location.path === '/collect/status' ? '/collect' : location.path
+  const path = location.path === '/collect/status'
+    ? '/collect'
+    : location.path === '/manage/slack'
+      ? '/manage/commands'
+      : location.path
   const [authTick, setAuthTick] = useState(0)
   const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([])
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -156,10 +160,10 @@ export default function App() {
       {path === '/answer/rules' && <Harness />}
       {path === '/manage' && <OperationsDashboard user={user} navigate={navigate} />}
       {path === '/manage/specialists' && <SpecialistManagement user={user} query={location.query} onToast={toast} />}
-      {path === '/manage/slack' && <SlackDiagnostics />}
+      {path === '/manage/commands' && <CommandDiagnostics />}
       {path === '/manage/logs' && <ServiceLogs context={logContext} />}
       {path === '/manage/batches' && <BatchTimers onToast={toast} />}
-      {path === '/manage/deploy' && <Deploy user={user} onToast={toast} />}
+      {path === '/manage/deploy' && <Deploy onToast={toast} />}
       {path === '/manage/workspaces' && <Workspaces selectedKey={location.query.get('workspace')} onToast={toast} />}
       {path === '/manage/environment' && <EnvSettings onToast={toast} />}
       {path === '/console' && <ConsoleDashboard navigate={navigate} />}

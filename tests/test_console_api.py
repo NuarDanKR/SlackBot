@@ -279,6 +279,38 @@ def test_status_lists_workspaces_from_archive(client):
     assert fin["lastIngestedAt"] is not None
     assert len(fin["courses"]) == 30
     assert fin["courses"][-1]["lines"] == 3  # 오늘 3줄
+    assert fin["answersToday"] == 1
+    assert fin["answerErrorsToday"] == 0
+    assert fin["answerHealth"] == "ok"
+    assert fin["errorHealth"] == "ok"
+
+    mgmt = next(r for r in rows if r["key"] == "mgmt")
+    assert mgmt["answersToday"] == 0
+    assert mgmt["answerHealth"] == "unknown"
+    assert mgmt["errorHealth"] == "unknown"
+
+
+def test_status_marks_today_answer_errors(client, env):
+    day = datetime.now(KST).date().isoformat()
+    path = env / "qa-log" / f"qa-{day[:7]}.jsonl"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "ts": f"{day}T11:15:00+09:00",
+            "workspace": "fin",
+            "reason": "runtime",
+            "hits": 0,
+            "elapsed_ms": 18000,
+            "error": "RuntimeError",
+        }, ensure_ascii=False) + "\n")
+
+    rows = client.get("/api/status", headers=owner(client)).json()["workspaces"]
+    fin = next(r for r in rows if r["key"] == "fin")
+    assert fin["answersToday"] == 2
+    assert fin["answerErrorsToday"] == 1
+    assert fin["noHitAnswersToday"] == 1
+    assert fin["slowAnswersToday"] == 1
+    assert fin["answerHealth"] == "bad"
+    assert fin["errorHealth"] == "bad"
 
 
 def test_status_marks_broken_documents(client):
@@ -1213,6 +1245,10 @@ def test_diagnostics_follow_read_and_developer_permissions(client):
     assert client.get("/api/diagnostics/archive", headers=guest(client)).status_code == 200
     assert client.get("/api/diagnostics/answers", headers=guest(client)).status_code == 403
     assert client.get("/api/diagnostics/slack", headers=member(client)).status_code == 200
+    response = client.get("/api/diagnostics/commands", headers=member(client))
+    assert response.status_code == 200
+    assert "section" in response.json()
+    assert "bot" not in response.json()
 
 
 def test_specialist_registry_is_developer_only(client, monkeypatch):
@@ -1324,7 +1360,7 @@ def test_admin_approval_does_not_allow_self_approval(client, monkeypatch):
     assert seen["allow_self"] is False
 
 
-def test_admin_cannot_submit_a_specialist_change(client, monkeypatch):
+def test_admin_can_submit_a_specialist_change(client, monkeypatch):
     called = False
 
     def create_request(**_kwargs):
@@ -1333,6 +1369,7 @@ def test_admin_cannot_submit_a_specialist_change(client, monkeypatch):
         return 1
 
     monkeypatch.setattr(console_app.specialist_store, "create_request", create_request)
+    monkeypatch.setattr(console_app.specialist_store, "list_requests", lambda: [])
     response = client.post(
         "/api/specialists/requests",
         headers=_write_headers(owner(client)),
@@ -1342,8 +1379,8 @@ def test_admin_cannot_submit_a_specialist_change(client, monkeypatch):
         },
     )
 
-    assert response.status_code == 403
-    assert called is False
+    assert response.status_code == 200
+    assert called is True
 
 
 def test_a_developer_still_needs_someone_else(client):

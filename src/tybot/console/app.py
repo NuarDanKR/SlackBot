@@ -271,8 +271,8 @@ def me(user: User) -> dict:
 
 @app.get("/api/status")
 def status(user: User) -> dict:
-    """데이터 현황 — 워크스페이스별 수집 상태와 추이."""
-    rows = _visible(user, reader.workspace_status(store()), key="key")
+    """Workspace collection and today's answer health."""
+    rows = _workspace_runtime_status(user)
     return {"workspaces": rows}
 
 
@@ -304,9 +304,51 @@ def _scoped_health(user: ConsoleUser, *, include_text: bool = False) -> dict:
     )
 
 
+def _workspace_runtime_status(user: ConsoleUser) -> list[dict]:
+    """Collection and today's answer health, scoped before aggregation."""
+    workspaces = _visible(user, reader.workspace_status(store()), key="key")
+    visible_keys = {str(row["key"]) for row in workspaces}
+    today = reader._now().date().isoformat()
+    by_workspace: dict[str, list[dict]] = {key: [] for key in visible_keys}
+    for record in reader._read_qa_records(1):
+        key = str(record.get("workspace") or "")
+        if key in visible_keys and str(record.get("ts") or "")[:10] == today:
+            by_workspace[key].append(record)
+
+    enriched: list[dict] = []
+    for workspace in workspaces:
+        records = by_workspace[str(workspace["key"])]
+        errors = sum(1 for row in records if str(row.get("error") or "").strip())
+        no_hits = sum(1 for row in records if int(row.get("hits") or 0) == 0)
+        slow = sum(1 for row in records if int(row.get("elapsed_ms") or 0) > health.SLOW_MS)
+        if not records:
+            answer_health = "unknown"
+            error_health = "unknown"
+        elif errors:
+            answer_health = "bad"
+            error_health = "bad"
+        else:
+            answer_health = "watch" if no_hits or slow else "ok"
+            error_health = "ok"
+        enriched.append({
+            **workspace,
+            "answersToday": len(records),
+            "answerErrorsToday": errors,
+            "noHitAnswersToday": no_hits,
+            "slowAnswersToday": slow,
+            "lastAnsweredAt": max(
+                (str(row.get("ts") or "") for row in records),
+                default=None,
+            ),
+            "answerHealth": answer_health,
+            "errorHealth": error_health,
+        })
+    return enriched
+
+
 @app.get("/api/dashboards/collection")
 def collection_dashboard(user: User) -> dict:
-    workspaces = _visible(user, reader.workspace_status(store()), key="key")
+    workspaces = _workspace_runtime_status(user)
     return {
         "documents": sum(int(row.get("docs") or 0) for row in workspaces),
         "rawLines": sum(int(row.get("rawLines") or 0) for row in workspaces),
@@ -379,8 +421,8 @@ def console_dashboard(user: User) -> dict:
     except account_store.AccountStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
-        requests = deploy_approval_store.list_requests(None)
-    except deploy_approval_store.DeployApprovalError:
+        requests = specialist_store.list_requests()
+    except specialist_store.SpecialistStoreError:
         requests = []
     events = audit_store.list_events(qa_log_dir=reader.qa_log_dir(), limit=20)
     return {
@@ -485,6 +527,17 @@ def slack_diagnostics(user: User) -> dict:
         "checkedAt": report["checkedAt"],
         "bot": report["sections"]["bot"],
         "commands": report["sections"]["commands"],
+    }
+
+
+@app.get("/api/diagnostics/commands")
+def command_diagnostics(user: User) -> dict:
+    """Command registration diagnostics without duplicated workspace health."""
+    _require_developer(user)
+    report = _scoped_health(user)
+    return {
+        "checkedAt": report["checkedAt"],
+        "section": report["sections"]["commands"],
     }
 
 
@@ -665,8 +718,7 @@ def create_specialist_request(
     request: Request,
     user: User,
 ) -> dict:
-    if user.role != "developer":
-        raise HTTPException(status_code=403, detail="전문 봇 개발자만 변경을 요청할 수 있습니다.")
+    _require_developer(user)
     _check_write_request(request)
     requested_workspaces = set(body.workspaces)
     if not user.all_workspaces and (

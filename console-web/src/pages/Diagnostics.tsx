@@ -77,13 +77,13 @@ export function AnswerQuality({ user }: { user: ConsoleUser }) {
     </Section></>
 }
 
-export function SlackDiagnostics() {
-  const res = useResource<{ checkedAt: string; bot: HealthReport['sections']['bot']; commands: HealthReport['sections']['commands'] }>('/api/diagnostics/slack')
-  if (res.loading) return <Loading what="Slack 진단을" />
-  if (res.error || !res.data) return <Failed what="Slack 진단을" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
-  return <><PageHead crumb="운영 · Slack" title="Slack 연결·명령 진단" note="워크스페이스 연결과 코드·매니페스트의 명령 정합성을 확인합니다." aside={<CheckedAt value={res.data.checkedAt} />} />
-    <Section title="워크스페이스 연결" aside={<Level value={res.data.bot.level} />}><div className="table-wrap"><table className="table"><thead><tr><th>워크스페이스</th><th>상태</th><th>연결</th><th>문제</th></tr></thead><tbody>{res.data.bot.workspaces.map((w) => <tr key={w.workspace}><td>{w.label}<div className="ws-key">{w.workspace}</div></td><td><Level value={w.level} /></td><td>{w.connected == null ? '확인 불가' : w.connected ? '연결됨' : '끊김'}</td><td>{w.problems.join(' · ') || '-'}</td></tr>)}</tbody></table></div></Section>
-    <Section title="명령 정합성" aside={<Level value={res.data.commands.level} />}><div className="table-wrap"><table className="table"><thead><tr><th>명령</th><th>코드</th><th>매니페스트</th></tr></thead><tbody>{res.data.commands.commands.map((c) => <tr key={c.name}><td className="mono">{c.name}</td><td>{c.inCode ? '등록' : '없음'}</td><td>{c.inManifest ? '등록' : '없음'}</td></tr>)}</tbody></table></div><Problems items={res.data.commands.problems} /></Section></>
+export function CommandDiagnostics() {
+  const res = useResource<{ checkedAt: string; section: HealthReport['sections']['commands'] }>('/api/diagnostics/commands')
+  if (res.loading) return <Loading what="명령 진단을" />
+  if (res.error || !res.data) return <Failed what="명령 진단을" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
+  const commands = res.data.section
+  return <><PageHead crumb="운영 · 명령" title="명령 진단" note="코드에 구현된 Slack 명령과 앱 매니페스트 등록 상태가 일치하는지 확인합니다." aside={<CheckedAt value={res.data.checkedAt} />} />
+    <Section title="명령 정합성" aside={<Level value={commands.level} />}><div className="table-wrap"><table className="table"><thead><tr><th>명령</th><th>코드</th><th>매니페스트</th></tr></thead><tbody>{commands.commands.map((c) => <tr key={c.name}><td className="mono">{c.name}</td><td>{c.inCode ? '등록' : '없음'}</td><td>{c.inManifest ? '등록' : '없음'}</td></tr>)}</tbody></table></div><Problems items={commands.problems} /></Section></>
 }
 
 export function FeedbackPage({ user, onToast }: { user: ConsoleUser; onToast: (message: string) => void }) {

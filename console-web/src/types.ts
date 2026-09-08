@@ -17,6 +17,7 @@
 
 export type WorkspaceRole = 'root' | 'member'
 export type Health = 'ok' | 'watch' | 'stalled'
+export type RuntimeHealth = 'ok' | 'watch' | 'bad' | 'unknown'
 
 /** 적층도의 한 칸 — 하루치 타설량. lines 가 0 이면 그날은 '구멍'이다. */
 export interface DailyCourse {
@@ -30,7 +31,7 @@ export interface WorkspaceStatus {
   role: WorkspaceRole
   /** 이 워크스페이스가 추가로 읽을 수 있는 워크스페이스 키 (CROSS_WS_READ) */
   readable: string[]
-  connected: boolean
+  connected: boolean | null
   realtime: boolean
   channels: number
   /** 봇이 초대되지 않아 수집 대상에서 빠진 채널 수 */
@@ -45,6 +46,13 @@ export interface WorkspaceStatus {
   spendTodayUsd: number
   limitUsd: number
   health: Health
+  answersToday: number
+  answerErrorsToday: number
+  noHitAnswersToday: number
+  slowAnswersToday: number
+  lastAnsweredAt: string | null
+  answerHealth: RuntimeHealth
+  errorHealth: RuntimeHealth
 }
 
 export type AnomalyKind = 'spike' | 'limit' | 'loop' | 'stalled'
