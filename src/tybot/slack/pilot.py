@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 from .. import (
     attachment_view,
+    daily_review,
     evidence_view,
     heartbeat,
     reviewers,
@@ -44,12 +45,16 @@ from ..canvas_answer import create as create_answer_canvas
 from ..canvas_answer import grant_channel as grant_canvas_channel
 from ..canvas_answer import grant_user as grant_canvas_user
 from ..canvas_answer import parse_request as parse_canvas_request
+from ..channel_health import HealthFacts
+from ..channel_health import report as health_report
 from ..channel_management import (
+    EDIT_CALLBACK,
     ChannelNameError,
     ChannelOwnerStore,
     action_prefix,
     create_modal,
-    rename_modal,
+    edit_from_view,
+    edit_modal,
     request_from_view,
     requests_from_view,
     selected_prefix,
@@ -430,8 +435,14 @@ class WorkspaceBot:
             if action in ("", "생성", "만들기"):
                 self._open_create_modal(client, command["trigger_id"], command["user_id"])
                 return
-            if action in ("이름변경", "이름바꾸기"):
-                self._open_rename_modal(
+            if action in ("상태", "점검", "health", "status"):
+                self._respond_channel_health(client, command, respond)
+                return
+            # 이름 변경은 **수정으로 합쳤다.** 이름만 고치려는 사람도, 검토자만
+            # 고치려는 사람도 같은 화면에서 한다 — 어디서 무엇을 고치는지 기억하게
+            # 만들면 사람은 둘 다 안 고친다.
+            if action in ("수정", "설정", "변경", "이름변경", "이름바꾸기", "고치기"):
+                self._open_edit_modal(
                     client,
                     command["trigger_id"],
                     command["user_id"],
@@ -443,7 +454,9 @@ class WorkspaceBot:
                 self._handle_reviewer_command(command, args, respond)
                 return
             respond(
-                "사용법: `/채널 생성`, `/채널 이름변경`, `/채널 검토자`, `/채널 도움말`\n"
+                "사용법: `/채널 상태`, `/채널 수정`, `/채널 생성`, `/채널 도움말`\n"
+                "`상태` 는 이름·봇 참여·수집·검토자·첨부를 한 번에 점검합니다.\n"
+                "`수정` 에서 이름과 검토자를 함께 고칩니다(이름변경은 여기로 합쳤습니다).\n"
                 "명령어 없이 `/채널`만 입력해도 생성 화면이 열립니다.",
                 response_type="ephemeral",
             )
@@ -729,6 +742,26 @@ class WorkspaceBot:
             ack()
             self._create_channels(client, user_id, requests)
 
+        @self.app.view(EDIT_CALLBACK)
+        def on_edit_submission(ack, body, client, view):
+            """`/채널 수정` 제출. 채운 것만 바꾼다."""
+            try:
+                edit = edit_from_view(view)
+            except ChannelNameError as e:
+                ack(response_action="errors", errors={e.block_id: str(e)})
+                return
+            ack()
+            metadata = self._modal_metadata(view)
+            self._apply_channel_edit(
+                client,
+                (body.get("user") or {}).get("id", ""),
+                metadata.get("channel_id", ""),
+                edit,
+            )
+
+        # 이 화면은 더 이상 열리지 않는다 — `/채널 이름변경` 은 수정 모달로 간다.
+        # 배포 순간에 이미 떠 있던 옛 모달의 제출만 받는다. 지우면 그 사람은
+        # 저장을 눌렀는데 오류만 보게 된다.
         @self.app.view("tybot_rename_channel")
         def on_rename_submission(ack, body, client, view):
             try:
@@ -1298,9 +1331,48 @@ class WorkspaceBot:
         self._poll_notice(client, body, user_id, message)
 
     def _can_manage_channel(self, channel_id: str, user_id: str) -> bool:
-        return user_id in self.channel_admin_users or self.channel_owners.is_owner(
-            self.workspace, channel_id, user_id
-        )
+        """이 채널을 고칠 수 있는가.
+
+        ## Slack 생성자까지 본다 (2026-09-08)
+
+        전에는 **TYBot 이 만든 채널**만 고칠 수 있었다(`channel_owners` 는 우리
+        생성 기록이다). 그래서 A 가 Slack 에서 직접 만든 채널을 A 가 고치려 하면
+        「TYBot 이 만든 게 아니라서 안 된다」 고 막혔다. 자기가 만든 채널을
+        자기가 못 고치는 것은 권한이 아니라 고장이다.
+
+        Slack 이 알려 주는 `channel.creator` 는 우리 JSON 기록보다 더 확실한
+        사실이다. 그것을 마지막 근거로 쓴다 — 권한을 넓히는 것이 아니라, 우리가
+        기록을 놓친 자리를 Slack 에게 되묻는 것이다.
+        """
+        if user_id in self.channel_admin_users:
+            return True
+        if self.channel_owners.is_owner(self.workspace, channel_id, user_id):
+            return True
+        return bool(user_id) and self._slack_creator(channel_id) == user_id
+
+    def _slack_creator(self, channel_id: str) -> str:
+        """Slack 이 기록한 채널 생성자. 못 읽으면 빈 문자열.
+
+        권한 판정마다 API 를 부르지 않게 캐시한다. 생성자는 바뀌지 않는다.
+        """
+        if not channel_id:
+            return ""
+        cache = getattr(self, "_creator_cache", None)
+        if cache is None:
+            cache = self._creator_cache = {}
+        if channel_id in cache:
+            return cache[channel_id]
+        try:
+            info = (
+                self.app.client.conversations_info(channel=channel_id) or {}
+            ).get("channel") or {}
+            creator = str(info.get("creator") or "")
+        except Exception as e:  # 못 읽으면 권한을 넓히지 않는다
+            log.warning("[%s] 채널 생성자 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
+            # 실패는 캐시하지 않는다. 일시 오류가 그 채널을 영구히 잠근다.
+            return ""
+        cache[channel_id] = creator
+        return creator
 
     def _may_review_attachments(self, channel_id: str, user_id: str) -> bool:
         """승인 권한. 채널 소유자 또는 그 채널의 요약 검토자.
@@ -1503,32 +1575,203 @@ class WorkspaceBot:
             response_type="ephemeral",
         )
 
-    def _open_rename_modal(
+    # --- `/채널 상태` · `/채널 수정` -------------------------------------
+    def _health_facts(self, client, channel_id: str) -> HealthFacts:
+        """상태 화면이 쓸 사실을 모은다. **판단은 `channel_health` 가 한다.**
+
+        한 조각을 못 읽었다고 화면 전체를 포기하지 않는다 — 못 읽은 것은
+        `None` 으로 넘겨 「모른다」 로 표시된다. 「없음」 과 다른 사실이다.
+        """
+        channel = self._channel_name(client, channel_id)
+        info = {}
+        try:
+            info = (client.conversations_info(channel=channel_id) or {}).get("channel", {})
+        except Exception as e:
+            log.warning("[%s] 채널 정보 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
+
+        doc = next((d for d in self.store.docs() if d.channel == channel), None)
+
+        found = None
+        send_at = ""
+        try:
+            rows = reviewers.reviewers_for(self.workspace, channel_id)
+            found = [r.reviewer_user for r in rows]
+            if rows:
+                send_at = rows[0].send_at.strftime("%H:%M")
+        except reviewers.ReviewerError as e:
+            log.warning("[%s] 검토자 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
+
+        waiting = None
+        try:
+            waiting = len(daily_review.blocked(
+                self.archive_dir,
+                workspace=self.workspace,
+                channel_id=channel_id,
+                extracted=self._extracted_names(channel_id),
+            ))
+        except Exception as e:
+            log.warning("[%s] 첨부 대기 집계 실패 ch=%s: %s", self.workspace, channel_id, e)
+
+        return HealthFacts(
+            channel=channel,
+            channel_id=channel_id,
+            is_private=bool(info.get("is_private")),
+            is_member=bool(info.get("is_member")),
+            is_dm=bool(info.get("is_im")) or channel_id.startswith("D"),
+            autojoin_enabled=self.autojoin,
+            realtime_enabled=self.realtime,
+            bot_name=self.bot_name,
+            raw_lines=len(doc.raw_lines) if doc else 0,
+            last_ingested=doc.last_ingested if doc else None,
+            write_problems=dict(self.path_problems),
+            reviewers=found,
+            send_at=send_at,
+            waiting_attachments=waiting,
+            manager_known=bool(
+                self.channel_admin_users
+                or self._slack_creator(channel_id)
+                or self.channel_owners.owner_of(self.workspace, channel_id)
+            ),
+        )
+
+    def _extracted_names(self, channel_id: str) -> set[str]:
+        """이 채널 문서에 변환본이 들어간 첨부 이름.
+
+        **채널명이 아니라 ID 로 고른다.** 이름은 바뀌고, 바뀌면 이 집계가 조용히
+        0건이 되어 이미 읽고 있는 파일까지 「확인 필요」 로 올라온다.
+        """
+        from ..answer import EXTRACTED_ATTACHMENT_RE as pattern
+
+        return {
+            m.group("name")
+            for doc in self.store.docs()
+            if doc.channel_id == channel_id
+            for line in doc.raw_lines
+            if (m := pattern.match((line.text or "").strip()))
+        }
+
+    def _respond_channel_health(self, client, command: dict, respond) -> None:
+        """`/채널 상태` — 넷 다 조용히 고장 나는 것들을 한 화면에 모은다."""
+        channel_id = str(command.get("channel_id") or "")
+        if not channel_id:
+            respond("채널 안에서 실행해 주세요.", response_type="ephemeral")
+            return
+        try:
+            text = health_report(self._health_facts(client, channel_id))
+        except Exception as e:
+            log.warning("[%s] 채널 상태 실패 ch=%s: %s", self.workspace, channel_id, e)
+            respond("채널 상태를 읽지 못했습니다.", response_type="ephemeral")
+            return
+        respond(text, response_type="ephemeral")
+
+    def _open_edit_modal(
         self, client, trigger_id: str, user_id: str, channel_id: str, respond
     ) -> None:
-        if not channel_id or not self._can_manage_channel(channel_id, user_id):
+        """`/채널 수정` — 이름과 검토자를 한 화면에서.
+
+        **현재 이름이 표준 형식이 아니어도 연다.** 전에는 여기서 막았는데, 그건
+        정확히 이름을 고쳐야 하는 채널을 못 고치게 하는 것이었다.
+        """
+        if not channel_id:
+            respond("채널 안에서 실행해 주세요.", response_type="ephemeral")
+            return
+        if not self._can_manage_channel(channel_id, user_id):
             respond(
-                "이 채널의 최초 생성 요청자 또는 TYBot 채널 관리자만 이름을 변경할 수 있습니다.",
+                "이 채널의 생성자 또는 TYBot 채널 관리자만 수정할 수 있습니다.",
                 response_type="ephemeral",
             )
             return
+        name = self._channel_name(client, channel_id)
+        spec = parse(name)
+        current: tuple[str, ...] = ()
+        send_at = "08:00"
         try:
-            channel = client.conversations_info(channel=channel_id)["channel"]
-            spec = parse(channel.get("name", ""))
-            if spec is None:
-                respond(
-                    "현재 채널명이 TYBot 표준 형식이 아니어서 이 화면에서 변경할 수 없습니다.",
-                    response_type="ephemeral",
-                )
-                return
-            metadata = json.dumps({"channel_id": channel_id}, ensure_ascii=False)
+            rows = reviewers.reviewers_for(self.workspace, channel_id)
+            current = tuple(r.reviewer_user for r in rows)
+            if rows:
+                send_at = rows[0].send_at.strftime("%H:%M")
+        except reviewers.ReviewerError as e:
+            # 검토자를 못 읽었다고 이름 수정까지 막지 않는다. 다만 그 상태로
+            # 저장하면 기존 검토자를 지울 수 있으므로 화면에서 말한다.
+            log.warning("[%s] 검토자 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
+        try:
             client.views_open(
                 trigger_id=trigger_id,
-                view=rename_modal(metadata, spec),
+                view=edit_modal(
+                    json.dumps({"channel_id": channel_id}, ensure_ascii=False),
+                    spec=spec,
+                    current_name=name,
+                    reviewers=current,
+                    send_at=send_at,
+                ),
             )
         except Exception as e:
-            log.warning("[%s] 채널 이름 변경 모달 열기 실패: %s", self.workspace, e)
+            log.warning("[%s] 채널 수정 모달 열기 실패: %s", self.workspace, e)
             respond("채널 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+
+    def _apply_channel_edit(self, client, user_id: str, channel_id: str, edit) -> None:
+        """수정 제출을 적용한다. 채운 것만 바꾸고, **무엇을 바꿨는지 되돌려 준다.**
+
+        아무것도 안 바뀌었는데 「저장했습니다」 라고 하면, 사람은 바뀐 줄 알고 나간다.
+        """
+        if not channel_id or not self._can_manage_channel(channel_id, user_id):
+            self._notify_user(client, user_id, "이 채널을 수정할 권한이 없습니다.")
+            return
+
+        done: list[str] = []
+        failed: list[str] = []
+
+        current = self._channel_name(client, channel_id).lstrip("#")
+        if edit.renames and edit.name.lstrip("#").lower() != current.lower():
+            try:
+                result = client.conversations_rename(
+                    channel=channel_id, name=edit.name.lstrip("#").lower()
+                )
+                actual = (result.get("channel") or {}).get("name") or edit.name
+                self._chan_cache[channel_id] = "#" + actual
+                done.append(f"이름 → <#{channel_id}>")
+                log.info(
+                    "[%s] 채널 이름 변경 channel=%s name=%s requester=%s",
+                    self.workspace, channel_id, actual, user_id,
+                )
+            except Exception as e:
+                log.warning("[%s] 채널 이름 변경 실패 ch=%s: %s", self.workspace, channel_id, e)
+                failed.append(f"이름 변경 실패 (`{edit.name}`)")
+
+        if edit.reviewers or edit.clear_reviewers:
+            try:
+                rows = reviewers.set_reviewers(
+                    workspace=self.workspace,
+                    channel_id=channel_id,
+                    channel_name=self._channel_name(client, channel_id),
+                    reviewer_users=list(edit.reviewers),
+                    send_at=reviewers.parse_send_at(edit.send_at),
+                    set_by=user_id,
+                )
+                if rows:
+                    who = " ".join(f"<@{r.reviewer_user}>" for r in rows)
+                    done.append(f"검토자 → {who} · 매일 {rows[0].send_at:%H:%M}")
+                else:
+                    done.append(
+                        "검토자 → 전부 해제. **이 채널은 요약을 반영하지 않고, "
+                        "읽지 못한 첨부도 아무에게도 가지 않습니다.**"
+                    )
+            except reviewers.ReviewerError as e:
+                failed.append(f"검토자 저장 실패 — {e}")
+
+        if not done and not failed:
+            self._notify_user(
+                client, user_id,
+                "바뀐 것이 없습니다. 이름을 바꾸려면 조직과 업무명을 채우고, "
+                "검토자를 바꾸려면 사람을 고르세요.",
+            )
+            return
+
+        lines = [f"✅ {row}" for row in done] + [f"⚠️ {row}" for row in failed]
+        lines.append("")
+        lines.append("확인: `/채널 상태`")
+        self._notify_user(client, user_id, NEWLINE.join(lines))
+
 
     def _notify_user(self, client, user_id: str, text: str) -> None:
         if not user_id:
@@ -1595,7 +1838,8 @@ class WorkspaceBot:
                 user_id,
                 f"{visibility} 업무 채널 <#{channel_id}>을 만들었습니다. "
                 f"이름이 수집 규칙에 맞아 **이 채널의 대화는 아카이브에 쌓입니다.**"
-                "\n`/채널 이름변경`으로 표준 이름 안에서 변경할 수 있습니다. "
+                "\n`/채널 수정`으로 이름과 요약 검토자를 함께 고칠 수 있고, "
+                "`/채널 상태`로 수집·검토자·첨부가 제대로 물렸는지 봅니다. "
                 "규칙 밖 이름으로 바꾸면 그 시점부터 수집이 멈춥니다."
                 "\nSlack 기본 관리 권한이 필요하면 채널 정보 → 관리자로 지정에서 추가하세요."
                 + suffix,

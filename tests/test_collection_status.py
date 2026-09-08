@@ -65,7 +65,7 @@ def test_dm_is_not_a_failure():
 def test_every_failure_state_tells_the_user_what_to_do(facts):
     """원인만 알려주고 방법을 안 알려주면 결국 담당자에게 다시 묻게 된다."""
     text = report(facts)
-    assert "/invite" in text or "/채널 이름변경" in text
+    assert "/invite" in text or "/채널 수정" in text
 
 
 def test_private_report_explains_the_slack_limitation():

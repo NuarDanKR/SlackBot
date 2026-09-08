@@ -387,6 +387,161 @@ def rename_modal(private_metadata: str, spec: ChannelSpec) -> dict:
     }
 
 
+# --- `/채널 수정` — 한 화면에서 이름·검토자·시각 ------------------------------
+#
+# 전에는 `/채널 이름변경` 과 `/채널 검토자` 가 따로였고, 이름 변경은 **현재 이름이
+# 표준 형식일 때만** 열렸다. 그래서 정작 규칙 밖 이름을 고치려는 사람이 막혔다.
+# 여기서는 이름 칸을 **선택 입력**으로 두고, 채운 것만 바꾼다.
+EDIT_CALLBACK = "tybot_edit_channel"
+
+REVIEWER_BLOCK = "reviewers"
+SEND_AT_BLOCK = "send_at"
+
+
+@dataclass(frozen=True)
+class ChannelEdit:
+    """`/채널 수정` 제출 결과. 비어 있는 항목은 **바꾸지 않는다는 뜻**이다."""
+
+    name: str = ""
+    reviewers: tuple[str, ...] = ()
+    send_at: str = ""
+    # 검토자 칸을 비워서 제출했는가. 「그대로 두기」 와 「전부 해제」 를 가른다 —
+    # 이 둘을 섞으면 실수로 검토가 멈추고 아무 표시도 안 난다.
+    clear_reviewers: bool = False
+
+    @property
+    def renames(self) -> bool:
+        return bool(self.name)
+
+
+def edit_modal(
+    private_metadata: str,
+    *,
+    spec: ChannelSpec | None,
+    current_name: str = "",
+    reviewers: tuple[str, ...] = (),
+    send_at: str = "08:00",
+    defaults: dict | None = None,
+) -> dict:
+    """이름·검토자·시각을 한 화면에서 고친다.
+
+    이름 칸은 **선택 입력**이다. 검토자만 바꾸려는 사람에게 조직 검색을 강요하면,
+    그 사람은 검토자 지정을 포기한다.
+    """
+    name_blocks = _name_inputs(
+        spec,
+        prefix=spec.prefix if spec else "본사팀",
+        defaults=defaults,
+        dispatch_prefix=False,
+    )
+    # 이름은 안 건드려도 된다. `prefix` 는 항상 초기값이 있어 비울 수 없으므로
+    # 조직·업무만 선택으로 둔다 — 이름 변경은 그 둘이 다 채워졌을 때만 한다.
+    for block in name_blocks:
+        if block["block_id"] != "prefix":
+            block["optional"] = True
+
+    where = current_name or (spec.raw if spec else "")
+    head = (
+        f"*{where}*" if where else "*채널 수정*"
+    ) + "\n이름은 바꿀 때만 채우세요. 검토자만 고쳐도 됩니다."
+    if spec is None and where:
+        head += (
+            "\n\n🔴 지금 이름이 표준 형식이 아니어서 **이 채널은 수집되지 않습니다.** "
+            "조직과 업무명을 고르면 표준 이름으로 바꿉니다."
+        )
+
+    return {
+        "type": "modal",
+        "callback_id": EDIT_CALLBACK,
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": "채널 수정"},
+        "submit": {"type": "plain_text", "text": "저장"},
+        "close": {"type": "plain_text", "text": "취소"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": head}},
+            {"type": "divider"},
+            *name_blocks,
+            {"type": "divider"},
+            {
+                "type": "input",
+                "block_id": REVIEWER_BLOCK,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "요약 검토자"},
+                "element": {
+                    "type": "multi_users_select",
+                    "action_id": "reviewers",
+                    "placeholder": {"type": "plain_text", "text": "검토자를 고르세요"},
+                    **({"initial_users": list(reviewers)} if reviewers else {}),
+                },
+                "hint": {
+                    "type": "plain_text",
+                    "text": "검토자가 없으면 요약을 반영하지 않고, 읽지 못한 첨부도 "
+                            "아무에게도 가지 않습니다. 비우고 저장하면 전부 해제됩니다.",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": SEND_AT_BLOCK,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "검토 DM 보낼 시각 (KST)"},
+                "element": {
+                    "type": "timepicker",
+                    "action_id": "send_at",
+                    "initial_time": send_at or "08:00",
+                },
+                "hint": {
+                    "type": "plain_text",
+                    "text": "그날 요약 후보와 확인이 필요한 첨부를 이 시각에 DM 으로 보냅니다.",
+                },
+            },
+        ],
+    }
+
+
+def edit_from_view(view: dict) -> ChannelEdit:
+    """`/채널 수정` 제출을 읽는다.
+
+    이름은 **조직과 업무명이 둘 다 채워졌을 때만** 조립한다. 하나만 채운 것은
+    실수이므로 그 칸에 오류를 붙여 되돌려 준다 — 조용히 무시하면 사람은 바꿨다고
+    믿고 나간다.
+    """
+    state = (view.get("state") or {}).get("values") or {}
+    prefix = (_selected(state, "prefix", "prefix").get("selected_option") or {}).get(
+        "value", ""
+    )
+    org_block_id, org_action = _selected_by_action(state, "org")
+    selected_org = org_action.get("selected_option") or {}
+    org_code, _derived, org_name = decode_value(selected_org.get("value", ""))
+    task = (_selected(state, "task", "task").get("value") or "").strip()
+
+    picked_org = bool(org_code and org_name)
+    name = ""
+    if picked_org and task:
+        name = build_channel_name(prefix, org_name, org_code, task)
+    elif picked_org and not task:
+        raise ChannelNameError("업무명을 적어 주세요.", "task")
+    elif task and not picked_org:
+        raise ChannelNameError(
+            "조직명을 검색해 목록에서 선택해 주세요.", org_block_id or "org_team"
+        )
+
+    reviewer_action = _selected(state, REVIEWER_BLOCK, "reviewers")
+    picked = tuple(reviewer_action.get("selected_users") or ())
+    # 검토자 칸이 화면에 있었는가. 없던 화면(옛 모달)의 제출을 「전부 해제」 로
+    # 읽으면 검토가 조용히 멈춘다.
+    had_block = REVIEWER_BLOCK in state
+    send_at = (
+        _selected(state, SEND_AT_BLOCK, "send_at").get("selected_time") or ""
+    )
+
+    return ChannelEdit(
+        name=name,
+        reviewers=picked,
+        send_at=send_at,
+        clear_reviewers=had_block and not picked,
+    )
+
+
 class ChannelOwnerStore:
     """TYBot 생성 채널의 최초 요청자를 원자적으로 기록한다."""
 
