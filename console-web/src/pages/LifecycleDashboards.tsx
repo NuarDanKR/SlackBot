@@ -2,6 +2,7 @@ import { useResource } from '../api/hooks'
 import { Chip, Failed, Loading, Metric, PageHead, Section, fmt } from '../components/primitives'
 import type { AuditEvent, ConsoleUser } from '../types'
 import { withQuery } from '../navigation'
+import { DateRangeFilter, periodLabel } from '../components/DateRangeFilter'
 
 type Navigate = (path: string) => void
 
@@ -17,25 +18,32 @@ function ActionRow({ title, detail, tone = 'plain', onClick }: {
 }
 
 interface AnswerData {
-  callsToday: number; spentUsd: number; limitUsd: number
+  today: string; periodStart: string; periodEnd: string; isToday: boolean
+  calls: number; spentUsd: number; limitUsd: number
   answers: { groundedRate?: number; errorRate?: number; errors?: number; slowAnswers?: number }
   feedback: { satisfaction?: number | null; openCorrections?: number }
   specialists: { calls: number; success: number; fallback: number }
 }
 
-export function AnswerDashboard({ user, navigate }: { user: ConsoleUser; navigate: Navigate }) {
-  const res = useResource<AnswerData>('/api/dashboards/answers')
+export function AnswerDashboard({ user, query, navigate }: { user: ConsoleUser; query: URLSearchParams; navigate: Navigate }) {
+  const start = query.get('start') ?? ''
+  const end = query.get('end') ?? ''
+  const params = new URLSearchParams({ ...(start && { start }), ...(end && { end }) })
+  const res = useResource<AnswerData>(`/api/dashboards/answers?${params}`)
   if (res.loading) return <Loading what="답변 대시보드를" />
   if (res.error || !res.data) return <Failed what="답변 대시보드를" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
   const d = res.data
   return <>
-    <PageHead crumb="답변" title="답변 개요" note="근거 확보, 오류, 비용과 사용자 피드백을 함께 봅니다." aside={<Chip tone={(d.answers.errors ?? 0) ? 'watch' : 'ok'}>오늘 질문 {fmt.int(d.callsToday)}건</Chip>} />
-    <Section title="오늘의 답변" lead="질문 내용은 표시하지 않고 처리 결과만 집계합니다.">
-      <div className="metrics overview-metrics"><Metric k="질문" v={fmt.int(d.callsToday)} unit="건" /><Metric k="근거 확보율" v={d.answers.groundedRate == null ? '-' : `${Math.round(d.answers.groundedRate * 100)}%`} /><Metric k="오류" v={fmt.int(d.answers.errors ?? 0)} unit="건" /><Metric k="사용액" v={fmt.usd(d.spentUsd)} /></div>
+    <PageHead crumb="답변" title="답변 개요" note="선택한 기간의 근거 확보, 오류, 비용과 사용자 피드백을 함께 봅니다." aside={<Chip tone={(d.answers.errors ?? 0) ? 'watch' : 'ok'}>기간 질문 {fmt.int(d.calls)}건</Chip>} />
+    <Section title="조회 기간" note={periodLabel(d.periodStart, d.periodEnd)}>
+      <DateRangeFilter path="/answer" query={query} navigate={navigate} defaultStart={d.periodStart} defaultEnd={d.periodEnd} today={d.today} />
+    </Section>
+    <Section title="기간 답변" lead="질문 내용은 표시하지 않고 처리 결과만 집계합니다.">
+      <div className="metrics overview-metrics"><Metric k="질문" v={fmt.int(d.calls)} unit="건" /><Metric k="근거 확보율" v={d.answers.groundedRate == null ? '-' : `${Math.round(d.answers.groundedRate * 100)}%`} /><Metric k="오류" v={fmt.int(d.answers.errors ?? 0)} unit="건" /><Metric k="사용액" v={fmt.usd(d.spentUsd)} /></div>
     </Section>
     <Section title="분석 바로가기"><div className="action-list">
-      <ActionRow title="사용량 및 비용" detail={`하루 상한 ${fmt.usd(d.limitUsd)}`} onClick={() => navigate('/answer/usage')} />
-      {user.role !== 'guest' && <ActionRow title="질문 처리 기록" detail={`오류 ${(d.answers.errors ?? 0)}건, 느린 답변 ${(d.answers.slowAnswers ?? 0)}건`} tone={(d.answers.errors ?? 0) ? 'watch' : 'plain'} onClick={() => navigate(withQuery('/answer/questions', { result: (d.answers.errors ?? 0) ? 'error' : null }))} />}
+      <ActionRow title="사용량 및 비용" detail={`기간 상한 ${fmt.usd(d.limitUsd)}`} onClick={() => navigate(withQuery('/answer/usage', { start: d.periodStart, end: d.periodEnd }))} />
+      {user.role !== 'guest' && <ActionRow title="질문 처리 기록" detail={`오류 ${(d.answers.errors ?? 0)}건, 느린 답변 ${(d.answers.slowAnswers ?? 0)}건`} tone={(d.answers.errors ?? 0) ? 'watch' : 'plain'} onClick={() => navigate(withQuery('/answer/questions', { start: d.periodStart, end: d.periodEnd, result: (d.answers.errors ?? 0) ? 'error' : null }))} />}
       {user.role !== 'guest' && <ActionRow title="전문 봇 분석" detail={`호출 ${d.specialists.calls}건 · 폴백 ${d.specialists.fallback}건`} tone={d.specialists.fallback ? 'watch' : 'plain'} onClick={() => navigate(withQuery('/answer/specialists', { result: d.specialists.fallback ? 'fallback' : null }))} />}
       {user.role !== 'guest' && <ActionRow title="피드백" detail={`미처리 정정 ${d.feedback.openCorrections ?? 0}건`} tone={(d.feedback.openCorrections ?? 0) ? 'watch' : 'plain'} onClick={() => navigate(withQuery('/answer/feedback', { state: (d.feedback.openCorrections ?? 0) ? 'open' : null }))} />}
     </div></Section>

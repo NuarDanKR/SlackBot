@@ -222,11 +222,26 @@ const hours = Array.from({ length: 15 }, (_, i) => {
 
 export const usage: UsageSnapshot = {
   asOf: '2026-08-21T14:30:00+09:00',
+  periodStart: '2026-08-21',
+  periodEnd: '2026-08-21',
+  periodDays: 1,
+  isToday: true,
+  dailyLimitUsd: 10,
   limitUsd: 10,
   spentUsd: 2.67,
   projectedUsd: 4.12,
   baselineUsd: 1.55,
   callsToday: hours.reduce((a, h) => a + h.calls, 0),
+  calls: hours.reduce((a, h) => a + h.calls, 0),
+  answerSummary: {
+    questions: 8,
+    grounded: 4,
+    noHits: 2,
+    groundedRate: 50,
+    errors: 0,
+    errorRate: 0,
+    slowAnswers: 2,
+  },
   byHour: hours,
   byModel: [
     {

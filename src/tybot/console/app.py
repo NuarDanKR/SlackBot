@@ -409,10 +409,12 @@ def answers_dashboard(
             <= period_end.isoformat()
         ]
     return {
+        "today": usage_data["asOf"][:10],
         "periodStart": usage_data["periodStart"],
         "periodEnd": usage_data["periodEnd"],
         "isToday": usage_data["isToday"],
         "calls": usage_data["calls"],
+        "callsToday": usage_data["callsToday"],
         "spentUsd": usage_data["spentUsd"],
         "limitUsd": usage_data["limitUsd"],
         "answers": {key: value for key, value in answers.items() if key != "problems"},

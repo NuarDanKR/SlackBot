@@ -151,9 +151,9 @@ export default function App() {
       {path === '/collect/archive' && <ArchiveDiagnostics />}
       {path === '/collect/documents' && <Collected user={user} query={location.query} onToast={toast} />}
       {(path === '/collect/summaries' || path === '/collect/reviews') && <><div className="page-head"><div><div className="crumb">수집</div><h1 className="page-title">화면을 준비하고 있습니다</h1><p className="page-note">기능이 활성화되었지만 이 버전의 콘솔에는 화면이 연결되지 않았습니다. 관리자에게 콘솔 배포 상태를 알려 주세요.</p></div></div></>}
-      {path === '/answer' && <AnswerDashboard user={user} navigate={navigate} />}
+      {path === '/answer' && <AnswerDashboard user={user} query={location.query} navigate={navigate} />}
       {path === '/answer/questions' && <Questions query={location.query} navigate={navigate} />}
-      {path === '/answer/usage' && <Usage canViewLogs={user.role !== 'guest'} showRecent={false} onOpenErrorLogs={(context) => navigate(withQuery('/manage/logs', { workspace: context.workspace, at: context.at, level: 'error' }))} />}
+      {path === '/answer/usage' && <Usage canViewLogs={user.role !== 'guest'} showRecent={false} query={location.query} navigate={navigate} onOpenErrorLogs={(context) => navigate(withQuery('/manage/logs', { workspace: context.workspace, at: context.at, level: 'error' }))} />}
       {path === '/answer/specialists' && <SpecialistAnalytics query={location.query} navigate={navigate} />}
       {path === '/answer/quality' && <AnswerQuality user={user} />}
       {path === '/answer/feedback' && <FeedbackPage user={user} onToast={toast} />}

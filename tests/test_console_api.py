@@ -397,10 +397,59 @@ def test_guest_can_read_only_scoped_data_views(client):
 
 def test_usage_totals(client):
     u = client.get("/api/usage", headers=owner(client)).json()
+    assert u["calls"] == 2
     assert u["callsToday"] == 2
     assert u["spentUsd"] == pytest.approx(0.056)
     assert u["limitUsd"] == 10.0
     assert {w["key"] for w in u["byWorkspace"]} == {"fin", "site-gimhae"}
+
+
+def test_answer_views_accept_a_date_range(client, env):
+    today = datetime.now(KST).date()
+    previous = today - timedelta(days=1)
+    path = env / "qa-log" / f"qa-{previous.isoformat()[:7]}.jsonl"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "ts": f"{previous.isoformat()}T08:30:00+09:00",
+            "workspace": "fin",
+            "intent_kind": "search",
+            "intent_source": "llm",
+            "reason": "answered",
+            "hits": 2,
+            "model": "claude-sonnet-5",
+            "cost_usd": 0.012,
+            "elapsed_ms": 1200,
+        }, ensure_ascii=False) + "\n")
+
+    params = {"start": previous.isoformat(), "end": today.isoformat()}
+    usage = client.get("/api/usage", params=params, headers=owner(client)).json()
+    assert usage["periodStart"] == previous.isoformat()
+    assert usage["periodEnd"] == today.isoformat()
+    assert usage["periodDays"] == 2
+    assert usage["isToday"] is False
+    assert usage["calls"] == 3
+    assert usage["spentUsd"] == pytest.approx(0.068)
+
+    questions = client.get("/api/questions", params=params, headers=member(client)).json()
+    assert len(questions["questions"]) == 2
+    assert questions["questions"][0]["logAt"].startswith(today.isoformat())
+
+    overview = client.get(
+        "/api/dashboards/answers", params=params, headers=member(client)
+    ).json()
+    assert overview["calls"] == 2
+    assert overview["periodStart"] == previous.isoformat()
+
+
+def test_answer_date_range_is_validated(client):
+    today = datetime.now(KST).date()
+    response = client.get(
+        "/api/usage",
+        params={"start": today.isoformat(), "end": (today - timedelta(days=1)).isoformat()},
+        headers=owner(client),
+    )
+    assert response.status_code == 422
+    assert "시작일" in response.json()["detail"]
 
 
 def test_usage_never_returns_question_text(client):

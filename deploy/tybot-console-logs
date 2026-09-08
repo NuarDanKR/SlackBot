@@ -42,9 +42,9 @@ function save_block(  slot) {
 END {
   save_block()
   count = saved < limit ? saved : limit
-  first = saved > limit ? (saved % limit) + 1 : 1
   for (i = 0; i < count; i++) {
-    slot = ((first - 1 + i) % limit) + 1
+    # Ring buffer contains the latest records; walk backward from the newest.
+    slot = ((saved - i - 1) % limit) + 1
     printf "%s\n%c\n", blocks[slot], 30
   }
 }'

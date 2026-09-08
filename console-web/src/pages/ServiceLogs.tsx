@@ -57,7 +57,7 @@ export function ServiceLogs({ context }: { context?: ErrorLogContext | null }) {
       )}
       <Section
         title="최근 기록"
-        note={`${resource.data?.entries.length ?? 0}건`}
+        note={`${resource.data?.entries.length ?? 0}건 · 최신순`}
         aside={
           <div className="form-row" style={{ marginTop: 0 }}>
             {(['info', 'warning', 'error'] as Level[]).map((value) => (

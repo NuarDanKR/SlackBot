@@ -210,6 +210,12 @@ def test_console_build_failure_fails_the_deployment():
     assert "CONSOLE_BUILD_FAILED=1" not in script
 
 
+def test_console_log_helper_outputs_newest_records_first():
+    script = (ROOT / "deploy" / "tybot-console-logs").read_text(encoding="utf-8")
+
+    assert "slot = ((saved - i - 1) % limit) + 1" in script
+
+
 def test_install_says_why_it_cannot_set_permissions():
     """권한을 못 바꾸는 환경이면 find 가 수천 줄 오류를 쏟고서야 멈춘다."""
     script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
