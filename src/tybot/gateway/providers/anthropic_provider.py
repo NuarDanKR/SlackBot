@@ -59,7 +59,17 @@ class AnthropicProvider:
         ]
         resp = client.messages.create(
             model=spec.model,
-            system=system or None,
+            # **콘텐츠 블록 배열로 보낸다.** 문자열도 받는 모델이 있지만 받지 않는
+            # 모델이 있다 — `claude-opus-5` 가 `system: Input should be a valid
+            # array` 로 400 을 돌려줬다(2026-09-08 실측).
+            #
+            # 겉으로는 **모델을 바꾸면 답이 안 나오는** 것으로 나타났다. 마스터는
+            # sonnet/haiku 라 문자열이 통했고, 전문 봇만 opus 로 지정돼 있어서
+            # 라우팅은 맞는데 전문가만 조용히 폴백했다.
+            #
+            # 배열이 표준 형태고, 나중에 프롬프트 캐시(`cache_control`)를 붙일 자리도
+            # 여기다 — 문자열로는 못 붙인다.
+            system=[{"type": "text", "text": system}] if system else None,
             messages=turns,
             max_tokens=max_tokens,
             temperature=temperature,

@@ -194,7 +194,12 @@ def _probe(model: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001 - 이유를 그대로 보여 주는 것이 목적이다
         print(f"      호출 시험: 🔴 {error_reason(exc)}")
-        print("      → 이 줄이 폴백의 실제 이유다. 모델 이름·계정 권한을 확인한다.")
+        print("      → 이 줄이 폴백의 실제 이유다.")
+        print("        `not_found_error` · 모델 이름 → 콘솔에서 모델을 바꾼다")
+        print("        `authentication_error` → API 키를 확인한다")
+        print("        그 밖의 `invalid_request_error` → 요청 형태 문제다.")
+        print("        벤더가 형식을 조이면 **모델을 바꾼 전문가만** 조용히 폴백한다")
+        print("        (2026-09-08: `system` 을 문자열로 보내 opus 만 400 이었다).")
         return
     print(f"      호출 시험: OK ({resp.model} · ${resp.cost_usd:.6f})")
 
