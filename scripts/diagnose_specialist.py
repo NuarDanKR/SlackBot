@@ -170,6 +170,57 @@ def _check_rows(rows, providers: set[str], *, probe: bool = False) -> int:
     return problems
 
 
+def _request_shape() -> str:
+    """**이 서버에 깔린 코드**가 요청을 어떤 모양으로 만드는지 본다.
+
+    2026-09-08: `system` 을 배열로 보내도록 고친 뒤에도 같은 400 이 났다.
+    원인은 코드가 아니라 **배포**였다 — 진단 로그 개선분은 올라갔고 그 뒤 커밋인
+    수정분은 안 올라갔다. 그런데 진단은 그 차이를 말할 방법이 없어서, 같은 400 을
+    한 번 더 보고서야 알았다.
+
+    벤더를 부르지 않고 확인한다. 가짜 클라이언트에 넣어 보고 모양만 읽는다.
+    """
+    from tybot.gateway.base import Message, ModelSpec, Sensitivity
+    from tybot.gateway.providers.anthropic_provider import AnthropicProvider
+
+    captured: dict = {}
+
+    class _Messages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            raise _Captured
+
+    class _Client:
+        messages = _Messages()
+
+    provider = AnthropicProvider(api_key="probe")
+    provider._client = _Client()
+    spec = ModelSpec("probe", "anthropic", 0.0, 0.0, Sensitivity.CONFIDENTIAL)
+    try:
+        provider.complete(
+            spec,
+            [Message("system", "규칙"), Message("user", "질문")],
+            max_tokens=8,
+        )
+    except _Captured:
+        pass
+    except Exception as exc:  # noqa: BLE001 - 모양을 못 읽으면 그 사실이 답이다
+        return f"확인 불가 ({type(exc).__name__}: {exc})"
+
+    system = captured.get("system")
+    if isinstance(system, list):
+        return "OK (system 을 배열로 보낸다)"
+    return (
+        f"🔴 system 을 {type(system).__name__} 으로 보낸다 — "
+        "`system: Input should be a valid array` 로 400 이 난다. "
+        "배포된 코드가 옛 것이다"
+    )
+
+
+class _Captured(Exception):
+    """가짜 클라이언트가 요청을 잡았다는 신호. 실제 호출은 하지 않는다."""
+
+
 def _probe(model: str) -> None:
     """그 모델로 최소 호출 한 번. **사내 근거는 싣지 않는다.**
 
@@ -179,6 +230,15 @@ def _probe(model: str) -> None:
     """
     from tybot.gateway.base import Message, Sensitivity, error_reason
     from tybot.gateway.router import Router
+
+    # 벤더를 부르기 전에 **우리 코드 모양**을 본다. 배포가 뒤처져 있으면 같은
+    # 400 을 또 보게 되는데, 그건 조사 시간을 두 배로 쓰는 일이다.
+    shape = _request_shape()
+    print(f"      요청 모양: {shape}")
+    if shape.startswith("🔴"):
+        print("      → 벤더를 부를 필요가 없다. 최신 커밋을 배포하고 다시 본다:")
+        print("        cat /opt/tybot/.deployed-commit")
+        return
 
     try:
         router = Router.from_default_registry()
