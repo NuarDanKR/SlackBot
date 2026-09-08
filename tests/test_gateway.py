@@ -169,13 +169,18 @@ def test_several_system_messages_become_one_block():
     assert kwargs["system"] == [{"type": "text", "text": "가\n\n나"}]
 
 
-def test_no_system_message_sends_none():
-    """빈 배열을 보내면 그것도 거부당한다. 없을 때는 아예 안 보낸다."""
+def test_no_system_message_omits_the_key():
+    """`None` 을 명시하면 SDK 가 `"system": null` 로 **실어 보낸다.**
+
+    SDK 기본값은 `Omit` — 즉 안 보내는 것이다. 우리가 `None` 을 넣어 그 기본값을
+    덮었고, API 는 null 을 같은 문구로 거부했다: `system: Input should be a valid
+    array`. 문자열 문제를 고친 뒤에도 **같은 오류 문구**가 나와서 한 번 더 헛돌았다.
+    """
     from tybot.gateway.base import Message
 
     kwargs = _provider_call([Message("user", "합계는?")])
 
-    assert kwargs["system"] is None
+    assert "system" not in kwargs, "없는 system 을 null 로 실어 보낸다"
 
 
 def test_the_user_turns_are_untouched():

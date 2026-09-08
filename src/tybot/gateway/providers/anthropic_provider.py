@@ -57,23 +57,33 @@ class AnthropicProvider:
             for m in messages
             if m.role in ("user", "assistant")
         ]
-        resp = client.messages.create(
-            model=spec.model,
-            # **콘텐츠 블록 배열로 보낸다.** 문자열도 받는 모델이 있지만 받지 않는
-            # 모델이 있다 — `claude-opus-5` 가 `system: Input should be a valid
-            # array` 로 400 을 돌려줬다(2026-09-08 실측).
-            #
-            # 겉으로는 **모델을 바꾸면 답이 안 나오는** 것으로 나타났다. 마스터는
-            # sonnet/haiku 라 문자열이 통했고, 전문 봇만 opus 로 지정돼 있어서
-            # 라우팅은 맞는데 전문가만 조용히 폴백했다.
-            #
-            # 배열이 표준 형태고, 나중에 프롬프트 캐시(`cache_control`)를 붙일 자리도
-            # 여기다 — 문자열로는 못 붙인다.
-            system=[{"type": "text", "text": system}] if system else None,
-            messages=turns,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        # `system` 은 **콘텐츠 블록 배열**이고, 없으면 **키를 아예 빼야 한다.**
+        #
+        # 2026-09-08 실측, 두 번 걸렸다. 둘 다 같은 400 문구로 나타나서 첫 수정 뒤에도
+        # 같은 오류를 보게 됐다 — `system: Input should be a valid array`.
+        #
+        # | 보낸 것 | 결과 |
+        # |---|---|
+        # | 문자열 | sonnet·haiku 는 받고 **opus-5 는 거부** |
+        # | `None` | SDK 가 `"system": null` 로 실어 보내고 거부당한다 |
+        # | 배열 | OK |
+        # | 키 없음 | OK (SDK 기본값이 `Omit` 이다) |
+        #
+        # 겉으로는 **모델을 바꾸면 답이 안 나오는** 것으로 보였다. 마스터는
+        # sonnet/haiku 라 문자열이 통했고, 전문 봇만 opus 로 지정돼 있어 라우팅은
+        # 맞는데 전문가만 조용히 폴백했다.
+        #
+        # 배열이 표준 형태고, 나중에 프롬프트 캐시(`cache_control`)를 붙일 자리도
+        # 여기다 — 문자열로는 못 붙인다.
+        request: dict = {
+            "model": spec.model,
+            "messages": turns,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system:
+            request["system"] = [{"type": "text", "text": system}]
+        resp = client.messages.create(**request)
         text = "".join(getattr(b, "text", "") for b in resp.content)
         in_tok = resp.usage.input_tokens
         out_tok = resp.usage.output_tokens

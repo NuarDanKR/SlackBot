@@ -180,6 +180,8 @@ def _request_shape() -> str:
 
     벤더를 부르지 않고 확인한다. 가짜 클라이언트에 넣어 보고 모양만 읽는다.
     """
+    import contextlib
+
     from tybot.gateway.base import Message, ModelSpec, Sensitivity
     from tybot.gateway.providers.anthropic_provider import AnthropicProvider
 
@@ -196,24 +198,35 @@ def _request_shape() -> str:
     provider = AnthropicProvider(api_key="probe")
     provider._client = _Client()
     spec = ModelSpec("probe", "anthropic", 0.0, 0.0, Sensitivity.CONFIDENTIAL)
+
+    def _shape(messages) -> object:
+        captured.clear()
+        with contextlib.suppress(_Captured):
+            provider.complete(spec, messages, max_tokens=8)
+        return captured
+
     try:
-        provider.complete(
-            spec,
-            [Message("system", "규칙"), Message("user", "질문")],
-            max_tokens=8,
-        )
-    except _Captured:
-        pass
+        with_system = _shape(
+            [Message("system", "규칙"), Message("user", "질문")]
+        ).copy()
+        without = _shape([Message("user", "질문")]).copy()
     except Exception as exc:  # noqa: BLE001 - 모양을 못 읽으면 그 사실이 답이다
         return f"확인 불가 ({type(exc).__name__}: {exc})"
 
-    system = captured.get("system")
-    if isinstance(system, list):
-        return "OK (system 을 배열로 보낸다)"
-    return (
-        f"🔴 system 을 {type(system).__name__} 으로 보낸다 — "
-        "`system: Input should be a valid array` 로 400 이 난다"
-    )
+    system = with_system.get("system")
+    if not isinstance(system, list):
+        return (
+            f"🔴 system 을 {type(system).__name__} 으로 보낸다 — "
+            "`system: Input should be a valid array` 로 400 이 난다"
+        )
+    # **없을 때 `None` 을 보내는 것도 같은 문구로 거부당한다.** SDK 기본값은
+    # `Omit` 인데 `None` 을 넣으면 그 기본값을 덮어 `"system": null` 이 나간다.
+    if "system" in without:
+        return (
+            f"🔴 system 이 없을 때 {type(without['system']).__name__} 을 실어 보낸다 — "
+            "같은 400 이 난다. 키를 빼야 한다"
+        )
+    return "OK (배열로 보내고, 없을 때는 키를 뺀다)"
 
 
 def _loaded_from() -> list[str]:
@@ -297,7 +310,10 @@ def _probe(model: str) -> None:
         return
     try:
         resp = router.complete(
-            [Message("user", "1+1은?")],
+            # **시스템 프롬프트를 함께 보낸다.** 전문가 경로는 항상 그렇게 부르고,
+            # 형식 문제는 거기서 난다. 없이 시험하면 다른 것을 시험한 셈이 되고,
+            # 실제로 그렇게 한 번 헛돌았다(2026-09-08).
+            [Message("system", "짧게 답한다."), Message("user", "1+1은?")],
             model=model,
             sensitivity=Sensitivity.CONFIDENTIAL,
             max_tokens=16,
