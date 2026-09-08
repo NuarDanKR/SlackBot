@@ -725,6 +725,9 @@ class WorkspaceBot:
                         prefix=action_prefix(body),
                         defaults=self._org_defaults(user_id, client=client),
                         task=typed_task(view),
+                        # 다시 그릴 때도 기본값을 넘긴다. Slack 은 block_id 가 같으면
+                        # 고른 값을 보존하므로 사람이 바꾼 검토자는 그대로 남는다.
+                        default_reviewer=user_id,
                     ),
                 )
             except Exception as e:
@@ -1220,7 +1223,13 @@ class WorkspaceBot:
         try:
             client.views_open(
                 trigger_id=trigger_id,
-                view=create_modal(metadata, defaults=self._org_defaults(user_id, client=client)),
+                view=create_modal(
+                    metadata,
+                    defaults=self._org_defaults(user_id, client=client),
+                    # 기본 검토자는 **만든 사람 자신**이다. 빈 칸으로 열면 사람이
+                    # 누구를 넣어야 할지 몰라 아무나 넣거나 그냥 닫는다.
+                    default_reviewer=user_id,
+                ),
             )
         except Exception as e:
             log.warning("[%s] 채널 생성 모달 열기 실패: %s", self.workspace, e)
@@ -1849,6 +1858,26 @@ class WorkspaceBot:
             # 소유권을 기록하지 못하면 이름 변경 권한은 막히지만, 만들어진 채널은 유지한다.
             log.error("[%s] 채널 소유권 기록 실패 channel=%s: %s", self.workspace, channel_id, e)
 
+        # 검토자를 **여기서 저장한다.** 나중에 정하게 두면 안 정한 채널이 쌓이고,
+        # 그 채널은 요약이 반영되지 않고 읽지 못한 첨부도 아무에게도 가지 않는다.
+        # 저장 실패는 삼키지 않는다 - 채널은 만들어졌는데 검토가 안 물린 상태다.
+        reviewer_error = ""
+        if request.reviewers:
+            try:
+                reviewers.set_reviewers(
+                    workspace=self.workspace,
+                    channel_id=channel_id,
+                    channel_name="#" + actual_name,
+                    reviewer_users=list(request.reviewers),
+                    send_at=reviewers.parse_send_at(request.send_at),
+                    set_by=user_id,
+                )
+            except reviewers.ReviewerError as e:
+                reviewer_error = str(e)
+                log.warning(
+                    "[%s] 검토자 저장 실패 channel=%s: %s", self.workspace, channel_id, e
+                )
+
         members = sorted({user_id, *request.members} - {""})
         invite_error = False
         if members:
@@ -1860,6 +1889,15 @@ class WorkspaceBot:
 
         visibility = "비공개" if request.visibility == "private" else "공개"
         suffix = "\n일부 참여자 초대에 실패했습니다. 채널에서 직접 초대해 주세요." if invite_error else ""
+        if reviewer_error:
+            suffix += (
+                "\n⚠️ **요약 검토자를 저장하지 못했습니다** — " + reviewer_error
+                + " 지금은 요약이 반영되지 않고 읽지 못한 첨부도 가지 않습니다. "
+                "`/채널 수정` 으로 다시 지정해 주세요."
+            )
+        elif request.reviewers:
+            who = " ".join(f"<@{u}>" for u in request.reviewers)
+            suffix += f"\n요약 검토자 {who} · 매일 {request.send_at} DM."
         if notify:
             self._notify_user(
                 client,
@@ -1913,12 +1951,19 @@ class WorkspaceBot:
             else:
                 failed.append(f"`{request.name}`")
 
+        base = requests[0]
         lines = [f"업무 채널 {len(made)}개를 만들었습니다."]
         if made:
             lines.append(" ".join(made))
             lines.append(
                 "이름이 수집 규칙에 맞아 **이 채널들의 대화는 아카이브에 쌓입니다.**"
             )
+            if base.reviewers:
+                who = " ".join(f"<@{u}>" for u in base.reviewers)
+                lines.append(f"요약 검토자 {who} · 매일 {base.send_at} DM.")
+            # 검토자 저장은 채널마다 따로 실패할 수 있다. 한 통으로 알릴 때는
+            # 확인 경로만 준다 - 어느 채널이 빠졌는지는 상태가 답한다.
+            lines.append("검토자가 제대로 물렸는지: 각 채널에서 `/채널 상태`")
             lines.append(SECTION_TIP)
         if failed:
             lines.append(

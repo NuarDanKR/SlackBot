@@ -34,6 +34,12 @@ _ORG_BLOCK_IDS = {
 }
 
 
+# 검토자·발송 시각 입력 칸. **생성 모달과 수정 모달이 같은 이름을 쓴다** -
+# 갈리면 한쪽 제출이 조용히 「검토자 없음」 으로 읽힌다.
+REVIEWER_BLOCK = "reviewers"
+SEND_AT_BLOCK = "send_at"
+
+
 class ChannelNameError(ValueError):
     """모달의 특정 입력 블록에 표시할 채널명 오류."""
 
@@ -50,6 +56,11 @@ class ChannelRequest:
     task: str
     visibility: str = "private"
     members: tuple[str, ...] = ()
+    # 요약 검토자와 보낼 시각. **생성 시점에 정한다** — 나중에 정하게 두면
+    # 안 정한 채널이 쌓이고, 그 채널들은 요약이 반영되지 않고 읽지 못한 첨부도
+    # 아무에게도 가지 않는다(조용히).
+    reviewers: tuple[str, ...] = ()
+    send_at: str = "08:00"
 
     @property
     def name(self) -> str:
@@ -153,6 +164,10 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
     task = _selected(state, "task", "task").get("value", "")
     visibility = "private"
     members: tuple[str, ...] = ()
+    # 생성 화면에만 있는 값들. 기본값을 **여기서** 정해 둔다 - `if` 안에서만
+    # 만들면 다른 화면의 제출에서 이름 조립이 UnboundLocalError 로 터진다.
+    reviewers: tuple[str, ...] = ()
+    send_at = "08:00"
     if include_channel_options:
         visibility = (
             _selected(state, "visibility", "visibility").get("selected_option") or {}
@@ -160,7 +175,21 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
         members = tuple(
             _selected(state, "members", "members").get("selected_users") or ()
         )
-    request = ChannelRequest(prefix, org_name, org_code, task, visibility, members)
+        reviewers = tuple(
+            _selected(state, REVIEWER_BLOCK, "reviewers").get("selected_users") or ()
+        )
+        if not reviewers:
+            raise ChannelNameError(
+                "요약 검토자를 한 명 이상 골라 주세요. 검토자가 없으면 요약이 "
+                "반영되지 않고, 봇이 읽지 못한 첨부도 아무에게도 가지 않습니다.",
+                REVIEWER_BLOCK,
+            )
+        send_at = (
+            _selected(state, SEND_AT_BLOCK, "send_at").get("selected_time") or "08:00"
+        )
+    request = ChannelRequest(
+        prefix, org_name, org_code, task, visibility, members, reviewers, send_at
+    )
     _ = request.name
     return request
 
@@ -177,7 +206,8 @@ def requests_from_view(view: dict) -> list[ChannelRequest]:
 
     out = [
         ChannelRequest(base.prefix, base.org_name, base.org_code, task,
-                       base.visibility, base.members)
+                       base.visibility, base.members,
+                       base.reviewers, base.send_at)
         for task in tasks
     ]
     # 이름까지 조립해 봐야 규칙 위반이 여기서 드러난다. 만들다가 중간에 실패하면
@@ -315,6 +345,7 @@ def create_modal(
     prefix: str = "본사팀",
     defaults: dict | None = None,
     task: str = "",
+    default_reviewer: str = "",
 ) -> dict:
     """전역 바로가기와 `/채널 생성`이 공유하는 생성 모달.
 
@@ -360,6 +391,40 @@ def create_modal(
                     "placeholder": {"type": "plain_text", "text": "나중에 초대해도 됩니다"},
                 },
             },
+            # 검토자는 **필수**다. 선택으로 두면 안 정한 채널이 쌓이고, 그 채널은
+            # 요약이 반영되지 않고 읽지 못한 첨부도 아무에게도 가지 않는다 —
+            # 둘 다 오류 없이 조용하다. 기본값은 만든 사람 자신이다.
+            {
+                "type": "input",
+                "block_id": REVIEWER_BLOCK,
+                "label": {"type": "plain_text", "text": "요약 검토자"},
+                "element": {
+                    "type": "multi_users_select",
+                    "action_id": "reviewers",
+                    "placeholder": {"type": "plain_text", "text": "검토자를 고르세요"},
+                    **(
+                        {"initial_users": [default_reviewer]}
+                        if default_reviewer
+                        else {}
+                    ),
+                },
+                "hint": {
+                    "type": "plain_text",
+                    "text": "봇이 만든 요약 후보와 읽지 못한 첨부를 매일 이 사람에게 "
+                            "DM 으로 보냅니다. 확인한 것만 반영됩니다.",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": SEND_AT_BLOCK,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "검토 DM 보낼 시각 (KST)"},
+                "element": {
+                    "type": "timepicker",
+                    "action_id": "send_at",
+                    "initial_time": "08:00",
+                },
+            },
         ]
     )
     return {
@@ -393,10 +458,6 @@ def rename_modal(private_metadata: str, spec: ChannelSpec) -> dict:
 # 표준 형식일 때만** 열렸다. 그래서 정작 규칙 밖 이름을 고치려는 사람이 막혔다.
 # 여기서는 이름 칸을 **선택 입력**으로 두고, 채운 것만 바꾼다.
 EDIT_CALLBACK = "tybot_edit_channel"
-
-REVIEWER_BLOCK = "reviewers"
-SEND_AT_BLOCK = "send_at"
-
 
 @dataclass(frozen=True)
 class ChannelEdit:

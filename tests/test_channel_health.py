@@ -381,3 +381,90 @@ def test_our_own_record_wins_over_slack():
 
     assert WorkspaceBot._human_owner(bot, "C1") == "UA"
     assert bot._client.calls == 0, "기록이 있는데 Slack 을 물었다"
+
+
+# --- 생성 시점에 검토자를 정한다 (2026-09-08) --------------------------------
+#
+# `/채널 생성` 에 검토자 칸이 없어서, 만들어진 채널은 모두 검토자 없는 상태로
+# 시작했다. 그 채널은 요약이 반영되지 않고 읽지 못한 첨부도 아무에게도 가지
+# 않는다 — 둘 다 오류 없이 조용하다.
+def _create_view(*, reviewers=("U1",), send_at="09:00", with_block=True):
+    from tybot.orgsearch import OrgHit, option
+
+    state = {
+        "prefix": {"prefix": {"selected_option": {"value": "본사팀"}}},
+        "org_team": {"org": {"selected_option": option(OrgHit("ABB110", "전산"))}},
+        "task": {"task": {"value": "주간회의"}},
+        "visibility": {"visibility": {"selected_option": {"value": "private"}}},
+        "members": {"members": {"selected_users": []}},
+    }
+    if with_block:
+        state["reviewers"] = {"reviewers": {"selected_users": list(reviewers)}}
+        state["send_at"] = {"send_at": {"selected_time": send_at}}
+    return {"state": {"values": state}}
+
+
+def test_the_create_modal_asks_for_a_reviewer():
+    from tybot.channel_management import create_modal
+
+    modal = create_modal("{}", default_reviewer="UME")
+
+    block = next(
+        b for b in modal["blocks"]
+        if b.get("block_id") == "reviewers"
+    )
+    assert not block.get("optional"), "선택으로 두면 안 정한 채널이 쌓인다"
+    assert block["element"]["initial_users"] == ["UME"], "기본값은 만든 사람 자신"
+
+
+def test_creating_without_a_reviewer_is_refused():
+    """빈 칸으로 만들어지면 그 채널은 조용히 검토 밖에 놓인다."""
+    from tybot.channel_management import request_from_view
+
+    with pytest.raises(ChannelNameError) as got:
+        request_from_view(_create_view(reviewers=()), include_channel_options=True)
+
+    assert got.value.block_id == "reviewers"
+
+
+def test_the_reviewer_rides_along_to_every_channel():
+    """업무명을 여러 줄 적으면 그만큼 만든다 — 검토자도 다 붙어야 한다."""
+    from tybot.channel_management import requests_from_view
+
+    view = _create_view(reviewers=("U1", "U2"))
+    view["state"]["values"]["task"]["task"]["value"] = "주간회의\n안전점검"
+
+    made = requests_from_view(view)
+
+    assert len(made) == 2
+    for request in made:
+        assert request.reviewers == ("U1", "U2")
+        assert request.send_at == "09:00"
+
+
+def test_the_rename_path_does_not_break_on_the_new_fields():
+    """검토자 칸이 없는 화면의 제출도 이름은 읽혀야 한다.
+
+    생성 화면에만 있는 값을 `if` 안에서만 만들면 여기서 UnboundLocalError 로
+    터진다 — 실제로 그렇게 터졌다.
+    """
+    from tybot.channel_management import request_from_view
+
+    request = request_from_view(
+        _create_view(with_block=False), include_channel_options=False
+    )
+
+    assert request.name == "팀-전산_ABB110-주간회의"
+    assert request.reviewers == ()
+
+
+def test_creation_stores_the_reviewer_and_says_when_it_could_not():
+    """채널은 만들어졌는데 검토가 안 물린 상태를 삼키면 안 된다."""
+    import inspect
+
+    from tybot.slack.pilot import WorkspaceBot
+
+    source = inspect.getsource(WorkspaceBot._create_channel)
+
+    assert "set_reviewers" in source, "생성 시점에 저장하지 않는다"
+    assert "reviewer_error" in source, "저장 실패를 사용자에게 말하지 않는다"

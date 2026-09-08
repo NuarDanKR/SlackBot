@@ -61,6 +61,10 @@ def test_request_from_view_reads_create_fields():
                     "visibility": {"selected_option": {"value": "private"}}
                 },
                 "members": {"members": {"selected_users": ["U2", "U3"]}},
+                # 검토자는 필수다 — 선택으로 두면 안 정한 채널이 쌓이고,
+                # 그 채널은 요약도 첨부 확인도 조용히 멈춘다.
+                "reviewers": {"reviewers": {"selected_users": ["U1"]}},
+                "send_at": {"send_at": {"selected_time": "09:00"}},
             }
         }
     }
@@ -68,6 +72,8 @@ def test_request_from_view_reads_create_fields():
     assert request.name == "현장-김해외동_180182-채팅방"
     assert request.visibility == "private"
     assert request.members == ("U2", "U3")
+    assert request.reviewers == ("U1",)
+    assert request.send_at == "09:00"
 
 
 def test_owner_store_isolated_by_workspace_and_channel(tmp_path):
@@ -181,6 +187,8 @@ def _create_view(task_text: str) -> dict:
                 "task": {"task": {"value": task_text}},
                 "visibility": {"visibility": {"selected_option": {"value": "private"}}},
                 "members": {"members": {"selected_users": ["U2"]}},
+                "reviewers": {"reviewers": {"selected_users": ["U1"]}},
+                "send_at": {"send_at": {"selected_time": "09:00"}},
             }
         }
     }

@@ -89,3 +89,65 @@ def test_explain_gives_actionable_message():
     assert "수집 대상 아님" in explain("#점심메뉴")
     assert "#팀-전산_ABB110-주간회의" in explain("#점심메뉴")
     assert "수집 대상" in explain("#팀-전산_ABB110-주간회의")
+
+
+# --- 두문자 뒤 밑줄도 인식한다 (2026-09-08) ----------------------------------
+#
+# 사내에 `#팀_전산_ABB110-주간회의` 처럼 밑줄로 만든 채널이 많았다. 그 채널들은
+# 규칙에 안 맞아 **아무 오류 없이 수집에서 빠져 있었다** — 사람은 봇을 초대했고
+# 이름도 규칙대로 적었다고 믿는데 기록이 한 줄도 안 쌓인다.
+@pytest.mark.parametrize(
+    "name,prefix,org,code,task",
+    [
+        ("#팀_전산_ABB110-주간회의", "팀", "전산", "ABB110", "주간회의"),
+        ("#본사팀_전산_ABB155-slack_ai프로젝트", "본사팀", "전산", "ABB155", "slack_ai프로젝트"),
+        ("#현장_김해외동_180182-채팅방", "현장", "김해외동", "180182", "채팅방"),
+        ("#업무_전산_ABB110-협업", "업무", "전산", "ABB110", "협업"),
+        ("#팀_전산_ABB110", "팀", "전산", "ABB110", ""),
+    ],
+)
+def test_underscore_after_the_prefix_is_also_recognised(name, prefix, org, code, task):
+    s = parse(name)
+
+    assert s is not None, f"밑줄 형식이 수집에서 빠진다: {name}"
+    assert (s.prefix, s.org_name, s.org_code, s.task) == (prefix, org, code, task)
+
+
+def test_the_two_separators_give_the_same_result():
+    """구분자만 다른 두 이름은 **같은 조직·같은 업무**로 읽혀야 한다.
+
+    갈리면 같은 팀 채널이 조직 트리에서 둘로 나뉜다.
+    """
+    dash = parse("#팀-전산_ABB110-주간회의")
+    under = parse("#팀_전산_ABB110-주간회의")
+
+    assert (dash.prefix, dash.org_name, dash.org_code, dash.task) == (
+        under.prefix, under.org_name, under.org_code, under.task
+    )
+    assert dash.kind == under.kind
+
+
+def test_the_long_prefix_still_wins_with_an_underscore():
+    """`본사팀_…` 이 `팀` 으로 잘리면 조직명이 `사팀…` 이 된다."""
+    s = parse("#본사팀_전산_ABB110-주간회의")
+
+    assert s.prefix == "본사팀"
+    assert s.org_name == "전산"
+
+
+def test_we_still_create_only_one_shape():
+    """인식은 넓히고 **생성은 좁게** 둔다.
+
+    두 형식을 다 만들게 하면 같은 팀 채널이 두 모양으로 쌓이고, 사람이 어느
+    것이 맞는지 묻기 시작한다.
+    """
+    from tybot.channel_management import build_channel_name
+
+    name = build_channel_name("본사팀", "전산", "ABB110", "주간회의")
+
+    assert name == "팀-전산_ABB110-주간회의", name
+
+
+def test_the_retired_paren_format_is_still_rejected():
+    """`_` 를 허용해도 구 형식이 되살아나면 안 된다 — 괄호는 조직코드가 아니다."""
+    assert parse("#팀_자금(ABB540)_주간보고") is None
