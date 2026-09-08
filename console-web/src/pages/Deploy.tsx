@@ -130,13 +130,22 @@ export function Deploy({ user, onToast }: { user: ConsoleUser; onToast: (message
 
   return (
     <>
-      <PageHead crumb="운영 관리 · 배포" title="배포 관리"
-        note="개발자가 변경 이유와 담당 워크스페이스를 지정해 요청하면, 요청자가 아닌 관리자가 승인한 뒤 서버의 전체 테스트를 통과한 코드만 배포합니다."
+      <PageHead crumb="운영 관리 · 배포" title="마스터 봇 배포"
+        note="이 화면은 TYBot 마스터 저장소만 배포합니다. 개발자가 변경 이유와 담당 워크스페이스를 지정해 요청하면, 요청자가 아닌 관리자가 승인한 뒤 서버의 전체 테스트를 통과한 코드만 배포합니다."
         aside={current ? runtimeChip(current.state) : <Chip tone="plain">상태 없음</Chip>} />
 
       {error && <div className="notice bad"><div className="notice-kind">처리 실패</div><div>
         <div className="notice-title">배포 요청을 처리하지 못했습니다</div><div className="notice-detail">{error}</div>
       </div></div>}
+
+      <Section title="배포 단위" lead="전문 봇은 각 개발팀의 독립 저장소와 배포 절차를 사용하며, 이 화면의 마스터 봇 배포에 포함되지 않습니다.">
+        <div className="action-list">
+          <a className="action-row action-link" href="#/manage/specialists">
+            <span><strong>전문 봇 등록·승인 현황</strong><small>개발자의 요청과 관리자의 승인 결과, 계약 버전과 헬스를 확인합니다.</small></span>
+            <span aria-hidden="true">→</span>
+          </a>
+        </div>
+      </Section>
 
       <Section title="배포 요청 등록" lead="자신이 등록한 요청은 직접 승인할 수 없습니다. 최소 두 명의 관리자가 있어야 관리자의 변경도 배포할 수 있습니다.">
         <div className="card card-pad">

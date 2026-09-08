@@ -1,0 +1,8 @@
+schema = "tybot-specialist/v1"
+key = "example-specialist"
+name = "예시 전문 봇"
+domain = "전문 분야를 입력하세요"
+release_type = "prompt-contract"
+contract_version = "v1"
+version = "0.1.0"
+artifacts = ["contract/prompts/system.md", "contract/tests/cases.json"]

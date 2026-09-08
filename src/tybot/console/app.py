@@ -665,7 +665,8 @@ def create_specialist_request(
     request: Request,
     user: User,
 ) -> dict:
-    _require_developer(user)
+    if user.role != "developer":
+        raise HTTPException(status_code=403, detail="전문 봇 개발자만 변경을 요청할 수 있습니다.")
     _check_write_request(request)
     requested_workspaces = set(body.workspaces)
     if not user.all_workspaces and (
@@ -709,11 +710,9 @@ def decide_specialist_request(
             actor=user.email,
             decision=decision,
             note=body.note,
-            # **관리자는 자기 요청을 승인할 수 있다.** 서버에 root 로 들어가 SQL 을
-            # 칠 수 있는 사람에게 두 명을 강제하면, 콘솔을 놔두고 그쪽으로 도는 길만
-            # 열리고 그쪽은 기록이 없다. 막는 대신 감사 기록에 남긴다.
-            # 개발자는 그대로 다른 사람의 승인을 받는다.
-            allow_self=user.is_admin,
+            # 전문 봇 개발자와 승인 관리자는 역할이 분리되어 있다. 과거 요청까지
+            # 포함해 요청자가 자신의 변경을 승인하는 경로를 열지 않는다.
+            allow_self=False,
         )
         rows = specialist_store.list_specialists()
         requests = specialist_store.list_requests()

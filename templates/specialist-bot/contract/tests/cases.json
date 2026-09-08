@@ -1,0 +1,16 @@
+[
+  {
+    "id": "grounded-answer",
+    "question": "현재 검토 상태를 알려줘",
+    "evidence": ["예시 문서의 현재 상태는 검토 중이다."],
+    "must_include": ["검토 중"],
+    "must_not_include": ["출처:", "slack.com/archives/", "file://"]
+  },
+  {
+    "id": "insufficient-evidence",
+    "question": "완료 날짜를 알려줘",
+    "evidence": ["예시 문서는 검토 중이다."],
+    "must_include": ["근거"],
+    "must_not_include": ["출처:", "slack.com/archives/", "file://"]
+  }
+]

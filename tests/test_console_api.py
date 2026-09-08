@@ -1269,7 +1269,7 @@ def test_audit_events_are_admin_only(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 전문 봇 관리 — 관리자 셀프 승인 · 모델 목록
+# 전문 봇 등록·승인 — 개발자 요청 · 관리자 승인 · 모델 목록
 # ---------------------------------------------------------------------------
 
 
@@ -1304,11 +1304,7 @@ def test_the_router_default_model_is_registered():
     assert DEFAULT_ROUTER_MODEL in DEFAULT_REGISTRY
 
 
-def test_admin_may_approve_their_own_specialist_request(client, monkeypatch):
-    """root 로 SQL 을 칠 수 있는 사람에게 두 명을 강제하면,
-
-    콘솔을 놔두고 그쪽으로 도는 길만 열리고 그쪽은 기록이 없다.
-    """
+def test_admin_approval_does_not_allow_self_approval(client, monkeypatch):
     seen: dict = {}
     monkeypatch.setattr(
         console_app.specialist_store,
@@ -1325,7 +1321,29 @@ def test_admin_may_approve_their_own_specialist_request(client, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert seen["allow_self"] is True
+    assert seen["allow_self"] is False
+
+
+def test_admin_cannot_submit_a_specialist_change(client, monkeypatch):
+    called = False
+
+    def create_request(**_kwargs):
+        nonlocal called
+        called = True
+        return 1
+
+    monkeypatch.setattr(console_app.specialist_store, "create_request", create_request)
+    response = client.post(
+        "/api/specialists/requests",
+        headers=_write_headers(owner(client)),
+        json={
+            "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+            "adapter": "hermes", "state": "draft", "workspaces": ["fin"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert called is False
 
 
 def test_a_developer_still_needs_someone_else(client):

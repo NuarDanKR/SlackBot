@@ -45,7 +45,7 @@ const NAV: NavGroup[] = [
   ] },
   { label: '운영', path: '/manage', minimum: 'developer', items: [
     { path: '/manage', label: '운영 현황', minimum: 'developer' },
-    { path: '/manage/specialists', label: '전문 봇 관리', minimum: 'developer', capability: 'specialists' },
+    { path: '/manage/specialists', label: '전문 봇 등록·승인', minimum: 'developer', capability: 'specialists' },
     { path: '/manage/slack', label: 'Slack 연결·명령 진단', minimum: 'developer' },
     { path: '/manage/logs', label: '서비스 로그', minimum: 'developer' },
     { path: '/manage/batches', label: '배치 관리', minimum: 'admin' },
