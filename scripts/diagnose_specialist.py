@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""전문 봇이 왜 답하지 않는지 판정한다.
+
+    python scripts/diagnose_specialist.py
+
+## 왜 필요한가
+
+2026-09-08 실측: 콘솔의 「최근 호출」 이 `hermes · 신뢰도 95% · 마스터 폴백 /
+adapter-error` 를 보였다. **라우팅은 맞았다** — 전문가를 골랐고 확신도 높았다.
+실패는 그 다음, 전문가를 실제로 부르는 자리였다. 그런데 `adapter-error` 는
+서로 완전히 다른 원인 셋을 한 덩어리로 뭉갠 이름이었다.
+
+| 원인 | 사람이 할 일 |
+|---|---|
+| 모델 이름이 게이트웨이 레지스트리에 없다 | 콘솔에서 모델을 고쳐 등록 |
+| 그 모델의 프로바이더가 안 붙어 있다(키·SDK) | 서버에 키를 넣는다 |
+| 전문가 프롬프트가 없다 | 콘솔에 규칙을 넣거나 프롬프트 파일 배포 |
+| 모델이 오류를 냈다 | 다시 시도 · 상태 확인 |
+
+**$0.000 · 500ms 이하**로 실패했다면 API 를 부르기도 전에 터진 것이다 — 위의
+앞 세 가지다. 이 스크립트는 그 셋을 갈라 보인다.
+
+## 아무것도 부르지 않는다
+
+모델을 호출하지 않는다(비용 0). 설정이 서로 맞물리는지만 본다.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from tybot import specialist_adapters, specialist_router
+from tybot.envfile import load_env_file
+from tybot.gateway.base import Sensitivity
+from tybot.gateway.router import DEFAULT_REGISTRY
+
+
+def _workspaces(explicit: str) -> list[str]:
+    """볼 워크스페이스. 전문가 등록은 **워크스페이스마다** 다르다.
+
+    하나만 보고 「등록됨」 이라 결론 내면, 정작 질문이 오는 워크스페이스에는
+    등록이 안 돼 있는 경우를 놓친다.
+    """
+    if explicit:
+        return [explicit]
+    try:
+        from tybot.workspaces import load_workspaces
+
+        return [c.key for c in load_workspaces()]
+    except Exception as exc:  # noqa: BLE001 - 설정이 없으면 그 사실이 답이다
+        print(f"  워크스페이스 설정을 읽지 못했습니다: {type(exc).__name__}: {exc}")
+        return []
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="전문 봇이 왜 답하지 않는지 판정한다")
+    ap.add_argument("--workspace", default="", help="한 워크스페이스만 본다")
+    args = ap.parse_args(argv)
+
+    load_env_file()
+
+    print("=== 게이트웨이가 아는 모델")
+    print("  콘솔에서 고를 수 있는 값은 **이 목록뿐**이다. 밖의 값을 넣으면")
+    print("  호출 직전에 `unknown-model` 로 터지고 마스터가 답한다.")
+    try:
+        from tybot.gateway.providers import build_default_providers
+
+        providers = set(build_default_providers())
+    except Exception as exc:  # noqa: BLE001 - 키가 없어도 목록은 보여야 한다
+        print(f"  프로바이더 구성 실패: {type(exc).__name__}: {exc}")
+        providers = set()
+
+    for name, spec in sorted(DEFAULT_REGISTRY.items()):
+        mark = "OK  " if spec.provider in providers else "프로바이더 없음"
+        conf = "" if spec.max_sensitivity == Sensitivity.CONFIDENTIAL else \
+            f"  (민감도 최대 {spec.max_sensitivity.value} — 사내 근거는 못 싣는다)"
+        print(f"  {mark} {name} [{spec.provider}]{conf}")
+
+    print()
+    print("=== 프롬프트가 배포된 전문가 (저장소 파일)")
+    keys = sorted(specialist_adapters.available_keys())
+    print(f"  {', '.join(keys) if keys else '(없음)'}")
+
+    problems = 0
+    found = 0
+    for workspace in _workspaces(args.workspace):
+        print()
+        print(f"=== 등록된 전문가 — 워크스페이스 {workspace}")
+        # `available()` 은 읽기 실패를 **빈 목록**으로 돌려준다(막는 쪽이 기본값).
+        # 그래서 「등록 없음」 과 「DB 를 못 읽음」 이 겉으로 같다. 캐시를 비우고
+        # 한 번 더 부르는 것으로는 안 갈리므로, 그 사실을 문구로 말한다.
+        rows = specialist_router.available(workspace)
+        if not rows:
+            print("  (없음) — 콘솔에서 등록·승인해야 라우팅 후보가 된다.")
+            print("  DB 를 읽지 못한 경우도 같은 모양으로 보인다:")
+            print("    journalctl -u tybot | grep '전문가 목록'")
+            continue
+        found += len(rows)
+        problems += _check_rows(rows, providers)
+
+    print()
+    print("=== 판정")
+    if not found:
+        print("  등록된 전문가가 없다. 라우팅이 전문가를 골라도 부를 대상이 없어")
+        print("  마스터가 답한다(콘솔에는 `no-adapter` 로 기록된다).")
+        return 0
+    if problems:
+        print(f"  막힌 설정 {problems}건. 위의 🔴 를 고치면 전문가가 답한다.")
+        print("  고치기 전까지는 마스터가 답하고, 콘솔에는 폴백으로 기록된다.")
+    else:
+        print("  설정은 맞물려 있다. 그래도 폴백이 나오면 콘솔의 오류 코드를 본다:")
+        print("    unknown-model / model-not-allowed / cost-limit → 설정")
+        print("    timeout / invalid-output → 모델 응답")
+        print("    adapter-error → journalctl -u tybot | grep '전문가 호출 실패'")
+    return 0
+
+
+def _check_rows(rows, providers: set[str]) -> int:
+    """전문가 한 줄씩 설정을 맞춰 본다. 막힌 건수를 돌려준다."""
+    problems = 0
+    for row in rows:
+        print()
+        print(f"  [{row.key}] 모델={row.model or '(게이트웨이 기본)'}")
+        print(f"    최소 신뢰도 {row.min_confidence} · 어댑터 {row.adapter}")
+
+        # 1) 규칙이 있는가
+        try:
+            specialist_adapters.build(row.key, None, model=row.model, rules=row.rules)
+            source = "콘솔" if (row.rules or "").strip() else "파일"
+            print(f"    규칙: OK ({source})")
+        except specialist_adapters.AdapterError as exc:
+            problems += 1
+            print(f"    규칙: 🔴 {exc}")
+            print("      → 콘솔에서 답변 규칙을 넣거나 프롬프트 파일을 배포한다.")
+
+        # 2) 모델을 게이트웨이가 풀 수 있는가
+        if not row.model:
+            print("    모델: OK (기본 모델을 쓴다)")
+            continue
+        spec = DEFAULT_REGISTRY.get(row.model)
+        if spec is None:
+            problems += 1
+            print("    모델: 🔴 레지스트리에 없다 — `unknown-model` 로 터진다")
+            print("      → 위 목록의 이름으로 콘솔에서 바꾼다.")
+            near = [n for n in DEFAULT_REGISTRY if n.split("-")[1:2] == row.model.split("-")[1:2]]
+            if near:
+                print(f"      비슷한 이름: {', '.join(sorted(near))}")
+        elif spec.provider not in providers:
+            problems += 1
+            print(f"    모델: 🔴 프로바이더 `{spec.provider}` 가 안 붙어 있다")
+            print("      → 서버에 그 벤더 API 키를 넣는다(콘솔 환경변수).")
+        elif spec.max_sensitivity.rank() < Sensitivity.CONFIDENTIAL.rank():
+            problems += 1
+            print(f"    모델: 🔴 민감도 상한이 `{spec.max_sensitivity.value}` 다")
+            print("      전문가에게는 사내 근거가 실린다 — `model-not-allowed` 로 터진다.")
+            print("      → confidential 을 허용하는 모델로 바꾼다.")
+        else:
+            print(f"    모델: OK ({spec.provider})")
+    return problems
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

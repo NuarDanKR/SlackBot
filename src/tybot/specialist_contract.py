@@ -1,10 +1,33 @@
 """Narrow execution contract between TYBot and read-only specialist bots."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from typing import Protocol
+
+log = logging.getLogger("tybot.specialist_contract")
+
+# 실패 이유를 **한 덩어리(`adapter-error`)로 뭉개지 않는다.**
+#
+# 2026-09-08 실측: 콘솔의 「최근 호출」 에 `마스터 폴백 / adapter-error` 만 떴고,
+# 그것이 「모델 이름이 레지스트리에 없다」 인지 「프로바이더 키가 없다」 인지
+# 「모델이 화났다」 인지 알 방법이 없었다. 로그에도 한 줄이 없었다 —
+# 예외를 잡아 폴백만 하고 아무것도 남기지 않았기 때문이다.
+#
+# 이 셋은 사람이 할 일이 서로 완전히 다르다: 모델 이름을 고친다 / 키를 넣는다 /
+# 다시 시도한다.
+_ERROR_CODES: dict[str, str] = {
+    "UnknownModel": "unknown-model",
+    "ModelNotAllowed": "model-not-allowed",
+    "CostLimitExceeded": "cost-limit",
+}
+
+
+def error_code_for(exc: BaseException) -> str:
+    """예외 → 짧은 코드. 모르는 것은 `adapter-error` 로 남긴다."""
+    return _ERROR_CODES.get(type(exc).__name__, "adapter-error")
 
 
 class ContractViolation(RuntimeError):
@@ -85,7 +108,14 @@ def execute(
         return SpecialistCallResult(fallback(), "fallback", "timeout")
     except ContractViolation:
         return SpecialistCallResult(fallback(), "contract_violation", "invalid-output")
-    except Exception:  # noqa: BLE001 - an adapter failure must not take down the master bot
-        return SpecialistCallResult(fallback(), "fallback", "adapter-error")
+    except Exception as exc:  # noqa: BLE001 - an adapter failure must not take down the master bot
+        # **반드시 남긴다.** 이 줄이 없어서 콘솔의 `adapter-error` 가 원인을 하나도
+        # 말하지 못했다. 예외 메시지에 근거 본문은 들어가지 않는다(모델 이름·
+        # 프로바이더·상태 코드뿐).
+        log.warning(
+            "전문가 호출 실패 code=%s %s: %s",
+            error_code_for(exc), type(exc).__name__, exc,
+        )
+        return SpecialistCallResult(fallback(), "fallback", error_code_for(exc))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
