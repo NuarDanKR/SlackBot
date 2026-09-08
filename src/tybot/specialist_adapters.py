@@ -150,7 +150,14 @@ class PromptSpecialist:
             model=self._model or None,
             # 사내 근거가 실린다. 전문가라고 민감도를 낮추지 않는다.
             sensitivity=Sensitivity.CONFIDENTIAL,
-            max_tokens=1024,
+            # **thinking 이 이 예산을 함께 쓴다.** 현재 모델들은 사고가 기본으로
+            # 켜져 있고(Opus 5 는 끌 수도 없는 기본값), 그 토큰이 `max_tokens` 에서
+            # 나간다. 1024 로 두면 사고하다 예산이 끝나 본문이 비고, 계약이 그것을
+            # 「빈 응답」 으로 막아 **매번 마스터로 폴백**한다 — 오류는 안 나고
+            # 전문가만 조용히 안 쓰인다.
+            #
+            # 실제로 쓴 만큼만 과금되므로 상한을 올리는 것 자체의 비용은 없다.
+            max_tokens=8192,
         )
         self.last_model = response.model
         self.last_cost_usd = response.cost_usd

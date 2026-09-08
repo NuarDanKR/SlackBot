@@ -359,6 +359,21 @@
   min-height: 40px;
   gap: 8px;
 }
+.period-filter {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 170px 170px auto;
+  align-items: end;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.period-presets {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+}
 .specialist-form {
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
 }

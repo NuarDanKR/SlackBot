@@ -189,3 +189,77 @@ def test_the_user_turns_are_untouched():
     kwargs = _provider_call([Message("system", "규칙"), Message("user", "합계는?")])
 
     assert kwargs["messages"] == [{"role": "user", "content": "합계는?"}]
+
+
+# --- 샘플링 파라미터를 제거한 모델 (2026-09-08) -------------------------------
+#
+# Opus 5·4.8·4.7 과 Sonnet 5 는 `temperature`/`top_p`/`top_k` 를 없앴다.
+# 보내면 `temperature is deprecated for this model` 로 400 이다.
+#
+# **이 부류가 세 번째다** — system 문자열, system null, 그리고 이것. 셋 다 같은
+# 모양으로 나타났다: 마스터는 멀쩡한데 **모델을 지정한 전문 봇만** 조용히 폴백.
+def _spec(name, *, sampling):
+    from tybot.gateway.base import ModelSpec, Sensitivity
+
+    return ModelSpec(name, "anthropic", 1.0, 1.0, Sensitivity.CONFIDENTIAL,
+                     supports_sampling=sampling)
+
+
+def _call_with_spec(spec):
+    from tybot.gateway.base import Message
+    from tybot.gateway.providers.anthropic_provider import AnthropicProvider
+
+    provider = AnthropicProvider(api_key="test")
+    client = _FakeClient()
+    provider._client = client
+    provider.complete(spec, [Message("user", "합계는?")], max_tokens=16)
+    return client.messages.kwargs
+
+
+def test_a_model_without_sampling_gets_no_temperature():
+    kwargs = _call_with_spec(_spec("claude-opus-5", sampling=False))
+
+    assert "temperature" not in kwargs, "보내면 400 이 난다"
+
+
+def test_a_model_with_sampling_still_gets_it():
+    """haiku·sonnet 4.6 은 받는다. 다 빼 버리면 그 모델들의 결정성이 사라진다."""
+    kwargs = _call_with_spec(_spec("claude-haiku-4-5", sampling=True))
+
+    assert kwargs["temperature"] == 0.0
+
+
+def test_the_registry_knows_which_models_dropped_sampling():
+    """**프로바이더에 모델 이름을 박지 않는다.** 박으면 새 모델마다 썩고,
+    그 고장은 그 모델을 지정한 전문 봇만 조용히 폴백하는 모양으로 나타난다."""
+    from tybot.gateway.router import DEFAULT_REGISTRY
+
+    for name in ("claude-opus-5", "claude-opus-4-8", "claude-sonnet-5"):
+        assert not DEFAULT_REGISTRY[name].supports_sampling, name
+    assert DEFAULT_REGISTRY["claude-haiku-4-5"].supports_sampling
+
+
+def test_the_provider_has_no_model_names_in_it():
+    import inspect
+
+    from tybot.gateway.providers import anthropic_provider
+
+    source = inspect.getsource(anthropic_provider.AnthropicProvider.complete)
+
+    assert "claude-" not in source, "모델 이름이 프로바이더에 박혔다 — 레지스트리가 정한다"
+
+
+def test_the_specialist_budget_covers_thinking():
+    """현재 모델들은 사고가 기본으로 켜져 있고 그 토큰이 `max_tokens` 에서 나간다.
+
+    1024 로 두면 사고하다 예산이 끝나 본문이 비고, 계약이 그것을 「빈 응답」 으로
+    막아 **매번 마스터로 폴백**한다 — 오류는 안 나고 전문가만 조용히 안 쓰인다.
+    """
+    import inspect
+
+    from tybot import specialist_adapters
+
+    source = inspect.getsource(specialist_adapters.PromptSpecialist.complete)
+
+    assert "max_tokens=1024" not in source
+    assert "max_tokens=8192" in source

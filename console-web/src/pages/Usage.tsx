@@ -1,6 +1,7 @@
 import { useResource } from '../api/hooks'
 import type { UsageSnapshot } from '../types'
-import { Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
+import { Failed, Loading, Metric, PageHead, Section, fmt } from '../components/primitives'
+import { DateRangeFilter, periodLabel } from '../components/DateRangeFilter'
 
 interface ErrorLogContext {
   at: string
@@ -11,12 +12,19 @@ export function Usage({
   canViewLogs,
   onOpenErrorLogs,
   showRecent = true,
+  query,
+  navigate,
 }: {
   canViewLogs: boolean
   onOpenErrorLogs: (context: ErrorLogContext) => void
   showRecent?: boolean
+  query: URLSearchParams
+  navigate: (path: string) => void
 }) {
-  const res = useResource<UsageSnapshot>('/api/usage')
+  const start = query.get('start') ?? ''
+  const end = query.get('end') ?? ''
+  const params = new URLSearchParams({ ...(start && { start }), ...(end && { end }) })
+  const res = useResource<UsageSnapshot>(`/api/usage?${params}`)
   if (res.loading) return <Loading what="사용량을" />
   if (res.error || !res.data)
     return (
@@ -45,13 +53,17 @@ export function Usage({
   return (
     <>
       <PageHead
-        crumb={`데이터 · API 사용량 · ${fmt.dayClock(usage.asOf)} 기준`}
+        crumb={`답변 · 사용량 및 비용 · ${periodLabel(usage.periodStart, usage.periodEnd)}`}
         title="API 사용량"
-        note="봇이 답변을 만들 때 드는 AI 사용료를 봅니다. 하루 상한은 모든 워크스페이스를 합쳐 계산하고, 누적 금액은 서버에 기록되어 봇을 다시 띄워도 초기화되지 않습니다."
-        aside={<span className="chip flat">오늘 질문 {fmt.int(usage.callsToday)}건</span>}
+        note="선택한 기간의 질문과 AI 사용료를 워크스페이스·모델·시간대별로 확인합니다."
+        aside={<span className="chip flat">기간 질문 {fmt.int(usage.calls)}건</span>}
       />
 
-      <Section
+      <Section title="조회 기간" note={periodLabel(usage.periodStart, usage.periodEnd)}>
+        <DateRangeFilter path="/answer/usage" query={query} navigate={navigate} defaultStart={usage.periodStart} defaultEnd={usage.periodEnd} today={usage.asOf.slice(0, 10)} />
+      </Section>
+
+      {usage.isToday ? <Section
         title="하루 상한 대비 사용액"
         note="사선 구간은 예상치입니다"
         lead="파란 막대가 지금까지 쓴 금액입니다. 사선 구간은 지금 속도가 유지될 때 자정까지 늘어날 예상 금액이고, 세로선은 평소 이 시각의 사용액입니다."
@@ -104,7 +116,9 @@ export function Usage({
             <span>하루 상한 {fmt.usd(usage.limitUsd)}</span>
           </div>
         </div>
-      </Section>
+      </Section> : <Section title="기간 사용량" lead="기간 상한은 일별 상한을 선택한 날짜 수만큼 합산한 값입니다.">
+        <div className="metrics overview-metrics"><Metric k="질문" v={fmt.int(usage.calls)} unit="건" /><Metric k="사용액" v={fmt.usd(usage.spentUsd)} /><Metric k="기간 상한" v={fmt.usd(usage.limitUsd)} /><Metric k="일평균" v={fmt.usd(usage.spentUsd / usage.periodDays)} /></div>
+      </Section>}
 
       <Section
         title="시간대별 질문 수"
@@ -113,7 +127,7 @@ export function Usage({
       >
         <div className="card card-pad">
           {usage.byHour.length === 0 && (
-            <p className="field-help">오늘은 아직 질문이 없습니다.</p>
+            <p className="field-help">선택한 기간에는 질문이 없습니다.</p>
           )}
           <div className="spark">
             {usage.byHour.map((h, i) => (

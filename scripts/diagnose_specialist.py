@@ -181,6 +181,7 @@ def _request_shape() -> str:
     벤더를 부르지 않고 확인한다. 가짜 클라이언트에 넣어 보고 모양만 읽는다.
     """
     import contextlib
+    from dataclasses import replace
 
     from tybot.gateway.base import Message, ModelSpec, Sensitivity
     from tybot.gateway.providers.anthropic_provider import AnthropicProvider
@@ -199,10 +200,12 @@ def _request_shape() -> str:
     provider._client = _Client()
     spec = ModelSpec("probe", "anthropic", 0.0, 0.0, Sensitivity.CONFIDENTIAL)
 
-    def _shape(messages) -> object:
+    def _shape(messages, *, sampling: bool = True) -> object:
         captured.clear()
         with contextlib.suppress(_Captured):
-            provider.complete(spec, messages, max_tokens=8)
+            provider.complete(
+                replace(spec, supports_sampling=sampling), messages, max_tokens=8
+            )
         return captured
 
     try:
@@ -212,6 +215,15 @@ def _request_shape() -> str:
         without = _shape([Message("user", "질문")]).copy()
     except Exception as exc:  # noqa: BLE001 - 모양을 못 읽으면 그 사실이 답이다
         return f"확인 불가 ({type(exc).__name__}: {exc})"
+
+    # 샘플링 파라미터를 안 받는 모델에 `temperature` 를 보내면 400 이다.
+    # **모델별 사실이라 레지스트리가 정한다** — 여기서는 그 판정을 그대로 따랐는지만 본다.
+    strict = _shape([Message("user", "질문")], sampling=False).copy()
+    if "temperature" in strict:
+        return (
+            "🔴 샘플링을 안 받는 모델에도 temperature 를 보낸다 — "
+            "`temperature is deprecated for this model` 로 400 이 난다"
+        )
 
     system = with_system.get("system")
     if not isinstance(system, list):
@@ -226,7 +238,7 @@ def _request_shape() -> str:
             f"🔴 system 이 없을 때 {type(without['system']).__name__} 을 실어 보낸다 — "
             "같은 400 이 난다. 키를 빼야 한다"
         )
-    return "OK (배열로 보내고, 없을 때는 키를 뺀다)"
+    return "OK (system 배열 · 없으면 키 생략 · 샘플링 미지원 모델엔 temperature 생략)"
 
 
 def _loaded_from() -> list[str]:

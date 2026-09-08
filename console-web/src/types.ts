@@ -104,13 +104,28 @@ export interface CallRow {
 export interface UsageSnapshot {
   /** 집계 기준 시각 (KST) */
   asOf: string
+  periodStart: string
+  periodEnd: string
+  periodDays: number
+  isToday: boolean
   limitUsd: number
+  dailyLimitUsd: number
   spentUsd: number
   /** 현 속도 유지 시 자정 예상치 */
   projectedUsd: number
   /** 최근 14일 같은 시각 중위값 — 이상 판정의 기준선 */
   baselineUsd: number
+  calls: number
   callsToday: number
+  answerSummary: {
+    questions: number
+    grounded: number
+    noHits: number
+    groundedRate: number | null
+    errors: number
+    errorRate: number | null
+    slowAnswers: number
+  }
   byHour: { hour: string; calls: number; costUsd: number }[]
   byModel: ModelSpend[]
   byWorkspace: WorkspaceSpend[]

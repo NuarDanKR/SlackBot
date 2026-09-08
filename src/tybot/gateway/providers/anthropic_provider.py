@@ -79,10 +79,15 @@ class AnthropicProvider:
             "model": spec.model,
             "messages": turns,
             "max_tokens": max_tokens,
-            "temperature": temperature,
         }
         if system:
             request["system"] = [{"type": "text", "text": system}]
+        # `temperature` 를 받지 않는 모델이 있다 — Opus 5·4.8·4.7, Sonnet 5 는
+        # 샘플링 파라미터를 제거했고 보내면 `temperature is deprecated for this
+        # model` 로 400 이다. **어느 모델이 무엇을 받는지는 레지스트리가 안다** —
+        # 여기에 모델 이름을 박으면 새 모델이 늘 때마다 썩는다.
+        if spec.supports_sampling:
+            request["temperature"] = temperature
         resp = client.messages.create(**request)
         text = "".join(getattr(b, "text", "") for b in resp.content)
         in_tok = resp.usage.input_tokens

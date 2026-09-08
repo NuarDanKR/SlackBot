@@ -31,15 +31,19 @@ class ModelNotAllowed(PermissionError):
 # (Claude 는 claude-api 스킬 참조), 민감도 라우팅 표는 DPA/zero-retention 확인 후 조정한다.
 DEFAULT_REGISTRY: dict[str, ModelSpec] = {
     "claude-opus-4-8": ModelSpec(
-        "claude-opus-4-8", "anthropic", 15.0, 75.0, Sensitivity.CONFIDENTIAL
+        "claude-opus-4-8", "anthropic", 15.0, 75.0, Sensitivity.CONFIDENTIAL,
+        supports_sampling=False,
     ),
     "claude-sonnet-5": ModelSpec(
-        "claude-sonnet-5", "anthropic", 3.0, 15.0, Sensitivity.CONFIDENTIAL
+        "claude-sonnet-5", "anthropic", 3.0, 15.0, Sensitivity.CONFIDENTIAL,
+        supports_sampling=False,
     ),
     # 민감도는 모델 티어가 아니라 **벤더 계약(DPA/zero-retention)** 단위로 정한다.
     # Anthropic 계약 하나로 묶이므로 haiku 도 confidential 허용.
     "claude-opus-5": ModelSpec(
-        "claude-opus-5", "anthropic", 5.0, 25.0, Sensitivity.CONFIDENTIAL
+        "claude-opus-5", "anthropic", 5.0, 25.0, Sensitivity.CONFIDENTIAL,
+        # 샘플링 파라미터를 제거한 모델. 보내면 400 이다.
+        supports_sampling=False,
     ),
     "claude-haiku-4-5": ModelSpec(
         "claude-haiku-4-5", "anthropic", 1.0, 5.0, Sensitivity.CONFIDENTIAL

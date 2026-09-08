@@ -200,6 +200,16 @@ def test_copy_never_deletes_what_only_the_server_builds():
     assert "TREE_EXCLUDES[@]" in keep, ".venv·dist 는 공통 목록에서 물려받는다"
 
 
+def test_console_build_failure_fails_the_deployment():
+    """An old dist must not be reported as a successful new deployment."""
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    build_section = script[script.index("# --- 콘솔 화면 빌드 ---"):script.index("== 5/6 권한")]
+
+    assert "이전 화면으로 성공 처리하지 않습니다" in build_section
+    assert "exit 1" in build_section
+    assert "CONSOLE_BUILD_FAILED=1" not in script
+
+
 def test_install_says_why_it_cannot_set_permissions():
     """권한을 못 바꾸는 환경이면 find 가 수천 줄 오류를 쏟고서야 멈춘다."""
     script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")

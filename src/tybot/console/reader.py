@@ -310,7 +310,12 @@ def _spent_today_from_state() -> float | None:
         return None
 
 
-def usage_snapshot(allowed: frozenset[str] | set[str] | None = None) -> dict:
+def usage_snapshot(
+    allowed: frozenset[str] | set[str] | None = None,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> dict:
     """`API 사용량` 화면이 쓰는 값. 질문 본문은 담지 않는다.
 
     `allowed` 를 주면 **그 워크스페이스의 기록만으로 모든 집계를 만든다.**
@@ -319,10 +324,18 @@ def usage_snapshot(allowed: frozenset[str] | set[str] | None = None) -> dict:
     범위를 한 곳(행을 고르는 자리)에서만 정하면 그런 누락이 생기지 않는다.
     """
     now = _now()
-    today = now.date().isoformat()
-    recent = _read_qa_records(BASELINE_DAYS)
+    today_date = now.date()
+    today = today_date.isoformat()
+    period_start = start_date or today_date
+    period_end = end_date or today_date
+    days_back = max(BASELINE_DAYS, (today_date - period_start).days + 1)
+    recent = _read_qa_records(days_back)
     if allowed is not None:
         recent = [r for r in recent if str(r.get("workspace", "")) in allowed]
+    period_rows = [
+        r for r in recent
+        if period_start.isoformat() <= str(r.get("ts", ""))[:10] <= period_end.isoformat()
+    ]
     today_rows = [r for r in recent if str(r.get("ts", ""))[:10] == today]
 
     by_hour_calls: dict[str, int] = defaultdict(int)
@@ -330,7 +343,7 @@ def usage_snapshot(allowed: frozenset[str] | set[str] | None = None) -> dict:
     by_model: dict[str, dict] = {}
     by_workspace: dict[str, dict] = defaultdict(lambda: {"calls": 0, "costUsd": 0.0})
 
-    for r in today_rows:
+    for r in period_rows:
         hour = str(r.get("ts", ""))[11:13] + ":00"
         by_hour_calls[hour] += 1
         by_hour_cost[hour] += float(r.get("cost_usd") or 0)
@@ -359,32 +372,61 @@ def usage_snapshot(allowed: frozenset[str] | set[str] | None = None) -> dict:
 
     # 당일 누적은 봇이 남긴 상태 파일이 더 정확하다(분류 호출까지 포함). 다만 그 값은
     # **전 워크스페이스 합산**이라, 범위가 좁혀진 요청에는 쓸 수 없다.
-    spent = _spent_today_from_state() if allowed is None else None
+    is_today = period_start == today_date and period_end == today_date
+    spent = _spent_today_from_state() if allowed is None and is_today else None
     if spent is None:
-        spent = sum(float(r.get("cost_usd") or 0) for r in today_rows)
+        spent = sum(float(r.get("cost_usd") or 0) for r in period_rows)
 
     # 자정 예상: 지금까지의 속도를 남은 시간에 그대로 적용
     elapsed_h = now.hour + now.minute / 60
-    projected = spent * (24 / elapsed_h) if elapsed_h > 0.5 else spent
+    projected = spent * (24 / elapsed_h) if is_today and elapsed_h > 0.5 else spent
 
     labels = _workspace_labels()
     keys = set(labels) if allowed is None else set(labels) & set(allowed)
     limits = {k: float((heartbeat.read(k) or {}).get("limit_usd", 0.0)) for k in keys}
 
     # 상한도 범위를 따른다. 전체 요청이면 합산 상한, 좁혀진 요청이면 그 워크스페이스 상한의 합.
-    limit_usd = (
+    daily_limit_usd = (
         float(os.getenv("DAILY_COST_LIMIT_USD", "50"))
         if allowed is None
         else round(sum(limits.values()), 6)
     )
+    period_days = (period_end - period_start).days + 1
+    limit_usd = daily_limit_usd * period_days
+
+    errors = sum(1 for row in period_rows if str(row.get("error") or "").strip())
+    no_hits = sum(1 for row in period_rows if int(row.get("hits") or 0) == 0)
+    slow_answers = sum(
+        1 for row in period_rows if int(row.get("elapsed_ms") or 0) > 15_000
+    )
+    grounded = sum(
+        1
+        for row in period_rows
+        if int(row.get("hits") or 0) > 0 and not str(row.get("error") or "").strip()
+    )
 
     return {
         "asOf": now.isoformat(timespec="seconds"),
+        "periodStart": period_start.isoformat(),
+        "periodEnd": period_end.isoformat(),
+        "periodDays": period_days,
+        "isToday": is_today,
         "limitUsd": limit_usd,
+        "dailyLimitUsd": daily_limit_usd,
         "spentUsd": round(spent, 6),
         "projectedUsd": round(projected, 6),
-        "baselineUsd": round(baseline, 6),
+        "baselineUsd": round(baseline, 6) if is_today else 0.0,
+        "calls": len(period_rows),
         "callsToday": len(today_rows),
+        "answerSummary": {
+            "questions": len(period_rows),
+            "grounded": grounded,
+            "noHits": no_hits,
+            "groundedRate": grounded / len(period_rows) if period_rows else None,
+            "errors": errors,
+            "errorRate": errors / len(period_rows) if period_rows else None,
+            "slowAnswers": slow_answers,
+        },
         "byHour": [
             {"hour": h, "calls": by_hour_calls[h], "costUsd": round(by_hour_cost[h], 6)}
             for h in sorted(by_hour_calls)
@@ -396,7 +438,7 @@ def usage_snapshot(allowed: frozenset[str] | set[str] | None = None) -> dict:
                 "label": labels.get(k, k),
                 "calls": v["calls"],
                 "costUsd": round(v["costUsd"], 6),
-                "limitUsd": limits.get(k, 0.0),
+                "limitUsd": limits.get(k, 0.0) * period_days,
             }
             for k, v in sorted(by_workspace.items())
         ],
@@ -413,7 +455,7 @@ def usage_snapshot(allowed: frozenset[str] | set[str] | None = None) -> dict:
                 "costUsd": float(r.get("cost_usd") or 0),
                 "ms": int(r.get("elapsed_ms") or 0),
             }
-            for r in sorted(today_rows, key=lambda r: str(r.get("ts", "")), reverse=True)[:30]
+            for r in sorted(period_rows, key=lambda r: str(r.get("ts", "")), reverse=True)[:500]
         ],
     }
 

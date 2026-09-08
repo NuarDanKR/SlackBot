@@ -37,6 +37,16 @@ class ModelSpec:
     output_price_per_mtok: float
     # 이 모델로 처리 허용되는 최대 민감도(이하 민감도만 허용)
     max_sensitivity: Sensitivity
+    # `temperature`·`top_p`·`top_k` 를 받는가.
+    #
+    # **모델이 정하는 사실이라 레지스트리가 들고 있어야 한다.** 프로바이더에
+    # 모델 이름 목록을 박으면 새 모델이 늘 때마다 그 목록이 썩고, 그 고장은
+    # **그 모델을 지정한 전문 봇만** 조용히 폴백하는 모양으로 나타난다.
+    # 실제로 그렇게 두 번 걸렸다(`system` 형식 → `temperature`, 2026-09-08).
+    #
+    # Opus 5·4.8·4.7 과 Sonnet 5 는 샘플링 파라미터를 제거했고 보내면 400 이다.
+    # Haiku 4.5·Sonnet 4.6·Opus 4.6 은 받는다.
+    supports_sampling: bool = True
 
     def cost(self, input_tokens: int, output_tokens: int) -> float:
         return (

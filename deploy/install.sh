@@ -153,8 +153,10 @@ fi
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
 
   # --- 콘솔 화면 빌드 ---
-  # **실패해도 설치를 멈추지 않는다.** 화면이 안 만들어지는 것과 봇이 못 뜨는 것은
-  # 무게가 다르다. 여기서 exit 하면 프런트엔드 사정으로 봇 배포가 막힌다.
+  # 콘솔이 설치된 서버에서 빌드 실패를 무시하면 이전 dist 가 그대로 남는데도
+  # `.deployed-commit` 은 최신으로 기록된다. 그러면 배포 화면은 성공이라고 말하면서
+  # 실제 화면은 과거 버전인 상태가 지속된다. 실패를 배포 실패로 올려 다음 실행이
+  # 다시 시도하게 하고, deploy-last.log 에 npm/Node 오류를 남긴다.
   build_console() {
     # Vite 7 은 Node 20.19+ 를 요구한다. 낮으면 알 수 없는 오류로 죽는다.
     if node_too_old; then
@@ -172,8 +174,8 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
     if build_console; then
       echo "  화면 빌드 완료: $APP_DIR/console-web/dist"
     else
-      CONSOLE_BUILD_FAILED=1
-      echo "  ! 화면 빌드 실패 — API 는 뜨지만 화면은 안 나옵니다. 설치는 계속합니다."
+      echo "  ! 콘솔 화면 빌드 실패 — 이전 화면으로 성공 처리하지 않습니다."
+      exit 1
     fi
   fi
 fi
@@ -324,8 +326,4 @@ cat <<EOF
   6) sudo systemctl enable --now tybot-console
   7) 8787 포트는 사내망/VPN 출발지에만 허용하세요.
 EOF
-if [[ "${CONSOLE_BUILD_FAILED:-0}" == "1" ]]; then
-  echo "  ! 화면 빌드가 실패했습니다. 콘솔 API 는 뜨지만 브라우저에는 404 가 나옵니다."
-  echo "    Node 20.19+ 설치 후 다시 실행하거나, dist 를 직접 올리세요."
-fi
 fi

@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -277,13 +277,22 @@ def status(user: User) -> dict:
 
 
 @app.get("/api/usage")
-def usage(user: User) -> dict:
+def usage(
+    user: User,
+    start: date | None = None,
+    end: date | None = None,
+) -> dict:
     """API 사용량. 담당자에게는 자기 워크스페이스 몫만 보인다.
 
     범위를 여기서 걸러내지 않고 `reader` 에 넘긴다. 응답을 만든 뒤 목록만 걸러내면
     시간대별·모델별·기준선 같은 합계에 다른 워크스페이스 값이 남는다.
     """
-    return reader.usage_snapshot(None if user.all_workspaces else user.workspaces)
+    period_start, period_end = _report_period(start, end)
+    return reader.usage_snapshot(
+        None if user.all_workspaces else user.workspaces,
+        start_date=period_start,
+        end_date=period_end,
+    )
 
 
 @app.get("/api/capabilities")
@@ -302,6 +311,19 @@ def _scoped_health(user: ConsoleUser, *, include_text: bool = False) -> dict:
         store=store(),
         include_text=include_text and user.is_admin,
     )
+
+
+def _report_period(start: date | None, end: date | None) -> tuple[date, date]:
+    today = reader._now().date()
+    period_start = start or today
+    period_end = end or today
+    if period_start > period_end:
+        raise HTTPException(status_code=422, detail="시작일은 종료일보다 늦을 수 없습니다.")
+    if period_end > today:
+        raise HTTPException(status_code=422, detail="미래 날짜는 조회할 수 없습니다.")
+    if (period_end - period_start).days >= 366:
+        raise HTTPException(status_code=422, detail="조회 기간은 최대 366일입니다.")
+    return period_start, period_end
 
 
 def _workspace_runtime_status(user: ConsoleUser) -> list[dict]:
@@ -361,10 +383,19 @@ def collection_dashboard(user: User) -> dict:
 
 
 @app.get("/api/dashboards/answers")
-def answers_dashboard(user: User) -> dict:
-    usage_data = reader.usage_snapshot(None if user.all_workspaces else user.workspaces)
+def answers_dashboard(
+    user: User,
+    start: date | None = None,
+    end: date | None = None,
+) -> dict:
+    period_start, period_end = _report_period(start, end)
+    usage_data = reader.usage_snapshot(
+        None if user.all_workspaces else user.workspaces,
+        start_date=period_start,
+        end_date=period_end,
+    )
     report = _scoped_health(user)
-    answers = report["sections"]["answers"]
+    answers = usage_data["answerSummary"]
     feedback = report["sections"]["feedback"]
     specialist_calls: list[dict] = []
     with contextlib.suppress(specialist_store.SpecialistStoreError):
@@ -372,8 +403,16 @@ def answers_dashboard(user: User) -> dict:
             allowed=None if user.all_workspaces else user.workspaces,
             limit=500,
         )
+        specialist_calls = [
+            row for row in specialist_calls
+            if period_start.isoformat() <= str(row.get("at") or "")[:10]
+            <= period_end.isoformat()
+        ]
     return {
-        "callsToday": usage_data["callsToday"],
+        "periodStart": usage_data["periodStart"],
+        "periodEnd": usage_data["periodEnd"],
+        "isToday": usage_data["isToday"],
+        "calls": usage_data["calls"],
         "spentUsd": usage_data["spentUsd"],
         "limitUsd": usage_data["limitUsd"],
         "answers": {key: value for key, value in answers.items() if key != "problems"},
@@ -438,10 +477,17 @@ def questions(
     user: User,
     workspace: str = "",
     result: str = "",
+    start: date | None = None,
+    end: date | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict:
     _require_developer(user)
-    rows = reader.usage_snapshot(None if user.all_workspaces else user.workspaces)["recent"]
+    period_start, period_end = _report_period(start, end)
+    rows = reader.usage_snapshot(
+        None if user.all_workspaces else user.workspaces,
+        start_date=period_start,
+        end_date=period_end,
+    )["recent"]
     if workspace:
         rows = [row for row in rows if row.get("workspace") == workspace]
     if result:
@@ -449,7 +495,12 @@ def questions(
             row for row in rows
             if row.get("reason") == result or row.get("intent") == result
         ]
-    return {"questions": rows[:limit]}
+    return {
+        "today": reader._now().date().isoformat(),
+        "periodStart": period_start.isoformat(),
+        "periodEnd": period_end.isoformat(),
+        "questions": rows[:limit],
+    }
 
 
 @app.get("/api/diagnostics/archive")
