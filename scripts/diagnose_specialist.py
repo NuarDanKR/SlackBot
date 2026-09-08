@@ -212,9 +212,57 @@ def _request_shape() -> str:
         return "OK (system 을 배열로 보낸다)"
     return (
         f"🔴 system 을 {type(system).__name__} 으로 보낸다 — "
-        "`system: Input should be a valid array` 로 400 이 난다. "
-        "배포된 코드가 옛 것이다"
+        "`system: Input should be a valid array` 로 400 이 난다"
     )
+
+
+def _loaded_from() -> list[str]:
+    """**실행 중인 인터프리터가 실제로 읽은 파일**을 보고한다.
+
+    2026-09-08: 배포된 커밋에는 수정이 들어 있는데 동작은 옛 것이었다.
+    「저장소에 있다」 와 「이 프로세스가 그것을 읽었다」 는 다른 사실이고,
+    그 둘이 갈리면 소스를 몇 번 봐도 답이 안 나온다.
+
+    갈릴 수 있는 자리 셋: `sys.path` 우선순위(src vs site-packages),
+    남아 있는 `__pycache__`, 그리고 SDK 버전.
+    """
+    import inspect
+
+    from tybot.gateway.providers import anthropic_provider as mod
+
+    out: list[str] = []
+    path = getattr(mod, "__file__", "?")
+    out.append(f"읽은 파일: {path}")
+    if "site-packages" in str(path):
+        out.append(
+            "  🔴 저장소가 아니라 **설치된 패키지**를 읽었다. 배포는 src/ 를 "
+            "갱신하지만 이 경로는 pip 가 갱신한다 — 재설치가 필요하다:"
+        )
+        out.append("     sudo /opt/tybot/.venv/bin/pip install -e /opt/tybot")
+
+    cached = getattr(mod, "__cached__", "")
+    if cached and Path(cached).is_file():
+        src_mtime = Path(path).stat().st_mtime if Path(path).is_file() else 0
+        pyc_mtime = Path(cached).stat().st_mtime
+        if pyc_mtime < src_mtime:
+            out.append(f"  (바이트코드가 소스보다 오래됨: {cached})")
+
+    try:
+        source = inspect.getsource(mod.AnthropicProvider.complete)
+        has_array = '"type": "text"' in source
+        out.append(f"  system 배열 수정 포함: {'예' if has_array else '🔴 아니오'}")
+        if not has_array:
+            out.append("  → 이 파일이 옛 것이다. 이 경로를 갱신해야 한다.")
+    except OSError:
+        out.append("  (소스를 읽지 못했다 — 바이트코드만 배포된 상태일 수 있다)")
+
+    try:
+        import anthropic
+
+        out.append(f"anthropic SDK: {getattr(anthropic, '__version__', '?')}")
+    except ImportError:
+        out.append("anthropic SDK: 🔴 미설치")
+    return out
 
 
 class _Captured(Exception):
@@ -235,9 +283,11 @@ def _probe(model: str) -> None:
     # 400 을 또 보게 되는데, 그건 조사 시간을 두 배로 쓰는 일이다.
     shape = _request_shape()
     print(f"      요청 모양: {shape}")
+    for line in _loaded_from():
+        print(f"      {line}")
     if shape.startswith("🔴"):
-        print("      → 벤더를 부를 필요가 없다. 최신 커밋을 배포하고 다시 본다:")
-        print("        cat /opt/tybot/.deployed-commit")
+        print("      → 벤더를 부를 필요가 없다. 위의 「읽은 파일」 을 갱신해야 한다.")
+        print("        배포된 커밋: cat /opt/tybot/.deployed-commit")
         return
 
     try:
