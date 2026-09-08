@@ -1576,7 +1576,7 @@ class WorkspaceBot:
         )
 
     # --- `/채널 상태` · `/채널 수정` -------------------------------------
-    def _health_facts(self, client, channel_id: str) -> HealthFacts:
+    def _health_facts(self, client, channel_id: str, viewer: str = "") -> HealthFacts:
         """상태 화면이 쓸 사실을 모은다. **판단은 `channel_health` 가 한다.**
 
         한 조각을 못 읽었다고 화면 전체를 포기하지 않는다 — 못 읽은 것은
@@ -1627,12 +1627,38 @@ class WorkspaceBot:
             reviewers=found,
             send_at=send_at,
             waiting_attachments=waiting,
-            manager_known=bool(
-                self.channel_admin_users
-                or self._slack_creator(channel_id)
-                or self.channel_owners.owner_of(self.workspace, channel_id)
-            ),
+            # **권한 판정은 `/채널 수정` 과 같은 함수를 쓴다.** 갈리면 수정은
+            # 거절되는데 화면은 초록으로 뜬다(2026-09-08 실측). 화면이 자기
+            # 모순이면 사람은 화면을 안 믿는다.
+            viewer_can_edit=self._can_manage_channel(channel_id, viewer),
+            owner=self._human_owner(channel_id),
+            admin_exists=bool(self.channel_admin_users),
         )
+
+    def _human_owner(self, channel_id: str) -> str:
+        """이 채널을 고칠 수 있는 **사람**. 없으면 빈 문자열.
+
+        TYBot 이 만든 채널은 Slack 상 생성자가 **봇 자신**이다. 그 값을 개설자로
+        보이면 「<@TYBot> 에게 요청하세요」 가 되어 막다른 안내가 된다.
+        우리 생성 기록이 먼저고, Slack 생성자는 그것이 사람일 때만 쓴다.
+        """
+        recorded = self.channel_owners.owner_of(self.workspace, channel_id)
+        if recorded:
+            return recorded
+        creator = self._slack_creator(channel_id)
+        return "" if creator == self._bot_user_id() else creator
+
+    def _bot_user_id(self) -> str:
+        """봇 자신의 사용자 ID. 못 읽으면 빈 문자열(그때는 아무것도 걸러지지 않는다)."""
+        cached = getattr(self, "_bot_uid", None)
+        if cached is not None:
+            return cached
+        try:
+            self._bot_uid = str((self.app.client.auth_test() or {}).get("user_id") or "")
+        except Exception as e:
+            log.warning("[%s] 봇 사용자 ID 조회 실패: %s", self.workspace, e)
+            return ""
+        return self._bot_uid
 
     def _extracted_names(self, channel_id: str) -> set[str]:
         """이 채널 문서에 변환본이 들어간 첨부 이름.
@@ -1657,7 +1683,9 @@ class WorkspaceBot:
             respond("채널 안에서 실행해 주세요.", response_type="ephemeral")
             return
         try:
-            text = health_report(self._health_facts(client, channel_id))
+            text = health_report(
+                self._health_facts(client, channel_id, str(command.get("user_id") or ""))
+            )
         except Exception as e:
             log.warning("[%s] 채널 상태 실패 ch=%s: %s", self.workspace, channel_id, e)
             respond("채널 상태를 읽지 못했습니다.", response_type="ephemeral")

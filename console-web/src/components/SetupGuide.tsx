@@ -212,6 +212,23 @@ export function SetupGuide() {
 
             <ManifestBlock />
 
+            {/*
+              이미 앱을 만든 뒤 명령이 추가되면, **코드만 배포해서는 생기지 않는다.**
+              2026-09-08 실측: `/첨부` 를 실행했는데 Slack 이 「유효한 명령어가
+              아닙니다」 로 답했다. 코드와 이 매니페스트에는 있었지만 Slack 앱
+              설정이 그대로였다. 오류가 아니라 「그런 명령 없음」 으로 나타나
+              사람은 기능이 사라진 줄 안다.
+            */}
+            <div className="callout warn">
+              <span>
+                <b>이미 앱을 만드셨다면 — 명령이 늘 때마다 다시 붙여넣어야 합니다.</b>{' '}
+                슬래시 명령은 Slack 앱 설정에 등록된 것만 동작합니다. 서버를 배포해도
+                자동으로 생기지 않습니다. <b>App Manifest</b> 화면에서 위 내용을 다시
+                붙여넣고 <b>Save Changes</b> 하세요. 안 하면 새 명령은 Slack 이
+                「유효한 명령어가 아닙니다」 로 답합니다.
+              </span>
+            </div>
+
             <div className="rule-list">
               <div className="rule ok">
                 <span className="rule-mark">수정 가능</span>

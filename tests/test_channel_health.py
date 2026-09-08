@@ -294,3 +294,90 @@ def test_the_creator_is_looked_up_once():
     _may(bot, "UB")
 
     assert bot._client.calls == 1
+
+
+# --- 화면이 자기 모순이던 것 (2026-09-08 실측) --------------------------------
+#
+# `/채널 수정` 은 「생성자 또는 TYBot 채널 관리자만」 이라고 거절하는데, 같은
+# 화면의 관리 항목은 🟢 「개설자 또는 채널 관리자가 수정할 수 있습니다」 로 떴다.
+# 「누군가는 고칠 수 있다」 를 보였기 때문이다. 화면이 자기 모순이면 사람은
+# 화면을 안 믿는다.
+def test_a_viewer_without_permission_is_told_so():
+    check = _find(_facts(viewer_can_edit=False, owner="UA"), "관리")
+
+    assert check.mark != ch.OK
+    assert "권한이 없습니다" in check.detail
+    assert "UA" in check.detail, "누구에게 요청할지 말해야 한다"
+
+
+def test_a_channel_nobody_can_edit_is_a_failure_not_a_warning():
+    """개설 기록도 없고 관리자도 없으면 그 채널은 **영영 못 고친다.**"""
+    check = _find(_facts(viewer_can_edit=False, owner="", admin_exists=False), "관리")
+
+    assert check.mark == ch.BAD
+    assert "CHANNEL_ADMIN_USERS" in check.fix, "서버에서 무엇을 해야 하는지 말해야 한다"
+
+
+def test_an_admin_exists_is_only_a_warning():
+    check = _find(_facts(viewer_can_edit=False, admin_exists=True), "관리")
+
+    assert check.mark == ch.WARN
+
+
+def test_a_powerless_viewer_is_not_sent_to_a_command_that_will_refuse():
+    """막다른 안내는 「이 봇은 안 된다」 로 읽힌다."""
+    check = _find(
+        _facts(waiting_attachments=3, reviewers=[], viewer_can_edit=False), "첨부"
+    )
+
+    assert "/채널 수정" not in check.fix
+    assert "요청" in check.fix
+
+
+def test_the_screen_and_the_edit_command_share_one_verdict():
+    """따로 판정하면 갈린다 — 갈린 것이 실제로 화면에 나갔다."""
+    import inspect
+
+    from tybot.slack.pilot import WorkspaceBot
+
+    source = inspect.getsource(WorkspaceBot._health_facts)
+
+    assert "_can_manage_channel" in source, "화면이 권한을 따로 센다"
+
+
+def test_the_bot_is_never_shown_as_the_owner():
+    """TYBot 이 만든 채널은 Slack 상 생성자가 **봇 자신**이다.
+
+    그 값을 개설자로 보이면 「<@TYBot> 에게 요청하세요」 가 된다.
+    """
+    from types import SimpleNamespace
+
+    from tybot.slack.pilot import WorkspaceBot
+
+    bot = _bot(creator="UBOT")
+    bot.channel_owners = SimpleNamespace(
+        is_owner=lambda ws, ch, uid: False, owner_of=lambda ws, ch: ""
+    )
+    bot._bot_uid = "UBOT"
+    bot._bot_user_id = lambda: "UBOT"
+    bot._slack_creator = lambda ch: WorkspaceBot._slack_creator(bot, ch)
+
+    assert WorkspaceBot._human_owner(bot, "C1") == ""
+
+
+def test_our_own_record_wins_over_slack():
+    """우리 생성 기록이 먼저다 — 봇이 만든 채널의 실제 요청자가 거기 있다."""
+    from types import SimpleNamespace
+
+    from tybot.slack.pilot import WorkspaceBot
+
+    bot = _bot(creator="UBOT")
+    bot.channel_owners = SimpleNamespace(
+        is_owner=lambda ws, ch, uid: False, owner_of=lambda ws, ch: "UA"
+    )
+    bot._bot_uid = "UBOT"
+    bot._bot_user_id = lambda: "UBOT"
+    bot._slack_creator = lambda ch: WorkspaceBot._slack_creator(bot, ch)
+
+    assert WorkspaceBot._human_owner(bot, "C1") == "UA"
+    assert bot._client.calls == 0, "기록이 있는데 Slack 을 물었다"

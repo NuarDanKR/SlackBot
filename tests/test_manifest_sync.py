@@ -123,3 +123,39 @@ def test_manifest_has_the_scopes_the_bot_actually_needs():
         "app_home_opened",
     ):
         assert event in text, f"이벤트 누락: {event}"
+
+
+# --- 코드에 등록한 명령이 매니페스트에도 있는가 ------------------------------
+#
+# 2026-09-08: 사용자가 `/첨부` 를 실행했는데 Slack 이 「유효한 명령어가 아닙니다」
+# 로 답했다. 코드에도 있고 이 매니페스트에도 있었지만, **Slack 앱 설정에 다시
+# 적용하지 않았다.** 코드만 배포하면 슬래시 명령은 생기지 않는다.
+#
+# 그 운영 절차까지 테스트가 대신할 수는 없다. 대신 **파일과 코드가 갈리는 것**은
+# 여기서 막는다 — 그게 갈려 있으면 매니페스트를 다시 적용해도 여전히 안 된다.
+def _code_commands() -> set[str]:
+    import re
+
+    source = (ROOT / "src" / "tybot" / "slack" / "pilot.py").read_text(encoding="utf-8")
+    return set(re.findall(r'app\.command\("(/[^"]+)"\)', source))
+
+
+def _manifest_commands() -> set[str]:
+    import re
+
+    text = REPO_MANIFEST.read_text(encoding="utf-8")
+    return set(re.findall(r"^\s*-?\s*command:\s*(/\S+)", text, re.MULTILINE))
+
+
+def test_every_registered_command_is_in_the_manifest():
+    """매니페스트에 없는 명령은 Slack 에 만들어지지 않는다 — 코드는 영영 안 불린다."""
+    missing = _code_commands() - _manifest_commands()
+
+    assert not missing, f"매니페스트에 없다: {sorted(missing)}"
+
+
+def test_the_manifest_has_no_command_nobody_handles():
+    """매니페스트에만 있는 명령은 누르면 **Slack 타임아웃**으로 끝난다."""
+    orphan = _manifest_commands() - _code_commands()
+
+    assert not orphan, f"처리하는 코드가 없다: {sorted(orphan)}"

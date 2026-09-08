@@ -75,8 +75,16 @@ class HealthFacts:
     send_at: str = ""
     # 사람이 봐야 원본을 읽는 첨부. `None` 이면 세지 못했다.
     waiting_attachments: int | None = None
-    # 이 채널을 고칠 수 있는 사람이 있는가(개설자를 알아냈는가).
-    manager_known: bool = True
+    # **이 화면을 보는 사람**이 이 채널을 고칠 수 있는가.
+    #
+    # 「누군가는 고칠 수 있다」 를 보이면 안 된다 — 실제로 그렇게 만들었다가,
+    # `/채널 수정` 은 거절되는데 같은 화면의 관리 항목은 초록으로 뜨는 상태가 됐다
+    # (2026-09-08 실측). 화면이 자기 모순이면 사람은 화면을 안 믿는다.
+    viewer_can_edit: bool = True
+    # 고칠 수 있는 사람. TYBot 이 만든 채널은 **Slack 상 생성자가 봇**이라
+    # 이 값이 비는 경우가 있다 — 그러면 아무도 못 고치는 채널이다.
+    owner: str = ""
+    admin_exists: bool = False
 
 
 def _collection_facts(f: HealthFacts) -> ChannelFacts:
@@ -201,21 +209,46 @@ def check_attachments(f: HealthFacts) -> Check:
             f"매일 {f.send_at or '08:00'} 검토자 DM 으로 갑니다. "
             "지금 보려면 `/첨부`.",
         )
+    # 권한이 없는 사람에게 `/채널 수정` 을 시키면 거절만 당한다. 막다른 안내는
+    # 「이 봇은 안 된다」 로 읽힌다.
+    fix = (
+        "`/채널 수정` 에서 검토자를 정하거나, 지금 `/첨부` 로 처리하세요."
+        if f.viewer_can_edit
+        else "개설자 또는 TYBot 채널 관리자에게 검토자 지정을 요청하세요."
+    )
     return Check(
         BAD, "첨부",
         f"{f.waiting_attachments}건이 확인을 기다리는데 **받을 사람이 없습니다.**",
-        "`/채널 수정` 에서 검토자를 정하거나, 지금 `/첨부` 로 처리하세요.",
+        fix,
     )
 
 
 def check_manager(f: HealthFacts) -> Check:
-    """고칠 수 있는 사람이 있는가. 없으면 이 채널은 **아무도 못 고친다.**"""
-    if f.manager_known:
-        return Check(OK, "관리", "개설자 또는 채널 관리자가 수정할 수 있습니다.")
+    """**이 화면을 보는 사람**이 고칠 수 있는가.
+
+    「누군가는 고칠 수 있다」 를 보이면 화면이 자기 모순이 된다 — `/채널 수정` 은
+    거절되는데 관리 항목만 초록으로 뜬다. 그러면 사람은 무엇이 맞는지 모른다.
+    """
+    if f.viewer_can_edit:
+        return Check(OK, "관리", "당신이 이 채널을 수정할 수 있습니다.")
+    if f.owner:
+        return Check(
+            WARN, "관리",
+            f"당신은 수정 권한이 없습니다. 개설자는 <@{f.owner}> 입니다.",
+            "그 사람에게 `/채널 수정` 을 요청하세요.",
+        )
+    if f.admin_exists:
+        return Check(
+            WARN, "관리",
+            "당신은 수정 권한이 없고, 개설자 기록도 없습니다.",
+            "TYBot 채널 관리자에게 요청하세요.",
+        )
     return Check(
-        WARN, "관리",
-        "개설자를 확인하지 못했습니다.",
-        "TYBot 채널 관리자에게 요청하세요.",
+        BAD, "관리",
+        "이 채널을 수정할 수 있는 사람이 없습니다 — 개설 기록이 없고 "
+        "관리자도 지정되지 않았습니다.",
+        "TYBot 이 만든 채널은 Slack 상 생성자가 봇이라 사람으로 되돌릴 수 "
+        "없습니다. 서버 담당자에게 `CHANNEL_ADMIN_USERS` 등록을 요청하세요.",
     )
 
 
