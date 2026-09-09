@@ -260,7 +260,7 @@ def run(rows: list[Row], store, router, hook) -> None:
             row.note = f"마스터 실패: {type(exc).__name__}"
             continue
         row.master_ms = int((time.monotonic() - started) * 1000)
-        row.hits = answer.hits
+        row.hits = answer.hit_count
         row.master_text = answer.text
         row.master_cost = answer.cost_usd
         row.master_has_source = "출처:" in answer.to_slack()
@@ -279,9 +279,12 @@ def run(rows: list[Row], store, router, hook) -> None:
         row.special_cost = answer2.cost_usd
         row.special_has_source = "출처:" in answer2.to_slack()
         row.special_unsupported = unsupported_values(answer2.text, evidence)
-        row.specialist = getattr(hook, "last_specialist", "")
-        row.confidence = getattr(hook, "last_confidence", None)
-        row.routing_reason = getattr(hook, "last_reason", "")
+        # `getattr` 기본값을 쓰지 않는다. 훅은 이 스크립트가 만든 객체이고,
+        # 속성 이름이 바뀌면 **조용히 「전문가 미호출」 로 보고**된다 — 측정이
+        # 거짓이 되는 것이 터지는 것보다 나쁘다.
+        row.specialist = hook.last_specialist
+        row.confidence = hook.last_confidence
+        row.routing_reason = hook.last_reason
         if not row.specialist:
             # 라우터가 마스터로 접었다. 답이 같은지로 판정하지 않는다 —
             # 우연히 같은 문장이 나올 수도 있고, 그러면 판정이 뒤집힌다.

@@ -216,3 +216,41 @@ def test_question_ids_are_stable_but_workspace_specific(mod):
 
     assert first == again
     assert first != other_workspace
+
+
+# --- 이 스크립트가 만지는 이름이 실제로 있는가 (2026-09-09) -------------------
+#
+# `answer.hits` 를 읽고 있었다. `Answer` 에는 `hit_count` 만 있어서 첫 질문에서
+# `AttributeError` 로 죽었다 — 20건 측정이 0건에서 끝났다. 스크립트는 테스트가
+# 얇아서 이런 이름 오차가 **실행할 때까지** 드러나지 않는다.
+def test_the_answer_attributes_it_reads_exist():
+    """읽는 이름이 하나라도 틀리면 측정이 첫 질문에서 죽는다."""
+    from tybot.answer import Answer
+
+    fields = set(Answer.__dataclass_fields__) | {
+        name for name in dir(Answer) if not name.startswith("_")
+    }
+
+    for name in ("hit_count", "text", "cost_usd", "citations", "reason", "to_slack"):
+        assert name in fields, f"Answer 에 없는 이름을 읽는다: {name}"
+
+
+def test_it_reads_hit_count_not_hits():
+    """`hits` 는 qa-log 열 이름이고, `Answer` 의 이름은 `hit_count` 다.
+
+    두 이름이 한 파일에 같이 있어서 헷갈렸다 — 그 혼동이 바로 이 고장이었다.
+    """
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "answer.hits" not in source
+    assert "answer2.hits" not in source
+    assert "answer.hit_count" in source
+
+
+def test_the_hook_attributes_are_read_without_a_default():
+    """`getattr(hook, ..., "")` 는 이름이 바뀌어도 조용히 「전문가 미호출」 로
+    보고한다. 측정이 거짓이 되는 것이 터지는 것보다 나쁘다."""
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'getattr(hook, "last_specialist"' not in source
+    assert "hook.last_specialist" in source
