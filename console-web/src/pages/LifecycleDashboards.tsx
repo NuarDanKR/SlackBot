@@ -69,6 +69,8 @@ export function OperationsDashboard({ user, navigate }: { user: ConsoleUser; nav
       <ActionRow title="전문 봇" detail={`장애 ${d.specialistErrors}개`} tone={d.specialistErrors ? 'bad' : 'plain'} onClick={() => navigate(withQuery('/manage/specialists', { state: d.specialistErrors ? 'error' : null }))} />
       {user.role === 'admin' && <ActionRow title="배치" detail={`사용 중지 ${d.disabledTimers}개`} tone={d.disabledTimers ? 'watch' : 'ok'} onClick={() => navigate(withQuery('/manage/batches', { state: d.disabledTimers ? 'disabled' : null }))} />}
       {user.role === 'admin' && <ActionRow title="배포" detail={d.deployment.message || d.deployment.state} tone={d.deployment.state === 'failed' ? 'bad' : 'plain'} onClick={() => navigate(withQuery('/manage/deploy', { state: d.deployment.state === 'failed' ? 'failed' : null }))} />}
+      {user.role === 'admin' && <ActionRow title="워크스페이스" detail="등록, 사용 중지와 Slack 토큰을 관리합니다." onClick={() => navigate('/manage/workspaces')} />}
+      {user.role === 'admin' && <ActionRow title="환경 설정" detail="공통 동작과 LLM API 키를 관리합니다." onClick={() => navigate('/manage/environment')} />}
     </div></Section>
   </>
 }
@@ -80,7 +82,7 @@ export function ConsoleDashboard({ navigate }: { navigate: Navigate }) {
   if (res.error || !res.data) return <Failed what="콘솔 대시보드를" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
   const d = res.data
   return <>
-    <PageHead crumb="설정·권한" title="권한 현황" note="콘솔 접근 권한과 관리 작업의 흔적을 확인합니다." />
+    <PageHead crumb="콘솔 관리" title="권한 현황" note="콘솔 접근 권한과 관리 작업의 흔적을 확인합니다." />
     <Section title="접근과 승인"><div className="metrics overview-metrics"><Metric k="사용자" v={fmt.int(d.users)} unit="명" /><Metric k="관리자" v={fmt.int(d.admins)} unit="명" /><Metric k="승인 대기" v={fmt.int(d.pendingApprovals)} unit="건" /></div></Section>
     <Section title="관리 바로가기"><div className="action-list">
       <ActionRow title="콘솔 사용자 관리" detail="계정, 역할과 워크스페이스 범위를 관리합니다." onClick={() => navigate('/console/users')} />

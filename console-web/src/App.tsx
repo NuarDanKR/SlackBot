@@ -50,11 +50,11 @@ const NAV: NavGroup[] = [
     { path: '/manage/logs', label: '서비스 로그', minimum: 'developer' },
     { path: '/manage/batches', label: '배치 관리', minimum: 'admin' },
     { path: '/manage/deploy', label: '배포 관리', minimum: 'admin' },
-  ] },
-  { label: '설정·권한', path: '/console', minimum: 'admin', items: [
-    { path: '/console', label: '권한 현황', minimum: 'admin' },
     { path: '/manage/workspaces', label: '워크스페이스 관리', minimum: 'admin' },
     { path: '/manage/environment', label: '환경 설정', minimum: 'admin' },
+  ] },
+  { label: '콘솔 관리', path: '/console', minimum: 'admin', items: [
+    { path: '/console', label: '권한 현황', minimum: 'admin' },
     { path: '/console/users', label: '콘솔 사용자 관리', minimum: 'admin' },
     { path: '/console/audit', label: '감사 기록', minimum: 'admin' },
   ] },

@@ -145,7 +145,7 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
   return (
     <>
       <PageHead
-        crumb="관리자 설정 · 워크스페이스"
+        crumb="운영 · 워크스페이스"
         title="워크스페이스 관리"
         note="새 Slack 앱을 등록하고 표시 이름, 열람 범위, 사용 상태와 토큰을 관리합니다. 저장된 토큰 원문은 다시 표시되지 않습니다."
         aside={<Chip tone="plain">등록 {rows.length}개</Chip>}
