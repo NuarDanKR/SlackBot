@@ -1,0 +1,83 @@
+[Unit]
+# 전문 봇 격리 런타임 — 인스턴스 하나가 전문가 하나다.
+#
+# 설계: docs/design/specialist-runtime-v2.md §런타임 격리
+#
+# **이 파일은 템플릿이고 고정이다.** DB 값이나 업로드 내용으로 unit 을 만들지
+# 않는다. 만들면 매니페스트 한 줄이 곧 systemd 설정이 되고, 그건 root 권한으로
+# 임의 실행하는 것과 같다. 인스턴스 이름(`%i`)은 전문가 key 이고, root helper 가
+# `^[a-z][a-z0-9-]{1,31}$` 를 확인한 뒤에만 이 unit 을 부른다.
+Description=TYBot 전문 봇 %i (격리 컨테이너)
+Documentation=file:///opt/tybot/docs/design/specialist-runtime-v2.md
+After=network-online.target
+# **TYBot 을 끌어오지 않는다.** 전문 봇이 못 뜬다고 마스터가 멈추면, 남의 코드
+# 하나가 Slack 답변 전체를 세우게 된다.
+PartOf=tybot-specialists.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+# 전문가마다 다른 사용자. TYBot·콘솔과 다르다 — 같으면 프로세스 격리가
+# 이름만 남는다.
+User=specialist-%i
+Group=specialist-%i
+
+# 이미지는 **digest 로 고정**한다. 태그는 움직이고, 움직이는 것을 승인하면
+# 승인한 것과 도는 것이 갈린다. 이 값은 root helper 가 배포 시점에
+# drop-in(`/etc/systemd/system/tybot-specialist@%i.service.d/image.conf`)으로
+# 넣는다 — 여기 비어 있으면 기동하지 않는다.
+Environment=TYBOT_SPECIALIST_IMAGE=
+
+# 자격은 **파일로만** 준다. 환경변수는 `/proc/<pid>/environ` 과 크래시 덤프,
+# systemd 상태 출력에 그대로 보인다.
+LoadCredential=hmac:/var/lib/tybot/specialist-secrets/%i/hmac
+
+RuntimeDirectory=tybot-subbots/%i
+RuntimeDirectoryMode=0750
+
+ExecStartPre=/usr/local/libexec/tybot-specialist-run precheck %i
+ExecStart=/usr/local/libexec/tybot-specialist-run start %i
+ExecStopPost=/usr/local/libexec/tybot-specialist-run stop %i
+
+# 반복 장애는 `unhealthy` 다. 무한 재시작하면 죽어 가는 컨테이너를 계속
+# 밀어붙이고, 그 사이 라우팅은 열린 채로 남는다.
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+WatchdogSec=60s
+TimeoutStartSec=60
+TimeoutStopSec=20
+
+# --- 호스트 격리 -------------------------------------------------------------
+# 컨테이너 안의 격리는 Podman 이 하고, 여기서는 **helper 자체**를 가둔다.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+# 쓸 수 있는 곳은 자기 소켓 디렉터리와 자기 컨테이너 상태뿐이다.
+# **아카이브·DB 소켓·`/etc/tybot` 는 없다.**
+ReadWritePaths=/run/tybot-subbots/%i /var/lib/tybot-subbots/%i
+
+# 로그에는 request ID 와 오류 코드만 남는다. 본문이 나오면 아카이브 원문이
+# journald 로 새는 것이다 — 컨테이너 쪽 계약이고 여기서는 크기만 묶는다.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-specialist-%i
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=200
+
+[Install]
+WantedBy=tybot-specialists.target

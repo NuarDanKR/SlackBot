@@ -237,18 +237,30 @@ def _bot(*, creator="", admins=(), owner_of="", boom=False):
         workspace="tyit",
         channel_admin_users=set(admins),
         channel_owners=SimpleNamespace(
+            # `is_manager` = 개설자 또는 위임된 수정 담당자. 권한 판정이 보는
+            # 것은 이쪽이다 — `is_owner` 만 두면 위임된 사람이 빠진다.
+            is_manager=lambda ws, ch, uid: uid == owner_of,
             is_owner=lambda ws, ch, uid: uid == owner_of,
+            managers_of=lambda ws, ch: (),
             owner_of=lambda ws, ch: owner_of,
         ),
         app=SimpleNamespace(client=client),
+        _is_workspace_admin=lambda uid: False,
         _client=client,
     )
 
 
-def _may(bot, user_id, channel_id="C1"):
+def _may(bot, user_id, channel_id="C1", *, workspace_admin=False):
     from tybot.slack.pilot import WorkspaceBot
 
     bot._slack_creator = lambda ch: WorkspaceBot._slack_creator(bot, ch)
+    # Workspace Admin 은 Slack `users.info` 가 판정한다. 기본은 **아니다** —
+    # 켜 두면 「남은 못 고친다」 를 검증할 수 없다.
+    #
+    # **테스트가 미리 심어 둔 것은 덮지 않는다.** 덮으면 그 테스트가 무엇을
+    # 검증하는지와 무관하게 이 기본값이 이긴다.
+    if not hasattr(bot, "_is_workspace_admin"):
+        bot._is_workspace_admin = lambda uid: workspace_admin
     return WorkspaceBot._can_manage_channel(bot, channel_id, user_id)
 
 
@@ -270,6 +282,41 @@ def test_our_own_owner_record_still_counts():
 
     assert _may(bot, "UA")
     assert bot._client.calls == 0, "필요 없는 Slack 호출을 했다"
+
+
+def test_a_delegated_tybot_manager_can_edit():
+    bot = _bot(creator="UA")
+    bot.channel_owners.is_manager = lambda ws, ch, uid: uid == "UMANAGER"
+
+    assert _may(bot, "UMANAGER")
+    assert bot._client.calls == 0
+
+
+def test_a_workspace_admin_can_edit_without_environment_allowlist():
+    bot = _bot(creator="UA")
+    bot._is_workspace_admin = lambda uid: uid == "UADMIN"
+
+    assert _may(bot, "UADMIN")
+
+
+def test_a_regular_member_is_not_treated_as_workspace_admin():
+    bot = _bot(creator="UA")
+    bot._is_workspace_admin = lambda uid: False
+
+    assert not _may(bot, "UMEMBER")
+
+
+def test_workspace_admin_fields_are_read_from_slack_and_cached():
+    from tybot.slack.pilot import WorkspaceBot
+
+    bot = _bot(creator="UA")
+    bot.app.client.users_info = lambda user: {
+        "user": {"id": user, "is_admin": user == "UADMIN"}
+    }
+
+    assert WorkspaceBot._is_workspace_admin(bot, "UADMIN")
+    assert not WorkspaceBot._is_workspace_admin(bot, "UMEMBER")
+    assert bot._workspace_admin_cache == {"UADMIN": True, "UMEMBER": False}
 
 
 def test_a_slack_failure_does_not_widen_permission():
@@ -356,7 +403,10 @@ def test_the_bot_is_never_shown_as_the_owner():
 
     bot = _bot(creator="UBOT")
     bot.channel_owners = SimpleNamespace(
-        is_owner=lambda ws, ch, uid: False, owner_of=lambda ws, ch: ""
+        is_manager=lambda ws, ch, uid: False,
+        is_owner=lambda ws, ch, uid: False,
+        managers_of=lambda ws, ch: (),
+        owner_of=lambda ws, ch: "",
     )
     bot._bot_uid = "UBOT"
     bot._bot_user_id = lambda: "UBOT"
@@ -373,7 +423,10 @@ def test_our_own_record_wins_over_slack():
 
     bot = _bot(creator="UBOT")
     bot.channel_owners = SimpleNamespace(
-        is_owner=lambda ws, ch, uid: False, owner_of=lambda ws, ch: "UA"
+        is_manager=lambda ws, ch, uid: False,
+        is_owner=lambda ws, ch, uid: False,
+        managers_of=lambda ws, ch: (),
+        owner_of=lambda ws, ch: "UA",
     )
     bot._bot_uid = "UBOT"
     bot._bot_user_id = lambda: "UBOT"

@@ -1,0 +1,11 @@
+[Unit]
+# 전문 봇 전체를 한 번에 켜고 끄는 자리.
+#
+# **TYBot 이 이 target 을 필요로 하지 않는다.** 마스터가 전문 봇에 의존하면
+# 남의 코드 하나가 Slack 답변 전체를 세운다. 반대 방향만 둔다 —
+# 전문 봇 unit 들이 이 target 에 속한다(`PartOf`).
+Description=TYBot 전문 봇 (격리 컨테이너) 전체
+Documentation=file:///opt/tybot/docs/design/specialist-runtime-v2.md
+
+[Install]
+WantedBy=multi-user.target

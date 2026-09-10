@@ -280,6 +280,23 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
 fi
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.service" /etc/systemd/system/tybot-deploy.service
 install -m 0644 "$APP_DIR/deploy/tybot-deploy.path"    /etc/systemd/system/tybot-deploy.path
+
+# 전문 봇 격리 런타임(2단계). **템플릿과 helper 는 root 소유로 배치한다** —
+# 콘솔이 쓸 수 있는 곳에 있으면 helper 자체를 바꿔치기할 수 있고, 그러면
+# 「허용 목록에 있는 동작만」 이라는 전제가 사라진다.
+#
+# unit 을 깔아 두는 것과 전문 봇을 켜는 것은 다른 일이다. 여기서는 파일만
+# 놓고, 활성화는 콘솔 승인 → 배포 helper 가 한다.
+install -m 0644 "$APP_DIR/deploy/tybot-specialist@.service"     /etc/systemd/system/tybot-specialist@.service
+install -m 0644 "$APP_DIR/deploy/tybot-specialists.target"     /etc/systemd/system/tybot-specialists.target
+install -o root -g root -m 0755 "$APP_DIR/deploy/tybot-specialist-run"     /usr/local/libexec/tybot-specialist-run
+# 시크릿과 컨테이너 상태. 소유자만 읽는다.
+install -o root -g root -d -m 0700 /var/lib/tybot/specialist-secrets
+install -o root -g root -d -m 0750 /var/lib/tybot-subbots
+# 검역은 **실행 금지**로 마운트하는 것이 전제다. 마운트 옵션은 운영이 정하고,
+# 여기서는 최소한 실행 비트가 붙지 않도록 권한만 잠근다.
+install -o tybot -g tybot -d -m 0700 "$DATA_DIR/subbot-quarantine"
+
 systemctl daemon-reload
 
 # 콘솔의 배포 버튼은 root 권한을 받지 않고 요청 파일만 만든다. 이 path 유닛은 파일
