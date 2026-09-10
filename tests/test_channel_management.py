@@ -112,6 +112,23 @@ def test_clearing_delegates_never_removes_the_creator(tmp_path):
     assert store.is_manager("it", "C1", "U1")
 
 
+def test_slack_creator_backfill_never_overwrites_an_existing_owner(tmp_path):
+    store = ChannelOwnerStore(tmp_path / "channel-owners.json")
+    store.record("it", "C1", "UREQUESTER", "팀-전산_ABB110-회의")
+
+    assert not store.record_if_missing("it", "C1", "USLACK", "renamed")
+    assert store.owner_of("it", "C1") == "UREQUESTER"
+
+
+def test_slack_creator_backfill_preserves_existing_managers(tmp_path):
+    store = ChannelOwnerStore(tmp_path / "channel-owners.json")
+    store.set_managers("it", "C1", ["UMANAGER"], set_by="UADMIN")
+
+    assert store.record_if_missing("it", "C1", "UCREATOR", "기존-채널")
+    assert store.owner_of("it", "C1") == "UCREATOR"
+    assert store.managers_of("it", "C1") == ("UMANAGER",)
+
+
 def test_channel_owner_can_delegate_edit_permission(tmp_path):
     bot = _bot(tmp_path)
     bot.channel_owners.record("it", "C1", "UOWNER", "팀-전산_ABB110-회의")
@@ -172,6 +189,36 @@ def _bot(tmp_path) -> WorkspaceBot:
     bot.channel_owners = ChannelOwnerStore(tmp_path / "channel-owners.json")
     bot._chan_cache = {}
     return bot
+
+
+def test_visible_channel_creators_are_backfilled_on_connect(tmp_path):
+    bot = _bot(tmp_path)
+    bot._bot_uid = "UBOT"
+    client = Mock()
+    client.conversations_list.side_effect = [
+        {
+            "channels": [
+                {"id": "C1", "name": "기존-채널", "creator": "UCREATOR"},
+                {"id": "C2", "name": "봇-생성", "creator": "UBOT"},
+            ],
+            "response_metadata": {"next_cursor": "NEXT"},
+        },
+        {
+            "channels": [
+                {"id": "C3", "name": "다음-채널", "creator": "UOTHER"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        },
+    ]
+    bot.app = Mock(client=client)
+
+    WorkspaceBot._backfill_channel_owners(bot)
+
+    assert bot.channel_owners.owner_of("it", "C1") == "UCREATOR"
+    assert bot.channel_owners.owner_of("it", "C2") == ""
+    assert bot.channel_owners.owner_of("it", "C3") == "UOTHER"
+    assert client.conversations_list.call_count == 2
+    assert client.conversations_list.call_args_list[1].kwargs["cursor"] == "NEXT"
 
 
 def test_create_private_channel_records_owner_and_invites_requester(tmp_path):

@@ -39,4 +39,19 @@ COMMENT ON TABLE review_digest_sent IS
 CREATE INDEX IF NOT EXISTS review_digest_by_date
     ON review_digest_sent (digest_date, kind);
 
+-- 권한. **이게 빠져서 검토 DM 이 한 건도 나가지 않았다**(2026-09-11 확인).
+-- 표 자체는 만들어져 있었고 소유자는 postgres 였다. 봇 역할에 GRANT 가 없어서
+-- 첫 조회가 `permission denied` 로 끊겼고, 그건 "보낼 것이 없다" 와 구별되지 않았다.
+--
+-- 같은 배포에 있는 `channel_reviewer` 는 누군가 손으로 GRANT 를 넣어 두었다.
+-- 손으로 넣는 단계는 한 번은 빠진다. 그래서 스키마 파일이 직접 부여한다.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE review_digest_sent'
+                ' TO tyslackai';
+    END IF;
+END
+$$;
+
 COMMIT;

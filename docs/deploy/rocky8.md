@@ -543,12 +543,34 @@ sudo -u postgres psql -p 55432 -d tyslackai -c "\dx" | grep bigm
 
 ### 요약 검토자 (B-37)
 
+**두 파일을 다 적용한다.** 하나는 누가 검토자인가, 하나는 어디까지 보냈나다.
+
 ```bash
 sudo cat /opt/tybot/deploy/sql/reviewer_schema.sql | sudo -u postgres psql -p 55432 -d tyslackai -f -
+sudo cat /opt/tybot/deploy/sql/review_digest_schema.sql | sudo -u postgres psql -p 55432 -d tyslackai -f -
+```
+
+두 번째 파일이 이 문서에 빠져 있어서 검토 DM 이 한 건도 나가지 않았다(2026-09-11).
+표는 다른 경로로 만들어져 있었지만 소유자가 postgres 였고 봇 역할에 GRANT 가 없었다.
+스키마 파일이 GRANT 까지 넣으므로 **여러 번 실행해도 안전하다.**
+
+적용됐는지 확인 — 봇 역할이 읽고 쓸 수 있어야 한다:
+
+```bash
+sudo -u postgres psql -p 55432 -d tyslackai -tAc   "select has_table_privilege('tyslackai','review_digest_sent','SELECT'),
+          has_table_privilege('tyslackai','review_digest_sent','INSERT')"
+# t|t 가 나와야 한다
 ```
 
 채널에서 `/채널 검토자 @사람 09:00`. **채널 소유자만** 정할 수 있다.
 검토자가 없는 채널은 요약을 반영하지 않는다 — 헬스 체크에 목록으로 올라온다.
+
+DM 이 안 오면 이 순서로 본다.
+
+```bash
+sudo systemctl status tybot-review-dm.timer          # 타이머가 켜져 있나
+sudo journalctl -u tybot-review-dm -n 30 --no-pager  # 권한·수신자 문제는 여기 찍힌다
+```
 
 ### LLM API 키를 DB 로 옮기기
 

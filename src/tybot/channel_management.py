@@ -669,6 +669,37 @@ class ChannelOwnerStore:
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self.path)
 
+    def record_if_missing(
+        self, workspace: str, channel_id: str, owner_user_id: str, name: str
+    ) -> bool:
+        """Slack 개설자를 내부 기록이 비어 있을 때만 보충한다.
+
+        기존 owner는 TYBot 생성 당시의 실제 요청자일 수 있다. Slack API에서는
+        그 채널의 creator가 봇으로 보이므로, 역채움이 기존 값을 덮으면 권한을 잃는다.
+        """
+        if not workspace or not channel_id or not owner_user_id:
+            return False
+        with _OWNER_LOCK:
+            data = self._read()
+            key = f"{workspace}:{channel_id}"
+            existing = data["channels"].get(key)
+            row = existing if isinstance(existing, dict) else {}
+            if row.get("owner_user_id"):
+                return False
+            row["owner_user_id"] = owner_user_id
+            row["name"] = name
+            row.setdefault("created_at", datetime.now(UTC).isoformat(timespec="seconds"))
+            row.setdefault("manager_user_ids", [])
+            row["owner_source"] = "slack_creator_backfill"
+            data["channels"][key] = row
+            version = data.get("version")
+            data["version"] = max(version if isinstance(version, int) else 1, 2)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.path)
+        return True
+
     def owner_of(self, workspace: str, channel_id: str) -> str:
         """이 채널을 만든 사람. 없으면 빈 문자열.
 

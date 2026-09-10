@@ -388,29 +388,96 @@ def test_a_missing_schema_says_what_to_run():
     assert "-p 55432" in dr.SCHEMA_MISSING, "포트를 빠뜨리면 psql 이 소켓을 찾는다"
 
 
-def test_schema_check_reads_the_catalog():
-    class Conn:
-        def __init__(self, value):
-            self.value = value
+# --- 스키마 검사 --------------------------------------------------------------
+#
+# 2026-09-11: 검토 DM 이 한 건도 나가지 않았다. 표는 있었지만 소유자가 postgres 였고
+# 봇 역할에 GRANT 가 없었다. 검사는 `to_regclass` 로 **존재만** 봐서 통과했고, 바로
+# 다음 조회가 permission denied 로 끊겼다. 검사가 통과했는데 동작이 실패했고, 그건
+# "보낼 것이 없다" 와 구별되지 않았다.
+#
+# 그래서 검사는 존재가 아니라 **쓸 수 있는가**를 본다.
+class FakeCur:
+    """지정한 SQL 조각에서만 터지는 커서."""
 
-        class _Cur:
-            def __init__(self, outer):
-                self.outer = outer
+    def __init__(self, *, present="review_digest_sent", fail_on=None):
+        self.present = present
+        self.fail_on = fail_on or ()
+        self.ran: list[str] = []
 
-            def __enter__(self):
-                return self
+    def __enter__(self):
+        return self
 
-            def __exit__(self, *exc):
-                return False
+    def __exit__(self, *exc):
+        return False
 
-            def execute(self, sql):
-                assert "review_digest_sent" in sql
+    def execute(self, sql, params=None):
+        self.ran.append(sql)
+        for needle in self.fail_on:
+            if needle in sql:
+                raise RuntimeError("InsufficientPrivilege")
 
-            def fetchone(self):
-                return {"t": self.outer.value}
+    def fetchone(self):
+        return {"t": self.present}
 
-        def cursor(self):
-            return self._Cur(self)
 
-    assert dr.schema_ready(Conn("review_digest_sent"))
-    assert not dr.schema_ready(Conn(None))
+class FakeSchemaConn:
+    def __init__(self, **kw):
+        self.cur = FakeCur(**kw)
+
+    def cursor(self):
+        return self.cur
+
+
+def test_usable_table_passes():
+    conn = FakeSchemaConn()
+    assert dr.schema_problem(conn) == ""
+    assert dr.schema_ready(conn)
+
+
+def test_missing_table_says_to_create_it():
+    problem = dr.schema_problem(FakeSchemaConn(present=None))
+    assert "테이블이 없습니다" in problem
+    assert "review_digest_schema.sql" in problem
+
+
+def test_table_without_read_permission_is_not_ready():
+    """존재만 보면 이 상태가 통과한다. 그게 이번 사고였다."""
+    conn = FakeSchemaConn(fail_on=("SELECT 1 FROM review_digest_sent",))
+    problem = dr.schema_problem(conn)
+    assert problem
+    assert not dr.schema_ready(conn)
+    # 조치가 다르므로 문장도 달라야 한다 — 표를 만들러 가면 원인은 그대로 남는다.
+    assert "테이블이 없습니다" not in problem
+    assert "권한이 없는" in problem
+
+
+def test_write_permission_is_checked_too():
+    """읽기만 되면 보낸 뒤 이력이 안 남고, 같은 DM 이 하루 종일 간다."""
+    conn = FakeSchemaConn(fail_on=("INSERT INTO review_digest_sent",))
+    assert not dr.schema_ready(conn)
+
+
+def test_probe_does_not_leave_a_row():
+    """쓰기를 시험하되 남기지 않는다. 남기면 그날 몫을 보낸 것으로 오인된다."""
+    conn = FakeSchemaConn()
+    dr.schema_problem(conn)
+    assert any("INSERT INTO review_digest_sent" in s for s in conn.cur.ran)
+    assert any("ROLLBACK TO SAVEPOINT" in s for s in conn.cur.ran)
+
+
+def test_grant_is_in_the_schema_file():
+    """손으로 넣는 단계는 한 번은 빠진다. 파일이 직접 부여해야 한다."""
+    import pathlib
+
+    sql = pathlib.Path("deploy/sql/review_digest_schema.sql").read_text(encoding="utf-8")
+    assert "GRANT" in sql
+    assert "review_digest_sent" in sql.split("GRANT", 1)[1]
+    assert "tyslackai" in sql
+
+
+def test_deploy_doc_applies_the_schema():
+    """문서에 없으면 아무도 문서 절차로 적용하지 않는다 — 이번 사고의 뿌리다."""
+    import pathlib
+
+    doc = pathlib.Path("docs/deploy/rocky8.md").read_text(encoding="utf-8")
+    assert "review_digest_schema.sql" in doc

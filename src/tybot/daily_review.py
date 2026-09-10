@@ -239,23 +239,61 @@ def due(send_at: time, now: datetime) -> bool:
 
 
 # --- 하루에 한 번 -------------------------------------------------------------
-SCHEMA_MISSING = (
-    "review_digest_sent 테이블이 없습니다. 스키마를 먼저 적용하세요:\n"
+_APPLY = (
     "  sudo cat /opt/tybot/deploy/sql/review_digest_schema.sql "
     "| sudo -u postgres psql -p 55432 -d tyslackai -f -"
 )
 
+SCHEMA_MISSING = (
+    "review_digest_sent 테이블이 없습니다. 스키마를 먼저 적용하세요:\n" + _APPLY
+)
 
-def schema_ready(conn) -> bool:
-    """이력 테이블이 있는가.
+# 표는 있는데 못 쓴다. 조치가 다르므로 문장도 다르다 — "테이블이 없다" 를 보면
+# 담당자는 표를 만들러 가고, 원인인 권한 누락은 그대로 남는다.
+SCHEMA_DENIED = (
+    "review_digest_sent 를 읽거나 쓸 수 없습니다({reason}). 표는 있으므로 만들 필요는"
+    " 없고, 봇 역할에 권한이 없는 상태입니다. 아래를 실행하면 스키마 파일이 GRANT 까지"
+    " 넣습니다:\n" + _APPLY
+)
 
-    없으면 회차마다 **채널 수만큼 트레이스백**이 쌓이고, 무엇을 해야 하는지는
-    어디에도 안 적힌다. 시작할 때 한 번 보고 할 일을 말한다.
+
+def schema_problem(conn) -> str:
+    """이력 테이블을 **쓸 수 있는가.** 못 쓰면 할 일을 문장으로 돌려준다.
+
+    예전에는 `to_regclass` 로 존재만 봤다. 그래서 표는 있는데 봇 역할에 GRANT 가
+    없던 상태를 통과시켰고, 바로 다음 조회가 `permission denied` 로 끊겼다.
+    **검사는 통과했는데 동작이 실패하는** 조합이고, 그건 "보낼 것이 없다" 와
+    구별되지 않았다 — 2026-09-11 까지 검토 DM 이 한 건도 나가지 않은 원인이다.
+
+    읽기만 시험하는 것으로는 부족하다. 보낸 뒤에 쓰기가 막히면 이력이 안 남아 같은
+    사람에게 같은 DM 이 하루 종일 간다. 그래서 세이브포인트 안에서 쓰기까지 해 보고
+    되돌린다.
     """
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.review_digest_sent') AS t")
         row = cur.fetchone()
-    return bool(row and row.get("t"))
+        present = row.get("t") if isinstance(row, dict) else (row[0] if row else None)
+        if not present:
+            return SCHEMA_MISSING
+        try:
+            cur.execute("SAVEPOINT probe_review_digest")
+            cur.execute("SELECT 1 FROM review_digest_sent LIMIT 1")
+            cur.execute(
+                "INSERT INTO review_digest_sent"
+                " (workspace, channel_id, recipient, digest_date, kind, item_count)"
+                " VALUES ('__probe__', '__probe__', '__probe__', CURRENT_DATE,"
+                "         'attachment', 0)"
+            )
+        except Exception as exc:  # noqa: BLE001 - 권한·컬럼 등 원인이 여럿이다
+            cur.execute("ROLLBACK TO SAVEPOINT probe_review_digest")
+            return SCHEMA_DENIED.format(reason=type(exc).__name__)
+        cur.execute("ROLLBACK TO SAVEPOINT probe_review_digest")
+    return ""
+
+
+def schema_ready(conn) -> bool:
+    """`schema_problem` 의 예/아니오 판."""
+    return not schema_problem(conn)
 
 
 def already_sent(conn, digest: Digest, *, kind: str = KIND_ATTACHMENT) -> bool:
@@ -377,7 +415,18 @@ def run(
                 # 매일 "없습니다" 가 오면 사람이 이 DM 을 끈다.
                 result.skipped += 1
                 continue
-            if already_sent(conn, digest):
+            try:
+                seen = already_sent(conn, digest)
+            except Exception as exc:  # noqa: BLE001 - 한 사람 때문에 전원이 못 받으면 안 된다
+                # 예전에는 이 조회가 그대로 터져 run() 밖으로 나갔다. 그러면 뒤에
+                # 남은 채널·사람 전부가 못 받고, 로그에는 트레이스백 하나만 남는다.
+                logger.warning(
+                    "발송 이력을 읽지 못했다 ws=%s ch=%s: %s",
+                    workspace, channel_id, type(exc).__name__,
+                )
+                result.failed += 1
+                continue
+            if seen:
                 result.skipped += 1
                 continue
             try:
@@ -389,7 +438,16 @@ def run(
                 )
                 result.failed += 1
                 continue
-            mark_sent(conn, digest)
+            try:
+                mark_sent(conn, digest)
+            except Exception as exc:  # noqa: BLE001 - 이미 보냈다. 여기서 멈추면 더 나쁘다
+                # 보낸 뒤에 이력이 안 남으면 다음 회차에 같은 DM 이 또 간다. 그래도
+                # 나머지 사람을 못 보내게 하는 쪽이 더 나쁘므로 계속한다.
+                logger.error(
+                    "보냈지만 이력을 남기지 못했다 — 중복 발송이 생길 수 있다"
+                    " ws=%s ch=%s: %s",
+                    workspace, channel_id, type(exc).__name__,
+                )
             logger.info(
                 "하루치 발송 ws=%s ch=%s 오늘=%d 밀림=%d",
                 workspace, channel_id, len(digest.today), digest.backlog,
@@ -467,8 +525,9 @@ def main(argv: list[str] | None = None) -> int:
     with psycopg.connect(
         os.environ["DATABASE_URL"], row_factory=psycopg.rows.dict_row
     ) as conn:
-        if not schema_ready(conn):
-            logger.error("%s", SCHEMA_MISSING)
+        problem = schema_problem(conn)
+        if problem:
+            logger.error("%s", problem)
             return 2
         channels = _channels(conn)
         if args.dry_run:
