@@ -24,6 +24,23 @@
 
 코드가 이름보다 세다. 이름은 사람이 바꿀 수 있지만 코드 체계는 그룹웨어가 준다.
 
+## 어떤 조직이 후보인가 — 규칙은 `SELECTABLE_ORG` 한 곳에만 있다
+`org_unit` 은 그룹웨어 조직도를 **그대로** 복제한다. 계열사·SPC·폐지 조직·`퇴직부서`
+까지 다 들어 있다(2026-09-10 기준 1370행 중 태영건설 사용중은 241행). 복제를 좁히지는
+않는다 — 사람의 소속이 계열사 조직을 가리킬 수 있고, 조직개편 전 코드가 이미 채널명에
+박혀 있기도 하다. 지우면 그 연결이 끊긴다.
+
+그래서 **고를 수 있는 것만** 좁힌다.
+
+| 제외 | 이유 |
+|---|---|
+| `active = false` | 폐지된 조직으로 새 채널을 만들 이유가 없다 |
+| `company_code <> 'TY'` | 계열사·SPC. 우리 워크스페이스의 채널 주체가 아니다 |
+| `1_RetireDept`(퇴직부서) | 사용중으로 표시돼 있지만 조직이 아니다 |
+
+이 조건이 두 곳에 흩어지면 검색과 자동 채움이 서로 다른 후보를 내고, 그건 에러가
+아니라 **같은 사람에게 다른 조직**으로 나타난다. 그래서 SQL 조각 하나를 공유한다.
+
 ## 업무는 조직이 아니다
 `업무` 는 다른 팀과 협업하는 채널이라 조직도에 없다. 주관 팀의 코드를 빌리므로
 기본값은 내 팀과 같고, 조직명만 협업 이름으로 바꿔 쓰면 된다.
@@ -38,6 +55,28 @@ from .channels import COLLECT_PREFIXES
 logger = logging.getLogger("tybot.orgsearch")
 
 MAX_OPTIONS = 100
+
+# 고를 수 있는 조직의 조건. 검색과 자동 채움이 **같은 조각**을 쓴다.
+# 별칭은 `o` 로 고정한다 — 쿼리마다 다른 별칭을 쓰면 조각을 공유할 수 없다.
+#
+# 태영건설 사용중 조직만. 회사 코드를 뷰가 이미 실어 보내므로(V_TYSLACK_ORG.company_code)
+# 여기서 판정할 수 있다. 자기 회사 코드를 바꿀 일이 생기면 이 상수만 고친다.
+OWN_COMPANY_CODE = "TY"
+
+# 그룹웨어에 사용중으로 남아 있지만 조직이 아니다. 퇴직자를 담아 두는 자리다.
+NON_ORG_CODES = ("1_RetireDept",)
+
+SELECTABLE_ORG = """
+    o.active
+    and o.company_code = %(company)s
+    and o.code <> all(%(non_org)s)
+"""
+
+
+def selectable_params() -> dict:
+    """`SELECTABLE_ORG` 가 쓰는 바인딩. 쿼리마다 다시 적지 않는다."""
+    return {"company": OWN_COMPANY_CODE, "non_org": list(NON_ORG_CODES)}
+
 MAX_TEXT = 75
 MAX_VALUE = 150
 
@@ -128,7 +167,7 @@ def split_org_name(name: str) -> tuple[str, str]:
 #
 # depth 로 재귀를 끊는다. 스키마가 자기 자신을 부모로 두는 것만 막고 더 긴 순환은
 # 막지 못한다. 순환이 생기면 이 조회가 영원히 도는 대신 20단계에서 멈춘다.
-MY_ORGS_SQL = """
+MY_ORGS_SQL = f"""
 with recursive up as (
     select o.code, o.name, o.parent_code, 1 as depth
       from org_unit o
@@ -137,12 +176,12 @@ with recursive up as (
         on ui.emp_no = e.emp_no
        and ui.workspace = %(workspace)s
        and ui.slack_user = %(slack_user)s
-     where o.active
+     where {SELECTABLE_ORG.strip()}
     union all
     select p.code, p.name, p.parent_code, up.depth + 1
       from org_unit p
       join up on p.code = up.parent_code
-     where p.active and up.depth < 20
+     where {SELECTABLE_ORG.strip().replace("o.", "p.")} and up.depth < 20
 )
 select code, name, depth from up order by depth
 """
@@ -153,7 +192,9 @@ def my_org_chain(conn, *, workspace: str, slack_user: str) -> list[OrgHit]:
     if not workspace or not slack_user:
         return []
     with conn.cursor() as cur:
-        cur.execute(MY_ORGS_SQL, {"workspace": workspace, "slack_user": slack_user})
+        cur.execute(MY_ORGS_SQL, {
+            **selectable_params(), "workspace": workspace, "slack_user": slack_user,
+        })
         rows = cur.fetchall()
     out: list[OrgHit] = []
     for raw in rows:
@@ -186,11 +227,11 @@ NO_CHAIN = (
 )
 
 
-SEARCH_SQL = """
+SEARCH_SQL = f"""
 select o.code, o.name, coalesce(p.name, '') as parent_name
   from org_unit o
   left join org_unit p on p.code = o.parent_code
- where o.active
+ where {SELECTABLE_ORG.strip()}
    and (o.name ilike %(like)s or o.code ilike %(prefix)s)
  order by
    case when o.name ilike %(prefix)s then 0 else 1 end,
@@ -207,6 +248,7 @@ def search(conn, query: str, *, limit: int = MAX_OPTIONS) -> list[OrgHit]:
         return []
     with conn.cursor() as cur:
         cur.execute(SEARCH_SQL, {
+            **selectable_params(),
             "like": f"%{q}%",
             "prefix": f"{q}%",
             "limit": max(1, min(limit, MAX_OPTIONS)),

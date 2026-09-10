@@ -168,7 +168,8 @@ def test_chain_walks_up_from_my_org():
     assert [h.code for h in chain] == ["ABB110", "ABB300"]
     sql, params = conn.executed[-1]
     assert "with recursive" in sql
-    assert params == {"workspace": "pilot", "slack_user": "U1"}
+    assert params["workspace"] == "pilot"
+    assert params["slack_user"] == "U1"
 
 
 def test_chain_stops_recursing_on_a_cycle():
@@ -474,3 +475,50 @@ def test_org_search_filters_results_to_the_selected_prefix(monkeypatch):
     )
     found = _bot()._org_options("경영", prefix="본사팀")
     assert [item["value"] for item in found] == ["ABB110|본사팀|전산"]
+
+
+# --- 고를 수 있는 조직 --------------------------------------------------------
+#
+# `org_unit` 은 그룹웨어 조직도를 그대로 복제한다 — 계열사·SPC·폐지 조직·`퇴직부서`
+# 까지. 복제를 좁히지 않는 대신 **고를 수 있는 것만** 좁힌다. 사람의 소속이 계열사
+# 조직을 가리킬 수 있고, 개편 전 코드가 이미 채널명에 박혀 있기도 하다.
+def test_selectable_excludes_other_companies_and_dead_orgs():
+    from tybot.orgsearch import SELECTABLE_ORG
+
+    assert "o.active" in SELECTABLE_ORG
+    assert "o.company_code = %(company)s" in SELECTABLE_ORG
+    assert "o.code <> all(%(non_org)s)" in SELECTABLE_ORG
+
+
+def test_retire_department_is_not_an_org():
+    """퇴직부서는 사용중으로 표시돼 있지만 조직이 아니다."""
+    from tybot.orgsearch import NON_ORG_CODES, selectable_params
+
+    assert "1_RetireDept" in NON_ORG_CODES
+    assert selectable_params()["non_org"] == list(NON_ORG_CODES)
+    assert selectable_params()["company"] == "TY"
+
+
+def test_search_and_chain_share_one_rule():
+    """조건이 갈라지면 에러가 아니라 **같은 사람에게 다른 조직**으로 나타난다."""
+    from tybot.orgsearch import MY_ORGS_SQL, SEARCH_SQL
+
+    for fragment in ("company_code = %(company)s", "<> all(%(non_org)s)"):
+        assert fragment in SEARCH_SQL, fragment
+        assert fragment in MY_ORGS_SQL, fragment
+    # 상위 사슬은 별칭이 p 다. 별칭까지 함께 바뀌어야 한다.
+    assert "p.company_code = %(company)s" in MY_ORGS_SQL
+
+
+def test_both_queries_bind_the_shared_params():
+    conn = FakeConn([{"code": "ABB110", "name": "전산팀", "parent_name": "경영본부"}])
+    search(conn, "전산")
+    _, params = conn.executed[-1]
+    assert params["company"] == "TY"
+    assert params["non_org"] == ["1_RetireDept"]
+
+    conn = FakeConn(CHAIN_ROWS)
+    my_org_chain(conn, workspace="pilot", slack_user="U1")
+    _, params = conn.executed[-1]
+    assert params["company"] == "TY"
+    assert params["non_org"] == ["1_RetireDept"]
