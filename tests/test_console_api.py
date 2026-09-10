@@ -1324,6 +1324,7 @@ def test_specialist_change_requires_csrf(client):
 
 def _imported_specialist() -> dict:
     return {
+        "sourceType": "git", "sourceName": "", "bundleSha256": "",
         "repositoryUrl": "https://github.com/wkimclementia/hermes",
         "releaseRef": "v1.0.0",
         "sourceCommit": "a" * 40,
@@ -1385,6 +1386,78 @@ def test_specialist_git_request_is_revalidated(client, monkeypatch):
 
     assert response.status_code == 422
     assert called is False
+
+
+def test_developer_can_upload_specialist_contract_zip(client, monkeypatch):
+    imported = {
+        **_imported_specialist(),
+        "sourceType": "zip", "sourceName": "hermes-v1.0.0.zip",
+        "bundleSha256": "c" * 64, "repositoryUrl": "", "releaseRef": "",
+        "sourceCommit": "",
+    }
+    monkeypatch.setattr(console_app.specialist_zip, "import_bundle", lambda *_args: imported)
+    monkeypatch.setattr(console_app.specialist_zip, "issue_receipt", lambda *_args: "receipt")
+
+    response = client.post(
+        "/api/specialists/import-upload",
+        headers={
+            **_write_headers(member(client)),
+            "Content-Type": "application/zip",
+            "X-TYBot-Filename": "hermes-v1.0.0.zip",
+        },
+        content=b"PK-test",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["uploadReceipt"] == "receipt"
+    assert response.json()["sourceType"] == "zip"
+
+
+def test_zip_request_rejects_changed_content(client, monkeypatch):
+    imported = {
+        **_imported_specialist(),
+        "sourceType": "zip", "sourceName": "hermes-v1.0.0.zip",
+        "bundleSha256": "c" * 64, "repositoryUrl": "", "releaseRef": "",
+        "sourceCommit": "",
+    }
+    receipt = console_app.specialist_zip.issue_receipt(imported, "dan@taeyoung.com")
+    body = {**imported, "workspaces": ["fin"], "state": "draft", "uploadReceipt": receipt}
+    body.pop("checks")
+    body["rules"] = "업로드 뒤 바꾼 규칙"
+
+    response = client.post(
+        "/api/specialists/requests", headers=_write_headers(owner(client)), json=body,
+    )
+
+    assert response.status_code == 422
+    assert "영수증" in response.json()["detail"]
+
+
+def test_zip_request_accepts_the_server_verified_contract(client, monkeypatch):
+    imported = {
+        **_imported_specialist(),
+        "sourceType": "zip", "sourceName": "hermes-v1.0.0.zip",
+        "bundleSha256": "c" * 64, "repositoryUrl": "", "releaseRef": "",
+        "sourceCommit": "",
+    }
+    receipt = console_app.specialist_zip.issue_receipt(imported, "dan@taeyoung.com")
+    body = {**imported, "workspaces": ["fin"], "state": "draft", "uploadReceipt": receipt}
+    body.pop("checks")
+    seen: dict = {}
+    monkeypatch.setattr(
+        console_app.specialist_store,
+        "create_request",
+        lambda **kwargs: seen.update(kwargs) or 7,
+    )
+    monkeypatch.setattr(console_app.specialist_store, "list_requests", lambda: [])
+
+    response = client.post(
+        "/api/specialists/requests", headers=_write_headers(owner(client)), json=body,
+    )
+
+    assert response.status_code == 200
+    assert seen["proposal"]["sourceType"] == "zip"
+    assert "uploadReceipt" not in seen["proposal"]
 
 
 def test_developer_cannot_request_specialist_outside_workspace(client, monkeypatch):

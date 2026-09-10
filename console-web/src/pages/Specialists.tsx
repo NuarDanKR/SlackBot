@@ -47,6 +47,10 @@ interface SpecialistResponse { specialists: Specialist[]; requests: SpecialistRe
 interface ModelResponse { models: GatewayModel[] }
 interface WorkspaceOptions { workspaces: { key: string; label: string }[] }
 interface SpecialistImportResult {
+  sourceType: 'git' | 'zip'
+  sourceName: string
+  bundleSha256: string
+  uploadReceipt?: string
   repositoryUrl: string
   releaseRef: string
   sourceCommit: string
@@ -72,10 +76,13 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
     version: '', contractVersion: 'v1', model: '', routingHint: '',
     minConfidence: 0.6, rules: '', repositoryUrl: '', releaseRef: '',
     sourceCommit: '', artifactHashes: {} as Record<string, string>,
+    sourceType: 'manual' as 'manual' | 'git' | 'zip', sourceName: '',
+    bundleSha256: '', uploadReceipt: '',
   })
   const [repositoryUrl, setRepositoryUrl] = useState('')
   const [release, setRelease] = useState('latest')
   const [imported, setImported] = useState<SpecialistImportResult | null>(null)
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
   // 워크스페이스는 쉼표 문자열이 아니라 **고른 목록**으로 다룬다.
   const [picked, setPicked] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
@@ -117,8 +124,41 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
         releaseRef: result.releaseRef,
         sourceCommit: result.sourceCommit,
         artifactHashes: result.artifactHashes,
+        sourceType: result.sourceType,
+        sourceName: result.sourceName,
+        bundleSha256: result.bundleSha256,
+        uploadReceipt: '',
       }))
       onToast(`${result.key} ${result.releaseRef} 계약을 검증했습니다.`)
+    } catch (caught) { setError(caught instanceof ApiError ? caught.message : String(caught)) }
+    finally { setBusy(false) }
+  }
+  async function importUpload() {
+    if (!uploadFile) return
+    setBusy(true); setError(null); setImported(null)
+    try {
+      const result = await api.secureUpload<SpecialistImportResult>('/api/specialists/import-upload', uploadFile)
+      setImported(result)
+      setDraft((current) => ({
+        ...current,
+        key: result.key,
+        name: result.name,
+        domain: result.domain,
+        adapter: result.adapter,
+        state: 'draft',
+        version: result.version,
+        contractVersion: result.contractVersion,
+        rules: result.rules,
+        repositoryUrl: '',
+        releaseRef: '',
+        sourceCommit: '',
+        artifactHashes: result.artifactHashes,
+        sourceType: 'zip',
+        sourceName: result.sourceName,
+        bundleSha256: result.bundleSha256,
+        uploadReceipt: result.uploadReceipt ?? '',
+      }))
+      onToast(`${result.key} 계약 ZIP을 검증했습니다.`)
     } catch (caught) { setError(caught instanceof ApiError ? caught.message : String(caught)) }
     finally { setBusy(false) }
   }
@@ -127,6 +167,7 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
     setDraft((current) => ({
       ...current,
       repositoryUrl: '', releaseRef: '', sourceCommit: '', artifactHashes: {},
+      sourceType: 'manual', sourceName: '', bundleSha256: '', uploadReceipt: '',
     }))
   }
   async function decide(id: string, decision: 'approve' | 'reject') {
@@ -152,6 +193,10 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
       releaseRef: row.releaseRef,
       sourceCommit: row.sourceCommit,
       artifactHashes: row.artifactHashes,
+      sourceType: row.sourceType,
+      sourceName: row.sourceName,
+      bundleSha256: row.bundleSha256,
+      uploadReceipt: '',
     })
     setImported(null)
     setPicked(row.workspaces)
@@ -164,23 +209,30 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
   return <><PageHead crumb="관리 · 전문 봇" title="전문 봇 관리"
     note="전문 봇 등록·변경 요청을 만들고 검토합니다. 관리자가 만든 요청도 다른 관리자의 승인을 받아야 적용됩니다." />
     {error && <div className="notice bad"><div><div className="notice-title">처리하지 못했습니다.</div><div className="notice-detail">{error}</div></div></div>}
-    <Section title="Git 릴리스 가져오기" lead="공개 GitHub 저장소의 불변 태그에서 전문 봇 계약만 읽습니다. 저장소 코드는 실행하거나 TYBot 소스 폴더에 복사하지 않습니다.">
+    <Section title="전문 봇 계약 가져오기" lead="Git 릴리스 또는 계약 ZIP에서 검증된 파일만 읽습니다. 저장소 코드와 ZIP의 실행 파일은 실행하거나 TYBot 소스 폴더에 복사하지 않습니다.">
       <div className="card card-pad">
+        <div className="section-kicker">Git 릴리스</div>
         <div className="form-grid specialist-form">
           <div className="field field-wide"><label className="field-label" htmlFor="specialist-repository-url">GitHub 저장소 URL</label><input id="specialist-repository-url" className="input" type="url" placeholder="https://github.com/organization/specialist" value={repositoryUrl} onChange={(event) => setRepositoryUrl(event.target.value)} /></div>
           <div className="field"><label className="field-label" htmlFor="specialist-release">릴리스</label><input id="specialist-release" className="input" placeholder="latest 또는 v1.0.0" value={release} onChange={(event) => setRelease(event.target.value)} /><div className="field-help"><code>latest</code>는 GitHub Release가 필요합니다. 태그를 직접 입력하면 해당 태그를 검사합니다.</div></div>
         </div>
         <div className="form-row"><button className="btn btn-primary" type="button" disabled={busy || !repositoryUrl.trim() || !release.trim()} onClick={importRelease}>가져와서 검증</button></div>
-        {imported && <div className="notice ok"><div><div className="notice-title">{imported.key} {imported.releaseRef}</div><div className="notice-detail mono">{imported.sourceCommit}</div>{imported.checks.map((check) => <div className="notice-detail" key={check.id}>{check.detail}</div>)}</div></div>}
+        <hr className="divider" />
+        <div className="section-kicker">계약 ZIP</div>
+        <div className="form-grid specialist-form">
+          <div className="field field-wide"><label className="field-label" htmlFor="specialist-upload">계약 파일</label><input id="specialist-upload" className="input" type="file" accept=".zip,application/zip" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} /><div className="field-help">2MB 이하의 ZIP 안에 tybot-specialist.toml과 contract/만 포함해야 합니다.</div></div>
+        </div>
+        <div className="form-row"><button className="btn" type="button" disabled={busy || !uploadFile} onClick={importUpload}>파일 검증</button></div>
+        {imported && <div className="notice ok"><div><div className="notice-title">{imported.key} {imported.version}</div>{imported.sourceType === 'git' && <div className="notice-detail mono">{imported.releaseRef} · {imported.sourceCommit}</div>}{imported.sourceType === 'zip' && <div className="notice-detail mono">{imported.sourceName} · {imported.bundleSha256}</div>}{imported.checks.map((check) => <div className="notice-detail" key={check.id}>{check.detail}</div>)}</div></div>}
       </div>
     </Section>
-    <Section title="등록된 전문 봇" note={`${filtered.length}개`}><div className="table-wrap"><table className="table"><thead><tr><th>전문 봇</th><th>분야</th><th>어댑터</th><th>모델</th><th>버전</th><th>적용 범위</th><th>상태</th><th>요청</th></tr></thead><tbody>{filtered.map((row) => <tr key={row.key}><td>{row.name}<div className="ws-key">{row.key}</div></td><td>{row.domain}</td><td className="mono">{row.adapter}{!row.adapterAvailable && <div className="hint">런타임 미배포</div>}</td><td className="mono">{row.model || '기본'}{row.hasRules && <div className="hint">규칙 v{row.rulesVersion}</div>}</td><td>{row.version || '-'}<div className="hint">계약 {row.contractVersion}</div>{row.releaseRef && <div className="hint mono">{row.releaseRef} · {row.sourceCommit.slice(0, 12)}</div>}</td><td>{row.workspaces.join(', ') || '미지정'}</td><td>{stateChip(row.state, row.health)}{row.errorCode && <div className="hint mono">{row.errorCode}</div>}</td><td><button className="btn btn-sm" type="button" onClick={() => edit(row)}>변경 요청</button></td></tr>)}</tbody></table></div></Section>
+    <Section title="등록된 전문 봇" note={`${filtered.length}개`}><div className="table-wrap"><table className="table"><thead><tr><th>전문 봇</th><th>분야</th><th>어댑터</th><th>모델</th><th>버전</th><th>적용 범위</th><th>상태</th><th>요청</th></tr></thead><tbody>{filtered.map((row) => <tr key={row.key}><td>{row.name}<div className="ws-key">{row.key}</div></td><td>{row.domain}</td><td className="mono">{row.adapter}{!row.adapterAvailable && <div className="hint">런타임 미배포</div>}</td><td className="mono">{row.model || '기본'}{row.hasRules && <div className="hint">규칙 v{row.rulesVersion}</div>}</td><td>{row.version || '-'}<div className="hint">계약 {row.contractVersion}</div>{row.sourceType === 'git' && <div className="hint mono">{row.releaseRef} · {row.sourceCommit.slice(0, 12)}</div>}{row.sourceType === 'zip' && <div className="hint mono">ZIP · {row.sourceName} · {row.bundleSha256.slice(0, 12)}</div>}</td><td>{row.workspaces.join(', ') || '미지정'}</td><td>{stateChip(row.state, row.health)}{row.errorCode && <div className="hint mono">{row.errorCode}</div>}</td><td><button className="btn btn-sm" type="button" onClick={() => edit(row)}>변경 요청</button></td></tr>)}</tbody></table></div></Section>
     <Section title="승인 대기 및 이력" note={`${data?.requests.length ?? 0}건`}><div className="table-wrap"><table className="table"><thead><tr><th>요청</th><th>전문 봇</th><th>요청자</th><th>상태</th><th>처리</th></tr></thead><tbody>{(data?.requests ?? []).map((row) => <tr key={row.id}><td>#{row.id}<div className="hint">{fmt.dayClock(row.requestedAt)}</div></td><td className="mono">{row.specialist}</td><td>{row.requester}</td><td>{REQUEST_STATE_LABEL[row.state]}</td><td>{user.role === 'admin' && row.state === 'awaiting_approval' ? <div className="form-row"><button className="btn btn-sm btn-primary" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'approve', specialist: row.specialist, requester: row.requester })}>승인</button><button className="btn btn-sm" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'reject', specialist: row.specialist, requester: row.requester })}>반려</button></div> : '-'}</td></tr>)}</tbody></table></div></Section>
     <Section title="등록·변경 요청" lead="개발자와 관리자가 등록 정보와 변경 사항을 제출할 수 있습니다. 다른 관리자가 승인한 뒤에만 적용되며, 활성화는 런타임 어댑터가 배포된 뒤에만 가능합니다."><div className="card card-pad"><div className="form-grid specialist-form">
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-key">키</label><input id="specialist-draft-key" className="input" readOnly={Boolean(draft.repositoryUrl)} placeholder="예: hermes" value={draft.key} onChange={(e) => setDraft({ ...draft, key: e.target.value })} /></div>
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-name">표시 이름</label><input id="specialist-draft-name" className="input" readOnly={Boolean(draft.repositoryUrl)} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-domain">담당 분야</label><input id="specialist-draft-domain" className="input" readOnly={Boolean(draft.repositoryUrl)} value={draft.domain} onChange={(e) => setDraft({ ...draft, domain: e.target.value })} /></div>
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-adapter">어댑터</label><select id="specialist-draft-adapter" className="input" disabled={Boolean(draft.repositoryUrl)} value={draft.adapter} onChange={(e) => setDraft({ ...draft, adapter: e.target.value })}>{(data?.adapters ?? []).map((a) => <option key={a.key} value={a.key}>{a.name} ({a.available ? '배포됨' : '미배포'})</option>)}</select></div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-key">키</label><input id="specialist-draft-key" className="input" readOnly={draft.sourceType !== 'manual'} placeholder="예: hermes" value={draft.key} onChange={(e) => setDraft({ ...draft, key: e.target.value })} /></div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-name">표시 이름</label><input id="specialist-draft-name" className="input" readOnly={draft.sourceType !== 'manual'} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-domain">담당 분야</label><input id="specialist-draft-domain" className="input" readOnly={draft.sourceType !== 'manual'} value={draft.domain} onChange={(e) => setDraft({ ...draft, domain: e.target.value })} /></div>
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-adapter">어댑터</label><select id="specialist-draft-adapter" className="input" disabled={draft.sourceType !== 'manual'} value={draft.adapter} onChange={(e) => setDraft({ ...draft, adapter: e.target.value })}>{(data?.adapters ?? []).map((a) => <option key={a.key} value={a.key}>{a.name} ({a.available ? '배포됨' : '미배포'})</option>)}</select></div>
       <div className="field"><label className="field-label" htmlFor="specialist-draft-state">상태</label><select id="specialist-draft-state" className="input" value={draft.state} onChange={(e) => setDraft({ ...draft, state: e.target.value })}><option value="draft">초안</option><option value="enabled">사용</option><option value="disabled">사용 중지</option></select></div>
       <div className="field"><label className="field-label" htmlFor="specialist-draft-model">모델</label>
         <select id="specialist-draft-model" className="input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })}>
@@ -201,10 +253,10 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
         <input id="specialist-draft-confidence" className="input" type="number" min={0} max={1} step={0.05} value={draft.minConfidence} onChange={(e) => setDraft({ ...draft, minConfidence: Number(e.target.value) })} />
         <div className="field-help">라우터 판정이 이보다 낮으면 마스터가 직접 답합니다. 틀렸을 때 손해가 큰 분야는 높게 둡니다.</div>
       </div>
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-version">배포 버전</label><input id="specialist-draft-version" className="input" readOnly={Boolean(draft.repositoryUrl)} placeholder="예: 1.4.2" value={draft.version} onChange={(e) => setDraft({ ...draft, version: e.target.value })} />
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-version">배포 버전</label><input id="specialist-draft-version" className="input" readOnly={draft.sourceType !== 'manual'} placeholder="예: 1.4.2" value={draft.version} onChange={(e) => setDraft({ ...draft, version: e.target.value })} />
         <div className="field-help">그 팀이 배포한 전문 봇의 버전입니다. 표시용이고 동작에 쓰이지 않습니다.</div>
       </div>
-      <div className="field"><label className="field-label" htmlFor="specialist-draft-contract">계약 버전</label><input id="specialist-draft-contract" className="input" readOnly={Boolean(draft.repositoryUrl)} value={draft.contractVersion} onChange={(e) => setDraft({ ...draft, contractVersion: e.target.value })} />
+      <div className="field"><label className="field-label" htmlFor="specialist-draft-contract">계약 버전</label><input id="specialist-draft-contract" className="input" readOnly={draft.sourceType !== 'manual'} value={draft.contractVersion} onChange={(e) => setDraft({ ...draft, contractVersion: e.target.value })} />
         <div className="field-help">주고받는 형식의 판(현재 v1). 우리 코드가 검사할 수 있는 값만 승인됩니다 — 배포 버전과 달리 <strong>동작을 바꿉니다</strong>.</div>
       </div>
       <div className="field field-wide"><label className="field-label">적용 워크스페이스</label>
@@ -220,10 +272,10 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
         <div className="field-help">고르지 않으면 이 전문가는 어디에서도 호출되지 않습니다.</div>
       </div>
       <div className="field field-wide"><label className="field-label" htmlFor="specialist-draft-rules">답변 규칙</label>
-        <textarea id="specialist-draft-rules" className="input" readOnly={Boolean(draft.repositoryUrl)} rows={8} maxLength={8000} placeholder="비워 두면 저장소의 기본 규칙을 씁니다." value={draft.rules} onChange={(e) => setDraft({ ...draft, rules: e.target.value })} />
-        <div className="field-help">{draft.repositoryUrl ? `${draft.repositoryUrl} · ${draft.releaseRef} · ${draft.sourceCommit.slice(0, 12)}` : '이 전문가가 답할 때의 지시문입니다. 승인 뒤 다음 답변부터 적용됩니다.'}</div>
+        <textarea id="specialist-draft-rules" className="input" readOnly={draft.sourceType !== 'manual'} rows={8} maxLength={8000} placeholder="비워 두면 저장소의 기본 규칙을 씁니다." value={draft.rules} onChange={(e) => setDraft({ ...draft, rules: e.target.value })} />
+        <div className="field-help">{draft.sourceType === 'git' ? `${draft.repositoryUrl} · ${draft.releaseRef} · ${draft.sourceCommit.slice(0, 12)}` : draft.sourceType === 'zip' ? `${draft.sourceName} · SHA-256 ${draft.bundleSha256.slice(0, 12)}` : '이 전문가가 답할 때의 지시문입니다. 승인 뒤 다음 답변부터 적용됩니다.'}</div>
       </div>
-    </div><div className="form-row">{draft.repositoryUrl && <button className="btn" type="button" onClick={detachRelease}>Git 연결 해제</button>}<button className="btn btn-primary" disabled={busy || !draft.key || !draft.name || !draft.domain} onClick={requestChange}>승인 요청</button></div></div></Section>
+    </div><div className="form-row">{draft.sourceType !== 'manual' && <button className="btn" type="button" onClick={detachRelease}>가져오기 연결 해제</button>}<button className="btn btn-primary" disabled={busy || !draft.key || !draft.name || !draft.domain} onClick={requestChange}>승인 요청</button></div></div></Section>
     <ConfirmDialog open={decisionPending !== null} title={`전문 봇 변경 요청을 ${decisionPending?.decision === 'approve' ? '승인' : '반려'}할까요?`}
       detail={`${decisionPending?.specialist ?? ''} · 요청자 ${decisionPending?.requester ?? ''}. 처리 결과와 승인자는 감사 기록에 남습니다.`}
       confirmLabel={decisionPending?.decision === 'approve' ? '변경 승인' : '요청 반려'} danger={decisionPending?.decision === 'reject'} busy={busy}

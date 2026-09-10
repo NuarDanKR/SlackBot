@@ -161,14 +161,22 @@ def _validate_proposal(proposal: dict) -> dict:
     repository_url = str(proposal.get("repositoryUrl") or "").strip()
     release_ref = str(proposal.get("releaseRef") or "").strip()
     source_commit = str(proposal.get("sourceCommit") or "").strip().lower()
+    source_type = str(proposal.get("sourceType") or "").strip().lower()
+    source_name = str(proposal.get("sourceName") or "").strip()
+    bundle_sha256 = str(proposal.get("bundleSha256") or "").strip().lower()
     raw_hashes = proposal.get("artifactHashes") or {}
     if not isinstance(raw_hashes, dict):
         raise SpecialistStoreError("릴리스 artifact 해시 형식이 잘못됐습니다.")
     artifact_hashes = {str(path): str(digest).lower() for path, digest in raw_hashes.items()}
-    provenance = (repository_url, release_ref, source_commit, artifact_hashes)
-    if any(provenance) and not all(provenance):
-        raise SpecialistStoreError("Git 릴리스 출처 정보가 일부만 제출됐습니다.")
-    if repository_url:
+    if not source_type:
+        source_type = "git" if repository_url else "manual"
+    if source_type not in {"manual", "git", "zip"}:
+        raise SpecialistStoreError("지원하지 않는 전문 봇 출처 형식입니다.")
+    if source_type == "git":
+        if not all((repository_url, release_ref, source_commit, artifact_hashes)):
+            raise SpecialistStoreError("Git 릴리스 출처 정보가 일부만 제출됐습니다.")
+        if source_name or bundle_sha256:
+            raise SpecialistStoreError("Git 릴리스에 ZIP 출처 정보가 함께 제출됐습니다.")
         from .specialist_git import SpecialistGitError, normalize_repository_url
 
         try:
@@ -183,6 +191,25 @@ def _validate_proposal(proposal: dict) -> dict:
             for path, digest in artifact_hashes.items()
         ):
             raise SpecialistStoreError("Git 릴리스 artifact 해시가 계약과 다릅니다.")
+    elif source_type == "zip":
+        if repository_url or release_ref or source_commit:
+            raise SpecialistStoreError("ZIP 업로드에 Git 출처 정보가 함께 제출됐습니다.")
+        if (
+            not source_name
+            or len(source_name) > 150
+            or not source_name.lower().endswith(".zip")
+            or "/" in source_name
+            or "\\" in source_name
+            or not HASH_RE.fullmatch(bundle_sha256)
+        ):
+            raise SpecialistStoreError("ZIP 파일명 또는 묶음 해시 형식이 잘못됐습니다.")
+        if not 1 <= len(artifact_hashes) <= 20 or any(
+            not path.startswith("contract/") or not HASH_RE.fullmatch(digest)
+            for path, digest in artifact_hashes.items()
+        ):
+            raise SpecialistStoreError("ZIP artifact 해시가 계약과 다릅니다.")
+    elif any((repository_url, release_ref, source_commit, source_name, bundle_sha256, artifact_hashes)):
+        raise SpecialistStoreError("수동 요청에 검증되지 않은 출처 정보가 포함됐습니다.")
 
     return {
         "key": key,
@@ -201,6 +228,9 @@ def _validate_proposal(proposal: dict) -> dict:
         "releaseRef": release_ref,
         "sourceCommit": source_commit,
         "artifactHashes": artifact_hashes,
+        "sourceType": source_type,
+        "sourceName": source_name,
+        "bundleSha256": bundle_sha256,
     }
 
 
@@ -215,6 +245,11 @@ def create_request(*, actor: str, proposal: dict) -> int:
             {"id": "repository", "state": "pass", "detail": clean["repositoryUrl"]},
             {"id": "release", "state": "pass", "detail": clean["releaseRef"]},
             {"id": "commit", "state": "pass", "detail": clean["sourceCommit"]},
+        ])
+    elif clean["sourceType"] == "zip":
+        checks.extend([
+            {"id": "upload", "state": "pass", "detail": clean["sourceName"]},
+            {"id": "bundle", "state": "pass", "detail": clean["bundleSha256"]},
         ])
     try:
         with _connect() as conn, conn.cursor() as cur:
@@ -274,9 +309,10 @@ def decide_request(
                         (key, name, domain, adapter, state, version, contract_version,
                          model, routing_hint, min_confidence, rules, rules_version,
                          repository_url, release_ref, source_commit, artifact_hashes,
+                         source_type, source_name, bundle_sha256,
                          created_by, updated_by)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1,
-                            %s, %s, %s, %s, %s, %s)
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (key) DO UPDATE SET
                         name = excluded.name, domain = excluded.domain,
                         adapter = excluded.adapter, state = excluded.state,
@@ -290,6 +326,9 @@ def decide_request(
                         release_ref = excluded.release_ref,
                         source_commit = excluded.source_commit,
                         artifact_hashes = excluded.artifact_hashes,
+                        source_type = excluded.source_type,
+                        source_name = excluded.source_name,
+                        bundle_sha256 = excluded.bundle_sha256,
                         -- 규칙이 실제로 바뀔 때만 올린다. 이름만 고친 승인에도
                         -- 버전이 오르면 「무엇이 돌고 있나」 의 뜻이 사라진다.
                         rules_version = specialist_bot.rules_version
@@ -302,7 +341,8 @@ def decide_request(
                      p.get("routingHint", ""), p.get("minConfidence", 0.6),
                      p.get("rules", ""), p.get("repositoryUrl", ""),
                      p.get("releaseRef", ""), p.get("sourceCommit", ""),
-                     json.dumps(p.get("artifactHashes", {})), actor, actor),
+                     json.dumps(p.get("artifactHashes", {})), p.get("sourceType", "manual"),
+                     p.get("sourceName", ""), p.get("bundleSha256", ""), actor, actor),
                 )
                 cur.execute("DELETE FROM specialist_workspace WHERE specialist = %s", (p["key"],))
                 for workspace in p["workspaces"]:

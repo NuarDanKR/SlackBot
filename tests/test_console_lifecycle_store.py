@@ -60,3 +60,17 @@ def test_specialist_request_rejects_partial_git_provenance():
             "adapter": "hermes", "state": "draft", "workspaces": ["tyit"],
             "repositoryUrl": "https://github.com/wkimclementia/hermes",
         })
+
+
+def test_specialist_request_keeps_verified_zip_provenance():
+    value = specialist_store._validate_proposal({
+        "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+        "adapter": "hermes", "state": "draft", "workspaces": ["tyit"],
+        "sourceType": "zip", "sourceName": "hermes-v1.0.0.zip",
+        "bundleSha256": "a" * 64,
+        "artifactHashes": {"contract/prompts/system.md": "b" * 64},
+    })
+
+    assert value["sourceType"] == "zip"
+    assert value["sourceName"] == "hermes-v1.0.0.zip"
+    assert value["bundleSha256"] == "a" * 64

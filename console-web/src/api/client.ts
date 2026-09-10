@@ -39,7 +39,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
       // 세션 쿠키를 함께 보냅니다.
       credentials: 'same-origin',
-      headers: { ...(init?.headers ?? {}), 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     })
   } catch (e) {
     // 서버가 꺼져 있거나 네트워크가 끊긴 경우입니다. 원인을 사람 말로 바꿔 줍니다.
@@ -76,6 +76,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body ?? {}),
       headers: { 'X-TYBot-CSRF': '1' },
+    }),
+  secureUpload: <T>(path: string, file: File) =>
+    request<T>(path, {
+      method: 'POST',
+      body: file,
+      headers: {
+        'Content-Type': 'application/zip',
+        'X-TYBot-CSRF': '1',
+        'X-TYBot-Filename': encodeURIComponent(file.name),
+      },
     }),
   put: <T>(path: string, body: unknown) =>
     request<T>(path, {

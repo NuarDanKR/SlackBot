@@ -319,6 +319,10 @@ CREATE TABLE IF NOT EXISTS specialist_bot (
     release_ref      text NOT NULL DEFAULT '',
     source_commit    text NOT NULL DEFAULT '',
     artifact_hashes  jsonb NOT NULL DEFAULT '{}'::jsonb,
+    source_type      text NOT NULL DEFAULT 'manual'
+                     CHECK (source_type IN ('manual', 'git', 'zip')),
+    source_name      text NOT NULL DEFAULT '',
+    bundle_sha256    text NOT NULL DEFAULT '',
     health           text NOT NULL DEFAULT 'unknown'
                      CHECK (health IN ('unknown', 'ok', 'error')),
     error_code       text,
@@ -334,6 +338,11 @@ ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS repository_url text NOT NULL
 ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS release_ref text NOT NULL DEFAULT '';
 ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS source_commit text NOT NULL DEFAULT '';
 ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS artifact_hashes jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS source_type text NOT NULL DEFAULT 'manual';
+ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS source_name text NOT NULL DEFAULT '';
+ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS bundle_sha256 text NOT NULL DEFAULT '';
+UPDATE specialist_bot SET source_type = 'git'
+ WHERE source_type = 'manual' AND repository_url <> '';
 
 CREATE TABLE IF NOT EXISTS specialist_workspace (
     specialist text NOT NULL REFERENCES specialist_bot(key) ON DELETE CASCADE,

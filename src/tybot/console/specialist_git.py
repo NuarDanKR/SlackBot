@@ -15,6 +15,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import PurePosixPath
 
 GITHUB_HOST = "github.com"
@@ -176,6 +177,84 @@ def _validate_cases(cases: object) -> int:
     return len(cases)
 
 
+def validate_contract(
+    manifest_bytes: bytes,
+    read_artifact: Callable[[str], bytes],
+    *,
+    expected_ref: str = "",
+) -> dict:
+    """Validate one prompt-contract bundle from any transport without executing it."""
+    try:
+        manifest = tomllib.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise SpecialistGitError(f"전문 봇 매니페스트를 읽지 못했습니다: {exc}") from exc
+    if set(manifest) != REQUIRED_MANIFEST:
+        raise SpecialistGitError(
+            f"매니페스트 필드가 계약과 다릅니다: {sorted(set(manifest) ^ REQUIRED_MANIFEST)}"
+        )
+    if manifest["schema"] != "tybot-specialist/v1":
+        raise SpecialistGitError("지원하지 않는 전문 봇 매니페스트 스키마입니다.")
+    if manifest["release_type"] != "prompt-contract" or manifest["contract_version"] != "v1":
+        raise SpecialistGitError("현재는 prompt-contract v1 릴리스만 가져올 수 있습니다.")
+    key = str(manifest["key"])
+    version = str(manifest["version"])
+    if not KEY_RE.fullmatch(key) or not VERSION_RE.fullmatch(version):
+        raise SpecialistGitError("전문 봇 키 또는 SemVer 버전 형식이 잘못됐습니다.")
+    if expected_ref and expected_ref.removeprefix("v") != version:
+        raise SpecialistGitError(
+            f"릴리스 태그({expected_ref})와 매니페스트 버전({version})이 다릅니다."
+        )
+    if not all(
+        isinstance(manifest[name], str) and 1 <= len(manifest[name].strip()) <= 80
+        for name in ("name", "domain")
+    ):
+        raise SpecialistGitError("전문 봇 이름과 담당 분야는 1~80자여야 합니다.")
+    raw_artifacts = manifest["artifacts"]
+    if not isinstance(raw_artifacts, list) or not 1 <= len(raw_artifacts) <= MAX_ARTIFACTS:
+        raise SpecialistGitError(f"artifact는 1~{MAX_ARTIFACTS}개여야 합니다.")
+    artifacts = [_artifact_path(value) for value in raw_artifacts]
+    if len(set(artifacts)) != len(artifacts):
+        raise SpecialistGitError("중복된 artifact 경로가 있습니다.")
+    prompt_path = "contract/prompts/system.md"
+    cases_path = "contract/tests/cases.json"
+    if prompt_path not in artifacts or cases_path not in artifacts:
+        raise SpecialistGitError("system.md와 cases.json은 필수 artifact입니다.")
+
+    blobs = {path: read_artifact(path) for path in artifacts}
+    if any(len(value) > MAX_ARTIFACT_BYTES for value in blobs.values()):
+        raise SpecialistGitError(f"계약 파일 하나가 {MAX_ARTIFACT_BYTES // 1024}KB를 넘습니다.")
+    if sum(len(value) for value in blobs.values()) > MAX_TOTAL_BYTES:
+        raise SpecialistGitError("계약 파일 전체 크기가 256KB를 넘습니다.")
+    try:
+        rules = blobs[prompt_path].decode("utf-8").strip()
+        cases = json.loads(blobs[cases_path].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SpecialistGitError(f"계약 파일을 읽지 못했습니다: {exc}") from exc
+    if not rules or len(rules) > MAX_RULES_CHARS:
+        raise SpecialistGitError(f"답변 규칙은 1~{MAX_RULES_CHARS}자여야 합니다.")
+    found = [text for text in FORBIDDEN_PROMPT_TEXT if text in rules]
+    if found:
+        raise SpecialistGitError(f"답변 규칙에 마스터 전용 값이 포함됐습니다: {', '.join(found)}")
+    case_count = _validate_cases(cases)
+    return {
+        "key": key,
+        "name": str(manifest["name"]).strip(),
+        "domain": str(manifest["domain"]).strip(),
+        "adapter": key,
+        "version": version,
+        "contractVersion": str(manifest["contract_version"]),
+        "rules": rules,
+        "artifactHashes": {
+            path: hashlib.sha256(content).hexdigest() for path, content in blobs.items()
+        },
+        "checks": [{
+            "id": "contract",
+            "state": "pass",
+            "detail": f"artifact {len(artifacts)}개 · 테스트 {case_count}개 검증",
+        }],
+    }
+
+
 def import_release(repository_url: str, release: str = "latest") -> dict:
     normalized_url, owner, repository = normalize_repository_url(repository_url)
     requested_release = release.strip() or "latest"
@@ -194,76 +273,22 @@ def import_release(repository_url: str, release: str = "latest") -> dict:
         if not COMMIT_RE.fullmatch(commit):
             raise SpecialistGitError("릴리스 커밋 SHA를 확인하지 못했습니다.")
         manifest_bytes = _read_blob(git_dir, commit, "tybot-specialist.toml", env=env)
-        try:
-            manifest = tomllib.loads(manifest_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-            raise SpecialistGitError(f"전문 봇 매니페스트를 읽지 못했습니다: {exc}") from exc
-        if set(manifest) != REQUIRED_MANIFEST:
-            raise SpecialistGitError(
-                f"매니페스트 필드가 계약과 다릅니다: {sorted(set(manifest) ^ REQUIRED_MANIFEST)}"
-            )
-        if manifest["schema"] != "tybot-specialist/v1":
-            raise SpecialistGitError("지원하지 않는 전문 봇 매니페스트 스키마입니다.")
-        if manifest["release_type"] != "prompt-contract" or manifest["contract_version"] != "v1":
-            raise SpecialistGitError("현재는 prompt-contract v1 릴리스만 가져올 수 있습니다.")
-        key = str(manifest["key"])
-        version = str(manifest["version"])
-        if not KEY_RE.fullmatch(key) or not VERSION_RE.fullmatch(version):
-            raise SpecialistGitError("전문 봇 키 또는 SemVer 버전 형식이 잘못됐습니다.")
-        if tag.removeprefix("v") != version:
-            raise SpecialistGitError(f"릴리스 태그({tag})와 매니페스트 버전({version})이 다릅니다.")
-        if not all(
-            isinstance(manifest[name], str) and 1 <= len(manifest[name].strip()) <= 80
-            for name in ("name", "domain")
-        ):
-            raise SpecialistGitError("전문 봇 이름과 담당 분야는 비어 있을 수 없습니다.")
-        raw_artifacts = manifest["artifacts"]
-        if not isinstance(raw_artifacts, list) or not 1 <= len(raw_artifacts) <= MAX_ARTIFACTS:
-            raise SpecialistGitError(f"artifact는 1~{MAX_ARTIFACTS}개여야 합니다.")
-        artifacts = [_artifact_path(value) for value in raw_artifacts]
-        if len(set(artifacts)) != len(artifacts):
-            raise SpecialistGitError("중복된 artifact 경로가 있습니다.")
-        prompt_path = "contract/prompts/system.md"
-        cases_path = "contract/tests/cases.json"
-        if prompt_path not in artifacts or cases_path not in artifacts:
-            raise SpecialistGitError("system.md와 cases.json은 필수 artifact입니다.")
-
-        blobs = {path: _read_blob(git_dir, commit, path, env=env) for path in artifacts}
-        if sum(len(value) for value in blobs.values()) > MAX_TOTAL_BYTES:
-            raise SpecialistGitError("계약 파일 전체 크기가 256KB를 넘습니다.")
-        try:
-            rules = blobs[prompt_path].decode("utf-8").strip()
-            cases = json.loads(blobs[cases_path].decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SpecialistGitError(f"계약 파일을 읽지 못했습니다: {exc}") from exc
-        if not rules or len(rules) > MAX_RULES_CHARS:
-            raise SpecialistGitError(f"답변 규칙은 1~{MAX_RULES_CHARS}자여야 합니다.")
-        found = [text for text in FORBIDDEN_PROMPT_TEXT if text in rules]
-        if found:
-            raise SpecialistGitError(f"답변 규칙에 마스터 전용 값이 포함됐습니다: {', '.join(found)}")
-        case_count = _validate_cases(cases)
-
+        contract = validate_contract(
+            manifest_bytes,
+            lambda path: _read_blob(git_dir, commit, path, env=env),
+            expected_ref=tag,
+        )
         return {
+            **contract,
+            "sourceType": "git",
             "repositoryUrl": normalized_url.removesuffix(".git"),
             "releaseRef": tag,
             "sourceCommit": commit,
-            "artifactHashes": {
-                path: hashlib.sha256(content).hexdigest() for path, content in blobs.items()
-            },
-            "key": key,
-            "name": str(manifest["name"]).strip(),
-            "domain": str(manifest["domain"]).strip(),
-            "adapter": key,
-            "version": version,
-            "contractVersion": str(manifest["contract_version"]),
-            "rules": rules,
+            "sourceName": "",
+            "bundleSha256": "",
             "checks": [
                 {"id": "repository", "state": "pass", "detail": f"{owner}/{repository}@{tag}"},
                 {"id": "commit", "state": "pass", "detail": commit},
-                {
-                    "id": "contract",
-                    "state": "pass",
-                    "detail": f"artifact {len(artifacts)}개 · 테스트 {case_count}개 검증",
-                },
+                *contract["checks"],
             ],
         }

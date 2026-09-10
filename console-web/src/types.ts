@@ -179,6 +179,9 @@ export interface Specialist {
   releaseRef: string
   sourceCommit: string
   artifactHashes: Record<string, string>
+  sourceType: 'manual' | 'git' | 'zip'
+  sourceName: string
+  bundleSha256: string
   /** 상세 조회에서만 채워집니다. */
   rules?: string
   updatedAt: string

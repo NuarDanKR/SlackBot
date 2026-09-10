@@ -42,6 +42,7 @@ from . import (
     service_logs,
     specialist_git,
     specialist_store,
+    specialist_zip,
     timer_manager,
     workspace_store,
 )
@@ -190,6 +191,10 @@ class SpecialistProposalBody(BaseModel):
     releaseRef: str = Field(default="", max_length=100)
     sourceCommit: str = Field(default="", max_length=40)
     artifactHashes: dict[str, str] = Field(default_factory=dict)
+    sourceType: Literal["manual", "git", "zip"] = "manual"
+    sourceName: str = Field(default="", max_length=150)
+    bundleSha256: str = Field(default="", max_length=64)
+    uploadReceipt: str = Field(default="", max_length=200)
 
 
 class SpecialistImportBody(BaseModel):
@@ -636,6 +641,9 @@ def _specialist_response(row: dict) -> dict:
         "releaseRef": row.get("release_ref") or "",
         "sourceCommit": row.get("source_commit") or "",
         "artifactHashes": dict(row.get("artifact_hashes") or {}),
+        "sourceType": row.get("source_type") or "manual",
+        "sourceName": row.get("source_name") or "",
+        "bundleSha256": row.get("bundle_sha256") or "",
         "updatedAt": row.get("updated_at"),
         "updatedBy": row.get("updated_by") or "-",
     }
@@ -782,6 +790,44 @@ def import_specialist_release(
     return imported
 
 
+@app.post("/api/specialists/import-upload")
+async def import_specialist_upload(
+    request: Request,
+    user: User,
+    filename: Annotated[str | None, Header(alias="X-TYBot-Filename")] = None,
+) -> dict:
+    """Validate a small contract-only ZIP without extracting it to the filesystem."""
+    _require_developer(user)
+    _check_write_request(request)
+    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/zip":
+        raise HTTPException(status_code=415, detail="application/zip 파일만 업로드할 수 있습니다.")
+    content = bytearray()
+    async for chunk in request.stream():
+        if len(content) + len(chunk) > specialist_zip.MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="계약 ZIP은 2MB를 넘을 수 없습니다.")
+        content.extend(chunk)
+    try:
+        imported = specialist_zip.import_bundle(bytes(content), filename or "")
+    except specialist_zip.SpecialistZipError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if imported["adapter"] not in specialist_store.ALLOWED_ADAPTERS:
+        raise HTTPException(
+            status_code=422,
+            detail="TYBot 코드에 등록되지 않은 전문 봇 어댑터입니다.",
+        )
+    imported["uploadReceipt"] = specialist_zip.issue_receipt(imported, user.email)
+    _audit_event(
+        actor=user.email,
+        category="specialist",
+        action="bundle-preview",
+        target_type="specialist",
+        target_id=imported["key"],
+        outcome="succeeded",
+        metadata={"filename": imported["sourceName"], "sha256": imported["bundleSha256"]},
+    )
+    return imported
+
+
 @app.get("/api/specialist-calls")
 def specialist_calls(
     user: User,
@@ -830,14 +876,21 @@ def create_specialist_request(
             detail="담당 워크스페이스 범위의 전문 봇만 요청할 수 있습니다.",
         )
     proposal = body.model_dump()
-    if body.repositoryUrl:
+    if body.sourceType == "zip":
+        if not specialist_zip.verify_receipt(proposal, user.email, body.uploadReceipt):
+            raise HTTPException(
+                status_code=422,
+                detail="ZIP 검증 영수증이 만료됐거나 내용이 변경됐습니다. 파일을 다시 올리세요.",
+            )
+    elif body.repositoryUrl:
         try:
             imported = specialist_git.import_release(body.repositoryUrl, body.releaseRef)
         except specialist_git.SpecialistGitError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         protected = (
             "repositoryUrl", "releaseRef", "sourceCommit", "artifactHashes",
-            "key", "name", "domain", "adapter", "version", "contractVersion", "rules",
+            "sourceType", "sourceName", "bundleSha256", "key", "name", "domain",
+            "adapter", "version", "contractVersion", "rules",
         )
         if any(proposal.get(field) != imported.get(field) for field in protected):
             raise HTTPException(
@@ -845,6 +898,7 @@ def create_specialist_request(
                 detail="가져온 릴리스가 미리보기와 다릅니다. 다시 가져온 뒤 요청하세요.",
             )
         proposal.update({field: imported[field] for field in protected})
+    proposal.pop("uploadReceipt", None)
     try:
         request_id = specialist_store.create_request(actor=user.email, proposal=proposal)
         rows = specialist_store.list_requests()
