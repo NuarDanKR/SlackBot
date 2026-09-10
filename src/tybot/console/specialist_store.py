@@ -12,6 +12,9 @@ import re
 from .workspace_store import WorkspaceStoreError
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 # `available` 은 여기 적지 않는다. **프롬프트 파일이 있으면 배포된 것**이다
 # (`specialist_adapters.available_keys()`). 손으로 적으면 프롬프트를 지워도 화면은
 # 「배포됨」 이라고 말하고, 그 어긋남은 눌러 봐야 드러난다.
@@ -71,6 +74,7 @@ def is_ready() -> bool:
 def _row(row: dict) -> dict:
     item = dict(row)
     item["workspaces"] = list(item.get("workspaces") or [])
+    item["artifact_hashes"] = dict(item.get("artifact_hashes") or {})
     item["adapterAvailable"] = str(item["adapter"]) in _deployed()
     return item
 
@@ -154,6 +158,32 @@ def _validate_proposal(proposal: dict) -> dict:
     if not 0.0 <= min_confidence <= 1.0:
         raise SpecialistStoreError("최소 신뢰도는 0과 1 사이여야 합니다.")
 
+    repository_url = str(proposal.get("repositoryUrl") or "").strip()
+    release_ref = str(proposal.get("releaseRef") or "").strip()
+    source_commit = str(proposal.get("sourceCommit") or "").strip().lower()
+    raw_hashes = proposal.get("artifactHashes") or {}
+    if not isinstance(raw_hashes, dict):
+        raise SpecialistStoreError("릴리스 artifact 해시 형식이 잘못됐습니다.")
+    artifact_hashes = {str(path): str(digest).lower() for path, digest in raw_hashes.items()}
+    provenance = (repository_url, release_ref, source_commit, artifact_hashes)
+    if any(provenance) and not all(provenance):
+        raise SpecialistStoreError("Git 릴리스 출처 정보가 일부만 제출됐습니다.")
+    if repository_url:
+        from .specialist_git import SpecialistGitError, normalize_repository_url
+
+        try:
+            normalized, _owner, _repository = normalize_repository_url(repository_url)
+        except SpecialistGitError as exc:
+            raise SpecialistStoreError(str(exc)) from exc
+        repository_url = normalized.removesuffix(".git")
+        if not TAG_RE.fullmatch(release_ref) or not COMMIT_RE.fullmatch(source_commit):
+            raise SpecialistStoreError("Git 릴리스 태그 또는 커밋 형식이 잘못됐습니다.")
+        if not 1 <= len(artifact_hashes) <= 20 or any(
+            not path.startswith("contract/") or not HASH_RE.fullmatch(digest)
+            for path, digest in artifact_hashes.items()
+        ):
+            raise SpecialistStoreError("Git 릴리스 artifact 해시가 계약과 다릅니다.")
+
     return {
         "key": key,
         "name": name,
@@ -167,6 +197,10 @@ def _validate_proposal(proposal: dict) -> dict:
         "routingHint": hint,
         "minConfidence": round(min_confidence, 2),
         "rules": rules,
+        "repositoryUrl": repository_url,
+        "releaseRef": release_ref,
+        "sourceCommit": source_commit,
+        "artifactHashes": artifact_hashes,
     }
 
 
@@ -176,6 +210,12 @@ def create_request(*, actor: str, proposal: dict) -> int:
         {"id": "adapter", "state": "pass", "detail": "코드 등록 어댑터"},
         {"id": "contract", "state": "pass", "detail": "계약 버전 지정"},
     ]
+    if clean["repositoryUrl"]:
+        checks.extend([
+            {"id": "repository", "state": "pass", "detail": clean["repositoryUrl"]},
+            {"id": "release", "state": "pass", "detail": clean["releaseRef"]},
+            {"id": "commit", "state": "pass", "detail": clean["sourceCommit"]},
+        ])
     try:
         with _connect() as conn, conn.cursor() as cur:
             if clean["workspaces"]:
@@ -233,8 +273,10 @@ def decide_request(
                     INSERT INTO specialist_bot
                         (key, name, domain, adapter, state, version, contract_version,
                          model, routing_hint, min_confidence, rules, rules_version,
+                         repository_url, release_ref, source_commit, artifact_hashes,
                          created_by, updated_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1,
+                            %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (key) DO UPDATE SET
                         name = excluded.name, domain = excluded.domain,
                         adapter = excluded.adapter, state = excluded.state,
@@ -244,6 +286,10 @@ def decide_request(
                         routing_hint = excluded.routing_hint,
                         min_confidence = excluded.min_confidence,
                         rules = excluded.rules,
+                        repository_url = excluded.repository_url,
+                        release_ref = excluded.release_ref,
+                        source_commit = excluded.source_commit,
+                        artifact_hashes = excluded.artifact_hashes,
                         -- 규칙이 실제로 바뀔 때만 올린다. 이름만 고친 승인에도
                         -- 버전이 오르면 「무엇이 돌고 있나」 의 뜻이 사라진다.
                         rules_version = specialist_bot.rules_version
@@ -254,7 +300,9 @@ def decide_request(
                     (p["key"], p["name"], p["domain"], adapter, requested_state,
                      p["version"], p["contractVersion"], p.get("model", ""),
                      p.get("routingHint", ""), p.get("minConfidence", 0.6),
-                     p.get("rules", ""), actor, actor),
+                     p.get("rules", ""), p.get("repositoryUrl", ""),
+                     p.get("releaseRef", ""), p.get("sourceCommit", ""),
+                     json.dumps(p.get("artifactHashes", {})), actor, actor),
                 )
                 cur.execute("DELETE FROM specialist_workspace WHERE specialist = %s", (p["key"],))
                 for workspace in p["workspaces"]:

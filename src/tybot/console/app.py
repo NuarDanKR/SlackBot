@@ -40,6 +40,7 @@ from . import (
     llm_secret_store,
     reader,
     service_logs,
+    specialist_git,
     specialist_store,
     timer_manager,
     workspace_store,
@@ -185,6 +186,15 @@ class SpecialistProposalBody(BaseModel):
     minConfidence: float = Field(default=0.6, ge=0.0, le=1.0)
     # 답변 규칙. 비면 저장소의 프롬프트 파일을 쓴다.
     rules: str = Field(default="", max_length=8000)
+    repositoryUrl: str = Field(default="", max_length=300)
+    releaseRef: str = Field(default="", max_length=100)
+    sourceCommit: str = Field(default="", max_length=40)
+    artifactHashes: dict[str, str] = Field(default_factory=dict)
+
+
+class SpecialistImportBody(BaseModel):
+    repositoryUrl: str = Field(min_length=1, max_length=300)
+    release: str = Field(default="latest", min_length=1, max_length=100)
 
 
 class SpecialistDecisionBody(BaseModel):
@@ -622,6 +632,10 @@ def _specialist_response(row: dict) -> dict:
         # 편집 화면이 상세 조회로 따로 받는다.
         "hasRules": bool((row.get("rules") or "").strip()),
         "rulesVersion": int(row.get("rules_version") or 0),
+        "repositoryUrl": row.get("repository_url") or "",
+        "releaseRef": row.get("release_ref") or "",
+        "sourceCommit": row.get("source_commit") or "",
+        "artifactHashes": dict(row.get("artifact_hashes") or {}),
         "updatedAt": row.get("updated_at"),
         "updatedBy": row.get("updated_by") or "-",
     }
@@ -734,6 +748,40 @@ def specialist(key: str, user: User) -> dict:
     return detail
 
 
+@app.post("/api/specialists/import-preview")
+def import_specialist_release(
+    body: SpecialistImportBody,
+    request: Request,
+    user: User,
+) -> dict:
+    """Read and validate an immutable prompt contract without executing repository code."""
+    _require_developer(user)
+    _check_write_request(request)
+    try:
+        imported = specialist_git.import_release(body.repositoryUrl, body.release)
+    except specialist_git.SpecialistGitError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if imported["adapter"] not in specialist_store.ALLOWED_ADAPTERS:
+        raise HTTPException(
+            status_code=422,
+            detail="TYBot 코드에 등록되지 않은 전문 봇 어댑터입니다.",
+        )
+    _audit_event(
+        actor=user.email,
+        category="specialist",
+        action="release-preview",
+        target_type="specialist",
+        target_id=imported["key"],
+        outcome="succeeded",
+        metadata={
+            "repository": imported["repositoryUrl"],
+            "release": imported["releaseRef"],
+            "commit": imported["sourceCommit"],
+        },
+    )
+    return imported
+
+
 @app.get("/api/specialist-calls")
 def specialist_calls(
     user: User,
@@ -781,8 +829,24 @@ def create_specialist_request(
             status_code=403,
             detail="담당 워크스페이스 범위의 전문 봇만 요청할 수 있습니다.",
         )
+    proposal = body.model_dump()
+    if body.repositoryUrl:
+        try:
+            imported = specialist_git.import_release(body.repositoryUrl, body.releaseRef)
+        except specialist_git.SpecialistGitError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        protected = (
+            "repositoryUrl", "releaseRef", "sourceCommit", "artifactHashes",
+            "key", "name", "domain", "adapter", "version", "contractVersion", "rules",
+        )
+        if any(proposal.get(field) != imported.get(field) for field in protected):
+            raise HTTPException(
+                status_code=422,
+                detail="가져온 릴리스가 미리보기와 다릅니다. 다시 가져온 뒤 요청하세요.",
+            )
+        proposal.update({field: imported[field] for field in protected})
     try:
-        request_id = specialist_store.create_request(actor=user.email, proposal=body.model_dump())
+        request_id = specialist_store.create_request(actor=user.email, proposal=proposal)
         rows = specialist_store.list_requests()
     except specialist_store.SpecialistStoreError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -1322,6 +1322,71 @@ def test_specialist_change_requires_csrf(client):
     assert response.status_code == 403
 
 
+def _imported_specialist() -> dict:
+    return {
+        "repositoryUrl": "https://github.com/wkimclementia/hermes",
+        "releaseRef": "v1.0.0",
+        "sourceCommit": "a" * 40,
+        "artifactHashes": {"contract/prompts/system.md": "b" * 64},
+        "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+        "adapter": "hermes", "version": "1.0.0", "contractVersion": "v1",
+        "rules": "근거 안에서만 답한다.",
+        "checks": [{"id": "contract", "state": "pass", "detail": "검증"}],
+    }
+
+
+def test_developer_can_preview_specialist_git_release(client, monkeypatch):
+    monkeypatch.setattr(
+        console_app.specialist_git, "import_release", lambda *_args: _imported_specialist()
+    )
+
+    response = client.post(
+        "/api/specialists/import-preview",
+        headers=_write_headers(member(client)),
+        json={"repositoryUrl": "https://github.com/wkimclementia/hermes", "release": "v1.0.0"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["sourceCommit"] == "a" * 40
+
+
+def test_specialist_git_preview_rejects_unregistered_adapter(client, monkeypatch):
+    imported = _imported_specialist()
+    imported["adapter"] = "unregistered"
+    monkeypatch.setattr(console_app.specialist_git, "import_release", lambda *_args: imported)
+
+    response = client.post(
+        "/api/specialists/import-preview",
+        headers=_write_headers(member(client)),
+        json={"repositoryUrl": "https://github.com/org/repo", "release": "v1.0.0"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_specialist_git_request_is_revalidated(client, monkeypatch):
+    imported = _imported_specialist()
+    called = False
+
+    def create_request(**_kwargs):
+        nonlocal called
+        called = True
+        return 1
+
+    monkeypatch.setattr(console_app.specialist_git, "import_release", lambda *_args: imported)
+    monkeypatch.setattr(console_app.specialist_store, "create_request", create_request)
+    body = {**imported, "workspaces": ["fin"], "state": "draft"}
+    body.pop("checks")
+    body["rules"] = "화면에서 바꾼 규칙"
+
+    response = client.post(
+        "/api/specialists/requests", headers=_write_headers(owner(client)), json=body,
+    )
+
+    assert response.status_code == 422
+    assert called is False
+
+
 def test_developer_cannot_request_specialist_outside_workspace(client, monkeypatch):
     called = False
 

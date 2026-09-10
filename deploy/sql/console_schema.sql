@@ -315,6 +315,10 @@ CREATE TABLE IF NOT EXISTS specialist_bot (
                      CHECK (state IN ('draft', 'enabled', 'disabled', 'error')),
     version          text NOT NULL DEFAULT '',
     contract_version text NOT NULL DEFAULT 'v1',
+    repository_url   text NOT NULL DEFAULT '',
+    release_ref      text NOT NULL DEFAULT '',
+    source_commit    text NOT NULL DEFAULT '',
+    artifact_hashes  jsonb NOT NULL DEFAULT '{}'::jsonb,
     health           text NOT NULL DEFAULT 'unknown'
                      CHECK (health IN ('unknown', 'ok', 'error')),
     error_code       text,
@@ -324,6 +328,12 @@ CREATE TABLE IF NOT EXISTS specialist_bot (
     updated_at       timestamptz NOT NULL DEFAULT now(),
     updated_by       text NOT NULL
 );
+
+-- 기존 설치에도 Git 릴리스 출처 필드를 추가한다.
+ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS repository_url text NOT NULL DEFAULT '';
+ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS release_ref text NOT NULL DEFAULT '';
+ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS source_commit text NOT NULL DEFAULT '';
+ALTER TABLE specialist_bot ADD COLUMN IF NOT EXISTS artifact_hashes jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS specialist_workspace (
     specialist text NOT NULL REFERENCES specialist_bot(key) ON DELETE CASCADE,

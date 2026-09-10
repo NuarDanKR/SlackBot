@@ -37,3 +37,26 @@ def test_specialist_request_rejects_unverified_contract_version():
             "adapter": "hermes", "state": "draft", "contractVersion": "v-next",
             "workspaces": ["tyit"],
         })
+
+
+def test_specialist_request_keeps_verified_git_provenance():
+    value = specialist_store._validate_proposal({
+        "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+        "adapter": "hermes", "state": "draft", "workspaces": ["tyit"],
+        "repositoryUrl": "https://github.com/wkimclementia/hermes",
+        "releaseRef": "v1.0.0", "sourceCommit": "a" * 40,
+        "artifactHashes": {"contract/prompts/system.md": "b" * 64},
+    })
+
+    assert value["repositoryUrl"] == "https://github.com/wkimclementia/hermes"
+    assert value["releaseRef"] == "v1.0.0"
+    assert value["sourceCommit"] == "a" * 40
+
+
+def test_specialist_request_rejects_partial_git_provenance():
+    with pytest.raises(specialist_store.SpecialistStoreError, match="일부만"):
+        specialist_store._validate_proposal({
+            "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+            "adapter": "hermes", "state": "draft", "workspaces": ["tyit"],
+            "repositoryUrl": "https://github.com/wkimclementia/hermes",
+        })

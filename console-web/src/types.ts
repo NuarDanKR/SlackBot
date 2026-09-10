@@ -174,6 +174,11 @@ export interface Specialist {
   /** 콘솔에서 넣은 답변 규칙이 있는지. 본문은 상세 조회에서만 옵니다. */
   hasRules: boolean
   rulesVersion: number
+  /** 승인된 Git 릴리스 계약의 출처. 수동 등록이면 빈 값입니다. */
+  repositoryUrl: string
+  releaseRef: string
+  sourceCommit: string
+  artifactHashes: Record<string, string>
   /** 상세 조회에서만 채워집니다. */
   rules?: string
   updatedAt: string
