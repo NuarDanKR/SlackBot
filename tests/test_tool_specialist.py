@@ -186,3 +186,108 @@ def test_the_specialist_exposes_what_it_read():
     specialist = _specialist(FakeRouter(_answer("답")), box)
 
     assert specialist.touched is box.touched
+
+
+# --- 실제로 연결됐는가 (2026-09-11) ------------------------------------------
+#
+# 도구도 어댑터도 만들었는데 **라우터가 안 쓰면** 아무 일도 안 일어난다.
+# 그건 오류 없이 「전문가가 그냥 프롬프트로 돈다」 로만 보인다.
+def test_the_factory_picks_the_tool_adapter():
+    box = FakeBox()
+
+    made = adapters.build(
+        "hermes", FakeRouter(_answer("답")), rules="규칙",
+        execution_mode="tools", toolbox=box,
+    )
+
+    assert isinstance(made, adapters.ToolSpecialist)
+
+
+def test_the_factory_defaults_to_prompt():
+    made = adapters.build("hermes", FakeRouter(_answer("답")), rules="규칙")
+
+    assert isinstance(made, adapters.PromptSpecialist)
+
+
+def test_tools_mode_without_a_toolbox_falls_back_to_prompt(caplog):
+    """도구를 못 만든 사정 하나가 전문가를 통째로 끄면 안 된다 — 마스터가
+    고른 근거로라도 답하는 편이 낫다."""
+    with caplog.at_level("WARNING"):
+        made = adapters.build(
+            "hermes", FakeRouter(_answer("답")), rules="규칙",
+            execution_mode="tools", toolbox=None,
+        )
+
+    assert isinstance(made, adapters.PromptSpecialist)
+    assert "프롬프트로 내려간다" in caplog.text
+
+
+def test_the_router_row_carries_the_execution_mode():
+    """DB 열을 안 읽으면 도구형으로 등록해도 프롬프트로 돈다."""
+    from tybot.specialist_router import Specialist
+
+    row = Specialist(
+        key="hermes", name="H", domain="d", routing_hint="", adapter="hermes",
+        model="", min_confidence=0.6, rules="", execution_mode="tools",
+    )
+
+    assert row.execution_mode == "tools"
+
+
+def test_the_query_reads_the_execution_mode():
+    import inspect
+
+    from tybot import specialist_router
+
+    source = inspect.getsource(specialist_router.available)
+
+    assert "execution_mode" in source, "쿼리가 실행 방식을 안 읽는다"
+
+
+def test_the_hook_builds_a_toolbox_for_tool_mode():
+    """`ctx` 를 묶은 새 묶음을 **요청마다** 만든다. 재사용하면 앞 요청의 권한으로
+    읽게 된다."""
+    import inspect
+
+    from tybot.slack import pilot
+
+    source = inspect.getsource(pilot.specialist_hook)
+
+    assert "ToolBox(" in source
+    assert "ctx=ctx" in source, "권한 컨텍스트를 안 묶는다"
+    assert "execution_mode" in source, "도구형인지 보지 않는다"
+
+
+def test_the_answer_cites_what_the_specialist_read():
+    """도구형은 마스터가 고른 것과 다른 문서를 연다. 마스터 검색 결과로 출처를
+    붙이면 답과 출처가 어긋난다."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from tybot.answer import _specialist_citations
+
+    doc = SimpleNamespace(
+        workspace="tyit", channel="#팀-전산_ABB110-주간회의",
+        path=Path("2026-09-01.md"),
+    )
+    special = SimpleNamespace(documents=(doc,), live_links=())
+    ctx = SimpleNamespace(workspace="tyit")
+
+    got = _specialist_citations(special, [], ctx)
+
+    assert got == ["#팀-전산_ABB110-주간회의, 📄2026-09-01.md"]
+
+
+def test_live_evidence_cites_slack_not_the_archive():
+    """아카이브 문서로 붙이면 그 문서에는 아직 없는 내용이다."""
+    from types import SimpleNamespace
+
+    from tybot.answer import _specialist_citations
+
+    special = SimpleNamespace(
+        documents=(), live_links=("https://slack.com/archives/C1/p1",)
+    )
+
+    got = _specialist_citations(special, [], SimpleNamespace(workspace="tyit"))
+
+    assert any("실시간" in c and "slack.com" in c for c in got)

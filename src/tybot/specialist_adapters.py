@@ -164,12 +164,29 @@ class PromptSpecialist:
         return response.text
 
 
-def build(key: str, router, *, model: str = "", rules: str = ""):
-    """어댑터 하나 만들기. 지금은 프롬프트 방식뿐이다.
+def build(
+    key: str,
+    router,
+    *,
+    model: str = "",
+    rules: str = "",
+    execution_mode: str = "prompt",
+    toolbox=None,
+    live: bool = False,
+):
+    """어댑터 하나 만들기. 호출부는 어느 갈래인지 몰라도 된다.
 
-    HTTP 전송이 필요해지면 여기에 한 갈래를 더한다. 호출부는 어느 쪽인지 몰라도
-    된다 — 그게 계약을 좁혀 둔 이유다.
+    `tools` 인데 도구 묶음이 없으면 **프롬프트로 내려간다.** 여기서 예외를 내면
+    도구를 못 만든 사정(스토어 없음 등) 하나가 전문가를 통째로 끄는데, 그보다는
+    마스터가 고른 근거로라도 답하는 편이 낫다.
     """
+    if execution_mode == "tools":
+        if toolbox is None:
+            log.warning("도구 묶음이 없어 프롬프트로 내려간다 key=%s", key)
+        else:
+            return ToolSpecialist(
+                key, router, toolbox=toolbox, model=model, rules=rules, live=live
+            )
     return PromptSpecialist(key, router, model=model, rules=rules)
 
 

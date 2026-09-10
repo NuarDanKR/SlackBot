@@ -143,14 +143,16 @@ ALTER TABLE specialist_bot
     DROP CONSTRAINT IF EXISTS specialist_bot_execution_mode;
 ALTER TABLE specialist_bot
     ADD CONSTRAINT specialist_bot_execution_mode
-    CHECK (execution_mode IN ('prompt', 'http'));
+    CHECK (execution_mode IN ('prompt', 'tools', 'http'));
 
 ALTER TABLE specialist_bot
     ADD COLUMN IF NOT EXISTS active_deployment_id bigint;
 
 COMMENT ON COLUMN specialist_bot.execution_mode IS
-    'prompt=마스터 프로세스 안의 어댑터, http=격리 컨테이너. http 인데 active '
-    'deployment 가 없거나 health 가 정상이 아니면 라우팅 후보에서 뺀다.';
+    'prompt=마스터가 고른 근거로 한 번 답한다. '
+    'tools=우리 아카이브 위 도구를 부르며 스스로 찾는다(권한은 우리 ctx). '
+    'http=격리 컨테이너. http 인데 active deployment 가 없거나 health 가 '
+    '정상이 아니면 라우팅 후보에서 뺀다.';
 
 -- 어느 배포가 답했는지 남긴다. **질문·근거·응답 본문은 넣지 않는다.**
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS deployment_id bigint;

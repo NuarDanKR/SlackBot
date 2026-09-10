@@ -255,6 +255,33 @@ def _attachment_source_links(hits: list[SearchHit]) -> list[str]:
     return links
 
 
+def _specialist_citations(special, hits: list[SearchHit], ctx) -> list[str]:
+    """전문가 답에 붙일 출처.
+
+    **전문가가 직접 읽었으면 그것으로 만든다.** 도구를 쓰는 전문가는 마스터가
+    고른 것과 다른 문서를 열 수 있는데, 그때 마스터 검색 결과로 출처를 붙이면
+    답과 출처가 어긋난다 — 사람이 확인하러 갔다가 그 내용을 못 찾고, 그 순간
+    출처는 신뢰를 만드는 것이 아니라 깎는다.
+
+    실시간으로 읽은 대화는 **Slack 링크**로 붙는다(2026-09-11 원칙 개정).
+    아카이브 문서로 붙이면 그 문서에는 아직 없는 내용이다.
+    """
+    documents = getattr(special, "documents", ()) or ()
+    if documents:
+        out = []
+        for doc in documents[:5]:
+            prefix = f"[{doc.workspace}] " if doc.workspace != ctx.workspace else ""
+            out.append(f"{prefix}{doc.channel}, 📄{doc.path.name}")
+    else:
+        out = [
+            h.citation(with_workspace=h.doc.workspace != ctx.workspace)
+            for h in hits[:5]
+        ]
+    for link in (getattr(special, "live_links", ()) or ())[:3]:
+        out.append(f"🔴실시간 <{link}|Slack 원문>")
+    return out
+
+
 def _extracted_names(hits: list[SearchHit]) -> set[str]:
     """근거 문서에 **변환본이 들어간** 첨부 이름.
 
@@ -721,10 +748,7 @@ class AnswerEngine:
         if self._specialist is not None:
             special = self._specialist(q, ctx, _evidence_block(hits))
             if special is not None and special.text.strip():
-                citations = [
-                    h.citation(with_workspace=h.doc.workspace != ctx.workspace)
-                    for h in hits[:5]
-                ]
+                citations = _specialist_citations(special, hits, ctx)
                 citations += _attachment_source_links(hits)
                 logger.info(
                     "answer ok(전문가) ws=%s specialist=%s model=%s hits=%d srcs=%s",

@@ -79,8 +79,14 @@ def test_frontmatter_does_not_reach_the_model():
 
 
 def test_the_prompt_version_is_readable():
-    """콘솔에 「지금 무엇이 돌고 있나」 를 보이려면 버전이 있어야 한다."""
-    assert sa.prompt_version("hermes") == "1"
+    """콘솔에 「지금 무엇이 돌고 있나」 를 보이려면 버전이 있어야 한다.
+
+    **값을 못 박지 않는다.** 프롬프트를 고칠 때마다 이 테스트가 깨지면,
+    고치는 사람이 숫자만 맞추고 지나가게 된다 — 검사할 것은 「읽히는가」 다.
+    """
+    got = sa.prompt_version("hermes")
+
+    assert got.isdigit() and int(got) >= 1, got
 
 
 # --- 모델은 전문가별로 ------------------------------------------------------

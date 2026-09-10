@@ -2747,6 +2747,44 @@ class WorkspaceBot:
             lines.append("ℹ️ 아직 수집된 원문이 없습니다. 채널에서 `수집` 또는 대화가 쌓이길 기다리세요.")
         return "\n".join(lines)
 
+    def recent_messages(self, channel_id: str, limit: int = 20) -> list[dict]:
+        """아직 아카이브에 없는 최근 대화. **권한 판정은 하지 않는다.**
+
+        부르는 쪽(`specialist_tools.ToolBox._fetch_recent`)이 이미 그 채널을
+        `visible_docs` 로 확인했다. 여기서 또 판정하면 규칙이 두 곳에 생긴다.
+
+        **봇 발언에 표시를 붙여 보낸다.** 거르는 것은 도구가 하지만, 여기서
+        `is_bot` 을 안 실으면 도구가 거를 근거가 없다 — 우리 답이 다음 답의
+        근거가 되고 잘못 말한 숫자가 굳는다(원칙 1).
+        """
+        if not channel_id:
+            return []
+        try:
+            got = self.app.client.conversations_history(
+                channel=channel_id, limit=max(1, min(limit, 100))
+            )
+        except Exception as e:
+            log.warning("[%s] 실시간 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
+            return []
+        out: list[dict] = []
+        # Slack 은 최신부터 준다. 읽는 순서는 시간 순이 자연스럽다.
+        for message in reversed(got.get("messages") or []):
+            ts = str(message.get("ts") or "")
+            is_bot = bool(message.get("bot_id")) or message.get("subtype") == "bot_message"
+            out.append({
+                "ts": _kst_stamp(ts),
+                "speaker": self._user_name(self.app.client, str(message.get("user") or "")),
+                "text": str(message.get("text") or ""),
+                "is_bot": is_bot,
+                # permalink 를 따로 부르면 메시지마다 API 호출이 하나씩 는다.
+                # 링크 모양은 안정적이라 우리가 만든다.
+                "permalink": (
+                    f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
+                    if ts else ""
+                ),
+            })
+        return out
+
     def connect(self) -> None:
         """Socket Mode 연결을 비동기로 연다(블로킹하지 않는다).
 
@@ -2755,6 +2793,7 @@ class WorkspaceBot:
         from slack_bolt.adapter.socket_mode import SocketModeHandler
 
         self._handler = SocketModeHandler(self.app, self.cfg.app_token)
+        self._backfill_channel_owners()
         self._handler.connect()
         self.autojoin_sweep()
         log.info(
@@ -2764,6 +2803,59 @@ class WorkspaceBot:
             sorted(self.cfg.readable) or "없음",
         )
         self.publish_status(connected=True)
+
+    def _backfill_channel_owners(self) -> None:
+        """내부 기록이 없는 봇 가시 채널에 Slack 개설자를 보충한다.
+
+        공개 채널과 봇이 초대된 비공개 채널만 bot token으로 볼 수 있다. Slack상
+        creator가 봇 자신이면 실제 생성 요청자를 알 수 없으므로 기록하지 않는다.
+        조회나 파일 기록 하나가 실패해도 봇 연결은 유지한다.
+        """
+        client = self.app.client
+        bot_user_id = self._bot_user_id()
+        cursor = None
+        found = added = skipped_bot = skipped_missing = 0
+        try:
+            while True:
+                response = client.conversations_list(
+                    types="public_channel,private_channel",
+                    exclude_archived=True,
+                    limit=200,
+                    cursor=cursor,
+                )
+                for channel in response.get("channels", []):
+                    found += 1
+                    channel_id = str(channel.get("id") or "")
+                    creator = str(channel.get("creator") or "")
+                    if not channel_id or not creator:
+                        skipped_missing += 1
+                        continue
+                    if creator == bot_user_id:
+                        skipped_bot += 1
+                        continue
+                    if self.channel_owners.record_if_missing(
+                        self.workspace,
+                        channel_id,
+                        creator,
+                        str(channel.get("name") or ""),
+                    ):
+                        added += 1
+                cursor = str(
+                    (response.get("response_metadata") or {}).get("next_cursor") or ""
+                )
+                if not cursor:
+                    break
+        except Exception as exc:
+            log.warning("[%s] 채널 개설자 역채움 실패: %s", self.workspace, exc)
+            return
+        log.info(
+            "[%s] 채널 개설자 역채움 visible=%d added=%d bot_creator=%d missing=%d",
+            self.workspace,
+            found,
+            added,
+            skipped_bot,
+            skipped_missing,
+        )
 
     def close(self) -> None:
         """재시작·종료 전에 Socket Mode 연결과 작업 스레드를 정리한다."""
@@ -2834,7 +2926,21 @@ def enforce_archive_writable(problems: dict[str, str]) -> None:
     )
 
 
-def specialist_hook(router):
+def _kst_stamp(ts: str) -> str:
+    """Slack ts → `2026-09-11 14:03` (KST). 못 읽으면 원값.
+
+    아카이브 줄과 **같은 모양**이어야 한다. 모양이 다르면 모델이 두 근거를
+    서로 다른 종류로 읽는다.
+    """
+    try:
+        return datetime.fromtimestamp(float(ts), tz=UTC).astimezone(KST).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    except (TypeError, ValueError):
+        return ts
+
+
+def specialist_hook(router, store=None, live_fetch=None):
     """엔진이 근거를 모은 뒤 부를 훅을 만든다. 전문가 문장 또는 `None`.
 
     **엔진은 전문가를 모른다.** 라우팅·DB·계약이 여기 있고 엔진은 결과만 받는다.
@@ -2863,12 +2969,38 @@ def specialist_hook(router):
             # 근거는 이미 `visible_docs` 를 통과한 것뿐이다(원칙 3).
             # `authorization_id` 는 그 판정을 가리키고, 나중에 「무엇이 전문가에게
             # 갔나」 를 되짚는 근거가 된다.
+            #
+            # 도구를 쓰는 전문가에게는 **요청마다 새 묶음**을 만든다. `ctx` 를
+            # 안에 가둬야 도구가 누구 권한으로 읽는지를 바꿀 수 없다.
+            toolbox = None
+            uses_tools = (
+                decision.specialist is not None
+                and decision.specialist.execution_mode == "tools"
+            )
+            if uses_tools and store is not None:
+                from ..specialist_tools import ToolBox
+
+                # `live_fetch` 는 워크스페이스를 받아야 한다 — 엔진은 전체에
+                # 하나지만 Slack 클라이언트는 워크스페이스마다 다르다.
+                # 여기서 묶어 두면 도구는 채널 ID 만 알면 된다.
+                bound = (
+                    (lambda cid, n: live_fetch(workspace, cid, n))
+                    if live_fetch else None
+                )
+                toolbox = ToolBox(
+                    store=store, ctx=ctx, live_fetch=bound,
+                    here=getattr(ctx, "channel", "") or "",
+                )
             return specialist_router.ask(
                 decision,
                 question=question,
                 workspace=workspace,
                 evidence=[evidence],
                 router=router,
+                toolbox=toolbox,
+                # 실시간 조회는 Slack 클라이언트가 있을 때만 준다. 도구를 안 주면
+                # 모델이 못 부른다 — 프롬프트로 막는 것보다 확실하다.
+                live=bool(live_fetch),
                 # 전문가가 못 답하면 빈 문자열. 호출부가 그것을 「마스터가 답한다」
                 # 로 읽는다 — 여기서 마스터 답변을 만들면 답이 두 번 만들어진다.
                 fallback=lambda: "",
@@ -2899,7 +3031,18 @@ def build_bots() -> list[WorkspaceBot]:
         # 재시작해도 당일 누적이 유지되어야 상한이 실제로 상한 역할을 한다.
         cost_state_path=cost_state_path(str(qa_log.root)),
     )
-    engine = AnswerEngine(store, router, specialist=specialist_hook(router))
+    # 실시간 조회는 워크스페이스별 클라이언트가 필요한데 엔진은 전체에 하나다.
+    # 등록부를 먼저 만들고 봇이 생긴 뒤 채운다 — 훅이 만들어질 때는 아직 봇이 없다.
+    live_bots: dict[str, WorkspaceBot] = {}
+
+    def live_fetch(workspace: str, channel_id: str, limit: int) -> list[dict]:
+        bot = live_bots.get(workspace)
+        return bot.recent_messages(channel_id, limit) if bot else []
+
+    engine = AnswerEngine(
+        store, router,
+        specialist=specialist_hook(router, store=store, live_fetch=live_fetch),
+    )
 
     configs = load_workspaces()
     # 상태 트리가 다른 워크스페이스 이름을 표시하려면 키만으로는 부족하다.
@@ -2913,6 +3056,7 @@ def build_bots() -> list[WorkspaceBot]:
         )
         bot.path_problems = problems
         bot.workspace_labels = labels
+        live_bots[cfg.key] = bot
         bots.append(bot)
     return bots
 

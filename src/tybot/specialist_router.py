@@ -90,6 +90,9 @@ class Specialist:
     min_confidence: float
     # 콘솔에서 넣은 답변 규칙. 비면 어댑터가 저장소 프롬프트를 쓴다.
     rules: str = ""
+    # prompt | tools | http. **기본은 prompt** 라 기존 등록은 그대로 돈다.
+    execution_mode: str = "prompt"
+
 
 
 @dataclass(frozen=True)
@@ -139,7 +142,10 @@ def available(workspace: str) -> list[Specialist]:
             cur.execute(
                 """
                 SELECT s.key, s.name, s.domain, s.routing_hint, s.adapter,
-                       s.model, s.min_confidence, s.rules
+                       s.model, s.min_confidence, s.rules,
+                       -- 옛 스키마에는 없는 열이다. 없으면 prompt 로 본다 —
+                       -- 스키마를 아직 안 올린 설치에서 라우팅이 멈추면 안 된다.
+                       COALESCE(s.execution_mode, 'prompt') AS execution_mode
                   FROM specialist_bot s
                   JOIN specialist_workspace w ON w.specialist = s.key
                  WHERE s.state = 'enabled'
@@ -273,12 +279,21 @@ def route(question: str, workspace: str, router) -> Decision:
 # --- MCP 연결 ---------------------------------------------------------------
 @dataclass(frozen=True)
 class SpecialistAnswer:
-    """전문가가 만든 문장. **출처는 없다** — 그 자리는 마스터 몫이다."""
+    """전문가가 만든 문장. **출처는 없다** — 그 자리는 마스터 몫이다.
+
+    다만 **무엇을 읽었는지는 함께 온다.** 도구를 쓰는 전문가는 마스터가 고른 것과
+    다른 문서를 열 수 있고, 그때 마스터가 자기 검색 결과로 출처를 붙이면 답과
+    출처가 어긋난다 — 사람이 확인하러 갔다가 그 내용을 못 찾는다.
+    """
 
     text: str
     specialist: str
     model: str
     cost_usd: float
+    # 전문가가 실제로 연 아카이브 문서. 비면 마스터 검색 결과로 출처를 만든다.
+    documents: tuple = ()
+    # 아직 아카이브에 없는 실시간 대화의 Slack 링크(2026-09-11 원칙 개정).
+    live_links: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -397,6 +412,8 @@ def ask(
     fallback,
     authorization_id: str,
     record_call_row: bool = True,
+    toolbox=None,
+    live: bool = False,
 ) -> SpecialistAnswer | None:
     """고른 전문가에게 묻는다. 마스터가 답할 자리면 `None`.
 
@@ -427,18 +444,28 @@ def ask(
     adapter = None
     try:
         adapter = specialist_adapters.build(
-            chosen.adapter, router, model=chosen.model, rules=chosen.rules
+            chosen.adapter, router, model=chosen.model, rules=chosen.rules,
+            execution_mode=chosen.execution_mode, toolbox=toolbox, live=live,
         )
-        request = SpecialistRequest(
-            question=question,
-            evidence=tuple(
+        authorized = tuple(
+            AuthorizedEvidence.from_acl_filter(
+                workspace=workspace, text=text, authorization_id=authorization_id
+            )
+            for text in evidence
+            if text.strip()
+        )
+        # **도구형은 근거 없이도 돈다.** 스스로 찾는 것이 전제라, 마스터 검색이
+        # 0건이라고 전문가를 못 부르게 하면 그 봇의 값이 통째로 사라진다.
+        # 계약(`SpecialistRequest`)은 빈 근거를 거부하므로 자리표시 한 줄을 준다.
+        if not authorized and chosen.execution_mode == "tools":
+            authorized = (
                 AuthorizedEvidence.from_acl_filter(
-                    workspace=workspace, text=text, authorization_id=authorization_id
-                )
-                for text in evidence
-                if text.strip()
-            ),
-        )
+                    workspace=workspace,
+                    text="(마스터 검색 결과 없음 — 도구로 직접 찾으세요)",
+                    authorization_id=authorization_id,
+                ),
+            )
+        request = SpecialistRequest(question=question, evidence=authorized)
         result = execute(
             adapter,
             request,
@@ -476,9 +503,14 @@ def ask(
     # `fallback` 이 빈 문자열을 주므로, 빈 답도 곧 「마스터가 답한다」 다.
     if result is None or not result.text.strip():
         return None
+    # 무엇을 읽었는지 함께 돌려준다. 도구형은 마스터가 고른 것과 다른 문서를
+    # 열 수 있고, 그때 마스터 검색 결과로 출처를 붙이면 답과 출처가 어긋난다.
+    touched = getattr(adapter, "touched", None)
     return SpecialistAnswer(
         text=result.text,
         specialist=chosen.key,
         model=getattr(adapter, "last_model", "") or chosen.model,
         cost_usd=getattr(adapter, "last_cost_usd", 0.0),
+        documents=tuple(getattr(touched, "documents", ()) or ()),
+        live_links=tuple(getattr(touched, "live_permalinks", ()) or ()),
     )
