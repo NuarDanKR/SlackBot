@@ -167,9 +167,11 @@ Slack은 채널명의 영문을 소문자로 저장하므로 실제 화면에서
 아카이브 원문이 아니며 검색 근거로 사용하지 않는다. 요청자는 `/채널 수정`을 사용할 수 있다.
 추가 운영자는 `.env`의 `CHANNEL_ADMIN_USERS`에 Slack 사용자 ID를 지정한다.
 
-Pro 플랜의 Slack Channel Manager는 별도 역할이다. Slack 기본 화면에서 직접 이름 변경·보관까지
-하게 하려면 채널 정보 → **Managed by(관리자)** 에서 요청자를 한 번 지정한다. Slack 공개 Web API에는
-이 역할을 자동 지정하는 메서드가 없으므로 TYBot의 논리 관리자 기록과 구분한다.
+Slack Channel Manager는 별도 역할이다. Slack 기본 화면에서 직접 이름 변경·보관까지 하게 하려면
+채널 정보 → **Managed by(관리자)** 에서 지정한다. 이 채널별 역할은 bot token에 위임되지 않고
+Slack 공개 Web API로 목록을 조회할 수도 없다. 따라서 TYBot의 `/채널 수정`도 맡길 사람은 개설자,
+기존 담당자 또는 Workspace Admin이 채널에서 `/채널 담당자 @사람`을 한 번 실행한다. 해제는
+`/채널 담당자 없음`이다. Workspace Admin/Owner는 Slack `users.info`로 자동 확인한다.
 
 ### 수집 경로 세 가지 — 언제 무엇이 쓰이나
 

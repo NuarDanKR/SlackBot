@@ -250,17 +250,10 @@ def _bot(*, creator="", admins=(), owner_of="", boom=False):
     )
 
 
-def _may(bot, user_id, channel_id="C1", *, workspace_admin=False):
+def _may(bot, user_id, channel_id="C1"):
     from tybot.slack.pilot import WorkspaceBot
 
     bot._slack_creator = lambda ch: WorkspaceBot._slack_creator(bot, ch)
-    # Workspace Admin 은 Slack `users.info` 가 판정한다. 기본은 **아니다** —
-    # 켜 두면 「남은 못 고친다」 를 검증할 수 없다.
-    #
-    # **테스트가 미리 심어 둔 것은 덮지 않는다.** 덮으면 그 테스트가 무엇을
-    # 검증하는지와 무관하게 이 기본값이 이긴다.
-    if not hasattr(bot, "_is_workspace_admin"):
-        bot._is_workspace_admin = lambda uid: workspace_admin
     return WorkspaceBot._can_manage_channel(bot, channel_id, user_id)
 
 

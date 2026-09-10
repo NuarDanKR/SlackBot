@@ -85,6 +85,68 @@ def test_owner_store_isolated_by_workspace_and_channel(tmp_path):
     assert not store.is_owner("it", "C1", "U2")
 
 
+def test_owner_store_persists_delegated_managers_without_changing_owner(tmp_path):
+    store = ChannelOwnerStore(tmp_path / "channel-owners.json")
+    store.record("it", "C1", "U1", "팀-전산_ABB110-회의")
+
+    assert store.set_managers("it", "C1", ["U2", "U2", "U3"], set_by="U1") == (
+        "U2", "U3"
+    )
+
+    reloaded = ChannelOwnerStore(store.path)
+    assert reloaded.owner_of("it", "C1") == "U1"
+    assert reloaded.managers_of("it", "C1") == ("U2", "U3")
+    assert reloaded.is_manager("it", "C1", "U1")
+    assert reloaded.is_manager("it", "C1", "U2")
+    assert not reloaded.is_manager("it", "C1", "U4")
+
+
+def test_clearing_delegates_never_removes_the_creator(tmp_path):
+    store = ChannelOwnerStore(tmp_path / "channel-owners.json")
+    store.record("it", "C1", "U1", "팀-전산_ABB110-회의")
+    store.set_managers("it", "C1", ["U2"], set_by="U1")
+
+    store.set_managers("it", "C1", [], set_by="U1")
+
+    assert store.managers_of("it", "C1") == ()
+    assert store.is_manager("it", "C1", "U1")
+
+
+def test_channel_owner_can_delegate_edit_permission(tmp_path):
+    bot = _bot(tmp_path)
+    bot.channel_owners.record("it", "C1", "UOWNER", "팀-전산_ABB110-회의")
+    bot._can_manage_channel = lambda channel, user: user == "UOWNER"
+    replies = []
+
+    WorkspaceBot._handle_channel_manager_command(
+        bot,
+        {"channel_id": "C1", "user_id": "UOWNER"},
+        "<@UMANAGER>",
+        lambda text, **kwargs: replies.append((text, kwargs)),
+    )
+
+    assert bot.channel_owners.is_manager("it", "C1", "UMANAGER")
+    assert "이제 해당 사용자는" in replies[0][0]
+    assert replies[0][1]["response_type"] == "ephemeral"
+
+
+def test_channel_member_cannot_delegate_permission_to_self(tmp_path):
+    bot = _bot(tmp_path)
+    bot.channel_owners.record("it", "C1", "UOWNER", "팀-전산_ABB110-회의")
+    bot._can_manage_channel = lambda channel, user: False
+    replies = []
+
+    WorkspaceBot._handle_channel_manager_command(
+        bot,
+        {"channel_id": "C1", "user_id": "UMEMBER"},
+        "<@UMEMBER>",
+        lambda text, **kwargs: replies.append(text),
+    )
+
+    assert not bot.channel_owners.is_manager("it", "C1", "UMEMBER")
+    assert "지정할 수 있습니다" in replies[0]
+
+
 def _bot(tmp_path) -> WorkspaceBot:
     bot = WorkspaceBot.__new__(WorkspaceBot)
     bot.workspace = "it"

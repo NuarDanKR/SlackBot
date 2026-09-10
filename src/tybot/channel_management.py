@@ -604,7 +604,7 @@ def edit_from_view(view: dict) -> ChannelEdit:
 
 
 class ChannelOwnerStore:
-    """TYBot 생성 채널의 최초 요청자를 원자적으로 기록한다."""
+    """TYBot 생성 채널의 최초 요청자와 위임된 수정 담당자를 기록한다."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -622,10 +622,12 @@ class ChannelOwnerStore:
         with _OWNER_LOCK:
             data = self._read()
             key = f"{workspace}:{channel_id}"
+            existing = data["channels"].get(key) or {}
             data["channels"][key] = {
                 "owner_user_id": owner_user_id,
                 "name": name,
                 "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "manager_user_ids": list(existing.get("manager_user_ids") or []),
             }
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
@@ -643,6 +645,44 @@ class ChannelOwnerStore:
             row = self._read()["channels"].get(f"{workspace}:{channel_id}") or {}
         return str(row.get("owner_user_id") or "")
 
+    def managers_of(self, workspace: str, channel_id: str) -> tuple[str, ...]:
+        """개설자 외에 `/채널 수정`을 위임받은 사용자들."""
+        with _OWNER_LOCK:
+            row = self._read()["channels"].get(f"{workspace}:{channel_id}") or {}
+        raw = row.get("manager_user_ids") or []
+        if not isinstance(raw, list):
+            return ()
+        return tuple(dict.fromkeys(str(user).strip() for user in raw if str(user).strip()))
+
+    def set_managers(
+        self,
+        workspace: str,
+        channel_id: str,
+        manager_user_ids: list[str] | tuple[str, ...],
+        *,
+        set_by: str,
+    ) -> tuple[str, ...]:
+        """위임 목록을 교체한다. 개설자 기록은 그대로 보존한다."""
+        managers = tuple(
+            dict.fromkeys(str(user).strip() for user in manager_user_ids if str(user).strip())
+        )
+        with _OWNER_LOCK:
+            data = self._read()
+            key = f"{workspace}:{channel_id}"
+            row = data["channels"].get(key)
+            if not isinstance(row, dict):
+                row = {}
+                data["channels"][key] = row
+            row["manager_user_ids"] = list(managers)
+            row["managers_updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+            row["managers_updated_by"] = set_by
+            data["version"] = 2
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.path)
+        return managers
+
     def owners(self) -> dict[tuple[str, str], str]:
         """`{(워크스페이스, 채널ID): 개설자}` — 한 번 읽어 여러 채널에 쓴다."""
         with _OWNER_LOCK:
@@ -659,3 +699,11 @@ class ChannelOwnerStore:
         with _OWNER_LOCK:
             row = self._read()["channels"].get(f"{workspace}:{channel_id}") or {}
         return bool(user_id) and row.get("owner_user_id") == user_id
+
+    def is_manager(self, workspace: str, channel_id: str, user_id: str) -> bool:
+        """개설자 또는 위임된 TYBot 수정 담당자인가."""
+        if not user_id:
+            return False
+        return self.is_owner(workspace, channel_id, user_id) or user_id in self.managers_of(
+            workspace, channel_id
+        )

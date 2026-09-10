@@ -453,10 +453,14 @@ class WorkspaceBot:
             if head in ("검토자", "검토자지정", "요약검토자"):
                 self._handle_reviewer_command(command, args, respond)
                 return
+            if head in ("담당자", "수정담당자", "채널담당자"):
+                self._handle_channel_manager_command(command, args, respond)
+                return
             respond(
-                "사용법: `/채널 상태`, `/채널 수정`, `/채널 생성`, `/채널 도움말`\n"
+                "사용법: `/채널 상태`, `/채널 수정`, `/채널 생성`, `/채널 담당자`, `/채널 도움말`\n"
                 "`상태` 는 이름·봇 참여·수집·검토자·첨부를 한 번에 점검합니다.\n"
                 "`수정` 에서 이름과 검토자를 함께 고칩니다(이름변경은 여기로 합쳤습니다).\n"
+                "`담당자 @사람` 으로 이 채널의 TYBot 수정 권한을 위임합니다.\n"
                 "명령어 없이 `/채널`만 입력해도 생성 화면이 열립니다.",
                 response_type="ephemeral",
             )
@@ -1355,9 +1359,38 @@ class WorkspaceBot:
         """
         if user_id in self.channel_admin_users:
             return True
-        if self.channel_owners.is_owner(self.workspace, channel_id, user_id):
+        if self.channel_owners.is_manager(self.workspace, channel_id, user_id):
             return True
-        return bool(user_id) and self._slack_creator(channel_id) == user_id
+        if bool(user_id) and self._slack_creator(channel_id) == user_id:
+            return True
+        return self._is_workspace_admin(user_id)
+
+    def _is_workspace_admin(self, user_id: str) -> bool:
+        """Slack이 공개 API로 확인해 주는 Workspace Admin/Owner인가.
+
+        채널별 Channel Manager 목록은 bot Web API로 조회할 수 없다. 그 역할은
+        `/채널 담당자`로 TYBot에 한 번 위임한다. 반면 workspace admin/owner는
+        `users.info`의 안정된 필드로 확인할 수 있으므로 별도 환경변수가 필요 없다.
+        """
+        if not user_id:
+            return False
+        cache = getattr(self, "_workspace_admin_cache", None)
+        if cache is None:
+            cache = self._workspace_admin_cache = {}
+        if user_id in cache:
+            return cache[user_id]
+        try:
+            user = (self.app.client.users_info(user=user_id) or {}).get("user") or {}
+            allowed = bool(
+                user.get("is_admin")
+                or user.get("is_owner")
+                or user.get("is_primary_owner")
+            )
+        except Exception as e:  # 조회 실패가 권한을 넓히면 안 된다
+            log.warning("[%s] 워크스페이스 관리자 조회 실패 user=%s: %s", self.workspace, user_id, e)
+            return False
+        cache[user_id] = allowed
+        return allowed
 
     def _slack_creator(self, channel_id: str) -> str:
         """Slack 이 기록한 채널 생성자. 못 읽으면 빈 문자열.
@@ -1584,6 +1617,62 @@ class WorkspaceBot:
             response_type="ephemeral",
         )
 
+    def _handle_channel_manager_command(self, command: dict, args: str, respond) -> None:
+        """`/채널 담당자 @사람` — TYBot의 채널 수정 권한을 위임한다.
+
+        Slack의 채널별 Channel Manager는 bot token에 권한이 위임되지 않고 그 목록도
+        공개 Web API로 조회할 수 없다. 개설자, 기존 담당자, Workspace Admin/Owner 또는
+        전역 TYBot 채널 관리자가 이 명령으로 같은 권한을 명시적으로 연결한다.
+        """
+        channel_id = str(command.get("channel_id") or "")
+        user_id = str(command.get("user_id") or "")
+        if not channel_id:
+            respond("채널 안에서 실행해 주세요.", response_type="ephemeral")
+            return
+
+        users = _mentioned_users(args)
+        clearing = _asks_to_clear(args)
+        if not users and not clearing:
+            owner = self.channel_owners.owner_of(self.workspace, channel_id)
+            managers = self.channel_owners.managers_of(self.workspace, channel_id)
+            lines = [f"개설자: <@{owner}>" if owner else "개설자 기록: 없음"]
+            lines.append(
+                "TYBot 수정 담당자: " + " ".join(f"<@{uid}>" for uid in managers)
+                if managers
+                else "TYBot 수정 담당자: 없음"
+            )
+            lines.append("지정: `/채널 담당자 @사람` · 해제: `/채널 담당자 없음`")
+            respond(NEWLINE.join(lines), response_type="ephemeral")
+            return
+
+        if not self._can_manage_channel(channel_id, user_id):
+            respond(
+                "이 채널의 개설자, 기존 TYBot 수정 담당자 또는 Workspace Admin만 "
+                "담당자를 지정할 수 있습니다. Slack의 채널별 Channel Manager 역할은 "
+                "봇 API에 전달되지 않으므로 기존 담당자에게 한 번 연결을 요청해 주세요.",
+                response_type="ephemeral",
+            )
+            return
+
+        managers = self.channel_owners.set_managers(
+            self.workspace,
+            channel_id,
+            [] if clearing else users,
+            set_by=user_id,
+        )
+        if not managers:
+            respond(
+                "TYBot 수정 담당자를 모두 해제했습니다. 개설자와 Workspace Admin의 권한은 유지됩니다.",
+                response_type="ephemeral",
+            )
+            return
+        respond(
+            "TYBot 수정 담당자: " + " ".join(f"<@{uid}>" for uid in managers)
+            + NEWLINE
+            + "이제 해당 사용자는 `/채널 수정`을 사용할 수 있습니다.",
+            response_type="ephemeral",
+        )
+
     # --- `/채널 상태` · `/채널 수정` -------------------------------------
     def _health_facts(self, client, channel_id: str, viewer: str = "") -> HealthFacts:
         """상태 화면이 쓸 사실을 모은다. **판단은 `channel_health` 가 한다.**
@@ -1714,7 +1803,8 @@ class WorkspaceBot:
             return
         if not self._can_manage_channel(channel_id, user_id):
             respond(
-                "이 채널의 생성자 또는 TYBot 채널 관리자만 수정할 수 있습니다.",
+                "이 채널의 개설자, TYBot 수정 담당자 또는 Workspace Admin만 수정할 수 있습니다. "
+                "Slack 채널별 관리자는 `/채널 담당자`로 한 번 연결해야 합니다.",
                 response_type="ephemeral",
             )
             return
