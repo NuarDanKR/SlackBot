@@ -459,8 +459,8 @@ class WorkspaceBot:
             respond(
                 "사용법: `/채널 상태`, `/채널 수정`, `/채널 생성`, `/채널 담당자`, `/채널 도움말`\n"
                 "`상태` 는 이름·봇 참여·수집·검토자·첨부를 한 번에 점검합니다.\n"
-                "`수정` 에서 이름과 검토자를 함께 고칩니다(이름변경은 여기로 합쳤습니다).\n"
-                "`담당자 @사람` 으로 이 채널의 TYBot 수정 권한을 위임합니다.\n"
+                "`수정` 에서 이름·검토자·수정 담당자를 함께 고칩니다.\n"
+                "`담당자 @사람`은 기존 자동화용 예비 명령입니다.\n"
                 "명령어 없이 `/채널`만 입력해도 생성 화면이 열립니다.",
                 response_type="ephemeral",
             )
@@ -1365,6 +1365,20 @@ class WorkspaceBot:
             return True
         return self._is_workspace_admin(user_id)
 
+    def _can_delegate_channel_manager(self, channel_id: str, user_id: str) -> bool:
+        """이 채널의 TYBot 수정 담당자를 지정할 수 있는가.
+
+        위임받은 담당자에게 재위임 권한까지 주면 권한이 연쇄 확장된다. 채널을
+        고칠 권한과 다른 사람에게 그 권한을 줄 권한을 분리한다.
+        """
+        if user_id in self.channel_admin_users:
+            return True
+        if self.channel_owners.is_owner(self.workspace, channel_id, user_id):
+            return True
+        if bool(user_id) and self._slack_creator(channel_id) == user_id:
+            return True
+        return self._is_workspace_admin(user_id)
+
     def _is_workspace_admin(self, user_id: str) -> bool:
         """Slack이 공개 API로 확인해 주는 Workspace Admin/Owner인가.
 
@@ -1621,8 +1635,8 @@ class WorkspaceBot:
         """`/채널 담당자 @사람` — TYBot의 채널 수정 권한을 위임한다.
 
         Slack의 채널별 Channel Manager는 bot token에 권한이 위임되지 않고 그 목록도
-        공개 Web API로 조회할 수 없다. 개설자, 기존 담당자, Workspace Admin/Owner 또는
-        전역 TYBot 채널 관리자가 이 명령으로 같은 권한을 명시적으로 연결한다.
+        공개 Web API로 조회할 수 없다. 개설자, Workspace Admin/Owner 또는 전역 TYBot
+        채널 관리자가 이 명령으로 같은 권한을 명시적으로 연결한다.
         """
         channel_id = str(command.get("channel_id") or "")
         user_id = str(command.get("user_id") or "")
@@ -1632,6 +1646,14 @@ class WorkspaceBot:
 
         users = _mentioned_users(args)
         clearing = _asks_to_clear(args)
+        if args.strip() and not users and not clearing:
+            respond(
+                "사용자를 식별하지 못했습니다. `/채널 수정`을 열어 "
+                "`채널 수정 담당자`에서 사용자를 선택해 주세요. "
+                "예비 명령을 쓸 때는 Slack 자동완성 목록에서 사람을 선택해야 합니다.",
+                response_type="ephemeral",
+            )
+            return
         if not users and not clearing:
             owner = self.channel_owners.owner_of(self.workspace, channel_id)
             managers = self.channel_owners.managers_of(self.workspace, channel_id)
@@ -1641,15 +1663,15 @@ class WorkspaceBot:
                 if managers
                 else "TYBot 수정 담당자: 없음"
             )
-            lines.append("지정: `/채널 담당자 @사람` · 해제: `/채널 담당자 없음`")
+            lines.append("변경: `/채널 수정` · 예비 명령: `/채널 담당자 @사람`")
             respond(NEWLINE.join(lines), response_type="ephemeral")
             return
 
-        if not self._can_manage_channel(channel_id, user_id):
+        if not self._can_delegate_channel_manager(channel_id, user_id):
             respond(
-                "이 채널의 개설자, 기존 TYBot 수정 담당자 또는 Workspace Admin만 "
+                "이 채널의 개설자 또는 Workspace Admin만 "
                 "담당자를 지정할 수 있습니다. Slack의 채널별 Channel Manager 역할은 "
-                "봇 API에 전달되지 않으므로 기존 담당자에게 한 번 연결을 요청해 주세요.",
+                "봇 API에 전달되지 않으므로 개설자나 Workspace Admin에게 연결을 요청해 주세요.",
                 response_type="ephemeral",
             )
             return
@@ -1804,7 +1826,7 @@ class WorkspaceBot:
         if not self._can_manage_channel(channel_id, user_id):
             respond(
                 "이 채널의 개설자, TYBot 수정 담당자 또는 Workspace Admin만 수정할 수 있습니다. "
-                "Slack 채널별 관리자는 `/채널 담당자`로 한 번 연결해야 합니다.",
+                "Slack 채널별 관리자는 개설자나 Workspace Admin이 `/채널 수정`에서 연결해야 합니다.",
                 response_type="ephemeral",
             )
             return
@@ -1830,6 +1852,11 @@ class WorkspaceBot:
                     current_name=name,
                     reviewers=current,
                     send_at=send_at,
+                    managers=(
+                        self.channel_owners.managers_of(self.workspace, channel_id)
+                        if self._can_delegate_channel_manager(channel_id, user_id)
+                        else None
+                    ),
                 ),
             )
         except Exception as e:
@@ -1885,6 +1912,24 @@ class WorkspaceBot:
                     )
             except reviewers.ReviewerError as e:
                 failed.append(f"검토자 저장 실패 — {e}")
+
+        if edit.managers or edit.clear_managers:
+            if not self._can_delegate_channel_manager(channel_id, user_id):
+                failed.append("수정 담당자 저장 실패 — 담당자를 지정할 권한이 없습니다.")
+            else:
+                before = self.channel_owners.managers_of(self.workspace, channel_id)
+                if tuple(edit.managers) != before:
+                    managers = self.channel_owners.set_managers(
+                        self.workspace,
+                        channel_id,
+                        edit.managers,
+                        set_by=user_id,
+                    )
+                    if managers:
+                        who = " ".join(f"<@{uid}>" for uid in managers)
+                        done.append(f"수정 담당자 → {who}")
+                    else:
+                        done.append("수정 담당자 → 전부 해제")
 
         if not done and not failed:
             self._notify_user(

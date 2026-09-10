@@ -38,6 +38,7 @@ _ORG_BLOCK_IDS = {
 # 갈리면 한쪽 제출이 조용히 「검토자 없음」 으로 읽힌다.
 REVIEWER_BLOCK = "reviewers"
 SEND_AT_BLOCK = "send_at"
+MANAGER_BLOCK = "channel_managers"
 
 
 class ChannelNameError(ValueError):
@@ -469,6 +470,10 @@ class ChannelEdit:
     # 검토자 칸을 비워서 제출했는가. 「그대로 두기」 와 「전부 해제」 를 가른다 —
     # 이 둘을 섞으면 실수로 검토가 멈추고 아무 표시도 안 난다.
     clear_reviewers: bool = False
+    managers: tuple[str, ...] = ()
+    # 담당자 입력란은 개설자나 Workspace Admin에게만 보인다. 블록이 없는
+    # 제출을 전부 해제로 읽지 않도록 검토자와 같은 방식으로 구분한다.
+    clear_managers: bool = False
 
     @property
     def renames(self) -> bool:
@@ -482,6 +487,7 @@ def edit_modal(
     current_name: str = "",
     reviewers: tuple[str, ...] = (),
     send_at: str = "08:00",
+    managers: tuple[str, ...] | None = None,
     defaults: dict | None = None,
 ) -> dict:
     """이름·검토자·시각을 한 화면에서 고친다.
@@ -510,6 +516,29 @@ def edit_modal(
             "\n\n🔴 지금 이름이 표준 형식이 아니어서 **이 채널은 수집되지 않습니다.** "
             "조직과 업무명을 고르면 표준 이름으로 바꿉니다."
         )
+
+    manager_blocks: list[dict] = []
+    if managers is not None:
+        manager_blocks = [
+            {"type": "divider"},
+            {
+                "type": "input",
+                "block_id": MANAGER_BLOCK,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "채널 수정 담당자"},
+                "element": {
+                    "type": "multi_users_select",
+                    "action_id": "channel_managers",
+                    "placeholder": {"type": "plain_text", "text": "수정 담당자를 고르세요"},
+                    **({"initial_users": list(managers)} if managers else {}),
+                },
+                "hint": {
+                    "type": "plain_text",
+                    "text": "선택한 사람은 이 채널의 이름과 검토 설정을 수정할 수 있습니다. "
+                            "비우고 저장하면 위임된 담당자를 모두 해제합니다.",
+                },
+            },
+        ]
 
     return {
         "type": "modal",
@@ -555,6 +584,7 @@ def edit_modal(
                     "text": "그날 요약 후보와 확인이 필요한 첨부를 이 시각에 DM 으로 보냅니다.",
                 },
             },
+            *manager_blocks,
         ],
     }
 
@@ -594,12 +624,17 @@ def edit_from_view(view: dict) -> ChannelEdit:
     send_at = (
         _selected(state, SEND_AT_BLOCK, "send_at").get("selected_time") or ""
     )
+    manager_action = _selected(state, MANAGER_BLOCK, "channel_managers")
+    picked_managers = tuple(manager_action.get("selected_users") or ())
+    had_manager_block = MANAGER_BLOCK in state
 
     return ChannelEdit(
         name=name,
         reviewers=picked,
         send_at=send_at,
         clear_reviewers=had_block and not picked,
+        managers=picked_managers,
+        clear_managers=had_manager_block and not picked_managers,
     )
 
 

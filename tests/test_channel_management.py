@@ -115,7 +115,7 @@ def test_clearing_delegates_never_removes_the_creator(tmp_path):
 def test_channel_owner_can_delegate_edit_permission(tmp_path):
     bot = _bot(tmp_path)
     bot.channel_owners.record("it", "C1", "UOWNER", "팀-전산_ABB110-회의")
-    bot._can_manage_channel = lambda channel, user: user == "UOWNER"
+    bot._can_delegate_channel_manager = lambda channel, user: user == "UOWNER"
     replies = []
 
     WorkspaceBot._handle_channel_manager_command(
@@ -133,7 +133,7 @@ def test_channel_owner_can_delegate_edit_permission(tmp_path):
 def test_channel_member_cannot_delegate_permission_to_self(tmp_path):
     bot = _bot(tmp_path)
     bot.channel_owners.record("it", "C1", "UOWNER", "팀-전산_ABB110-회의")
-    bot._can_manage_channel = lambda channel, user: False
+    bot._can_delegate_channel_manager = lambda channel, user: False
     replies = []
 
     WorkspaceBot._handle_channel_manager_command(
@@ -145,6 +145,24 @@ def test_channel_member_cannot_delegate_permission_to_self(tmp_path):
 
     assert not bot.channel_owners.is_manager("it", "C1", "UMEMBER")
     assert "지정할 수 있습니다" in replies[0]
+
+
+def test_plain_display_name_is_not_silently_treated_as_a_status_query(tmp_path):
+    """should_escape가 아직 반영되지 않아도 `@이름`을 조회로 오해하면 안 된다."""
+    bot = _bot(tmp_path)
+    replies = []
+
+    WorkspaceBot._handle_channel_manager_command(
+        bot,
+        {"channel_id": "C1", "user_id": "UOWNER"},
+        "@정학철",
+        lambda text, **kwargs: replies.append((text, kwargs)),
+    )
+
+    assert "사용자를 식별하지 못했습니다" in replies[0][0]
+    assert "/채널 수정" in replies[0][0]
+    assert replies[0][1]["response_type"] == "ephemeral"
+    assert bot.channel_owners.managers_of("it", "C1") == ()
 
 
 def _bot(tmp_path) -> WorkspaceBot:

@@ -153,8 +153,20 @@ def test_current_reviewers_are_prefilled():
     assert blocks["send_at"]["element"]["initial_time"] == "10:30"
 
 
+def test_channel_managers_are_only_shown_to_people_who_can_delegate():
+    hidden = edit_modal("{}", spec=parse(GOOD))
+    shown = edit_modal("{}", spec=parse(GOOD), managers=("U2", "U3"))
+
+    assert not any(b.get("block_id") == "channel_managers" for b in hidden["blocks"])
+    block = next(b for b in shown["blocks"] if b.get("block_id") == "channel_managers")
+    assert block["element"]["initial_users"] == ["U2", "U3"]
+
+
 # --- 제출 읽기 ---------------------------------------------------------------
-def _view(*, org="", task="", reviewers=None, send_at="", with_reviewer_block=True):
+def _view(
+    *, org="", task="", reviewers=None, send_at="", with_reviewer_block=True,
+    managers=None, with_manager_block=False,
+):
     from tybot.orgsearch import OrgHit, option
 
     state: dict = {
@@ -169,6 +181,10 @@ def _view(*, org="", task="", reviewers=None, send_at="", with_reviewer_block=Tr
         state["reviewers"] = {"reviewers": {"selected_users": list(reviewers or [])}}
     if send_at:
         state["send_at"] = {"send_at": {"selected_time": send_at}}
+    if with_manager_block:
+        state["channel_managers"] = {
+            "channel_managers": {"selected_users": list(managers or [])}
+        }
     return {"state": {"values": state}}
 
 
@@ -208,6 +224,17 @@ def test_a_screen_without_the_reviewer_block_does_not_clear_them():
     edit = edit_from_view(_view(task="주간회의", org="전산", with_reviewer_block=False))
 
     assert not edit.clear_reviewers
+
+
+def test_channel_managers_are_read_only_when_the_block_was_shown():
+    changed = edit_from_view(_view(managers=["U2"], with_manager_block=True))
+    hidden = edit_from_view(_view())
+    cleared = edit_from_view(_view(managers=[], with_manager_block=True))
+
+    assert changed.managers == ("U2",)
+    assert not changed.clear_managers
+    assert hidden.managers == () and not hidden.clear_managers
+    assert cleared.clear_managers
 
 
 # --- 자기가 만든 채널을 자기가 못 고쳤다 -------------------------------------
@@ -290,6 +317,27 @@ def test_a_workspace_admin_can_edit_without_environment_allowlist():
     bot._is_workspace_admin = lambda uid: uid == "UADMIN"
 
     assert _may(bot, "UADMIN")
+
+
+def test_a_delegated_manager_cannot_delegate_again():
+    from tybot.slack.pilot import WorkspaceBot
+
+    bot = _bot(creator="UCREATOR")
+    bot.channel_owners.is_manager = lambda ws, ch, uid: uid == "UMANAGER"
+    bot.channel_owners.is_owner = lambda ws, ch, uid: False
+
+    assert _may(bot, "UMANAGER")
+    assert not WorkspaceBot._can_delegate_channel_manager(bot, "C1", "UMANAGER")
+
+
+def test_workspace_admin_can_delegate_for_any_channel():
+    from tybot.slack.pilot import WorkspaceBot
+
+    bot = _bot(creator="UCREATOR")
+    bot._slack_creator = lambda channel_id: "UCREATOR"
+    bot._is_workspace_admin = lambda uid: uid == "UADMIN"
+
+    assert WorkspaceBot._can_delegate_channel_manager(bot, "C1", "UADMIN")
 
 
 def test_a_regular_member_is_not_treated_as_workspace_admin():
