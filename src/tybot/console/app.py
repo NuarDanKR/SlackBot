@@ -25,9 +25,9 @@ from typing import Annotated, Literal
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from .. import deploy_request
+from .. import deploy_request, heartbeat
 from ..archive.store import ArchiveStore
 from ..feedback import FeedbackLog
 from ..managed_env import request_restart
@@ -41,6 +41,8 @@ from . import (
     reader,
     service_logs,
     specialist_git,
+    specialist_runtime_store,
+    specialist_source,
     specialist_store,
     specialist_zip,
     timer_manager,
@@ -953,6 +955,260 @@ def decide_specialist_request(
         "specialists": [_specialist_response(row) for row in rows],
         "requests": [_specialist_request_response(row) for row in requests],
         "adapters": specialist_store.adapters(),
+    }
+
+
+# ===========================================================================
+# 전문 봇 2단계 — 실행형 런타임
+# ===========================================================================
+#
+# 설계: docs/design/specialist-runtime-v2.md §콘솔 API와 권한
+#
+# **1단계 API 와 경로를 분리한다.** `/api/specialists/*` 는 프롬프트 계약이고
+# 여기는 격리 실행이다. 상한도 검사도 다르므로, 같은 경로에 얹으면 한쪽 완화가
+# 다른 쪽을 조용히 넓힌다.
+#
+# **콘솔은 아무것도 실행하지 않는다.** Podman 을 부르지 않고 systemd 를 만지지
+# 않는다. 여기서 하는 일은 DB 에 상태를 남기는 것까지고, 실제 빌드·기동은 고정된
+# root helper 가 한다(`deploy/tybot-specialist-build`, `-deploy`).
+
+
+class RuntimeGitBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=2, max_length=32)
+    repositoryUrl: str = Field(min_length=1, max_length=300)
+    releaseRef: str = Field(min_length=1, max_length=100)
+
+
+class RuntimeNoteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = Field(default="", max_length=500)
+
+
+def _require_runtime_ready() -> None:
+    if not specialist_runtime_store.is_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="실행형 런타임 스키마가 아직 적용되지 않았습니다"
+                   "(deploy/sql/specialist_runtime_schema.sql).",
+        )
+
+
+def _runtime_scope(user: ConsoleUser, key: str) -> None:
+    """제출·승인·조회 **모든 단계**에서 워크스페이스 범위를 다시 본다.
+
+    한 번만 보면, 범위 밖 전문가의 배포를 나중에 활성화·롤백할 수 있다.
+    """
+    if user.all_workspaces:
+        return
+    try:
+        row = specialist_store.get_specialist(key)
+    except specialist_store.SpecialistStoreError:
+        row = None
+    allowed = set(user.workspaces)
+    scope = set((row or {}).get("workspaces") or [])
+    if not scope or not scope <= allowed:
+        raise HTTPException(
+            status_code=403, detail="담당 워크스페이스의 전문 봇만 다룰 수 있습니다."
+        )
+
+
+@app.get("/api/specialist-runtime")
+def specialist_runtime_overview(user: User, key: str = "") -> dict:
+    """실행형 현황. 게스트는 상태와 비민감 버전만 본다."""
+    if not user.may_manage_bot:
+        raise HTTPException(status_code=403, detail="권한이 없습니다.")
+    _require_runtime_ready()
+    specialist = key.strip()
+    if specialist:
+        _runtime_scope(user, specialist)
+    try:
+        sources = specialist_runtime_store.list_sources(specialist)
+        deployments = specialist_runtime_store.list_deployments(specialist)
+    except specialist_runtime_store.RuntimeStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"sources": sources, "deployments": deployments}
+
+
+@app.post("/api/specialist-runtime/sources/git")
+def submit_runtime_git_source(
+    body: RuntimeGitBody, request: Request, user: User
+) -> dict:
+    """공개 Git 태그를 제출한다. **체크아웃하지 않는다** — 형식만 본다."""
+    _require_developer(user)
+    _check_write_request(request)
+    _require_runtime_ready()
+    _runtime_scope(user, body.key)
+    try:
+        url, ref = specialist_source.validate_git_source(
+            body.repositoryUrl, body.releaseRef
+        )
+        source_id = specialist_runtime_store.create_source(
+            specialist=body.key, source_type="git", submitted_by=user.email,
+            repository_url=url, release_ref=ref,
+        )
+    except (specialist_source.SourceError,
+            specialist_runtime_store.RuntimeStoreError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="specialist-runtime", action="submit-git",
+        target_type="specialist-source", target_id=str(source_id), outcome="requested",
+        metadata={"specialist": body.key, "releaseRef": ref},
+    )
+    return {"sourceId": source_id, "repositoryUrl": url, "releaseRef": ref}
+
+
+@app.post("/api/specialist-runtime/sources/upload")
+async def submit_runtime_zip_source(
+    request: Request,
+    user: User,
+    key: Annotated[str, Header(alias="X-TYBot-Specialist")],
+    filename: Annotated[str | None, Header(alias="X-TYBot-Filename")] = None,
+) -> dict:
+    """소스 ZIP 을 검역에 넣는다. **압축을 풀지 않는다.**
+
+    콘솔이 풀면 경로 탈출·심볼릭 링크·압축 폭탄이 콘솔이 쓸 수 있는 모든 곳에
+    닿는다. 여기서는 색인만 읽고 원본 바이트를 UUID 이름으로 저장한다.
+    """
+    _require_developer(user)
+    _check_write_request(request)
+    _require_runtime_ready()
+    _runtime_scope(user, key)
+    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/zip":
+        raise HTTPException(status_code=415, detail="application/zip 만 업로드할 수 있습니다.")
+    content = bytearray()
+    async for chunk in request.stream():
+        if len(content) + len(chunk) > specialist_source.MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"소스 ZIP 은 "
+                       f"{specialist_source.MAX_UPLOAD_BYTES // (1024 * 1024)}MB 를 "
+                       "넘을 수 없습니다.",
+            )
+        content.extend(chunk)
+    try:
+        bundle = specialist_source.inspect_zip(bytes(content), filename or "")
+        if bundle.manifest.key != key:
+            raise specialist_source.SourceError(
+                f"매니페스트 key({bundle.manifest.key})가 요청과 다릅니다."
+            )
+        # 검역은 `/var/lib/tybot` 아래다. **콘솔 작업 디렉터리에 두지 않는다** —
+        # 배포가 그 경로를 지우거나 덮을 수 있고, 그러면 제출물이 조용히 사라진다.
+        quarantine_key = specialist_source.store(bytes(content), heartbeat.state_dir())
+        source_id = specialist_runtime_store.create_source(
+            specialist=key, source_type="zip", submitted_by=user.email,
+            source_name=filename or "", bundle_sha256=bundle.bundle_sha256,
+            quarantine_key=quarantine_key,
+        )
+    except (specialist_source.SourceError,
+            specialist_runtime_store.RuntimeStoreError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="specialist-runtime", action="submit-zip",
+        target_type="specialist-source", target_id=str(source_id), outcome="requested",
+        # **파일 내용도 검역 경로도 남기지 않는다.** 해시와 수치뿐이다.
+        metadata={
+            "specialist": key, "sha256": bundle.bundle_sha256,
+            "entries": bundle.entries, "version": bundle.manifest.version,
+        },
+    )
+    return {
+        "sourceId": source_id,
+        "bundleSha256": bundle.bundle_sha256,
+        "entries": bundle.entries,
+        "version": bundle.manifest.version,
+        "runtime": bundle.manifest.runtime,
+    }
+
+
+@app.post("/api/specialist-runtime/deployments/{deployment_id}/activate")
+def activate_runtime_deployment(
+    deployment_id: int, body: RuntimeNoteBody, request: Request, user: User
+) -> dict:
+    """standby 후보를 active 로. **요청자와 승인자가 달라야 한다.**"""
+    _require_admin(user)
+    _check_write_request(request)
+    _require_runtime_ready()
+    try:
+        rows = specialist_runtime_store.list_deployments()
+        row = next((r for r in rows if int(r["id"]) == deployment_id), None)
+        if row is None:
+            raise HTTPException(status_code=404, detail="배포 기록을 찾지 못했습니다.")
+        _runtime_scope(user, str(row["specialist"]))
+        specialist_runtime_store.check_separation(str(row["deployed_by"]), user.email)
+        specialist_runtime_store.activate(deployment_id, actor=user.email)
+    except specialist_runtime_store.RuntimeStoreError as exc:
+        _audit_event(
+            actor=user.email, category="specialist-runtime", action="activate",
+            target_type="specialist-deployment", target_id=str(deployment_id),
+            outcome="failed",
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="specialist-runtime", action="activate",
+        target_type="specialist-deployment", target_id=str(deployment_id),
+        outcome="succeeded",
+        metadata={"specialist": row["specialist"], "digest": row["image_digest"]},
+    )
+    return {"deployments": specialist_runtime_store.list_deployments()}
+
+
+@app.post("/api/specialist-runtime/specialists/{key}/disable")
+def disable_runtime_specialist(
+    key: str, body: RuntimeNoteBody, request: Request, user: User
+) -> dict:
+    """라우팅을 즉시 닫는다. **컨테이너 정리를 기다리지 않는다.**
+
+    남의 코드가 이상하게 답할 때 기다릴 수 있는 시간은 몇 분이 아니라 몇 초다.
+    """
+    _require_admin(user)
+    _check_write_request(request)
+    _require_runtime_ready()
+    _runtime_scope(user, key)
+    try:
+        specialist_runtime_store.disable(key, actor=user.email)
+    except specialist_runtime_store.RuntimeStoreError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="specialist-runtime", action="disable",
+        target_type="specialist", target_id=key, outcome="succeeded",
+        metadata={"note": body.note[:200]},
+    )
+    return {"deployments": specialist_runtime_store.list_deployments(key)}
+
+
+@app.post("/api/specialist-runtime/specialists/{key}/rollback")
+def rollback_runtime_specialist(
+    key: str, body: RuntimeNoteBody, request: Request, user: User
+) -> dict:
+    """직전 승인 digest 로 되돌린다. 되돌릴 곳이 없으면 **그 사실을 말한다.**"""
+    _require_admin(user)
+    _check_write_request(request)
+    _require_runtime_ready()
+    _runtime_scope(user, key)
+    try:
+        target = specialist_runtime_store.rollback_target(key)
+        if target is None:
+            raise HTTPException(
+                status_code=422,
+                detail="되돌릴 이전 승인 배포가 없습니다.",
+            )
+        new_id = specialist_runtime_store.create_deployment(
+            specialist=key, build_id=int(target["build_id"]), deployed_by=user.email
+        )
+    except specialist_runtime_store.RuntimeStoreError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="specialist-runtime", action="rollback",
+        target_type="specialist", target_id=key, outcome="requested",
+        metadata={"digest": target["image_digest"], "deploymentId": new_id},
+    )
+    return {
+        "deploymentId": new_id,
+        "imageDigest": target["image_digest"],
+        "deployments": specialist_runtime_store.list_deployments(key),
     }
 
 

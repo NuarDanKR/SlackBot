@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# 전문 봇 배포 helper — standby 기동, smoke, 전환, 중지, 롤백.
+#
+# 설계: docs/design/specialist-runtime-v2.md §배포 수명주기 · §실패와 롤백 원칙
+#
+#   tybot-specialist-deploy stage    <key> <sha256:...>
+#   tybot-specialist-deploy activate <key>
+#   tybot-specialist-deploy disable  <key>
+#   tybot-specialist-deploy rollback <key> <sha256:...>
+#
+# ## 무엇이 여기 있고 무엇이 DB 에 있나
+#
+# **라우팅을 닫는 것은 DB 가 한다**(`specialist_runtime_store.disable`). 이
+# helper 는 컨테이너를 다룬다. 순서가 중요하다 — 중지는 DB 를 먼저 바꾸고
+# 컨테이너를 정리한다. 반대로 하면 컨테이너 정리가 실패했을 때 라우팅이 열린
+# 채로 남고, 그 사이 질문이 계속 그쪽으로 간다.
+#
+# ## 실패가 현재 active 를 건드리지 않는다
+#
+# 후보는 **다른 이름**으로 띄우고 smoke 를 통과한 뒤에만 자리를 바꾼다.
+# 배포 helper 가 죽어도 지금 도는 전문가와 TYBot 은 멈추지 않아야 한다.
+set -euo pipefail
+
+ACTION=${1:-}
+KEY=${2:-}
+DIGEST=${3:-}
+
+DROPIN_DIR=/etc/systemd/system
+STATE_DIR=/var/lib/tybot-subbots
+RUN_DIR=/run/tybot-subbots
+SMOKE_TIMEOUT=10
+
+die() { echo "tybot-specialist-deploy: $*" >&2; exit 1; }
+
+[[ "$KEY" =~ ^[a-z][a-z0-9-]{1,31}$ ]] || die "전문가 key 형식이 올바르지 않습니다"
+
+unit() { echo "tybot-specialist@$KEY.service"; }
+
+write_dropin() {
+  # 이미지 digest 는 **drop-in 파일**로만 unit 에 들어간다. unit 본문을 만들지
+  # 않는 이유와 같다 — 만들면 그 내용이 곧 systemd 설정이 된다.
+  local digest=$1
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "digest 형식이 올바르지 않습니다"
+  local dir="$DROPIN_DIR/$(unit).d"
+  install -o root -g root -d -m 0755 "$dir"
+  local tmp="$dir/.image.conf.new"
+  cat > "$tmp" <<CONF
+[Service]
+Environment=TYBOT_SPECIALIST_IMAGE=localhost/tybot-specialist/$KEY@$digest
+CONF
+  chmod 0644 "$tmp"
+  # 원자적으로 바꾼다. 반쯤 쓰인 drop-in 을 systemd 가 읽으면 기동이 실패한다.
+  mv -f "$tmp" "$dir/image.conf"
+  systemctl daemon-reload
+}
+
+smoke() {
+  # **정해진 요청 하나**를 보내 본다. 승인만으로 켜지 않는 이유는, 문서로
+  # 계약을 알리고 사람이 리뷰로 잡는 방식이 팀이 늘어나는 만큼 놓치기 때문이다.
+  local socket="$RUN_DIR/$KEY/http.sock"
+  for _ in $(seq 1 "$SMOKE_TIMEOUT"); do
+    [[ -S "$socket" ]] && break
+    sleep 1
+  done
+  [[ -S "$socket" ]] || return 1
+  # health 만 본다. 모델을 부르는 요청은 비용이 들고, 여기서 확인할 것은
+  # 「살아 있고 계약 버전이 맞는가」 다.
+  curl --silent --show-error --fail --max-time 5 \
+    --unix-socket "$socket" http://localhost/v1/health \
+    | grep -q '"contract_version"[[:space:]]*:[[:space:]]*"v2"'
+}
+
+case "$ACTION" in
+stage)
+  # 후보를 standby 로 띄운다. **기존 active 는 건드리지 않는다.**
+  [[ $# -eq 3 ]] || die "인자는 stage <key> <digest> 입니다"
+  write_dropin "$DIGEST"
+  systemctl restart "$(unit)" || die "후보 기동 실패"
+  if ! smoke; then
+    systemctl stop "$(unit)" || true
+    die "smoke 실패 — 기존 배포를 유지합니다"
+  fi
+  echo "standby"
+  ;;
+
+activate)
+  [[ $# -eq 2 ]] || die "인자는 activate <key> 입니다"
+  systemctl is-active --quiet "$(unit)" || die "후보가 떠 있지 않습니다"
+  smoke || die "smoke 실패 — 활성화하지 않습니다"
+  systemctl enable "$(unit)" >/dev/null 2>&1 || true
+  echo "active"
+  ;;
+
+disable)
+  # **DB 는 이미 라우팅을 닫았다.** 여기는 뒤따르는 정리다. 이 명령이 실패해도
+  # 새 질문은 마스터로 간다.
+  [[ $# -eq 2 ]] || die "인자는 disable <key> 입니다"
+  systemctl disable --now "$(unit)" >/dev/null 2>&1 || true
+  rm -f "$RUN_DIR/$KEY/http.sock"
+  echo "disabled"
+  ;;
+
+rollback)
+  # 이전 승인 digest 로 되돌린다. 되돌리기가 배포를 타지 않는 것이 중요하다 —
+  # 남의 코드가 이상하게 답할 때 기다릴 수 있는 시간은 몇 초다.
+  [[ $# -eq 3 ]] || die "인자는 rollback <key> <digest> 입니다"
+  write_dropin "$DIGEST"
+  systemctl restart "$(unit)" || die "롤백 기동 실패"
+  smoke || die "롤백 대상도 smoke 를 통과하지 못했습니다"
+  echo "rolled-back"
+  ;;
+
+reconcile)
+  # TYBot 재시작 뒤 DB active digest 와 unit 상태를 맞춘다. 인자로 digest 를
+  # 받아 지금 떠 있는 것과 다르면 다시 띄운다.
+  [[ $# -eq 3 ]] || die "인자는 reconcile <key> <digest> 입니다"
+  want="localhost/tybot-specialist/$KEY@$DIGEST"
+  have=$(systemctl show "$(unit)" --property=Environment --value 2>/dev/null \
+         | tr ' ' '\n' | sed -n 's/^TYBOT_SPECIALIST_IMAGE=//p')
+  if [[ "$have" != "$want" ]]; then
+    write_dropin "$DIGEST"
+    systemctl restart "$(unit)" || die "reconcile 기동 실패"
+  fi
+  smoke || die "reconcile 후 smoke 실패"
+  echo "reconciled"
+  ;;
+
+*)
+  die "허용된 동작은 stage|activate|disable|rollback|reconcile 뿐입니다"
+  ;;
+esac

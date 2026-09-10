@@ -290,6 +290,9 @@ install -m 0644 "$APP_DIR/deploy/tybot-deploy.path"    /etc/systemd/system/tybot
 install -m 0644 "$APP_DIR/deploy/tybot-specialist@.service"     /etc/systemd/system/tybot-specialist@.service
 install -m 0644 "$APP_DIR/deploy/tybot-specialists.target"     /etc/systemd/system/tybot-specialists.target
 install -o root -g root -m 0755 "$APP_DIR/deploy/tybot-specialist-run"     /usr/local/libexec/tybot-specialist-run
+install -o root -g root -m 0755 "$APP_DIR/deploy/tybot-specialist-build"     /usr/local/libexec/tybot-specialist-build
+install -o root -g root -m 0755 "$APP_DIR/deploy/tybot-specialist-deploy"     /usr/local/libexec/tybot-specialist-deploy
+install -o root -g root -d -m 0700 /var/lib/tybot-subbots/build
 # 시크릿과 컨테이너 상태. 소유자만 읽는다.
 install -o root -g root -d -m 0700 /var/lib/tybot/specialist-secrets
 install -o root -g root -d -m 0750 /var/lib/tybot-subbots

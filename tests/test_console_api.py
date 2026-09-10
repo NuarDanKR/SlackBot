@@ -1579,3 +1579,98 @@ def test_a_developer_still_needs_someone_else(client):
     )
 
     assert response.status_code == 403
+
+
+# --- 전문 봇 2단계 실행형 런타임 (2026-09-10) --------------------------------
+#
+# 설계: docs/design/specialist-runtime-v2.md §콘솔 API와 권한
+#
+# 1단계 API 와 **경로를 분리**한 이유는 상한과 검사가 다르기 때문이다. 같은
+# 경로에 얹으면 한쪽 완화가 다른 쪽을 조용히 넓힌다.
+def _runtime_ready(monkeypatch, ready=True):
+    monkeypatch.setattr(
+        console_app.specialist_runtime_store, "is_ready", lambda: ready
+    )
+
+
+def test_runtime_overview_is_developer_only(client, monkeypatch):
+    _runtime_ready(monkeypatch)
+    monkeypatch.setattr(
+        console_app.specialist_runtime_store, "list_sources", lambda k="", limit=50: []
+    )
+    monkeypatch.setattr(
+        console_app.specialist_runtime_store, "list_deployments",
+        lambda k="", limit=50: [],
+    )
+
+    assert client.get("/api/specialist-runtime", headers=guest(client)).status_code == 403
+    assert client.get("/api/specialist-runtime", headers=member(client)).status_code == 200
+
+
+def test_runtime_says_when_the_schema_is_missing(client, monkeypatch):
+    """스키마가 없는데 500 을 내면 「콘솔이 고장났다」 로 읽힌다. 무엇을
+    해야 하는지 말해야 한다."""
+    _runtime_ready(monkeypatch, ready=False)
+
+    response = client.get("/api/specialist-runtime", headers=member(client))
+
+    assert response.status_code == 503
+    assert "specialist_runtime_schema.sql" in response.json()["detail"]
+
+
+def test_submitting_a_source_requires_csrf(client, monkeypatch):
+    _runtime_ready(monkeypatch)
+
+    response = client.post(
+        "/api/specialist-runtime/sources/git",
+        headers=member(client),
+        json={"key": "hermes", "repositoryUrl": "https://github.com/t/h",
+              "releaseRef": "v1.0.0"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_a_moving_ref_is_refused_by_the_api(client, monkeypatch):
+    """승인한 것과 나중에 도는 것이 달라진다."""
+    _runtime_ready(monkeypatch)
+    monkeypatch.setattr(
+        console_app.specialist_store, "get_specialist",
+        lambda key: {"workspaces": ["fin"]},
+    )
+    headers = owner(client)
+    headers["X-TYBot-Csrf"] = client.cookies.get("tybot_csrf") or ""
+
+    response = client.post(
+        "/api/specialist-runtime/sources/git",
+        headers=headers,
+        json={"key": "hermes", "repositoryUrl": "https://github.com/t/h",
+              "releaseRef": "main"},
+    )
+
+    assert response.status_code in (403, 422)
+    if response.status_code == 422:
+        assert "움직입니다" in response.json()["detail"]
+
+
+def test_disable_and_rollback_are_admin_only(client, monkeypatch):
+    _runtime_ready(monkeypatch)
+
+    for path in ("disable", "rollback"):
+        response = client.post(
+            f"/api/specialist-runtime/specialists/hermes/{path}",
+            headers=member(client), json={"note": ""},
+        )
+        assert response.status_code == 403, path
+
+
+def test_the_runtime_api_path_is_separate_from_stage_one():
+    """상한과 검사가 다르다. 같은 경로에 얹으면 한쪽 완화가 다른 쪽을 넓힌다."""
+    paths = {
+        getattr(route, "path", "") for route in console_app.app.routes
+    }
+    runtime = {p for p in paths if p.startswith("/api/specialist-runtime")}
+
+    assert runtime, "실행형 경로가 없다"
+    for path in runtime:
+        assert not path.startswith("/api/specialists/"), path

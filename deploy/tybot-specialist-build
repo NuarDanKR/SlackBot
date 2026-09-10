@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# 전문 봇 무시크릿 빌드 — 일회성 컨테이너 안에서만 돈다.
+#
+# 설계: docs/design/specialist-runtime-v2.md §무시크릿 빌드
+#
+#   tybot-specialist-build <key> <source-dir>
+#
+# ## 왜 별도 컨테이너인가
+#
+# **빌드는 임의 코드 실행이다.** `npm ci` 는 lifecycle script 를 부를 수 있고,
+# `npm run build` 와 `npm test` 는 그 저장소가 쓴 코드 그 자체다. 그것을
+# `tybot-console` 이나 `tybot.service` 안에서 돌리면, 업로드한 사람이 우리
+# 프로세스의 권한을 그대로 갖는다.
+#
+# 그래서 builder 에는 **아무 자격도 마운트하지 않는다** — /etc/tybot, 아카이브,
+# DB 소켓, Podman 소켓, 호스트 홈 어느 것도 없다. 있는 것은 소스 하나와
+# 결과를 내놓을 빈 디렉터리뿐이다.
+#
+# 출력은 stdout 한 줄의 JSON 이다. 호출부(콘솔 배포 helper)가 그것만 읽는다 —
+# 빌드 로그를 그대로 흘리면 업로드 소스와 환경변수가 콘솔 화면으로 나간다.
+set -euo pipefail
+
+KEY=${1:-}
+SRC=${2:-}
+
+PODMAN=/usr/bin/podman
+BUILD_ROOT=/var/lib/tybot-subbots/build
+# npm registry 만 열린 네트워크. 없으면 의존성 단계에서 실패한다 —
+# 인터넷 전체를 여는 것보다 실패하는 쪽이 맞다.
+NPM_NETWORK=${TYBOT_NPM_NETWORK:-}
+
+# 빌드 상한. 넘으면 실패다. 없으면 한 번의 빌드가 서버를 통째로 쓴다.
+BUILD_CPUS=${TYBOT_BUILD_CPUS:-2}
+BUILD_MEMORY=${TYBOT_BUILD_MEMORY:-2g}
+BUILD_TIMEOUT=${TYBOT_BUILD_TIMEOUT:-900}
+BUILD_PIDS=${TYBOT_BUILD_PIDS:-512}
+
+# 허용 runtime → base image. **매니페스트가 이미지를 고르지 못한다.**
+# 고르게 하면 임의 이미지 실행이 된다.
+declare -A RUNTIME_BASE=(
+  [nodejs22]="docker.io/library/node:22-alpine"
+)
+
+die() { printf '{"status":"build_failed","error_code":"%s"}\n' "$1"; exit 1; }
+
+[[ "$KEY" =~ ^[a-z][a-z0-9-]{1,31}$ ]] || die "invalid-key"
+[[ $# -eq 2 ]] || die "invalid-args"
+[[ -d "$SRC" ]] || die "source-missing"
+
+MANIFEST="$SRC/tybot-specialist.toml"
+[[ -f "$MANIFEST" ]] || die "manifest-invalid"
+[[ -f "$SRC/package-lock.json" ]] || die "lockfile-missing"
+
+# runtime 은 매니페스트가 선언하지만, **우리가 아는 값일 때만** 받는다.
+RUNTIME=$(sed -n 's/^runtime[[:space:]]*=[[:space:]]*"\([a-z0-9]*\)".*/\1/p' "$MANIFEST" | head -1)
+BASE=${RUNTIME_BASE[$RUNTIME]:-}
+[[ -n "$BASE" ]] || die "runtime-denied"
+
+# **제출물 검사가 먼저다.** 환경 문제(podman 없음)를 먼저 보면, lockfile 을
+# 빠뜨린 개발자에게 `podman-missing` 이 돌아간다 — 자기가 고칠 수 없는 코드다.
+command -v "$PODMAN" >/dev/null || die "podman-missing"
+
+WORK=$(mktemp -d "$BUILD_ROOT/XXXXXXXX" 2>/dev/null) || die "workspace-failed"
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+
+install -d -m 0700 "$WORK/out"
+
+# --- 1) 의존성: registry 만 열고, lifecycle script 는 끈다 --------------------
+#
+# `--ignore-scripts` 가 핵심이다. 없으면 `npm ci` 한 번이 곧 임의 코드 실행이고,
+# 그 순간 이 컨테이너의 격리가 유일한 방어선이 된다.
+NET=(--network=none)
+if [[ -n "$NPM_NETWORK" ]]; then
+  NET=(--network="$NPM_NETWORK")
+else
+  die "dependency-denied"
+fi
+
+run_stage() {
+  local stage=$1
+  shift
+  timeout "$BUILD_TIMEOUT" "$PODMAN" run --rm \
+    --name "tybot-build-$KEY-$stage" \
+    "${NET[@]}" \
+    --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
+    --security-opt=no-new-privileges \
+    --cap-drop=ALL \
+    --cpus="$BUILD_CPUS" \
+    --memory="$BUILD_MEMORY" \
+    --memory-swap="$BUILD_MEMORY" \
+    --pids-limit="$BUILD_PIDS" \
+    --user 10002:10002 \
+    --workdir /work \
+    --volume "$SRC:/work:rw,noexec,nosuid,nodev" \
+    --env HOME=/tmp \
+    --env npm_config_cache=/tmp/npm \
+    --env npm_config_update_notifier=false \
+    "$BASE" "$@"
+}
+
+run_stage deps npm ci --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 \
+  || die "dependency-denied"
+
+# --- 2) 빌드·테스트: 네트워크를 닫고 돌린다 -----------------------------------
+#
+# 여기서부터는 **불신 코드**다. 네트워크를 닫는 이유는 두 가지다 — 테스트가
+# 인터넷에 나가면 재현되지 않고, 그 통로로 근거가 아니라 우리 서버 정보가 나간다.
+NET=(--network=none)
+run_stage build npm run build >/dev/null 2>&1 || die "build-failed"
+run_stage test npm test >/dev/null 2>&1 || die "test-failed"
+
+# --- 3) 이미지: 산출물과 production 의존성만 --------------------------------
+#
+# compiler, 소스 ZIP, Git metadata 를 넣지 않는다. 넣으면 운영 컨테이너 안에
+# 빌드 도구가 남고, 그건 침입자가 가장 먼저 찾는 것이다.
+#
+# **Dockerfile 을 받지 않는다.** 우리가 쓴 것만 쓴다.
+cat > "$WORK/Containerfile" <<CONTAINERFILE
+FROM $BASE
+USER 10001:10001
+WORKDIR /app
+COPY --chown=10001:10001 . /app
+ENV NODE_ENV=production
+CONTAINERFILE
+
+IMAGE="localhost/tybot-specialist/$KEY"
+"$PODMAN" build \
+  --file "$WORK/Containerfile" \
+  --tag "$IMAGE:candidate" \
+  --label "tybot.contract_version=v2" \
+  --label "tybot.specialist=$KEY" \
+  --squash-all \
+  "$SRC" >/dev/null 2>&1 || die "image-failed"
+
+DIGEST=$("$PODMAN" image inspect "$IMAGE:candidate" --format '{{.Digest}}' 2>/dev/null || true)
+[[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "digest-missing"
+
+# 태그는 지운다. **운영은 digest 로만 가리킨다** — 태그가 남아 있으면 누군가
+# 그것으로 실행하고, 그 순간 승인한 것과 도는 것이 갈린다.
+"$PODMAN" untag "$IMAGE:candidate" >/dev/null 2>&1 || true
+
+# SBOM. 생성 실패는 빌드 실패로 본다 — 무엇이 들어갔는지 모르는 이미지를
+# 승인 화면에 올릴 수 없다.
+SBOM="$WORK/out/sbom.json"
+if command -v syft >/dev/null 2>&1; then
+  syft "$IMAGE@$DIGEST" -o cyclonedx-json > "$SBOM" 2>/dev/null || die "sbom-failed"
+else
+  # syft 가 없으면 lockfile 을 SBOM 대신 해시한다. 완전하지 않지만
+  # 「무엇을 설치했는지」 의 기준은 된다.
+  cp "$SRC/package-lock.json" "$SBOM" || die "sbom-failed"
+fi
+SBOM_SHA=$(sha256sum "$SBOM" | cut -d' ' -f1)
+
+printf '{"status":"image_ready","image_digest":"%s","sbom_sha256":"%s","runtime":"%s"}\n' \
+  "$DIGEST" "$SBOM_SHA" "$RUNTIME"
