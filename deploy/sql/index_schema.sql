@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS org_unit (
 ALTER TABLE org_unit ADD COLUMN IF NOT EXISTS company_code text;
 -- 그룹웨어 원본 경로(`ORGROOT;TY;ABB300;ABB340;`). 분류가 틀렸을 때 되짚는 근거로 남긴다.
 ALTER TABLE org_unit ADD COLUMN IF NOT EXISTS org_path text;
+-- 조직장의 사번(SYS_OBJECT_GROUP.MANAGERCODE). employee 를 참조하지 **않는다** —
+-- 조직 스냅샷과 인사 스냅샷의 시점이 어긋나면 외래키가 반영 전체를 되돌린다.
+-- 조직장이 없는 부서가 절반이므로(2026-09-10 기준 242개 중 123개) NULL 이 정상이다.
+ALTER TABLE org_unit ADD COLUMN IF NOT EXISTS manager_emp_no text;
 
 CREATE INDEX IF NOT EXISTS org_unit_parent ON org_unit (parent_code);
 CREATE INDEX IF NOT EXISTS org_unit_active ON org_unit (active) WHERE active;

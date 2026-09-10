@@ -58,7 +58,14 @@ def mask(value: object) -> str:
     return text[0] + "*" * (len(text) - 2) + text[-1]
 
 
-def connect():
+def connect(*, probe: bool = False):
+    """읽기 전용 접속.
+
+    `probe=True` 면 조사 전용 계정(`GW_PROBE_*`)을 쓴다. 그 계정은 원본 스키마를
+    보기 위한 것이고 UPDATE/DROP ANY TABLE 권한을 갖고 있어서, `ORACLE_USER`
+    자리에 넣으면 "뷰 2개만 읽는다" 는 설계가 무의미해진다. 그래서 **다른 변수로
+    분리하고 호출할 때 명시**한다 — 실수로 봇 경로에 섞이지 않게.
+    """
     load_env_file()
     try:
         import oracledb
@@ -66,12 +73,21 @@ def connect():
         print("oracledb 가 없다:  pip install oracledb")
         raise SystemExit(2) from None
 
-    user = os.environ.get("ORACLE_USER")
-    password = os.environ.get("ORACLE_PASSWORD")
-    if not user or not password:
-        print("ORACLE_USER / ORACLE_PASSWORD 가 없다. .env 를 확인한다"
-              " (형식은 .env.example 참고).")
-        raise SystemExit(2)
+    if probe:
+        user = os.environ.get("GW_PROBE_USER")
+        password = os.environ.get("GW_PROBE_PASSWORD")
+        if not user or not password:
+            print("GW_PROBE_USER / GW_PROBE_PASSWORD 가 없다. 조사 전용 계정이며"
+                  " 조사가 끝나면 .env 에서 지운다.")
+            raise SystemExit(2)
+        print(f"[조사 계정 {user} 로 접속한다 — 이 스크립트는 SELECT 만 실행한다]")
+    else:
+        user = os.environ.get("ORACLE_USER")
+        password = os.environ.get("ORACLE_PASSWORD")
+        if not user or not password:
+            print("ORACLE_USER / ORACLE_PASSWORD 가 없다. .env 를 확인한다"
+                  " (형식은 .env.example 참고).")
+            raise SystemExit(2)
 
     dsn = os.environ.get("ORACLE_DSN")
     if not dsn:
@@ -238,6 +254,40 @@ def show_sample(cur, schema: str | None, table: str) -> None:
     print("값은 전부 마스킹했다. 구조 확인이 목적이지 내용 열람이 아니다.")
 
 
+def show_values(cur, schema: str | None, spec: str, *, limit: int = 60) -> None:
+    """한 컬럼의 서로 다른 값과 건수.
+
+    분류용 코드 컬럼(직위·직책 등)은 **값을 봐야** 쓸 수 있는지 판단된다 — 컬럼
+    이름만으로는 코드 체계인지 자유 입력인지 알 수 없다. 값이 자유 입력이면 그걸로
+    그룹을 만들 수 없다.
+
+    이름이 민감해 보이는 컬럼은 거부한다. 값 목록은 마스킹이 통하지 않으므로
+    (마스킹하면 목적 자체가 사라진다) 아예 조회하지 않는 편이 맞다.
+    """
+    obj, _, column = spec.partition(".")
+    if not obj or not column:
+        print("형식은 객체.컬럼 이다 (예: SYS_OBJECT_USER.JOBDUTY)")
+        return
+    if is_sensitive(column):
+        print(column + " 는 민감해 보이는 이름이다. 값 목록은 조회하지 않는다.")
+        return
+    prefix = (schema.upper() + ".") if schema else ""
+    col = '"' + column.upper() + '"'
+    cur.execute(
+        "select " + col + " as v, count(*) as n from " + prefix
+        + '"' + obj.upper() + '"'
+        + " group by " + col + " order by count(*) desc"
+    )
+    rows = cur.fetchall()
+    print(spec.upper() + " — 서로 다른 값 " + str(len(rows)) + "개")
+    for value, count in rows[:limit]:
+        shown = "(null)" if value is None else str(value)
+        print("  " + shown.ljust(28) + str(count))
+    if len(rows) > limit:
+        print("  … 그 외 " + str(len(rows) - limit) + "개")
+    print("")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--schema", default=os.environ.get("ORACLE_SCHEMA"))
@@ -247,9 +297,14 @@ def main() -> int:
     ap.add_argument("--code", default="ORG_CODE", help="--tree 의 조직코드 컬럼")
     ap.add_argument("--parent", default="PARENT_ORG_CODE", help="--tree 의 상위코드 컬럼")
     ap.add_argument("--name", default="ORG_NAME", help="--tree 의 조직명 컬럼")
+    ap.add_argument("--values", help="한 컬럼의 서로 다른 값과 건수 (형식: 객체.컬럼)")
+    ap.add_argument(
+        "--probe", action="store_true",
+        help="조사 전용 계정(GW_PROBE_*)으로 접속. 원본 스키마를 볼 때만 쓴다",
+    )
     args = ap.parse_args()
 
-    with connect() as conn, conn.cursor() as cur:
+    with connect(probe=args.probe) as conn, conn.cursor() as cur:
         show_identity(cur)
         if args.table:
             show_columns(cur, args.schema, args.table)
@@ -257,6 +312,8 @@ def main() -> int:
             check_tree(cur, args.schema, args.tree, args.code, args.parent, args.name)
         elif args.sample:
             show_sample(cur, args.schema, args.sample)
+        elif args.values:
+            show_values(cur, args.schema, args.values)
         else:
             find_objects(cur, args.schema)
     return 0

@@ -19,10 +19,12 @@ from tybot.orgsync import (
 )
 
 
-def _org(code, name="조직", parent=None, kind="team", company="TY", active=True):
+def _org(code, name="조직", parent=None, kind="team", company="TY", active=True,
+         manager=None):
     return {
         "org_code": code, "org_name": name, "parent_code": parent,
         "kind": kind, "company_code": company, "active": active,
+        "manager_emp_no": manager,
     }
 
 
@@ -270,3 +272,52 @@ def test_apply_refuses_shrunken_snapshot_against_live_counts(db_conn):
     result = apply_snapshot(db_conn, _snap(org=[_org("A")], emp=[_emp("1")]))
     assert not result.ok
     assert any("급감" in p for p in result.problems)
+
+
+# --- 조직장 ------------------------------------------------------------------
+#
+# 조직장은 `SYS_OBJECT_GROUP.MANAGERCODE` 다. 2026-09-10 확인 기준 TY 사용중 부서
+# 242개 중 **119개만 채워져 있다.** 그래서 NULL 이 정상이고, 없는 값을 추정으로
+# 메우지 않는다 — "이 조직의 장은 누구" 를 틀리게 답하는 것보다 모른다고 답하는 편이
+# 낫다.
+def test_snapshot_carries_the_manager(db_conn):
+    """COPY 컬럼 수가 어긋나면 반영 전체가 실패한다. dry-run 이 그걸 잡는다."""
+    from tybot.orgsync import apply_snapshot
+
+    with db_conn.cursor() as cur:
+        cur.execute("select count(*) from org_unit where active")
+        live_org = cur.fetchone()[0]
+        cur.execute("select count(*) from employee where active")
+        live_emp = cur.fetchone()[0]
+
+    org = [_org("ZZMGR_HQ", kind="hq", manager="10001")]
+    org += [_org(f"ZZMGR_{i}", parent="ZZMGR_HQ",
+                 manager=("10002" if i % 2 else None))
+            for i in range(live_org)]
+    emp = [_emp(f"ZZMGR_{i}", org="ZZMGR_HQ") for i in range(live_emp + 1)]
+
+    result = apply_snapshot(db_conn, _snap(org=org, emp=emp), dry_run=True)
+    assert result.ok, result.problems
+
+
+def test_manager_column_exists(db_conn):
+    """스키마가 없으면 위 dry-run 이 통과해도 실제 반영에서 터진다."""
+    with db_conn.cursor() as cur:
+        cur.execute("""select data_type from information_schema.columns
+                        where table_name='org_unit' and column_name='manager_emp_no'""")
+        row = cur.fetchone()
+    assert row, "index_schema.sql 의 ALTER 를 아직 적용하지 않았다"
+    assert row[0] == "text"
+
+
+def test_manager_is_not_a_foreign_key(db_conn):
+    """조직 스냅샷과 인사 스냅샷의 시점이 어긋나면 외래키가 반영을 되돌린다."""
+    with db_conn.cursor() as cur:
+        cur.execute("""
+            select count(*) from information_schema.key_column_usage k
+              join information_schema.table_constraints c
+                on c.constraint_name = k.constraint_name
+             where k.table_name='org_unit' and k.column_name='manager_emp_no'
+               and c.constraint_type='FOREIGN KEY'
+        """)
+        assert cur.fetchone()[0] == 0

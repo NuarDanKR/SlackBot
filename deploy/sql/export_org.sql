@@ -26,7 +26,9 @@ SELECT JSON_OBJECT(
          KEY 'org_name'    VALUE org_name,
          KEY 'parent_code' VALUE parent_org_code,
          KEY 'kind'        VALUE org_kind,
-         KEY 'active'      VALUE CASE WHEN use_yn = 'Y' THEN 'true' ELSE 'false' END FORMAT JSON
+         KEY 'active'      VALUE CASE WHEN use_yn = 'Y' THEN 'true' ELSE 'false' END FORMAT JSON,
+         KEY 'company_code'    VALUE company_code,
+         KEY 'manager_emp_no'  VALUE manager_emp_no
        )
   FROM V_TYSLACK_ORG
  ORDER BY org_code;

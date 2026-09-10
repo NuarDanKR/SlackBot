@@ -278,16 +278,19 @@ def apply_snapshot(conn, snapshot: Snapshot, *, dry_run: bool = False) -> SyncRe
         cur.execute(
             "create temp table org_stage ("
             " code text, name text, kind text, parent_code text,"
-            " company_code text, active boolean) on commit drop"
+            " company_code text, active boolean, manager_emp_no text)"
+            " on commit drop"
         )
         with cur.copy(
-            "copy org_stage (code, name, kind, parent_code, company_code, active)"
+            "copy org_stage (code, name, kind, parent_code, company_code, active,"
+            "                 manager_emp_no)"
             " from stdin"
         ) as cp:
             for r in snapshot.org:
                 cp.write_row((
                     r["org_code"], r["org_name"], r["kind"],
                     r.get("parent_code"), r.get("company_code"), bool(r.get("active")),
+                    r.get("manager_emp_no") or None,
                 ))
 
         cur.execute(
@@ -309,13 +312,18 @@ def apply_snapshot(conn, snapshot: Snapshot, *, dry_run: bool = False) -> SyncRe
         # 순서에 따라 실패하므로, 먼저 부모 없이 전부 넣고 나서 부모를 채운다.
         cur.execute(
             "insert into org_unit (code, name, kind, parent_code, company_code,"
-            "                      org_path, active, synced_at)"
-            " select code, name, kind, null, company_code, null, active, now()"
+            "                      org_path, active, manager_emp_no, synced_at)"
+            " select code, name, kind, null, company_code, null, active,"
+            "        manager_emp_no, now()"
             "   from org_stage"
             " on conflict (code) do update"
             "    set name = excluded.name, kind = excluded.kind,"
             "        company_code = excluded.company_code,"
-            "        active = excluded.active, synced_at = now()"
+            "        active = excluded.active,"
+            # 그룹웨어에서 조직장이 비워지면 우리도 비운다. 예전 값을 남기면
+            # 이미 그 자리에 없는 사람을 조직장으로 답하게 된다.
+            "        manager_emp_no = excluded.manager_emp_no,"
+            "        synced_at = now()"
         )
         cur.execute(
             "update org_unit o set parent_code = s.parent_code"

@@ -122,6 +122,13 @@ GRANT CREATE SESSION TO TYSLACK_BOT;
 --   `경영진`·`이사회의장` 같은 것은 team 으로 떨어진다. 애매한 것은 team 이다.
 --   틀려도 **권한 판정은 parent 트리로 하므로 안전하다.** kind 는 표시·분류용이다.
 
+--
+-- manager_emp_no — **조직장.** SYS_OBJECT_GROUP.MANAGERCODE 를 그대로 쓴다.
+--   이 값은 SYS_OBJECT_USER.USERCODE 로 이어진다(2026-09-10 확인: TY 사용중 부서
+--   242개 중 채워진 119개 전부가 재직자로 정상 연결, 겸임 때문에 사람은 95명).
+--   **123개 부서는 조직장이 비어 있다.** 그룹웨어에 안 채워져 있다는 뜻이고, 우리가
+--   추정으로 메우지 않는다 — "이 조직의 장은 누구" 를 틀리게 답하는 것보다 모른다고
+--   답하는 편이 낫다. 받는 쪽은 NULL 을 그대로 두고 기능에서 없는 경우를 처리한다.
 CREATE OR REPLACE VIEW V_TYSLACK_ORG AS
 SELECT g.GROUPCODE                                        AS org_code,
        g.DISPLAYNAME                                      AS org_name,
@@ -147,7 +154,8 @@ SELECT g.GROUPCODE                                        AS org_code,
        -- 계열사 경계. TY(태영건설)와 SUB/SPC(자회사·SPC)를 섞으면 안 된다.
        g.COMPANYCODE                                      AS company_code,
        g.GROUPPATH                                        AS org_path,
-       g.ISUSE                                            AS use_yn
+       g.ISUSE                                            AS use_yn,
+       g.MANAGERCODE                                      AS manager_emp_no
   FROM COVI_SMART4J.SYS_OBJECT_GROUP g
  WHERE g.GROUPTYPE = 'Dept'
    AND g.GROUPPATH IS NOT NULL;

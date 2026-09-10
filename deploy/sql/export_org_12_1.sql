@@ -62,6 +62,11 @@ SELECT '{"org_code":'
           END
        || ',"active":'
        || CASE WHEN use_yn = 'Y' THEN 'true' ELSE 'false' END
+       || ',"manager_emp_no":'
+       || CASE WHEN manager_emp_no IS NULL THEN 'null' ELSE
+            '"' || REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+              manager_emp_no, '\', '\\'), '"', '\"'), CHR(13), ' '), CHR(10), ' '), CHR(9), ' ') || '"'
+          END
        || '}'
   FROM TYSLACK.V_TYSLACK_ORG
  ORDER BY org_code;
