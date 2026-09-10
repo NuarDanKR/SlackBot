@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 
-from ..base import LLMResponse, Message, ModelSpec
+from ..base import LLMResponse, Message, ModelSpec, ToolCall, ToolSpec
 
 
 def _resolve_key() -> str | None:
@@ -49,6 +49,7 @@ class AnthropicProvider:
         *,
         max_tokens: int = 1024,
         temperature: float = 0.0,
+        tools: Sequence[ToolSpec] = (),
     ) -> LLMResponse:
         client = self._get_client()
         system = "\n\n".join(m.content for m in messages if m.role == "system")
@@ -88,8 +89,33 @@ class AnthropicProvider:
         # 여기에 모델 이름을 박으면 새 모델이 늘 때마다 썩는다.
         if spec.supports_sampling:
             request["temperature"] = temperature
+        # 도구가 없으면 **키를 아예 빼야 한다.** 빈 배열을 보내면 거부하는 모델이
+        # 있고, 그 실패는 `system` 때와 같은 모양으로 나타난다.
+        if tools:
+            request["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                }
+                for t in tools
+            ]
         resp = client.messages.create(**request)
-        text = "".join(getattr(b, "text", "") for b in resp.content)
+        # `text` 블록만 모은다. thinking 블록은 `.text` 가 없고, tool_use 는 아래에서
+        # 따로 꺼낸다 — 여기서 섞으면 도구 인자가 답변 본문에 붙는다.
+        text = "".join(
+            getattr(b, "text", "") for b in resp.content
+            if getattr(b, "type", "") == "text"
+        )
+        calls = tuple(
+            ToolCall(
+                id=str(getattr(b, "id", "")),
+                name=str(getattr(b, "name", "")),
+                input=dict(getattr(b, "input", {}) or {}),
+            )
+            for b in resp.content
+            if getattr(b, "type", "") == "tool_use"
+        )
         in_tok = resp.usage.input_tokens
         out_tok = resp.usage.output_tokens
         return LLMResponse(
@@ -100,4 +126,6 @@ class AnthropicProvider:
             output_tokens=out_tok,
             cost_usd=spec.cost(in_tok, out_tok),
             raw=resp,
+            tool_calls=calls,
+            stop_reason=str(getattr(resp, "stop_reason", "") or ""),
         )

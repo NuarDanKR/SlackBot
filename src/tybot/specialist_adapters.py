@@ -171,3 +171,131 @@ def build(key: str, router, *, model: str = "", rules: str = ""):
     된다 — 그게 계약을 좁혀 둔 이유다.
     """
     return PromptSpecialist(key, router, model=model, rules=rules)
+
+
+# --- 도구를 갖춘 전문가 (A+) --------------------------------------------------
+#
+# `PromptSpecialist` 는 마스터가 **고른 근거**로 한 번 답한다. Hermes 는 그렇게
+# 동작하지 않는다 — 검색하고, 읽고, 모자라면 다시 검색한다(`ref/hermes` 소스,
+# 2026-09-11 확인). 그 루프가 그 봇의 값이고, 프롬프트 한 장으로는 못 옮긴다.
+#
+# 그래서 도구는 우리가 만들고(`specialist_tools`) 설명문과 규칙만 가져온다.
+# 권한은 도구 안에서 `RequestContext` 로 한 번만 판정된다.
+
+# 루프 상한. **없으면 모델이 검색을 무한히 돈다** — 비용도 지연도 상한이 없어진다.
+MAX_TOOL_ROUNDS = 8
+# 루프 전체 예산. 사고가 켜져 있는 모델은 한 회차가 크다.
+TOOL_MAX_TOKENS = 8192
+
+
+class ToolSpecialist:
+    """도구를 부르며 스스로 근거를 찾는 전문가.
+
+    `specialist_contract.SpecialistAdapter` 를 만족한다. **출처를 붙이지 않는다** —
+    무엇을 실제로 읽었는지는 `toolbox.touched` 에 남고, 출처는 마스터가 그것으로
+    만든다. 모델이 본문에 적은 것을 믿고 출처를 만들면 그게 곧 환각이다.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        router,
+        *,
+        toolbox,
+        model: str = "",
+        rules: str = "",
+        live: bool = False,
+        max_rounds: int = MAX_TOOL_ROUNDS,
+    ) -> None:
+        self.key = key
+        self.prompt = rules.strip() or load_prompt(key)
+        self.source = "console" if rules.strip() else "file"
+        self._router = router
+        self._model = model or ""
+        self._toolbox = toolbox
+        self._live = live
+        self._max_rounds = max_rounds
+        self.last_model = ""
+        self.last_cost_usd = 0.0
+        self.rounds = 0
+
+    @property
+    def touched(self):
+        """무엇을 읽었나. 출처를 만드는 쪽이 읽는다."""
+        return self._toolbox.touched
+
+    def complete(self, request) -> str:
+        from .gateway.base import Message, Sensitivity
+        from .specialist_tools import specs
+
+        tools = specs(live=self._live)
+        # 마스터가 이미 고른 근거가 있으면 함께 준다. 없어도 된다 —
+        # 도구로 스스로 찾는 것이 이 어댑터의 전제다.
+        seed = "\n\n".join(item.text for item in request.evidence)[:MAX_EVIDENCE_CHARS]
+        opening = f"질문: {request.question}"
+        if seed:
+            opening = f"이미 찾아 둔 근거:\n{seed}\n\n{opening}"
+
+        messages: list = [
+            Message("system", self.prompt),
+            Message("user", opening),
+        ]
+
+        for _ in range(self._max_rounds):
+            self.rounds += 1
+            response = self._router.complete(
+                messages,
+                model=self._model or None,
+                sensitivity=Sensitivity.CONFIDENTIAL,
+                max_tokens=TOOL_MAX_TOKENS,
+                tools=tools,
+            )
+            self.last_model = response.model
+            self.last_cost_usd += response.cost_usd
+
+            if not response.wants_tools:
+                return response.text
+
+            # 모델이 만든 블록을 **그대로** 되돌려 넣는다. 텍스트만 넣으면
+            # tool_use 와 tool_result 의 짝이 깨져 다음 호출이 400 이다.
+            messages.append(Message("assistant", _assistant_blocks(response)))
+            messages.append(Message("user", [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "content": self._toolbox.run(call.name, call.input),
+                }
+                for call in response.tool_calls
+            ]))
+
+        # 상한에 걸렸다. **도구 없이 한 번 더 물어 지금까지 읽은 것으로 답하게 한다.**
+        # 도구를 계속 주면 또 부르고, 상한이 상한이 아니게 된다.
+        #
+        # 그래도 비면 빈 문자열을 돌려준다 — 계약 검사가 그것을 위반으로 보고
+        # 마스터가 답한다. 모자란 채로 억지 문장을 만드는 것보다 낫다.
+        log.warning("전문가 도구 루프 상한 key=%s rounds=%d", self.key, self.rounds)
+        messages.append(Message(
+            "user",
+            "더 찾지 말고 지금까지 읽은 것으로 답하세요. 모자라면 모자라다고 쓰세요.",
+        ))
+        final = self._router.complete(
+            messages,
+            model=self._model or None,
+            sensitivity=Sensitivity.CONFIDENTIAL,
+            max_tokens=TOOL_MAX_TOKENS,
+        )
+        self.last_model = final.model
+        self.last_cost_usd += final.cost_usd
+        return final.text
+
+
+def _assistant_blocks(response) -> list[dict]:
+    """모델 turn 을 대화에 되돌려 넣을 블록으로. 텍스트와 tool_use 둘 다 필요하다."""
+    blocks: list[dict] = []
+    if response.text.strip():
+        blocks.append({"type": "text", "text": response.text})
+    blocks.extend(
+        {"type": "tool_use", "id": call.id, "name": call.name, "input": call.input}
+        for call in response.tool_calls
+    )
+    return blocks

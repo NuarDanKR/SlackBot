@@ -22,8 +22,9 @@ class FakeProvider:
         self.name = name
         self.calls = 0
 
-    def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0):
+    def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0, tools=()):
         self.calls += 1
+        self.last_tools = tuple(tools)
         in_tok, out_tok = 1000, 500
         return LLMResponse(
             text=f"[{spec.model}] ok",
@@ -120,6 +121,7 @@ class _FakeMessages:
             output_tokens = 5
 
         class Block:
+            type = "text"
             text = "답"
 
         class Resp:
@@ -263,3 +265,104 @@ def test_the_specialist_budget_covers_thinking():
 
     assert "max_tokens=1024" not in source
     assert "max_tokens=8192" in source
+
+
+# --- 도구 (2026-09-11) --------------------------------------------------------
+#
+# Hermes 를 흡수하려면 검색·읽기 루프가 필요하고, 그 루프는 게이트웨이가
+# 도구를 실어 보낼 수 있어야 돈다. **루프 자체는 여기 없다** — 몇 번 부를지는
+# 정책이라 호출부(`ToolSpecialist`)가 정한다.
+def test_no_tools_means_the_argument_is_not_sent():
+    """`system`·`temperature` 와 같은 이유다. 안 쓰는 것을 보내면 그것을
+    모르는 구현이 거부하고, 그 실패는 「전문가만 답을 못 한다」 로 보인다."""
+    from tybot.gateway.base import Message
+
+    seen = {}
+
+    class Old:
+        """도구를 모르는 구현. 인자가 오면 터진다."""
+
+        name = "anthropic"
+
+        def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0):
+            seen["called"] = True
+            return LLMResponse(text="답", model=spec.model, provider=self.name,
+                               input_tokens=1, output_tokens=1, cost_usd=0.0)
+
+    router = Router.from_default_registry(providers={"anthropic": Old()})
+
+    got = router.complete([Message("user", "안녕")], model="claude-sonnet-5")
+
+    assert got.text == "답"
+    assert seen["called"]
+
+
+def test_tools_reach_the_provider():
+    from tybot.gateway.base import Message, ToolSpec
+
+    provider = FakeProvider("anthropic")
+    router = Router.from_default_registry(providers={"anthropic": provider})
+    spec = ToolSpec(name="search", description="찾는다", input_schema={"type": "object"})
+
+    router.complete([Message("user", "?")], model="claude-sonnet-5", tools=[spec])
+
+    assert provider.last_tools == (spec,)
+
+
+def test_tool_use_blocks_become_tool_calls():
+    """`tool_use` 를 텍스트에 섞으면 도구 인자가 답변 본문에 붙는다."""
+    from tybot.gateway.base import Message, ModelSpec, Sensitivity
+    from tybot.gateway.providers.anthropic_provider import AnthropicProvider
+
+    class Use:
+        type = "tool_use"
+        id = "toolu_1"
+        name = "search"
+
+        def __init__(self):
+            self.input = {"query": "기성금"}
+
+    class Text:
+        type = "text"
+        text = "찾아볼게요."
+
+    class Usage:
+        input_tokens = 10
+        output_tokens = 5
+
+    class Resp:
+        def __init__(self):
+            self.content = [Text(), Use()]
+            self.usage = Usage()
+            self.stop_reason = "tool_use"
+
+    class Client:
+        # SDK 모양을 그대로 흉내 낸다.
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                Client.seen = kwargs
+                return Resp()
+
+    provider = AnthropicProvider(api_key="test")
+    provider._client = Client()
+    model = ModelSpec("claude-opus-5", "anthropic", 1.0, 1.0, Sensitivity.CONFIDENTIAL)
+
+    got = provider.complete(
+        model, [Message("user", "?")],
+        tools=[_tool_spec_for_test()],
+    )
+
+    assert got.text == "찾아볼게요."
+    assert got.wants_tools
+    assert got.tool_calls[0].name == "search"
+    assert got.tool_calls[0].input == {"query": "기성금"}
+    assert Client.seen["tools"][0]["name"] == "search"
+
+
+# 위 테스트에서만 쓰는 작은 생성자.
+def _tool_spec_for_test():
+    from tybot.gateway.base import ToolSpec
+
+    return ToolSpec(name="search", description="찾는다",
+                    input_schema={"type": "object", "properties": {}})

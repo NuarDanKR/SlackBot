@@ -11,6 +11,7 @@ from .base import (
     ModelSpec,
     Provider,
     Sensitivity,
+    ToolSpec,
     error_reason,
 )
 from .cost import CostGuard
@@ -173,6 +174,7 @@ class Router:
         sensitivity: Sensitivity = Sensitivity.INTERNAL,
         max_tokens: int = 1024,
         temperature: float = 0.0,
+        tools: Sequence[ToolSpec] = (),
     ) -> LLMResponse:
         spec = self.resolve(model, sensitivity)
         # 러프 사전 견적(입력 토큰 근사 = 콘텐츠 크기/4). 문서·이미지 블록도 누락하지 않는다.
@@ -191,8 +193,13 @@ class Router:
         for candidate in self._candidates(spec, sensitivity):
             provider = self._providers[candidate.provider]
             try:
+                # **도구가 없으면 인자를 넘기지 않는다.** `system` · `temperature`
+                # 와 같은 이유다 — 안 쓰는 것을 보내면 그것을 모르는 구현이
+                # 거부한다. 도구를 실제로 쓰는 호출에서만 계약이 넓어진다.
+                extra = {"tools": tools} if tools else {}
                 resp = provider.complete(
-                    candidate, messages, max_tokens=max_tokens, temperature=temperature
+                    candidate, messages, max_tokens=max_tokens,
+                    temperature=temperature, **extra,
                 )
             except Exception as exc:  # noqa: BLE001 - 다음 후보로 넘긴다
                 last_error = exc

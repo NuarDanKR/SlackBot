@@ -55,6 +55,28 @@ class ModelSpec:
         )
 
 
+@dataclass(frozen=True)
+class ToolSpec:
+    """모델에게 주는 도구 하나.
+
+    **설명문이 곧 규칙이다.** 「결과가 없다고 낱말을 바꿔 다시 부르지 말 것」 같은
+    지시는 시스템 프롬프트가 아니라 여기 적어야 모델이 그 도구를 부르는 순간에 본다.
+    """
+
+    name: str
+    description: str
+    input_schema: dict
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """모델이 부른 도구. `id` 를 그대로 결과에 붙여 돌려줘야 짝이 맞는다."""
+
+    id: str
+    name: str
+    input: dict
+
+
 @dataclass
 class LLMResponse:
     text: str
@@ -64,6 +86,14 @@ class LLMResponse:
     output_tokens: int
     cost_usd: float
     raw: object | None = None
+    # 도구를 준 호출에서만 채워진다. **루프는 호출부가 돈다** — 게이트웨이는
+    # 전송이고, 무엇을 몇 번 부를지는 정책이라 여기서 정하지 않는다.
+    tool_calls: tuple[ToolCall, ...] = ()
+    stop_reason: str = ""
+
+    @property
+    def wants_tools(self) -> bool:
+        return bool(self.tool_calls)
 
 
 @runtime_checkable
@@ -79,6 +109,7 @@ class Provider(Protocol):
         *,
         max_tokens: int = 1024,
         temperature: float = 0.0,
+        tools: Sequence[ToolSpec] = (),
     ) -> LLMResponse: ...
 
 
