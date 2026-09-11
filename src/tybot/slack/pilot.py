@@ -81,6 +81,7 @@ from ..feedback import (
 from ..feedback import (
     validation_errors as feedback_errors,
 )
+from ..identity import backfill as identity_backfill
 from ..identity import ensure as ensure_identity
 from ..intent import (
     INGEST_ALL_RE,
@@ -2784,6 +2785,7 @@ class WorkspaceBot:
         self._backfill_channel_owners()
         self._handler.connect()
         self.autojoin_sweep()
+        self.identity_sweep()
         log.info(
             "워크스페이스 연결 — %s / 실시간수집=%s / 크로스열람=%s",
             self.cfg.masked(),
@@ -2791,6 +2793,37 @@ class WorkspaceBot:
             sorted(self.cfg.readable) or "없음",
         )
         self.publish_status(connected=True)
+
+    def identity_sweep(self) -> None:
+        """워크스페이스 멤버를 이메일로 사번에 이어 둔다. 기동 시 1회.
+
+        `ensure` 는 **사람이 봇을 쓸 때** 불린다. 그래서 봇을 써 볼 이유가 없던 사람은
+        매핑이 없고, 매핑이 없으면 일정 DM 같은 자동 발송에서 조용히 빠진다 — 이메일이
+        맞아도 그렇다. 실제로 8명 팀에서 4명만 잡혀 있었다(2026-09-11).
+
+        기동을 막지 않는다. Slack 이 느리거나 권한이 없어도 봇은 떠야 한다 — 매핑이
+        없으면 그 사람만 알림을 못 받고, 그건 다음 기동이나 첫 명령에서 이어진다.
+        """
+        with db_connect() as conn:
+            if conn is None:
+                log.info("[%s] DB 가 없어 사번 매핑 훑기를 건너뛴다", self.workspace)
+                return
+            try:
+                result = identity_backfill(
+                    conn, self.app.client, workspace=self.workspace
+                )
+            except Exception as e:
+                log.warning("[%s] 사번 매핑 훑기 실패: %s", self.workspace, e)
+                return
+        log.info("[%s] %s", self.workspace, result.summary())
+        if result.unmatched:
+            # 사람이 손으로 확인할 목록. 이메일·이름은 남기지 않는다.
+            log.warning(
+                "[%s] 사번을 못 찾은 멤버 %d명 — Slack 프로필 이메일과 인사 이메일이"
+                " 같은지 확인하라: %s",
+                self.workspace, len(result.unmatched),
+                ", ".join(result.unmatched[:20]),
+            )
 
     def _backfill_channel_owners(self) -> None:
         """내부 기록이 없는 봇 가시 채널에 Slack 개설자를 보충한다.

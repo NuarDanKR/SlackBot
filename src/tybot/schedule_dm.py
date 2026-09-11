@@ -37,9 +37,12 @@ logger = logging.getLogger("tybot.schedule_dm")
 
 KST = timezone(timedelta(hours=9))
 
-ALLOWED_MINUTES = (10, 30)
-# 설정을 따로 하지 않은 사람의 기본값. **10분 전**이다(2026-09-11 오너 결정).
-# 30분은 회의 직전에 일이 몰리는 사람에게 너무 이르다는 판단.
+# **10분 전 하나만 쓴다**(2026-09-11 오너 결정). 고를 수 있게 두면 사람마다 다른
+# 값이 되고, 그 선택이 쓸모 있었던 적이 없었다. 알림은 오거나 안 오거나다.
+#
+# 컬럼과 CHECK 제약은 그대로 둔다 — 다시 여러 값을 쓰게 될 때 스키마를 또 바꾸지
+# 않아도 되고, 이미 저장된 값도 제약을 통과한다.
+ALLOWED_MINUTES = (10,)
 DEFAULT_MINUTES = (10,)
 
 # 이만큼 늦은 알림은 보내지 않는다. 봇이 멈췄다 살아나면 지난 알림이 몰려 나가는데,
@@ -789,10 +792,9 @@ UNAVAILABLE = (
     "일정 알림 설정이 아직 준비되지 않았습니다. 관리자에게 문의해 주세요."
 )
 
+# 화면에 남기는 표시용. 고르는 버튼은 없앴다 — 값이 하나뿐이라 고를 것이 없다.
 _MINUTE_CHOICES = (
-    ((30,), "30분 전"),
     ((10,), "10분 전"),
-    ((30, 10), "둘 다"),
 )
 
 
@@ -817,22 +819,17 @@ def settings_blocks(pref: Preference | None, *, workspace_label: str = "") -> li
     """
     off = bool(pref and not pref.enabled)
     on = not off
-    picked = normalize_minutes(pref.minutes) if pref else DEFAULT_MINUTES
+    picked = DEFAULT_MINUTES
     if off:
         head = (
             "*일정 알림: 꺼짐*\n"
             "회원님이 직접 끄셨습니다. 다시 받으려면 아래에서 켜 주세요."
         )
-    elif pref is None:
-        head = (
-            f"*일정 알림: 받는 중* · {minutes_label(picked)}(기본)\n"
-            "소속 부서에 열려 있는 그룹웨어 팀 일정을 회의 전에 개인 DM 으로 알려 "
-            "드립니다. 따로 켜지 않아도 받습니다 — 분을 바꾸거나 끄실 수 있습니다."
-        )
     else:
         head = (
-            f"*일정 알림: 켜짐* · {minutes_label(pref.minutes)}\n"
-            "회의 시작 전에 개인 DM 으로 알려 드립니다."
+            f"*일정 알림: 받는 중* · {minutes_label(picked)}\n"
+            "소속 부서에 열려 있는 그룹웨어 팀 일정을 회의 10분 전에 개인 DM 으로 "
+            "알려 드립니다. 따로 켜지 않아도 받습니다 — 필요 없으면 끄실 수 있습니다."
         )
 
     blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": head}}]
@@ -845,19 +842,6 @@ def settings_blocks(pref: Preference | None, *, workspace_label: str = "") -> li
             }],
         })
 
-    blocks.append({
-        "type": "actions",
-        "elements": [
-            {
-                "type": "button",
-                "action_id": f"{ACTION_MINUTES}:{'-'.join(str(m) for m in value)}",
-                "text": {"type": "plain_text", "text": label},
-                "value": "-".join(str(m) for m in value),
-                **({"style": "primary"} if on and value == picked else {}),
-            }
-            for value, label in _MINUTE_CHOICES
-        ],
-    })
     blocks.append({
         "type": "actions",
         "elements": [

@@ -19,7 +19,6 @@ import pytest
 from tybot import schedule_dm as dm
 from tybot.schedule_dm import (
     ACTION_ENABLE,
-    ACTION_MINUTES,
     ACTION_OFF,
     DEFAULT_MINUTES,
     KST,
@@ -132,16 +131,18 @@ class FakeConn:
 
 
 # --- 설정 값 ------------------------------------------------------------------
+# 2026-09-11 오너 결정: **10분 하나만 쓴다.** 고를 수 있게 두면 사람마다 다른 값이
+# 되고, 그 선택이 쓸모 있었던 적이 없었다. 알림은 오거나 안 오거나다.
 @pytest.mark.parametrize(
     ("given", "expected"),
     [
-        ([30], (30,)),
         ([10], (10,)),
-        ([10, 30], (30, 10)),
+        ([10, 10], (10,)),
         ([], DEFAULT_MINUTES),
         (None, DEFAULT_MINUTES),
         ([5, 60], DEFAULT_MINUTES),   # 허용 밖은 버린다
-        ([30, 30], (30,)),
+        ([30], DEFAULT_MINUTES),      # 예전 값도 이제 허용 밖이다
+        ([30, 10], (10,)),
     ],
 )
 def test_normalize_minutes_matches_the_schema_check(given, expected):
@@ -149,9 +150,17 @@ def test_normalize_minutes_matches_the_schema_check(given, expected):
     assert normalize_minutes(given) == expected
 
 
+def test_only_ten_minutes_is_allowed():
+    from tybot.schedule_dm import ALLOWED_MINUTES
+
+    assert ALLOWED_MINUTES == (10,)
+    assert DEFAULT_MINUTES == (10,)
+
+
 def test_minutes_label():
-    assert minutes_label([30]) == "30분 전"
-    assert minutes_label([10, 30]) == "둘 다"
+    assert minutes_label([10]) == "10분 전"
+    # 허용 밖 값은 기본값 이름으로 떨어진다 — 화면에 없는 값을 쓰지 않는다.
+    assert minutes_label([30]) == "10분 전"
 
 
 # --- 신원 ---------------------------------------------------------------------
@@ -176,8 +185,8 @@ def test_missing_identity_is_none():
 def test_enable_moves_the_representative_workspace():
     """한 사람의 대표 수신 위치는 하나다. 다른 곳에서 켜면 옮겨간다."""
     conn = FakeConn()
-    pref = enable(conn, emp_no="E1", workspace="tyit", slack_user="U9", minutes=[10, 30])
-    assert pref.minutes == (30, 10)
+    pref = enable(conn, emp_no="E1", workspace="tyit", slack_user="U9", minutes=[10])
+    assert pref.minutes == (10,)
     assert "on conflict (emp_no) do update" in conn.sql_for("insert into schedule_dm_preference")
     # 옛 경로의 미발송 건은 정리한다.
     params = conn.params_for("workspace <> %(workspace)s")
@@ -197,10 +206,10 @@ def test_disable_keeps_history_but_cancels_pending():
 def test_get_preference_reads_minutes():
     conn = FakeConn(pref=[{
         "emp_no": "E1", "workspace": "tyit", "slack_user": "U1",
-        "reminder_minutes": [30, 10], "enabled": True,
+        "reminder_minutes": [10], "enabled": True,
     }])
     pref = get_preference(conn, "E1")
-    assert pref.minutes == (30, 10)
+    assert pref.minutes == (10,)
     assert pref.enabled is True
 
 
@@ -494,13 +503,13 @@ def test_render_uses_kst_for_utc_input():
 
 
 def test_normalize_minutes_ignores_malformed_values():
-    assert normalize_minutes(["30", None, "invalid", 10]) == (30, 10)
+    assert normalize_minutes(["10", None, "invalid", 10]) == (10,)
 
 
 # --- 설정 화면 ----------------------------------------------------------------
 def test_panel_says_the_current_state_first():
-    on = settings_blocks(Preference("E1", "tyit", "U1", (30,), True))
-    assert "켜짐" in on[0]["text"]["text"]
+    on = settings_blocks(Preference("E1", "tyit", "U1", (10,), True))
+    assert "받는 중" in on[0]["text"]["text"]
     off = settings_blocks(Preference("E1", "tyit", "U1", (10,), False))
     assert "꺼짐" in off[0]["text"]["text"]
 
@@ -511,41 +520,34 @@ def test_panel_without_a_preference_says_it_is_already_receiving():
     head = settings_blocks(None)[0]["text"]["text"]
     assert "받는 중" in head
     assert "꺼짐" not in head
-    assert "기본" in head
     assert "10분 전" in head
+    # 켜는 동작을 하지 않아도 온다는 사실이 문장에 있어야 한다.
+    assert "따로 켜지 않아도" in head
 
 
 def test_panel_without_a_preference_offers_turning_it_off():
     """받고 있으니 줄 버튼은 끄기다. 「켜기」 는 누를 이유가 없다."""
     actions = [b for b in settings_blocks(None) if b["type"] == "actions"]
-    assert actions[1]["elements"][0]["action_id"] == ACTION_OFF
+    assert actions[0]["elements"][0]["action_id"] == ACTION_OFF
 
 
-def test_panel_offers_three_minute_choices():
-    blocks = settings_blocks(None)
-    actions = [b for b in blocks if b["type"] == "actions"]
-    labels = [e["text"]["text"] for e in actions[0]["elements"]]
-    assert labels == ["30분 전", "10분 전", "둘 다"]
+def test_panel_is_a_single_switch():
+    """분을 고르는 버튼은 없다. 값이 하나뿐이라 고를 것이 없다."""
+    actions = [b for b in settings_blocks(None) if b["type"] == "actions"]
+    assert len(actions) == 1
+    assert len(actions[0]["elements"]) == 1
 
 
 def test_panel_offers_turning_it_back_on_only_when_off():
     off = Preference("E1", "tyit", "U1", (10,), False)
     actions = [b for b in settings_blocks(off) if b["type"] == "actions"]
-    assert actions[1]["elements"][0]["action_id"] == ACTION_ENABLE
+    assert actions[0]["elements"][0]["action_id"] == ACTION_ENABLE
 
 
 def test_panel_shows_turn_off_when_enabled():
-    blocks = settings_blocks(Preference("E1", "tyit", "U1", (30,), True))
+    blocks = settings_blocks(Preference("E1", "tyit", "U1", (10,), True))
     actions = [b for b in blocks if b["type"] == "actions"]
-    assert actions[1]["elements"][0]["action_id"] == ACTION_OFF
-
-
-def test_minute_buttons_carry_their_value():
-    blocks = settings_blocks(None)
-    actions = [b for b in blocks if b["type"] == "actions"]
-    values = [e["value"] for e in actions[0]["elements"]]
-    assert values == ["30", "10", "30-10"]
-    assert all(e["action_id"].startswith(ACTION_MINUTES) for e in actions[0]["elements"])
+    assert actions[0]["elements"][0]["action_id"] == ACTION_OFF
 
 
 def test_panel_warns_that_turning_on_moves_the_destination():
