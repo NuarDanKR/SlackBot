@@ -1674,3 +1674,33 @@ def test_the_runtime_api_path_is_separate_from_stage_one():
     assert runtime, "실행형 경로가 없다"
     for path in runtime:
         assert not path.startswith("/api/specialists/"), path
+
+
+def test_the_console_shows_the_deployed_contract_version(client, monkeypatch):
+    """`specialist_bot.version` 은 **승인한 것**이고, 파일 버전은 **지금 도는 것**이다.
+
+    둘이 갈리면 승인 밖에서 프롬프트가 바뀐 것인데, 나란히 보이지 않으면 오류
+    없이 지나간다. `prompt_version()` 은 만들어 두고 아무도 안 읽던 함수였다 —
+    만들고 안 잇는 것이 우리가 가장 자주 겪은 고장이다.
+    """
+    monkeypatch.setattr(
+        console_app.specialist_store, "list_specialists",
+        lambda: [{
+            "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+            "adapter": "hermes", "state": "enabled", "version": "1",
+            "workspaces": ["fin"], "artifact_hashes": {},
+        }],
+    )
+    monkeypatch.setattr(console_app.specialist_store, "list_requests", lambda: [])
+    monkeypatch.setattr(console_app.specialist_store, "adapters", lambda: [])
+
+    row = client.get("/api/specialists", headers=member(client)).json()["specialists"][0]
+
+    assert row["version"] == "1", "승인 버전"
+    assert row["deployedVersion"] == "2", "실제 배포된 계약 버전"
+
+
+def test_an_unreadable_version_does_not_break_the_list():
+    """버전 하나 때문에 전문 봇 목록이 통째로 안 뜨면 그게 더 나쁘다."""
+    assert console_app._deployed_prompt_version("없는어댑터") == ""
+    assert console_app._deployed_prompt_version("") == ""

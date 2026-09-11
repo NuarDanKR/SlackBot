@@ -618,6 +618,20 @@ def feedback_report(user: User) -> dict:
     return {"checkedAt": report["checkedAt"], "section": report["sections"]["feedback"]}
 
 
+def _deployed_prompt_version(adapter: str) -> str:
+    """지금 서버에 깔린 계약 파일의 버전. 못 읽으면 빈 문자열.
+
+    읽기 실패가 화면을 막지 않는다 — 버전 하나 때문에 전문 봇 목록이 통째로
+    안 뜨면 그게 더 나쁘다.
+    """
+    try:
+        from ..specialist_adapters import prompt_version
+
+        return prompt_version(adapter)
+    except Exception:  # noqa: BLE001 - 표시값 하나가 화면을 막지 않는다
+        return ""
+
+
 def _specialist_response(row: dict) -> dict:
     return {
         "key": row["key"],
@@ -627,6 +641,16 @@ def _specialist_response(row: dict) -> dict:
         "adapterAvailable": bool(row.get("adapterAvailable")),
         "state": row["state"],
         "version": row.get("version") or "",
+        # **승인 버전과 실제 배포된 계약 버전을 나란히 보인다.**
+        #
+        # `specialist_bot.version` 은 「승인한 것」 이고 `deployedVersion` 은
+        # 「지금 파일에 있는 것」 이다. 둘이 갈리면 승인 밖에서 프롬프트가 바뀐
+        # 것이고, 그건 오류 없이 지나간다 — 설계가 나란히 보이라고 한 이유다
+        # (specialist-deployment.md §버전은 응답과 승인 기록을 대조한다).
+        #
+        # `prompt_version()` 은 만들어 두고 아무도 안 읽던 함수다. 만들고 안
+        # 잇는 것이 우리가 가장 자주 겪은 고장이다.
+        "deployedVersion": _deployed_prompt_version(str(row.get("adapter") or "")),
         "contractVersion": row.get("contract_version") or "v1",
         "health": row.get("health") or "unknown",
         "errorCode": row.get("error_code") or "",
