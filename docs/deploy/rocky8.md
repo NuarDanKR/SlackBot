@@ -565,12 +565,38 @@ sudo -u postgres psql -p 55432 -d tyslackai -tAc   "select has_table_privilege('
 채널에서 `/채널 검토자 @사람 09:00`. **채널 소유자만** 정할 수 있다.
 검토자가 없는 채널은 요약을 반영하지 않는다 — 헬스 체크에 목록으로 올라온다.
 
+**타이머를 켠다.** 이 지시가 이 문서에 빠져 있어서, 권한을 고친 뒤에도 DM 이 오지
+않았다(2026-09-11). 유닛 파일은 `install.sh` 가 배치하지만 enable 은 사람이 한다.
+
+```bash
+sudo systemctl enable --now tybot-review-dm.timer
+```
+
 DM 이 안 오면 이 순서로 본다.
 
 ```bash
-sudo systemctl status tybot-review-dm.timer          # 타이머가 켜져 있나
-sudo journalctl -u tybot-review-dm -n 30 --no-pager  # 권한·수신자 문제는 여기 찍힌다
+sudo systemctl status tybot-review-dm.timer          # disabled 면 위 명령을 안 한 것이다
+sudo journalctl -u tybot-review-dm -n 30 --no-pager  # 로그가 없으면 한 번도 안 돈 것이다
+sudo systemctl start tybot-review-dm.service         # 기다리지 않고 한 회차 돌려 본다
 ```
+
+채널에서 `/채널 상태` 를 보면 **검토 DM** 항목이 있다. 「한 번도 나가지 않았습니다」
+가 뜨면 위 둘 중 하나다 — 권한이거나 타이머다.
+
+### 켜져 있어야 하는 타이머 전체
+
+enable 은 한 번만 하고 잊기 쉬운데, 안 켜진 타이머는 **오류 없이 아무 일도 하지
+않는다.** 한 줄로 전부 대조한다.
+
+```bash
+for u in tybot-collect tybot-schedule-dm tybot-index tybot-review-dm          tybot-schedule-reconcile tybot-schedule-sync tybot-tidy tybot-update; do
+  printf '%-30s %s
+' "$u.timer" "$(systemctl is-enabled $u.timer 2>&1)"
+done
+```
+
+`disabled` 가 하나라도 있으면 그 작업은 지금 전혀 돌지 않는다. 관리 콘솔의 배치
+관리에서도 같은 목록을 켜고 끌 수 있다.
 
 ### LLM API 키를 DB 로 옮기기
 

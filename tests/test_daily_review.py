@@ -481,3 +481,11 @@ def test_deploy_doc_applies_the_schema():
 
     doc = pathlib.Path("docs/deploy/rocky8.md").read_text(encoding="utf-8")
     assert "review_digest_schema.sql" in doc
+
+
+def test_deploy_doc_enables_the_timer():
+    """스키마를 적용해도 타이머가 꺼져 있으면 DM 은 안 온다 (2026-09-11 실측)."""
+    import pathlib
+
+    doc = pathlib.Path("docs/deploy/rocky8.md").read_text(encoding="utf-8")
+    assert "systemctl enable --now tybot-review-dm.timer" in doc
