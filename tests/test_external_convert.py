@@ -38,6 +38,29 @@ def test_kordoc_marks_ocr_output(monkeypatch):
 def test_converter_binary_is_not_downloaded_at_runtime(monkeypatch):
     monkeypatch.delenv("KORDOC_BIN", raising=False)
     monkeypatch.setattr(ext.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ext, "SYSTEM_BINARY_DIRS", ())
 
     with pytest.raises(ext.ExternalConverterUnavailable):
         ext.kordoc_lines(b"document", "hwp")
+
+
+def test_converter_finds_standard_path_when_process_path_is_narrow(monkeypatch, tmp_path):
+    binary = tmp_path / "kordoc"
+    binary.write_text("#!/bin/sh\n", encoding="ascii")
+    binary.chmod(binary.stat().st_mode | 0o111)
+    monkeypatch.delenv("KORDOC_BIN", raising=False)
+    monkeypatch.setattr(ext.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ext, "SYSTEM_BINARY_DIRS", (tmp_path,))
+
+    assert ext._binary("KORDOC_BIN", "kordoc") == str(binary)
+
+
+def test_configured_converter_must_be_executable(monkeypatch, tmp_path):
+    binary = tmp_path / "kordoc"
+    binary.write_text("not executable", encoding="ascii")
+    monkeypatch.setenv("KORDOC_BIN", str(binary))
+    monkeypatch.setattr(ext.os, "access", lambda *_args: False)
+    monkeypatch.setattr(ext.shutil, "which", lambda _name: None)
+
+    with pytest.raises(ext.ExternalConverterUnavailable, match="KORDOC_BIN"):
+        ext._binary("KORDOC_BIN", "kordoc")

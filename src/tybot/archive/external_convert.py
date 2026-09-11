@@ -30,20 +30,39 @@ HERMES_XLSX = PROJECT_ROOT / "vendor" / "hermes" / "xlsx_to_blocks.py"
 COMMAND_TIMEOUT = 120
 MIN_DOCUMENT_CHARS = 200
 IMAGE_MARK = re.compile(r"!\[image\]\([^)]*\)")
+SYSTEM_BINARY_DIRS = (
+    Path("/usr/local/bin"),
+    Path("/usr/bin"),
+    Path("/bin"),
+)
+
+
+def _installed_binary(name: str) -> str | None:
+    """Find an installed converter even when sudo/systemd supplies a narrow PATH."""
+    found = shutil.which(name)
+    if found:
+        return found
+    if Path(name).name != name:
+        return None
+    for directory in SYSTEM_BINARY_DIRS:
+        candidate = directory / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 def _binary(env_name: str, *names: str) -> str:
     configured = os.getenv(env_name, "").strip()
     if configured:
         path = Path(configured)
-        if path.is_file():
+        if path.is_file() and os.access(path, os.X_OK):
             return str(path)
-        found = shutil.which(configured)
+        found = _installed_binary(configured)
         if found:
             return found
         raise ExternalConverterUnavailable(f"{env_name} 실행 파일을 찾지 못했습니다")
     for name in names:
-        found = shutil.which(name)
+        found = _installed_binary(name)
         if found:
             return found
     raise ExternalConverterUnavailable(f"실행 파일을 찾지 못했습니다: {', '.join(names)}")
