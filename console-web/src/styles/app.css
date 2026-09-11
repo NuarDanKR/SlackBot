@@ -2571,6 +2571,12 @@
 .nowrap {
   white-space: nowrap;
 }
+.attachment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-width: 110px;
+}
 
 /* 전문 봇 폼 — 여러 줄짜리 입력은 칸을 가로질러 놓는다.
    좁은 칸에 8000자 텍스트를 넣으면 읽으면서 고치는 것이 불가능하다. */

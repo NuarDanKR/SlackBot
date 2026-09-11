@@ -1309,17 +1309,20 @@ def test_archive_attachment_failures_are_workspace_scoped(client, monkeypatch):
         return SimpleNamespace(
             workspace=workspace,
             channel_id="C1",
+            file_id=f"F-{workspace}",
             name=name,
             filetype="pdf",
             status=attachment_review.DOWNLOAD_OR_EXTRACT_FAILED,
             error="converter failed",
             permalink="https://example.slack.com/files/F1",
             staged_at="2026-09-11T01:00:00+00:00",
+            object_path=None,
+            conversion_failed=True,
         )
 
     monkeypatch.setattr(
         attachment_review,
-        "failures",
+        "scan",
         lambda archive: [failed("fin", "볼수있음.pdf"), failed("tyit", "범위밖.pdf")],
     )
 
@@ -1329,6 +1332,54 @@ def test_archive_attachment_failures_are_workspace_scoped(client, monkeypatch):
     items = response.json()["section"]["failedAttachments"]
     assert [item["name"] for item in items] == ["볼수있음.pdf"]
     assert "error" not in items[0]
+
+
+def test_admin_can_explicitly_preview_a_pii_blocked_image(client, env, monkeypatch):
+    staged = env / "staging/workspaces/fin/channels/C1/attachments/F-PII"
+    objects = env / "objects/workspaces/fin/channels/C1/attachments/F-PII"
+    staged.mkdir(parents=True)
+    objects.mkdir(parents=True)
+    image = objects / "scan.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"test-image")
+    (staged / "metadata.json").write_text(json.dumps({
+        "schema_version": 1,
+        "status": "pii_refused",
+        "slack_file_id": "F-PII",
+        "name": "scan.png",
+        "filetype": "png",
+        "mimetype": "image/png",
+        "declared_size": image.stat().st_size,
+        "object_path": str(image),
+        "extracted": False,
+        "error": "수집 제외 대상(등기부등본)",
+        "staged_at": "2026-09-11T01:00:00+00:00",
+    }, ensure_ascii=False), encoding="utf-8")
+    audited = []
+    monkeypatch.setattr(console_app, "_audit_event", lambda **event: audited.append(event))
+
+    developer_list = client.get("/api/diagnostics/archive", headers=member(client))
+    assert developer_list.status_code == 200
+    item = developer_list.json()["section"]["failedAttachments"][0]
+    assert item["previewable"] is False
+    assert "등기부등본" in item["reason"]
+
+    params = {"workspace": "fin", "channel_id": "C1", "file_id": "F-PII"}
+    assert client.get(
+        "/api/diagnostics/archive/attachment-preview", params=params, headers=member(client)
+    ).status_code == 403
+
+    admin_headers = owner(client)
+    admin_list = client.get("/api/diagnostics/archive", headers=admin_headers)
+    assert admin_list.json()["section"]["failedAttachments"][0]["previewable"] is True
+    response = client.get(
+        "/api/diagnostics/archive/attachment-preview", params=params, headers=admin_headers
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "no-store, private"
+    assert response.content.startswith(b"\x89PNG")
+    assert audited[0]["action"] == "preview-quarantined-image"
+    assert "name" not in audited[0]["metadata"]
 
 
 def test_specialist_registry_is_developer_only(client, monkeypatch):

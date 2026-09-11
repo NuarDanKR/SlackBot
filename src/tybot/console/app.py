@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import deploy_request, heartbeat
@@ -524,10 +524,14 @@ def questions(
 
 @app.get("/api/diagnostics/archive")
 def archive_diagnostics(user: User) -> dict:
-    from ..attachment_review import failures, public_failure_reason
+    from ..attachment_review import PII_REFUSED, public_failure_reason, scan
 
     report = _scoped_health(user)
-    failed = failures(reader.archive_dir())
+    failed = [
+        item
+        for item in scan(reader.archive_dir())
+        if item.conversion_failed or item.status == PII_REFUSED
+    ]
     if not user.all_workspaces:
         failed = [item for item in failed if item.workspace in user.workspaces]
     failed.sort(key=lambda item: item.staged_at, reverse=True)
@@ -537,15 +541,103 @@ def archive_diagnostics(user: User) -> dict:
         {
             "workspace": item.workspace,
             "channelId": item.channel_id,
+            "fileId": item.file_id,
             "name": item.name,
             "filetype": item.filetype,
+            "status": item.status,
             "reason": public_failure_reason(item),
             "permalink": item.permalink,
             "stagedAt": item.staged_at,
+            "previewable": user.is_admin and _attachment_preview_type(item.object_path) is not None,
         }
         for item in failed[:200]
     ]
     return {"checkedAt": report["checkedAt"], "section": section}
+
+
+def _attachment_preview_type(path: Path | None) -> str | None:
+    """Return a browser-safe image type after checking both suffix and file signature."""
+    if path is None:
+        return None
+    expected = {
+        ".png": ("image/png", (b"\x89PNG\r\n\x1a\n",)),
+        ".jpg": ("image/jpeg", (b"\xff\xd8\xff",)),
+        ".jpeg": ("image/jpeg", (b"\xff\xd8\xff",)),
+        ".webp": ("image/webp", (b"RIFF",)),
+        ".gif": ("image/gif", (b"GIF87a", b"GIF89a")),
+    }.get(path.suffix.lower())
+    if expected is None:
+        return None
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(12)
+    except OSError:
+        return None
+    media_type, signatures = expected
+    if not any(header.startswith(signature) for signature in signatures):
+        return None
+    if media_type == "image/webp" and header[8:12] != b"WEBP":
+        return None
+    return media_type
+
+
+@app.get("/api/diagnostics/archive/attachment-preview")
+def archive_attachment_preview(
+    user: User,
+    workspace: Annotated[str, Query(min_length=1, max_length=80)],
+    channel_id: Annotated[str, Query(min_length=1, max_length=80)],
+    file_id: Annotated[str, Query(min_length=1, max_length=160)],
+) -> Response:
+    """Explicitly show one quarantined image to an administrator and audit the read."""
+    from ..attachment_review import PII_REFUSED, scan
+
+    _require_admin(user)
+    if not user.may_see(workspace):
+        raise HTTPException(status_code=403, detail="이 워크스페이스를 볼 권한이 없습니다.")
+    matches = [
+        item
+        for item in scan(reader.archive_dir())
+        if item.workspace == workspace
+        and item.channel_id == channel_id
+        and item.file_id == file_id
+        and (item.conversion_failed or item.status == PII_REFUSED)
+    ]
+    if len(matches) != 1 or matches[0].object_path is None:
+        raise HTTPException(status_code=404, detail="확인할 격리 이미지를 찾지 못했습니다.")
+    item = matches[0]
+    path = item.object_path.resolve()
+    objects_root = (reader.archive_dir().parent / "objects").resolve()
+    if not path.is_relative_to(objects_root):
+        logger.warning(
+            "첨부 미리보기 경로 거절 workspace=%s channel=%s file=%s",
+            workspace,
+            channel_id,
+            file_id,
+        )
+        raise HTTPException(status_code=404, detail="확인할 격리 이미지를 찾지 못했습니다.")
+    media_type = _attachment_preview_type(path)
+    if media_type is None:
+        raise HTTPException(status_code=415, detail="콘솔에서 미리 볼 수 있는 이미지 형식이 아닙니다.")
+    _audit_event(
+        actor=user.email,
+        category="attachment",
+        action="preview-quarantined-image",
+        target_type="slack-file",
+        target_id=item.file_id,
+        workspace=item.workspace,
+        outcome="succeeded",
+        metadata={"channel": item.channel_id, "status": item.status},
+    )
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        },
+    )
 
 
 @app.get("/api/diagnostics/answers")

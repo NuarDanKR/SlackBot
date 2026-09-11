@@ -164,6 +164,11 @@ def extracted_preview(item: Attachment, *, limit: int = 700) -> str:
 def public_failure_reason(item: Attachment) -> str:
     """콘솔과 Slack에 노출해도 되는 조치 중심 실패 사유."""
     error = item.error.lower()
+    if item.status == PII_REFUSED:
+        for label in ("등기부등본", "계약자 명단", "주민등록번호 형식", "주민번호 언급"):
+            if label.lower() in error:
+                return f"민감정보 검사 차단: OCR 결과에서 '{label}' 표현을 감지했습니다. 원본 확인이 필요합니다."
+        return "민감정보 검사에서 차단됐습니다. 원본 확인이 필요합니다."
     if "files:read" in error or "로그인 페이지" in error or "토큰" in error:
         return "Slack 파일 다운로드 권한 또는 봇 토큰을 확인하세요."
     if "제한 초과" in item.error:
