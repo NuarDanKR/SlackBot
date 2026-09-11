@@ -26,6 +26,9 @@ class FakeQALog:
     def recent_for_user(self, workspace, user_id):
         return [("2026-08-27T15:32", "현재상태")]
 
+    def context_for_thread(self, workspace, channel_id, thread_ts):
+        return []
+
     def write(self, rec):
         self.records.append(rec)
 
@@ -37,9 +40,11 @@ class FakeEngine:
         self._tasks = tasks
         self._answers = list(answers)
         self.asked: list[str] = []
+        self.plan_contexts: list[str] = []
         self.router = None  # compose 는 fallback 문구를 쓴다
 
-    def plan(self, text):
+    def plan(self, text, *, conversation_context=""):
+        self.plan_contexts.append(conversation_context)
         return list(self._tasks)
 
     def respond(self, question, ctx, intent):
@@ -128,6 +133,35 @@ def test_archive_task_gets_its_own_clause_not_the_whole_message():
     _handle(bot, "기억나? 그리고 김해외동 기성금 얼마야?")
 
     assert bot.engine.asked == ["김해외동 기성금 얼마야"]
+
+
+def test_follow_up_in_a_thread_passes_prior_bot_exchange_only_to_the_planner():
+    ans = Answer("문서 내용을 다시 확인했습니다.", ["#현장, 📄doc.md(2026-09-11)"],
+                 "m", 0.0, 1, "answered")
+    bot = _bot([Intent("search", question="가정산서.pdf 다시 확인해줘",
+                              terms=["가정산서.pdf"])], [ans])
+    bot.qa_log.context_for_thread = lambda workspace, channel_id, thread_ts: [{
+        "question": "첨부 문서 내용 알려줘",
+        "answer": "가정산서.pdf 하나는 자동 변환에 실패했습니다.",
+    }]
+    sent: list[str] = []
+
+    bot._handle(
+        {
+            "text": "처리 안 된 하나의 문서도 다시 확인해줘",
+            "user": "U1",
+            "channel": "C1",
+            "ts": "2.0",
+            "thread_ts": "1.0",
+        },
+        Mock(),
+        lambda **kw: sent.append(kw["text"]),
+        in_channel=True,
+    )
+
+    assert "가정산서.pdf" in bot.engine.plan_contexts[0]
+    assert bot.engine.asked == ["가정산서.pdf 다시 확인해줘"]
+    assert "이전 봇 답변" not in bot.engine.asked[0]
 
 
 def test_audit_record_keeps_every_intent():

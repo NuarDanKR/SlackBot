@@ -131,6 +131,52 @@ def test_planner_prompt_asks_for_task_list():
     assert "하위질문" in system
 
 
+def test_thread_context_is_for_reference_resolution_not_evidence():
+    router = FakeRouter([_tasks({
+        "kind": "search",
+        "question": "가정산서.pdf 다시 확인해줘",
+        "terms": ["가정산서.pdf"],
+    })])
+
+    (task,) = plan(
+        "처리 안 된 하나의 문서도 다시 확인해줘",
+        router,
+        conversation_context="이전 봇 답변: 가정산서.pdf 하나는 변환 실패",
+    )
+
+    assert task.question == "가정산서.pdf 다시 확인해줘"
+    assert task.terms == ["가정산서.pdf"]
+    user = router.calls[0][1].content
+    assert "<이전_스레드>" in user
+    assert "<현재_질문>" in user
+    assert "사실 근거가 아니므로" in router.calls[0][0].content
+
+
+def test_a_singular_failed_attachment_follow_up_cannot_expand_to_channel_summary():
+    router = FakeRouter([_tasks({"kind": "summary", "question": "처리 실패 문서 정리"})])
+    context = (
+        "이전 봇 답변: _근거: 문서 4건 · 자동 변환 실패로 내용을 읽지 못한 첨부: "
+        "202512 미수금관리보고.pdf_"
+    )
+
+    (task,) = plan("처리 안 된 하나의 문서도 다시 확인해서 정리해줘", router,
+                   conversation_context=context)
+
+    assert task.kind == "search"
+    assert task.terms == ["202512 미수금관리보고.pdf"]
+    assert task.source == "context"
+
+
+def test_singular_failed_attachment_context_also_works_when_planner_is_down():
+    context = "자동 변환 실패로 내용을 읽지 못한 첨부: 가정산서.pdf"
+
+    (task,) = plan("처리 안 된 하나의 문서 확인해줘", None,
+                   conversation_context=context)
+
+    assert task.kind == "search"
+    assert task.terms == ["가정산서.pdf"]
+
+
 # --- 의도 분류 집합 ----------------------------------------------------------
 def test_kind_groups_cover_every_kind_exactly_once():
     """분류만 추가하고 실행 경로를 안 붙이면 그 의도는 조용히 무응답이 된다."""

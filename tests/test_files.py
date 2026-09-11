@@ -4,7 +4,9 @@ from __future__ import annotations
 import io
 from unittest.mock import patch
 
-from tybot.archive.files import DownloadError, SlackFile, download_text, file_lines
+import pytest
+
+from tybot.archive.files import DownloadError, SlackFile, download_bytes, download_text, file_lines
 
 
 def _f(name, filetype, size=2048, mime=""):
@@ -97,10 +99,34 @@ def test_failed_conversion_still_leaves_a_trace():
     assert len(warns) == 1
 
 
-def test_oversized_document_is_not_converted():
+def test_large_document_remains_convertible_without_a_size_limit():
     huge = _f("대용량.xlsx", "xlsx", size=50 * 1024 * 1024)
-    lines, warns = file_lines([huge], "xoxb-t")
-    assert "[첨부:미변환]" in lines[0] and warns == []
+    file = SlackFile.from_event(huge)
+
+    assert file.is_convertible
+
+
+def test_a_21mb_field_presentation_is_convertible():
+    file = SlackFile.from_event(_f("현황보고.pptx", "pptx", size=21_456 * 1024))
+
+    assert file.is_convertible
+
+
+def test_document_download_without_a_limit_reads_the_complete_response():
+    payload = b"x" * 1024
+    file = SlackFile.from_event(_f("large.pptx", "pptx", size=len(payload)))
+
+    with patch("tybot.archive.files.urlopen", return_value=_Resp(payload)):
+        assert download_bytes(file, "xoxb-t") == payload
+
+
+def test_limited_download_still_protects_non_document_callers():
+    payload = b"x" * 11
+    file = SlackFile.from_event(_f("canvas.txt", "txt", size=len(payload)))
+
+    with patch("tybot.archive.files.urlopen", return_value=_Resp(payload)):
+        with pytest.raises(DownloadError, match="제한 초과"):
+            download_bytes(file, "xoxb-t", 10)
 
 
 def test_long_text_folds_the_middle_not_the_tail(monkeypatch):

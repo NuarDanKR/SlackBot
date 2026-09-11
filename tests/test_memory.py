@@ -141,3 +141,25 @@ def test_recent_for_user_without_user_id(tmp_path):
 
 def test_missing_log_dir_is_not_an_error(tmp_path):
     assert QALog(tmp_path / "없음").recent_for_user("pilot", "U1") == []
+
+
+def test_thread_context_is_limited_to_the_same_workspace_channel_and_thread(tmp_path):
+    log = QALog(tmp_path, write_md=False)
+    common = dict(
+        user="U1", user_name="홍길동", intent_kind="search", intent_source="llm",
+        reason="answered", hits=1, scope="현재 채널", citations=[], model="m",
+        cost_usd=0.0, elapsed_ms=1, request_ts="1", response_ts="2",
+        channel_type="channel", error="",
+    )
+    log.write(QARecord.build(
+        workspace="pilot", channel="#A", channel_id="CA", question="첫 질문",
+        answer="첫 답변", thread_ts="T1", **common,
+    ))
+    log.write(QARecord.build(
+        workspace="pilot", channel="#B", channel_id="CB", question="비밀 질문",
+        answer="비밀 답변", thread_ts="T1", **common,
+    ))
+
+    rows = log.context_for_thread("pilot", "CA", "T1")
+
+    assert [(row["question"], row["answer"]) for row in rows] == [("첫 질문", "첫 답변")]

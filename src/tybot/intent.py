@@ -125,6 +125,14 @@ CLAUSE_SPLIT_RE = re.compile(
 # 보통 2개, 많아도 3개다. 넘치면 앞의 것부터 답하고 나머지는 다시 묻게 안내한다.
 MAX_TASKS = 3
 
+SINGULAR_FOLLOW_UP_RE = re.compile(
+    r"(하나(?:의|인)?\s*문서|한\s*개(?:의)?\s*문서|그\s*문서|해당\s*문서|"
+    r"처리\s*(?:가\s*)?(?:안\s*된|되지\s*않은|실패한)\s*문서)"
+)
+FAILED_ATTACHMENT_NOTE_RE = re.compile(
+    r"자동 변환 실패로 내용을 읽지 못한 첨부:\s*(?P<name>[^\n]+)"
+)
+
 
 @dataclass
 class Intent:
@@ -195,6 +203,10 @@ PLANNER_PROMPT = CLASSIFIER_PROMPT.replace(
 - 최대 3개. 각 task 의 question 에는 그 하위질문의 원문 조각을 그대로 넣는다.
 - 수집 지시(ingest/ingest_all)가 섞여 있으면 그것만 남긴다 —
   무엇을 실행하는지 모호한 상태로 실행해서는 안 된다.
+- `<이전_스레드>`가 있으면 현재 질문의 "그 문서", "하나", "아까 것" 같은
+  지칭어만 해석하는 데 쓴다. 이전 봇 답변은 사실 근거가 아니므로 그대로 답하지 않는다.
+- 후속 질문의 task.question과 terms는 지칭 대상을 정확히 넣어 독립적으로 이해되게
+  만든다. 하나를 가리키면 이전 답변의 전체 목록으로 넓히지 않는다.
 
 JSON 만 출력한다. 설명·코드펜스 금지.
 {"tasks": [{"kind": "...", "question": "...", "days": 7, "terms": ["..."]}]}""",
@@ -276,7 +288,33 @@ def plan_by_rule(text: str) -> list[Intent]:
     return tasks
 
 
-def plan(text: str, router: Router | None) -> list[Intent]:
+def _referenced_failed_attachment(text: str, conversation_context: str) -> str:
+    """후속 질문이 이전 답변의 실패 첨부 한 건을 가리키면 그 파일명을 돌려준다."""
+    if not conversation_context or not SINGULAR_FOLLOW_UP_RE.search(text):
+        return ""
+    matches = FAILED_ATTACHMENT_NOTE_RE.findall(conversation_context)
+    if not matches:
+        return ""
+    name = matches[-1].strip().strip("`*_ ")
+    # 여러 건을 줄여 표시한 문구는 어느 하나인지 결정할 수 없다.
+    if "," in name or re.search(r"\s외\s+\d+건", name):
+        return ""
+    return name
+
+
+def _context_fallback(text: str, conversation_context: str) -> list[Intent]:
+    name = _referenced_failed_attachment(text, conversation_context)
+    if name:
+        return [Intent("search", terms=[name], source="context", question=f"{name} 내용을 다시 확인해줘")]
+    return plan_by_rule(text)
+
+
+def plan(
+    text: str,
+    router: Router | None,
+    *,
+    conversation_context: str = "",
+) -> list[Intent]:
     """복합 질문을 하위질문 목록으로 분해한다(1차 LLM). 실패하면 규칙으로 폴백한다.
 
     라벨 하나만 돌려주던 예전 구조에서는 "기억나? 그리고 전산팀은 무슨 일 있어?" 처럼
@@ -284,9 +322,15 @@ def plan(text: str, router: Router | None) -> list[Intent]:
     옮겨 사람이 실제로 묻는 방식에 맞춘다.
     """
     if router is None:
-        return plan_by_rule(text)
+        return _context_fallback(text, conversation_context)
 
-    messages = [Message("system", PLANNER_PROMPT), Message("user", text)]
+    user_text = text
+    if conversation_context.strip():
+        user_text = (
+            f"<이전_스레드>\n{conversation_context.strip()}\n</이전_스레드>\n\n"
+            f"<현재_질문>\n{text}\n</현재_질문>"
+        )
+    messages = [Message("system", PLANNER_PROMPT), Message("user", user_text)]
     for model in (CLASSIFIER_MODEL, None):
         try:
             resp = router.complete(
@@ -300,9 +344,9 @@ def plan(text: str, router: Router | None) -> list[Intent]:
             logger.info("분류 모델 %s 사용 불가(%s) - 다음 후보 시도", model, e)
         except Exception as e:
             logger.warning("분해 호출 실패(%s) - 규칙 기반으로 폴백", e)
-            return plan_by_rule(text)
+            return _context_fallback(text, conversation_context)
     else:
-        return plan_by_rule(text)
+        return _context_fallback(text, conversation_context)
 
     try:
         raw = _extract_json(resp.text)
@@ -329,11 +373,23 @@ def plan(text: str, router: Router | None) -> list[Intent]:
             raise ValueError("유효한 task 없음")
     except Exception as e:
         logger.warning("분해 파싱 실패(%s) - 규칙 기반으로 폴백. raw=%r", e, resp.text[:200])
-        return plan_by_rule(text)
+        return _context_fallback(text, conversation_context)
 
     writes = [x for x in tasks if x.kind in WRITE_KINDS]
     if writes:
         return [writes[0]]
+    referenced = _referenced_failed_attachment(text, conversation_context)
+    if referenced:
+        # "정리해서 알려줘"가 summary로 분류되면 채널 전체 실패 목록이 다시 나온다.
+        # 이전 답변이 한 건을 명시한 경우에만 그 파일 검색으로 좁힌다.
+        return [
+            Intent(
+                "search",
+                terms=[referenced],
+                source="context",
+                question=f"{referenced} 내용을 다시 확인해줘",
+            )
+        ]
     # 실행 계층이 상한을 적용하고 생략 안내를 만든다. planner는 전체 개수를 보존한다.
     return _dedupe(tasks)
 

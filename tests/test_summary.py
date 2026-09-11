@@ -111,7 +111,8 @@ def test_summary_has_citations_in_slack_output(engine):
     eng, _ = engine
     ans = eng.summarize(RequestContext(workspace="pilot", role="exec"), days=7)
     out = ans.to_slack()
-    assert "출처:" in out and "📄" in out
+    assert "출처:" in out
+    assert "📄" not in out, "내부 채팅 저장 파일명은 사용자 출처가 아니다"
 
 
 def _bare_router():

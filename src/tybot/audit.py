@@ -138,6 +138,49 @@ class QALog:
         out.sort(reverse=True)
         return out[:limit]
 
+    def context_for_thread(
+        self,
+        workspace: str,
+        channel_id: str,
+        thread_ts: str,
+        *,
+        limit: int = 3,
+    ) -> list[dict[str, str]]:
+        """같은 Slack 스레드의 이전 TYBot 문답을 시간순으로 돌려준다.
+
+        답변을 새 사실의 근거로 재사용하는 API가 아니다. 호출자는 ``question``과
+        ``answer``를 후속 질문의 지칭어 해석에만 사용하고, 실제 답은 아카이브에서
+        다시 찾아야 한다. 채널과 스레드를 함께 고정해 다른 대화가 섞이지 않게 한다.
+        """
+        if not workspace or not channel_id or not thread_ts or limit < 1:
+            return []
+        out: list[dict[str, str]] = []
+        try:
+            for path in sorted(self.root.glob("qa-*.jsonl"), reverse=True)[:2]:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        row.get("workspace") != workspace
+                        or row.get("channel_id") != channel_id
+                        or row.get("thread_ts") != thread_ts
+                    ):
+                        continue
+                    out.append(
+                        {
+                            "ts": str(row.get("ts") or ""),
+                            "question": _clip(str(row.get("question") or "")),
+                            "answer": _clip(str(row.get("answer") or "")),
+                        }
+                    )
+        except OSError as exc:
+            logger.warning("스레드 문답 맥락 조회 실패: %s", exc)
+            return []
+        out.sort(key=lambda row: row["ts"])
+        return out[-limit:]
+
     def find_answer(
         self,
         workspace: str,

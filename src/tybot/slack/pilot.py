@@ -299,6 +299,7 @@ def _scope_label(ctx: RequestContext | None) -> str:
 CHANNEL_SCOPE_NOTICE = (
     "_조회 범위: 현재 채널만 · 여러 채널 통합 조회는 TYBot 개인 DM에서 요청하세요._"
 )
+MAX_THREAD_CONTEXT_CHARS = 6000
 
 
 def _response_ts(response) -> str:
@@ -436,6 +437,29 @@ class WorkspaceBot:
             channel_id=channel_id,
             channel=channel,
         )
+
+    def _thread_conversation_context(self, event: dict) -> str:
+        """같은 스레드의 이전 문답을 지칭어 해석용으로만 직렬화한다."""
+        thread_ts = str(event.get("thread_ts") or "")
+        channel_id = str(event.get("channel") or "")
+        reader = getattr(self.qa_log, "context_for_thread", None)
+        if not thread_ts or not channel_id or not callable(reader):
+            return ""
+        rows = reader(self.workspace, channel_id, thread_ts)
+        blocks: list[str] = []
+        used = 0
+        for row in reversed(rows):
+            block = (
+                f"이전 질문: {row.get('question', '')}\n"
+                f"이전 봇 답변: {row.get('answer', '')}"
+            ).strip()
+            if not block:
+                continue
+            if used + len(block) > MAX_THREAD_CONTEXT_CHARS:
+                break
+            blocks.insert(0, block)
+            used += len(block)
+        return "\n\n".join(blocks)
 
     def autojoin_sweep(self) -> None:
         """규칙에 맞는 공개 채널에 자동 참여. 기동 시 1회."""
@@ -2252,7 +2276,10 @@ class WorkspaceBot:
         elif INGEST_RE.search(text):
             tasks = [Intent("ingest", source="cmd", question=text)]
         else:
-            tasks = self.engine.plan(text)
+            tasks = self.engine.plan(
+                text,
+                conversation_context=self._thread_conversation_context(event),
+            )
         if not tasks:
             tasks = [Intent("search", source="regex", question=text)]
 
@@ -2520,13 +2547,15 @@ class WorkspaceBot:
         """
         recent = self.qa_log.recent_for_user(self.workspace, user_id)
         return {
-            "이전_답변_기억": False,
+            "스레드_밖_지속_기억": False,
+            "같은_스레드_맥락": (
+                "이전 질문과 답변으로 '그 문서' 같은 지칭어만 해석하고, "
+                "실제 답은 권한 내 원문에서 다시 찾는다."
+            ),
             "이유": [
                 "봇 답변을 다시 근거로 쓰면 틀린 내용이 사실처럼 굳는다(요약 재귀).",
                 "근거는 사람이 쓴 원문이어야 출처를 붙이고 검증할 수 있다.",
             ],
-            "예외": "스레드 안에서 이어 물으면 그 스레드에 답한다. "
-                    "다만 이전 답변 내용을 근거로 삼지는 않는다.",
             "매_질문마다": "아카이브 원문에서 처음부터 다시 찾는다.",
             "본인_최근_질문": [
                 {"시각": ts[5:16].replace("T", " "), "질문": q} for ts, q in recent
@@ -2623,14 +2652,15 @@ class WorkspaceBot:
         대신 감사 기록에 남은 **본인 질문**은 보여준다.
         """
         lines = [
-            "*이전 답변을 기억하지 않습니다.* 질문마다 아카이브 원문에서 처음부터 찾습니다.",
+            "*이전 답변을 스레드 밖까지 기억하지 않습니다.* "
+            "질문마다 아카이브 원문에서 다시 찾습니다.",
             "",
             "그렇게 만든 이유:",
             "• 제 답변을 다시 근거로 쓰면 틀린 내용이 사실처럼 굳습니다(요약 재귀).",
             "• 근거는 사람이 쓴 원문뿐이어야 출처를 붙이고 검증할 수 있습니다.",
             "",
-            "다만 스레드 안에서 이어 물으시면 그 스레드에 답합니다. "
-            "이전 답변 내용을 근거로 삼지는 않습니다.",
+            "같은 스레드에서 이어 물으면 이전 문답으로 `그 문서` 같은 지칭어를 "
+            "해석합니다. 이전 봇 답변 자체를 근거로 쓰지는 않고 원문에서 다시 검증합니다.",
         ]
         recent = self.qa_log.recent_for_user(self.workspace, user_id)
         if recent:

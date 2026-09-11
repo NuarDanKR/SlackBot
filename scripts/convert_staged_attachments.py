@@ -36,10 +36,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -77,6 +78,32 @@ def _parse_ts(raw: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _record_result(item, *, status: str, error: str = "", body: list[str] | None = None) -> None:
+    """재변환 결과를 콘솔이 읽는 메타데이터와 미리보기에 함께 반영한다."""
+    try:
+        meta = json.loads(item.meta_path.read_text(encoding="utf-8"))
+        meta.update({
+            "status": status,
+            "error": error or None,
+            "extracted": body is not None,
+            "reprocessed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        })
+        tmp = item.meta_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(item.meta_path)
+        preview = item.meta_path.parent / "extracted.md"
+        if body is None:
+            preview.unlink(missing_ok=True)
+        else:
+            preview.write_text(
+                "<!-- 로컬 재변환본. 아카이브 기록 시 PII 검사 적용 -->\n"
+                f"# {item.name}\n\n" + "\n".join(body).rstrip() + "\n",
+                encoding="utf-8",
+            )
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"  경고: {item.name} 재변환 상태를 기록하지 못했습니다: {exc}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -189,51 +216,78 @@ def main(argv: list[str] | None = None) -> int:
     done = 0
     failed: list[tuple[str, str]] = []
     refused_total = 0
-    # 채널별로 모아 한 번에 쓴다. 파일 잠금을 파일마다 잡으면 46번 잠근다.
-    batches: dict[tuple[str, str, str], list[writer.IncomingMessage]] = {}
 
     for item, (ts, speaker, channel, workspace) in todo:
         try:
             data = Path(item.object_path).read_bytes()
             body = convert(_suffix(item.name), data)
         except (OSError, ConvertError) as exc:
-            failed.append((item.name, f"{type(exc).__name__}: {exc}"))
+            reason = f"{type(exc).__name__}: {exc}"
+            failed.append((item.name, reason))
+            _record_result(item, status="download_or_extract_failed", error=reason)
             continue
         except Exception as exc:  # noqa: BLE001 - 한 파일 실패가 나머지를 막지 않는다
-            failed.append((item.name, f"예상치 못한 오류 {type(exc).__name__}: {exc}"))
+            reason = f"예상치 못한 오류 {type(exc).__name__}: {exc}"
+            failed.append((item.name, reason))
+            _record_result(item, status="download_or_extract_failed", error=reason)
             continue
 
         rows = [line.strip() for line in body if line.strip()][:MAX_TEXT_LINES]
         if not rows:
-            failed.append((item.name, "변환 결과가 비어 있다"))
+            reason = "변환 결과가 비어 있다"
+            failed.append((item.name, reason))
+            _record_result(item, status="download_or_extract_failed", error=reason)
             continue
 
-        key = (workspace or item.workspace, channel, item.channel_id)
-        bucket = batches.setdefault(key, [])
         # 변환 사실을 먼저 한 줄. 원래의 `[첨부:검수대기]` 줄은 **그대로 둔다** —
         # 원문은 고치지 않는다. 지금 무슨 일이 있었는지는 이 줄이 말한다.
-        bucket.append(writer.IncomingMessage(
-            ts=ts, speaker=speaker,
-            text=f"[첨부:재변환] {item.name} ({_suffix(item.name)}, "
-                 f"{max(1, item.size // 1024)}KB)",
-        ))
-        bucket.extend(
+        messages = [writer.IncomingMessage(
+            ts=ts,
+            speaker=speaker,
+            text=(
+                f"[첨부:재변환] {item.name} ({_suffix(item.name)}, "
+                f"{max(1, item.size // 1024)}KB)"
+            ),
+        )]
+        messages.extend(
             writer.IncomingMessage(
                 ts=ts, speaker=speaker, text=f"[첨부추출:{item.name}] {row}"
             )
             for row in rows
         )
-        done += 1
 
-    for (workspace, channel, channel_id), messages in sorted(batches.items()):
+        # PII가 한 줄이라도 있으면 파일 전체를 막는다. 일부만 넣으면 문맥이 깨지고
+        # 금지 문서의 나머지 내용이 검색 가능한 상태로 남는다.
+        refused = next(
+            (
+                reason
+                for message in messages
+                if (reason := writer.screen(message.text))
+            ),
+            None,
+        )
+        if refused:
+            refused_total += 1
+            reason = f"수집 제외 대상({refused})"
+            failed.append((item.name, reason))
+            _record_result(item, status="pii_refused", error=reason)
+            continue
+
         result = writer.ingest(
             root,
-            workspace=workspace,
+            workspace=workspace or item.workspace,
             channel=channel,
-            channel_id=channel_id,
+            channel_id=item.channel_id,
             messages=messages,
         )
-        refused_total += len(result.refused)
+        if result.refused:
+            refused_total += 1
+            reason = f"수집 제외 대상({result.refused[0][1]})"
+            failed.append((item.name, reason))
+            _record_result(item, status="pii_refused", error=reason)
+            continue
+        _record_result(item, status="converted", body=rows)
+        done += 1
         print(f"  {channel}: {result.written}줄 추가"
               + (f" · PII 거절 {len(result.refused)}줄" if result.refused else ""))
 

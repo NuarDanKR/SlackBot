@@ -72,6 +72,21 @@ def contract_path(key: str) -> Path | None:
 # 자르는 것이 나은 이유: 컨텍스트를 넘겨 호출이 통째로 실패하면 답이 아예 안 나간다.
 MAX_EVIDENCE_CHARS = 40_000
 
+# 전문 봇별 계약보다 상위에 있는 마스터 출력 정책. 전문 봇 소스와 버전을 바꾸지 않고
+# 모든 어댑터에 동일하게 적용한다. 출처 링크는 여전히 마스터가 별도로 붙인다.
+MASTER_OUTPUT_POLICY = """
+
+## TYBot 마스터 출력 정책
+
+사람의 평가·의견·판단을 옮길 때는 근거에 적힌 발언자와 날짜를 함께 씁니다.
+누군가의 평가를 전문 봇 자신의 평가처럼 바꾸어 쓰지 않습니다. 근거에 발언자가
+없으면 평가 주체를 알 수 없다고 밝힙니다.
+"""
+
+
+def _governed_prompt(prompt: str) -> str:
+    return prompt.rstrip() + MASTER_OUTPUT_POLICY
+
 
 class AdapterError(Exception):
     """어댑터를 만들 수 없다. 호출부는 마스터 답변으로 넘어간다."""
@@ -182,7 +197,7 @@ class PromptSpecialist:
 
         response = self._router.complete(
             [
-                Message("system", self.prompt),
+                Message("system", _governed_prompt(self.prompt)),
                 # 근거를 먼저, 질문을 뒤에. 캐시는 접두사 일치라 이 순서라야
                 # 같은 채널을 다시 물을 때 근거 부분이 캐시된다.
                 Message("user", f"근거:\n{evidence}\n\n질문: {request.question}"),
@@ -294,7 +309,7 @@ class ToolSpecialist:
             opening = f"이미 찾아 둔 근거:\n{seed}\n\n{opening}"
 
         messages: list = [
-            Message("system", self.prompt),
+            Message("system", _governed_prompt(self.prompt)),
             Message("user", opening),
         ]
 

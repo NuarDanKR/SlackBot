@@ -32,6 +32,8 @@ SYSTEM_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것�
 1. <원문>에 없는 사실은 절대 추가하지 않는다. 일반 상식·추측·외부 지식 금지.
 2. 금액·날짜·기관명·사람 이름은 원문 그대로 옮긴다. 반올림·환산·추론 금지.
 3. 사람 발언과 문서 내용은 구분해서 쓴다. 숫자가 엇갈리면 두 시점을 함께 표기한다.
+   누군가의 평가·의견·판단을 옮길 때는 발언자와 날짜를 함께 적고, 봇 자신의
+   평가처럼 바꾸어 쓰지 않는다.
 4. <원문>으로 답할 수 없으면 "아카이브에서 근거를 찾지 못했습니다"라고만 답한다.
 5. 답변은 한국어, 간결하게. 출처 줄은 시스템이 붙이므로 네가 쓰지 않는다.
 6. 출력은 Slack 메시지다. `#` 제목과 `**굵게**`는 Slack에서 글자 그대로 보이니 쓰지 않는다.
@@ -46,6 +48,7 @@ SUMMARY_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것�
 1. <원문>에 없는 사실·추측·전망을 절대 추가하지 않는다. 진척률·완료 여부를 임의 판단하지 않는다.
 2. 금액·날짜·기관명·사람 이름은 원문 그대로. 반올림·환산 금지.
 3. **채널별로 묶어서** 정리한다. 각 항목은 `- 내용 (발언자, 날짜)` 형식.
+   특히 평가·의견·판단은 발언자와 날짜를 생략하지 않는다.
 4. 결정된 것 / 진행 중 / 미해결·대기 를 구분한다. 원문에서 판단이 안 되면 그 구분을 비운다.
 5. 원문이 빈약하면 "이 기간 원문이 N줄뿐이라 정리가 제한적입니다"를 먼저 밝힌다.
 6. 한국어, 간결. 출처 줄은 시스템이 붙이므로 쓰지 않는다.
@@ -188,9 +191,25 @@ class Answer:
         if note:
             parts.append(note)
         if self.citations:
-            srcs = "\n".join(f"• {c}" for c in dict.fromkeys(self.citations))
+            srcs = "\n".join(
+                f"• {_display_citation(c)}" for c in dict.fromkeys(self.citations)
+            )
             parts.append(f"출처:\n{srcs}")
         return "\n\n".join(parts)
+
+
+ARCHIVE_MD_CITATION_RE = re.compile(
+    r"^(?P<channel>.*?),\s*📄[^,]+?\.md(?:\((?P<date>\d{4}-\d{2}-\d{2})\))?$"
+)
+
+
+def _display_citation(citation: str) -> str:
+    """Slack에는 내부 아카이브 MD 파일명 대신 채널과 대화 날짜를 표시한다."""
+    match = ARCHIVE_MD_CITATION_RE.match(citation.strip())
+    if not match:
+        return citation
+    date = match.group("date")
+    return f"{match.group('channel')} ({date})" if date else match.group("channel")
 
 
 def parse_model_flag(text: str) -> tuple[str | None, str]:
@@ -575,14 +594,14 @@ class AnswerEngine:
         _, q = parse_model_flag(question)
         return classify(q, self._router)
 
-    def plan(self, question: str) -> list[Intent]:
+    def plan(self, question: str, *, conversation_context: str = "") -> list[Intent]:
         """복합 질문을 하위질문 목록으로 분해한다(1차 LLM, 실패 시 규칙).
 
         라벨 하나만 돌려주던 `classify` 를 대체한다 - 사람은 한 번에 여러 가지를 묻고,
         예전 구조에서는 그중 하나만 처리 경로에 도달했다.
         """
         _, q = parse_model_flag(question)
-        return plan(q, self._router)
+        return plan(q, self._router, conversation_context=conversation_context)
 
     @property
     def router(self):

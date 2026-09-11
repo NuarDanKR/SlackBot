@@ -35,7 +35,6 @@ UNCONVERTED_EXTS = {
 }
 
 MAX_TEXT_BYTES = 256 * 1024  # 원문에 넣는 텍스트 상한
-MAX_DOC_BYTES = 20 * 1024 * 1024  # 변환 시도 상한(20MB)
 # 텍스트 파일에서 원문에 넣는 줄 수.
 #
 # 200 이던 것을 올렸다(2026-09-07). `csv`·`tsv` 가 여기로 오는데, 표는 **뒤에 합계가
@@ -87,7 +86,7 @@ class SlackFile:
 
     @property
     def is_convertible(self) -> bool:
-        return can_convert(self.filetype) and self.size <= MAX_DOC_BYTES
+        return can_convert(self.filetype)
 
     def describe(self, state: str | None = None) -> str:
         """원문에 남기는 한 줄 설명. 본문을 못 넣는 경우에도 흔적은 남는다."""
@@ -161,13 +160,15 @@ def _decode_text(raw: bytes, declared_size: int) -> str:
     return out
 
 
-def download_bytes(f: SlackFile, bot_token: str, limit: int) -> bytes:
+def download_bytes(f: SlackFile, bot_token: str, limit: int | None = None) -> bytes:
     """원본 바이트를 가져온다. 로그인 HTML 이 오면 실패로 처리한다."""
     if not f.url_private_download:
         raise DownloadError(f"{f.name}: 다운로드 URL 없음")
     req = Request(f.url_private_download, headers={"Authorization": f"Bearer {bot_token}"})
     with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:
-        raw = resp.read(limit + 1)
+        raw = resp.read() if limit is None else resp.read(limit + 1)
+    if limit is not None and len(raw) > limit:
+        raise DownloadError(f"{f.name}: {limit // 1024 // 1024}MB 제한 초과")
     if raw[:15].lstrip().lower().startswith(b"<!doctype html"):
         raise DownloadError(f"{f.name}: 로그인 페이지가 내려왔다 - files:read 스코프 확인")
     return raw
@@ -223,11 +224,7 @@ def stage_files(
         try:
             if not bot_token:
                 raise DownloadError(f"{f.name}: 토큰이 없어 원본을 가져오지 못했습니다")
-            if f.size > MAX_DOC_BYTES:
-                raise DownloadError(f"{f.name}: {MAX_DOC_BYTES // 1024 // 1024}MB 제한 초과")
-            raw = download_bytes(f, bot_token, MAX_DOC_BYTES)
-            if len(raw) > MAX_DOC_BYTES:
-                raise DownloadError(f"{f.name}: {MAX_DOC_BYTES // 1024 // 1024}MB 제한 초과")
+            raw = download_bytes(f, bot_token)
 
             digest = hashlib.sha256(raw).hexdigest()
             objects.mkdir(parents=True, exist_ok=True)
@@ -339,7 +336,7 @@ def file_lines(files: list[dict], bot_token: str | None) -> tuple[list[str], lis
                 body = download_text(f, bot_token).splitlines()
                 tag = "첨부본문"
             else:
-                data = download_bytes(f, bot_token, MAX_DOC_BYTES)
+                data = download_bytes(f, bot_token)
                 body = convert(f.filetype, data)
                 tag = "첨부추출"
         except (DownloadError, ConvertError) as e:

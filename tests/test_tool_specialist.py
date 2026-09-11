@@ -73,6 +73,9 @@ def test_a_direct_answer_needs_no_tools():
 
     assert got == "3.2억입니다."
     assert box.ran == []
+    system = router.calls[0]["messages"][0].content
+    assert "발언자와 날짜" in system
+    assert "전문 봇 자신의 평가처럼" in system
 
 
 def test_a_tool_call_is_executed_and_fed_back():

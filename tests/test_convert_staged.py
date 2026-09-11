@@ -113,6 +113,31 @@ def test_it_fills_a_pending_document(mod, tmp_path, monkeypatch, capsys):
     doc = next((archive).rglob("*.md")).read_text(encoding="utf-8")
     assert "[첨부추출:가정산서.xlsx]" in doc
     assert "320000000" in doc
+    meta = json.loads(next((tmp_path / "staging").rglob("metadata.json")).read_text("utf-8"))
+    assert meta["status"] == "converted"
+    assert meta["extracted"] is True
+    assert meta["error"] is None
+    assert (next((tmp_path / "staging").rglob("metadata.json")).parent
+            / "extracted.md").is_file()
+
+
+def test_reprocessing_refuses_the_whole_file_when_screening_fails(
+    mod, tmp_path, monkeypatch, capsys
+):
+    archive = _archive(tmp_path, ["[첨부:처리실패] 제한문서.xlsx (xlsx, 10KB)"])
+    _stage(tmp_path, name="제한문서.xlsx", file_id="F1", data=b"book")
+    monkeypatch.setattr(mod, "convert", lambda suffix, data: ["허용 행", "제한 행"])
+    monkeypatch.setattr(mod.writer, "screen", lambda text: "제한 정보" if "제한 행" in text else None)
+
+    code, out = _run(mod, archive, monkeypatch, capsys, "--apply")
+
+    assert code == 0
+    assert "변환한 파일 0건" in out
+    doc = next(archive.rglob("*.md")).read_text(encoding="utf-8")
+    assert "허용 행" not in doc
+    meta = json.loads(next((tmp_path / "staging").rglob("metadata.json")).read_text("utf-8"))
+    assert meta["status"] == "pii_refused"
+    assert meta["extracted"] is False
 
 
 def test_the_original_lines_are_untouched(mod, tmp_path, monkeypatch, capsys):
