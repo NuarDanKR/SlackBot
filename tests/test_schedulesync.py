@@ -485,9 +485,17 @@ def test_missing_inbox_is_not_an_error(tmp_path):
     assert newest_snapshot(tmp_path / "없음") is None
 
 
-# --- 폴더↔조직 후보 등록 ------------------------------------------------------
-# 매핑은 Oracle 폴더 ACL 에서 온 사실이고, "그 팀에 DM 을 보낼 것인가" 는 정책이다.
-# 값은 자동으로 채우되 승인은 사람이 켠다.
+# --- 폴더↔조직 등록 ----------------------------------------------------------
+#
+# 2026-09-11 오너 결정: **기본 허용**이다.
+#
+# 이 매핑은 우리 추정이 아니라 그룹웨어 폴더 ACL 이다 — `SYS_OBJECT_ACL` 에서
+# `SUBJECTTYPE='GR'`·`READ='R'` 인 행, 즉 "이 부서는 이 폴더를 읽을 수 있다" 를
+# 그룹웨어가 직접 선언한 값이다. 이미 열어 준 것을 또 승인받으면 같은 판단을 두 번
+# 하는 것이고, 그 사이에 아무에게도 DM 이 가지 않는다 — 실제로 0건이었다.
+#
+# 노출이 늘지는 않는다. 받는 사람은 그 폴더를 그룹웨어에서 이미 볼 수 있고, `/일정 알림`
+# 을 스스로 켠 사람만 받는다. 우리가 더하는 것은 밀어 주기뿐이다.
 class RecordingCursor:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
@@ -501,19 +509,22 @@ def _snapshot_with(folders):
     return ss.Snapshot(rows=[], manifest={"folders": folders}, source=Path("x"))
 
 
-def test_candidates_are_registered_but_never_enabled():
+def test_acl_rows_are_registered_enabled():
+    """ACL 이 곧 허용이다. 끈 상태로 넣으면 아무에게도 가지 않는다."""
     cur = RecordingCursor()
     ss._register_folder_candidates(
         cur, _snapshot_with([{"folder_id": 654, "folder_name": "업무", "org_code": "ABB155"}])
     )
 
+    assert cur.calls
     for sql, params in cur.calls:
-        assert "false" in sql, "승인된 상태로 넣으면 안 된다"
-        assert params.get("by") == ss.CANDIDATE_BY
+        assert "true" in sql, "ACL 행은 켠 상태로 넣는다"
+        assert "false" not in sql
+        assert params.get("by") == ss.ACL_BY
 
 
 def test_existing_rows_are_not_overwritten():
-    """사람이 켠 것을 동기화가 되돌리면 안 된다."""
+    """사람이 **끈** 것을 동기화가 되살리면 안 된다 — 되살리면 끌 방법이 없다."""
     cur = RecordingCursor()
     ss._register_folder_candidates(
         cur, _snapshot_with([{"folder_id": 654, "org_code": "ABB155"}])
@@ -532,6 +543,17 @@ def test_unknown_org_code_cannot_abort_the_whole_snapshot():
 
     org_sql = [sql for sql, _ in cur.calls if "schedule_folder_org" in sql]
     assert org_sql and "exists (select 1 from org_unit" in org_sql[0]
+
+
+def test_migration_only_touches_untouched_candidates():
+    """사람이 끈 행은 `approved_by` 가 그 사람이라 이 UPDATE 에 안 걸린다."""
+    sql = Path("deploy/sql/schedule_folder_acl_default.sql").read_text(encoding="utf-8")
+    # 두 표 모두 후보 표시가 남은 행만 켠다.
+    assert sql.count("approved_by = '자동수집(미승인)'") == 2
+    assert "schedule_folder" in sql
+    assert "schedule_folder_org" in sql
+    # 대표 조직 보정은 덮어쓰지 않는다.
+    assert "ON CONFLICT (source_folder_id, org_code) DO NOTHING" in sql
 
 
 def test_rows_without_org_still_register_the_folder():

@@ -1,27 +1,35 @@
-"""일정 폴더↔조직 승인 — DM 이 나가려면 사람이 한 번 켜야 한다.
+"""일정 폴더↔조직 — 무엇이 누구에게 가는지 보고, 시끄러운 것을 끈다.
 
-## 왜 이 도구가 필요한가
-`schedule_folder_org` 가 비어 있으면 **아무에게도 일정 DM 이 나가지 않는다.** 그런데
-승인으로 넘기는 수단이 없었다. 코드 주석은 "콘솔에서 켜야 발송된다" 고 하지만 그 화면이
-아직 없어서, 지금까지는 손으로 SQL 을 쓰는 것이 유일한 길이었다.
+## 기본은 허용이다 (2026-09-11 오너 결정)
+폴더↔조직 매핑은 우리 추정이 아니라 **그룹웨어의 폴더 ACL** 이다. Oracle 뷰의
+`org_code` 는 `SYS_OBJECT_ACL` 에서 `SUBJECTTYPE='GR'`·`READ='R'` 인 행 — "이 부서는
+이 폴더를 읽을 수 있다" 를 그룹웨어가 직접 선언한 값이다.
 
-첨부 검수 게이트에서 같은 일이 있었다 — 격리는 되는데 승인 전이가 없어서 원본이 쌓이기만
-했다. 게이트를 만들 때는 **통과시키는 문도 같이** 만들어야 한다.
+그룹웨어가 이미 열어 준 것을 우리가 또 승인받으면 같은 판단을 두 번 하는 것이고, 그
+사이에 **아무에게도 DM 이 가지 않는다.** 실제로 그렇게 됐다 — 승인 표가 빈 채로 남아
+일정 DM 이 0건이었다. 그래서 동기화가 켠 상태로 넣는다.
 
-## 자동 승인하지 않는 이유
-한 Oracle 폴더가 여러 조직에 열려 있을 수 있다. 그대로 켜면 관계없는 팀에 남의 일정이
-DM 으로 나간다. 그래서 값은 동기화가 후보로 채우고(`enabled=false`), 켜는 것은 사람이
-한다(원칙 3: 막는 쪽이 기본값).
+노출이 늘지는 않는다. 받는 사람은 그 폴더를 그룹웨어에서 이미 열어 볼 수 있고, 게다가
+`/일정 알림` 을 스스로 켠 사람만 받는다. 우리가 더하는 것은 밀어 주기뿐이다.
+
+## 그래서 사람이 하는 일은 **끄는 것**이다
+시끄러운 폴더를 빼는 것은 판단이라 사람이 한다. 끈 행은 동기화가 되살리지 않는다
+(`on conflict do nothing`) — 되살리면 끌 방법이 없어진다.
+
+`approve` 는 남겨 둔다. 끈 것을 되돌릴 때, 그리고 ACL 에 아직 안 잡힌 폴더를 손으로
+열 때 쓴다.
 
 ## 쓰기
 
-    python scripts/schedule_folder_approve.py list            # 켜진 폴더와 자격 조직
-    python scripts/schedule_folder_approve.py pending         # 후보(미승인)
-    python scripts/schedule_folder_approve.py who 3420-M      # 이 사람이 받을 수 있나
-    python scripts/schedule_folder_approve.py approve 654 ABB155 --actor dan@taeyoung.com
+    python scripts/schedule_folder_approve.py list            # 폴더별 수신 조직
+    python scripts/schedule_folder_approve.py who 3420-M      # 이 사람이 받는 폴더 수
+    python scripts/schedule_folder_approve.py gap             # 켜졌는데 수신 조직이 없는 폴더
+    python scripts/schedule_folder_approve.py pending         # 사람이 끈 것
     python scripts/schedule_folder_approve.py revoke  654 ABB155 --actor dan@taeyoung.com
+    python scripts/schedule_folder_approve.py approve 654 ABB155 --actor dan@taeyoung.com
 
-`revoke` 는 행을 지우지 않고 끈다. 지우면 언제부터 왜 멈췄는지 알 수 없다.
+`revoke` 는 행을 지우지 않고 끄고, 그 조직의 미발송 큐를 함께 취소한다. 지우면 언제부터
+왜 멈췄는지 알 수 없고, 큐를 남기면 끈 뒤에도 DM 이 나간다.
 """
 from __future__ import annotations
 
@@ -45,6 +53,7 @@ select f.source_folder_id, f.label, f.org_code as 대표조직,
  order by f.source_folder_id
 """
 
+# 사람이 끈 행. 기본이 허용이므로 여기 있는 것은 **누군가의 결정**이다.
 PENDING_SQL = """
 select fo.source_folder_id, f.label, fo.org_code, fo.approved_by
   from schedule_folder_org fo
@@ -115,7 +124,8 @@ def _print(rows: list[dict], *, empty: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="일정 폴더↔조직 승인")
+    ap = argparse.ArgumentParser(
+        description="일정 폴더↔조직 — ACL 기준 기본 허용. 사람은 끄는 쪽을 한다")
     ap.add_argument("action", choices=("list", "pending", "gap", "who", "approve", "revoke"))
     ap.add_argument("target", nargs="?", help="approve/revoke 의 폴더 ID, who 의 사번")
     ap.add_argument("org_code", nargs="?", help="approve/revoke 의 조직코드")
@@ -133,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == "pending":
             cur.execute(PENDING_SQL)
-            _print(_rows(cur), empty="미승인 후보가 없다.")
+            _print(_rows(cur), empty="사람이 끈 폴더↔조직이 없다.")
             return 0
         if args.action == "gap":
             cur.execute(GAP_SQL)
@@ -155,7 +165,9 @@ def main(argv: list[str] | None = None) -> int:
             count = entitled_folders(conn, args.target)
             print(f"{args.target} 가 받을 수 있는 폴더: {count}개")
             if not count:
-                print("0개다 — 알림을 켜도 아무것도 오지 않는다. `gap` 으로 원인을 본다.")
+                print("0개다 — 알림을 켜도 아무것도 오지 않는다.")
+                print("그룹웨어에서 이 사람 부서에 열린 일정 폴더가 없거나,"
+                      " 누군가 끈 것이다. `gap` 과 `pending` 으로 본다.")
                 return 1
             return 0
 

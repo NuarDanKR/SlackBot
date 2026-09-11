@@ -341,9 +341,11 @@ sudo -u tybot TYBOT_ENV_FILE=/etc/tybot/tybot.env \
 ```
 
 끝에 `일정 DM 발송 sent=N retry=N failed=N skipped=N` 이 나온다.
-`sent=0` 이고 아무것도 없으면 큐가 빈 것이고, 원인은 대개 셋이다 —
-일정이 동기화되지 않았거나(`schedule_occurrence` 가 비었거나),
-사용자가 `/일정 알림` 으로 DM 을 켜지 않았거나, 사번↔Slack 매핑이 없다.
+`sent=0` 이고 아무것도 없으면 큐가 빈 것이다. 플래너가 **왜 0인지 로그에 찍는다** —
+`큐가 빈 이유 판단용 — 2시간내일정=N 승인폴더=N 폴더조직=N 알림켠사람=N 사번매핑=N`.
+0인 항목이 곧 원인이다. 「2시간내일정」 만 0이면 정상이다(앞으로 회의가 없다).
+
+`폴더조직=0` 이면 위 `schedule_folder_acl_default.sql` 을 안 돌린 것이다.
 
 ---
 
@@ -623,12 +625,30 @@ DB 를 못 읽을 때 되돌아갈 자리로 잠시 남겨 두는 것도 방법�
 
 ```bash
 sudo cat /opt/tybot/deploy/sql/schedule_dm_schema.sql | sudo -u postgres psql -p 55432 -d tyslackai -f -
+sudo cat /opt/tybot/deploy/sql/schedule_folder_acl_default.sql | sudo -u postgres psql -p 55432 -d tyslackai -f -
 sudo systemctl enable --now tybot-schedule-dm.timer   # 1분 주기
 ```
 
-`schedule_folder_org` 에 폴더별 승인 조직을 넣어야 대상자가 생긴다. **비어 있으면
-아무에게도 가지 않는다** — 안전한 기본값이지만 기능이 조용히 0건으로 보인다.
-사용자는 Slack 에서 `/일정 알림` 으로 직접 켠다(기본 미수신).
+두 번째 파일이 **폴더↔조직을 ACL 기준 기본 허용으로** 돌린다(2026-09-11 오너 결정).
+예전에는 관리자 승인을 기다렸는데, 그 표가 빈 채로 남아 **일정 DM 이 한 건도 나가지
+않았다.** 매핑은 우리 추정이 아니라 그룹웨어 폴더 ACL 이라 — "이 부서는 이 폴더를 읽을
+수 있다" 를 그룹웨어가 직접 선언한 값 — 같은 판단을 두 번 할 이유가 없다.
+
+노출이 늘지는 않는다. 받는 사람은 그 폴더를 그룹웨어에서 이미 볼 수 있고, 게다가
+`/일정 알림` 을 스스로 켠 사람만 받는다(기본 미수신). 더해지는 것은 밀어 주기뿐이다.
+
+적용 결과 확인 — 조직당 수신 폴더는 2~3개 수준이다(2026-09-11 실측 253개 조직 274행):
+
+```bash
+cd /opt/tybot && sudo -u tybot .venv/bin/python scripts/schedule_folder_approve.py list
+sudo -u tybot .venv/bin/python scripts/schedule_folder_approve.py who <사번>
+```
+
+시끄러운 폴더를 빼는 것은 사람이 한다. 끈 행은 동기화가 되살리지 않는다:
+
+```bash
+sudo -u tybot .venv/bin/python scripts/schedule_folder_approve.py revoke <폴더> <조직> --actor <나>
+```
 
 **시각 대조를 한 번 해야 한다** — 추출기가 그룹웨어 시각에 `+09:00` 을 붙인다.
 데이터가 들어오면 `/일정 오늘` 출력과 그룹웨어 화면의 시각이 같은지 확인한다.

@@ -638,10 +638,16 @@ def test_entitlement_uses_the_same_joins_as_the_planner():
         assert fragment in PLAN_SQL, fragment
 
 
-def test_not_entitled_notice_says_not_to_retry():
-    """다시 켜라고 하면 사람은 계속 다시 켠다. 기다릴 곳을 알려야 한다."""
+def test_not_entitled_notice_points_at_the_groupware():
+    """자격의 근거는 그룹웨어 폴더 ACL 이다. 우리 승인이 아니다(2026-09-11).
+
+    「관리자 승인을 기다려라」 라고 하면 조치할 수 없는 곳으로 보내는 것이 된다 —
+    우리 쪽에는 승인 단계가 없다.
+    """
     from tybot.schedule_dm import NOT_ENTITLED
 
     assert "오지 않습니다" in NOT_ENTITLED
-    assert "관리자" in NOT_ENTITLED
+    assert "그룹웨어" in NOT_ENTITLED
     assert "다시 켤 필요는 없습니다" in NOT_ENTITLED
+    # 없는 승인 절차를 기다리게 하지 않는다.
+    assert "승인" not in NOT_ENTITLED
