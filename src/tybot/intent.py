@@ -75,7 +75,12 @@ STATUS_RE = re.compile(
     r"(어때|어떠|어떤|어떻|알려|보여|확인|점검|출력)|"
     r"버전\s*(확인|알려|뭐)|어떤\s*모델|무슨\s*모델|설정\s*확인|"
     # '수집 현황을 묻는' 표현 - 수집 '지시'보다 먼저 걸러야 한다(아래 INGEST_RE 보다 우선 검사).
-    r"(수집|취합)\s*(현황|상태|건수|얼마나|몇)|몇\s*건|수집(했|됐|된)|취합(했|됐|된))"
+    #
+    # `수집된` 은 **관형형**이라 뒤에 명사가 오면 상태 질문이 아니다 —
+    # 「여태까지 **수집된 주간 보고**를 종합해줘」 가 status 로 새면 요약 요청이
+    # 통째로 사라진다(2026-09-11 실측). 그래서 뒤에 낱말이 이어지면 안 잡는다.
+    r"(수집|취합)\s*(현황|상태|건수|얼마나|몇)|몇\s*건|"
+    r"(수집|취합)(했|됐)|(수집|취합)된(?!\s*[0-9A-Za-z가-힣]))"
 )
 HELP_RE = re.compile(r"(도움말|사용법|명령어|뭘\s*할\s*수|어떻게\s*써|\bhelp\b)")
 # 봇의 '기억'을 묻는 질문. STATUS_RE 보다 먼저 검사한다 —
@@ -101,7 +106,10 @@ ADVICE_RE = re.compile(
     r"어떻게\s*(하는\s*게|해야|가는\s*게)|바람직)"
 )
 SUMMARY_RE = re.compile(
-    r"(요약|브리핑|정리해|정리 좀|진행\s*상황|진행\s*현황|현재\s*상황|현황|"
+    # `종합` 은 여러 문서를 묶어 달라는 요청이다. 없으면 그런 질문이 search 로 새고,
+    # 단일 사실 검색 경로에서 보고서 여러 건을 못 묶는다(2026-09-11 실측).
+    r"(요약|브리핑|정리해|정리 좀|종합해|종합\s*좀|취합해|모아\s*줘|"
+    r"진행\s*상황|진행\s*현황|현재\s*상황|현황|"
     r"어디까지|어떻게\s*돼가|무슨\s*일|summary|summarize|status\s*update)"
 )
 PERIOD_RE = re.compile(r"(\d+)\s*(일|주|개월|달)")
@@ -110,6 +118,38 @@ PERIOD_WORDS = {
     "지난주": 14, "저번주": 14, "이번달": 30, "이번 달": 30, "한달": 30, "지난달": 60,
 }
 DEFAULT_DAYS = 7
+
+# --- 기간의 범위 (설계 §9) ----------------------------------------------------
+#
+# 「여태까지 수집된 주간 보고를 종합해줘」 를 최근 7일로 처리하면, 파일이 멀쩡히
+# 아카이브에 있어도 후보에 안 들어온다. 사용자의 요청과 실제 조회 범위가 다른데
+# 답변은 「자료가 없다」 로 나가서, 그 차이가 화면에 드러나지 않는다.
+SCOPE_DEFAULT = "default"   # 기간 언급 없음 — 기존 기본값
+SCOPE_BOUNDED = "bounded"   # 「최근 N일」·명시 날짜
+SCOPE_ALL = "all"           # 「여태까지」·「지금까지」 — 전체 기간
+
+# 전체 기간을 가리키는 표현. 정규식이 아니라 목록인 이유는 **검토 가능해야** 하기
+# 때문이다. LLM 이 임의로 늘리면 다른 질문까지 전체 스캔이 된다.
+ALL_TIME_WORDS = (
+    "여태까지", "여태", "지금까지", "이제까지", "전체 기간", "전기간",
+    "수집된 모든", "수집한 모든", "모든 기간", "그동안", "그 동안", "누적",
+)
+
+# 문서 종류 동의어. **코드의 검토된 사전에서만** 확장한다(§9).
+#
+# 파일명에는 `주간업무보고`·`주간보고`·`업무보고` 가 섞여 있는데 본문에는 「주간 보고
+# 회의」 라는 문구가 없을 수 있다. 본문 키워드만 찾으면 보고서 자체를 놓친다(§2.6).
+#
+# LLM 에게 동의어를 맡기지 않는다 — 「보고」 에서 「회계보고」·「사고보고」 로 번지면
+# 묻지 않은 문서가 근거에 섞인다.
+DOCUMENT_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "주간보고": ("주간보고", "주간업무보고", "업무보고", "주간"),
+    "주간업무보고": ("주간보고", "주간업무보고", "업무보고", "주간"),
+    "업무보고": ("업무보고", "주간업무보고", "주간보고"),
+    "현황보고": ("현황보고", "현황", "현장이력카드"),
+    "미수금": ("미수금", "미수금관리보고", "미수금현황보고"),
+    "회의록": ("회의록", "회의", "미팅"),
+}
 # 검색어에서 걸러낼 요청 표현 (폴백 경로용 최소 스톱워드)
 STOPWORDS = {
     "알려줘", "알려", "말해줘", "말해", "궁금", "궁금해", "확인", "확인해줘", "해줘", "주세요",
@@ -195,6 +235,14 @@ class Intent:
     # 어느 QA 레코드를 이어 가는가. **LLM 이 정하지 않는다** — 같은 워크스페이스·
     # 채널·스레드 안에서 코드가 고른다.
     referenced_record_ids: list[str] = field(default_factory=list)
+    # --- 문서 집합 요약 (설계: document-pipeline-trace-and-report-summary.md §9)
+    #
+    # `days` 를 0 이나 큰 수로 덮어쓰지 않는다. **범위를 따로 들고** 있어야
+    # 「7일이 기본이라 7일」 과 「전체를 요청해서 전체」 를 구별해 답변에 밝힐 수 있다.
+    time_scope: str = SCOPE_DEFAULT
+    # 찾을 **문서 종류**. `terms` 는 본문에서 찾을 주제어이고, 이쪽은 파일명에서
+    # 찾을 이름 조각이다. 본문에 그 문구가 없는 보고서를 놓치지 않으려면 둘이 필요하다.
+    document_query: list[str] = field(default_factory=list)
 
     @property
     def query(self) -> str:
@@ -203,6 +251,15 @@ class Intent:
     @property
     def is_followup(self) -> bool:
         return self.reference_mode != "none"
+
+    @property
+    def wants_all_time(self) -> bool:
+        return self.time_scope == SCOPE_ALL
+
+    @property
+    def is_document_set(self) -> bool:
+        """문서 집합 요약인가. 채널 최근 줄이 아니라 **문서 단위**로 근거를 고른다."""
+        return self.kind == "summary" and bool(self.document_query)
 
 
 # 아카이브 원문을 근거로 답하는 의도. 이 의도의 답변은 **답변 엔진 출력을 그대로** 쓴다 -
@@ -225,6 +282,36 @@ def parse_period(text: str, *, default: int = DEFAULT_DAYS) -> int:
     return default
 
 
+def parse_time_scope(text: str) -> str:
+    """기간의 **범위**를 판정한다. 일수와 따로 둔다.
+
+    「7일이 기본이라 7일」 과 「전체를 요청해서 전체」 는 다른 사실이다. 하나로 뭉치면
+    답변에서 「어디까지 봤는지」 를 말할 수 없다.
+    """
+    if any(word in text for word in ALL_TIME_WORDS):
+        return SCOPE_ALL
+    if PERIOD_RE.search(text) or any(word in text for word in PERIOD_WORDS):
+        return SCOPE_BOUNDED
+    return SCOPE_DEFAULT
+
+
+def expand_document_query(text: str) -> list[str]:
+    """질문에서 **문서 종류**를 뽑는다. 사전에 있는 것만.
+
+    파일명에는 `주간업무보고`·`주간보고`·`업무보고` 가 섞여 있는데 본문에는 그 문구가
+    없을 수 있다. 본문 키워드만 찾으면 보고서 자체를 후보로 못 찾는다(§2.6).
+
+    **사전 밖으로 넓히지 않는다.** 「보고」 에서 「회계보고」·「사고보고」 로 번지면
+    묻지 않은 문서가 근거에 섞인다.
+    """
+    flat = text.replace(" ", "")
+    found: list[str] = []
+    for key, synonyms in DOCUMENT_SYNONYMS.items():
+        if key in flat:
+            found += [s for s in synonyms if s not in found]
+    return found
+
+
 def classify_by_rule(text: str) -> Intent:
     """LLM 없이 판단. 분류기 장애 시 폴백 경로."""
     if MEMORY_RE.search(text):
@@ -238,7 +325,17 @@ def classify_by_rule(text: str) -> Intent:
     if HELP_RE.search(text):
         return Intent("help", source="regex")
     if SUMMARY_RE.search(text):
-        return Intent("summary", days=parse_period(text), source="regex")
+        scope = parse_time_scope(text)
+        return Intent(
+            "summary",
+            days=parse_period(text),
+            source="regex",
+            time_scope=scope,
+            # 범위 요약 안에 주제가 있으면 그것도 뽑는다. 비면 채널 전체 최근 줄을
+            # 쓰게 되고, 그건 질문과 상관없는 답이 된다(§2.5).
+            terms=[t for t in TOKEN_RE.findall(text) if t not in STOPWORDS],
+            document_query=expand_document_query(text),
+        )
     terms = [t for t in TOKEN_RE.findall(text) if t not in STOPWORDS]
     if ADVICE_RE.search(text):
         return Intent("advice", terms=terms, source="regex")
@@ -304,6 +401,15 @@ def _dedupe(tasks: list[Intent]) -> list[Intent]:
         for term in task.terms:
             if term not in same.terms:
                 same.terms.append(term)
+        for doc in task.document_query:
+            if doc not in same.document_query:
+                same.document_query.append(doc)
+        # 한쪽이 「여태까지」 면 합친 것도 전체다. 좁은 쪽으로 합치면 사용자가
+        # 요청한 범위가 조용히 줄어든다.
+        if SCOPE_ALL in (same.time_scope, task.time_scope):
+            same.time_scope = SCOPE_ALL
+        elif SCOPE_BOUNDED in (same.time_scope, task.time_scope):
+            same.time_scope = SCOPE_BOUNDED
         if task.question and task.question not in same.question:
             same.question = f"{same.question} {task.question}".strip()
     return out
@@ -550,13 +656,24 @@ def plan(
                 logger.info("알 수 없는 kind 무시: %r", kind)
                 continue
             terms = [str(x) for x in (item.get("terms") or []) if str(x).strip()]
+            question = str(item.get("question") or "").strip() or text
+            # **범위와 문서 종류는 코드가 정한다.** 모델에게 맡기면 「보고」 에서
+            # 「회계보고」·「사고보고」 로 번지거나, 「여태까지」 를 임의 기간으로
+            # 바꿔 버린다. 둘 다 묻지 않은 자료를 근거에 섞는 길이다(§9).
+            #
+            # 판정 대상은 원문 질문이다. 분해된 조각에는 「여태까지」 가 없을 수 있다.
             tasks.append(
                 Intent(
                     kind=kind,
                     days=_clamp_days(item.get("days")),
                     terms=terms,
                     source="llm",
-                    question=str(item.get("question") or "").strip() or text,
+                    question=question,
+                    time_scope=parse_time_scope(text),
+                    document_query=(
+                        expand_document_query(f"{text} {question}")
+                        if kind == "summary" else []
+                    ),
                 )
             )
         if not tasks:
