@@ -10,6 +10,17 @@ from tybot.archive import convert as cv
 from tybot.archive.convert import ConvertError, can_convert, convert
 
 
+@pytest.fixture
+def without_external_converters(monkeypatch):
+    """Keep basic-parser tests independent of tools installed on the test host."""
+
+    def unavailable(*_args, **_kwargs):
+        raise cv.ExternalConverterUnavailable("test fixture")
+
+    monkeypatch.setattr(cv, "kordoc_lines", unavailable)
+    monkeypatch.setattr(cv, "office_pdf_lines", unavailable)
+
+
 def test_xlsx_keeps_sheet_and_row_structure():
     from openpyxl import Workbook
 
@@ -30,7 +41,7 @@ def test_xlsx_keeps_sheet_and_row_structure():
     assert "[시트] 요약" in lines  # 시트가 여러 개면 모두 나온다
 
 
-def test_docx_paragraphs_and_tables():
+def test_docx_paragraphs_and_tables(without_external_converters):
     import docx
 
     d = docx.Document()
@@ -49,7 +60,7 @@ def test_docx_paragraphs_and_tables():
     assert "기성금 | 3억" in lines
 
 
-def test_pptx_slides():
+def test_pptx_slides(without_external_converters):
     from pptx import Presentation
 
     prs = Presentation()
@@ -63,7 +74,7 @@ def test_pptx_slides():
     assert "주간 보고" in lines
 
 
-def test_pdf_without_text_layer_is_refused():
+def test_pdf_without_text_layer_is_refused(without_external_converters):
     """스캔본은 변환하지 않는다 - OCR 오류가 사실처럼 굳는 걸 막는다."""
     from pypdf import PdfWriter
 
@@ -90,7 +101,7 @@ def test_hwpx_text_extraction():
     assert any("자재 수급 문제" in ln for ln in lines)
 
 
-def test_hwpx_billion_laughs_is_refused():
+def test_hwpx_billion_laughs_is_refused(without_external_converters):
     """사용자가 올린 XML 이므로 엔티티 폭탄을 막아야 한다."""
     bomb = (
         '<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol">'
