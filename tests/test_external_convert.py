@@ -19,15 +19,17 @@ def test_kordoc_requires_exactly_one_output(monkeypatch):
         ext.kordoc_lines(b"document", "hwp")
 
 
-def test_kordoc_marks_ocr_output(monkeypatch):
+def test_kordoc_marks_ocr_output(monkeypatch, tmp_path):
     monkeypatch.setattr(ext, "_binary", lambda *_args: "/usr/bin/kordoc")
 
-    def fake_run(_command, *, cwd):
+    def fake_run(_command, *, cwd, home):
+        assert home == tmp_path
         output = cwd / "out" / "source.md"
         output.write_text("금액 3억 원", encoding="utf-8")
         return subprocess.CompletedProcess([], 0, "", "")
 
     monkeypatch.setattr(ext, "_run", fake_run)
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
 
     lines = ext.kordoc_lines(b"scan", "pdf", force_ocr=True)
 
@@ -64,3 +66,18 @@ def test_configured_converter_must_be_executable(monkeypatch, tmp_path):
 
     with pytest.raises(ext.ExternalConverterUnavailable, match="KORDOC_BIN"):
         ext._binary("KORDOC_BIN", "kordoc")
+
+
+def test_run_overrides_inherited_home(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_subprocess_run(command, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(ext.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setenv("HOME", "/root")
+
+    ext._run(["soffice", "--version"], cwd=tmp_path, home=tmp_path)
+
+    assert seen["env"]["HOME"] == str(tmp_path)

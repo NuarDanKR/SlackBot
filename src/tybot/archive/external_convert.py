@@ -68,11 +68,20 @@ def _binary(env_name: str, *names: str) -> str:
     raise ExternalConverterUnavailable(f"실행 파일을 찾지 못했습니다: {', '.join(names)}")
 
 
-def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str],
+    *,
+    cwd: Path,
+    home: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    if home is not None:
+        environment["HOME"] = str(home)
     try:
         return subprocess.run(
             command,
             cwd=cwd,
+            env=environment,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -159,7 +168,9 @@ def kordoc_lines(data: bytes, suffix: str, *, force_ocr: bool = False) -> list[s
         if force_ocr:
             command.append("--ocr-force")
         command.append(str(source))
-        result = _run(command, cwd=work)
+        state_dir = Path(os.getenv("STATE_DIR", "").strip() or "/var/lib/tybot")
+        home = state_dir if state_dir.is_dir() and os.access(state_dir, os.W_OK) else work
+        result = _run(command, cwd=work, home=home)
         made = sorted(output.glob("*.md"))
         if result.returncode != 0 or len(made) != 1:
             detail = (result.stderr or result.stdout).strip()[:300]
@@ -198,6 +209,7 @@ def office_pdf_lines(data: bytes, suffix: str) -> list[str]:
                 str(source),
             ],
             cwd=work,
+            home=work,
         )
         pdf = output / "source.pdf"
         if result.returncode != 0 or not pdf.is_file():
