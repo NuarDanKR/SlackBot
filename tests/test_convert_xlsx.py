@@ -65,22 +65,22 @@ def test_an_empty_cell_stays_empty():
 
     lines = convert.convert("xlsx", data)
 
-    assert "가 | 다" in lines
+    row = next(line for line in lines if line.startswith("<tr>"))
+    assert row == "<tr><th>가</th><th></th><th>다</th></tr>"
 
 
-def test_values_only_files_do_not_pay_for_a_second_read(monkeypatch):
-    """값이 다 채워진 파일은 두 번 읽지 않는다. 평소에는 비용이 없어야 한다."""
+def test_the_high_fidelity_renderer_is_called_once(monkeypatch):
+    """정밀 변환기를 중복 실행하면 큰 보고서의 지연과 메모리가 두 배가 된다."""
     calls = {"n": 0}
-    real = convert.__dict__.get("_sheet_rows")
 
-    def counting(wb):
+    def render(_data):
         calls["n"] += 1
-        return real(wb)
+        return ["[시트] 가정산", "<table>", "</table>"]
 
-    monkeypatch.setattr(convert, "_sheet_rows", counting)
+    monkeypatch.setattr(convert, "xlsx_lines", render)
     convert.convert("xlsx", _book([["가", "나"], [1, 2]]))
 
-    assert calls["n"] == 1, "빈 칸이 없는데 수식을 다시 읽었다"
+    assert calls["n"] == 1
 
 
 # --- 접기 --------------------------------------------------------------------
@@ -96,9 +96,9 @@ def test_the_total_row_survives_folding(monkeypatch):
 
     lines = convert.convert("xlsx", _book(rows))
 
-    assert any(line.startswith("합계") for line in lines), "합계가 잘려 나갔다"
+    assert any("합계" in line for line in lines), "합계가 잘려 나갔다"
     assert any("가운데" in line and "생략" in line for line in lines), "접은 사실을 말해야 한다"
-    assert lines[1].startswith("공구"), "헤더도 남아야 한다"
+    assert any("공구" in line and "기성금" in line for line in lines), "헤더도 남아야 한다"
 
 
 def test_the_fold_note_reports_the_real_total(monkeypatch):
@@ -110,7 +110,7 @@ def test_the_fold_note_reports_the_real_total(monkeypatch):
     lines = convert.convert("xlsx", _book([[f"행{i}", i] for i in range(50)]))
 
     note = next(line for line in lines if "생략" in line)
-    assert "총 50줄" in note, note
+    assert "총 53줄" in note, note  # 시트 머리와 table 시작·끝도 검색 가능한 구조 줄이다
 
 
 def test_the_row_limit_is_high_enough_for_real_tables():

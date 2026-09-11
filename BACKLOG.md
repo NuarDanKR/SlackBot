@@ -416,13 +416,17 @@ B-01 결과를 사람이 보는 곳으로 보낸다. 마스터봇의 실질적 �
 
 ## B-11
 ### 스캔 PDF·구형 hwp 변환
-**우선 낮음 · 상태 대기(사람 승인 흐름 필요)**
+**우선 낮음 · 상태 구현됨(서버 도구 설치·실문서 검증 필요)**
 
-현재 미변환으로 목록만 남긴다([convert.py](src/tybot/archive/convert.py)).
+TYBot 수집 계층에서 사전 설치된 kordoc/LibreOffice를 호출한다
+([convert.py](src/tybot/archive/convert.py)). 실행 중 패키지 다운로드는 하지 않는다.
 
-- 스캔 PDF: OCR(tesseract + 한국어). **OCR 오류가 사실처럼 굳는 게 문제**라
-  인용 시 "원본 확인 권함" 부기가 필수
-- 구형 `.hwp`: LibreOffice CLI 변환 검토(의존성 큼)
+- 스캔 PDF: OCR 결과에 원본 확인 안내를 붙인다. 서버의 한국어 OCR 실물 검증은 남았다.
+- 구형 `.hwp`: kordoc 미설치 시 명시적으로 실패한다.
+- PPT/PPTX: LibreOffice로 PDF 렌더 후 kordoc으로 읽고, 도구가 없으면 PPTX만 기본
+  텍스트 파서로 내린다.
+- Excel: Hermes 유래 표 렌더러를 `vendor/hermes`로 이관했다. 실제 사내 보고서 골든
+  세트의 수치·병합셀·합계 대조는 배포 전 필요하다.
 
 **착수 조건** — 변환본을 근거로 쓸 때의 표시 규칙을 먼저 정한다. 기술 문제가 아니라 신뢰 문제다.
 

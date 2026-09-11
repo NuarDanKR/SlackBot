@@ -53,6 +53,7 @@ KEYWORD_ALLOWED=':(exclude).githooks/*
 :(exclude)scripts/*
 :(exclude)src/*
 :(exclude)tests/*
+:(exclude)vendor/hermes/*.py
 :(exclude).env.example'
 
 # 주민번호 '형식'은 실제 값일 가능성이 높아 거의 모든 곳에서 막는다.

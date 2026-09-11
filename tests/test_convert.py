@@ -24,8 +24,8 @@ def test_xlsx_keeps_sheet_and_row_structure():
 
     lines = convert("xlsx", buf.getvalue())
     assert "[시트] 기성내역" in lines
-    assert "현장 | 금액 | 비고" in lines
-    assert "김해외동 | 3억 2천만원" in lines
+    assert any("현장" in line and "금액" in line and "비고" in line for line in lines)
+    assert any("김해외동" in line and "3억 2천만원" in line for line in lines)
     assert "[시트] 요약" in lines  # 시트가 여러 개면 모두 나온다
 
 
@@ -104,10 +104,13 @@ def test_hwpx_billion_laughs_is_refused():
         convert("hwpx", buf.getvalue())
 
 
-def test_old_hwp_binary_is_not_convertible():
-    assert not can_convert("hwp")
-    with pytest.raises(ConvertError, match="변환 대상이 아니다"):
-        convert("hwp", b"\xd0\xcf\x11\xe0binary")
+def test_old_hwp_binary_is_routed_to_the_external_converter(monkeypatch):
+    import tybot.archive.convert as cv
+
+    monkeypatch.setattr(cv, "kordoc_lines", lambda data, suffix: [f"{suffix}:{len(data)}"])
+
+    assert can_convert("hwp")
+    assert convert("hwp", b"\xd0\xcf\x11\xe0binary") == ["hwp:10"]
 
 
 def test_empty_file_refused():
@@ -116,9 +119,9 @@ def test_empty_file_refused():
 
 
 def test_convertible_set():
-    for ext in ("xlsx", "xlsm", "docx", "pptx", "pdf", "hwpx"):
+    for ext in ("xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp"):
         assert can_convert(ext)
-    for ext in ("hwp", "xls", "doc", "ppt", "jpg", "dwg", "zip"):
+    for ext in ("xls", "jpg", "dwg", "zip"):
         assert not can_convert(ext)
 
 
@@ -146,4 +149,4 @@ def test_large_sheet_folds_the_middle_not_the_tail(monkeypatch):
 
     assert len(lines) <= 4 + 1 + 3 + 1  # 머리 + 접기표시 + 꼬리 + 시트머리
     assert any("가운데" in ln and "생략" in ln for ln in lines)
-    assert lines[-1] == "합계", f"합계가 잘려 나갔다: {lines[-3:]}"
+    assert any("합계" in line for line in lines[-3:]), f"합계가 잘려 나갔다: {lines[-3:]}"

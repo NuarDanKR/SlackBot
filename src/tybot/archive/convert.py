@@ -8,18 +8,18 @@
    사람이 "이건 자동 변환된 텍스트"임을 항상 알 수 있어야 한다.
 2. **표는 구조를 살려 옮긴다**(시트명·행 단위). 요약·정리하지 않는다 — 그건 LLM 이 할 일이다.
 3. **변환 실패는 조용히 넘기지 않는다.** 목록 줄은 남기고 경고를 올린다.
-4. **스캔 PDF(텍스트 레이어 없음)는 변환하지 않는다.** OCR 은 오류가 사실처럼 굳는 경로다.
-5. 라이브러리가 없으면 미변환으로 처리한다. 설치 여부가 조용한 고장이 되지 않게 경고를 남긴다.
+4. **OCR 결과는 변환 안내로 표시한다.** 금액·날짜·조문은 원본 확인이 필요하다.
+5. 외부 변환기가 없으면 기본 파서로 내리거나 미변환 처리하고 경고를 남긴다.
 
 ## 지원
 | 형식 | 방법 | 비고 |
 |---|---|---|
-| xlsx/xlsm | openpyxl (values only) | 수식 결과값. 시트·행 단위 |
-| docx | python-docx | 문단 + 표 |
-| pptx | python-pptx | 슬라이드별 텍스트 프레임 |
-| pdf | pypdf | 텍스트 레이어만. 스캔본은 미변환 |
-| hwpx | zipfile + XML | 한글 2014+ 표준 포맷 |
-| hwp(구형 바이너리) | 미변환 | 신뢰할 만한 순수 파이썬 파서가 없다 |
+| xlsx/xlsm | Hermes 유래 openpyxl 렌더러 | 표시값·표·시트·마스킹 메타 |
+| docx | kordoc, python-docx 폴백 | 문단 + 표 |
+| pptx/ppt | LibreOffice PDF + kordoc | 시각 배치·이미지 OCR, 기본 텍스트 폴백 |
+| pdf | pypdf + kordoc OCR | 텍스트가 없거나 매우 짧으면 OCR |
+| hwpx | kordoc, 안전 XML 폴백 | 표·배치 우선, XML은 텍스트 폴백 |
+| hwp(구형 바이너리) | kordoc | 미설치 시 명시적 실패 |
 | 이미지·도면 | 미변환 | OCR 미도입 |
 
 ## XML 안전
@@ -33,6 +33,14 @@ import io
 import logging
 import re
 import zipfile
+
+from .external_convert import (
+    ExternalConversionError,
+    ExternalConverterUnavailable,
+    kordoc_lines,
+    office_pdf_lines,
+    xlsx_lines,
+)
 
 logger = logging.getLogger("tybot.convert")
 
@@ -53,7 +61,7 @@ MAX_TOTAL_CHARS = 300_000
 FOLD_HEAD = 12_000
 FOLD_TAIL = 4_000
 MAX_CELL = 200  # 셀 한 칸 길이 상한
-CONVERTIBLE = {"xlsx", "xlsm", "docx", "pptx", "pdf", "hwpx"}
+CONVERTIBLE = {"xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp"}
 
 
 class ConvertError(RuntimeError):
@@ -123,7 +131,7 @@ def _sheet_rows(wb) -> dict[str, tuple[list[tuple[int, list[str]]], int]]:
         out[ws.title] = (picked, total)
     return out
 
-def _xlsx(data: bytes) -> list[str]:
+def _xlsx_basic(data: bytes) -> list[str]:
     """엑셀 → 텍스트. **수식이 있는 칸을 비워 두지 않는다.**
 
     `data_only=True` 는 openpyxl 이 **저장 시 캐시된 값**을 준다. 파일이 계산 없이
@@ -195,7 +203,16 @@ def _xlsx(data: bytes) -> list[str]:
         out.append("[안내] 이 파일에는 매크로가 있습니다. 계산 로직은 원본을 확인하세요.")
     return _finish(out)
 
-def _docx(data: bytes) -> list[str]:
+
+def _xlsx(data: bytes) -> list[str]:
+    """Use the Hermes-derived renderer; retain the old parser as an explicit fallback."""
+    try:
+        return _finish(xlsx_lines(data))
+    except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+        logger.warning("Excel 정밀 변환기를 쓰지 못해 기본 변환으로 전환: %s", exc)
+        return [f"[변환 안내] 정밀 표 변환 미사용: {exc}", *_xlsx_basic(data)]
+
+def _docx_basic(data: bytes) -> list[str]:
     try:
         import docx
     except ImportError as e:
@@ -212,7 +229,7 @@ def _docx(data: bytes) -> list[str]:
     return _finish(out)
 
 
-def _pptx(data: bytes) -> list[str]:
+def _pptx_basic(data: bytes) -> list[str]:
     try:
         from pptx import Presentation
     except ImportError as e:
@@ -236,6 +253,22 @@ def _pptx(data: bytes) -> list[str]:
     return _finish(out)
 
 
+def _docx(data: bytes) -> list[str]:
+    try:
+        return _finish(kordoc_lines(data, "docx"))
+    except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+        logger.warning("DOCX 정밀 변환기를 쓰지 못해 기본 변환으로 전환: %s", exc)
+        return [f"[변환 안내] 문서 내 이미지 미해석: {exc}", *_docx_basic(data)]
+
+
+def _pptx(data: bytes) -> list[str]:
+    try:
+        return _finish(office_pdf_lines(data, "pptx"))
+    except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+        logger.warning("PPTX 시각 변환기를 쓰지 못해 기본 변환으로 전환: %s", exc)
+        return [f"[변환 안내] 슬라이드 이미지·도형 미해석: {exc}", *_pptx_basic(data)]
+
+
 def _pdf(data: bytes) -> list[str]:
     try:
         from pypdf import PdfReader
@@ -255,16 +288,27 @@ def _pdf(data: bytes) -> list[str]:
         if lines:
             out.append(f"[{i}쪽]")
             out.extend(lines)
+    extracted_chars = sum(len(line) for line in out if not line.startswith("["))
+    if out and extracted_chars < 200:
+        try:
+            return _finish(kordoc_lines(data, "pdf", force_ocr=True))
+        except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+            logger.warning("PDF 본문이 짧지만 OCR을 쓰지 못함: %s", exc)
+            out.insert(0, f"[변환 안내] 이미지 본문 OCR 미사용: {exc}")
     if not out:
-        # 텍스트 레이어가 없다 = 스캔본. OCR 은 도입하지 않는다(원칙 4).
-        raise ConvertError("텍스트 레이어 없음(스캔본으로 보임) - 원본 확인 필요")
+        try:
+            return _finish(kordoc_lines(data, "pdf", force_ocr=True))
+        except ExternalConverterUnavailable as exc:
+            raise ConvertError(f"텍스트 레이어 없음 - OCR 변환기 미설치: {exc}") from exc
+        except ExternalConversionError as exc:
+            raise ConvertError(f"스캔 PDF OCR 실패: {exc}") from exc
     return _finish(out)
 
 
 HWPX_TEXT_TAGS = ("t", "char")
 
 
-def _hwpx(data: bytes) -> list[str]:
+def _hwpx_basic(data: bytes) -> list[str]:
     """hwpx 는 zip + XML 이다. 텍스트 노드만 순서대로 뽑는다.
 
     파싱은 defusedxml 로만 한다 - 사용자가 올린 XML 이므로 XXE·엔티티 폭탄 대상이다.
@@ -307,12 +351,34 @@ def _hwpx(data: bytes) -> list[str]:
     return _finish(out)
 
 
+def _hwpx(data: bytes) -> list[str]:
+    try:
+        return _finish(kordoc_lines(data, "hwpx"))
+    except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+        logger.warning("HWPX 정밀 변환기를 쓰지 못해 기본 변환으로 전환: %s", exc)
+        return [f"[변환 안내] HWPX 표·배치 단순화: {exc}", *_hwpx_basic(data)]
+
+
+def _hwp(data: bytes) -> list[str]:
+    try:
+        return _finish(kordoc_lines(data, "hwp"))
+    except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+        raise ConvertError(f"HWP 변환 실패: {exc}") from exc
+
+
+def _legacy_office(data: bytes, suffix: str) -> list[str]:
+    try:
+        return _finish(office_pdf_lines(data, suffix))
+    except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+        raise ConvertError(f"{suffix.upper()} 변환 실패: {exc}") from exc
+
+
 _HANDLERS = {
     "xlsx": _xlsx, "xlsm": _xlsx,
-    "docx": _docx,
-    "pptx": _pptx,
+    "docx": _docx, "doc": lambda data: _legacy_office(data, "doc"),
+    "pptx": _pptx, "ppt": lambda data: _legacy_office(data, "ppt"),
     "pdf": _pdf,
-    "hwpx": _hwpx,
+    "hwpx": _hwpx, "hwp": _hwp,
 }
 
 

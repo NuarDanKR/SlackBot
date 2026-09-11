@@ -33,7 +33,7 @@ class _Resp(io.BytesIO):
 def test_unconvertible_types_are_listed_only():
     """도면·이미지·구형 바이너리는 다운로드조차 하지 않고 목록만 남긴다."""
     lines, warns = file_lines(
-        [_f("도면.dwg", "dwg"), _f("사진.jpg", "jpg"), _f("구형.hwp", "hwp")], "xoxb-t"
+        [_f("도면.dwg", "dwg"), _f("사진.jpg", "jpg"), _f("구형.xls", "xls")], "xoxb-t"
     )
     assert len(lines) == 3 and warns == []
     assert all("[첨부:미변환]" in ln for ln in lines)
@@ -79,7 +79,14 @@ def test_document_is_converted_and_tagged():
     assert warns == []
     assert "[첨부:변환]" in lines[0]
     assert any(ln == "[첨부추출:원가.xlsx] [시트] 기성" for ln in lines)
-    assert any("김해외동 기성금 | 3억 2천만원" in ln for ln in lines)
+    assert any("김해외동 기성금" in ln and "3억 2천만원" in ln for ln in lines)
+
+
+def test_slack_binary_hwp_uses_the_filename_extension():
+    file = SlackFile.from_event(_f("보고서.hwp", "binary"))
+
+    assert file.filetype == "hwp"
+    assert file.is_convertible
 
 
 def test_failed_conversion_still_leaves_a_trace():

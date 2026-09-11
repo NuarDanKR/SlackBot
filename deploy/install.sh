@@ -136,6 +136,10 @@ if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   for m in answer.py intent.py archive/store.py archive/writer.py slack/pilot.py; do
     [[ -f "$APP_DIR/src/tybot/$m" ]] || { echo "배치 누락: src/tybot/$m"; exit 1; }
   done
+  [[ -f "$APP_DIR/vendor/hermes/xlsx_to_blocks.py" ]] || {
+    echo "배치 누락: vendor/hermes/xlsx_to_blocks.py"
+    exit 1
+  }
 fi
 
 echo "== 4/6 가상환경 =="

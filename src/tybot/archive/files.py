@@ -5,7 +5,7 @@
 - **업무 문서(xlsx/docx/pptx/pdf/hwpx)는 변환해서 넣는다** — 실사용자가 올리는 건 이쪽이고,
   이걸 놓치면 맥락의 대부분이 빠진다. 변환 규칙은 `convert.py` 참조.
 - 변환본은 `[첨부추출:파일명]` 으로 표시한다. 사람이 자동 변환본임을 알 수 있어야 한다.
-- 스캔 PDF·구형 hwp·이미지·도면은 **여전히 미변환**이다. OCR 은 오류가 사실처럼 굳는 경로다.
+- 스캔 PDF·구형 hwp는 서버 변환기가 있을 때 처리하고, OCR 사용 여부를 본문에 표시한다.
 - 다운로드에는 `files:read` 스코프와 봇 토큰 Bearer 헤더가 **둘 다** 필요하다.
   헤더가 없으면 파일 대신 로그인 HTML 이 200 으로 내려온다(조용한 고장) - 그래서 검증한다.
 """
@@ -28,7 +28,7 @@ TEXT_EXTS = {"txt", "md", "markdown", "csv", "tsv", "json", "yaml", "yml", "log"
 TEXT_MIMES = {"text/plain", "text/markdown", "text/csv", "application/json"}
 # 변환도 안 되는 형식 - 목록만 남긴다
 UNCONVERTED_EXTS = {
-    "xls", "doc", "ppt", "hwp",  # 구형 바이너리 포맷
+    "xls",  # 구형 Excel은 안전한 변환 경로가 아직 없다
     "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff",  # 이미지(OCR 미도입)
     "dwg", "dxf",  # 도면
     "zip", "7z", "rar",  # 압축
@@ -65,10 +65,16 @@ class SlackFile:
 
     @classmethod
     def from_event(cls, f: dict) -> SlackFile:
+        name = str(f.get("name") or f.get("title") or f.get("id") or "unnamed")
+        reported = str(f.get("filetype") or "").lower()
+        suffix = Path(name).suffix.lstrip(".").lower()
+        # Slack은 구형 HWP를 흔히 `binary`로 보고한다. 파일명 확장자가 우리가 실제로
+        # 처리하는 형식이면 그것을 우선해야 HWP가 변환기에 도달한다.
+        filetype = suffix if suffix in TEXT_EXTS or can_convert(suffix) else reported
         return cls(
             id=str(f.get("id", "")),
-            name=str(f.get("name") or f.get("title") or f.get("id") or "unnamed"),
-            filetype=str(f.get("filetype") or "").lower(),
+            name=name,
+            filetype=filetype,
             size=int(f.get("size") or 0),
             url_private_download=f.get("url_private_download") or f.get("url_private"),
             mimetype=str(f.get("mimetype") or ""),
