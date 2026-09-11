@@ -21,8 +21,7 @@ class Sensitivity(str, Enum):  # noqa: UP042 - StrEnum 은 3.11+ 이지만 기�
 @dataclass
 class Message:
     role: str  # "system" | "user" | "assistant"
-    # 보통은 문자열이다. 첨부 원본을 함께 보낼 때만 콘텐츠 블록 목록이 온다
-    # (document/image + text). 프로바이더는 그대로 넘긴다.
+    # 기본 답변은 문자열만 사용한다. 일부 게이트웨이 호출자는 콘텐츠 블록도 지원한다.
     content: str | list[dict]
 
 

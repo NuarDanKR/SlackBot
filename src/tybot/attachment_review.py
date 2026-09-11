@@ -1,21 +1,7 @@
-"""첨부 원본 검수 — 승인된 것만 답변에 쓴다.
+"""첨부 자동 변환 결과와 과거 검수 메타데이터를 읽는다.
 
-## 왜 검수가 필요한가
-`stage_files()` 는 첨부 원본을 `objects/` 에 격리 보관하고 `pending_review` 로 표시한다.
-그런데 **승인으로 넘기는 코드가 없어서** 원본은 쌓이기만 하고 쓰이지 못했다.
-
-원본을 그대로 LLM 에 보내기로 결정하면서(검토 §3) 이 게이트가 안전장치의 전부가 된다.
-수집 단계 PII 거절은 **텍스트 기반**이라 스캔본·이미지에는 작동하지 않는다. 우리가 못
-읽어서 못 걸러낸 것이 벤더로 가는 유일한 경로가 여기이므로, 사람이 한 번 본 것만 통과시킨다.
-
-## 승인은 파일에 남긴다
-DB 가 없어도 동작해야 한다(첨부 수집은 DB 와 무관하다). 메타데이터 옆에 상태를 쓰고,
-누가 언제 무엇을 근거로 승인했는지 함께 남긴다 — 나중에 "이건 왜 나갔나" 를 답할 수
-있어야 한다.
-
-## 되돌릴 수 있다
-승인은 되돌릴 수 있다(`reject`). 원본 바이트는 지우지 않는다 — 지우면 오판을 다시
-검토할 근거가 사라진다. 상태만 바꾼다.
+첨부는 수집 시 로컬에서 자동 변환한다. 답변 엔진은 원본 바이트를 외부 모델에 보내지
+않으며, 이 모듈의 과거 승인 상태는 기존 메타데이터와 운영 도구의 호환을 위해 유지한다.
 """
 from __future__ import annotations
 
@@ -31,8 +17,22 @@ PENDING = "pending_review"
 APPROVED = "approved"
 REJECTED = "rejected"
 FAILED = "failed"
+CONVERTED = "converted"
+UNSUPPORTED = "unsupported"
+DOWNLOAD_OR_EXTRACT_FAILED = "download_or_extract_failed"
+PII_REFUSED = "pii_refused"
 
-STATES = (PENDING, APPROVED, REJECTED, FAILED)
+STATES = (
+    PENDING,
+    APPROVED,
+    REJECTED,
+    FAILED,
+    CONVERTED,
+    UNSUPPORTED,
+    DOWNLOAD_OR_EXTRACT_FAILED,
+    PII_REFUSED,
+)
+FAILURE_STATES = frozenset({FAILED, UNSUPPORTED, DOWNLOAD_OR_EXTRACT_FAILED})
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,9 @@ class Attachment:
     approved_by: str = ""
     approved_at: str = ""
     note: str = ""
+    permalink: str = ""
+    error: str = ""
+    extracted: bool = False
     # 언제 올라온 것인가. **하루치를 밀어 주려면 필요하다** — 오늘 올라온 것과
     # 밀린 것을 한 목록에 섞으면 오늘 것이 묻힌다.
     staged_at: str = ""
@@ -59,6 +62,10 @@ class Attachment:
     @property
     def is_approved(self) -> bool:
         return self.status == APPROVED
+
+    @property
+    def conversion_failed(self) -> bool:
+        return self.status in FAILURE_STATES
 
 
 def staging_root(archive_dir: Path | str) -> Path:
@@ -90,6 +97,9 @@ def _from_meta(meta: dict, meta_path: Path, workspace: str, channel_id: str) -> 
         approved_by=str(meta.get("approved_by") or ""),
         approved_at=str(meta.get("approved_at") or ""),
         note=str(meta.get("review_note") or ""),
+        permalink=str(meta.get("permalink") or ""),
+        error=str(meta.get("error") or ""),
+        extracted=bool(meta.get("extracted")),
         staged_at=str(meta.get("staged_at") or ""),
     )
 
@@ -121,6 +131,64 @@ def pending(archive_dir: Path | str) -> list[Attachment]:
     return scan(archive_dir, status=PENDING)
 
 
+def failures(archive_dir: Path | str) -> list[Attachment]:
+    """다운로드 또는 변환에 실패한 첨부만 반환한다."""
+    return [item for item in scan(archive_dir) if item.conversion_failed]
+
+
+def extracted_preview(item: Attachment, *, limit: int = 700) -> str:
+    """PII 검사를 통과해 저장된 로컬 변환본의 짧은 검토용 미리보기."""
+    if not item.extracted or limit < 1:
+        return ""
+    path = item.meta_path.parent / "extracted.md"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        logger.warning(
+            "첨부 변환본을 읽지 못했다 ws=%s ch=%s file=%s: %s",
+            item.workspace,
+            item.channel_id,
+            item.file_id,
+            exc,
+        )
+        return ""
+    body = [line.strip() for line in lines if line.strip() and not line.startswith("<!--")]
+    if body and body[0].startswith("# "):
+        body = body[1:]
+    text = "\n".join(body).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def public_failure_reason(item: Attachment) -> str:
+    """콘솔과 Slack에 노출해도 되는 조치 중심 실패 사유."""
+    error = item.error.lower()
+    if "files:read" in error or "로그인 페이지" in error or "토큰" in error:
+        return "Slack 파일 다운로드 권한 또는 봇 토큰을 확인하세요."
+    if "제한 초과" in item.error:
+        return "파일 크기 제한을 초과했습니다."
+    if "미설치" in item.error:
+        return "서버에 필요한 문서 변환기가 설치되지 않았습니다."
+    if "암호가 걸린 pdf" in error:
+        return "암호화된 PDF는 자동 변환할 수 없습니다."
+    if "텍스트 레이어 없음" in item.error:
+        return "PDF에 텍스트가 없고 OCR 변환기를 사용할 수 없습니다."
+    if "ocr 실패" in error:
+        return "스캔 문서 OCR 처리에 실패했습니다."
+    if "손상" in item.error or "구형 hwp" in error:
+        return "문서가 손상되었거나 지원하지 않는 구형 HWP 형식입니다."
+    if "텍스트를 찾지 못" in item.error:
+        return "문서에서 변환할 텍스트를 찾지 못했습니다."
+    if "빈 파일" in item.error:
+        return "빈 파일입니다."
+    if "지원하지" in item.error:
+        return "현재 지원하지 않는 문서 형식입니다."
+    if item.status == FAILED:
+        return "문서 처리에 실패했습니다."
+    return "문서 다운로드 또는 변환에 실패했습니다. 서비스 로그를 확인하세요."
+
+
 def _write_status(item: Attachment, status: str, *, actor: str, note: str) -> Attachment:
     meta = _read_meta(item.meta_path) or {}
     meta["status"] = status
@@ -140,7 +208,7 @@ def _write_status(item: Attachment, status: str, *, actor: str, note: str) -> At
 
 
 def approve(item: Attachment, *, actor: str, note: str = "") -> Attachment:
-    """이 원본을 답변에 쓸 수 있게 한다. 사람만 부른다."""
+    """과거 검수 상태를 승인으로 기록한다. 답변의 원본 전송을 허용하지는 않는다."""
     if not actor.strip():
         raise ValueError("승인자를 남기지 않은 승인은 받지 않는다")
     return _write_status(item, APPROVED, actor=actor, note=note)
@@ -159,7 +227,9 @@ def find_sendable(
     name: str,
     text_extracted: bool,
 ) -> Attachment | None:
-    """이 원본을 LLM 제공자에게 보내도 되는가. 안 되면 `None`.
+    """과거 원본 전송 정책의 호환 판정 함수.
+
+    현재 답변 엔진은 이 함수를 호출하지 않고 원본 바이트를 전송하지 않는다.
 
     ## 게이트를 좁힌 이유 (2026-09-08)
 
@@ -236,13 +306,12 @@ def summary(items: list[Attachment]) -> str:
 
 # --- CLI ----------------------------------------------------------------------
 #
-# 콘솔 화면은 다른 담당이다. 그전까지 운영자가 승인할 수단이 없으면 원본 전송 기능
-# 자체가 영원히 0건이므로, 최소한의 명령줄을 둔다.
+# 기존 메타데이터를 확인하거나 상태를 되돌려야 하는 운영 호환용 명령줄이다.
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import os
 
-    ap = argparse.ArgumentParser(description="첨부 원본 검수 — 승인된 것만 답변에 쓰인다")
+    ap = argparse.ArgumentParser(description="첨부 처리 메타데이터 확인 및 과거 검수 상태 관리")
     ap.add_argument("action", choices=("list", "approve", "reject"))
     ap.add_argument("file_id", nargs="?", help="approve/reject 대상 (list 로 확인)")
     ap.add_argument("--actor", default=os.getenv("USER") or os.getenv("USERNAME") or "",

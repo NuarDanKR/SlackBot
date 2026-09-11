@@ -12,7 +12,6 @@ from pathlib import Path
 from . import documents
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
-from .attachment_review import find_sendable
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -136,7 +135,7 @@ class Answer:
     reason: str  # answered | advice | no_hits | no_access | smalltalk | out_of_scope | error
     # 사용자에게 보여줄 근거 요약용 검색어. 새로 저장하는 값이 아니라 이미 쓴 값이다.
     terms: list[str] = field(default_factory=list)
-    # 근거에 언급됐지만 원본을 읽지 않은 첨부. 검수 대기이면 여기에 들어온다.
+    # 근거에 언급됐지만 자동 변환하지 못한 첨부.
     withheld: list[str] = field(default_factory=list)
     # 어느 전문가가 문장을 만들었나. 비면 마스터다.
     #
@@ -176,7 +175,7 @@ class Answer:
         if self.withheld:
             names = ", ".join(self.withheld[:3])
             more = f" 외 {len(self.withheld) - 3}건" if len(self.withheld) > 3 else ""
-            bits.append(f"검수 대기로 원본을 읽지 않은 첨부: {names}{more}")
+            bits.append(f"자동 변환 실패로 내용을 읽지 못한 첨부: {names}{more}")
         return f"_근거: {' · '.join(bits)}_" if bits else ""
 
     def to_slack(self) -> str:
@@ -213,8 +212,7 @@ EXTRACTED_ATTACHMENT_RE = re.compile(r"^\[첨부(?:본문|추출):(?P<name>[^\]]
 def _attachment_names(hits: list[SearchHit]) -> list[tuple[str, str, str]]:
     """검색에 걸린 줄에서 (워크스페이스, 채널ID, 파일명)을 뽑는다.
 
-    답변 근거로 이미 고른 문서의 첨부만 대상이다 - 검색과 무관한 파일을 원본으로
-    올려보내지 않는다.
+    답변 근거로 이미 고른 문서에서 자동 변환하지 못한 파일을 식별할 때 사용한다.
     """
     out: list[tuple[str, str, str]] = []
     for h in hits:
@@ -285,8 +283,8 @@ def _specialist_citations(special, hits: list[SearchHit], ctx) -> list[str]:
 def _extracted_names(hits: list[SearchHit]) -> set[str]:
     """근거 문서에 **변환본이 들어간** 첨부 이름.
 
-    변환본이 아카이브에 있다는 것은 그 텍스트가 수집 단계 PII 검사를 통과했다는
-    뜻이다(`writer.PII_PATTERNS`). 그 사실이 원본을 보내도 되는지의 근거가 된다.
+    변환본이 아카이브에 있으면 그 텍스트를 근거로 사용한다. 원본 바이트는 변환
+    성공 여부와 관계없이 답변 모델에 보내지 않는다.
     """
     out: set[str] = set()
     for hit in hits:
@@ -297,49 +295,16 @@ def _extracted_names(hits: list[SearchHit]) -> set[str]:
     return out
 
 
-def _originals(store: ArchiveStore, hits: list[SearchHit]) -> documents.Attached:
-    """검색에 걸린 첨부 중 **보내도 되는** 원본만 모은다.
+def _withheld_attachments(hits: list[SearchHit]) -> list[str]:
+    """근거에 언급됐지만 자동 변환 텍스트가 없는 첨부 이름.
 
-    막는 것은 **텍스트가 없어 PII 검사가 돌지 않는 파일**이다 — 스캔본·이미지.
-    변환된 파일은 그 검사를 이미 통과했으므로 사람을 기다리지 않는다.
-    판정은 `attachment_review.find_sendable` 한 곳에 있다.
-    """
-    extracted = _extracted_names(hits)
-    approved = []
-    for workspace, channel_id, name in _attachment_names(hits):
-        item = find_sendable(
-            store.root,
-            workspace=workspace,
-            channel_id=channel_id,
-            name=name,
-            text_extracted=name in extracted,
-        )
-        if item is not None:
-            approved.append(item)
-    return documents.collect(approved)
-
-def _withheld_attachments(store: ArchiveStore, hits: list[SearchHit]) -> list[str]:
-    """근거에 언급됐는데 **원본을 읽지 않은** 첨부 이름.
-
-    텍스트가 없어 PII 검사가 돌지 않는 파일은 사람이 볼 때까지 보내지 않는다.
-    그건 설계지만, 그 상태로 답하면 사용자에게는 **「봇이 파일을 못 읽는다」** 로만
-    보인다. 실제 사내 피드백이 그렇게 쌓였다(2026-09-07).
-
-    무엇이 왜 빠졌는지 말한다. 사람이 할 수 있는 다음 행동이 생긴다.
-
-    **`_originals` 와 같은 판정을 쓴다.** 갈리면 보낸 파일을 「안 읽었다」 고 적거나
-    그 반대가 되고, 둘 다 사람을 엉뚱한 조사로 보낸다.
+    원본은 외부 LLM에 보내지 않는다. 자동 변환이 실패한 사실과 파일명을 알려
+    사용자가 Slack 원본 또는 콘솔 진단에서 확인할 수 있게 한다.
     """
     extracted = _extracted_names(hits)
     out: list[str] = []
-    for workspace, channel_id, name in _attachment_names(hits):
-        if find_sendable(
-            store.root,
-            workspace=workspace,
-            channel_id=channel_id,
-            name=name,
-            text_extracted=name in extracted,
-        ):
+    for _workspace, _channel_id, name in _attachment_names(hits):
+        if name in extracted:
             continue
         if name not in out:
             out.append(name)
@@ -470,11 +435,9 @@ class AnswerEngine:
                 [], None, 0.0, 0, "no_hits",
             )
 
-        # 요약 경로에도 **승인된 원본을 함께 보낸다.** 예전에는 원문 라인만 보냈고,
-        # 그래서 「가정산서 내용 요약해줘」 같은 질문에 표·스캔 PDF 를 아예 못 읽었다.
-        # 근거로 고른 문서의 첨부만 대상이다 — 검색과 무관한 파일을 올려보내지 않는다.
-        attached = _originals(self._store, summary_hits)
-        withheld = _withheld_attachments(self._store, summary_hits)
+        # 원본 바이트는 외부 LLM에 보내지 않는다. 수집 단계에서 자동 변환하고 PII
+        # 검사를 통과한 텍스트만 근거가 된다.
+        withheld = _withheld_attachments(summary_hits)
         citations.extend(_attachment_source_links(summary_hits))
 
         # **요약도 전문가에게 먼저 묻는다.** Hermes 의 본업이 회의록·업무 진행 요약인데
@@ -535,14 +498,9 @@ class AnswerEngine:
             + "\n\n".join(blocks)
             + f"\n</원문>\n\n질문: {question or f'최근 {days}일 진행 상황을 정리해 주세요.'}"
         )
-        user_content = (
-            [*attached.blocks, {"type": "text", "text": summary_prompt}]
-            if attached.any
-            else summary_prompt
-        )
         messages = [
             Message("system", SUMMARY_PROMPT),
-            Message("user", user_content),
+            Message("user", summary_prompt),
         ]
         try:
             resp = self._router.complete(
@@ -727,19 +685,10 @@ class AnswerEngine:
                 "no_hits",
             )
 
-        # 스캔 PDF·이미지는 우리 전처리로 읽히지 않는다. 승인된 원본이 있으면 그대로
-        # 함께 보내 모델이 직접 읽게 한다. 전처리를 대체하는 게 아니라 - 어느 파일을
-        # 볼지는 위 검색이 이미 골랐다 - 그 파일의 원본을 덧붙이는 것이다.
-        attached = _originals(self._store, hits)
-        # 승인 전 원본은 모델에 가지 않는다(설계). 그 사실을 답변이 말해야
-        # 「봇이 파일을 못 읽는다」 로 읽히지 않는다.
-        withheld = _withheld_attachments(self._store, hits)
+        # 첨부 원본은 외부 LLM에 보내지 않는다. 자동 변환에 실패한 파일은 답변에서
+        # 분명히 밝히고, 변환된 텍스트만 근거로 사용한다.
+        withheld = _withheld_attachments(hits)
         prompt = f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"
-        user_content = (
-            [*attached.blocks, {"type": "text", "text": prompt}]
-            if attached.any
-            else prompt
-        )
         # 전문가에게 먼저 묻는다. **근거는 이미 권한을 통과한 것뿐**이고(위 검색이
         # `visible_docs` 로 걸렀다), 출처는 아래에서 우리가 붙인다 — 전문가는
         # 문장만 돌려준다(원칙 2·3).
@@ -771,7 +720,7 @@ class AnswerEngine:
 
         messages = [
             Message("system", SYSTEM_PROMPT),
-            Message("user", user_content),
+            Message("user", prompt),
         ]
         try:
             resp = self._router.complete(
@@ -800,11 +749,7 @@ class AnswerEngine:
         # API 가 붙인 구조화된 인용(페이지 포함). 모델이 쓴 문장이 아니라서
         # 우리가 지어낸 출처가 아니라는 점이 중요하다.
         citations += documents.citation_lines(getattr(resp.raw, "content", None))
-        body = resp.text.strip()
-        note = attached.note()
-        if note:
-            body = f"{body}\n\n{note}"
         return Answer(
-            body, citations, resp.model, resp.cost_usd, len(hits),
+            resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits),
             "answered", terms=list(terms or []), withheld=withheld,
         )

@@ -1,7 +1,7 @@
 """검토자에게 하루치를 밀어 준다 (2026-09-08).
 
-첨부 승인을 `/첨부` 로만 열어 뒀더니 **대기 31건·승인 0건**이 됐다. 사람은
-모르는 일을 하러 찾아오지 않는다. 당겨 가는 방식은 게이트가 아니라 정체였다.
+첨부 변환은 자동으로 수행하고 결과를 검토자와 채널 담당자에게 밀어 준다. 사람은
+모르는 일을 하러 찾아오지 않으므로 별도 명령을 요구하지 않는다.
 
 여기서 지키는 것은 「보냈다」 가 아니라 **사람이 실제로 볼 수 있는 목록**이다.
 """
@@ -19,7 +19,7 @@ KST = timezone(timedelta(hours=9))
 
 
 def _stage(tmp_path, *, name, file_id, status=PENDING, staged_at="2026-09-08T09:00:00+09:00",
-           ws="tyit", ch="C1"):
+           ws="tyit", ch="C1", extracted=False, error="", permalink=""):
     """`stage_files` 가 만드는 것과 같은 모양."""
     archive = tmp_path / "archive"
     archive.mkdir(exist_ok=True)
@@ -33,11 +33,17 @@ def _stage(tmp_path, *, name, file_id, status=PENDING, staged_at="2026-09-08T09:
         "schema_version": 1, "status": status, "slack_file_id": file_id,
         "name": name, "filetype": name.rsplit(".", 1)[-1], "mimetype": "",
         "declared_size": 4096, "object_path": str(obj),
+        "extracted": extracted, "error": error, "permalink": permalink,
     }
     if staged_at is not None:
         meta["staged_at"] = staged_at
     (staged / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False),
                                           encoding="utf-8")
+    if extracted:
+        (staged / "extracted.md").write_text(
+            "<!-- 로컬 변환본 -->\n# 문서\n\n공정률 | 62%\n",
+            encoding="utf-8",
+        )
     return archive
 
 
@@ -139,26 +145,13 @@ def test_a_utc_timestamp_lands_on_the_kst_day(tmp_path):
 
 
 # --- 화면 --------------------------------------------------------------------
-def test_every_button_carries_the_channel(tmp_path):
-    """**DM 에서 누르면** `body["channel"]["id"]` 는 DM 채널(`D…`)이다.
-
-    그 값으로 원본을 찾으면 0건이 되고, 오류가 아니라 「대상을 특정하지 못했습니다」
-    로 나타난다. 그래서 버튼 값이 원 채널을 함께 싣는다.
-    """
-    from tybot import attachment_view
-
+def test_the_dm_has_no_original_approval_button(tmp_path):
     archive = _stage(tmp_path, name="스캔본.png", file_id="F1")
     items = dr.blocked(archive, workspace="tyit", channel_id="C1", extracted=set())
 
     blocks = dr.blocks(_digest(archive, today=items))
 
-    buttons = [e for b in blocks if b["type"] == "actions" for e in b["elements"]]
-    assert buttons, "버튼이 없다"
-    for button in buttons:
-        assert button["value"], "value 가 비면 Slack 이 메시지를 통째로 거부한다"
-        channel, file_id = attachment_view.unpack_value(button["value"])
-        assert channel == "C1"
-        assert file_id == "F1"
+    assert not any(block["type"] == "actions" for block in blocks)
 
 
 def test_the_backlog_is_one_line_not_a_list(tmp_path):
@@ -173,13 +166,11 @@ def test_the_backlog_is_one_line_not_a_list(tmp_path):
     assert "30건" in tail["elements"][0]["text"]
 
 
-def test_the_dm_says_what_approval_means(tmp_path):
-    """무엇을 하는 버튼인지 화면이 말해야 한다."""
+def test_the_dm_says_failures_do_not_leave_the_server(tmp_path):
     blocks = dr.blocks(_digest(tmp_path / "archive"))
 
     head = blocks[0]["text"]["text"]
-    assert "LLM 제공자에게 전달" in head
-    assert "개인정보" in head
+    assert "외부 LLM에 보내지 않" in head
 
 
 def test_the_notification_preview_has_no_filename(tmp_path):
@@ -299,20 +290,23 @@ def test_it_sends_once_a_day(tmp_path, monkeypatch):
     assert len(client.sent) == 1
 
 
-def test_nothing_to_review_means_no_dm(tmp_path, monkeypatch):
-    """매일 "없습니다" 가 오면 사람이 이 DM 을 끈다. 침묵이 「없음」 이어야 한다."""
+def test_converted_attachment_is_sent_with_its_safe_preview(tmp_path, monkeypatch):
+    """검토자는 Hermes 검토 DM에서 자동 변환된 첨부 내용도 함께 확인한다."""
     from tybot import reviewers
 
     monkeypatch.setattr(reviewers, "reviewers_for", lambda ws, ch: [
         type("R", (), {"reviewer_user": "U1"})()
     ])
-    archive = _stage(tmp_path, name="가정산서.xlsx", file_id="F1")
+    archive = _stage(tmp_path, name="가정산서.xlsx", file_id="F1", extracted=True)
     conn, client = FakeConn(), FakeClient()
 
     result = _run(tmp_path, archive, conn, client, extracted={"가정산서.xlsx"})
 
-    assert result.sent == 0
-    assert client.sent == []
+    assert result.sent == 1
+    rendered = str(client.sent[0]["blocks"])
+    assert "공정률" in rendered
+    assert "62%" in rendered
+    assert not any(block["type"] == "actions" for block in client.sent[0]["blocks"])
 
 
 def test_no_recipient_is_reported_not_swallowed(tmp_path, monkeypatch, caplog):
@@ -326,7 +320,7 @@ def test_no_recipient_is_reported_not_swallowed(tmp_path, monkeypatch, caplog):
         result = _run(tmp_path, archive, FakeConn(), FakeClient())
 
     assert result.no_recipient == 1
-    assert "검토자도 개설자도 없어" in caplog.text
+    assert "검토자도 채널 담당자도 없어" in caplog.text
 
 
 def test_a_failed_send_is_not_recorded_as_sent(tmp_path, monkeypatch):
@@ -369,14 +363,52 @@ def test_it_waits_until_the_configured_hour(tmp_path, monkeypatch):
     assert client.sent == []
 
 
-def test_the_dm_never_carries_file_content():
-    """검토 DM 은 이름과 상태만 보인다. 본문을 실으면 그것이 Slack 에 남는다."""
+def test_the_dm_never_reads_or_sends_the_raw_object():
+    """검토 DM은 PII 검사 완료 변환본만 읽고 격리 원본 바이트는 열지 않는다."""
     import inspect
 
     source = inspect.getsource(dr)
 
-    for leaked in ("read_bytes", "read_text", "object_path"):
+    for leaked in ("read_bytes", "object_path"):
         assert leaked not in source, f"하루치가 파일 내용을 만진다: {leaked}"
+
+
+def test_failure_is_sent_to_reviewer_and_owner_without_approval_button(tmp_path, monkeypatch):
+    from tybot import reviewers
+
+    monkeypatch.setattr(reviewers, "reviewers_for", lambda ws, ch: [
+        type("R", (), {"reviewer_user": "UREVIEWER"})()
+    ])
+    archive = _stage(
+        tmp_path,
+        name="현장보고.pdf",
+        file_id="F1",
+        status="download_or_extract_failed",
+        error="converter failed",
+        permalink="https://example.slack.com/files/F1",
+    )
+    conn, client = FakeConn(), FakeClient()
+
+    result = _run(tmp_path, archive, conn, client, owners={("tyit", "C1"): "UOWNER"})
+
+    assert result.sent == 2
+    assert {message["channel"] for message in client.sent} == {
+        "D-UREVIEWER", "D-UOWNER",
+    }
+    rendered = str(client.sent[0]["blocks"])
+    assert "변환 실패" in rendered
+    assert "Slack 원본" in rendered
+    assert not any(block["type"] == "actions" for block in client.sent[0]["blocks"])
+
+
+def test_owner_and_reviewer_are_deduplicated(monkeypatch):
+    from tybot import reviewers
+
+    monkeypatch.setattr(reviewers, "reviewers_for", lambda ws, ch: [
+        type("R", (), {"reviewer_user": "U1"})()
+    ])
+
+    assert dr.recipients("tyit", "C1", owner="U1") == ["U1"]
 
 
 def test_a_missing_schema_says_what_to_run():

@@ -524,8 +524,28 @@ def questions(
 
 @app.get("/api/diagnostics/archive")
 def archive_diagnostics(user: User) -> dict:
+    from ..attachment_review import failures, public_failure_reason
+
     report = _scoped_health(user)
-    return {"checkedAt": report["checkedAt"], "section": report["sections"]["archive"]}
+    failed = failures(reader.archive_dir())
+    if not user.all_workspaces:
+        failed = [item for item in failed if item.workspace in user.workspaces]
+    failed.sort(key=lambda item: item.staged_at, reverse=True)
+    section = dict(report["sections"]["archive"])
+    section["attachmentFailures"] = len(failed)
+    section["failedAttachments"] = [
+        {
+            "workspace": item.workspace,
+            "channelId": item.channel_id,
+            "name": item.name,
+            "filetype": item.filetype,
+            "reason": public_failure_reason(item),
+            "permalink": item.permalink,
+            "stagedAt": item.staged_at,
+        }
+        for item in failed[:200]
+    ]
+    return {"checkedAt": report["checkedAt"], "section": section}
 
 
 @app.get("/api/diagnostics/answers")

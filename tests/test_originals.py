@@ -205,15 +205,16 @@ def test_an_ambiguous_name_is_never_sent(tmp_path):
     assert got is None
 
 
-def test_the_answer_path_uses_one_verdict(tmp_path):
-    """`_originals` 와 `_withheld_attachments` 가 갈리면 보낸 파일을 「안 읽었다」 고
-    적거나 그 반대가 된다. 둘 다 사람을 엉뚱한 조사로 보낸다."""
+def test_the_answer_path_never_collects_original_bytes():
+    """답변 엔진은 승인 상태와 무관하게 첨부 원본을 외부 모델에 보내지 않는다."""
     import inspect
 
     from tybot import answer
 
-    for fn in (answer._originals, answer._withheld_attachments):
-        assert "find_sendable" in inspect.getsource(fn), f"{fn.__name__} 이 따로 판정한다"
+    source = inspect.getsource(answer.AnswerEngine)
+    assert "documents.collect" not in source
+    assert "find_sendable" not in source
+    assert not hasattr(answer, "_originals")
 
 
 # --- 형식 --------------------------------------------------------------------

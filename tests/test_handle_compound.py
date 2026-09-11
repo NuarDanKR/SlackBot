@@ -15,7 +15,7 @@ import pytest
 from tybot.answer import Answer
 from tybot.canvas_answer import CanvasResult
 from tybot.intent import Intent
-from tybot.slack.pilot import WorkspaceBot
+from tybot.slack.pilot import CHANNEL_SCOPE_NOTICE, WorkspaceBot
 
 
 class FakeQALog:
@@ -64,7 +64,11 @@ def _bot(tasks, answers) -> WorkspaceBot:
     bot.path_problems = {}
     bot._user_name = lambda client, uid: "단라운"
     bot._context = lambda client, uid: Mock(
-        role="member", workspace="mgmt", is_root=False, channels={"#팀-전산_ABB110-회의"}
+        role="member",
+        workspace="mgmt",
+        is_root=False,
+        channels={"#팀-전산_ABB110-회의"},
+        readable_workspaces=frozenset(),
     )
     # 상태 답변이 쓰는 값들. LLM 이 없어도 결정적 블록이 나와야 한다.
     bot.store = Mock(docs=lambda: [], broken=lambda: [])
@@ -110,6 +114,7 @@ def test_both_questions_are_answered():
     assert "서버 이관" in reply                   # 두 번째 질문 - 예전에는 없었다
     assert "출처:" in reply                       # 출처가 살아 있다(원칙 2)
     assert "───" in reply                         # 두 답이 구분된다
+    assert reply.count(CHANNEL_SCOPE_NOTICE) == 1  # 복합 질문이어도 범위 안내는 한 번만
 
 
 def test_archive_task_gets_its_own_clause_not_the_whole_message():

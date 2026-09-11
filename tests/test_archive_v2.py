@@ -130,11 +130,11 @@ def test_staged_attachment_is_outside_search_archive(tmp_path, monkeypatch):
 
     lines, warnings = stage_files([raw_file], "xoxb-test", storage)
     assert warnings == []
-    assert lines[0].startswith("[첨부:변환·원본검수대기]")
+    assert lines[0].startswith("[첨부:자동변환]")
     assert "<https://example.slack.com/files/F123|원본 파일>" in lines[0]
     assert lines[1] == "[첨부본문:회의.txt] approved later"
     metadata = json.loads((storage.staging_dir / "F123" / "metadata.json").read_text("utf-8"))
-    assert metadata["status"] == "pending_review"
+    assert metadata["status"] == "converted"
     assert metadata["permalink"] == "https://example.slack.com/files/F123"
     assert (storage.objects_dir / "F123" / "회의.txt").read_bytes() == b"approved later"
     assert ArchiveStore(archive).docs() == []
@@ -164,3 +164,28 @@ def test_staged_attachment_rejects_all_extracted_lines_when_any_line_contains_pi
         (storage.staging_dir / "F-PII" / "metadata.json").read_text("utf-8")
     )
     assert metadata["status"] == "pii_refused"
+
+
+def test_unsupported_attachment_is_recorded_without_waiting_for_a_command(
+    tmp_path, monkeypatch
+):
+    archive = tmp_path / "archive"
+    storage = attachment_storage(archive, "pilot", "C123")
+    monkeypatch.setattr("tybot.archive.files.download_bytes", lambda *_: b"image")
+    raw_file = {
+        "id": "F-IMAGE",
+        "name": "현장사진.png",
+        "filetype": "png",
+        "size": 5,
+        "url_private_download": "https://example.invalid/file",
+    }
+
+    lines, warnings = stage_files([raw_file], "xoxb-test", storage)
+
+    assert warnings == []
+    assert lines == ["[첨부:미지원] 현장사진.png (png, 1KB)"]
+    metadata = json.loads(
+        (storage.staging_dir / "F-IMAGE" / "metadata.json").read_text("utf-8")
+    )
+    assert metadata["status"] == "unsupported"
+    assert metadata["extracted"] is False

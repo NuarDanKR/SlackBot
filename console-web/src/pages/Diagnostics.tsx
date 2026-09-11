@@ -12,12 +12,27 @@ function CheckedAt({ value }: { value: string }) { return <span className="updat
 function Problems({ items }: { items: string[] }) { return items.length ? <ul className="health-problems">{items.map((item) => <li key={item}>{item}</li>)}</ul> : <p className="hint">확인할 문제가 없습니다.</p> }
 
 export function ArchiveDiagnostics() {
-  const res = useResource<{ checkedAt: string; section: HealthReport['sections']['archive'] }>('/api/diagnostics/archive')
+  type ArchiveSection = HealthReport['sections']['archive'] & {
+    attachmentFailures: number
+    failedAttachments: {
+      workspace: string
+      channelId: string
+      name: string
+      filetype: string
+      reason: string
+      permalink: string
+      stagedAt: string
+    }[]
+  }
+  const res = useResource<{ checkedAt: string; section: ArchiveSection }>('/api/diagnostics/archive')
   if (res.loading) return <Loading what="아카이브 진단을" />
   if (res.error || !res.data) return <Failed what="아카이브 진단을" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
   const d = res.data.section
   return <><PageHead crumb="수집 · 아카이브 진단" title="아카이브 진단" note="형식이 깨졌거나 수집이 밀린 원문을 확인합니다." aside={<><CheckedAt value={res.data.checkedAt} /><Level value={d.level} /></>} />
-    <Section title="진단 결과"><div className="metrics overview-metrics"><Metric k="수집 문서" v={fmt.int(d.documents)} unit="건" /><Metric k="깨진 문서" v={fmt.int(d.brokenDocuments)} unit="건" /><Metric k="수집 밀림" v={fmt.int(d.staleWorkspaces)} unit="개" /></div><Problems items={d.problems} /></Section>
+    <Section title="진단 결과"><div className="metrics overview-metrics"><Metric k="수집 문서" v={fmt.int(d.documents)} unit="건" /><Metric k="깨진 문서" v={fmt.int(d.brokenDocuments)} unit="건" /><Metric k="첨부 변환 실패" v={fmt.int(d.attachmentFailures)} unit="건" /><Metric k="수집 밀림" v={fmt.int(d.staleWorkspaces)} unit="개" /></div><Problems items={d.problems} /></Section>
+    <Section title="첨부 변환 실패" lead="자동 변환에 실패한 첨부입니다. 원본은 격리 보관되며 자동으로 외부 LLM에 전송되지 않습니다.">
+      <div className="table-wrap"><table className="table"><thead><tr><th>시각</th><th>워크스페이스</th><th>채널</th><th>파일</th><th>실패 사유</th><th>원본</th></tr></thead><tbody>{d.failedAttachments.length ? d.failedAttachments.map((item, index) => <tr key={`${item.workspace}-${item.channelId}-${item.name}-${index}`}><td>{fmt.dayClock(item.stagedAt)}</td><td className="mono">{item.workspace}</td><td className="mono">{item.channelId}</td><td>{item.name}<div className="subtle mono">{item.filetype || '-'}</div></td><td>{item.reason}</td><td>{item.permalink ? <a href={item.permalink} target="_blank" rel="noreferrer">Slack에서 보기</a> : '-'}</td></tr>) : <tr><td colSpan={6}>변환에 실패한 첨부가 없습니다.</td></tr>}</tbody></table></div>
+    </Section>
     <Section title="문서 검사 분포" lead="전체 문서 중 스키마 검사를 통과한 문서와 실패한 문서를 비교합니다.">
       <MiniBars label="문서 검사 결과" items={[{ label: '검사 통과', value: Math.max(0, d.documents - d.brokenDocuments), tone: 'ok' }, { label: '형식 오류', value: d.brokenDocuments, tone: 'bad' }]} />
     </Section>

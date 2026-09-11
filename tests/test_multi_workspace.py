@@ -72,13 +72,15 @@ def test_wildcard_expands_and_excludes_self():
 
 
 def _ctx(ws="pilot", channels=("#팀_자금(ABB540)_주간보고",), readable=(), role="member",
-         is_root=False):
+         is_root=False, channel_id="", channel=""):
     return RequestContext(
         workspace=ws,
         channels=frozenset(channels),
         role=role,
         readable_workspaces=frozenset(readable),
         is_root=is_root,
+        channel_id=channel_id,
+        channel=channel,
     )
 
 
@@ -175,6 +177,70 @@ def test_exec_crosses_workspaces():
     assert can_access(ctx, visibility="private", acl=None, owner_workspace="pilot")
 
 
+@pytest.mark.parametrize(
+    "ctx",
+    [
+        _ctx(
+            ws="pilot",
+            channels=("#채널_A", "#채널_B"),
+            channel_id="CA",
+            channel="#채널_A",
+        ),
+        _ctx(
+            ws="pilot",
+            channels=(),
+            role="exec",
+            channel_id="CA",
+            channel="#채널_A",
+        ),
+        _ctx(
+            ws="pilot",
+            channels=(),
+            is_root=True,
+            channel_id="CA",
+            channel="#채널_A",
+        ),
+    ],
+    ids=["member", "exec", "root"],
+)
+def test_channel_question_cannot_reach_another_channel(ctx):
+    """채널 질문에서는 사용자 개인의 더 넓은 권한을 답변에 합치지 않는다."""
+    assert can_access(
+        ctx,
+        visibility="private",
+        acl=frozenset({"#채널_A"}),
+        owner_workspace="pilot",
+        channel_id="CA",
+        channel="#채널_A",
+    )
+    assert not can_access(
+        ctx,
+        visibility="public",
+        acl=frozenset({"#채널_B"}),
+        owner_workspace="pilot",
+        channel_id="CB",
+        channel="#채널_B",
+    )
+
+
+def test_channel_question_never_crosses_a_workspace_even_for_root():
+    ctx = _ctx(
+        ws="mgmt",
+        channels=(),
+        is_root=True,
+        channel_id="CA",
+        channel="#채널_A",
+    )
+    assert not can_access(
+        ctx,
+        visibility="private",
+        acl=None,
+        owner_workspace="pilot",
+        channel_id="CA",
+        channel="#채널_A",
+    )
+
+
 # --- 검색 경로에서의 격리 ------------------------------------------------
 
 
@@ -231,6 +297,30 @@ def test_member_search_limited_to_own_channels(store):
     assert "비밀 기성금 9억" in texts  # 소속 채널
     assert "공개 기성금 3억" in texts  # visibility: public (사람이 명시)
     assert "경영 기성금 5억" not in texts  # 타 워크스페이스
+
+
+def test_channel_search_is_limited_to_the_conversation_channel(store):
+    ctx = _ctx(
+        ws="pilot",
+        channels=("#파일럿_공개", "#파일럿_비공개"),
+        channel="#파일럿_비공개",
+    )
+
+    texts = [h.line.text for h in store.search("기성금", ctx)]
+
+    assert texts == ["비밀 기성금 9억"]
+
+
+def test_dm_search_keeps_the_users_full_authorized_scope(store):
+    ctx = _ctx(
+        ws="pilot",
+        channels=("#파일럿_공개", "#파일럿_비공개"),
+    )
+
+    texts = [h.line.text for h in store.search("기성금", ctx)]
+
+    assert "공개 기성금 3억" in texts
+    assert "비밀 기성금 9억" in texts
 
 
 def test_titles_hide_unreachable_workspaces(store):

@@ -296,6 +296,11 @@ def _scope_label(ctx: RequestContext | None) -> str:
     return f"채널 {len(ctx.channels)}개"
 
 
+CHANNEL_SCOPE_NOTICE = (
+    "_조회 범위: 현재 채널만 · 여러 채널 통합 조회는 TYBot 개인 DM에서 요청하세요._"
+)
+
+
 def _response_ts(response) -> str:
     try:
         return str(response.get("ts") or "")
@@ -2178,6 +2183,8 @@ class WorkspaceBot:
 
         def finish(reply: str, *, intent: Intent, ans: Answer | None, ctx: RequestContext | None):
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
+            if ans is not None and ctx is not None and (ctx.channel_id or ctx.channel):
+                reply = f"{reply}\n\n{CHANNEL_SCOPE_NOTICE}"
             # 아카이브 근거로 답한 경우에만 '근거 보기' 를 붙인다. 버튼이 있는데
             # 눌러도 아무것도 안 나오면 없는 것만 못하다.
             fallback_kw = {"text": reply}

@@ -761,6 +761,22 @@ class ChannelOwnerStore:
                 out[(workspace, channel_id)] = owner
         return out
 
+    def responsibles(self) -> dict[tuple[str, str], tuple[str, ...]]:
+        """개설자와 위임된 수정 담당자를 채널별 알림 수신자로 반환한다."""
+        with _OWNER_LOCK:
+            rows = self._read()["channels"]
+        out: dict[tuple[str, str], tuple[str, ...]] = {}
+        for key, row in rows.items():
+            workspace, _, channel_id = str(key).partition(":")
+            if not channel_id or not isinstance(row, dict):
+                continue
+            people = [str(row.get("owner_user_id") or "")]
+            people.extend(str(user) for user in row.get("manager_user_ids") or [])
+            unique = tuple(dict.fromkeys(user.strip() for user in people if user.strip()))
+            if unique:
+                out[(workspace, channel_id)] = unique
+        return out
+
     def is_owner(self, workspace: str, channel_id: str, user_id: str) -> bool:
         with _OWNER_LOCK:
             row = self._read()["channels"].get(f"{workspace}:{channel_id}") or {}

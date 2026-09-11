@@ -102,7 +102,7 @@ class SlackFile:
 
 @dataclass(frozen=True)
 class AttachmentStorage:
-    """승인 전 첨부를 원문 아카이브 밖에 격리하는 위치."""
+    """첨부 원본을 검색 가능한 원문 아카이브 밖에 격리하는 위치."""
 
     staging_dir: Path
     objects_dir: Path
@@ -204,8 +204,8 @@ def stage_files(
 ) -> tuple[list[str], list[str]]:
     """원본을 격리 저장하고, 로컬 추출 텍스트는 검색 가능한 원문으로 반환한다.
 
-    원본은 승인 전까지 ArchiveStore 밖에 둔다. 변환 텍스트는 호출자가 기존 PII 검사를
-    적용한 뒤 아카이브에 기록하므로 외부 LLM에 원본을 보내는 승인과는 별개다.
+    원본은 ArchiveStore 밖에 격리한다. 변환 텍스트는 호출자가 기존 민감정보 검사를
+    적용한 뒤 아카이브에 기록하며, 답변 경로는 원본 바이트를 외부 모델에 보내지 않는다.
     """
     lines: list[str] = []
     warnings: list[str] = []
@@ -214,7 +214,7 @@ def stage_files(
         file_id = _safe_component(f.id or hashlib.sha256(f.name.encode()).hexdigest()[:16])
         staged = storage.staging_dir / file_id
         objects = storage.objects_dir / file_id
-        state = "pending_review"
+        state = "unsupported"
         error: str | None = None
         extracted: str | None = None
         object_path: Path | None = None
@@ -238,6 +238,8 @@ def stage_files(
                 extracted = _decode_text(raw, f.size)
             elif f.is_convertible:
                 extracted = "\n".join(convert(f.filetype, raw))
+            if extracted is not None:
+                state = "converted"
         except (DownloadError, ConvertError, OSError) as exc:
             state = "download_or_extract_failed"
             error = str(exc)
@@ -295,9 +297,9 @@ def stage_files(
             logger.warning(warning)
 
         if extracted is not None:
-            label = "변환·원본검수대기"
-        elif state == "pending_review":
-            label = "검수대기"
+            label = "자동변환"
+        elif state == "unsupported":
+            label = "미지원"
         elif state == "pii_refused":
             label = "수집제외"
         else:

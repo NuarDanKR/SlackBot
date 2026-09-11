@@ -4,24 +4,24 @@
 
 ## 왜 밀어 주는가 (2026-09-08, 오너 결정)
 
-첨부 승인을 `/첨부` 로만 열어 뒀다. 결과는 **대기 31건·승인 0건**이었다.
+첨부 처리를 별도 명령으로만 열어 뒀을 때 결과는 **대기 31건·처리 0건**이었다.
 
 > "사용자는 이 첨부 파일이 승인이 필요한지도 모를거고 실패한지도 모를거야."
 
 맞다. 사람이 **모르는 일을 하러 찾아오지는 않는다.** 당겨 가는 방식은 게이트가
 아니라 정체였다. 그래서 두 가지를 바꿨다.
 
-1. 변환된 첨부는 아예 사람을 기다리지 않는다(`attachment_review.find_sendable`).
-   추출 텍스트가 아카이브에 들어갔다는 것이 곧 수집 단계 PII 검사를 통과했다는 뜻이다.
-2. 그래도 남는 것 — **텍스트가 없어 PII 검사가 돌지 않는 스캔본·이미지** — 은
-   채널 검토자에게 **정해진 시각에 하루치로 밀어 준다.** 여기다.
+1. 변환은 사람 승인을 기다리지 않는다. 추출 텍스트가 아카이브에 들어갔다는 것이
+   곧 수집 단계 PII 검사를 통과했다는 뜻이다.
+2. 자동 변환 결과와 실패, 읽지 못해 원본 확인이 필요한 항목을 검토자와 채널 담당자에게
+   정해진 시각에 하루치로 밀어 준다. 변환본은 짧은 본문 미리보기도 함께 보인다.
 
-`/첨부` 는 남긴다. 밀어 준 것을 놓쳤을 때 다시 볼 자리는 있어야 한다.
+밀어 준 것을 놓쳤거나 실패가 누적되면 관리 콘솔의 아카이브 진단에서 다시 본다.
 
 ## 지키는 것 다섯
 
-**막힌 것만 담는다.** 이미 답변에 쓰이고 있는 파일까지 목록에 넣으면, 사람이
-목록을 「할 일 없음」 으로 읽고 그 다음부터 열지 않는다.
+**검토할 정보가 있는 것만 담는다.** 변환 완료는 정제된 미리보기를, 실패는 조치 사유를,
+읽지 못한 파일은 원본 전송 여부를 보여 준다. PII로 수집 제외된 본문은 보내지 않는다.
 
 **오늘 것과 밀린 것을 섞지 않는다.** 밀린 31건 사이에 오늘 올라온 2건을 끼워 넣으면
 오늘 것이 묻힌다. 오늘 것을 건별로 보이고, 밀린 것은 **건수 한 줄**로만 말한다.
@@ -29,8 +29,8 @@
 **하루에 한 번.** 멱등 키는 `(워크스페이스, 채널, 받는 사람, 날짜, 종류)` 다.
 타이머가 1분마다 돌아도 두 번 가지 않는다.
 
-**검토자가 없으면 채널 개설자에게.** 둘 다 없으면 **보내지 않고 그 사실을 남긴다** —
-조용히 아무 일도 안 일어나는 것이 우리가 가장 자주 겪은 고장이다.
+**검토자와 채널 담당자 모두에게.** 같은 사람이 양쪽에 있으면 한 번만 보낸다. 아무도
+없으면 **보내지 않고 그 사실을 남긴다** — 조용한 실패를 만들지 않는다.
 
 **보낼 것이 없으면 보내지 않는다.** 매일 "없습니다" 가 오면 사람이 그 DM 을 끈다.
 
@@ -48,7 +48,13 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
-from .attachment_review import PENDING, Attachment, find_sendable, scan
+from .attachment_review import (
+    APPROVED,
+    PII_REFUSED,
+    REJECTED,
+    Attachment,
+    scan,
+)
 
 logger = logging.getLogger("tybot.daily_review")
 
@@ -93,30 +99,33 @@ def blocked(
     channel_id: str,
     extracted: set[str],
 ) -> list[Attachment]:
-    """이 채널에서 **승인 없이는 못 읽는** 첨부.
-
-    판정은 답변 경로와 같은 함수(`find_sendable`)를 쓴다. 갈리면 이미 쓰이고 있는
-    파일이 목록에 올라오고, 사람은 그 목록을 믿지 않게 된다.
-    """
+    """이 채널에서 자동 변환되지 않아 운영 확인이 필요한 첨부."""
     out: list[Attachment] = []
     for item in scan(archive_dir):
         if item.workspace != workspace or item.channel_id != channel_id:
             continue
-        if find_sendable(
-            archive_dir,
-            workspace=workspace,
-            channel_id=channel_id,
-            name=item.name,
-            text_extracted=item.name in extracted,
-        ):
+        if item.extracted or item.name in extracted:
             continue
-        # 반려한 것은 사람이 이미 판단했다 — 매일 다시 물으면 그 판단이 무시된다.
-        # 수집 실패(`failed`)도 뺀다. 파일이 우리에게 없으므로 승인해도 달라지는
-        # 것이 없다. 그건 검토가 아니라 운영 문제고 진단 스크립트가 본다.
-        if item.status != PENDING:
+        if item.status in {APPROVED, REJECTED, PII_REFUSED}:
             continue
         out.append(item)
     return out
+
+
+def review_items(
+    archive_dir,
+    *,
+    workspace: str,
+    channel_id: str,
+) -> list[Attachment]:
+    """검토자가 알아야 할 자동 변환 결과, 실패 및 원본 검토 대기 항목."""
+    return [
+        item
+        for item in scan(archive_dir)
+        if item.workspace == workspace
+        and item.channel_id == channel_id
+        and item.status not in {APPROVED, REJECTED, PII_REFUSED}
+    ]
 
 
 def staged_on(item: Attachment) -> date | None:
@@ -154,9 +163,7 @@ def build(
     extracted: set[str],
     on: date,
 ) -> Digest:
-    items = blocked(
-        archive_dir, workspace=workspace, channel_id=channel_id, extracted=extracted
-    )
+    items = review_items(archive_dir, workspace=workspace, channel_id=channel_id)
     today, backlog = split(items, on)
     return Digest(
         workspace=workspace,
@@ -172,19 +179,20 @@ def build(
 
 # --- 화면 --------------------------------------------------------------------
 def blocks(digest: Digest) -> list[dict]:
-    """검토 DM. **버튼 `value` 를 비우지 않는다** — 비면 Slack 이 메시지를 통째로
-    거부하고, 그건 오류가 아니라 「아무 일도 안 일어남」 으로 나타난다.
-
-    값에는 **채널 ID 를 함께 싣는다.** DM 에서 누르면 `body["channel"]["id"]` 가
-    DM 채널이라, 그것으로 원본을 찾으면 0건이 된다.
-    """
+    """자동 변환 결과와 실패를 보여 주는 검토 DM."""
     from . import attachment_view
 
     where = digest.channel_name or digest.channel_id
+    converted = sum(
+        1 for item in digest.today if item.extracted or item.name in digest.extracted
+    )
+    failed = sum(1 for item in digest.today if item.conversion_failed)
+    unreadable = len(digest.today) - converted - failed
     head = (
-        f"*{where} — 오늘 확인할 첨부 {len(digest.today)}건*\n"
-        "이 파일들은 글자가 없어(스캔·이미지) 봇이 내용을 읽지 못했습니다. "
-        "승인하면 원본이 LLM 제공자에게 전달됩니다 — 개인정보가 담긴 파일은 반려하세요."
+        f"*{where} — 오늘 첨부 처리 {len(digest.today)}건*\n"
+        f"자동 변환 {converted}건 · 변환 실패 {failed}건 · 원본 확인 필요 {unreadable}건\n"
+        "변환된 내용은 아래에서 확인할 수 있습니다. 실패한 파일은 외부 LLM에 보내지 "
+        "않으며 Slack 원본과 콘솔 진단에서 조치합니다."
     )
     out: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": head}}]
 
@@ -196,7 +204,9 @@ def blocks(digest: Digest) -> list[dict]:
         tail.append(f"오늘 것 중 {len(digest.today) - MAX_ROWS}건은 다음에 보입니다.")
     if digest.backlog:
         # 건수만 말한다. 늘어놓으면 오늘 것이 묻힌다.
-        tail.append(f"이전에 쌓인 {digest.backlog}건이 더 있습니다 — 채널에서 `/첨부`.")
+        tail.append(
+            f"이전에 쌓인 {digest.backlog}건이 더 있습니다 — 관리 콘솔의 아카이브 진단에서 확인하세요."
+        )
     if tail:
         out.append(
             {"type": "context", "elements": [{"type": "mrkdwn", "text": " ".join(tail)}]}
@@ -210,8 +220,13 @@ def text_fallback(digest: Digest) -> str:
 
 
 # --- 누구에게 ----------------------------------------------------------------
-def recipients(workspace: str, channel_id: str, *, owner: str = "") -> list[str]:
-    """검토자. 없으면 채널 개설자. 둘 다 없으면 빈 목록.
+def recipients(
+    workspace: str,
+    channel_id: str,
+    *,
+    owner: str | tuple[str, ...] | list[str] = "",
+) -> list[str]:
+    """검토자와 채널 담당자. 둘 다 없으면 빈 목록.
 
     빈 목록은 **호출부가 기록해야 할 사실**이다. 여기서 아무에게나 보내면 승인
     권한이 조용히 넓어진다.
@@ -224,9 +239,8 @@ def recipients(workspace: str, channel_id: str, *, owner: str = "") -> list[str]
         # 못 읽었을 때 개설자로 넘어가지 않는다 — 장애가 곧 권한 이동이 된다.
         logger.warning("검토자를 확인하지 못해 보내지 않는다 ch=%s: %s", channel_id, exc)
         return []
-    if found:
-        return found
-    return [owner] if owner else []
+    responsible = [owner] if isinstance(owner, str) else list(owner)
+    return list(dict.fromkeys([*found, *(user for user in responsible if user)]))
 
 
 def due(send_at: time, now: datetime) -> bool:
@@ -401,7 +415,7 @@ def run(
         if not people:
             # 조용히 넘어가지 않는다. 이 줄이 헬스 체크가 보는 것과 같은 사실이다.
             logger.warning(
-                "검토자도 개설자도 없어 하루치를 보내지 못했다 ws=%s ch=%s",
+                "검토자도 채널 담당자도 없어 하루치를 보내지 못했다 ws=%s ch=%s",
                 workspace, channel_id,
             )
             result.no_recipient += 1
@@ -566,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
             # 아무도 확인하지 않고, 아무 일도 안 일어난다.
             owners=ChannelOwnerStore(
                 heartbeat.state_dir() / "channel-owners.json"
-            ).owners(),
+            ).responsibles(),
         )
 
     logger.info(

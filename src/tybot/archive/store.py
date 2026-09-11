@@ -405,6 +405,8 @@ class ArchiveStore:
                 acl=d.acl if d.acl else None,
                 owner_workspace=d.workspace,
                 share_with=d.share_with if d.share_with else None,
+                channel_id=d.channel_id,
+                channel=d.channel,
             )
         ]
 

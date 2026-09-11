@@ -49,18 +49,18 @@ def _archive(tmp_path: Path, lines: list[str]) -> Path:
 
 # --- 네 가지 원인을 가른다 ---------------------------------------------------
 def test_it_separates_converted_from_staged(mod, tmp_path, monkeypatch, capsys):
-    """변환된 것과 검수 대기인 것은 사람이 할 일이 다르다."""
+    """자동 변환된 것과 미지원 형식은 사람이 할 일이 다르다."""
     monkeypatch.setenv("ARCHIVE_DIR", str(_archive(tmp_path, [
-        "[첨부:변환·원본검수대기] 가정산서.xlsx (xlsx, 900KB)",
+        "[첨부:자동변환] 가정산서.xlsx (xlsx, 900KB)",
         "[첨부추출:가정산서.xlsx]",
-        "[첨부:검수대기] 스크린샷.png (png, 120KB)",
+        "[첨부:미지원] 스크린샷.png (png, 120KB)",
     ])))
 
     assert mod.main() == 0
     out = capsys.readouterr().out
 
-    assert "[첨부:검수대기] 1건" in out
-    assert "[첨부:변환·원본검수대기] 1건" in out
+    assert "[첨부:미지원] 1건" in out
+    assert "[첨부:자동변환] 1건" in out
     assert "변환본이 들어간 파일: 1건" in out
 
 

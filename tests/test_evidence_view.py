@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+from tybot.access import RequestContext
 from tybot.evidence_view import (
     ACTION_SHOW,
     MAX_LINES,
@@ -153,6 +154,21 @@ def test_bot_searches_with_the_users_own_permission():
     args, kwargs = bot.store.search.call_args
     assert args[0] == "김해외동 기성금"
     assert kwargs["limit"] == 40
+
+
+def test_channel_evidence_recheck_keeps_the_original_channel_scope():
+    bot = _bot([_hit()])
+    bot._chan_cache = {"C1": "#본사팀-전산_ABB110-회의"}
+    bot._context = lambda client, uid: RequestContext(
+        workspace="mgmt",
+        channels=frozenset({"#본사팀-전산_ABB110-회의", "#다른채널"}),
+    )
+
+    bot._evidence_text(Mock(), "U1", "기성금", channel_id="C1")
+
+    ctx = bot.store.search.call_args.args[1]
+    assert ctx.channel_id == "C1"
+    assert ctx.channel == "#본사팀-전산_ABB110-회의"
 
 
 def test_bot_handles_empty_query():

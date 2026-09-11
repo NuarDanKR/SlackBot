@@ -101,6 +101,14 @@ def test_owner_store_persists_delegated_managers_without_changing_owner(tmp_path
     assert not reloaded.is_manager("it", "C1", "U4")
 
 
+def test_owner_store_lists_every_attachment_notification_recipient(tmp_path):
+    store = ChannelOwnerStore(tmp_path / "channel-owners.json")
+    store.record("it", "C1", "U1", "team-channel")
+    store.set_managers("it", "C1", ["U2", "U1"], set_by="U1")
+
+    assert store.responsibles() == {("it", "C1"): ("U1", "U2")}
+
+
 def test_clearing_delegates_never_removes_the_creator(tmp_path):
     store = ChannelOwnerStore(tmp_path / "channel-owners.json")
     store.record("it", "C1", "U1", "팀-전산_ABB110-회의")

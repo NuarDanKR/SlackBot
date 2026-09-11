@@ -1300,6 +1300,37 @@ def test_diagnostics_follow_read_and_developer_permissions(client):
     assert "bot" not in response.json()
 
 
+def test_archive_attachment_failures_are_workspace_scoped(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from tybot import attachment_review
+
+    def failed(workspace, name):
+        return SimpleNamespace(
+            workspace=workspace,
+            channel_id="C1",
+            name=name,
+            filetype="pdf",
+            status=attachment_review.DOWNLOAD_OR_EXTRACT_FAILED,
+            error="converter failed",
+            permalink="https://example.slack.com/files/F1",
+            staged_at="2026-09-11T01:00:00+00:00",
+        )
+
+    monkeypatch.setattr(
+        attachment_review,
+        "failures",
+        lambda archive: [failed("fin", "볼수있음.pdf"), failed("tyit", "범위밖.pdf")],
+    )
+
+    response = client.get("/api/diagnostics/archive", headers=member(client))
+
+    assert response.status_code == 200
+    items = response.json()["section"]["failedAttachments"]
+    assert [item["name"] for item in items] == ["볼수있음.pdf"]
+    assert "error" not in items[0]
+
+
 def test_specialist_registry_is_developer_only(client, monkeypatch):
     monkeypatch.setattr(console_app.specialist_store, "list_specialists", lambda: [])
     monkeypatch.setattr(console_app.specialist_store, "list_requests", lambda: [])

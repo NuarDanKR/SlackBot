@@ -242,22 +242,22 @@ def check_digest(f: HealthFacts) -> Check:
 
 
 def check_attachments(f: HealthFacts) -> Check:
-    """사람이 봐야 원본을 읽는 첨부. 변환된 것은 여기 세지 않는다 — 이미 쓰인다."""
+    """자동 변환에 실패했거나 지원하지 않아 운영 확인이 필요한 첨부."""
     if f.waiting_attachments is None:
         return Check(UNKNOWN, "첨부", "확인하지 못했습니다.")
     if not f.waiting_attachments:
-        return Check(OK, "첨부", "사람을 기다리는 파일이 없습니다.")
+        return Check(OK, "첨부", "자동 변환에 실패한 파일이 없습니다.")
     if f.reviewers:
         return Check(
             WARN, "첨부",
-            f"{f.waiting_attachments}건이 확인을 기다립니다(스캔·이미지).",
-            f"매일 {f.send_at or '08:00'} 검토자 DM 으로 갑니다. "
-            "지금 보려면 `/첨부`.",
+            f"자동 변환하지 못한 첨부 {f.waiting_attachments}건이 있습니다.",
+            f"매일 {f.send_at or '08:00'} 검토자·채널 담당자 DM 으로 갑니다. "
+            "상세 사유는 관리 콘솔의 아카이브 진단에서 확인하세요.",
         )
     # 권한이 없는 사람에게 `/채널 수정` 을 시키면 거절만 당한다. 막다른 안내는
     # 「이 봇은 안 된다」 로 읽힌다.
     fix = (
-        "`/채널 수정` 에서 검토자를 정하거나, 지금 `/첨부` 로 처리하세요."
+        "`/채널 수정` 에서 검토자를 지정하세요. 실패 상세는 관리 콘솔에서 확인할 수 있습니다."
         if f.viewer_can_edit
         else "개설자 또는 TYBot 채널 관리자에게 검토자 지정을 요청하세요."
     )

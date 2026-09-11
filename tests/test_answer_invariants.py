@@ -116,8 +116,12 @@ def _engine(tmp_path, provider):
     return _make_engine(tmp_path, router)
 
 
-def _ctx(*channels: str) -> RequestContext:
-    return RequestContext(workspace="pilot", channels=frozenset(channels))
+def _ctx(*channels: str, here: str = "") -> RequestContext:
+    return RequestContext(
+        workspace="pilot",
+        channels=frozenset(channels),
+        channel=here,
+    )
 
 
 # --- 원칙 2: 출처 강제 ------------------------------------------------------
@@ -163,6 +167,23 @@ def test_asking_with_no_channels_answers_nothing(tmp_path):
 
     for leak in ("3억 2천", "김해외동", "콘솔 배포"):
         assert leak not in answer.to_slack()
+
+
+def test_channel_summary_uses_only_the_channel_where_it_was_requested(tmp_path):
+    provider = Fake("요약했습니다.")
+    engine = _engine(tmp_path, provider)
+
+    answer = engine.summarize(
+        _ctx(MINE, NOT_MINE, here=MINE),
+        days=3650,
+        question="참여 중인 업무를 요약해줘",
+    )
+
+    assert answer.reason == "answered"
+    evidence = str(provider.calls[-1][1].content)
+    assert "콘솔 배포 자동화" in evidence
+    assert "기성금 3억 2천만원" not in evidence
+    assert all(NOT_MINE not in citation for citation in answer.citations)
 
 
 # --- 근거 없으면 답하지 않는다 ----------------------------------------------
@@ -425,13 +446,12 @@ def test_a_master_answer_claims_no_specialist(tmp_path):
     assert "전문봇" not in answer.to_slack()
 
 
-# --- 검수 대기 첨부를 왜 못 읽었는지 말한다 ---------------------------------
+# --- 자동 변환 실패 첨부를 왜 못 읽었는지 말한다 -----------------------------
 def test_a_pending_attachment_is_named_not_silently_dropped(tmp_path):
-    """승인 전 원본은 모델에 가지 않는다 — 그건 설계다(스캔본에는 PII 검사가 안 먹는다).
+    """변환하지 못한 원본은 모델에 가지 않는다.
 
     그런데 그 상태로 답하면 사용자에게는 **「봇이 파일을 못 읽는다」** 로만 보인다.
-    사내 피드백이 실제로 그렇게 쌓였다(2026-09-07). 무엇이 왜 빠졌는지 말하면
-    사람이 할 수 있는 다음 행동(검수 승인)이 생긴다.
+    무엇이 빠졌는지 명시하면 사용자가 Slack 원본이나 콘솔 진단을 확인할 수 있다.
     """
     doc = DOC_MINE.replace(
         "> [2026-08-12 09:15] 홍길동: 콘솔 배포 자동화를 끝냈습니다",
@@ -447,4 +467,4 @@ def test_a_pending_attachment_is_named_not_silently_dropped(tmp_path):
     answer = engine.answer("가정산서 내용 알려줘", _ctx(MINE))
 
     assert "가정산서.pdf" in answer.to_slack()
-    assert "검수 대기" in answer.to_slack(), "왜 원본을 안 읽었는지 말해야 한다"
+    assert "자동 변환 실패" in answer.to_slack(), "왜 원본을 안 읽었는지 말해야 한다"
