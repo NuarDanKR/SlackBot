@@ -317,3 +317,23 @@ def test_every_timer_can_be_switched_from_the_console():
 
     for timer in sorted((ROOT / "deploy").glob("*.timer")):
         assert timer.name in wrapper, f"{timer.name} 을 콘솔에서 켜고 끌 수 없다"
+
+
+def test_the_deploy_verifies_specialist_contracts():
+    """계약이 안 옮겨지면 `available_keys()` 가 그 전문가를 빼고, 콘솔은
+    「미배포」 로 라우터는 「후보 없음」 으로 보인다 — 어디에도 오류가 없어서
+    원인을 찾는 데 가장 오래 걸린다."""
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+
+    assert "subbots/*/contract/prompt.md" in install
+    assert "배치 누락" in install
+
+
+def test_subbots_is_not_excluded_from_the_copy():
+    """제외하면 서버에 계약이 아예 없다."""
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    excludes = next(
+        block for block in install.split("\n\n") if "TREE_EXCLUDES=(" in block
+    )
+
+    assert "subbots" not in excludes

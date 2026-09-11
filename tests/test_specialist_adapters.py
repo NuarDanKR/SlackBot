@@ -180,3 +180,65 @@ def test_the_adapter_has_no_way_to_read_the_archive():
 
     for attr in ("store", "_store", "archive", "conn", "_conn"):
         assert not hasattr(adapter, attr), f"어댑터가 {attr} 를 들고 있다"
+
+
+# --- 계약이 사는 자리 (2026-09-11) -------------------------------------------
+#
+# `subbots/<key>/contract/prompt.md` 가 정식이다. 다른 팀에게서 **받은 계약**이고
+# 콘솔이 버전·검사·승인을 관리한다 — 우리 코드 옆에 두면 "우리가 만든 프롬프트"
+# 처럼 보인다.
+def test_hermes_lives_in_subbots():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+
+    assert (root / "subbots" / "hermes" / "contract" / "prompt.md").is_file()
+    assert (root / "subbots" / "hermes" / "tybot-specialist.toml").is_file()
+
+
+def test_a_key_never_lives_in_both_places():
+    """두 곳에 같으면 **어느 쪽이 도는지 아무도 모른다.** 고친 쪽이 안 도는
+    상태가 조용히 생긴다 — 이 구조의 유일한 위험이다."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    official = {
+        p.parents[1].name for p in (root / "subbots").glob("*/contract/prompt.md")
+    }
+    legacy = {p.stem for p in (root / "src/tybot/specialist_prompts").glob("*.md")}
+
+    assert not (official & legacy), f"두 곳에 있다: {sorted(official & legacy)}"
+
+
+def test_the_official_path_wins():
+    """옛 자리에 남은 파일이 이기면, 옮긴 뒤에도 옛 것이 돈다."""
+    from pathlib import Path
+
+    path = sa.contract_path("hermes")
+
+    assert path is not None
+    assert Path("subbots") in Path(path).parents or "subbots" in str(path)
+
+
+def test_the_console_sees_hermes_as_deployed():
+    """`available_keys()` 하나가 콘솔 「배포됨」 판정의 근거다. 계약을 옮기고
+    이것을 안 고치면 화면이 「미배포」 로 뒤집힌다."""
+    assert "hermes" in sa.available_keys()
+
+
+def test_a_directory_without_a_contract_is_not_deployed():
+    """디렉터리만 있고 계약이 없으면 「등록했는데 답을 못 한다」 가 된다."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for folder in (root / "subbots").iterdir():
+        if not folder.is_dir():
+            continue
+        has_contract = (folder / "contract" / "prompt.md").is_file()
+        assert (folder.name in sa.available_keys()) == has_contract, folder.name
+
+
+@pytest.mark.parametrize("evil", ["../../etc/passwd", "a/b", "Hermes", "", "x" * 40])
+def test_a_bad_key_never_becomes_a_path(evil):
+    """DB 나 화면을 통해 온 값이라도 그대로 붙이면 그 자리가 곧 경로 탈출이다."""
+    assert sa.contract_path(evil) is None

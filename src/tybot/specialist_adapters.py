@@ -34,11 +34,39 @@ git 에서 콘솔로 옮겨간 것이지 없어진 것이 아니다.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 log = logging.getLogger("tybot.specialist_adapters")
 
+# 프롬프트 계약이 사는 두 자리.
+#
+# **`subbots/<key>/contract/prompt.md` 가 정식**이다. 콘솔이 버전·검사·승인을
+# 관리하는 전문 봇은 거기 둔다 — 다른 팀에게서 **받은 계약**이고, 우리 코드 옆에
+# 두면 "우리가 만든 프롬프트" 처럼 보인다. 받은 것은 받은 자리에 둔다
+# (`subbots/README.md`).
+#
+# `src/tybot/specialist_prompts/` 는 남겨 둔다. 그 경로가 패키지 안이라 어떤
+# 설치 형태에서도 따라오고, 저장소 밖에서 도는 경우의 마지막 보루다.
+# **두 곳에 같은 key 가 있으면 안 된다** — 어느 쪽이 도는지 아무도 모르게 되고,
+# 고친 쪽이 안 도는 상태가 조용히 생긴다. 테스트가 그것을 막는다.
 PROMPT_DIR = Path(__file__).parent / "specialist_prompts"
+SUBBOTS_DIR = Path(__file__).resolve().parents[2] / "subbots"
+
+
+def contract_path(key: str) -> Path | None:
+    """이 전문가의 프롬프트 계약 파일. 없으면 `None`.
+
+    key 를 경로에 붙이기 전에 **형식을 본다.** DB 나 화면을 통해 온 값이라도
+    그대로 붙이면 그 자리가 곧 경로 탈출이다.
+    """
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", key or ""):
+        return None
+    official = SUBBOTS_DIR / key / "contract" / "prompt.md"
+    if official.is_file():
+        return official
+    legacy = PROMPT_DIR / f"{key}.md"
+    return legacy if legacy.is_file() else None
 
 # 근거를 프롬프트에 실을 때의 상한. 넘으면 앞에서 자른다 —
 # 자르는 것이 나은 이유: 컨텍스트를 넘겨 호출이 통째로 실패하면 답이 아예 안 나간다.
@@ -55,11 +83,13 @@ def load_prompt(key: str) -> str:
     빈 프롬프트로 돌면 전문가가 아니라 그냥 모델이 답하는데, 겉으로는 전문가가
     답한 것처럼 기록된다. 그러면 판정이 맞는지 보는 일 자체가 무의미해진다.
     """
-    path = PROMPT_DIR / f"{key}.md"
+    path = contract_path(key)
+    if path is None:
+        raise AdapterError(f"전문가 프롬프트가 없습니다: {key}")
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise AdapterError(f"전문가 프롬프트가 없습니다: {key}") from exc
+        raise AdapterError(f"전문가 프롬프트를 읽지 못했습니다: {key}") from exc
     # 프론트매터(--- ... ---)는 출처·버전 기록이라 모델에 보내지 않는다.
     if text.startswith("---"):
         _, _, rest = text.partition("---")
@@ -73,7 +103,9 @@ def load_prompt(key: str) -> str:
 
 def prompt_version(key: str) -> str:
     """콘솔에 보일 프롬프트 버전. 읽지 못하면 빈 문자열."""
-    path = PROMPT_DIR / f"{key}.md"
+    path = contract_path(key)
+    if path is None:
+        return ""
     try:
         for line in path.read_text(encoding="utf-8").splitlines()[:10]:
             if line.startswith("version:"):
@@ -98,9 +130,17 @@ def available_keys() -> set[str]:
     목록을 손으로 적으면 프롬프트를 지워도 화면은 「배포됨」 이라고 말한다.
     파일이 곧 사실이다.
     """
-    if not PROMPT_DIR.is_dir():
-        return set()
-    return {p.stem for p in PROMPT_DIR.glob("*.md")}
+    keys: set[str] = set()
+    if SUBBOTS_DIR.is_dir():
+        # 정식 자리. `subbots/<key>/contract/prompt.md` 가 있어야 배포된 것이다 —
+        # 디렉터리만 있고 계약이 없으면 「등록했는데 답을 못 한다」 가 된다.
+        keys |= {
+            path.parents[1].name
+            for path in SUBBOTS_DIR.glob("*/contract/prompt.md")
+        }
+    if PROMPT_DIR.is_dir():
+        keys |= {p.stem for p in PROMPT_DIR.glob("*.md")}
+    return keys
 
 
 class PromptSpecialist:

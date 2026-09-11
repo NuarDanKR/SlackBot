@@ -123,6 +123,15 @@ if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   rm -f "$src_list" "$dst_list"
   if [[ $stale -gt 0 ]]; then echo "  소스에서 사라진 파일 ${stale}건 정리"; fi
 
+  # 전문 봇 계약도 확인한다. 빠지면 `available_keys()` 가 그 전문가를 빼고,
+  # 콘솔은 「미배포」 로, 라우터는 「후보 없음」 으로 보인다 — 어디에도 오류가
+  # 없어서 원인을 찾는 데 가장 오래 걸리는 모양이다.
+  for c in "$SRC_DIR"/subbots/*/contract/prompt.md; do
+    [[ -e "$c" ]] || continue
+    rel=${c#"$SRC_DIR"/}
+    [[ -f "$APP_DIR/$rel" ]] || { echo "배치 누락: $rel"; exit 1; }
+  done
+
   # 배치 결과를 검증한다 — 조용히 빠진 모듈이 가장 잡기 어렵다.
   for m in answer.py intent.py archive/store.py archive/writer.py slack/pilot.py; do
     [[ -f "$APP_DIR/src/tybot/$m" ]] || { echo "배치 누락: src/tybot/$m"; exit 1; }

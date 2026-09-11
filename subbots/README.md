@@ -3,6 +3,26 @@
 이 디렉터리는 전문 봇 소스 저장소를 모아 두는 곳이 아니다. 마스터 TYBot이 전문 봇을
 호출하기 전에 검증할 **계약과 연동 메타데이터**만 추적한다.
 
+## 구조
+
+```text
+subbots/
+  README.md
+  hermes/
+    tybot-specialist.toml     # 연동 메타데이터 — 실행 코드가 아니라 선언
+    contract/
+      prompt.md               # 답변 규칙. 이 파일이 곧 계약 본문이다
+```
+
+`prompt.md` 가 있어야 **배포된 것**이다(`specialist_adapters.available_keys`).
+디렉터리만 만들고 계약을 안 넣으면 콘솔에는 「미배포」 로 보인다 — 「등록했는데
+답을 못 한다」 보다 낫다.
+
+`src/tybot/specialist_prompts/` 도 아직 읽는다. 그 경로는 패키지 안이라 어떤
+설치 형태에서도 따라오므로 마지막 보루로 남긴다. **같은 key 를 두 곳에 두지
+않는다** — 어느 쪽이 도는지 아무도 모르게 되고, 고친 쪽이 안 도는 상태가 조용히
+생긴다(`tests/test_specialist_adapters.py` 가 막는다).
+
 ## 저장하는 것
 
 - 버전이 명시된 입출력 계약

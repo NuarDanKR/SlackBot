@@ -1,0 +1,44 @@
+# Hermes 연동 메타데이터 — **실행 코드가 아니라 선언이다.**
+#
+# 이 파일은 마스터가 이 전문 봇을 어떻게 부를지만 적는다. 소스도, 실행 경로도,
+# 외부 URL 도 여기 없다(`subbots/README.md` 의 경계).
+#
+# ## 왜 여기 있나 (2026-09-11)
+#
+# 처음에는 `src/tybot/specialist_prompts/hermes.md` 하나였다. 그건 우리 코드
+# 옆이라 "우리가 만든 프롬프트" 처럼 보인다. 실제로는 **다른 팀에게서 받은
+# 계약**이고, 콘솔이 버전·검사·승인을 관리한다. 받은 것은 받은 자리에 둔다.
+#
+# ## 왜 Hermes 는 코드가 아니라 계약인가
+#
+# 그 팀의 값은 모델이 아니라 **찾는 방식과 판정 규칙**에 있다(`ref/hermes`
+# 20746a9 확인). 그래서 소스를 포팅하지 않고 규칙만 가져와 우리 아카이브 위에서
+# 우리 권한으로 돌린다 — 근거가 밖으로 나가지 않고, 그 팀 배포를 기다리지 않는다.
+schema = "tybot-specialist/v1"
+key = "hermes"
+name = "Hermes — 내부 기록"
+domain = "내부 문서"
+adapter = "hermes"
+contract_version = "v1"
+version = "2"
+
+# prompt | tools | http
+#
+# `tools` = 우리 아카이브 위 도구(search·read_channel·read_document·
+# fetch_recent_slack)를 부르며 스스로 찾는다. 권한은 `RequestContext` 로
+# 한 곳에서만 판정된다(`src/tybot/specialist_tools.py`).
+execution_mode = "tools"
+
+# 답변 규칙. 이 경로가 곧 계약 본문이다.
+prompt = "contract/prompt.md"
+
+# 출처: 무엇에서 옮겼는지 남긴다. 그 팀이 계속 개발하므로, 다음에 가져올 때
+# 무엇과 비교해야 하는지 알아야 한다.
+[source]
+repository = "ref/hermes (검토용 사본)"
+commit = "20746a9"
+files = [
+    "src/prompts/qa.md",
+    "src/claude.js (도구 설명문)",
+    "src/ingest/verify.js (근거 대조 규칙)",
+]
