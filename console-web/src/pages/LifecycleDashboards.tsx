@@ -1,6 +1,7 @@
+import { useEffect, useState } from 'react'
 import { useResource } from '../api/hooks'
-import { Chip, Failed, Loading, Metric, PageHead, Section, fmt } from '../components/primitives'
-import type { AuditEvent, ConsoleUser } from '../types'
+import { Chip, Failed, Loading, Metric, MiniBars, PageHead, Section, fmt } from '../components/primitives'
+import type { AnswerRecordsResponse, AuditEvent, ConsoleUser } from '../types'
 import { withQuery } from '../navigation'
 import { DateRangeFilter, periodLabel } from '../components/DateRangeFilter'
 
@@ -17,36 +18,44 @@ function ActionRow({ title, detail, tone = 'plain', onClick }: {
   )
 }
 
-interface AnswerData {
-  today: string; periodStart: string; periodEnd: string; isToday: boolean
-  calls: number; spentUsd: number; limitUsd: number
-  answers: { groundedRate?: number; errorRate?: number; errors?: number; slowAnswers?: number }
-  feedback: { satisfaction?: number | null; openCorrections?: number }
-  specialists: { calls: number; success: number; fallback: number }
-}
-
 export function AnswerDashboard({ user, query, navigate }: { user: ConsoleUser; query: URLSearchParams; navigate: Navigate }) {
   const start = query.get('start') ?? ''
   const end = query.get('end') ?? ''
-  const params = new URLSearchParams({ ...(start && { start }), ...(end && { end }) })
-  const res = useResource<AnswerData>(`/api/dashboards/answers?${params}`)
+  const workspace = query.get('workspace') ?? ''
+  const result = query.get('result') ?? ''
+  const asker = query.get('asker') ?? ''
+  const [workspaceDraft, setWorkspaceDraft] = useState(workspace)
+  const [resultDraft, setResultDraft] = useState(result)
+  const [askerDraft, setAskerDraft] = useState(asker)
+  useEffect(() => { setWorkspaceDraft(workspace); setResultDraft(result); setAskerDraft(asker) }, [workspace, result, asker])
+  const params = new URLSearchParams({ ...(start && { start }), ...(end && { end }), ...(workspace && { workspace }), ...(result && { result }), ...(asker && { asker }) })
+  const res = useResource<AnswerRecordsResponse>(`/api/answer-records?${params}`)
   if (res.loading) return <Loading what="답변 대시보드를" />
   if (res.error || !res.data) return <Failed what="답변 대시보드를" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
   const d = res.data
+  const s = d.summary
   return <>
-    <PageHead crumb="답변" title="답변 개요" note="선택한 기간의 근거 확보, 오류, 비용과 사용자 피드백을 함께 봅니다." aside={<Chip tone={(d.answers.errors ?? 0) ? 'watch' : 'ok'}>기간 질문 {fmt.int(d.calls)}건</Chip>} />
+    <PageHead crumb="답변" title="답변 현황" note="답변 개요, 품질 지표와 질문 처리 기록을 같은 기간·범위로 확인합니다." aside={<><Chip tone={s.errors ? 'watch' : 'ok'}>기간 질문 {fmt.int(s.questions)}건</Chip><Chip tone={d.view === 'all' ? 'brand' : 'info'}>{d.view === 'all' ? '관리자 전체 범위' : '본인·검토 채널 범위'}</Chip></>} />
+    {!d.identityLinked && user.role !== 'admin' && <div className="notice warn"><div><div className="notice-title">Slack 사용자 연결을 확인할 수 없습니다</div><div className="notice-detail">회사 이메일과 Slack 사용자 매핑이 확인되면 본인 질문과 담당 검토 채널의 답변이 표시됩니다.</div></div></div>}
     <Section title="조회 기간" note={periodLabel(d.periodStart, d.periodEnd)}>
-      <DateRangeFilter path="/answer" query={query} navigate={navigate} defaultStart={d.periodStart} defaultEnd={d.periodEnd} today={d.today} />
+      <DateRangeFilter path="/answer" query={query} navigate={navigate} defaultStart={d.periodStart} defaultEnd={d.periodEnd} today={d.today} preserve={{ workspace, result, asker }} />
     </Section>
-    <Section title="기간 답변" lead="질문 내용은 표시하지 않고 처리 결과만 집계합니다.">
-      <div className="metrics overview-metrics"><Metric k="질문" v={fmt.int(d.calls)} unit="건" /><Metric k="근거 확보율" v={d.answers.groundedRate == null ? '-' : `${Math.round(d.answers.groundedRate * 100)}%`} /><Metric k="오류" v={fmt.int(d.answers.errors ?? 0)} unit="건" /><Metric k="사용액" v={fmt.usd(d.spentUsd)} /></div>
+    <Section title="기간 답변 요약" lead="아래 품질 분포와 처리 기록도 같은 필터 범위를 사용합니다.">
+      <div className="metrics overview-metrics"><Metric k="질문" v={fmt.int(s.questions)} unit="건" /><Metric k="근거 확보율" v={s.groundedRate == null ? '-' : `${Math.round(s.groundedRate * 100)}%`} /><Metric k="오류" v={fmt.int(s.errors)} unit="건" /><Metric k="15초 초과" v={fmt.int(s.slowAnswers)} unit="건" /><Metric k="사용액" v={fmt.usd(s.spentUsd)} /></div>
     </Section>
-    <Section title="분석 바로가기"><div className="action-list">
-      <ActionRow title="사용량 및 비용" detail={`기간 상한 ${fmt.usd(d.limitUsd)}`} onClick={() => navigate(withQuery('/answer/usage', { start: d.periodStart, end: d.periodEnd }))} />
-      {user.role !== 'guest' && <ActionRow title="질문 처리 기록" detail={`오류 ${(d.answers.errors ?? 0)}건, 느린 답변 ${(d.answers.slowAnswers ?? 0)}건`} tone={(d.answers.errors ?? 0) ? 'watch' : 'plain'} onClick={() => navigate(withQuery('/answer/questions', { start: d.periodStart, end: d.periodEnd, result: (d.answers.errors ?? 0) ? 'error' : null }))} />}
-      {user.role !== 'guest' && <ActionRow title="전문 봇 분석" detail={`호출 ${d.specialists.calls}건 · 폴백 ${d.specialists.fallback}건`} tone={d.specialists.fallback ? 'watch' : 'plain'} onClick={() => navigate(withQuery('/answer/specialists', { result: d.specialists.fallback ? 'fallback' : null }))} />}
-      {user.role !== 'guest' && <ActionRow title="피드백" detail={`미처리 정정 ${d.feedback.openCorrections ?? 0}건`} tone={(d.feedback.openCorrections ?? 0) ? 'watch' : 'plain'} onClick={() => navigate(withQuery('/answer/feedback', { state: (d.feedback.openCorrections ?? 0) ? 'open' : null }))} />}
-    </div></Section>
+    <Section title="답변 품질 분포" lead="한 질문이 근거 없음·오류·지연에 동시에 포함될 수 있습니다. 막대를 선택하면 해당 원본 목록으로 이동합니다.">
+      <MiniBars label="답변 품질 분포" items={[{ label: '근거 있음', value: s.grounded, tone: 'ok' }, { label: '근거 없음', value: s.noHits, tone: 'warn' }, { label: '오류', value: s.errors, tone: 'bad' }, { label: '15초 초과', value: s.slowAnswers, tone: 'warn' }]} />
+      <div className="quality-links"><button className="btn btn-sm" type="button" onClick={() => navigate(withQuery('/answer/records', { start: d.periodStart, end: d.periodEnd, result: 'no_hits' }))}>근거 없는 답변 원본</button><button className="btn btn-sm" type="button" onClick={() => navigate(withQuery('/answer/records', { start: d.periodStart, end: d.periodEnd, result: 'error' }))}>오류 답변 원본</button><button className="btn btn-sm" type="button" onClick={() => navigate(withQuery('/answer/records', { start: d.periodStart, end: d.periodEnd, result: 'slow' }))}>느린 답변 원본</button></div>
+    </Section>
+    <Section title="질문 처리 기록" note={`${d.records.length}건`} lead="행을 선택하면 질문·답변 원본과 출처, 연결된 피드백을 확인합니다.">
+      <form className="filter-row" onSubmit={(event) => { event.preventDefault(); navigate(withQuery('/answer', { start: d.periodStart, end: d.periodEnd, workspace: workspaceDraft.trim(), result: resultDraft, asker: askerDraft.trim() })) }}>
+        <div className="field"><label className="field-label" htmlFor="answer-workspace">워크스페이스</label><input id="answer-workspace" className="input" placeholder="예: tyit" value={workspaceDraft} onChange={(event) => setWorkspaceDraft(event.target.value)} /></div>
+        <div className="field"><label className="field-label" htmlFor="answer-result">처리 결과</label><select id="answer-result" className="input" value={resultDraft} onChange={(event) => setResultDraft(event.target.value)}><option value="">모든 결과</option><option value="answered">답변 완료</option><option value="no_hits">근거 없음</option><option value="error">오류</option><option value="slow">15초 초과</option><option value="feedback">피드백 있음</option></select></div>
+        {user.role === 'admin' && <div className="field"><label className="field-label" htmlFor="answer-asker">질문자</label><input id="answer-asker" className="input" placeholder="이름 또는 Slack ID" value={askerDraft} onChange={(event) => setAskerDraft(event.target.value)} /></div>}
+        <div className="filter-actions"><button className="btn btn-primary btn-sm" type="submit">조회</button>{(workspace || result || asker) && <button className="btn btn-sm btn-quiet" type="button" onClick={() => navigate(withQuery('/answer', { start: d.periodStart, end: d.periodEnd }))}>초기화</button>}</div>
+      </form>
+      <div className="table-wrap"><table className="table"><thead><tr><th>시각</th><th>질문자</th><th>워크스페이스·채널</th><th>분류</th><th>결과</th><th className="num">근거</th><th>모델</th><th className="num">소요 시간</th><th>원본</th></tr></thead><tbody>{d.records.map((row) => <tr key={row.recordKey} className={row.reason === 'error' ? 'is-error-row' : undefined}><td>{fmt.dayClock(row.at)}</td><td>{row.asker}</td><td>{row.workspace}<div className="subtle">{row.channel || '-'}</div></td><td className="mono">{row.intent}/{row.source}</td><td>{row.reason}{row.hasFeedback && <div className="subtle">피드백 있음</div>}</td><td className="num">{row.hits || '-'}</td><td className="mono">{row.model}</td><td className="num">{fmt.ms(row.ms)}</td><td><button className="table-link" type="button" onClick={() => navigate(withQuery('/answer/records', { record: row.recordKey, start: d.periodStart, end: d.periodEnd }))}>질문·답변 보기</button></td></tr>)}</tbody></table></div>
+    </Section>
   </>
 }
 

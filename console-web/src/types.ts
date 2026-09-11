@@ -101,6 +101,133 @@ export interface CallRow {
   ms: number
 }
 
+export interface AnswerRecordSummary {
+  recordKey: string
+  at: string
+  workspace: string
+  channel: string
+  asker: string
+  intent: string
+  source: string
+  reason: string
+  hits: number
+  model: string
+  costUsd: number
+  ms: number
+  qualityReasons: string[]
+  hasFeedback: boolean
+}
+
+export interface AnswerRecordDetail {
+  recordKey: string
+  at: string
+  workspace: string
+  channel: string
+  channelId: string
+  userId: string
+  asker: string
+  question: string
+  answer: string
+  intent: string
+  source: string
+  reason: string
+  scope: string
+  hits: number
+  citations: string[]
+  model: string
+  costUsd: number
+  ms: number
+  error: string
+  requestTs: string
+  responseTs: string
+  qualityReasons: string[]
+  feedback: {
+    id: string
+    at: string
+    actor: string
+    kind: string
+    text: string
+    handled: boolean
+    handledBy: string
+    handledNote: string
+  }[]
+}
+
+export interface AnswerRecordDetail {
+  recordKey: string
+  at: string
+  workspace: string
+  channel: string
+  channelId: string
+  userId: string
+  asker: string
+  question: string
+  answer: string
+  intent: string
+  source: string
+  reason: string
+  scope: string
+  hits: number
+  citations: string[]
+  model: string
+  costUsd: number
+  ms: number
+  error: string
+  requestTs: string
+  responseTs: string
+  qualityReasons: string[]
+  feedback: {
+    id: string
+    at: string
+    actor: string
+    kind: string
+    text: string
+    handled: boolean
+    handledBy: string
+    handledNote: string
+  }[]
+}
+
+export interface AnswerRecordDetail extends AnswerRecordSummary {
+  channelId: string
+  userId: string
+  question: string
+  answer: string
+  scope: string
+  citations: string[]
+  error: string
+  requestTs: string
+  responseTs: string
+  feedback: {
+    id: string
+    at: string
+    actor: string
+    kind: string
+    text: string
+    handled: boolean
+    handledBy: string
+    handledNote: string
+  }[]
+}
+
+export interface AnswerRecordsResponse {
+  today: string
+  periodStart: string
+  periodEnd: string
+  view: 'all' | 'reviewer'
+  identityLinked: boolean
+  summary: {
+    questions: number
+    grounded: number
+    noHits: number
+    groundedRate: number | null
+    errors: number
+    slowAnswers: number
+    spentUsd: number
+  }
+  records: AnswerRecordSummary[]
+}
+
 export interface UsageSnapshot {
   /** 집계 기준 시각 (KST) */
   asOf: string

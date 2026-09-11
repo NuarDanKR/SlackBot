@@ -33,6 +33,7 @@ from ..feedback import FeedbackLog
 from ..managed_env import request_restart
 from . import (
     account_store,
+    answer_records,
     audit_store,
     deploy_approval_store,
     env_settings,
@@ -520,6 +521,77 @@ def questions(
         "periodEnd": period_end.isoformat(),
         "questions": rows[:limit],
     }
+
+
+@app.get("/api/answer-records")
+def list_answer_records(
+    user: User,
+    start: date | None = None,
+    end: date | None = None,
+    workspace: str = "",
+    result: str = "",
+    asker: str = "",
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> dict:
+    """답변 현황과 원본 목록 메타데이터.
+
+    관리자는 전체를 보고, 그 외 사용자는 본인 질문과 자신이 지정된 검토 채널만 본다.
+    질문·답변 본문은 목록에 절대 싣지 않는다.
+    """
+    if start is None and end is None:
+        end = reader._now().date()
+        start = end - timedelta(days=6)
+    period_start, period_end = _report_period(start, end)
+    rows, scope = answer_records.visible_records(
+        user,
+        start=period_start,
+        end=period_end,
+        workspace=workspace,
+        result=result,
+        asker=asker,
+    )
+    feedback = answer_records.feedback_rows(
+        max(1, (reader._now().date() - period_start).days + 1)
+    )
+    if result == "feedback":
+        feedback_ids = {
+            str(item.get("qa_record_id") or "")
+            for item in feedback
+            if item.get("action") in {"added", "submitted"}
+        }
+        rows = [row for row in rows if str(row.get("record_id") or "") in feedback_ids]
+    return {
+        "today": reader._now().date().isoformat(),
+        "periodStart": period_start.isoformat(),
+        "periodEnd": period_end.isoformat(),
+        "view": "all" if user.is_admin else "reviewer",
+        "identityLinked": user.is_admin or bool(scope.own_users),
+        "summary": answer_records.summary(rows),
+        "records": answer_records.summaries(rows[:limit], feedback),
+    }
+
+
+@app.get("/api/answer-records/{record_key}")
+def answer_record_detail(record_key: str, response: Response, user: User) -> dict:
+    """질문·답변 한 건을 명시적으로 열고 열람 사실을 남긴다."""
+    if not re.fullmatch(r"[0-9a-f]{24,64}", record_key):
+        raise HTTPException(status_code=422, detail="질문·답변 기록 식별자가 올바르지 않습니다.")
+    row, _scope = answer_records.find_visible(user, record_key)
+    if row is None:
+        raise HTTPException(status_code=404, detail="열람할 수 있는 질문·답변 기록이 없습니다.")
+    _audit_event(
+        actor=user.email,
+        category="answer-record",
+        action="read",
+        target_type="qa-record",
+        target_id=record_key,
+        workspace=str(row.get("workspace") or ""),
+        outcome="succeeded",
+        metadata={"viewer": "admin" if user.is_admin else "reviewer"},
+    )
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    return answer_records.detail(row, answer_records.feedback_rows())
 
 
 @app.get("/api/diagnostics/archive")

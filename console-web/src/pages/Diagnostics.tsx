@@ -104,7 +104,7 @@ export function CommandDiagnostics() {
     <Section title="명령 정합성" aside={<Level value={commands.level} />}><div className="table-wrap"><table className="table"><thead><tr><th>명령</th><th>코드</th><th>매니페스트</th></tr></thead><tbody>{commands.commands.map((c) => <tr key={c.name}><td className="mono">{c.name}</td><td>{c.inCode ? '등록' : '없음'}</td><td>{c.inManifest ? '등록' : '없음'}</td></tr>)}</tbody></table></div><Problems items={commands.problems} /></Section></>
 }
 
-export function FeedbackPage({ user, onToast }: { user: ConsoleUser; onToast: (message: string) => void }) {
+export function FeedbackPage({ user, navigate, onToast }: { user: ConsoleUser; navigate: (path: string) => void; onToast: (message: string) => void }) {
   const res = useResource<{ checkedAt: string; section: HealthReport['sections']['feedback'] }>('/api/feedback')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -121,7 +121,7 @@ export function FeedbackPage({ user, onToast }: { user: ConsoleUser; onToast: (m
   return <><PageHead crumb="답변 · 피드백" title="피드백" note="반응과 정정 신고를 집계하고 관리자가 처리 상태를 남깁니다." aside={<><CheckedAt value={res.data.checkedAt} /><Level value={d.level} /></>} />
     {error && <div className="notice bad"><div><div className="notice-title">처리하지 못했습니다.</div><div className="notice-detail">{error}</div></div></div>}
     <Section title="피드백 현황"><div className="metrics overview-metrics"><Metric k="긍정" v={fmt.int(d.positive)} unit="건" /><Metric k="부정" v={fmt.int(d.negative)} unit="건" /><Metric k="근거 없음" v={fmt.int(d.missing)} unit="건" /><Metric k="미처리 정정" v={fmt.int(d.openCorrections)} unit="건" /></div></Section>
-    <Section title="정정 및 신고" note={`${d.items.length}건`}><div className="table-wrap"><table className="table"><thead><tr><th>시각</th><th>워크스페이스</th><th>유형</th><th>작성자</th>{user.role === 'admin' && <th>내용</th>}<th>상태</th></tr></thead><tbody>{d.items.map((item) => <tr key={item.id}><td>{fmt.dayClock(item.at)}</td><td>{item.workspace}</td><td>{item.kind}</td><td>{item.name || item.actor}</td>{user.role === 'admin' && <td>{item.text || '-'}</td>}<td>{item.handled ? `처리됨 · ${item.handledBy}` : user.role === 'admin' ? <button className="btn btn-sm" disabled={busy === item.id} onClick={() => setHandling({ id: item.id, note: '' })}>처리 표시</button> : '미처리'}</td></tr>)}</tbody></table></div></Section>
+    <Section title="정정 및 신고" note={`${d.items.length}건`}><div className="table-wrap"><table className="table"><thead><tr><th>시각</th><th>워크스페이스</th><th>유형</th><th>작성자</th>{user.role === 'admin' && <th>내용</th>}<th>질문·답변</th><th>상태</th></tr></thead><tbody>{d.items.map((item) => <tr key={item.id}><td>{fmt.dayClock(item.at)}</td><td>{item.workspace}</td><td>{item.kind}</td><td>{item.name || item.actor}</td>{user.role === 'admin' && <td>{item.text || '-'}</td>}<td>{item.qaRecordId ? <button className="table-link" type="button" onClick={() => navigate(`/answer/records?record=${encodeURIComponent(item.qaRecordId)}`)}>원본 보기</button> : '연결 없음'}</td><td>{item.handled ? `처리됨 · ${item.handledBy}` : user.role === 'admin' ? <button className="btn btn-sm" disabled={busy === item.id} onClick={() => setHandling({ id: item.id, note: '' })}>처리 표시</button> : '미처리'}</td></tr>)}</tbody></table></div></Section>
     <ConfirmDialog open={handling !== null} title="이 피드백을 처리 완료로 표시할까요?"
       detail="처리 내용과 실행자는 감사 기록에 남습니다. 실제 확인이나 정정이 끝난 항목만 처리해 주세요."
       confirmLabel="처리 완료" busy={busy !== null} onCancel={() => setHandling(null)}

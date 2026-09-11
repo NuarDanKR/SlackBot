@@ -3,7 +3,8 @@ import type { Me } from './api/client'
 import { ApiError, login as apiLogin, logout as apiLogout } from './api/client'
 import { useResource } from './api/hooks'
 import { AuditEvents } from './pages/AuditEvents'
-import { ArchiveDiagnostics, AnswerQuality, CommandDiagnostics, FeedbackPage } from './pages/Diagnostics'
+import { ArchiveDiagnostics, CommandDiagnostics, FeedbackPage } from './pages/Diagnostics'
+import { AnswerRecords } from './pages/AnswerRecords'
 import { BatchTimers } from './pages/BatchTimers'
 import { Collected } from './pages/Collected'
 import { ConsoleUsers } from './pages/ConsoleUsers'
@@ -13,7 +14,6 @@ import { EnvSettings } from './pages/EnvSettings'
 import { Harness } from './pages/Harness'
 import { Home } from './pages/Home'
 import { AnswerDashboard, OperationsDashboard, ConsoleDashboard } from './pages/LifecycleDashboards'
-import { Questions } from './pages/Questions'
 import { ServiceLogs } from './pages/ServiceLogs'
 import type { ErrorLogContext } from './pages/ServiceLogs'
 import { SpecialistAnalytics, SpecialistManagement } from './pages/Specialists'
@@ -35,12 +35,11 @@ const NAV: NavGroup[] = [
     { path: '/collect/reviews', label: '요약 검토 현황', capability: 'summaryReview' },
   ] },
   { label: '답변', path: '/answer', items: [
-    { path: '/answer', label: '답변 개요' },
-    { path: '/answer/questions', label: '질문 처리 기록', minimum: 'developer' },
+    { path: '/answer', label: '답변 현황' },
+    { path: '/answer/specialists', label: '봇 분류 상태', minimum: 'developer', capability: 'specialists' },
+    { path: '/answer/records', label: '질문·답변 원본' },
+    { path: '/answer/feedback', label: '피드백', minimum: 'admin' },
     { path: '/answer/usage', label: '사용량 및 비용' },
-    { path: '/answer/specialists', label: '전문 봇 분석', minimum: 'developer', capability: 'specialists' },
-    { path: '/answer/quality', label: '답변 품질', minimum: 'developer' },
-    { path: '/answer/feedback', label: '피드백', minimum: 'developer' },
     { path: '/answer/rules', label: '답변 규칙', minimum: 'developer' },
   ] },
   { label: '운영', path: '/manage', minimum: 'developer', items: [
@@ -60,7 +59,7 @@ const NAV: NavGroup[] = [
   ] },
 ]
 
-const ALL_PATHS = new Set(['/home', '/collect/status', '/manage/slack', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
+const ALL_PATHS = new Set(['/home', '/collect/status', '/manage/slack', '/answer/questions', '/answer/quality', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
 
 const RANK: Record<ConsoleRole, number> = { guest: 0, developer: 1, admin: 2 }
 const THEME_LABEL: Record<Theme, string> = { system: '시스템 설정', light: '밝게', dark: '어둡게' }
@@ -100,6 +99,8 @@ export default function App() {
   const { location, navigate } = useHashNavigation()
   const path = location.path === '/collect/status'
     ? '/collect'
+    : location.path === '/answer/questions' || location.path === '/answer/quality'
+      ? '/answer'
     : location.path === '/manage/slack'
       ? '/manage/commands'
       : location.path
@@ -152,11 +153,10 @@ export default function App() {
       {path === '/collect/documents' && <Collected user={user} query={location.query} onToast={toast} />}
       {(path === '/collect/summaries' || path === '/collect/reviews') && <><div className="page-head"><div><div className="crumb">수집</div><h1 className="page-title">화면을 준비하고 있습니다</h1><p className="page-note">기능이 활성화되었지만 이 버전의 콘솔에는 화면이 연결되지 않았습니다. 관리자에게 콘솔 배포 상태를 알려 주세요.</p></div></div></>}
       {path === '/answer' && <AnswerDashboard user={user} query={location.query} navigate={navigate} />}
-      {path === '/answer/questions' && <Questions query={location.query} navigate={navigate} />}
-      {path === '/answer/usage' && <Usage canViewLogs={user.role !== 'guest'} showRecent={false} query={location.query} navigate={navigate} onOpenErrorLogs={(context) => navigate(withQuery('/manage/logs', { workspace: context.workspace, at: context.at, level: 'error' }))} />}
       {path === '/answer/specialists' && <SpecialistAnalytics query={location.query} navigate={navigate} />}
-      {path === '/answer/quality' && <AnswerQuality user={user} />}
-      {path === '/answer/feedback' && <FeedbackPage user={user} onToast={toast} />}
+      {path === '/answer/records' && <AnswerRecords user={user} query={location.query} navigate={navigate} />}
+      {path === '/answer/feedback' && <FeedbackPage user={user} navigate={navigate} onToast={toast} />}
+      {path === '/answer/usage' && <Usage canViewLogs={user.role !== 'guest'} showRecent={false} query={location.query} navigate={navigate} onOpenErrorLogs={(context) => navigate(withQuery('/manage/logs', { workspace: context.workspace, at: context.at, level: 'error' }))} />}
       {path === '/answer/rules' && <Harness />}
       {path === '/manage' && <OperationsDashboard user={user} navigate={navigate} />}
       {path === '/manage/specialists' && <SpecialistManagement user={user} query={location.query} onToast={toast} />}
