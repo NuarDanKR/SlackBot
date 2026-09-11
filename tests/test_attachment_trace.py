@@ -345,3 +345,241 @@ def test_every_stage_has_a_label_and_an_action():
     for stage in at.STAGES:
         assert at.STAGE_LABEL.get(stage)
         assert at.STAGE_ACTION.get(stage)
+
+
+# --- 원문 반영 확인 (설계 §6) --------------------------------------------------
+#
+# 핵심: `writer.ingest().written == 0` 은 실패가 아니다. 이미 같은 줄이 있으면 멱등
+# 성공이다. 그래서 쓴 건수가 아니라 **원문에 줄이 있는지**를 본다.
+class FakeStaged:
+    def __init__(self, file_id, name, lines, meta_path=None):
+        self.file_id = file_id
+        self.name = name
+        self.lines = list(lines)
+        self.line_hashes = [at.line_hash(ln) for ln in self.lines]
+        self.metadata_path = meta_path
+        self.warnings: list[str] = []
+
+
+def test_confirm_marks_archived_when_every_line_is_present(tmp_path):
+    meta_path, _ = _stage(tmp_path)
+    lines = _archive_lines(REPORTS[0])
+    item = FakeStaged("F1", REPORTS[0], lines, meta_path)
+    assert at.confirm_archived(lines, [item]) == {"F1": at.ARCHIVE_DONE}
+    meta = at.read_metadata(meta_path)
+    assert meta["archive_state"] == at.ARCHIVE_DONE
+    assert meta["archived_at"]
+    assert meta["archive_error_code"] is None
+    assert meta["archive_line_hashes"] == item.line_hashes
+
+
+def test_confirm_marks_failed_when_lines_are_missing(tmp_path):
+    meta_path, _ = _stage(tmp_path)
+    item = FakeStaged("F1", REPORTS[0], _archive_lines(REPORTS[0]), meta_path)
+    assert at.confirm_archived([], [item]) == {"F1": at.ARCHIVE_FAILED}
+    meta = at.read_metadata(meta_path)
+    assert meta["archive_state"] == at.ARCHIVE_FAILED
+    assert meta["archived_at"] is None
+    assert meta["archive_error_code"].startswith("archive-lines-missing:")
+
+
+def test_idempotent_rewrite_is_confirmed_without_counting_writes(tmp_path):
+    """`written == 0` 이어도 줄이 있으면 성공이다."""
+    meta_path, _ = _stage(tmp_path)
+    lines = _archive_lines(REPORTS[0])
+    item = FakeStaged("F1", REPORTS[0], lines, meta_path)
+    at.confirm_archived(lines, [item])          # 첫 회
+    got = at.confirm_archived(lines, [item])    # 다시 — 쓴 건수는 0이다
+    assert got == {"F1": at.ARCHIVE_DONE}
+
+
+def test_one_failure_does_not_change_the_others(tmp_path):
+    """일부 첨부만 실패해도 다른 첨부 상태를 잘못 바꾸지 않는다."""
+    good_meta, _ = _stage(tmp_path, name=REPORTS[0], file_id="F1")
+    bad_meta, _ = _stage(tmp_path, name=REPORTS[1], file_id="F2")
+    lines = _archive_lines(REPORTS[0])
+    got = at.confirm_archived(lines, [
+        FakeStaged("F1", REPORTS[0], lines, good_meta),
+        FakeStaged("F2", REPORTS[1], _archive_lines(REPORTS[1]), bad_meta),
+    ])
+    assert got == {"F1": at.ARCHIVE_DONE, "F2": at.ARCHIVE_FAILED}
+    assert at.read_metadata(good_meta)["archive_state"] == at.ARCHIVE_DONE
+    assert at.read_metadata(bad_meta)["archive_state"] == at.ARCHIVE_FAILED
+
+
+def test_confirm_without_lines_stays_pending(tmp_path):
+    """넣을 줄이 없었으면 확인할 것도 없다. 실패로 적으면 없는 고장을 만든다."""
+    meta_path, _ = _stage(tmp_path)
+    item = FakeStaged("F1", REPORTS[0], [], meta_path)
+    assert at.confirm_archived([], [item]) == {"F1": at.ARCHIVE_PENDING}
+    # metadata 를 건드리지 않는다 — 없는 고장을 적으면 진단이 거짓이 된다.
+    assert at.read_metadata(meta_path).get("archive_state") is None
+
+
+def test_metadata_write_failure_does_not_raise(tmp_path):
+    """metadata 갱신 실패가 원문 쓰기를 되돌리면 안 된다."""
+    lines = _archive_lines(REPORTS[0])
+    missing = tmp_path / "없는곳" / "metadata.json"
+    got = at.confirm_archived(lines, [FakeStaged("F1", REPORTS[0], lines, missing)])
+    assert got == {"F1": at.ARCHIVE_DONE}   # 판정은 그대로다
+
+
+def test_confirm_accepts_an_archive_store(tmp_path):
+    """온라인 수집은 Store 를, 테스트는 줄 목록을 준다. 판정은 같아야 한다."""
+    class FakeLine:
+        def __init__(self, text):
+            self.text = text
+
+    class FakeDoc:
+        workspace = WS
+        channel_id = "C1"
+
+        def __init__(self, lines):
+            self.raw_lines = [FakeLine(t) for t in lines]
+
+    class FakeStore:
+        def __init__(self, lines):
+            self._docs = [FakeDoc(lines)]
+
+        def source_docs(self):
+            return self._docs
+
+    meta_path, _ = _stage(tmp_path)
+    lines = _archive_lines(REPORTS[0])
+    got = at.confirm_archived(
+        FakeStore(lines), [FakeStaged("F1", REPORTS[0], lines, meta_path)],
+        workspace=WS, channel_id="C1",
+    )
+    assert got == {"F1": at.ARCHIVE_DONE}
+
+
+def test_confirm_ignores_other_channels(tmp_path):
+    """다른 채널 원문에 같은 줄이 있어도 이 채널 반영이 된 것은 아니다."""
+    class FakeLine:
+        def __init__(self, text):
+            self.text = text
+
+    class FakeDoc:
+        def __init__(self, lines, channel_id):
+            self.workspace = WS
+            self.channel_id = channel_id
+            self.raw_lines = [FakeLine(t) for t in lines]
+
+    class FakeStore:
+        def __init__(self, docs):
+            self._docs = docs
+
+        def source_docs(self):
+            return self._docs
+
+    meta_path, _ = _stage(tmp_path)
+    lines = _archive_lines(REPORTS[0])
+    store = FakeStore([FakeDoc(lines, "OTHER")])
+    got = at.confirm_archived(
+        store, [FakeStaged("F1", REPORTS[0], lines, meta_path)],
+        workspace=WS, channel_id="C1",
+    )
+    assert got == {"F1": at.ARCHIVE_FAILED}
+
+
+def test_confirm_logs_only_the_file_id(tmp_path, caplog):
+    """파일명·본문은 일반 로그에 반복하지 않는다(설계 §15)."""
+    meta_path, _ = _stage(tmp_path)
+    lines = _archive_lines(REPORTS[0])
+    with caplog.at_level("INFO", logger="tybot.attachment_trace"):
+        at.confirm_archived(lines, [FakeStaged("F1", REPORTS[0], lines, meta_path)])
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "file=F1" in text
+    assert REPORTS[0] not in text
+
+
+# --- 추적 좌표 (설계 §5) -------------------------------------------------------
+def test_staging_records_the_origin(tmp_path):
+    """실시간 수집과 백필이 같은 구조를 쓴다. 한쪽이 빠지면 그 경로만 추적이 끊긴다."""
+    from tybot.archive.files import AttachmentOrigin, attachment_storage, stage_attachments
+
+    archive = tmp_path / "archive"
+    storage = attachment_storage(archive, WS, CH)
+    got = stage_attachments(
+        [{"id": "F9", "name": "메모.txt", "filetype": "txt", "size": 10}],
+        None,  # 토큰 없음 — 다운로드는 실패하지만 metadata 는 남는다
+        storage,
+        origin=AttachmentOrigin(
+            workspace=WS, channel_id=CH, message_ts="1789.1", thread_ts="1789.0",
+        ),
+    )
+    (item,) = got
+    assert item.file_id == "F9"
+    meta = at.read_metadata(item.metadata_path)
+    assert meta["origin_message_ts"] == "1789.1"
+    assert meta["origin_thread_ts"] == "1789.0"
+    assert meta["archive_state"] == at.ARCHIVE_PENDING
+
+
+def test_staging_without_origin_omits_the_fields(tmp_path):
+    """빈 문자열을 넣으면 「모른다」 가 「없다」 로 바뀐다. 아예 넣지 않는다."""
+    from tybot.archive.files import attachment_storage, stage_attachments
+
+    storage = attachment_storage(tmp_path / "archive", WS, CH)
+    (item,) = stage_attachments(
+        [{"id": "F9", "name": "메모.txt", "filetype": "txt", "size": 10}], None, storage
+    )
+    meta = at.read_metadata(item.metadata_path)
+    assert "origin_message_ts" not in meta
+    assert "origin_thread_ts" not in meta
+
+
+def test_warnings_stay_with_their_own_file(tmp_path):
+    """한 리스트에 섞으면 어느 파일의 경고인지 사라진다."""
+    from tybot.archive.files import attachment_storage, stage_attachments
+
+    storage = attachment_storage(tmp_path / "archive", WS, CH)
+    got = stage_attachments([
+        {"id": "F1", "name": "a.txt", "filetype": "txt", "size": 10},
+        {"id": "F2", "name": "b.txt", "filetype": "txt", "size": 10},
+    ], None, storage)
+    assert len(got) == 2
+    for item in got:
+        assert item.warnings
+        assert all(item.name in w for w in item.warnings)
+
+
+def test_flat_helper_still_works(tmp_path):
+    """기존 호출부와 테스트가 쓰는 평면 반환은 그대로 남는다."""
+    from tybot.archive.files import attachment_storage, stage_files
+
+    storage = attachment_storage(tmp_path / "archive", WS, CH)
+    lines, warns = stage_files(
+        [{"id": "F1", "name": "a.txt", "filetype": "txt", "size": 10}], None, storage
+    )
+    assert lines and warns
+
+
+# --- 지문이 있으면 이름 모호성이 사라진다 --------------------------------------
+def test_line_hashes_resolve_the_same_name_case(tmp_path):
+    """이름이 아니라 파일 ID 에 묶인 근거라, 같은 이름이 둘이어도 판정할 수 있다."""
+    lines = _archive_lines(REPORTS[0])
+    meta_path, meta = _stage(
+        tmp_path, extra={"archive_line_hashes": [at.line_hash(ln) for ln in lines]},
+    )
+    got = _trace(meta_path, meta, doc_lines=lines, same_name=2)
+    assert _status(got, at.ARCHIVED) == at.OK
+    assert got.first_failure is None or got.first_failure.stage != at.ARCHIVED
+
+
+def test_line_hashes_detect_a_partial_loss(tmp_path):
+    lines = _archive_lines(REPORTS[0])
+    meta_path, meta = _stage(
+        tmp_path, extra={"archive_line_hashes": [at.line_hash(ln) for ln in lines]},
+    )
+    stuck = _trace(meta_path, meta, doc_lines=lines[:1]).first_failure
+    assert stuck and stuck.stage == at.ARCHIVED
+    assert "archive-lines-missing:3/4" in stuck.detail
+
+
+def test_old_metadata_falls_back_to_the_name(tmp_path):
+    """지문 필드를 추가하기 전에 들어온 첨부도 판정돼야 한다."""
+    meta_path, meta = _stage(tmp_path)
+    assert "archive_line_hashes" not in meta
+    got = _trace(meta_path, meta, doc_lines=_archive_lines(REPORTS[0]))
+    assert _status(got, at.ARCHIVED) == at.OK

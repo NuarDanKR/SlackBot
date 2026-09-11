@@ -100,6 +100,42 @@ class SlackFile:
 
 
 @dataclass(frozen=True)
+class AttachmentOrigin:
+    """이 첨부가 온 자리. Slack 메시지와 답변 근거를 잇는 좌표다.
+
+    설계: `docs/design/document-pipeline-trace-and-report-summary.md` §5
+
+    인자를 문자열로 계속 늘리지 않는다. 실시간 수집과 정기 백필이 **같은 구조**를
+    써야 하고, 하나가 빠뜨리면 그 경로로 들어온 첨부만 추적이 끊긴다.
+    """
+
+    workspace: str = ""
+    channel_id: str = ""
+    message_ts: str = ""
+    thread_ts: str = ""
+
+
+@dataclass
+class StagedAttachmentResult:
+    """첨부 하나의 처리 결과. **어느 줄이 어느 파일에서 왔는지** 담는다.
+
+    `stage_files()` 가 `list[str]` 만 돌려주면 writer 이후에 그 연결을 되찾을 수
+    없다. 그래서 파일 ID 와 줄 지문을 함께 돌려준다 — 원문 반영을 확인하는 유일한
+    근거다(§6).
+
+    본문은 담지 않는다. `line_hashes` 는 「그 줄이 있었다」 만 확인하는 지문이다.
+    """
+
+    file_id: str
+    name: str
+    lines: list[str]
+    line_hashes: list[str]
+    metadata_path: Path
+    warnings: list[str]
+    extracted: bool = False
+
+
+@dataclass(frozen=True)
 class AttachmentStorage:
     """첨부 원본을 검색 가능한 원문 아카이브 밖에 격리하는 위치."""
 
@@ -198,20 +234,27 @@ def download_text(f: SlackFile, bot_token: str) -> str:
     return out
 
 
-def stage_files(
+def stage_attachments(
     files: list[dict],
     bot_token: str | None,
     storage: AttachmentStorage,
-) -> tuple[list[str], list[str]]:
-    """원본을 격리 저장하고, 로컬 추출 텍스트는 검색 가능한 원문으로 반환한다.
+    *,
+    origin: AttachmentOrigin | None = None,
+) -> list[StagedAttachmentResult]:
+    """원본을 격리 저장하고 **파일별로** 원문 줄과 줄 지문을 돌려준다.
 
     원본은 ArchiveStore 밖에 격리한다. 변환 텍스트는 호출자가 기존 민감정보 검사를
     적용한 뒤 아카이브에 기록하며, 답변 경로는 원본 바이트를 외부 모델에 보내지 않는다.
+
+    파일별로 나눠 돌려주는 이유는 하나다 — `writer.ingest()` 뒤에 **그 파일의 줄이
+    원문에 실제로 들어갔는지** 확인해야 하기 때문이다. 줄을 한 덩어리로 합치면 그
+    연결이 사라지고, 그때부터 `converted` 를 「답변 가능」 으로 오해하게 된다(§6).
     """
-    lines: list[str] = []
-    warnings: list[str] = []
+    results: list[StagedAttachmentResult] = []
     for item in files or []:
         f = SlackFile.from_event(item)
+        # 경고도 파일별로 모은다. 한 리스트에 섞으면 어느 파일의 경고인지 사라진다.
+        own_warnings: list[str] = []
         file_id = _safe_component(f.id or hashlib.sha256(f.name.encode()).hexdigest()[:16])
         staged = storage.staging_dir / file_id
         objects = storage.objects_dir / file_id
@@ -240,12 +283,12 @@ def stage_files(
         except (DownloadError, ConvertError, OSError) as exc:
             state = "download_or_extract_failed"
             error = str(exc)
-            warnings.append(error)
+            own_warnings.append(error)
             logger.warning("첨부 격리 저장 실패 %s: %s", f.name, exc)
         except Exception as exc:
             state = "download_or_extract_failed"
             error = f"{f.name}: 예상하지 못한 오류 {exc.__class__.__name__}: {exc}"
-            warnings.append(error)
+            own_warnings.append(error)
             logger.exception("첨부 격리 저장 중 예외 %s", f.name)
 
         if extracted is not None:
@@ -256,7 +299,7 @@ def stage_files(
             if refused:
                 state = "pii_refused"
                 error = f"{f.name}: 수집 제외 대상({refused})"
-                warnings.append(error)
+                own_warnings.append(error)
                 extracted = None
 
         try:
@@ -275,6 +318,17 @@ def stage_files(
                 "extracted": extracted is not None,
                 "error": error,
                 "staged_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                # --- 추적 좌표(§5). 없는 값은 넣지 않는다 — 구형 metadata 와
+                # 구별되어야 하고, 빈 문자열은 「모른다」 를 「없다」 로 바꾼다.
+                **({"origin_message_ts": origin.message_ts}
+                   if origin and origin.message_ts else {}),
+                **({"origin_thread_ts": origin.thread_ts}
+                   if origin and origin.thread_ts else {}),
+                # 원문 반영은 writer 이후에야 알 수 있다. 여기서는 아직 모른다.
+                "archive_state": "pending",
+                "archive_line_hashes": [],
+                "archived_at": None,
+                "archive_error_code": None,
             }
             (staged / "metadata.json").write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -290,7 +344,7 @@ def stage_files(
                 (staged / "extracted.md").unlink(missing_ok=True)
         except OSError as exc:
             warning = f"{f.name}: 검수 메타데이터 저장 실패: {exc}"
-            warnings.append(warning)
+            own_warnings.append(warning)
             logger.warning(warning)
 
         if extracted is not None:
@@ -301,15 +355,44 @@ def stage_files(
             label = "수집제외"
         else:
             label = "처리실패"
-        lines.append(f.describe(label))
+        own_lines = [f.describe(label)]
         if extracted is not None:
             tag = "첨부본문" if f.is_text else "첨부추출"
             body_lines = [line.strip() for line in extracted.splitlines() if line.strip()]
             truncated = len(body_lines) > MAX_TEXT_LINES
             for line in body_lines[:MAX_TEXT_LINES]:
-                lines.append(f"[{tag}:{f.name}] {line}")
+                own_lines.append(f"[{tag}:{f.name}] {line}")
             if truncated:
-                lines.append(f"[{tag}:{f.name}] …(이하 생략, 원본 링크에서 확인)")
+                own_lines.append(f"[{tag}:{f.name}] …(이하 생략, 원본 링크에서 확인)")
+
+        from ..attachment_trace import line_hash
+
+        results.append(StagedAttachmentResult(
+            file_id=str(f.id or file_id),
+            name=f.name,
+            lines=own_lines,
+            line_hashes=[line_hash(ln) for ln in own_lines],
+            metadata_path=staged / "metadata.json",
+            warnings=list(own_warnings),
+            extracted=extracted is not None,
+        ))
+    return results
+
+
+def stage_files(
+    files: list[dict],
+    bot_token: str | None,
+    storage: AttachmentStorage,
+    *,
+    origin: AttachmentOrigin | None = None,
+) -> tuple[list[str], list[str]]:
+    """`stage_attachments` 의 평면 반환. 기존 호출부를 위해 남긴다.
+
+    파일↔줄 연결이 필요하면 `stage_attachments` 를 쓴다 — 이 함수는 그 연결을 버린다.
+    """
+    results = stage_attachments(files, bot_token, storage, origin=origin)
+    lines = [ln for r in results for ln in r.lines]
+    warnings = [w for r in results for w in r.warnings]
     return lines, warnings
 
 

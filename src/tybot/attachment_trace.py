@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger("tybot.attachment_trace")
@@ -295,6 +296,22 @@ def _screened(meta: dict) -> StageResult:
 
 def _archived(meta: dict, doc_lines, *, same_name: int) -> StageResult:
     name = str(meta.get("name") or "")
+
+    # 줄 지문이 있으면 **그것으로 판정한다.** 이름이 아니라 파일 ID 에 묶인 근거라
+    # 같은 이름이 여럿이어도 모호하지 않다(설계 §6). 확인은 수집 시점에 끝났고,
+    # 여기서는 그 결과를 원문과 다시 맞춰 본다 — 원문이 진실이므로.
+    hashes = [str(h) for h in (meta.get("archive_line_hashes") or [])]
+    if hashes:
+        have = {line_hash(ln) for ln in doc_lines}
+        missing = [h for h in hashes if h not in have]
+        if not missing:
+            return StageResult(ARCHIVED, OK, f"lines={len(hashes)} (지문 확인)")
+        return StageResult(
+            ARCHIVED, FAIL,
+            f"code=archive-lines-missing:{len(missing)}/{len(hashes)} (지문 확인)",
+        )
+
+    # 지문이 없다 = 이 필드를 추가하기 전에 들어온 첨부다. 이름으로 되짚는다.
     if same_name > 1:
         # 원문 줄에는 파일명만 남는다. 같은 이름이 여럿이면 어느 것이 반영됐는지
         # 알 수 없다 — 찍어서 맞추면 잘못된 안심을 준다.
@@ -395,3 +412,103 @@ def summary_line(counts: dict[str, int]) -> str:
         if stage != "ok"
     ]
     return " · ".join(parts)
+
+
+# --- 원문 반영 확인과 기록 ----------------------------------------------------
+#
+# 설계 §6. **온라인 수집과 재변환 스크립트가 같은 함수를 쓴다** — 판정이 둘이면 한쪽은
+# 성공이라고 하고 다른 쪽은 실패라고 한다.
+#
+# 핵심: `writer.ingest().written == 0` 은 실패가 아니다. 이미 같은 줄이 있으면 멱등
+# 성공이다. 그래서 **쓴 건수가 아니라 원문에 줄이 있는지**를 본다.
+ARCHIVE_PENDING = "pending"
+ARCHIVE_DONE = "archived"
+ARCHIVE_FAILED = "failed"
+
+
+def confirm_archived(
+    store_or_lines, results, *, workspace: str = "", channel_id: str = ""
+) -> dict[str, str]:
+    """첨부별로 원문 반영을 확인하고 metadata 에 기록한다. 파일 ID → 상태.
+
+    `store_or_lines` 는 원문 줄 목록이거나 `ArchiveStore` 다. Store 를 주면 해당
+    워크스페이스·채널의 줄을 모아 쓴다.
+
+    한 첨부가 실패해도 **다른 첨부의 상태를 건드리지 않는다.** 그리고 metadata 갱신
+    실패는 원문 쓰기를 되돌리지 않는다 — 원문이 진실이고 metadata 는 그 사본이다.
+    실패하면 진단에서 `pending` 으로 남아 「모른다」 로 보인다.
+    """
+    lines = _lines_of(store_or_lines, workspace=workspace, channel_id=channel_id)
+    have = {line_hash(ln) for ln in lines}
+    out: dict[str, str] = {}
+    for item in results or []:
+        hashes = list(getattr(item, "line_hashes", None) or [])
+        file_id = str(getattr(item, "file_id", "") or "")
+        if not hashes:
+            # 넣을 줄이 없었다면 확인할 것도 없다. 실패로 적으면 없는 고장을 만든다.
+            out[file_id] = ARCHIVE_PENDING
+            continue
+        missing = [h for h in hashes if h not in have]
+        state = ARCHIVE_DONE if not missing else ARCHIVE_FAILED
+        out[file_id] = state
+        _record_archive_state(
+            getattr(item, "metadata_path", None),
+            state=state,
+            hashes=hashes,
+            missing=len(missing),
+        )
+    _log_confirm(workspace, channel_id, out)
+    return out
+
+
+def _lines_of(store_or_lines, *, workspace: str, channel_id: str) -> list[str]:
+    if hasattr(store_or_lines, "source_docs"):
+        lines: list[str] = []
+        for doc in store_or_lines.source_docs():
+            if workspace and doc.workspace != workspace:
+                continue
+            if channel_id and (doc.channel_id or "") != channel_id:
+                continue
+            lines += [ln.text for ln in doc.raw_lines]
+        return lines
+    return [str(ln) for ln in (store_or_lines or [])]
+
+
+def _record_archive_state(
+    meta_path, *, state: str, hashes: list[str], missing: int
+) -> None:
+    """metadata 에 반영 결과를 남긴다. 실패해도 예외를 올리지 않는다."""
+    if not meta_path:
+        return
+    path = Path(meta_path)
+    meta = read_metadata(path)
+    if meta is None:
+        return
+    meta["archive_state"] = state
+    meta["archive_line_hashes"] = hashes
+    meta["archived_at"] = (
+        datetime.now(UTC).isoformat(timespec="seconds")
+        if state == ARCHIVE_DONE else None
+    )
+    # 비민감 코드만. 상세는 서비스 로그에 남긴다(§5).
+    meta["archive_error_code"] = (
+        f"archive-lines-missing:{missing}" if state == ARCHIVE_FAILED else None
+    )
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        tmp.replace(path)
+    except OSError as exc:
+        # 원문 쓰기를 되돌리지 않는다. 진단에서 pending 으로 보이면 그게 사실이다.
+        logger.warning("첨부 반영 상태를 기록하지 못했다 %s: %s", path, exc)
+
+
+def _log_confirm(workspace: str, channel_id: str, out: dict[str, str]) -> None:
+    """파일 ID 를 공통 키로 남긴다(§15). 파일명·본문은 넣지 않는다."""
+    for file_id, state in out.items():
+        logger.info(
+            "attachment_archive ws=%s ch=%s file=%s result=%s",
+            workspace, channel_id, file_id, state,
+        )

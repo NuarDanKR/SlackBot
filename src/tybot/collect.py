@@ -26,7 +26,13 @@ from datetime import UTC, datetime
 
 from .archive import writer
 from .archive.canvas import canvas_lines
-from .archive.files import attachment_storage, stage_files
+from .archive.files import (
+    AttachmentOrigin,
+    attachment_storage,
+    stage_attachments,
+)
+from .archive.store import ArchiveStore
+from .attachment_trace import confirm_archived
 from .channels import should_collect
 from .envfile import load_env_file
 from .lock import AlreadyRunning, LockUnavailable, instance_lock
@@ -38,7 +44,10 @@ HISTORY_LIMIT = 15  # 신규 앱 요청당 상한
 PACE_SECONDS = 65  # 분당 1요청 제한 + 여유
 
 
-def _messages_from(client, event: dict, bot_token: str, name_cache: dict, storage) -> list:
+def _messages_from(
+    client, event: dict, bot_token: str, name_cache: dict, storage,
+    *, workspace: str = "", channel_id: str = "", staged_out: list | None = None,
+) -> list:
     ts = datetime.fromtimestamp(float(event["ts"]), tz=UTC)
     uid = event.get("user", "unknown")
     if uid not in name_cache:
@@ -56,10 +65,26 @@ def _messages_from(client, event: dict, bot_token: str, name_cache: dict, storag
     if body:
         out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=body))
     if event.get("files"):
-        lines, warns = stage_files(event["files"], bot_token, storage)
-        out.extend(writer.IncomingMessage(ts=ts, speaker=speaker, text=ln) for ln in lines)
-        for w in warns:
-            log.warning("첨부 처리 경고: %s", w)
+        # 실시간 수집과 **같은 구조**를 쓴다. 한쪽만 추적 좌표를 남기면 그 경로로
+        # 들어온 첨부만 조용히 추적이 끊긴다(설계 §5).
+        staged = stage_attachments(
+            event["files"], bot_token, storage,
+            origin=AttachmentOrigin(
+                workspace=workspace,
+                channel_id=channel_id,
+                message_ts=str(event.get("ts") or ""),
+                thread_ts=str(event.get("thread_ts") or ""),
+            ),
+        )
+        if staged_out is not None:
+            staged_out.extend(staged)
+        for item in staged:
+            out.extend(
+                writer.IncomingMessage(ts=ts, speaker=speaker, text=ln)
+                for ln in item.lines
+            )
+            for w in item.warnings:
+                log.warning("첨부 처리 경고: %s", w)
     return out
 
 
@@ -110,10 +135,14 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
             continue
 
         msgs = []
+        staged: list = []
         for m in reversed(res.get("messages", [])):
             if m.get("bot_id") or m.get("subtype") not in (None, "file_share"):
                 continue
-            msgs.extend(_messages_from(client, m, cfg.bot_token, name_cache, storage))
+            msgs.extend(_messages_from(
+                client, m, cfg.bot_token, name_cache, storage,
+                workspace=cfg.key, channel_id=ch["id"], staged_out=staged,
+            ))
 
         canvas = canvas_lines(client, ch["id"], cfg.bot_token)
         if canvas.lines:
@@ -153,6 +182,16 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
             log.info("[%s] %s 신규 %d건", cfg.key, name, r.written)
         if r.refused:
             log.warning("[%s] %s 제외 대상 %d건", cfg.key, name, len(r.refused))
+        if staged:
+            # 쓴 건수가 아니라 **원문에 줄이 있는지**로 판정한다. 재변환 스크립트와
+            # 같은 함수를 쓴다 — 판정이 둘이면 한쪽은 성공이라고 한다(§6).
+            try:
+                confirm_archived(
+                    ArchiveStore(archive_dir), staged,
+                    workspace=cfg.key, channel_id=ch["id"],
+                )
+            except Exception as e:
+                log.warning("[%s] %s 첨부 원문 반영 확인 실패: %s", cfg.key, name, e)
     return stats
 
 

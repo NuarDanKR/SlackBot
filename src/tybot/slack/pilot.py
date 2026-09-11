@@ -35,9 +35,14 @@ from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
 from ..archive.canvas import canvas_lines
-from ..archive.files import attachment_storage, stage_files
+from ..archive.files import (
+    AttachmentOrigin,
+    attachment_storage,
+    stage_attachments,
+)
 from ..archive.store import ArchiveStore
 from ..archive.writer import KST
+from ..attachment_trace import confirm_archived
 from ..audit import QALog, QARecord
 from ..autojoin import on_channel_event, sweep
 from ..canvas_answer import create as create_answer_canvas
@@ -2404,19 +2409,31 @@ class WorkspaceBot:
         """
         ts = datetime.fromtimestamp(float(event["ts"]), tz=UTC)
         speaker = self._user_name(client, event.get("user", "unknown"))
+        # 이전 메시지의 첨부가 남아 있으면 그 상태를 엉뚱한 원문으로 확인하게 된다.
+        self._pending_attachments = []
         out = []
         body = (event.get("text") or "").strip()
         if body:
             out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=body))
         if event.get("files"):
-            storage = attachment_storage(
-                self.archive_dir, self.workspace, event.get("channel", "unknown")
+            channel_id = event.get("channel", "unknown")
+            storage = attachment_storage(self.archive_dir, self.workspace, channel_id)
+            staged = stage_attachments(
+                event["files"], self.cfg.bot_token, storage,
+                origin=AttachmentOrigin(
+                    workspace=self.workspace,
+                    channel_id=channel_id,
+                    message_ts=str(event.get("ts") or ""),
+                    thread_ts=str(event.get("thread_ts") or ""),
+                ),
             )
-            lines, warns = stage_files(event["files"], self.cfg.bot_token, storage)
-            for ln in lines:
-                out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=ln))
-            for w in warns:
-                log.warning("첨부 처리 경고 ch=%s: %s", event.get("channel"), w)
+            # 파일↔줄 연결을 들고 있어야 writer 뒤에 반영을 확인할 수 있다.
+            self._pending_attachments = staged
+            for item in staged:
+                for ln in item.lines:
+                    out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=ln))
+                for w in item.warnings:
+                    log.warning("첨부 처리 경고 ch=%s: %s", channel_id, w)
         return out
 
     def _ingest_live(self, client, event) -> None:
@@ -2444,6 +2461,28 @@ class WorkspaceBot:
             self._last_ingest_at = datetime.now(UTC)
         if r.refused:
             log.warning("제외 대상으로 미저장 ch=%s 사유=%s", channel, r.refused[0][1])
+        self._confirm_attachments(event.get("channel", ""))
+
+    def _confirm_attachments(self, channel_id: str) -> None:
+        """첨부 줄이 **원문에 실제로 들어갔는지** 확인해 metadata 에 남긴다.
+
+        `r.written` 을 근거로 쓰지 않는다 — 이미 같은 줄이 있으면 0 이고, 그건 멱등
+        성공이다(설계 §6). 원문에 줄이 있는지가 유일한 근거다.
+
+        실패해도 수집을 막지 않는다. 원문이 진실이고 metadata 는 그 사본이다. 기록에
+        실패하면 진단에서 `pending` 으로 남아 「모른다」 로 보이는데, 그게 사실이다.
+        """
+        staged = getattr(self, "_pending_attachments", None)
+        if not staged:
+            return
+        self._pending_attachments = []
+        try:
+            confirm_archived(
+                self.store, staged,
+                workspace=self.workspace, channel_id=channel_id,
+            )
+        except Exception as e:
+            log.warning("첨부 원문 반영 확인 실패 ch=%s: %s", channel_id, e)
 
     def _ingest_channel(self, client, channel_id: str) -> str:
         channel = self._channel_name(client, channel_id)
