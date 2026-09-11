@@ -298,11 +298,15 @@ select
       on e.emp_no = ui.emp_no and e.active)                       as identities
 """
 
-PLAN_SQL = """
-insert into schedule_dm_delivery (
-    source_folder_id, date_id, emp_no, workspace, slack_user,
-    reminder_minutes, scheduled_for, status
-)
+# --- 수신 자격 — **정의는 여기 한 곳에만 있다** ------------------------------
+#
+# 이 규칙이 두 곳에 적혀 있으면 반드시 갈라진다. 실제로 갈라졌다 — 계획 쿼리는 기본
+# 수신으로 바꿨는데 「자격 없는 건 취소」 쿼리는 예전대로 `p.enabled` 를 요구해서,
+# 큐를 만든 뒤 같은 회차에 전부 취소했다(2026-09-11). 사람 눈에는 **아무 일도 안
+# 일어난 것**과 똑같이 보인다.
+#
+# 그래서 계획·취소가 같은 문자열을 쓴다. 고칠 때 한 군데만 고치면 된다.
+RECIPIENT_CTE = """
 with chosen as (
     -- 사람마다 받는 곳 **한 군데**. 여러 워크스페이스에 있으면 가장 최근에 연결한
     -- 곳으로 보낸다 — 그게 지금 실제로 쓰는 워크스페이스일 가능성이 높다.
@@ -330,6 +334,14 @@ recipient as (
      where e.active
        and (p.emp_no is null or p.enabled)
 )
+"""
+
+PLAN_SQL = f"""
+insert into schedule_dm_delivery (
+    source_folder_id, date_id, emp_no, workspace, slack_user,
+    reminder_minutes, scheduled_for, status
+)
+{RECIPIENT_CTE.strip()}
 select o.source_folder_id,
        o.date_id,
        r.emp_no,
@@ -385,18 +397,19 @@ update schedule_dm_delivery d
 """
 
 # 전근·퇴직으로 수신 자격이 사라진 미발송 큐를 취소한다.
-CANCEL_INELIGIBLE_SQL = """
+# 자격이 사라진 미발송 건을 취소한다 — 부서가 바뀌었거나, 폴더가 닫혔거나, 본인이
+# 껐을 때. **자격의 정의는 `RECIPIENT_CTE` 하나뿐이다.**
+CANCEL_INELIGIBLE_SQL = f"""
+{RECIPIENT_CTE.strip()}
 update schedule_dm_delivery d
    set status = 'cancelled', cancelled_at = now(), updated_at = now()
  where d.status in ('pending', 'retry')
    and not exists (
         select 1
-          from schedule_folder_org fo
-          join employee e on e.org_code = fo.org_code and e.active
-          join schedule_dm_preference p on p.emp_no = e.emp_no and p.enabled
+          from recipient r
+          join schedule_folder_org fo on fo.org_code = r.org_code and fo.enabled
          where fo.source_folder_id = d.source_folder_id
-           and fo.enabled
-           and p.emp_no = d.emp_no
+           and r.emp_no = d.emp_no
    )
 """
 
@@ -444,7 +457,8 @@ def plan(conn, *, now: datetime | None = None) -> PlanResult:
 
         cur.execute(CANCEL_GONE_SQL)
         result.cancelled += max(cur.rowcount or 0, 0)
-        cur.execute(CANCEL_INELIGIBLE_SQL)
+        # 같은 정의(RECIPIENT_CTE)를 쓰므로 같은 바인딩이 필요하다.
+        cur.execute(CANCEL_INELIGIBLE_SQL, {"default_minutes": list(DEFAULT_MINUTES)})
         result.cancelled += max(cur.rowcount or 0, 0)
 
         cur.execute(EXPIRE_SQL, {"cutoff": now - LATE_GRACE})

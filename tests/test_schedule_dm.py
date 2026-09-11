@@ -736,3 +736,49 @@ def test_not_entitled_notice_points_at_the_groupware():
     assert "다시 켤 필요는 없습니다" in NOT_ENTITLED
     # 없는 승인 절차를 기다리게 하지 않는다.
     assert "승인" not in NOT_ENTITLED
+
+
+# --- 자격 정의는 한 곳 --------------------------------------------------------
+#
+# 2026-09-11: 계획 쿼리를 기본 수신으로 바꿨는데 「자격 없는 건 취소」 쿼리는 예전대로
+# `p.enabled` 를 요구했다. 그래서 큐를 만든 뒤 **같은 회차에 전부 취소**했다.
+# 사람 눈에는 아무 일도 안 일어난 것과 똑같이 보인다 — 오류도 0건 로그도 아니다.
+#
+# 규칙이 두 곳에 적혀 있으면 반드시 갈라진다. 그래서 문자열을 공유한다.
+def test_plan_and_cancel_share_one_definition():
+    from tybot.schedule_dm import CANCEL_INELIGIBLE_SQL, RECIPIENT_CTE
+
+    rule = RECIPIENT_CTE.strip()
+    assert rule in PLAN_SQL
+    assert rule in CANCEL_INELIGIBLE_SQL
+
+
+def test_cancel_does_not_require_an_enabled_preference():
+    """이 조건이 남아 있으면 기본 수신자가 만들어지자마자 취소된다."""
+    from tybot.schedule_dm import CANCEL_INELIGIBLE_SQL
+
+    assert "p.enabled" not in CANCEL_INELIGIBLE_SQL.replace(
+        "p.emp_no is null or p.enabled", ""
+    )
+
+
+def test_cancel_binds_the_same_default_minutes():
+    """공유 CTE 가 바인딩을 쓰므로 취소 쿼리도 같은 값을 넘겨야 한다."""
+    from tybot.schedule_dm import CANCEL_INELIGIBLE_SQL
+
+    assert "%(default_minutes)s" in CANCEL_INELIGIBLE_SQL
+
+    conn = FakeConn()
+    plan(conn, now=NOW)
+    # `set status = 'cancelled'` 은 취소 쿼리가 둘이라 구별되지 않는다.
+    # 이 조인은 자격 취소 쿼리에만 있다.
+    params = conn.params_for("join schedule_folder_org fo on fo.org_code = r.org_code")
+    assert params and "default_minutes" in params
+
+
+def test_cancel_still_drops_people_who_turned_it_off():
+    """기본 수신이어도 끈 사람의 미발송 건은 취소돼야 한다."""
+    from tybot.schedule_dm import CANCEL_INELIGIBLE_SQL
+
+    assert "p.emp_no is null or p.enabled" in CANCEL_INELIGIBLE_SQL
+    assert "not exists" in CANCEL_INELIGIBLE_SQL
