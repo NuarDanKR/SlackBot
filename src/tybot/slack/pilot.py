@@ -1721,6 +1721,28 @@ class WorkspaceBot:
         except reviewers.ReviewerError as e:
             log.warning("[%s] 검토자 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
 
+        # 검토 DM 이 실제로 나가는지. 검토자 지정과 따로 고장나므로 따로 본다.
+        last_digest = None
+        reviewer_since = None
+        if found:
+            try:
+                with db_connect() as conn:
+                    if conn is not None:
+                        last_digest = daily_review.last_sent(
+                            conn, workspace=self.workspace, channel_id=channel_id
+                        )
+            except Exception as e:
+                log.warning(
+                    "[%s] 검토 DM 이력 조회 실패 ch=%s: %s", self.workspace, channel_id, e
+                )
+            try:
+                reviewer_since = reviewers.since(self.workspace, channel_id)
+            except Exception as e:
+                log.warning(
+                    "[%s] 검토자 지정 시각 조회 실패 ch=%s: %s",
+                    self.workspace, channel_id, e,
+                )
+
         waiting = None
         try:
             waiting = len(daily_review.blocked(
@@ -1746,6 +1768,8 @@ class WorkspaceBot:
             write_problems=dict(self.path_problems),
             reviewers=found,
             send_at=send_at,
+            last_digest=last_digest,
+            reviewer_since=reviewer_since,
             waiting_attachments=waiting,
             # **권한 판정은 `/채널 수정` 과 같은 함수를 쓴다.** 갈리면 수정은
             # 거절되는데 화면은 초록으로 뜬다(2026-09-08 실측). 화면이 자기

@@ -30,6 +30,7 @@ def _facts(**kw) -> ch.HealthFacts:
         "reviewers": ["U1"],
         "send_at": "09:00",
         "waiting_attachments": 0,
+        "last_digest": "2026-09-10",
     }
     base.update(kw)
     return ch.HealthFacts(**base)
@@ -562,3 +563,50 @@ def test_creation_stores_the_reviewer_and_says_when_it_could_not():
 
     assert "set_reviewers" in source, "생성 시점에 저장하지 않는다"
     assert "reviewer_error" in source, "저장 실패를 사용자에게 말하지 않는다"
+
+
+# --- 검토 DM 이 실제로 나가는가 ------------------------------------------------
+#
+# 2026-09-11: 검토자는 지정돼 있고 화면은 초록이었는데 DM 이 한 건도 안 갔다. 원인이
+# 둘이었다 — 이력 표에 봇 권한이 없었고, 타이머가 enable 조차 안 돼 있었다.
+#
+# 검토자 지정은 사람이 하는 일이고 발송은 서버가 하는 일이다. 둘은 따로 고장나므로
+# 초록 하나로 둘을 다 말하게 두지 않는다.
+def test_never_sent_is_reported_even_with_a_reviewer():
+    check = _find(_facts(last_digest=""), "검토 DM")
+    assert check.mark == ch.BAD
+    assert "한 번도 나가지 않았습니다" in check.detail
+    # 원인은 봇이 알 수 없다. 어디를 볼지만 말한다.
+    assert "tybot-review-dm" in check.fix
+
+
+def test_sent_recently_is_healthy():
+    assert _find(_facts(last_digest="2026-09-10"), "검토 DM").healthy
+
+
+def test_unknown_history_is_not_green():
+    """못 읽은 것과 안 간 것은 다르다. 조치도 다르다."""
+    check = _find(_facts(last_digest=None), "검토 DM")
+    assert check.mark == ch.UNKNOWN
+    assert not check.healthy
+
+
+def test_no_reviewer_does_not_double_report():
+    """검토자가 없으면 안 가는 게 당연하다. `검토자` 항목이 이미 빨강이다."""
+    facts = _facts(reviewers=[], last_digest="")
+    assert _find(facts, "검토자").mark == ch.BAD
+    assert _find(facts, "검토 DM").healthy
+
+
+def test_reviewer_set_today_is_not_yet_a_failure():
+    """방금 정했으면 아직 안 간 것이 정상이다."""
+    from datetime import datetime
+
+    today = datetime.now(ch.KST).date().isoformat()
+    facts = _facts(last_digest="", reviewer_since=today)
+    assert _find(facts, "검토 DM").healthy
+
+
+def test_reviewer_set_long_ago_and_never_sent_is_a_failure():
+    facts = _facts(last_digest="", reviewer_since="2026-01-01")
+    assert _find(facts, "검토 DM").mark == ch.BAD

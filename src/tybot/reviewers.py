@@ -171,6 +171,23 @@ def set_reviewers(
     return rows
 
 
+def since(workspace: str, channel_id: str) -> str:
+    """이 채널에 검토자를 처음 정한 날(KST 날짜 문자열). 없으면 빈 문자열.
+
+    방금 정했으면 아직 DM 이 안 간 것이 정상이다. 그 구별이 없으면 상태 화면이
+    지정 직후마다 빨강을 띄우고, 사람은 곧 그 빨강을 무시한다.
+    """
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT min(set_at) AS s FROM channel_reviewer"
+            " WHERE workspace = %s AND channel_id = %s AND enabled",
+            (workspace, channel_id),
+        )
+        row = cur.fetchone()
+    value = row.get("s") if isinstance(row, dict) else (row[0] if row else None)
+    return value.date().isoformat() if value else ""
+
+
 def reviewers_for(workspace: str, channel_id: str) -> list[Reviewer]:
     try:
         with _connect() as conn, conn.cursor() as cur:

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 from .channels import parse
 from .collection_status import (
@@ -39,6 +40,13 @@ OK = "🟢"
 WARN = "🟡"
 BAD = "🔴"
 UNKNOWN = "⚪"
+
+# 발송 시각은 KST 기준이다. 서버가 UTC 여도 사람이 보는 날짜는 KST 다.
+KST = timezone(timedelta(hours=9))
+
+
+def _today() -> str:
+    return datetime.now(KST).date().isoformat()
 
 
 @dataclass(frozen=True)
@@ -75,6 +83,15 @@ class HealthFacts:
     send_at: str = ""
     # 사람이 봐야 원본을 읽는 첨부. `None` 이면 세지 못했다.
     waiting_attachments: int | None = None
+    # 이 채널로 검토 DM 이 **실제로** 나간 마지막 날. `None` 이면 세지 못했다.
+    #
+    # 「검토자 있음」 만 보면 초록인데 DM 은 한 건도 안 가는 상태를 못 잡는다.
+    # 2026-09-11 에 그 상태가 실제로 있었다 — 이력 표에 봇 권한이 없었고, 타이머는
+    # enable 조차 안 돼 있었다. 두 고장이 다 이 틈으로 빠졌다. 원인은 둘이지만
+    # **증상은 하나**여서, 증상을 사실로 들고 있으면 둘 다 잡힌다.
+    last_digest: str | None = None
+    # 검토자를 정한 날. 정한 직후에는 아직 안 가는 것이 정상이다.
+    reviewer_since: str | None = None
     # **이 화면을 보는 사람**이 이 채널을 고칠 수 있는가.
     #
     # 「누군가는 고칠 수 있다」 를 보이면 안 된다 — 실제로 그렇게 만들었다가,
@@ -196,6 +213,34 @@ def check_reviewer(f: HealthFacts) -> Check:
     return Check(OK, "검토자", f"{who} · 매일 {f.send_at or '08:00'}")
 
 
+def check_digest(f: HealthFacts) -> Check:
+    """검토 DM 이 실제로 나가고 있는가.
+
+    검토자 지정은 사람이 하는 일이고, 발송은 서버가 하는 일이다. 둘은 따로 고장난다.
+    「검토자 있음」 초록 하나로 두 가지를 다 말하게 하면, 서버 쪽이 죽어 있을 때
+    화면이 **정상이라고 거짓말한다.**
+
+    여기서 원인까지 말하지는 않는다 — 권한인지 타이머인지 봇은 알 수 없다. 대신
+    "나가지 않고 있다" 는 사실과, 서버에서 무엇을 볼지 한 줄을 준다.
+    """
+    if not f.reviewers:
+        # 검토자가 없으면 안 가는 것이 당연하다. `check_reviewer` 가 이미 말했다.
+        return Check(OK, "검토 DM", "검토자를 정하면 이 항목이 켜집니다.")
+    if f.last_digest is None:
+        return Check(UNKNOWN, "검토 DM", "확인하지 못했습니다(발송 이력을 읽지 못함).")
+    if f.last_digest:
+        return Check(OK, "검토 DM", f"마지막 발송 {f.last_digest}")
+    if f.reviewer_since and f.reviewer_since >= _today():
+        # 오늘 막 정했다. 아직 안 간 것이 정상이다.
+        return Check(OK, "검토 DM", f"오늘 검토자를 정했습니다 — {f.send_at or '08:00'} 이후 발송")
+    return Check(
+        BAD, "검토 DM",
+        "검토자는 있는데 **한 번도 나가지 않았습니다.** 발송 쪽이 멈춰 있습니다.",
+        "서버 담당자에게 알려 주세요: `systemctl status tybot-review-dm.timer` 와 "
+        "`journalctl -u tybot-review-dm` 을 보면 원인이 나옵니다.",
+    )
+
+
 def check_attachments(f: HealthFacts) -> Check:
     """사람이 봐야 원본을 읽는 첨부. 변환된 것은 여기 세지 않는다 — 이미 쓰인다."""
     if f.waiting_attachments is None:
@@ -257,6 +302,7 @@ CHECKS = (
     check_membership,
     check_collection,
     check_reviewer,
+    check_digest,
     check_attachments,
     check_manager,
 )

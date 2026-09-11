@@ -296,6 +296,26 @@ def schema_ready(conn) -> bool:
     return not schema_problem(conn)
 
 
+def last_sent(conn, *, workspace: str, channel_id: str) -> str:
+    """이 채널로 검토 DM 이 마지막으로 나간 날(KST). 한 번도 없으면 빈 문자열.
+
+    「검토자 있음」 만으로는 발송이 살아 있는지 알 수 없다. 검토자 지정은 사람이
+    하는 일이고 발송은 서버가 하는 일이라 따로 고장난다 — 2026-09-11 에 권한 누락과
+    타이머 미기동이 동시에 있었고, 화면은 초록이었다.
+
+    받는 사람은 묻지 않는다. 「이 채널로 나갔나」 가 알고 싶은 것이다.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT max(digest_date) AS d FROM review_digest_sent"
+            " WHERE workspace = %s AND channel_id = %s",
+            (workspace, channel_id),
+        )
+        row = cur.fetchone()
+    value = row.get("d") if isinstance(row, dict) else (row[0] if row else None)
+    return value.isoformat() if value else ""
+
+
 def already_sent(conn, digest: Digest, *, kind: str = KIND_ATTACHMENT) -> bool:
     with conn.cursor() as cur:
         cur.execute(
