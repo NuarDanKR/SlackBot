@@ -155,6 +155,7 @@ COMMENT ON COLUMN specialist_bot.execution_mode IS
     '정상이 아니면 라우팅 후보에서 뺀다.';
 
 -- 어느 배포가 답했는지 남긴다. **질문·근거·응답 본문은 넣지 않는다.**
+ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS qa_record_id text NOT NULL DEFAULT '';
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS deployment_id bigint;
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS runtime_version text NOT NULL DEFAULT '';
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS http_status integer;

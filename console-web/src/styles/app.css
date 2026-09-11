@@ -2584,6 +2584,155 @@
   grid-column: 1 / -1;
 }
 
+/* 질문·답변 원본 — 목록에서 고른 한 건만 본문을 열어 감사 열람의 경계를 분명히 한다. */
+.quality-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.answer-browser {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(420px, 1.6fr);
+  min-height: 520px;
+  margin-top: 18px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+.answer-record-list {
+  max-height: 760px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--sunk);
+}
+.answer-record-item {
+  display: grid;
+  width: 100%;
+  gap: 5px;
+  padding: 15px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.answer-record-item:hover,
+.answer-record-item.is-active {
+  background: var(--surface);
+}
+.answer-record-item.is-active {
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+.answer-record-title {
+  font-weight: 700;
+}
+.answer-record-meta {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.answer-record-detail {
+  min-width: 0;
+  padding: 24px;
+}
+.answer-original-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.original-block {
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface);
+}
+.original-block + .original-block,
+.answer-trace + .original-block {
+  margin-top: 14px;
+}
+.original-label {
+  margin-bottom: 10px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 700;
+}
+.original-text {
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.answer-trace {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 14px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--line);
+}
+.answer-trace > div {
+  padding: 14px 16px;
+  background: var(--surface);
+}
+.answer-trace dt {
+  margin-bottom: 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 700;
+}
+.answer-trace dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.citation-list {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.7;
+}
+.feedback-detail-list {
+  display: grid;
+  gap: 10px;
+}
+.feedback-detail {
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border-radius: var(--r);
+  background: var(--sunk);
+}
+.feedback-detail > span {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.feedback-detail p {
+  margin: 0;
+  line-height: 1.6;
+}
+@media (max-width: 900px) {
+  .answer-browser {
+    grid-template-columns: 1fr;
+  }
+  .answer-record-list {
+    max-height: 360px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+@media (max-width: 640px) {
+  .answer-record-detail {
+    padding: 16px;
+  }
+  .answer-trace {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* 적용 워크스페이스. 쉼표로 키를 타이핑하게 하면 오타가 조용히 통과하고,
    그 전문가는 어디에서도 호출되지 않는다 — 오류가 아니라 "안 뜬다" 로 나타난다. */
 .checkbox-row {

@@ -380,8 +380,12 @@ CREATE TABLE IF NOT EXISTS specialist_call (
                     CHECK (result IN ('success', 'fallback', 'error', 'contract_violation')),
     elapsed_ms      integer NOT NULL DEFAULT 0 CHECK (elapsed_ms >= 0),
     cost_usd        numeric(12, 6) NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),
-    error_code      text NOT NULL DEFAULT ''
+    error_code      text NOT NULL DEFAULT '',
+    qa_record_id    text NOT NULL DEFAULT ''
 );
+
+-- 기존 설치에도 질문·답변 감사기록과의 연결 열을 추가한다. 본문은 중복 저장하지 않는다.
+ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS qa_record_id text NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS specialist_call_recent ON specialist_call (at DESC);
 CREATE INDEX IF NOT EXISTS specialist_call_scope

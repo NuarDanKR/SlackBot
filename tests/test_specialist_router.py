@@ -267,6 +267,22 @@ def test_recording_failure_does_not_break_the_answer(monkeypatch):
     assert decision is not None, "기록이 실패해도 판정은 돌아와야 한다"
 
 
+def test_routing_record_keeps_the_bound_qa_record_id(monkeypatch):
+    """분류 행은 시간 추정이 아니라 같은 처리 건의 QA ID로 원본과 연결한다."""
+    from tybot.console import specialist_store
+
+    written: list[dict] = []
+    monkeypatch.setattr(specialist_store, "record_call", lambda **kw: written.append(kw))
+    decision = sr.Decision(HERMES, 0.91, "회의록 질문", "claude-haiku-4-5")
+
+    with sr.bind_qa_record("ABC123"):
+        sr.record(decision, workspace="pilot", elapsed_ms=12)
+    sr.record(decision, workspace="pilot", elapsed_ms=13)
+
+    assert written[0]["qa_record_id"] == "abc123"
+    assert written[1]["qa_record_id"] == "", "다음 요청으로 이전 QA ID가 새면 안 된다"
+
+
 def test_the_cache_stops_a_database_hit_per_question(monkeypatch):
     """질문마다 DB 를 열면 답변 경로에 연결이 하나 늘고,
 

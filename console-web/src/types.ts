@@ -337,6 +337,8 @@ export interface SpecialistCall {
   elapsedMs: number
   costUsd: number
   errorCode: string
+  /** 동일 처리 건의 질문·답변 감사기록. 빈 값이면 연결 기능 도입 전 기록이다. */
+  qaRecordKey: string
 }
 
 export interface SpecialistRequest {

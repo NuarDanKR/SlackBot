@@ -26,6 +26,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -56,6 +58,23 @@ AVAILABLE_TTL_SECONDS = 60
 
 # {워크스페이스: (만료 시각, 목록)}. 프로세스 안에서만 산다.
 _cache: dict[str, tuple[float, list]] = {}
+
+# 한 Slack 질문에서 만든 QA 감사기록과 분류/전문 봇 호출을 정확히 잇는다.
+# ContextVar라서 동시에 여러 질문을 처리해도 다른 요청의 ID가 섞이지 않는다.
+_qa_record_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "specialist_qa_record_id", default=""
+)
+
+
+@contextlib.contextmanager
+def bind_qa_record(record_id: str):
+    """이 실행 문맥의 분류 기록을 QA 원본 한 건에 연결한다."""
+    token = _qa_record_id.set(record_id.strip().lower())
+    try:
+        yield
+    finally:
+        _qa_record_id.reset(token)
+
 
 SYSTEM = """너는 사내 질문을 어느 전문가에게 넘길지 고르는 분류기다.
 
@@ -369,6 +388,7 @@ def record(decision: Decision, *, workspace: str, elapsed_ms: int, cost_usd: flo
             elapsed_ms=elapsed_ms,
             cost_usd=cost_usd,
             error_code="no-adapter" if decision.specialist else "",
+            qa_record_id=_qa_record_id.get(),
         )
     except Exception as exc:  # noqa: BLE001 - 기록 실패가 답변을 막으면 안 된다
         log.warning("라우팅 판정을 남기지 못했습니다: %s", exc)
@@ -493,6 +513,7 @@ def ask(
             elapsed_ms=elapsed_ms,
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
             error_code=result.error_code if result else "adapter-build",
+            qa_record_id=_qa_record_id.get(),
         )
     except _SkipRecord:
         pass

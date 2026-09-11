@@ -1392,6 +1392,31 @@ def test_specialist_registry_is_developer_only(client, monkeypatch):
     assert response.json()["specialists"] == []
 
 
+def test_specialist_call_links_to_the_exact_qa_record(client, monkeypatch):
+    monkeypatch.setattr(
+        console_app.specialist_store,
+        "list_calls",
+        lambda **_kwargs: [{
+            "id": 7,
+            "at": "2026-09-11T09:00:00+09:00",
+            "workspace": "fin",
+            "specialist": "legal",
+            "routing_reason": "법률 해석이 필요함",
+            "confidence": 0.91,
+            "result": "success",
+            "elapsed_ms": 420,
+            "cost_usd": 0.002,
+            "error_code": "",
+            "qa_record_id": "qa-exact-7",
+        }],
+    )
+
+    response = client.get("/api/specialist-calls", headers=member(client))
+
+    assert response.status_code == 200
+    assert response.json()["calls"][0]["qaRecordKey"] == "qa-exact-7"
+
+
 def test_specialist_change_requires_csrf(client):
     response = client.post(
         "/api/specialists/requests",

@@ -382,7 +382,7 @@ def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""SELECT id, at, workspace, specialist, routing_reason, confidence,
-                           result, elapsed_ms, cost_usd, error_code
+                           result, elapsed_ms, cost_usd, error_code, qa_record_id
                       FROM specialist_call {where} ORDER BY at DESC LIMIT %s""",
                 params,
             )
@@ -394,7 +394,8 @@ def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "
 
 
 def record_call(*, workspace: str, specialist: str, routing_reason: str, confidence: float | None,
-                result: str, elapsed_ms: int, cost_usd: float, error_code: str = "") -> None:
+                result: str, elapsed_ms: int, cost_usd: float, error_code: str = "",
+                qa_record_id: str = "") -> None:
     """Record non-sensitive routing metadata for a specialist adapter."""
     if result not in {"success", "fallback", "error", "contract_violation"}:
         raise SpecialistStoreError("지원하지 않는 전문 봇 호출 결과입니다.")
@@ -403,10 +404,11 @@ def record_call(*, workspace: str, specialist: str, routing_reason: str, confide
             cur.execute(
                 """INSERT INTO specialist_call
                     (workspace, specialist, routing_reason, confidence, result,
-                     elapsed_ms, cost_usd, error_code)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                     elapsed_ms, cost_usd, error_code, qa_record_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (workspace, specialist, routing_reason[:200], confidence, result,
-                 max(0, elapsed_ms), max(0, cost_usd), error_code[:100]),
+                 max(0, elapsed_ms), max(0, cost_usd), error_code[:100],
+                 qa_record_id.strip().lower()),
             )
     except Exception as exc:
         raise SpecialistStoreError(f"전문 봇 호출 기록 저장 실패: {exc}") from exc

@@ -21,6 +21,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import UTC, datetime
 
 from .. import (
@@ -2208,6 +2209,7 @@ class WorkspaceBot:
                 else:
                     response_ts = _response_ts(say(text=reply))
             rec = QARecord.build(
+                record_id=str(event.get("_tybot_qa_record_id") or uuid.uuid4().hex),
                 workspace=self.workspace,
                 channel=self._chan_cache.get(event.get("channel", ""), event.get("channel", "")),
                 channel_id=str(event.get("channel") or ""),
@@ -2230,6 +2232,11 @@ class WorkspaceBot:
             self.qa_log.write(rec)
 
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
+        # 처리 시작부터 하나의 ID를 공유해야 분류 호출과 최종 질문·답변 원본을
+        # 시간 추정 없이 정확히 연결할 수 있다.
+        qa_record_id = uuid.uuid4().hex
+        # 이 메서드 뒤의 공통 예외 처리에서도 같은 ID로 오류 QA 기록을 남긴다.
+        event["_tybot_qa_record_id"] = qa_record_id
         raw_text = _clean(event.get("text", ""))
         canvas_requested, text = parse_canvas_request(raw_text)
         if canvas_requested and not text:
@@ -2288,6 +2295,7 @@ class WorkspaceBot:
                     # 접근할 수 없는 링크만 남기지 않고 원래 메시지 답변도 전달한다.
                     response = say(**fallback_kw)
             rec = QARecord.build(
+                record_id=qa_record_id,
                 workspace=self.workspace,
                 channel=self._chan_cache.get(channel_id, channel_id),
                 channel_id=channel_id,
@@ -2386,7 +2394,8 @@ class WorkspaceBot:
                 except Exception as exc:
                     log.exception("[%s] 후속 질문 해석 실패: %s", self.workspace, exc)
                     followup = None
-            ans = self.engine.respond(q, ctx, task, followup=followup)
+            with specialist_router.bind_qa_record(qa_record_id):
+                ans = self.engine.respond(q, ctx, task, followup=followup)
             last = ans
             sections.append(ans.to_slack())
 

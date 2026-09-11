@@ -1063,6 +1063,7 @@ def specialist_calls(
                 "confidence": float(row["confidence"]) if row["confidence"] is not None else None,
                 "result": row["result"], "elapsedMs": row["elapsed_ms"],
                 "costUsd": float(row["cost_usd"]), "errorCode": row["error_code"],
+                "qaRecordKey": str(row.get("qa_record_id") or ""),
             }
             for row in rows
         ]
