@@ -217,3 +217,90 @@ def test_citations_are_still_attached(engine):
     eng, _ = engine(lines)
     ans = eng.respond(QUESTION, _ctx())
     assert ans.citations
+
+
+# --- 입력 한도 (설계 §12) ------------------------------------------------------
+#
+# 근거가 전문가 입력 한도를 넘으면 예전에는 **조용히 끊었다.** 그러면 일부만 본 종합이
+# 전부를 본 종합처럼 나가고, 사람은 없는 내용을 봇이 봤다고 믿는다.
+class _Specialist:
+    """근거를 받아 그대로 기록하는 가짜 전문가."""
+
+    def __init__(self):
+        self.evidence = ""
+
+    def __call__(self, question, ctx, evidence):
+        from tybot.specialist_router import SpecialistAnswer
+
+        self.evidence = evidence
+        return SpecialistAnswer(
+            text="전문가 종합", specialist="hermes",
+            model="hermes-1", cost_usd=0.001,
+        )
+
+
+def _with_specialist(engine, lines, special):
+    eng, fake = engine(lines)
+    eng._specialist = special
+    return eng, fake
+
+
+def test_documents_over_the_limit_are_named_not_dropped(engine):
+    from tybot.specialist_adapters import MAX_EVIDENCE_CHARS
+
+    # 한도를 확실히 넘기도록 긴 문서를 여럿 만든다.
+    lines = []
+    names = [f"주간보고_{i}.hwp" for i in range(12)]
+    filler = "가" * 400
+    for name in names:
+        lines.append(_listed(name))
+        lines += [
+            f"> [{TODAY} 09:0{j % 10}] 홍길동: [첨부추출:{name}] {filler}\n"
+            for j in range(40)
+        ]
+    special = _Specialist()
+    eng, _ = _with_specialist(engine, lines, special)
+    ans = eng.respond(QUESTION, _ctx())
+
+    assert len(special.evidence) <= MAX_EVIDENCE_CHARS
+    assert "넣지 못한 문서" in ans.text
+    # 몇 건인지 밝힌다. 건수 없이 「일부 생략」 만 쓰면 규모를 알 수 없다.
+    assert "건:" in ans.text
+
+
+def test_nothing_omitted_says_nothing(engine):
+    lines = []
+    for name in REPORTS:
+        lines += [_listed(name), *_body(name, 5)]
+    special = _Specialist()
+    eng, _ = _with_specialist(engine, lines, special)
+    ans = eng.respond(QUESTION, _ctx())
+    assert "넣지 못한 문서" not in ans.text
+    assert "대상 3건" in ans.text
+
+
+def test_unreadable_documents_never_reach_the_specialist(engine):
+    """변환 실패 보고서는 전문가 원문 입력에 들어가지 않는다(§12).
+
+    파일명만 보고 내용을 지어내는 경로를 막는 것이 요점이다.
+    """
+    lines = [_listed(REPORTS[0]), *_body(REPORTS[0], 6), _listed(REPORTS[1])]
+    special = _Specialist()
+    eng, _ = _with_specialist(engine, lines, special)
+    ans = eng.respond(QUESTION, _ctx())
+
+    assert REPORTS[0] in special.evidence
+    assert REPORTS[1] not in special.evidence
+    # 그래도 **빠졌다는 사실**은 답변에 남는다.
+    assert REPORTS[1] in ans.text
+    assert "내용 미확인" in ans.text
+
+
+def test_the_specialist_answer_also_carries_coverage(engine):
+    """한쪽 경로만 붙이면 어느 경로로 답했는지에 따라 범위가 보였다 안 보인다."""
+    lines = [_listed(REPORTS[0]), *_body(REPORTS[0], 6), _listed(REPORTS[1])]
+    special = _Specialist()
+    eng, _ = _with_specialist(engine, lines, special)
+    ans = eng.respond(QUESTION, _ctx())
+    assert ans.text.startswith("전문가 종합")
+    assert "확인 범위" in ans.text

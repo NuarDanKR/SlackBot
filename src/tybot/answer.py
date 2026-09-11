@@ -502,6 +502,30 @@ def _match_terms(lines, terms: list[str] | None):
     return [ln for ln in lines if search_index.score_line(tokens, "", ln.speaker, ln.text)]
 
 
+def _block_title(block: str) -> str:
+    """근거 블록의 제목. `### 이름 (채널 …)` 의 이름만 쓴다."""
+    head = block.split("\n", 1)[0].lstrip("# ").strip()
+    name, sep, _ = head.partition(" (채널 ")
+    return name if sep else head
+
+
+def _with_omitted(coverage: str, omitted: list[str]) -> str:
+    """입력 한도로 못 보낸 문서를 범위에 더한다.
+
+    **건수와 파일을 밝힌다.** 밝히지 않으면 일부만 본 종합이 완전한 것처럼 읽히고,
+    사람은 없는 내용을 봇이 봤다고 믿는다(설계 §12).
+    """
+    if not omitted:
+        return coverage
+    names = ", ".join(omitted[:10])
+    if len(omitted) > 10:
+        names += f" 외 {len(omitted) - 10}건"
+    line = f"- 분량 한도로 이번 답변에 넣지 못한 문서 {len(omitted)}건: {names}"
+    if not coverage:
+        return "*확인 범위*\n" + line
+    return f"{coverage}\n{line}"
+
+
 def _with_coverage(text: str, coverage: str) -> str:
     """답변 끝에 「확인 범위」 를 붙인다.
 
@@ -819,16 +843,21 @@ class AnswerEngine:
             selected_hits: list[SearchHit] = []
             selected_lines = 0
             used_chars = 0
+            # 한도를 넘어 못 보낸 것을 **센다.** 조용히 끊으면 일부만 본 종합이
+            # 전부를 본 종합처럼 나간다(설계 §12).
+            omitted: list[str] = []
             for block, block_citations, block_hits in specialist_parts:
                 separator = 2 if selected_blocks else 0
                 if used_chars + separator + len(block) > MAX_EVIDENCE_CHARS:
-                    break
+                    omitted.append(_block_title(block))
+                    continue
                 selected_blocks.append(block)
                 selected_citations.extend(block_citations)
                 selected_hits.extend(block_hits)
                 selected_lines += len(block_hits)
                 used_chars += separator + len(block)
             selected_citations.extend(_attachment_source_links(selected_hits))
+            specialist_coverage = _with_omitted(coverage, omitted)
 
             # The adapter's final size guard must not silently cut a channel in half.
             # If no complete channel fits, the master handles the full evidence.
@@ -855,7 +884,7 @@ class AnswerEngine:
                     len(blocks),
                 )
                 return Answer(
-                    _with_coverage(special.text, coverage),
+                    _with_coverage(special.text, specialist_coverage),
                     selected_citations,
                     special.model,
                     special.cost_usd,
