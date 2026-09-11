@@ -38,7 +38,9 @@ logger = logging.getLogger("tybot.schedule_dm")
 KST = timezone(timedelta(hours=9))
 
 ALLOWED_MINUTES = (10, 30)
-DEFAULT_MINUTES = (30,)
+# 설정을 따로 하지 않은 사람의 기본값. **10분 전**이다(2026-09-11 오너 결정).
+# 30분은 회의 직전에 일이 몰리는 사람에게 너무 이르다는 판단.
+DEFAULT_MINUTES = (10,)
 
 # 이만큼 늦은 알림은 보내지 않는다. 봇이 멈췄다 살아나면 지난 알림이 몰려 나가는데,
 # 이미 지난 회의 알림은 쓸모가 없고 신뢰만 깎는다.
@@ -289,8 +291,11 @@ select
       and starts_at > %(now)s and starts_at <= %(horizon)s)      as upcoming,
   (select count(*) from schedule_folder where enabled)            as folders,
   (select count(*) from schedule_folder_org where enabled)        as folder_orgs,
-  (select count(*) from schedule_dm_preference where enabled)     as prefs,
-  (select count(*) from user_identity)                            as identities
+  -- 기본 수신이므로 `prefs` 는 관문이 아니다. 관문은 **신원 매핑**이다 —
+  -- Slack 계정과 사번이 이어진 재직자만 받을 수 있다.
+  (select count(*) from schedule_dm_preference where not enabled) as opted_out,
+  (select count(*) from user_identity ui join employee e
+      on e.emp_no = ui.emp_no and e.active)                       as identities
 """
 
 PLAN_SQL = """
@@ -298,11 +303,38 @@ insert into schedule_dm_delivery (
     source_folder_id, date_id, emp_no, workspace, slack_user,
     reminder_minutes, scheduled_for, status
 )
+with chosen as (
+    -- 사람마다 받는 곳 **한 군데**. 여러 워크스페이스에 있으면 가장 최근에 연결한
+    -- 곳으로 보낸다 — 그게 지금 실제로 쓰는 워크스페이스일 가능성이 높다.
+    -- 이 선택이 없으면 같은 사람에게 여러 번 가거나, 어디로 갈지 실행마다 달라진다.
+    select distinct on (ui.emp_no)
+           ui.emp_no, ui.workspace, ui.slack_user
+      from user_identity ui
+     where ui.emp_no is not null
+     order by ui.emp_no, ui.verified_at desc, ui.workspace
+),
+recipient as (
+    -- 기본이 수신이다(2026-09-11 오너 결정). 설정 행이 없으면 기본 분으로 받는다.
+    -- `/일정 알림` 은 **끄거나 분을 바꾸는** 수단이 된다.
+    --
+    -- 설정 행이 있으면 그 값이 이긴다. 껐으면(`enabled=false`) 제외한다 — 사람이
+    -- 명시적으로 끈 것을 기본값이 되살리면 끌 방법이 없다.
+    select e.emp_no,
+           e.org_code,
+           coalesce(p.workspace, c.workspace)     as workspace,
+           coalesce(p.slack_user, c.slack_user)   as slack_user,
+           coalesce(p.reminder_minutes, %(default_minutes)s) as reminder_minutes
+      from employee e
+      join chosen c on c.emp_no = e.emp_no
+      left join schedule_dm_preference p on p.emp_no = e.emp_no
+     where e.active
+       and (p.emp_no is null or p.enabled)
+)
 select o.source_folder_id,
        o.date_id,
-       p.emp_no,
-       p.workspace,
-       p.slack_user,
+       r.emp_no,
+       r.workspace,
+       r.slack_user,
        m.minutes,
        o.starts_at - make_interval(mins => m.minutes),
        'pending'
@@ -311,13 +343,14 @@ select o.source_folder_id,
     on f.source_folder_id = o.source_folder_id and f.enabled
   join schedule_folder_org fo
     on fo.source_folder_id = o.source_folder_id and fo.enabled
-  join employee e on e.org_code = fo.org_code and e.active
-  join schedule_dm_preference p on p.emp_no = e.emp_no and p.enabled
+  join recipient r on r.org_code = fo.org_code
+  -- 보낼 곳이 **지금도** 유효한지 다시 본다. 설정에 남은 옛 워크스페이스로 보내지
+  -- 않는다 — 그 계정은 이미 없을 수 있다.
   join user_identity ui
-    on ui.workspace = p.workspace
-   and ui.slack_user = p.slack_user
-   and ui.emp_no = p.emp_no
-  cross join lateral unnest(p.reminder_minutes) as m(minutes)
+    on ui.workspace = r.workspace
+   and ui.slack_user = r.slack_user
+   and ui.emp_no = r.emp_no
+  cross join lateral unnest(r.reminder_minutes) as m(minutes)
  where o.source_deleted_at is null
    and not o.is_all_day
    and o.starts_at > %(now)s
@@ -404,6 +437,8 @@ def plan(conn, *, now: datetime | None = None) -> PlanResult:
             "now": now,
             "horizon": now + PLAN_HORIZON,
             "grace": LATE_GRACE,
+            # 설정을 따로 하지 않은 사람에게 쓰는 기본값. 설정 행이 있으면 그 값이 이긴다.
+            "default_minutes": list(DEFAULT_MINUTES),
         })
         result.queued = max(cur.rowcount or 0, 0)
 
@@ -442,12 +477,13 @@ def _log_why_empty(conn, now: datetime) -> None:
         return
 
     counts = dict(row) if not isinstance(row, tuple) else dict(
-        zip(("upcoming", "folders", "folder_orgs", "prefs", "identities"), row, strict=True)
+        zip(("upcoming", "folders", "folder_orgs", "opted_out", "identities"),
+            row, strict=True)
     )
     logger.info(
-        "큐가 빈 이유 판단용 — 2시간내일정=%s 승인폴더=%s 폴더조직=%s 알림켠사람=%s 사번매핑=%s",
+        "큐가 빈 이유 판단용 — 2시간내일정=%s 활성폴더=%s 폴더조직=%s 수신대상=%s 직접끈사람=%s",
         counts.get("upcoming"), counts.get("folders"), counts.get("folder_orgs"),
-        counts.get("prefs"), counts.get("identities"),
+        counts.get("identities"), counts.get("opted_out"),
     )
     # **설정이 빈 것을 먼저 알린다.** "지금 일정이 없다" 로 끝내면, 설정이 비어 있어
     # 앞으로도 영원히 0건인 상태를 '오늘은 회의가 없나 보다' 로 넘기게 된다.
@@ -457,9 +493,10 @@ def _log_why_empty(conn, now: datetime) -> None:
     if counts.get("folder_orgs") == 0:
         blockers.append("폴더에 연결된 조직이 없습니다(schedule_folder_org)")
     if counts.get("identities") == 0:
-        blockers.append("사번↔Slack 매핑이 없습니다. 이메일이 맞아야 이어집니다")
-    if counts.get("prefs") == 0:
-        blockers.append("알림을 켠 사람이 없습니다. Slack 에서 `/일정 알림` 으로 켭니다")
+        blockers.append(
+            "Slack 계정과 사번이 이어진 재직자가 없습니다. 기본 수신이라 설정은 필요"
+            "없지만, 누구에게 보낼지는 이 매핑으로만 알 수 있습니다"
+        )
 
     for item in blockers:
         logger.warning("  ! %s — 이대로면 일정이 생겨도 DM 이 나가지 않습니다", item)
@@ -751,22 +788,41 @@ def minutes_label(minutes) -> str:
 
 
 def settings_blocks(pref: Preference | None, *, workspace_label: str = "") -> list[dict]:
-    """`/일정 알림` 화면. 지금 상태를 먼저 말하고 버튼을 준다."""
-    on = bool(pref and pref.enabled)
-    if on:
+    """`/일정 알림` 화면. 지금 상태를 먼저 말하고 버튼을 준다.
+
+    **상태가 셋이다**(2026-09-11 기본 수신으로 바뀐 뒤).
+
+    | 설정 행 | 지금 상태 | 버튼 |
+    |---|---|---|
+    | 없음 | 기본값으로 받는 중 | 끄기 |
+    | 있고 켜짐 | 본인이 정한 값으로 받는 중 | 끄기 |
+    | 있고 꺼짐 | 본인이 껐음 | 받기 |
+
+    설정 행이 없는 것을 「꺼짐」 으로 보이면 화면이 거짓말한다 — 실제로는 받고 있다.
+    그 사람은 「켜기」 를 누르고 달라진 것이 없어 혼란스러워한다.
+    """
+    off = bool(pref and not pref.enabled)
+    on = not off
+    picked = normalize_minutes(pref.minutes) if pref else DEFAULT_MINUTES
+    if off:
+        head = (
+            "*일정 알림: 꺼짐*\n"
+            "회원님이 직접 끄셨습니다. 다시 받으려면 아래에서 켜 주세요."
+        )
+    elif pref is None:
+        head = (
+            f"*일정 알림: 받는 중* · {minutes_label(picked)}(기본)\n"
+            "소속 부서에 열려 있는 그룹웨어 팀 일정을 회의 전에 개인 DM 으로 알려 "
+            "드립니다. 따로 켜지 않아도 받습니다 — 분을 바꾸거나 끄실 수 있습니다."
+        )
+    else:
         head = (
             f"*일정 알림: 켜짐* · {minutes_label(pref.minutes)}\n"
             "회의 시작 전에 개인 DM 으로 알려 드립니다."
         )
-    else:
-        head = (
-            "*일정 알림: 꺼짐*\n"
-            "켜면 회의 시작 전에 개인 DM 으로 알려 드립니다. "
-            "그룹웨어 팀 일정 중 승인된 폴더만 대상입니다."
-        )
 
     blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": head}}]
-    if on and workspace_label:
+    if on and pref and workspace_label:
         blocks.append({
             "type": "context",
             "elements": [{
@@ -775,7 +831,6 @@ def settings_blocks(pref: Preference | None, *, workspace_label: str = "") -> li
             }],
         })
 
-    picked = normalize_minutes(pref.minutes) if pref else DEFAULT_MINUTES
     blocks.append({
         "type": "actions",
         "elements": [

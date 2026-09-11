@@ -95,18 +95,22 @@ class FakeConn:
 
     def _key(self) -> str:
         s = self._last
+        # **구체적인 표시를 먼저 본다.** PLAN_SQL 과 DIAGNOSE_SQL 은 둘 다 CTE·하위
+        # 질의에서 `user_identity` 를 읽으므로, 그 검사가 앞에 오면 계획·진단 쿼리가
+        # 신원 조회로 잘못 분류된다. 그러면 fake 가 빈 결과를 주고, 테스트는
+        # 「아무것도 안 했다」 로 조용히 통과하거나 엉뚱한 곳에서 깨진다.
+        if "insert into schedule_dm_delivery" in s:
+            return "plan"
+        if "as upcoming" in s:
+            return "diagnose"
         if "from user_identity ui" in s:
             return "identity"
         if "from schedule_dm_preference p" in s and "select" in s:
             return "pref"
-        if "insert into schedule_dm_delivery" in s:
-            return "plan"
         if "with due as" in s:
             return "claim"
         if "from schedule_occurrence" in s and "select subject" in s:
             return "occurrence"
-        if "as upcoming" in s:
-            return "diagnose"
         if "join schedule_folder_org fo on fo.org_code = e.org_code" in s:
             return "entitled"
         return "?"
@@ -202,12 +206,16 @@ def test_get_preference_reads_minutes():
 
 # --- 큐 생성 ------------------------------------------------------------------
 def test_plan_requires_the_whole_permission_chain():
-    """폴더 승인 → 조직 ACL → 재직자 → 설정 → 검증된 신원. 하나라도 빠지면 0건."""
+    """폴더 활성 → 조직 ACL → 재직자 → 검증된 신원. 하나라도 빠지면 0건.
+
+    2026-09-11 부터 **설정은 사슬에 없다** — 기본이 수신이다. 남은 사슬은 전부
+    「그 부서가 그 폴더를 볼 수 있는가」 와 「보낼 곳이 확인됐는가」 다.
+    """
     for needle in (
         "schedule_folder f",
         "schedule_folder_org fo",
-        "employee e on e.org_code = fo.org_code and e.active",
-        "schedule_dm_preference p on p.emp_no = e.emp_no and p.enabled",
+        "recipient r on r.org_code = fo.org_code",
+        "e.active",
         "user_identity ui",
     ):
         assert needle in PLAN_SQL
@@ -232,7 +240,58 @@ def test_plan_is_idempotent_and_never_touches_sent_rows():
 
 
 def test_plan_creates_one_row_per_selected_minute():
-    assert "unnest(p.reminder_minutes)" in PLAN_SQL
+    assert "unnest(r.reminder_minutes)" in PLAN_SQL
+
+
+# --- 기본 수신 (2026-09-11 오너 결정) ----------------------------------------
+#
+# 예전에는 `/일정 알림` 을 켠 사람만 받았다. 그래서 기능이 있는데도 수신자가 0명인
+# 상태가 오래 갔다. 소속 부서에 열린 폴더면 그룹웨어에서 이미 볼 수 있는 일정이므로,
+# 기본을 수신으로 두고 **끄는 쪽**을 사람이 고른다.
+def test_no_preference_row_still_receives():
+    """설정 행이 없어도 받는다. `left join` 이 그 보장이다."""
+    assert "left join schedule_dm_preference p on p.emp_no = e.emp_no" in PLAN_SQL
+    assert "p.emp_no is null or p.enabled" in PLAN_SQL
+
+
+def test_explicit_opt_out_is_respected():
+    """사람이 끈 것을 기본값이 되살리면 끌 방법이 없다."""
+    assert "p.emp_no is null or p.enabled" in PLAN_SQL
+    # 켜진 설정만 통과하는 예전 조인은 사라졌다.
+    assert "schedule_dm_preference p on p.emp_no = e.emp_no and p.enabled" not in PLAN_SQL
+
+
+def test_default_minutes_is_ten():
+    from tybot.schedule_dm import DEFAULT_MINUTES
+
+    assert DEFAULT_MINUTES == (10,)
+
+
+def test_default_minutes_is_bound_not_hardcoded():
+    """기본값이 SQL 안에 박히면 코드와 DB 가 다른 값을 쓰게 된다."""
+    assert "%(default_minutes)s" in PLAN_SQL
+
+
+def test_one_recipient_per_person():
+    """여러 워크스페이스에 있어도 한 곳만. 아니면 같은 사람이 여러 번 받는다."""
+    assert "distinct on (ui.emp_no)" in PLAN_SQL
+    assert "order by ui.emp_no, ui.verified_at desc" in PLAN_SQL
+
+
+def test_preference_wins_over_the_default():
+    for fragment in (
+        "coalesce(p.workspace, c.workspace)",
+        "coalesce(p.slack_user, c.slack_user)",
+        "coalesce(p.reminder_minutes, %(default_minutes)s)",
+    ):
+        assert fragment in PLAN_SQL, fragment
+
+
+def test_send_target_is_revalidated():
+    """설정에 남은 옛 워크스페이스로 보내지 않는다. 그 계정은 이미 없을 수 있다."""
+    assert "ui.workspace = r.workspace" in PLAN_SQL
+    assert "ui.slack_user = r.slack_user" in PLAN_SQL
+    assert "ui.emp_no = r.emp_no" in PLAN_SQL
 
 
 def test_plan_runs_the_cleanup_steps_in_order():
@@ -442,15 +501,36 @@ def test_normalize_minutes_ignores_malformed_values():
 def test_panel_says_the_current_state_first():
     on = settings_blocks(Preference("E1", "tyit", "U1", (30,), True))
     assert "켜짐" in on[0]["text"]["text"]
-    off = settings_blocks(None)
+    off = settings_blocks(Preference("E1", "tyit", "U1", (10,), False))
     assert "꺼짐" in off[0]["text"]["text"]
 
 
-def test_panel_offers_three_minute_choices_and_a_toggle():
+# 설정 행이 없는 것을 「꺼짐」 으로 보이면 화면이 거짓말한다 — 실제로는 받고 있다.
+# 그 사람은 「켜기」 를 누르고 달라진 것이 없어 혼란스러워한다(2026-09-11).
+def test_panel_without_a_preference_says_it_is_already_receiving():
+    head = settings_blocks(None)[0]["text"]["text"]
+    assert "받는 중" in head
+    assert "꺼짐" not in head
+    assert "기본" in head
+    assert "10분 전" in head
+
+
+def test_panel_without_a_preference_offers_turning_it_off():
+    """받고 있으니 줄 버튼은 끄기다. 「켜기」 는 누를 이유가 없다."""
+    actions = [b for b in settings_blocks(None) if b["type"] == "actions"]
+    assert actions[1]["elements"][0]["action_id"] == ACTION_OFF
+
+
+def test_panel_offers_three_minute_choices():
     blocks = settings_blocks(None)
     actions = [b for b in blocks if b["type"] == "actions"]
     labels = [e["text"]["text"] for e in actions[0]["elements"]]
     assert labels == ["30분 전", "10분 전", "둘 다"]
+
+
+def test_panel_offers_turning_it_back_on_only_when_off():
+    off = Preference("E1", "tyit", "U1", (10,), False)
+    actions = [b for b in settings_blocks(off) if b["type"] == "actions"]
     assert actions[1]["elements"][0]["action_id"] == ACTION_ENABLE
 
 
@@ -505,7 +585,8 @@ def test_workspace_bot_opens_the_reminder_panel(monkeypatch):
 
     sent = respond.call_args.kwargs
     assert sent["response_type"] == "ephemeral"
-    assert "꺼짐" in sent["blocks"][0]["text"]["text"]
+    # 설정 행이 없는 사람도 기본으로 받는 중이다.
+    assert "받는 중" in sent["blocks"][0]["text"]["text"]
 
 
 def test_workspace_bot_moves_the_reminder_destination(monkeypatch):
@@ -548,7 +629,7 @@ def test_due_carries_no_body_fields():
 # 영원히 0건인 상태를 '오늘은 회의가 없나 보다' 로 넘길 뻔했다(2026-09-02).
 def _diag(caplog, **counts):
     row = {
-        "upcoming": 0, "folders": 0, "folder_orgs": 0, "prefs": 0, "identities": 0,
+        "upcoming": 0, "folders": 0, "folder_orgs": 0, "opted_out": 0, "identities": 0,
     }
     row.update(counts)
     conn = FakeConn(diagnose=[row])
@@ -558,19 +639,23 @@ def _diag(caplog, **counts):
 
 
 def test_empty_queue_reports_missing_folder_org_mapping(caplog):
-    text = _diag(caplog, folders=2, identities=3, prefs=1)
+    text = _diag(caplog, folders=2, identities=3)
     assert "schedule_folder_org" in text
     assert "DM 이 나가지 않습니다" in text
 
 
-def test_empty_queue_reports_nobody_opted_in(caplog):
-    text = _diag(caplog, folders=2, folder_orgs=1, identities=3)
-    assert "/일정 알림" in text
+def test_empty_queue_reports_missing_identity_mapping(caplog):
+    """기본 수신이라 설정은 관문이 아니다. 관문은 **누구에게 보낼지** 다."""
+    text = _diag(caplog, folders=2, folder_orgs=1, identities=0)
+    assert "사번" in text
+    assert "DM 이 나가지 않습니다" in text
+    # 없는 설정 단계를 하라고 보내지 않는다.
+    assert "`/일정 알림` 으로 켭니다" not in text
 
 
 def test_quiet_period_is_not_reported_as_a_problem(caplog):
     """설정이 다 갖춰졌고 단지 회의가 없는 것은 고장이 아니다."""
-    text = _diag(caplog, folders=2, folder_orgs=1, identities=3, prefs=1, upcoming=0)
+    text = _diag(caplog, folders=2, folder_orgs=1, identities=3, upcoming=0)
     assert "정상" in text
     assert "DM 이 나가지 않습니다" not in text
 

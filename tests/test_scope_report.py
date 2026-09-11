@@ -138,3 +138,43 @@ def test_bot_survives_slack_failure():
 def test_exec_user_is_labelled():
     bot, client = _bot(channels=["#본사팀-전산_ABB110-회의"], exec_users=("U1",))
     assert "임원" in bot._scope_report(client, "U1")
+
+
+# --- 첫 사용 안내는 홈 탭에서만 -------------------------------------------------
+#
+# 2026-09-11: 일정 알림 DM 을 읽으려고 봇 DM 을 열었더니 봇 소개가 따라왔다.
+# `app_home_opened` 는 `tab` 이 `messages` 일 때도 오기 때문이다 — 즉 **DM 을 읽는
+# 행동 자체가** 이벤트를 낸다. 알림을 읽으러 온 사람에게 소개를 읽히는 것은 방해다.
+def _welcome_sent(event: dict) -> bool:
+    """`on_home_opened` 의 판정만 떼어 시험한다.
+
+    핸들러는 `_register` 안의 클로저라 직접 부를 수 없다. 그래서 조건을 여기 옮겨
+    적는 대신 **소스에 그 조건이 있는지** 확인하고, 판정 자체는 아래 표로 고정한다.
+    """
+    return str(event.get("tab") or "") == "home" and bool(event.get("user"))
+
+
+def test_home_tab_opens_send_the_welcome():
+    assert _welcome_sent({"tab": "home", "user": "U1"})
+
+
+def test_reading_a_dm_does_not_send_the_welcome():
+    """`messages` 탭은 DM 을 읽는 행동이다. 여기서 소개를 보내면 알림을 가린다."""
+    assert not _welcome_sent({"tab": "messages", "user": "U1"})
+
+
+def test_missing_tab_is_not_treated_as_home():
+    """모르는 값이면 보내지 않는다 — 방해하는 쪽보다 조용한 쪽이 낫다."""
+    assert not _welcome_sent({"user": "U1"})
+    assert not _welcome_sent({"tab": "", "user": "U1"})
+
+
+def test_handler_actually_checks_the_tab():
+    """위 표가 실제 코드와 어긋나면 고정한 의미가 없다."""
+    import pathlib
+
+    src = pathlib.Path("src/tybot/slack/pilot.py").read_text(encoding="utf-8")
+    body = src[src.index('@self.app.event("app_home_opened")'):]
+    body = body[:body.index("self._notify_user")]
+    assert 'event.get("tab")' in body
+    assert '!= "home"' in body
