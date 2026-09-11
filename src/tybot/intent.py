@@ -757,4 +757,13 @@ def classify(text: str, router: Router | None) -> Intent:
     logger.info(
         "intent kind=%s days=%s terms=%s cost=$%.5f", kind, days, terms, resp.cost_usd
     )
-    return Intent(kind, days=min(max(days, 1), 365), terms=terms, source="llm")
+    # 범위와 문서 종류는 **코드가 판정한다**(§9). `plan()` 과 같은 규칙이어야 한다 —
+    # 갈라지면 단일 의도 경로에서만 「여태까지」 가 7일로 줄어든다.
+    return Intent(
+        kind,
+        days=min(max(days, 1), 365),
+        terms=terms,
+        source="llm",
+        time_scope=parse_time_scope(text),
+        document_query=expand_document_query(text) if kind == "summary" else [],
+    )

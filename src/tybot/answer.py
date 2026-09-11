@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import documents
+from . import document_evidence, documents
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
 from .attachment_review import find_sendable, status_line
@@ -502,6 +502,19 @@ def _match_terms(lines, terms: list[str] | None):
     return [ln for ln in lines if search_index.score_line(tokens, "", ln.speaker, ln.text)]
 
 
+def _with_coverage(text: str, coverage: str) -> str:
+    """답변 끝에 「확인 범위」 를 붙인다.
+
+    일부 문서가 빠졌는데 그 사실이 안 보이면, 불완전한 종합이 완전한 것처럼 읽힌다
+    (설계 §13). 모델이 이 줄을 쓰게 하지 않는다 — **건수는 코드가 센 사실**이고,
+    모델에게 맡기면 근거 없이 바뀐다.
+    """
+    body = (text or "").strip()
+    if not coverage:
+        return body
+    return f"{body}\n\n{coverage}" if body else coverage
+
+
 def _blocks_from_hits(hits: list[SearchHit], ctx) -> tuple[list, list, list, int]:
     """복원된 근거 줄을 채널별 블록으로 묶는다.
 
@@ -580,6 +593,89 @@ class AnswerEngine:
     def spent_today(self) -> float:
         return self._router.spent_today
 
+    def _document_set_blocks(
+        self, visible_docs, ctx, *, cutoff: str, terms, wanted: list[str]
+    ):
+        """문서 집합 요약의 근거 블록. 보고서마다 몫을 나눠 준다(설계 §11).
+
+        채널당 최근 N줄과 다른 점은 하나다 — **자르는 단위가 문서**다. 첨부 하나가
+        수백 줄이면 채널 예산을 통째로 먹어서 나머지 보고서가 통째로 밀려난다.
+
+        후보는 **파일명**으로 고른다. 파일명에 `주간보고` 가 있고 본문에 그 문구가
+        없는 보고서를 놓치지 않으려면 그래야 한다(§2.6). 다만 파일명은 후보 선정까지만
+        쓴다 — 내용은 추출된 줄에서만 나온다.
+        """
+        pairs = []
+        for doc in visible_docs:
+            lines = [
+                ln for ln in doc.raw_lines
+                if TS_RE.match(ln.ts) and (not cutoff or ln.ts[:10] >= cutoff)
+            ]
+            if lines:
+                pairs.append((doc, lines))
+
+        documents = document_evidence.group_documents(pairs)
+        # 이름이 맞는 첨부만 남긴다. 일반 대화는 이 질문의 후보가 아니다 —
+        # 「주간 보고를 종합해줘」 에 잡담을 섞으면 문서 종합이 아니게 된다.
+        matched = [
+            d for d in documents
+            if d.is_attachment and any(w in d.title for w in wanted)
+        ]
+        if not matched:
+            # 파일명으로 못 찾으면 본문에서 찾은 것으로 되돌아간다. 여기서 포기하면
+            # 「파일명이 다른 보고서」 가 통째로 사라진다.
+            matched = [d for d in documents if d.is_attachment]
+
+        got = document_evidence.allocate(matched, list(terms or []))
+
+        blocks: list[str] = []
+        citations: list[str] = []
+        parts: list[tuple[str, list[str], list[SearchHit]]] = []
+        hits: list[SearchHit] = []
+        total = 0
+        by_key = {f"{d.workspace}/{d.channel}": d for d, _ in got.selected}
+        del by_key  # 키는 문서별이라 채널 사전은 쓰지 않는다. 의도를 남겨 둔다.
+
+        doc_by_key = {}
+        for doc, lines in pairs:
+            for item in document_evidence.group_documents([(doc, lines)]):
+                doc_by_key[item.key] = doc
+
+        for item, picked in got.selected:
+            if not picked:
+                continue
+            source_doc = doc_by_key.get(item.key)
+            ws_tag = "" if item.workspace == ctx.workspace else f"[{item.workspace}] "
+            body = "\n".join(
+                f"[{ln.ts}] {ln.speaker}: {ln.text}" for ln in picked
+            )
+            # 채널이 아니라 **문서**가 블록의 제목이다. 그래야 모델이 보고서별로
+            # 읽고, 답변에서도 보고서를 구별해 쓴다.
+            block = f"### {ws_tag}{item.title} (채널 {item.channel})\n{body}"
+            blocks.append(block)
+            total += len(picked)
+
+            doc_citations: list[str] = []
+            seen: set[tuple[str, str]] = set()
+            for line in picked:
+                source = line.source_path or (source_doc.path if source_doc else None)
+                if source is None:
+                    continue
+                date = (line.ts or "").split()[0] if line.ts else ""
+                key = (str(source), date)
+                if key in seen:
+                    continue
+                seen.add(key)
+                doc_citations.append(
+                    f"{ws_tag}{item.channel}, 📄{item.title}({date})"
+                )
+                if source_doc is not None:
+                    hits.append(SearchHit(doc=source_doc, line=line, score=1))
+            citations.extend(doc_citations)
+            parts.append((block, doc_citations, list(hits[-len(picked):])))
+
+        return blocks, citations, parts, hits, total, document_evidence.coverage_block(got)
+
     def summarize(
         self,
         ctx: RequestContext,
@@ -590,8 +686,17 @@ class AnswerEngine:
         question: str | None = None,
         terms: list[str] | None = None,
         evidence_hits: list[SearchHit] | None = None,
+        document_query: list[str] | None = None,
+        all_time: bool = False,
     ) -> Answer:
-        """기간 요약 — 권한 내 전 채널의 최근 원문을 채널별로 정리한다.
+        """기간 요약 — 권한 내 전 채널의 최근 원문을 정리한다.
+
+        `document_query` 가 있으면 **문서 집합 요약**이다. 채널당 최근 N줄이 아니라
+        보고서마다 근거 몫을 나눠 준다(설계 §11) — 첨부 하나가 수백 줄이면 채널 예산을
+        통째로 먹어서 「11건을 종합해줘」 가 「한 건의 꼬리」 가 되기 때문이다.
+
+        `all_time` 이면 기간을 자르지 않는다. 「여태까지」 를 7일로 줄이면 파일이
+        아카이브에 있어도 후보에 못 들어온다(§9).
 
         검색이 아니라 기간 스캔이므로, 근거는 여전히 원문 라인 그대로만 넣는다.
 
@@ -618,9 +723,27 @@ class AnswerEngine:
                 for doc in self._store.visible_docs(ctx)
                 if not workspace_filter or doc.workspace in workspace_filter
             ]
-        cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+        # 「여태까지」 는 자르지 않는다. 사용자가 요청한 범위와 실제 조회 범위가
+        # 다른데 답변은 「자료가 없다」 로 나가면, 그 차이가 어디에도 안 보인다.
+        cutoff = (
+            "" if all_time
+            else (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+        )
+        wanted_docs = [d for d in (document_query or []) if d]
+        coverage = ""
+        if wanted_docs and not scoped:
+            blocks, citations, specialist_parts, summary_hits, total, coverage = (
+                self._document_set_blocks(
+                    visible_docs, ctx, cutoff=cutoff, terms=terms, wanted=wanted_docs
+                )
+            )
+            visible_docs = []
+
         for doc in visible_docs:
-            recent = [ln for ln in doc.raw_lines if TS_RE.match(ln.ts) and ln.ts[:10] >= cutoff]
+            recent = [
+                ln for ln in doc.raw_lines
+                if TS_RE.match(ln.ts) and (not cutoff or ln.ts[:10] >= cutoff)
+            ]
             recent = _match_terms(recent, terms)
             if not recent:
                 continue
@@ -732,7 +855,7 @@ class AnswerEngine:
                     len(blocks),
                 )
                 return Answer(
-                    special.text,
+                    _with_coverage(special.text, coverage),
                     selected_citations,
                     special.model,
                     special.cost_usd,
@@ -769,7 +892,8 @@ class AnswerEngine:
             ctx.workspace, days, len(blocks), total, resp.model, resp.cost_usd,
         )
         return Answer(
-            resp.text.strip(), citations, resp.model, resp.cost_usd, total,
+            _with_coverage(resp.text.strip(), coverage),
+            citations, resp.model, resp.cost_usd, total,
             "answered", withheld=withheld,
             evidence_refs=refs_from_hits(summary_hits, self._store.root),
             attachment_refs=_attachment_refs(self._store.root, summary_hits),
@@ -888,6 +1012,15 @@ class AnswerEngine:
                 model=model,
                 workspace_filter=_mentioned_workspaces(q) or None,
                 question=q,
+                # 문서 종류가 있으면 문서 집합 요약이다 — 채널당 최근 줄이 아니라
+                # 보고서마다 몫을 나눈다(설계 §11).
+                document_query=list(intent.document_query),
+                all_time=intent.wants_all_time,
+                # 주제어는 **문서 집합일 때만** 넘긴다. 일반 기간 요약에서 `terms` 는
+                # 하드 필터라, 「이번주 진행 상황」 같은 질문의 낱말로 거르면 원문이
+                # 통째로 탈락해 `no_hits` 가 된다. 문서 집합에서는 거르는 게 아니라
+                # 문서별로 **고르는** 데 쓰인다.
+                terms=list(intent.terms) if intent.document_query else None,
             )
         if intent.kind == "advice":
             return self.advise(question, ctx, terms=intent.terms)
@@ -908,6 +1041,8 @@ class AnswerEngine:
                     model=model,
                     workspace_filter=_mentioned_workspaces(q) or None,
                     question=q,
+                    document_query=list(intent.document_query),
+                    all_time=intent.wants_all_time,
                 )
             return Answer(
                 "사내 아카이브에 쌓인 원문만 근거로 답하는 봇입니다. "
