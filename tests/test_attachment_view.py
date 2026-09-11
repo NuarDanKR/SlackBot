@@ -43,7 +43,7 @@ def test_the_urgency_says_why():
 
     assert "이미 사용 중" in rows["표.xlsx"].urgency
     assert "변환 실패" in rows["보고서.pdf"].urgency
-    assert "지원하지 않는 형식" in rows["사진.png"].urgency
+    assert "자동 변환 실패" in rows["사진.png"].urgency
 
 
 # --- 원본 외부 전송 진입점이 생기지 않게 ------------------------------------
@@ -53,11 +53,12 @@ def test_the_status_view_has_no_approval_actions():
     assert not any(block["type"] == "actions" for block in blocks)
 
 
-def test_the_header_says_conversion_is_automatic_and_originals_stay_local():
+def test_the_header_explains_screened_visual_analysis():
     blocks = av.blocks(_rows(FakeItem("F1", "가.png")))
 
     assert "자동" in blocks[0]["text"]["text"]
-    assert "외부 LLM에 전송하지 않" in blocks[0]["text"]["text"]
+    assert "OCR·PII 검사" in blocks[0]["text"]["text"]
+    assert "실패한 원본은 전송하지 않" in blocks[0]["text"]["text"]
 
 
 def test_a_long_list_says_how_many_are_left(monkeypatch):

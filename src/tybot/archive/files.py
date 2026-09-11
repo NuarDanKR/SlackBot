@@ -26,10 +26,10 @@ logger = logging.getLogger("tybot.files")
 # 본문을 원문에 넣어도 되는 형식
 TEXT_EXTS = {"txt", "md", "markdown", "csv", "tsv", "json", "yaml", "yml", "log", "ini", "conf"}
 TEXT_MIMES = {"text/plain", "text/markdown", "text/csv", "application/json"}
-# 변환도 안 되는 형식 - 목록만 남긴다
+# 변환도 안 되는 형식 - 목록만 남긴다. PNG/JPEG/WebP는 kordoc OCR 대상이다.
 UNCONVERTED_EXTS = {
     "xls",  # 구형 Excel은 안전한 변환 경로가 아직 없다
-    "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff",  # 이미지(OCR 미도입)
+    "gif", "bmp", "tif", "tiff",
     "dwg", "dxf",  # 도면
     "zip", "7z", "rar",  # 압축
 }

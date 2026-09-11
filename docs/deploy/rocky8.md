@@ -305,6 +305,11 @@ sudo bash /opt/tybot/deploy/update.sh
 sudo TYBOT_FORCE=1 WITH_CONSOLE=1 bash /opt/tybot/deploy/update.sh
 ```
 
+HWP/HWPX, 스캔 PDF, 이미지 OCR을 위해 온라인 설치는 기본적으로
+`kordoc@4.12.0`과 LibreOffice를 함께 설치한다. 사전에 별도 관리하는 서버는
+`INSTALL_DOCUMENT_CONVERTERS=0`으로 건너뛸 수 있으며, 오프라인 배포에서는 변환기와
+OCR 모델을 미리 설치해야 한다.
+
 ---
 
 ## 6-A1. 타이머 켜기 — **설치가 켜 주지 않는다**

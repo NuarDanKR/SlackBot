@@ -12,6 +12,8 @@ DATA_DIR=/var/lib/tybot
 CONF_DIR=/etc/tybot
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY=python3.11
+INSTALL_DOCUMENT_CONVERTERS=${INSTALL_DOCUMENT_CONVERTERS:-1}
+KORDOC_VERSION=4.12.0
 
 [[ $EUID -eq 0 ]] || { echo "root 로 실행하세요 (sudo)"; exit 1; }
 
@@ -41,7 +43,9 @@ node_too_old() {
   return 0
 }
 
-if [[ "${WITH_CONSOLE:-0}" == "1" && "${OFFLINE:-0}" != "1" ]] && node_too_old; then
+if [[ "${OFFLINE:-0}" != "1" \
+      && ( "${WITH_CONSOLE:-0}" == "1" || "$INSTALL_DOCUMENT_CONVERTERS" == "1" ) \
+      ]] && node_too_old; then
   echo "  Node 올리기(nodejs:20) — 현재 $(command -v node >/dev/null && node -v || echo 없음)"
   dnf module reset -y nodejs >/dev/null 2>&1 || true
   dnf module enable -y nodejs:20 >/dev/null 2>&1 || true
@@ -52,6 +56,27 @@ if [[ "${WITH_CONSOLE:-0}" == "1" && "${OFFLINE:-0}" != "1" ]] && node_too_old; 
     echo "  ! Node 를 올리지 못했습니다($(node -v 2>/dev/null || echo 없음)) — 화면 빌드는 건너뜁니다"
   else
     echo "  Node $(node -v) 준비됨"
+  fi
+fi
+
+# HWP/HWPX와 스캔 PDF·이미지는 Python 폴백만으로 복구할 수 없다. 실행 중에
+# npx가 패키지를 내려받게 두지 않고 설치 시 검증한 고정 버전을 전역 설치한다.
+if [[ "$INSTALL_DOCUMENT_CONVERTERS" == "1" ]]; then
+  if [[ "${OFFLINE:-0}" == "1" ]]; then
+    echo "  ! 오프라인 설치: kordoc·LibreOffice 설치를 건너뜁니다. 사전 설치가 필요합니다."
+  else
+    if ! command -v soffice >/dev/null && ! command -v libreoffice >/dev/null; then
+      echo "  LibreOffice 문서 변환기 설치"
+      dnf install -y libreoffice-core libreoffice-writer libreoffice-impress
+    fi
+    if ! npm list -g --depth=0 "kordoc@$KORDOC_VERSION" >/dev/null 2>&1; then
+      echo "  kordoc $KORDOC_VERSION + 내장 OCR 설치"
+      npm install -g --no-audit --no-fund "kordoc@$KORDOC_VERSION"
+    fi
+    command -v kordoc >/dev/null || {
+      echo "kordoc 설치 후 실행 파일을 찾지 못했습니다."
+      exit 1
+    }
   fi
 fi
 
@@ -71,6 +96,14 @@ mkdir -p "$APP_DIR" "$CONF_DIR" "$DATA_DIR"/{archive,cache,qa-log,reports}
 find "$DATA_DIR" -mindepth 1 -maxdepth 1 ! -name src -exec chown -R tybot:tybot {} +
 chown tybot:tybot "$DATA_DIR"
 chmod 750 "$DATA_DIR"
+
+if [[ "$INSTALL_DOCUMENT_CONVERTERS" == "1" \
+      && "${OFFLINE:-0}" != "1" \
+      && -x "$(command -v kordoc)" ]]; then
+  # OCR 모델은 tybot 계정의 캐시에 둔다. kordoc이 SHA-256을 검증하며,
+  # 이미 받은 모델은 다시 내려받지 않는다.
+  runuser -u tybot -- env HOME="$DATA_DIR" kordoc check-ocr-models
+fi
 
 echo "== 3/6 코드 배치 =="
 

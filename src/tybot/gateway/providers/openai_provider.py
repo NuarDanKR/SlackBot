@@ -7,6 +7,26 @@ from collections.abc import Sequence
 from ..base import LLMResponse, Message, ModelSpec
 
 
+def _content(content: str | list[dict]):
+    """공통 이미지 블록을 OpenAI Chat Completions 형식으로 바꾼다."""
+    if isinstance(content, str):
+        return content
+    out = []
+    for block in content:
+        if block.get("type") != "image":
+            out.append(block)
+            continue
+        source = block.get("source") or {}
+        media = source.get("media_type")
+        data = source.get("data")
+        if media and data:
+            out.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{media};base64,{data}"},
+            })
+    return out
+
+
 def _resolve_key() -> str | None:
     """키를 DB 에서 먼저 찾고, 없으면 환경변수로 되돌아간다.
 
@@ -49,7 +69,7 @@ class OpenAIProvider:
         temperature: float = 0.0,
     ) -> LLMResponse:
         client = self._get_client()
-        payload = [{"role": m.role, "content": m.content} for m in messages]
+        payload = [{"role": m.role, "content": _content(m.content)} for m in messages]
         resp = client.chat.completions.create(
             model=spec.model,
             messages=payload,

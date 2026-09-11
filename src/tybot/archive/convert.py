@@ -20,7 +20,8 @@
 | pdf | pypdf + kordoc OCR | 텍스트가 없거나 매우 짧으면 OCR |
 | hwpx | kordoc, 안전 XML 폴백 | 표·배치 우선, XML은 텍스트 폴백 |
 | hwp(구형 바이너리) | kordoc | 미설치 시 명시적 실패 |
-| 이미지·도면 | 미변환 | OCR 미도입 |
+| png/jpg/jpeg/webp | kordoc OCR | 검색용 텍스트 + PII 검사 |
+| 기타 이미지·도면 | 미변환 | 원본 흔적만 보존 |
 
 ## XML 안전
 hwpx 는 사용자가 올린 zip 안의 XML 이다. 표준 파서는 외부 엔티티(XXE)와
@@ -366,6 +367,18 @@ def _hwp(data: bytes) -> list[str]:
         raise ConvertError(f"HWP 변환 실패: {exc}") from exc
 
 
+def _image(data: bytes, suffix: str) -> list[str]:
+    """이미지의 글자를 로컬 OCR로 추출한다.
+
+    원본 이미지는 검색 아카이브에 넣지 않는다. 이 결과가 writer의 PII 검사를
+    통과한 뒤에만 검색과 시각 질의 경로에서 사용할 수 있다.
+    """
+    try:
+        return _finish(kordoc_lines(data, suffix, force_ocr=True))
+    except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+        raise ConvertError(f"이미지 OCR 실패: {exc}") from exc
+
+
 def _legacy_office(data: bytes, suffix: str) -> list[str]:
     try:
         return _finish(office_pdf_lines(data, suffix))
@@ -379,6 +392,10 @@ _HANDLERS = {
     "pptx": _pptx, "ppt": lambda data: _legacy_office(data, "ppt"),
     "pdf": _pdf,
     "hwpx": _hwpx, "hwp": _hwp,
+    "png": lambda data: _image(data, "png"),
+    "jpg": lambda data: _image(data, "jpg"),
+    "jpeg": lambda data: _image(data, "jpeg"),
+    "webp": lambda data: _image(data, "webp"),
 }
 
 

@@ -191,16 +191,17 @@ def test_it_does_nothing_without_apply(mod, tmp_path, monkeypatch, capsys):
     assert "실제로 채우려면" in out
 
 
-def test_an_image_is_reported_not_converted(mod, tmp_path, monkeypatch, capsys):
-    """이미지는 로컬 변환으로 **한 글자도** 안 나온다. 세어 보이기만 한다."""
+def test_an_image_is_retried_with_ocr(mod, tmp_path, monkeypatch, capsys):
+    """과거 미변환 이미지는 kordoc 설치 후 일괄 OCR 대상으로 돌아온다."""
     archive = _archive(tmp_path, ["[첨부:검수대기] 스캔본.png (png, 120KB)"])
     _stage(tmp_path, name="스캔본.png", file_id="F1")
+    monkeypatch.setattr(mod, "convert", lambda suffix, data: ["OCR로 읽은 현장 표"])
 
     code, out = _run(mod, archive, monkeypatch, capsys, "--apply")
 
     assert code == 0
-    assert "변환 대상 아님(이미지·스캔)" in out
-    assert "모델이" in out, "무엇이 필요한지 말해야 한다"
+    assert "변환한 파일 1건" in out
+    assert "[첨부추출:스캔본.png] OCR로 읽은 현장 표" in next(archive.rglob("*.md")).read_text("utf-8")
 
 
 def test_an_already_converted_file_is_skipped(mod, tmp_path, monkeypatch, capsys):

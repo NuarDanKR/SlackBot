@@ -1,4 +1,4 @@
-"""승인된 첨부 원본을 Claude 에 그대로 보낸다.
+"""호출자가 전송 가능하다고 판정한 첨부 원본을 멀티모달 모델에 보낸다.
 
 검토: [`docs/design/trust-and-usability-review.md`](../../docs/design/trust-and-usability-review.md) §3
 
@@ -130,7 +130,7 @@ def collect(
     max_file_bytes: int = MAX_FILE_BYTES,
     max_total_bytes: int = MAX_TOTAL_BYTES,
 ) -> Attached:
-    """승인된 첨부 목록 → 콘텐츠 블록. 상한과 형식은 여기서 강제한다.
+    """전송 가능한 첨부 목록 → 콘텐츠 블록. 상한과 형식은 여기서 강제한다.
 
     `items` 는 `attachment_review.Attachment` 처럼 `name`·`object_path`·`size` 를 가진 것.
     """

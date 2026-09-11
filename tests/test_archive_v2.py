@@ -166,12 +166,13 @@ def test_staged_attachment_rejects_all_extracted_lines_when_any_line_contains_pi
     assert metadata["status"] == "pii_refused"
 
 
-def test_unsupported_attachment_is_recorded_without_waiting_for_a_command(
+def test_image_is_ocr_converted_without_waiting_for_a_command(
     tmp_path, monkeypatch
 ):
     archive = tmp_path / "archive"
     storage = attachment_storage(archive, "pilot", "C123")
     monkeypatch.setattr("tybot.archive.files.download_bytes", lambda *_: b"image")
+    monkeypatch.setattr("tybot.archive.files.convert", lambda *_: ["OCR 본문"])
     raw_file = {
         "id": "F-IMAGE",
         "name": "현장사진.png",
@@ -183,9 +184,12 @@ def test_unsupported_attachment_is_recorded_without_waiting_for_a_command(
     lines, warnings = stage_files([raw_file], "xoxb-test", storage)
 
     assert warnings == []
-    assert lines == ["[첨부:미지원] 현장사진.png (png, 1KB)"]
+    assert lines == [
+        "[첨부:자동변환] 현장사진.png (png, 1KB)",
+        "[첨부추출:현장사진.png] OCR 본문",
+    ]
     metadata = json.loads(
         (storage.staging_dir / "F-IMAGE" / "metadata.json").read_text("utf-8")
     )
-    assert metadata["status"] == "unsupported"
-    assert metadata["extracted"] is False
+    assert metadata["status"] == "converted"
+    assert metadata["extracted"] is True

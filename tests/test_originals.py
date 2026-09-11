@@ -15,7 +15,7 @@ import json
 import pytest
 
 from tybot import documents
-from tybot.answer import _attachment_source_links
+from tybot.answer import _attachment_source_links, _visual_originals
 from tybot.archive.store import ArchiveDoc, RawLine, SearchHit
 from tybot.attachment_review import (
     APPROVED,
@@ -205,16 +205,47 @@ def test_an_ambiguous_name_is_never_sent(tmp_path):
     assert got is None
 
 
-def test_the_answer_path_never_collects_original_bytes():
-    """답변 엔진은 승인 상태와 무관하게 첨부 원본을 외부 모델에 보내지 않는다."""
-    import inspect
+def test_answer_can_use_an_ocr_screened_image_from_the_same_channel(tmp_path):
+    archive = _stage(tmp_path, name="현장사진.png", status="converted", body=b"png")
+    doc = ArchiveDoc(
+        path=archive / "raw.md",
+        workspace="mgmt",
+        channel="#현장",
+        visibility="private",
+        acl=frozenset(),
+        share_with=frozenset(),
+        last_ingested="2026-09-11",
+        channel_id="C1",
+        raw_lines=[
+            RawLine("2026-09-11 09:00", "홍길동", "[첨부:변환] 현장사진.png (png, 1KB)", 1),
+            RawLine("2026-09-11 09:00", "홍길동", "[첨부추출:현장사진.png] 안전모 착용", 2),
+        ],
+    )
+    hit = SearchHit(doc, doc.raw_lines[1], 10)
 
-    from tybot import answer
+    got = _visual_originals(archive, [hit])
 
-    source = inspect.getsource(answer.AnswerEngine)
-    assert "documents.collect" not in source
-    assert "find_sendable" not in source
-    assert not hasattr(answer, "_originals")
+    assert got.included == ["현장사진.png"]
+    assert got.blocks[0]["type"] == "image"
+
+
+def test_answer_does_not_send_an_image_before_ocr_screening(tmp_path):
+    archive = _stage(tmp_path, name="현장사진.png", status=PENDING, body=b"png")
+    doc = ArchiveDoc(
+        path=archive / "raw.md",
+        workspace="mgmt",
+        channel="#현장",
+        visibility="private",
+        acl=frozenset(),
+        share_with=frozenset(),
+        last_ingested="2026-09-11",
+        channel_id="C1",
+        raw_lines=[
+            RawLine("2026-09-11 09:00", "홍길동", "[첨부:미변환] 현장사진.png (png, 1KB)", 1),
+        ],
+    )
+
+    assert not _visual_originals(archive, [SearchHit(doc, doc.raw_lines[0], 10)]).any
 
 
 # --- 형식 --------------------------------------------------------------------

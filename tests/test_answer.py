@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from tybot import documents
 from tybot.access import RequestContext
 from tybot.answer import AnswerEngine, parse_model_flag
 from tybot.archive.store import ArchiveStore
@@ -63,6 +64,28 @@ def test_answer_attaches_citation(engine):
     assert "출처:" in ans.to_slack()
     # 근거는 원문 라인이어야 한다
     assert "3억 2천만원" in fake.calls[0][1].content
+
+
+def test_answer_sends_an_ocr_screened_image_with_the_text_evidence(engine, monkeypatch):
+    eng, fake = engine
+    visual = documents.Attached(
+        blocks=[{
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "YWJj"},
+        }],
+        included=["현장사진.png"],
+        skipped=[],
+    )
+    monkeypatch.setattr("tybot.answer._visual_originals", lambda root, hits: visual)
+
+    ans = eng.answer("기성금 얼마야", _ctx())
+
+    assert ans.reason == "answered"
+    content = fake.calls[0][1].content
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert "3억 2천만원" in content[0]["text"]
+    assert content[1]["type"] == "image"
 
 
 def test_zero_hits_never_answers_something_else(engine):

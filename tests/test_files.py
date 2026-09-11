@@ -35,7 +35,7 @@ class _Resp(io.BytesIO):
 def test_unconvertible_types_are_listed_only():
     """도면·이미지·구형 바이너리는 다운로드조차 하지 않고 목록만 남긴다."""
     lines, warns = file_lines(
-        [_f("도면.dwg", "dwg"), _f("사진.jpg", "jpg"), _f("구형.xls", "xls")], "xoxb-t"
+        [_f("도면.dwg", "dwg"), _f("사진.bmp", "bmp"), _f("구형.xls", "xls")], "xoxb-t"
     )
     assert len(lines) == 3 and warns == []
     assert all("[첨부:미변환]" in ln for ln in lines)

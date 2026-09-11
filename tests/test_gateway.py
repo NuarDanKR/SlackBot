@@ -97,6 +97,24 @@ def test_content_size_counts_document_and_image_payloads():
     assert _content_size(content) >= 1002
 
 
+def test_openai_provider_translates_a_common_image_block():
+    from tybot.gateway.providers.openai_provider import _content
+
+    got = _content([
+        {"type": "text", "text": "무엇이 보이나?"},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "YWJj"},
+        },
+    ])
+
+    assert got[0] == {"type": "text", "text": "무엇이 보이나?"}
+    assert got[1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,YWJj"},
+    }
+
+
 def test_registry_specs_have_valid_sensitivity():
     for spec in DEFAULT_REGISTRY.values():
         assert spec.max_sensitivity in Sensitivity

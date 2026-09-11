@@ -12,6 +12,7 @@ from pathlib import Path
 from . import documents
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
+from .attachment_review import find_sendable
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -237,7 +238,21 @@ def _attachment_names(hits: list[SearchHit]) -> list[tuple[str, str, str]]:
     for h in hits:
         m = ATTACHMENT_RE.match((h.line.text or "").strip())
         if not m:
-            continue
+            extracted = EXTRACTED_ATTACHMENT_RE.match((h.line.text or "").strip())
+            if not extracted:
+                continue
+            name = extracted.group("name")
+            m = next(
+                (
+                    marker
+                    for line in h.doc.raw_lines
+                    if (marker := ATTACHMENT_RE.match((line.text or "").strip()))
+                    and marker.group("name") == name
+                ),
+                None,
+            )
+            if not m:
+                continue
         channel_id = h.doc.channel_id or ""
         if not channel_id:
             continue
@@ -328,6 +343,35 @@ def _withheld_attachments(hits: list[SearchHit]) -> list[str]:
         if name not in out:
             out.append(name)
     return out
+
+
+def _visual_originals(root: Path, hits: list[SearchHit]) -> documents.Attached:
+    """권한 필터와 OCR·PII 검사를 통과한 검색 결과의 이미지 원본만 고른다."""
+    items = []
+    for workspace, channel_id, name in _attachment_names(hits):
+        suffix = Path(name).suffix.lstrip(".").lower()
+        if suffix not in documents.IMAGE_TYPES:
+            continue
+        text_extracted = any(
+            hit.doc.workspace == workspace
+            and hit.doc.channel_id == channel_id
+            and any(
+                (match := EXTRACTED_ATTACHMENT_RE.match((line.text or "").strip()))
+                and match.group("name") == name
+                for line in hit.doc.raw_lines
+            )
+            for hit in hits
+        )
+        item = find_sendable(
+            root,
+            workspace=workspace,
+            channel_id=channel_id,
+            name=name,
+            text_extracted=text_extracted,
+        )
+        if item is not None:
+            items.append(item)
+    return documents.collect(items)
 
 def _evidence_block(hits: list[SearchHit]) -> str:
     return "\n".join(
@@ -704,16 +748,17 @@ class AnswerEngine:
                 "no_hits",
             )
 
-        # 첨부 원본은 외부 LLM에 보내지 않는다. 자동 변환에 실패한 파일은 답변에서
-        # 분명히 밝히고, 변환된 텍스트만 근거로 사용한다.
+        # 기본 근거는 변환된 텍스트다. 이미지 원본은 아래에서 같은 채널의 정확한 파일로
+        # 식별되고 OCR·PII 검사를 통과한 경우에만 시각 입력으로 추가한다.
         withheld = _withheld_attachments(hits)
+        visual = _visual_originals(self._store.root, hits)
         prompt = f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"
         # 전문가에게 먼저 묻는다. **근거는 이미 권한을 통과한 것뿐**이고(위 검색이
         # `visible_docs` 로 걸렀다), 출처는 아래에서 우리가 붙인다 — 전문가는
         # 문장만 돌려준다(원칙 2·3).
         #
         # 전문가가 없거나 못 답하면 `None` 이고, 그때 마스터가 그대로 답한다.
-        if self._specialist is not None:
+        if self._specialist is not None and not visual.any:
             special = self._specialist(q, ctx, _evidence_block(hits))
             if special is not None and special.text.strip():
                 citations = _specialist_citations(special, hits, ctx)
@@ -737,9 +782,12 @@ class AnswerEngine:
                     withheld=withheld,
                 )
 
+        user_content: str | list[dict] = prompt
+        if visual.any:
+            user_content = [{"type": "text", "text": prompt}, *visual.blocks]
         messages = [
             Message("system", SYSTEM_PROMPT),
-            Message("user", prompt),
+            Message("user", user_content),
         ]
         try:
             resp = self._router.complete(

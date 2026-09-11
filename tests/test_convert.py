@@ -6,6 +6,7 @@ import zipfile
 
 import pytest
 
+from tybot.archive import convert as cv
 from tybot.archive.convert import ConvertError, can_convert, convert
 
 
@@ -119,10 +120,23 @@ def test_empty_file_refused():
 
 
 def test_convertible_set():
-    for ext in ("xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp"):
+    for ext in (
+        "xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp",
+        "png", "jpg", "jpeg", "webp",
+    ):
         assert can_convert(ext)
-    for ext in ("xls", "jpg", "dwg", "zip"):
+    for ext in ("xls", "gif", "dwg", "zip"):
         assert not can_convert(ext)
+
+
+def test_image_uses_local_ocr(monkeypatch):
+    monkeypatch.setattr(
+        cv,
+        "kordoc_lines",
+        lambda data, suffix, *, force_ocr=False: [f"{suffix}:{len(data)}:{force_ocr}"],
+    )
+
+    assert convert("png", b"image") == ["png:5:True"]
 
 
 def test_large_sheet_folds_the_middle_not_the_tail(monkeypatch):
