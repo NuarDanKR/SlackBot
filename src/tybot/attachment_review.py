@@ -194,6 +194,42 @@ def public_failure_reason(item: Attachment) -> str:
     return "문서 다운로드 또는 변환에 실패했습니다. 서비스 로그를 확인하세요."
 
 
+# 사람에게 보일 상태 이름. **현재 메타데이터가 유일한 기준이다**(설계 §11) —
+# 과거 대화나 아카이브에 「처리실패」라고 적혀 있어도 지금 변환됐으면 변환된 것이다.
+STATUS_LABELS = {
+    CONVERTED: "변환 완료",
+    APPROVED: "변환 완료",
+    PENDING: "변환 대기",
+    REJECTED: "검수 반려",
+    FAILED: "변환 실패",
+    UNSUPPORTED: "지원하지 않는 형식",
+    DOWNLOAD_OR_EXTRACT_FAILED: "다운로드 또는 추출 실패",
+    PII_REFUSED: "민감정보 검사 차단",
+}
+NO_METADATA = "현재 상태를 확인하지 못함"
+
+
+def status_label(item: Attachment) -> str:
+    """이 첨부의 **지금** 상태 한 낱말."""
+    if item.status in FAILURE_STATES or item.status == PII_REFUSED:
+        return STATUS_LABELS.get(item.status, "변환 실패")
+    if item.extracted:
+        # 추출 텍스트가 아카이브에 들어갔다는 것이 곧 변환에 성공했다는 뜻이다.
+        return STATUS_LABELS[CONVERTED]
+    if item.object_path is None:
+        return "원본 없음"
+    return STATUS_LABELS.get(item.status, item.status or NO_METADATA)
+
+
+def status_line(item: Attachment) -> str:
+    """Slack 한 줄. 실패는 **조치 중심 사유**만 붙인다 — 추출 본문은 싣지 않는다."""
+    label = status_label(item)
+    name = item.name or item.file_id
+    if item.status in FAILURE_STATES or item.status == PII_REFUSED:
+        return f"{name} — {label}: {public_failure_reason(item)}"
+    return f"{name} — {label}"
+
+
 def _write_status(item: Attachment, status: str, *, actor: str, note: str) -> Attachment:
     meta = _read_meta(item.meta_path) or {}
     meta["status"] = status

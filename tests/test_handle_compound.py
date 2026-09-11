@@ -43,11 +43,11 @@ class FakeEngine:
         self.plan_contexts: list[str] = []
         self.router = None  # compose 는 fallback 문구를 쓴다
 
-    def plan(self, text, *, conversation_context=""):
+    def plan(self, text, *, conversation_context="", thread_has_refs=False):
         self.plan_contexts.append(conversation_context)
         return list(self._tasks)
 
-    def respond(self, question, ctx, intent):
+    def respond(self, question, ctx, intent, *, followup=None):
         self.asked.append(question)
         return self._answers.pop(0)
 
@@ -136,13 +136,20 @@ def test_archive_task_gets_its_own_clause_not_the_whole_message():
 
 
 def test_follow_up_in_a_thread_passes_prior_bot_exchange_only_to_the_planner():
+    """구형 레코드(좌표 없음)에서만 이전 답변 조각이 planner 로 간다.
+
+    이 값은 **지칭어 해석 전용**이다. 검색 근거나 전문 봇 입력으로 넘어가면
+    요약을 근거로 요약하게 된다(원칙 1).
+    """
     ans = Answer("문서 내용을 다시 확인했습니다.", ["#현장, 📄doc.md(2026-09-11)"],
                  "m", 0.0, 1, "answered")
     bot = _bot([Intent("search", question="가정산서.pdf 다시 확인해줘",
                               terms=["가정산서.pdf"])], [ans])
     bot.qa_log.context_for_thread = lambda workspace, channel_id, thread_ts: [{
         "question": "첨부 문서 내용 알려줘",
-        "answer": "가정산서.pdf 하나는 자동 변환에 실패했습니다.",
+        "evidence_refs": [],
+        "attachment_refs": [],
+        "legacy_answer": "가정산서.pdf 하나는 자동 변환에 실패했습니다.",
     }]
     sent: list[str] = []
 

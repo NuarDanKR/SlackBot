@@ -65,6 +65,7 @@ from ..collection_status import report as collection_report
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
 from ..db import connect as db_connect
+from ..evidence_refs import attachment_refs_to_json, refs_to_json
 from ..failures import failure_message
 from ..feedback import (
     SLASH_HELP,
@@ -439,21 +440,58 @@ class WorkspaceBot:
             channel=channel,
         )
 
-    def _thread_conversation_context(self, event: dict) -> str:
-        """같은 스레드의 이전 문답을 지칭어 해석용으로만 직렬화한다."""
+    def _followup_resolver(self):
+        """후속 질문 해석기. 스토어 하나를 공유하므로 봇당 하나만 만든다."""
+        got = getattr(self, "_followup_resolver_obj", None)
+        if got is None:
+            from ..thread_followup import ThreadFollowupResolver
+
+            got = ThreadFollowupResolver(self.store, archive_dir=self.archive_dir)
+            self._followup_resolver_obj = got
+        return got
+
+    def _thread_turns(self, event: dict) -> list[dict]:
+        """같은 스레드의 이전 TYBot 문답. 구조화된 turn 목록이다."""
         thread_ts = str(event.get("thread_ts") or "")
         channel_id = str(event.get("channel") or "")
         reader = getattr(self.qa_log, "context_for_thread", None)
         if not thread_ts or not channel_id or not callable(reader):
-            return ""
-        rows = reader(self.workspace, channel_id, thread_ts)
+            return []
+        try:
+            return list(reader(self.workspace, channel_id, thread_ts) or [])
+        except Exception as exc:
+            log.warning("[%s] 스레드 문맥 조회 실패: %s", self.workspace, exc)
+            return []
+
+    @staticmethod
+    def _thread_conversation_context(turns: list[dict]) -> str:
+        """planner 에게 줄 **지칭 해석용** 문맥.
+
+        예전에는 이전 봇 답변 전문을 최대 6,000자까지 이어 붙였다. 그 구조는 긴
+        답변 하나가 앞선 관련 문답을 밀어내고, 밀려난 것은 **오류 없이** 사라졌다.
+        더 나쁘게는 답변 문장이 다음 답의 재료가 됐다 — 요약을 근거로 요약하는
+        길이다(원칙 1).
+
+        지금 싣는 것은 질문과 작은 메타데이터다. 실제 근거는 좌표(`evidence_refs`)
+        로 잇고, 그 좌표는 `ThreadFollowupResolver` 가 현재 권한으로 다시 연다.
+        답변 문장은 좌표가 없는 **구형 레코드**에만 남아 있고, 그 값도 지칭어를
+        푸는 데만 쓴다.
+        """
         blocks: list[str] = []
         used = 0
-        for row in reversed(rows):
-            block = (
-                f"이전 질문: {row.get('question', '')}\n"
-                f"이전 봇 답변: {row.get('answer', '')}"
-            ).strip()
+        for turn in reversed(turns):
+            bits = [f"이전 질문: {turn.get('question', '')}".strip()]
+            topics = [str(t) for t in (turn.get("subject_terms") or []) if str(t).strip()]
+            if topics:
+                bits.append(f"이전 주제: {', '.join(topics[:6])}")
+            refs = turn.get("evidence_refs") or []
+            files = turn.get("attachment_refs") or []
+            if refs or files:
+                bits.append(f"이전 근거: 원문 {len(refs)}줄, 관련 파일 {len(files)}건")
+            legacy = str(turn.get("legacy_answer") or "").strip()
+            if legacy:
+                bits.append(f"이전 봇 답변(지칭 해석 전용): {legacy}")
+            block = "\n".join(b for b in bits if b)
             if not block:
                 continue
             if used + len(block) > MAX_THREAD_CONTEXT_CHARS:
@@ -2265,6 +2303,13 @@ class WorkspaceBot:
                 response_ts=_response_ts(response),
                 thread_ts=str(event.get("thread_ts") or event.get("ts") or ""),
                 channel_type=str(event.get("channel_type") or ("channel" if in_channel else "im")),
+                # 다음 질문이 이어 갈 **좌표**. 답변 문장이 아니다 —
+                # 문장을 이어 가면 요약을 근거로 요약하게 된다(원칙 1).
+                evidence_refs=refs_to_json(ans.evidence_refs) if ans else [],
+                attachment_refs=attachment_refs_to_json(ans.attachment_refs) if ans else [],
+                subject_terms=list(ans.subject_terms) if ans else [],
+                context_parent_ids=list(ans.context_parent_ids) if ans else [],
+                context_resolution=(ans.context_resolution if ans else "none"),
             )
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
@@ -2272,14 +2317,20 @@ class WorkspaceBot:
         # 명시 명령은 LLM 을 거치지 않는다(비용·지연 절약).
         # 그 외에는 1차 LLM 이 **하위질문 목록**으로 분해한다 - 사람은 한 번에 여러 가지를
         # 묻는데, 라벨 하나만 고르던 예전 구조에서는 그중 하나만 처리 경로에 도달했다.
+        turns: list[dict] = []
         if INGEST_ALL_RE.search(text):
             tasks = [Intent("ingest_all", source="cmd", question=text)]
         elif INGEST_RE.search(text):
             tasks = [Intent("ingest", source="cmd", question=text)]
         else:
+            turns = self._thread_turns(event)
             tasks = self.engine.plan(
                 text,
-                conversation_context=self._thread_conversation_context(event),
+                conversation_context=self._thread_conversation_context(turns),
+                # 좌표가 있으면 옛 답변 문구를 정규식으로 다시 파싱하지 않는다.
+                thread_has_refs=any(
+                    turn.get("evidence_refs") or turn.get("attachment_refs") for turn in turns
+                ),
             )
         if not tasks:
             tasks = [Intent("search", source="regex", question=text)]
@@ -2319,7 +2370,18 @@ class WorkspaceBot:
                     channel_id=channel_id,
                     in_channel=in_channel,
                 )
-            ans = self.engine.respond(q, ctx, task)
+            # 후속 질문이면 **이전 결과의 좌표를 현재 권한으로 되살린 범위**만
+            # 쓴다. 되살리지 못하면 못했다고 답한다 — 채널 전체로 넓히지 않는다.
+            followup = None
+            if task.is_followup and turns:
+                try:
+                    followup = self._followup_resolver().resolve(
+                        task, ctx, turns=turns, channel_id=channel_id if in_channel else ""
+                    )
+                except Exception as exc:
+                    log.exception("[%s] 후속 질문 해석 실패: %s", self.workspace, exc)
+                    followup = None
+            ans = self.engine.respond(q, ctx, task, followup=followup)
             last = ans
             sections.append(ans.to_slack())
 

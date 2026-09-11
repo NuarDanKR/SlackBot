@@ -162,4 +162,5 @@ def test_thread_context_is_limited_to_the_same_workspace_channel_and_thread(tmp_
 
     rows = log.context_for_thread("pilot", "CA", "T1")
 
-    assert [(row["question"], row["answer"]) for row in rows] == [("첫 질문", "첫 답변")]
+    # 구형 레코드(좌표 없음)에만 답변 조각이 실린다 — 지칭어 해석 전용이다.
+    assert [(row["question"], row["legacy_answer"]) for row in rows] == [("첫 질문", "첫 답변")]

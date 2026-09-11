@@ -414,6 +414,141 @@ class ArchiveStore:
         """검색 0건 폴백 — 권한 내 문서 제목 목록."""
         return [d.title for d in self.visible_docs(ctx)]
 
+    def resolve_refs(self, refs, ctx: RequestContext) -> tuple[list[SearchHit], list[str]]:
+        """이전 답변이 읽은 원문 좌표를 **지금 권한으로** 다시 연다.
+
+        설계: `docs/design/thread-follow-up-evidence.md` §6.2
+
+        후속 질문("방금 그 문서 다시 봐줘")이 이어 가는 것은 이전 답변 문장이
+        아니라 그 답변이 읽은 줄이다. 그 줄을 지금 다시 읽어야 하는 이유는 둘이다.
+
+        1. **권한은 그 사이에 바뀔 수 있다.** 지난주에 보였다는 사실은 지금도
+           보여도 된다는 뜻이 아니다. 그래서 경로를 찾기 **전에** `visible_docs()`
+           를 계산한다 — 순서가 반대면 권한 밖 문서의 존재 여부가 먼저 새어 나간다.
+        2. **원문은 바뀔 수 있다.** 줄 번호만 믿으면 파일 앞쪽에 줄이 끼어든 순간
+           엉뚱한 줄을 「그 문서의 그 줄」 로 답하게 된다. 지문이 맞아야 같은 줄이다.
+
+        돌려주는 것은 `(hits, dropped_codes)`. 사유 코드는 업무 내용을 담지 않는
+        고정 낱말이라 그대로 로그에 남길 수 있다.
+
+        **복원에 실패했다고 채널 전체 검색으로 넓히지 않는다.** 호출자가 판단한다 —
+        조용히 넓히면 사용자는 좁은 질문을 했는데 넓은 답을 받고, 그 사실을 알 수 없다.
+        """
+        from ..evidence_refs import ARCHIVE_LINE, content_hash, safe_relative_path
+
+        items = list(refs or ())
+        if not items:
+            return [], []
+
+        # 1. 권한이 경로 조회보다 먼저다.
+        #
+        # 채널 범위도 여기서 함께 걸린다 — `can_access()` 의 0번 판정이 "채널에서
+        # 온 질문이면 그 채널만" 이다. **여기에 같은 검사를 또 쓰지 않는다.** 판정이
+        # 두 곳으로 갈리면 한쪽만 고쳐도 오류가 안 나고, 그게 원칙 3이 막으려는
+        # 모양 그대로다. DM(`ctx.channel_id` 없음)은 그 판정을 건너뛰므로 사용자가
+        # 볼 수 있는 여러 채널이 함께 살아난다 — 설계 §9 가 요구하는 동작이다.
+        visible = self.visible_docs(ctx)
+
+        by_path: dict[str, tuple[ArchiveDoc, list[RawLine]]] = {}
+        for doc in visible:
+            for line in doc.raw_lines:
+                key = self._rel(line.source_path or doc.path)
+                entry = by_path.get(key)
+                if entry is None:
+                    by_path[key] = (doc, [line])
+                else:
+                    entry[1].append(line)
+
+        known: set[str] | None = None  # 권한 밖 문서까지 포함한 경로 집합(지연 계산)
+        hits: list[SearchHit] = []
+        dropped: list[str] = []
+        moved = 0  # 줄 번호는 어긋났지만 지문으로 찾은 건수
+
+        def drop(code: str) -> None:
+            if code not in dropped:
+                dropped.append(code)
+
+        for ref in items:
+            if getattr(ref, "kind", "") != ARCHIVE_LINE:
+                # 실시간 메시지는 아카이브에 없다. 다시 가져오는 것은 Slack 을 아는
+                # 계층의 몫이라, 여기서는 조용히 빼고 사유만 남긴다.
+                drop("live_not_archived")
+                continue
+            if ref.workspace and ref.workspace != ctx.workspace and not (
+                ctx.is_root or ref.workspace in ctx.readable_workspaces
+            ):
+                drop("workspace_scope")
+                continue
+            # 경로는 감사 기록(JSONL)을 거쳐 돌아온 값이다. **파일에서 읽은 값을
+            # 그대로 경로로 쓰는 것**이라, 여기서 검사하지 않으면 그 자리가 곧
+            # 경로 탈출이다. `EvidenceRef.from_json()` 이 이미 보지만, 코드가
+            # 직접 만든 참조도 같은 문을 지나게 한다.
+            path = safe_relative_path(ref.document_path)
+            if not path:
+                drop("path_rejected")
+                continue
+            entry = by_path.get(path)
+            if entry is None:
+                if known is None:
+                    known = {
+                        self._rel(line.source_path or doc.path)
+                        for doc in self.docs()
+                        for line in doc.raw_lines
+                    }
+                # 문서가 사라진 것과 지금 권한으로 안 보이는 것은 사람이 할 일이
+                # 다르다. 둘을 같은 코드로 적으면 권한 사고가 파일 정리처럼 보인다.
+                drop("source_missing" if path not in known else "permission_changed")
+                continue
+            doc, lines = entry
+            if ref.channel_id and (doc.channel_id or "") and ref.channel_id != doc.channel_id:
+                drop("channel_scope")
+                continue
+            line = next(
+                (
+                    ln
+                    for ln in lines
+                    if ln.lineno == ref.line_no
+                    and (
+                        not ref.content_hash
+                        or content_hash(ln.ts, ln.speaker, ln.text) == ref.content_hash
+                    )
+                ),
+                None,
+            )
+            if line is None and ref.content_hash:
+                # 줄이 밀렸을 수 있다. 같은 문서 안에서 지문으로 한 번만 더 찾는다.
+                line = next(
+                    (
+                        ln
+                        for ln in lines
+                        if (not ref.source_ts or ln.ts == ref.source_ts)
+                        and content_hash(ln.ts, ln.speaker, ln.text) == ref.content_hash
+                    ),
+                    None,
+                )
+                if line is not None:
+                    moved += 1
+            if line is None:
+                drop("hash_mismatch")
+                continue
+            hits.append(SearchHit(doc=doc, line=line, score=1))
+
+        logger.info(
+            "refs 복원 ws=%s ch=%s 요청=%d 복원=%d 줄밀림=%d 제외=%s",
+            ctx.workspace,
+            ctx.channel_id or "-",
+            len(items),
+            len(hits),
+            moved,
+            "|".join(dropped) or "-",
+        )
+        return hits, dropped
+
+    def _rel(self, path: Path) -> str:
+        from ..search_index import rel_path
+
+        return rel_path(path, self.root)
+
     def search(self, query: str, ctx: RequestContext, *, limit: int = 20) -> list[SearchHit]:
         """근거 줄 찾기. 색인(DB)을 먼저 보고, 못 보면 파일을 훑는다.
 

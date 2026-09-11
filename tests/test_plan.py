@@ -149,7 +149,7 @@ def test_thread_context_is_for_reference_resolution_not_evidence():
     user = router.calls[0][1].content
     assert "<이전_스레드>" in user
     assert "<현재_질문>" in user
-    assert "사실 근거가 아니므로" in router.calls[0][0].content
+    assert "사실 근거가" in router.calls[0][0].content
 
 
 def test_a_singular_failed_attachment_follow_up_cannot_expand_to_channel_summary():

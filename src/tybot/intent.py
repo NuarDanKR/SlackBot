@@ -125,6 +125,47 @@ CLAUSE_SPLIT_RE = re.compile(
 # 보통 2개, 많아도 3개다. 넘치면 앞의 것부터 답하고 나머지는 다시 묻게 안내한다.
 MAX_TASKS = 3
 
+# --- 후속 질문 (설계: thread-follow-up-evidence.md §8) ------------------------
+#
+# 같은 스레드에서 이어 묻는 말. **이 표현이 있다고 곧바로 후속 질문은 아니다** —
+# 실행 동사가 함께 있어야 한다. "아까 뭐라고 했지?" 는 기억을 묻는 것이고,
+# "아까 그거 다시 정리해줘" 는 실행 요청이다. 둘을 같은 칸에 넣으면 실행 요청이
+# 기억 확인으로 새고, 사용자는 "기억한다" 는 답만 받는다(2026-09-11 실제 발생).
+REFERENCE_RE = re.compile(
+    r"(방금|아까|직전|위에서|위의|앞서|이전\s*(답변|대화|내용|질문)|"
+    r"그\s*(문서|파일|자료|내용|건)|해당\s*(문서|파일|자료|건)|"
+    r"관련\s*(파일|문서|자료)|저\s*문서|"
+    r"(너와|우리가?)\s*나눈\s*대화|우리\s*대화|"
+    r"처리\s*(가\s*)?(안\s*된|되지\s*않은|실패한|못한)\s*(문서|파일)?)"
+)
+# 무언가를 **하라는** 말. 기억 여부를 묻는 문장과 가르는 기준이다.
+ACTION_RE = re.compile(
+    r"(요약|정리|확인|알려|보여|찾아|검색|비교|뽑아|추려|말해|설명|"
+    r"다시\s*(봐|보|확인|정리|요약|알려))"
+)
+# 기억 **여부 자체**를 묻는 표현. 실행 동사가 없을 때만 memory 다.
+MEMORY_ONLY_RE = re.compile(
+    r"(기억(나|해|하니|하고|되|할\s*수|력)|까먹|잊었|"
+    r"물어본\s*적|말한\s*적|한\s*적\s*있)"
+)
+# 첨부 변환 상태를 묻는 표현. 이 신호가 있으면 같은 참조 범위에
+# 현재 첨부 메타데이터를 결합한다 — 별도의 채널 전체 검색으로 쪼개지 않는다.
+ATTACHMENT_STATUS_RE = re.compile(
+    r"(첨부|변환|파일\s*(상태|처리|변환)|"
+    r"처리\s*(가\s*)?(안\s*된|되지\s*않은|실패|못한)|미처리|변환\s*실패)"
+)
+# 주제어에서 걸러낼 지칭·요청 표현. 주제가 아니라 **가리키는 말**이다.
+REFERENCE_STOPWORDS = frozenset(
+    {
+        "방금", "아까", "직전", "위에서", "이전", "앞서", "다시", "대화", "내용",
+        "요약", "정리", "확인", "알려", "보여", "검색", "관련", "문서", "파일",
+        "자료", "첨부", "변환", "실패", "처리", "너와", "우리", "나눈", "해당",
+        "상태", "목록", "부탁", "한번", "좀더", "하나", "한개", "이것", "그것",
+    }
+)
+
+REFERENCE_MODES = ("none", "prior_turn", "prior_topic", "prior_attachments")
+
 SINGULAR_FOLLOW_UP_RE = re.compile(
     r"(하나(?:의|인)?\s*문서|한\s*개(?:의)?\s*문서|그\s*문서|해당\s*문서|"
     r"처리\s*(?:가\s*)?(?:안\s*된|되지\s*않은|실패한)\s*문서)"
@@ -143,10 +184,25 @@ class Intent:
     # 이 하위질문이 가리키는 원문 조각. 복합 질문을 나눴을 때 각 조각을 답변 생성에 넘긴다.
     # 비어 있으면 호출자가 전체 질문을 쓴다(기존 호출부 호환).
     question: str = ""
+    # --- 후속 질문 (설계: thread-follow-up-evidence.md §8) --------------------
+    #
+    # **범위를 넓히는 필드가 아니라 좁히는 필드다.** 값이 `none` 이 아니면 이
+    # 질문의 근거는 「현재 권한 ∩ 현재 채널 ∩ 이전 답변의 원문 참조 ∩ 현재 주제」
+    # 의 교집합뿐이다. 복원에 실패해도 채널 전체로 되돌아가지 않는다.
+    reference_mode: str = "none"  # none | prior_turn | prior_topic | prior_attachments
+    topic_terms: list[str] = field(default_factory=list)
+    include_attachment_status: bool = False
+    # 어느 QA 레코드를 이어 가는가. **LLM 이 정하지 않는다** — 같은 워크스페이스·
+    # 채널·스레드 안에서 코드가 고른다.
+    referenced_record_ids: list[str] = field(default_factory=list)
 
     @property
     def query(self) -> str:
         return " ".join(self.terms)
+
+    @property
+    def is_followup(self) -> bool:
+        return self.reference_mode != "none"
 
 
 # 아카이브 원문을 근거로 답하는 의도. 이 의도의 답변은 **답변 엔진 출력을 그대로** 쓴다 -
@@ -204,9 +260,14 @@ PLANNER_PROMPT = CLASSIFIER_PROMPT.replace(
 - 수집 지시(ingest/ingest_all)가 섞여 있으면 그것만 남긴다 —
   무엇을 실행하는지 모호한 상태로 실행해서는 안 된다.
 - `<이전_스레드>`가 있으면 현재 질문의 "그 문서", "하나", "아까 것" 같은
-  지칭어만 해석하는 데 쓴다. 이전 봇 답변은 사실 근거가 아니므로 그대로 답하지 않는다.
+  지칭어만 해석하는 데 쓴다. 거기 적힌 것은 **질문과 주제 목록**이고, 사실 근거가
+  아니다. 실제 원문은 시스템이 좌표로 다시 연다.
 - 후속 질문의 task.question과 terms는 지칭 대상을 정확히 넣어 독립적으로 이해되게
   만든다. 하나를 가리키면 이전 답변의 전체 목록으로 넓히지 않는다.
+- "방금 그거 다시 정리해줘"처럼 **실행 동사가 있는** 후속 질문은 memory 가 아니다.
+  memory 는 "기억나?", "전에 물어본 적 있어?"처럼 기억 여부 자체를 묻는 것뿐이다.
+- 요약과 첨부 변환 상태를 한 문장에서 함께 물으면 **하나의 task 로 둔다.** 쪼개면
+  한쪽은 좁은 범위로, 다른 쪽은 채널 전체로 가서 서로 다른 범위의 답이 붙는다.
 
 JSON 만 출력한다. 설명·코드펜스 금지.
 {"tasks": [{"kind": "...", "question": "...", "days": 7, "terms": ["..."]}]}""",
@@ -288,6 +349,120 @@ def plan_by_rule(text: str) -> list[Intent]:
     return tasks
 
 
+# 토큰 끝에 붙어 오는 조사·어미. 한국어는 「문서」와 「문서도」가 다른 토큰이라,
+# 떼지 않으면 지칭어가 주제어로 남는다 — 그러면 "처리 안 된 문서도 확인해줘" 가
+# 「문서도」 라는 주제를 가진 질문이 되고, 이전 근거에서 그 낱말을 찾다 0건이 된다.
+JOSA_SUFFIXES = (
+    "하고", "해줘", "합니다", "한다", "으로", "에서", "까지", "부터", "에게",
+    "이나", "라도", "에는", "도", "은", "는", "이", "가", "을", "를", "의",
+    "에", "만", "와", "과", "로", "나",
+)
+
+
+def _stem(token: str) -> str:
+    for suffix in JOSA_SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= 2:
+            return token[: -len(suffix)]
+    return token
+
+
+def topic_terms_of(text: str, terms: list[str] | None = None) -> list[str]:
+    """이 후속 질문이 한정한 **주제어**.
+
+    "미수금 관련 내용을 다시 요약" 에서 남겨야 할 것은 `미수금` 하나다. `다시`,
+    `요약`, `관련` 은 가리키는 말이지 주제가 아닌데, 그대로 두면 이전 근거를
+    좁히는 게 아니라 아무 줄에나 걸린다.
+
+    조사가 붙은 형태도 같은 낱말로 본다. 「문서도」를 주제로 남기면 그 질문은
+    **첨부 상태 질문이 아니라 「문서도」 라는 주제의 질문**이 되어, 참조 범위에서
+    0건이 나오고 사용자는 근거가 없다는 답을 받는다.
+    """
+    out: list[str] = []
+    for raw in list(terms or []) + TOKEN_RE.findall(text or ""):
+        token = str(raw).strip()
+        if not token:
+            continue
+        stem = _stem(token)
+        if token in STOPWORDS or token in REFERENCE_STOPWORDS:
+            continue
+        if stem in STOPWORDS or stem in REFERENCE_STOPWORDS:
+            continue
+        if stem not in out:
+            out.append(stem)
+    return out[:8]
+
+
+def followup_hint(text: str) -> tuple[str, bool]:
+    """지칭 표현만 보고 `(reference_mode, include_attachment_status)` 를 정한다.
+
+    같은 스레드에 이전 문답이 있을 때만 의미가 있다 — 호출자가 그것을 확인한다.
+    분류 우선순위는 설계 §8 그대로다.
+    """
+    if not REFERENCE_RE.search(text or ""):
+        return "none", False
+    has_action = bool(ACTION_RE.search(text))
+    # 2순위: 기억 여부 자체를 묻는 것이면 기존 memory 동작을 유지한다.
+    if MEMORY_ONLY_RE.search(text) and not has_action:
+        return "none", False
+    if not has_action:
+        return "none", False
+    attachments = bool(ATTACHMENT_STATUS_RE.search(text))
+    topics = topic_terms_of(text)
+    if attachments and not topics:
+        return "prior_attachments", True
+    if topics:
+        return "prior_topic", attachments
+    return "prior_turn", attachments
+
+
+def _followup_kind(tasks: list[Intent]) -> str:
+    """복합 후속 질문 하나를 어떤 의도로 처리할지.
+
+    요약과 첨부 상태 확인이 한 문장에 있으면 **둘로 쪼개지 않는다**(설계 §8-5).
+    쪼개면 요약은 좁은 참조 범위로, 첨부 확인은 채널 전체로 가서 서로 다른
+    범위의 답이 한 메시지에 붙는다 — 사용자는 어느 쪽이 무엇인지 알 수 없다.
+    """
+    kinds = [t.kind for t in tasks]
+    if "summary" in kinds:
+        return "summary"
+    if "advice" in kinds:
+        return "advice"
+    return "search"
+
+
+def apply_followup(text: str, tasks: list[Intent], *, has_prior: bool) -> list[Intent]:
+    """후속 질문이면 **하나의 참조 범위를 공유하는 한 건**으로 합친다."""
+    if not has_prior or not tasks:
+        return tasks
+    mode, attachments = followup_hint(text)
+    if mode == "none":
+        return tasks
+    kind = _followup_kind(tasks)
+    terms: list[str] = []
+    for task in tasks:
+        for term in task.terms:
+            if term not in terms:
+                terms.append(term)
+    # 분해기가 지칭을 이미 풀었으면(하위질문 하나) 그 문장을 쓴다 — "그 문서" 보다
+    # "가정산서.pdf" 가 낫다. 여러 개로 쪼개진 복합 질문은 원문 전체를 쓴다.
+    question = tasks[0].question if len(tasks) == 1 and tasks[0].question else text
+    merged = Intent(
+        kind=kind,
+        days=max((t.days for t in tasks), default=DEFAULT_DAYS),
+        terms=terms,
+        source=tasks[0].source,
+        question=question,
+        reference_mode=mode,
+        topic_terms=topic_terms_of(text, terms),
+        include_attachment_status=attachments,
+    )
+    if mode == "prior_topic" and not merged.topic_terms:
+        # 주제를 못 뽑았으면 「직전 결과」 로 내려간다. 빈 주제로 교집합을 잡으면
+        # 아무것도 안 남고, 그건 근거가 없는 게 아니라 우리가 못 고른 것이다.
+        merged.reference_mode = "prior_turn"
+    return [merged]
+
+
 def _referenced_failed_attachment(text: str, conversation_context: str) -> str:
     """후속 질문이 이전 답변의 실패 첨부 한 건을 가리키면 그 파일명을 돌려준다."""
     if not conversation_context or not SINGULAR_FOLLOW_UP_RE.search(text):
@@ -302,11 +477,25 @@ def _referenced_failed_attachment(text: str, conversation_context: str) -> str:
     return name
 
 
-def _context_fallback(text: str, conversation_context: str) -> list[Intent]:
-    name = _referenced_failed_attachment(text, conversation_context)
-    if name:
-        return [Intent("search", terms=[name], source="context", question=f"{name} 내용을 다시 확인해줘")]
-    return plan_by_rule(text)
+def _context_fallback(
+    text: str, conversation_context: str, *, thread_has_refs: bool = False
+) -> list[Intent]:
+    if not thread_has_refs:
+        # 구형 레코드에만 남은 길이다. 좌표가 있으면 문장을 다시 파싱하지 않는다 —
+        # 문구가 바뀌거나 파일이 여러 개면 이 정규식은 조용히 어긋난다(설계 §8).
+        name = _referenced_failed_attachment(text, conversation_context)
+        if name:
+            return [
+                Intent(
+                    "search",
+                    terms=[name],
+                    source="context",
+                    question=f"{name} 내용을 다시 확인해줘",
+                )
+            ]
+    return apply_followup(
+        text, plan_by_rule(text), has_prior=bool(conversation_context.strip())
+    )
 
 
 def plan(
@@ -314,6 +503,7 @@ def plan(
     router: Router | None,
     *,
     conversation_context: str = "",
+    thread_has_refs: bool = False,
 ) -> list[Intent]:
     """복합 질문을 하위질문 목록으로 분해한다(1차 LLM). 실패하면 규칙으로 폴백한다.
 
@@ -322,7 +512,7 @@ def plan(
     옮겨 사람이 실제로 묻는 방식에 맞춘다.
     """
     if router is None:
-        return _context_fallback(text, conversation_context)
+        return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)
 
     user_text = text
     if conversation_context.strip():
@@ -344,9 +534,9 @@ def plan(
             logger.info("분류 모델 %s 사용 불가(%s) - 다음 후보 시도", model, e)
         except Exception as e:
             logger.warning("분해 호출 실패(%s) - 규칙 기반으로 폴백", e)
-            return _context_fallback(text, conversation_context)
+            return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)
     else:
-        return _context_fallback(text, conversation_context)
+        return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)
 
     try:
         raw = _extract_json(resp.text)
@@ -373,25 +563,29 @@ def plan(
             raise ValueError("유효한 task 없음")
     except Exception as e:
         logger.warning("분해 파싱 실패(%s) - 규칙 기반으로 폴백. raw=%r", e, resp.text[:200])
-        return _context_fallback(text, conversation_context)
+        return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)
 
     writes = [x for x in tasks if x.kind in WRITE_KINDS]
     if writes:
         return [writes[0]]
-    referenced = _referenced_failed_attachment(text, conversation_context)
-    if referenced:
-        # "정리해서 알려줘"가 summary로 분류되면 채널 전체 실패 목록이 다시 나온다.
-        # 이전 답변이 한 건을 명시한 경우에만 그 파일 검색으로 좁힌다.
-        return [
-            Intent(
-                "search",
-                terms=[referenced],
-                source="context",
-                question=f"{referenced} 내용을 다시 확인해줘",
-            )
-        ]
+    if not thread_has_refs:
+        referenced = _referenced_failed_attachment(text, conversation_context)
+        if referenced:
+            # 구형 레코드 전용 폴백. "정리해서 알려줘"가 summary로 분류되면 채널
+            # 전체 실패 목록이 다시 나오므로, 이전 답변이 한 건을 명시한 경우에만
+            # 그 파일 검색으로 좁힌다. 좌표가 있으면 이 길로 오지 않는다.
+            return [
+                Intent(
+                    "search",
+                    terms=[referenced],
+                    source="context",
+                    question=f"{referenced} 내용을 다시 확인해줘",
+                )
+            ]
     # 실행 계층이 상한을 적용하고 생략 안내를 만든다. planner는 전체 개수를 보존한다.
-    return _dedupe(tasks)
+    return apply_followup(
+        text, _dedupe(tasks), has_prior=bool(conversation_context.strip())
+    )
 
 
 def _extract_json(raw: str) -> dict:

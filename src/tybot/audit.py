@@ -20,6 +20,11 @@ logger = logging.getLogger("tybot.audit")
 
 KST = timezone(timedelta(hours=9))
 MAX_TEXT = 4000  # 한 건이 로그를 잡아먹지 않게 상한
+# 스레드 문맥으로 읽을 최근 문답 수. 전문이 아니라 메타데이터라 3건보다 넉넉히 본다 —
+# 긴 답변 하나 때문에 앞선 관련 문답이 밀려나는 것이 예전 구조의 고장이었다.
+THREAD_TURNS = 10
+# 참조가 없는 **구형 레코드**에서만 싣는 답변 조각. 지칭어 해석 전용이다.
+LEGACY_ANSWER_CHARS = 600
 
 MD_HEADER = """# 질의응답 기록 {date}
 
@@ -61,6 +66,17 @@ class QARecord:
     thread_ts: str = ""
     channel_type: str = ""
     error: str = ""
+    # --- 후속 질문이 이어 갈 것 (설계: thread-follow-up-evidence.md §5.3) -----
+    #
+    # **여기 남기는 것은 원문 좌표지 원문이 아니다.** 다음 질문은 이 좌표를
+    # 현재 권한으로 다시 열어 읽는다. 답변 문장(`answer`)은 콘솔 감사와 피드백
+    # 연결용으로 남을 뿐, 근거 해석에는 쓰지 않는다 — 쓰는 순간 요약을 근거로
+    # 요약하게 된다(원칙 1).
+    evidence_refs: list[dict] = field(default_factory=list)
+    attachment_refs: list[dict] = field(default_factory=list)
+    subject_terms: list[str] = field(default_factory=list)
+    context_parent_ids: list[str] = field(default_factory=list)
+    context_resolution: str = "none"
 
     @classmethod
     def build(cls, **kw) -> QARecord:
@@ -144,17 +160,28 @@ class QALog:
         channel_id: str,
         thread_ts: str,
         *,
-        limit: int = 3,
-    ) -> list[dict[str, str]]:
-        """같은 Slack 스레드의 이전 TYBot 문답을 시간순으로 돌려준다.
+        limit: int = THREAD_TURNS,
+    ) -> list[dict]:
+        """같은 Slack 스레드의 이전 TYBot 문답을 **구조화해서** 시간순으로 돌려준다.
 
-        답변을 새 사실의 근거로 재사용하는 API가 아니다. 호출자는 ``question``과
-        ``answer``를 후속 질문의 지칭어 해석에만 사용하고, 실제 답은 아카이브에서
-        다시 찾아야 한다. 채널과 스레드를 함께 고정해 다른 대화가 섞이지 않게 한다.
+        설계: `docs/design/thread-follow-up-evidence.md` §7
+
+        예전에는 질문과 답변 전문을 돌려줬다. 그 구조는 두 곳에서 샜다.
+
+        - 답변이 길면 앞선 관련 문답이 글자 예산에서 밀려났다. 밀려난 것은
+          **오류 없이** 사라지고, 후속 질문은 지칭 대상을 잃는다.
+        - 답변 문장을 다음 답의 재료로 쓰게 된다. 요약을 근거로 요약하는 길이다.
+
+        그래서 지금은 **질문과 작은 메타데이터**를 돌려준다. 이어 갈 것은
+        `evidence_refs` — 원문 좌표다. 답변 전문(`answer`)은 참조가 없는 **구형
+        레코드에만** 실린다. 그 값은 지칭어 해석에만 쓰고, 검색 근거나 전문 봇
+        입력으로는 절대 넘기지 않는다.
         """
+        from .evidence_refs import attachment_refs_from_json, refs_from_json
+
         if not workspace or not channel_id or not thread_ts or limit < 1:
             return []
-        out: list[dict[str, str]] = []
+        rows: list[dict] = []
         try:
             for path in sorted(self.root.glob("qa-*.jsonl"), reverse=True)[:2]:
                 for line in path.read_text(encoding="utf-8").splitlines():
@@ -168,18 +195,36 @@ class QALog:
                         or row.get("thread_ts") != thread_ts
                     ):
                         continue
-                    out.append(
-                        {
-                            "ts": str(row.get("ts") or ""),
-                            "question": _clip(str(row.get("question") or "")),
-                            "answer": _clip(str(row.get("answer") or "")),
-                        }
-                    )
+                    rows.append(row)
         except OSError as exc:
             logger.warning("스레드 문답 맥락 조회 실패: %s", exc)
             return []
-        out.sort(key=lambda row: row["ts"])
-        return out[-limit:]
+        rows.sort(key=lambda row: str(row.get("ts") or ""))
+
+        out: list[dict] = []
+        for row in rows[-limit:]:
+            refs = refs_from_json(row.get("evidence_refs"))
+            attachments = attachment_refs_from_json(row.get("attachment_refs"))
+            turn: dict = {
+                "record_id": str(row.get("record_id") or ""),
+                "ts": str(row.get("ts") or ""),
+                "question": _clip(str(row.get("question") or "")),
+                "intent_kind": str(row.get("intent_kind") or ""),
+                "subject_terms": [
+                    str(t) for t in (row.get("subject_terms") or []) if str(t).strip()
+                ][:12],
+                "evidence_refs": refs,
+                "attachment_refs": attachments,
+                "context_parent_ids": [
+                    str(t) for t in (row.get("context_parent_ids") or []) if str(t).strip()
+                ][:8],
+            }
+            if not refs and not attachments:
+                # 구형 레코드. 좌표가 없으니 지칭어를 풀 실마리가 문장뿐이다.
+                # 짧게 잘라 **지칭 해석 전용**으로만 싣는다.
+                turn["legacy_answer"] = _clip(str(row.get("answer") or ""))[:LEGACY_ANSWER_CHARS]
+            out.append(turn)
+        return out
 
     def find_answer(
         self,

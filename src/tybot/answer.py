@@ -12,7 +12,8 @@ from pathlib import Path
 from . import documents
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
-from .attachment_review import find_sendable
+from .attachment_review import find_sendable, status_line
+from .evidence_refs import refs_from_hits
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -147,6 +148,19 @@ class Answer:
     # 같으면 화면에 같은 이름이 뜨고, 그러면 「누가 답했나」 를 물어도 알 수 없다
     # (2026-09-07 실제로 그랬다). 값은 이미 가지고 있었고 표시만 안 했다.
     specialist: str = ""
+    # --- 후속 질문이 이어 갈 것 (설계: thread-follow-up-evidence.md §5.3) -----
+    #
+    # **다음 질문은 이 좌표를 다시 열어 읽는다.** 답변 문장을 이어 가면 요약을
+    # 근거로 요약하게 되고(원칙 1), 한 번 잘못 읽은 숫자가 대화 내내 사실로 굳는다.
+    evidence_refs: list = field(default_factory=list)
+    attachment_refs: list = field(default_factory=list)
+    subject_terms: list[str] = field(default_factory=list)
+    context_parent_ids: list[str] = field(default_factory=list)
+    # 이 답의 **범위를 무엇으로 정했나**.
+    #   none                 - 새 질문. 이번 검색으로 범위를 정했다
+    #   transmitted_evidence - 모델에 실제 전달한 근거를 좌표로 남겼다
+    #   prior_turn/topic/attachments - 이전 결과의 좌표를 다시 열어 좁혔다
+    context_resolution: str = "none"
 
     @property
     def doc_count(self) -> int:
@@ -287,6 +301,40 @@ def _attachment_source_links(hits: list[SearchHit]) -> list[str]:
     return links
 
 
+def _specialist_documents_ok(special, ctx, store) -> bool:
+    """전문가가 근거로 든 문서가 **지금 이 요청자에게 보이는 것**인가.
+
+    설계 §12. 도구를 쓰는 전문가는 마스터가 고른 것과 다른 문서를 열 수 있고, 그
+    자체는 정상이다 — 도구가 우리 `RequestContext` 를 통과하기 때문이다. 그래도
+    돌아온 목록을 한 번 더 대조하는 이유는, **그 통과를 우리가 확인할 수 있는
+    유일한 지점**이 여기이기 때문이다. 어느 날 도구가 바뀌어 권한을 건너뛰면
+    오류는 나지 않고, 보이면 안 되는 내용에 우리 출처가 붙어 나간다.
+
+    하나라도 어긋나면 계약 위반으로 보고 마스터로 폴백한다. 일부만 빼면 답은
+    남고 근거만 빠져서, 답변과 출처가 어긋난 채로 나간다.
+    """
+    docs = list(getattr(special, "documents", ()) or ())
+    if not docs:
+        return True
+    try:
+        allowed = {
+            (d.workspace, str(d.path)) for d in store.visible_docs(ctx)
+        }
+    except Exception as exc:  # noqa: BLE001 - 검사 실패는 통과가 아니라 폴백이다
+        logger.warning("전문가 출처 대조 실패: %s", exc)
+        return False
+    for doc in docs:
+        if (getattr(doc, "workspace", ""), str(getattr(doc, "path", ""))) not in allowed:
+            logger.error(
+                "전문가 계약 위반 — 권한 밖 출처 specialist=%s ws=%s user=%s",
+                getattr(special, "specialist", "?"),
+                ctx.workspace,
+                ctx.role,
+            )
+            return False
+    return True
+
+
 def _specialist_citations(special, hits: list[SearchHit], ctx) -> list[str]:
     """전문가 답에 붙일 출처.
 
@@ -373,10 +421,121 @@ def _visual_originals(root: Path, hits: list[SearchHit]) -> documents.Attached:
             items.append(item)
     return documents.collect(items)
 
+def _attachment_refs(root: Path, hits: list[SearchHit]):
+    """근거 줄에 보이는 첨부를 **staging 메타데이터의 file_id** 로 잇는다.
+
+    설계 §6.1. 이름을 참조값으로 쓰지 않는 이유는 하나다 — 같은 이름의 파일이
+    여러 개 올라오는 것은 드문 일이 아니고, 그때 후속 질문은 다른 파일의 상태를
+    그 파일의 상태로 답한다. 틀렸다는 신호가 어디에도 안 난다.
+
+    그래서 **정확히 하나로 좁혀지는 것만** 참조로 남긴다.
+    """
+    from .evidence_refs import AttachmentRef
+
+    names = _attachment_names(hits)
+    if not names:
+        return []
+    from . import attachment_review
+
+    try:
+        staged = attachment_review.scan(root)
+    except Exception as exc:  # noqa: BLE001 - 참조 하나 때문에 답변을 막지 않는다
+        logger.warning("첨부 메타데이터 조회 실패: %s", exc)
+        return []
+    out = []
+    for workspace, channel_id, name in names:
+        matches = [
+            a
+            for a in staged
+            if a.workspace == workspace and a.channel_id == channel_id and a.name == name
+        ]
+        if len(matches) != 1:
+            continue
+        ref = AttachmentRef(
+            workspace=workspace, channel_id=channel_id, file_id=matches[0].file_id
+        )
+        if ref not in out:
+            out.append(ref)
+    return out
+
+
+MISSING_ATTACHMENT_STATUS = "관련 파일의 현재 변환 상태를 확인하지 못했습니다."
+
+
+def _attachment_status_block(attachments, *, asked: bool = False) -> str:
+    """관련 첨부의 **현재** 상태. 아카이브 문장이 아니라 메타데이터가 기준이다.
+
+    설계 §11. 과거 대화에 「처리실패」라고 적혀 있어도 지금 변환됐으면 변환된
+    것이다 — 옛 문장을 사실 근거로 쓰면 이미 고친 것을 계속 고장으로 답한다.
+
+    묻지 않았으면 빈 문자열이다. 물었는데 알 수 없으면 **그 사실을 말한다** —
+    아무 말도 안 하면 사용자는 문제가 없다고 읽는다.
+    """
+    items = list(attachments or ())
+    if not items:
+        return MISSING_ATTACHMENT_STATUS if asked else ""
+    lines = [f"• {status_line(a)}" for a in items[:10]]
+    if len(items) > 10:
+        lines.append(f"… 외 {len(items) - 10}건")
+    return "*관련 파일 상태*\n" + "\n".join(lines)
+
+
 def _evidence_block(hits: list[SearchHit]) -> str:
     return "\n".join(
         f"[{h.line.ts}] ({h.doc.channel}) {h.line.speaker}: {h.line.text}" for h in hits
     )
+
+
+def _match_terms(lines, terms: list[str] | None):
+    """주제어가 걸린 줄만. 걸린 게 없으면 **빈 목록**을 돌려준다.
+
+    빈 목록을 원래 목록으로 되돌리면 "미수금 관련만" 이라는 한정이 조용히
+    사라지고, 사용자는 다른 주제 문서를 자기 질문의 답으로 받는다(설계 §10).
+    """
+    if not terms:
+        return list(lines)
+    from . import search_index
+
+    tokens = search_index.tokens_of(" ".join(terms))
+    if not tokens:
+        return list(lines)
+    return [ln for ln in lines if search_index.score_line(tokens, "", ln.speaker, ln.text)]
+
+
+def _blocks_from_hits(hits: list[SearchHit], ctx) -> tuple[list, list, list, int]:
+    """복원된 근거 줄을 채널별 블록으로 묶는다.
+
+    `summarize()` 의 기간 스캔과 **같은 모양**을 만든다. 모양이 다르면 후속 질문만
+    다른 프롬프트를 받게 되고, 그 차이는 답변 품질 차이로 나타나면서 원인을
+    찾기 어렵다.
+    """
+    grouped: dict[tuple[str, str], list[SearchHit]] = {}
+    for hit in hits:
+        grouped.setdefault((hit.doc.workspace, hit.doc.channel), []).append(hit)
+    blocks: list[str] = []
+    citations: list[str] = []
+    parts: list[tuple[str, list[str], list[SearchHit]]] = []
+    total = 0
+    for (workspace, channel), group in grouped.items():
+        group = sorted(group, key=lambda h: (h.line.ts or "", h.line.lineno))
+        ws_tag = "" if workspace == ctx.workspace else f"[{workspace}] "
+        body = "\n".join(f"[{h.line.ts}] {h.line.speaker}: {h.line.text}" for h in group)
+        block = f"### {ws_tag}채널 {channel}\n{body}"
+        blocks.append(block)
+        total += len(group)
+        doc_citations: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for hit in group:
+            source = hit.line.source_path or hit.doc.path
+            date = (hit.line.ts or "").split()[0] if hit.line.ts else ""
+            key = (str(source), date)
+            if key in seen:
+                continue
+            seen.add(key)
+            doc_citations.append(f"{ws_tag}{channel}, 📄{source.name}({date})")
+        citations.extend(doc_citations)
+        parts.append((block, doc_citations, group))
+    return blocks, citations, parts, total
 
 
 class AnswerEngine:
@@ -429,26 +588,40 @@ class AnswerEngine:
         model: str | None = None,
         workspace_filter: frozenset[str] | None = None,
         question: str | None = None,
+        terms: list[str] | None = None,
+        evidence_hits: list[SearchHit] | None = None,
     ) -> Answer:
         """기간 요약 — 권한 내 전 채널의 최근 원문을 채널별로 정리한다.
 
         검색이 아니라 기간 스캔이므로, 근거는 여전히 원문 라인 그대로만 넣는다.
+
+        `evidence_hits` 를 주면 **그 범위를 벗어나 새로 검색하지 않는다.** 후속
+        질문("방금 그 내용 다시 요약해줘")의 유효 범위는 「현재 권한 ∩ 현재 채널 ∩
+        이전 답변의 원문 참조 ∩ 현재 주제」 의 교집합이고, 여기서 기간 스캔으로
+        되돌아가면 그 교집합이 조용히 사라진다(설계 §10).
         """
         import datetime as _dt
 
-        cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
         blocks: list[str] = []
         specialist_parts: list[tuple[str, list[str], list[SearchHit]]] = []
         summary_hits: list[SearchHit] = []
         citations: list[str] = []
         total = 0
-        visible_docs = [
-            doc
-            for doc in self._store.visible_docs(ctx)
-            if not workspace_filter or doc.workspace in workspace_filter
-        ]
+        scoped = evidence_hits is not None
+        if scoped:
+            summary_hits = list(evidence_hits or ())
+            blocks, citations, specialist_parts, total = _blocks_from_hits(summary_hits, ctx)
+            visible_docs = []
+        else:
+            visible_docs = [
+                doc
+                for doc in self._store.visible_docs(ctx)
+                if not workspace_filter or doc.workspace in workspace_filter
+            ]
+        cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
         for doc in visible_docs:
             recent = [ln for ln in doc.raw_lines if TS_RE.match(ln.ts) and ln.ts[:10] >= cutoff]
+            recent = _match_terms(recent, terms)
             if not recent:
                 continue
             recent = recent[-self._max_lines_per_channel :]
@@ -474,6 +647,15 @@ class AnswerEngine:
             citations.extend(doc_citations)
             specialist_parts.append((block, doc_citations, recent_hits))
 
+        if not blocks and scoped:
+            # 좁혀 물었는데 근거가 안 남았다. **채널 목록으로 넓히지 않는다** —
+            # 넓히면 사용자는 자기 질문의 답이 아닌 것을 답으로 받는다(설계 §13).
+            return Answer(
+                "이전 답변이 근거로 쓴 원문을 현재 권한으로 다시 확인하지 못했습니다. "
+                "추측으로 답하지 않습니다.",
+                [], None, 0.0, 0, "no_hits",
+                context_resolution="scoped_empty",
+            )
         if not blocks:
             titles = [doc.channel for doc in visible_docs]
             if not titles:
@@ -537,7 +719,11 @@ class AnswerEngine:
                 if specialist_evidence
                 else None
             )
-            if special is not None and special.text.strip():
+            if (
+                special is not None
+                and special.text.strip()
+                and _specialist_documents_ok(special, ctx, self._store)
+            ):
                 logger.info(
                     "summary ok(전문가) ws=%s specialist=%s model=%s docs=%d",
                     ctx.workspace,
@@ -554,6 +740,10 @@ class AnswerEngine:
                     "answered",
                     withheld=withheld,
                     specialist=special.specialist,
+                    evidence_refs=refs_from_hits(selected_hits, self._store.root),
+                    attachment_refs=_attachment_refs(self._store.root, selected_hits),
+                    subject_terms=list(terms or []),
+                    context_resolution="transmitted_evidence",
                 )
 
         summary_prompt = (
@@ -581,6 +771,10 @@ class AnswerEngine:
         return Answer(
             resp.text.strip(), citations, resp.model, resp.cost_usd, total,
             "answered", withheld=withheld,
+            evidence_refs=refs_from_hits(summary_hits, self._store.root),
+            attachment_refs=_attachment_refs(self._store.root, summary_hits),
+            subject_terms=list(terms or []),
+            context_resolution="transmitted_evidence",
         )
 
     def advise(
@@ -638,29 +832,54 @@ class AnswerEngine:
         _, q = parse_model_flag(question)
         return classify(q, self._router)
 
-    def plan(self, question: str, *, conversation_context: str = "") -> list[Intent]:
+    def plan(
+        self,
+        question: str,
+        *,
+        conversation_context: str = "",
+        thread_has_refs: bool = False,
+    ) -> list[Intent]:
         """복합 질문을 하위질문 목록으로 분해한다(1차 LLM, 실패 시 규칙).
 
         라벨 하나만 돌려주던 `classify` 를 대체한다 - 사람은 한 번에 여러 가지를 묻고,
         예전 구조에서는 그중 하나만 처리 경로에 도달했다.
         """
         _, q = parse_model_flag(question)
-        return plan(q, self._router, conversation_context=conversation_context)
+        return plan(
+            q,
+            self._router,
+            conversation_context=conversation_context,
+            thread_has_refs=thread_has_refs,
+        )
 
     @property
     def router(self):
         """문장 생성(compose)용. 답변 엔진 밖에서도 같은 비용 상한을 쓰게 한다."""
         return self._router
 
-    def respond(self, question: str, ctx: RequestContext, intent: Intent | None = None) -> Answer:
+    def respond(
+        self,
+        question: str,
+        ctx: RequestContext,
+        intent: Intent | None = None,
+        *,
+        followup=None,
+    ) -> Answer:
         """아카이브로 답할 수 있는 의도를 처리한다.
 
         status/help 는 봇 런타임 정보라 Slack 계층이 처리한다 — 여기로 오면 안내만 한다.
+
+        `followup` 은 같은 스레드의 이전 결과를 현재 권한으로 되살린 범위다
+        (`thread_followup.ThreadFollowupResolver`). 주어지면 **그 범위를 벗어나지
+        않는다** — 복원에 실패해도 채널 전체 검색으로 넓히지 않는다.
         """
         model, q = parse_model_flag(question)
         if not q:
             return Answer("질문 내용이 없습니다.", [], None, 0.0, 0, "error")
         intent = intent or classify(q, self._router)
+
+        if followup is not None and getattr(followup, "applied", False):
+            return self._respond_scoped(q, ctx, intent, followup, model=model)
 
         if intent.kind == "summary":
             return self.summarize(
@@ -701,21 +920,116 @@ class AnswerEngine:
             )
         return self.answer(question, ctx, terms=intent.terms)
 
+    def _respond_scoped(
+        self,
+        q: str,
+        ctx: RequestContext,
+        intent: Intent,
+        followup,
+        *,
+        model: str | None = None,
+    ) -> Answer:
+        """후속 질문 — 되살린 좌표 안에서만 답한다(설계 §9·§10·§13).
+
+        여기서 넓히면 사용자는 좁게 물었는데 넓은 답을 받고, **그 사실을 알 수
+        없다.** 근거를 못 찾았으면 못 찾았다고 답하는 것이 맞다.
+        """
+        if followup.needs_clarification:
+            listed = "\n".join(f"• {name}" for name in followup.choices)
+            return Answer(
+                "어느 파일을 말씀하시는지 확정하지 못했습니다. 아래 중에서 알려주세요."
+                f"\n\n{listed}",
+                [], None, 0.0, 0, "clarify",
+                context_parent_ids=list(followup.parent_record_ids),
+                context_resolution=followup.resolution,
+            )
+
+        hits = list(followup.evidence_hits)
+        asked_status = bool(intent.include_attachment_status)
+        status = _attachment_status_block(followup.attachments, asked=asked_status)
+
+        if not hits:
+            if followup.attachments and asked_status:
+                # 원문은 못 살렸지만 파일 상태는 확인됐다. 물은 것의 절반은 답이다.
+                ans = Answer(status, [], None, 0.0, 0, "answered")
+            else:
+                ans = Answer(
+                    "이전 답변이 근거로 쓴 원문을 현재 권한으로 다시 확인하지 못했습니다. "
+                    "추측으로 답하지 않습니다."
+                    + (f"\n\n{status}" if status else ""),
+                    [], None, 0.0, 0, "no_hits",
+                )
+        elif intent.kind == "summary":
+            ans = self.summarize(
+                ctx,
+                days=intent.days or DEFAULT_DAYS,
+                model=model,
+                question=q,
+                terms=list(followup.topic_terms),
+                evidence_hits=hits,
+            )
+        else:
+            # advice 도 같은 길로 보낸다. 판단 요청이라고 범위를 넓히면 그 순간
+            # 이 질문은 더 이상 후속 질문이 아니다.
+            ans = self.answer(q, ctx, terms=list(intent.terms), evidence_hits=hits)
+
+        if status and hits:
+            ans.text = f"{ans.text}\n\n{status}"
+        ans.context_parent_ids = list(followup.parent_record_ids)
+        ans.context_resolution = followup.resolution
+        if followup.topic_terms:
+            ans.subject_terms = list(followup.topic_terms)
+        if followup.attachments and not ans.attachment_refs:
+            from .evidence_refs import AttachmentRef
+
+            ans.attachment_refs = [
+                AttachmentRef(
+                    workspace=a.workspace, channel_id=a.channel_id, file_id=a.file_id
+                )
+                for a in followup.attachments
+            ]
+        logger.info(
+            "followup ws=%s ch=%s %s",
+            ctx.workspace,
+            ctx.channel_id or "-",
+            followup.log_line(),
+        )
+        return ans
+
     def answer(
-        self, question: str, ctx: RequestContext, *, terms: list[str] | None = None
+        self,
+        question: str,
+        ctx: RequestContext,
+        *,
+        terms: list[str] | None = None,
+        evidence_hits: list[SearchHit] | None = None,
     ) -> Answer:
         """구체 사실 질문 — 원문 검색 후 그 라인만 근거로 답한다.
 
         terms 는 분류기가 뽑은 핵심어. 요청 표현("알려줘")이 검색을 오염시키는 걸 막는다.
+
+        `evidence_hits` 를 주면 **새로 검색하지 않는다.** 후속 질문이 가리키는
+        범위 밖으로 나가지 않기 위한 것이다(설계 §10).
         """
         model, q = parse_model_flag(question)
         if not q:
             return Answer("질문 내용이 없습니다.", [], None, 0.0, 0, "error")
 
-        # 2겹: 색인이 아니라 원문 라인을 연다.
-        query = " ".join(terms) if terms else q
-        hits = self._store.search(query, ctx, limit=self._max_hits)
+        scoped = evidence_hits is not None
+        if scoped:
+            hits = list(evidence_hits or ())
+        else:
+            # 2겹: 색인이 아니라 원문 라인을 연다.
+            query = " ".join(terms) if terms else q
+            hits = self._store.search(query, ctx, limit=self._max_hits)
 
+        if not hits and scoped:
+            return Answer(
+                "이전 답변이 근거로 쓴 원문을 현재 권한으로 다시 확인하지 못했습니다. "
+                "추측으로 답하지 않습니다.",
+                [], None, 0.0, 0, "no_hits",
+                context_resolution="scoped_empty",
+            )
         if not hits:
             # 3겹: 근거가 없으면 **다른 질문에 답하지 않는다.** 예전엔 최근 원문 요약으로 폴백했는데,
             # 아카이브와 무관한 질문에도 그럴듯한 딴 얘기를 내놓아 더 나빴다.
@@ -760,7 +1074,11 @@ class AnswerEngine:
         # 전문가가 없거나 못 답하면 `None` 이고, 그때 마스터가 그대로 답한다.
         if self._specialist is not None and not visual.any:
             special = self._specialist(q, ctx, _evidence_block(hits))
-            if special is not None and special.text.strip():
+            if (
+                special is not None
+                and special.text.strip()
+                and _specialist_documents_ok(special, ctx, self._store)
+            ):
                 citations = _specialist_citations(special, hits, ctx)
                 citations += _attachment_source_links(hits)
                 logger.info(
@@ -780,6 +1098,10 @@ class AnswerEngine:
                     "answered",
                     specialist=special.specialist,
                     withheld=withheld,
+                    evidence_refs=refs_from_hits(hits, self._store.root),
+                    attachment_refs=_attachment_refs(self._store.root, hits),
+                    subject_terms=list(terms or []),
+                    context_resolution="transmitted_evidence",
                 )
 
         user_content: str | list[dict] = prompt
@@ -819,4 +1141,8 @@ class AnswerEngine:
         return Answer(
             resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits),
             "answered", terms=list(terms or []), withheld=withheld,
+            evidence_refs=refs_from_hits(hits, self._store.root),
+            attachment_refs=_attachment_refs(self._store.root, hits),
+            subject_terms=list(terms or []),
+            context_resolution="transmitted_evidence",
         )
