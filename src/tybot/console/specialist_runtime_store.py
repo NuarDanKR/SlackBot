@@ -27,6 +27,14 @@ import re
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 KEY_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
+# 전문가를 **어떻게 부르는가.** 이 목록과 DB 의 CHECK 제약이 갈리면, 코드가
+# 아는 값을 DB 가 거부한다 — 2026-09-11 에 `tools` 로 그렇게 막혔다. 스키마를
+# 올리지 않은 설치에서 나는 일이고, 오류 문구가 「제약 위반」 이라 무엇을
+# 적용해야 하는지는 말해 주지 않는다.
+#
+# 테스트가 이 목록과 스키마 파일을 대조한다.
+EXECUTION_MODES = ("prompt", "tools", "http")
+
 # 소스 상태와 런타임 상태를 섞지 않는다(설계 §배포 수명주기).
 SOURCE_STATES = ("uploaded", "source_verified", "source_rejected")
 BUILD_STATES = ("building", "build_failed", "image_ready", "contract_failed")
@@ -452,6 +460,7 @@ __all__ = [
     "BUILD_STATES",
     "DEPLOY_STATES",
     "DIGEST_RE",
+    "EXECUTION_MODES",
     "SOURCE_STATES",
     "RuntimeStoreError",
     "activate",

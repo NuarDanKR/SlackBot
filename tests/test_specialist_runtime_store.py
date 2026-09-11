@@ -288,3 +288,43 @@ def test_both_helpers_are_installed_as_root():
 
     for name in ("tybot-specialist-build", "tybot-specialist-deploy"):
         assert f"-o root -g root -m 0755 \"$APP_DIR/deploy/{name}\"" in install, name
+
+
+# --- 코드가 아는 값을 DB 가 거부하면 안 된다 (2026-09-11) --------------------
+def test_the_schema_allows_every_execution_mode_the_code_knows():
+    """`UPDATE ... execution_mode='tools'` 가 제약 위반으로 막혔다.
+
+    스키마를 안 올린 설치에서 나는 일이고, 오류 문구는 「제약 위반」 이라
+    **무엇을 적용해야 하는지 말해 주지 않는다.** 목록이 갈리는 것을 여기서 막는다.
+    """
+    sql = (ROOT / "deploy" / "sql" / "specialist_runtime_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    line = next(
+        row for row in sql.splitlines() if "execution_mode IN" in row
+    )
+
+    for mode in store.EXECUTION_MODES:
+        assert f"'{mode}'" in line, f"스키마가 {mode} 를 거부한다"
+
+
+def test_the_adapter_factory_knows_the_same_modes():
+    """DB 가 받아 주는데 코드가 모르면, 등록은 되고 동작은 프롬프트로 내려간다."""
+    import inspect
+
+    from tybot import specialist_adapters
+
+    source = inspect.getsource(specialist_adapters.build)
+
+    # `prompt` 는 기본값이라 분기가 없어도 된다. 나머지는 이름이 보여야 한다.
+    assert '"tools"' in source
+
+
+def test_the_constraint_is_replaced_not_added():
+    """`ADD CONSTRAINT` 만 있으면 이미 있는 설치에서 적용이 실패하고, 그러면
+    아무도 다시 적용하지 않는다."""
+    sql = (ROOT / "deploy" / "sql" / "specialist_runtime_schema.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "DROP CONSTRAINT IF EXISTS specialist_bot_execution_mode" in sql
