@@ -160,6 +160,40 @@ def candidates(query: str, channels: list[str]) -> list[Candidate] | None:
         return None
 
 
+def indexed_counts(doc_paths: list[str]) -> dict[str, int] | None:
+    """문서별로 색인에 든 줄 수. **DB 를 못 보면 `None`.**
+
+    설계 §7.1 은 문서별 manifest(`archive_content_sha`)를 두자고 한다. 우리 아카이브는
+    **append-only** 라(원문 편집 금지, 원칙 1) 줄 수만으로도 같은 판정이 된다 —
+    줄이 늘면 색인이 낡은 것이고, 줄이 그대로면 내용도 그대로다. 표를 하나 더 만들고
+    동기화하는 비용을 치르지 않는 이유다.
+
+    이 방법이 못 잡는 것: 파일을 손으로 고쳐 **줄 수를 유지한 채** 내용만 바꾼 경우.
+    그건 원칙 1 위반이고, 그때는 재색인을 사람이 돌린다.
+    """
+    paths = [p for p in doc_paths if p]
+    if not paths:
+        return {}
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT doc_path, count(*) AS n
+                  FROM raw_line
+                 WHERE doc_path = ANY(%(paths)s)
+                 GROUP BY doc_path
+                """,
+                {"paths": paths},
+            )
+            return {str(r["doc_path"]): int(r["n"]) for r in cur.fetchall()}
+    except Exception as exc:  # noqa: BLE001 - 조회 실패는 파일 스캔으로 넘긴다
+        log.warning("색인 최신성 확인 실패 — 파일 스캔으로 보완합니다: %s", exc)
+        return None
+
+
 # --- 쓰기 -------------------------------------------------------------------
 def reindex(docs, root=None, *, batch: int = 1000) -> dict:
     """MD 문서들을 `raw_line` 에 넣는다. **멱등하다** — 같은 줄을 다시 넣어도 늘지 않는다.

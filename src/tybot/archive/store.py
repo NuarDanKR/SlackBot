@@ -589,7 +589,38 @@ class ArchiveStore:
             # 색인이 아직 안 돌았을 수 있다. 0건으로 답하기 전에 파일을 한 번 본다 —
             # 「색인 없음」이 「자료 없음」으로 보이는 것이 이 기능의 가장 나쁜 실패다.
             return self._scan(query, tokens, docs, limit)
+
+        # 색인에 **일부** 결과가 있으면 예전에는 여기서 끝났다. 그래서 방금 들어온
+        # 줄(예: 재변환한 첨부)이 조용히 검색에서 빠졌다 — 오류도 0건도 아니라
+        # 「예전 것만 나오는」 답이 된다(설계 §2.2·§7.2).
+        #
+        # 낡은 문서만 파일에서 보완한다. 전체 아카이브를 매번 훑지 않는다.
+        hits += self._stale_hits(query, tokens, docs, by_path)
         return self._rank(hits, limit)
+
+    def _stale_hits(self, query, tokens, docs, by_path) -> list[SearchHit]:
+        """색인이 뒤처진 문서만 파일에서 찾아 보탠다.
+
+        색인 경로와 **같은 점수 함수**를 쓴다(`_scan`). 다른 점수를 쓰면 같은 질문에
+        어느 경로로 갔느냐에 따라 순서가 달라진다.
+        """
+        from .. import search_index
+
+        counts = search_index.indexed_counts(list(by_path))
+        if counts is None:
+            # DB 를 못 봤다. 이미 색인 결과를 받은 뒤이므로 여기서 전체 스캔으로
+            # 되돌아가지 않는다 — 두 번 부담을 지우는 대신 있는 것으로 답한다.
+            return []
+        stale = [
+            doc for path, doc in by_path.items()
+            if counts.get(path, 0) < len(doc.raw_lines)
+        ]
+        if not stale:
+            return []
+        logger.info("색인이 뒤처진 문서 %d개를 파일에서 보완한다", len(stale))
+        # 상한은 호출부의 `_rank` 가 다시 적용한다. 여기서 자르면 관련도 높은 줄이
+        # 파일 순서 때문에 잘린다.
+        return self._scan(query, tokens, stale, len(stale) * 20)
 
     def _scan(
         self, query: str, tokens: list[str], docs: list[ArchiveDoc], limit: int
@@ -612,6 +643,16 @@ class ArchiveStore:
         같은 점수면 오래된 줄이 먼저 올라와, 바뀐 숫자를 묻는 질문에 옛 값이 근거로
         붙었다. 시각 표기가 없는 줄은 뒤로 보낸다(판정할 수 없는 것을 앞세우지 않는다).
         """
+        # 같은 줄이 두 번 들어올 수 있다 — 색인 결과와 낡은 문서 파일 스캔이
+        # 겹칠 때다. 그대로 두면 같은 사실이 두 번 인용되고, 근거 줄 수도 부풀려진다.
+        unique: dict[tuple, SearchHit] = {}
+        for hit in hits:
+            key = (str(hit.doc.path), hit.line.lineno)
+            kept = unique.get(key)
+            if kept is None or hit.score > kept.score:
+                unique[key] = hit
+        hits = list(unique.values())
+
         # 파이썬 정렬은 안정적이라, **덜 중요한 것부터 차례로** 정렬하면 된다.
         # 문자열을 음수화할 수 없으니 이 방식이 보수(complement) 트릭보다 읽기 쉽다.
         hits.sort(key=lambda h: (h.doc.path.name, h.line.lineno))

@@ -137,3 +137,91 @@ def test_same_score_puts_the_newer_line_first(store):
     assert hits[0].line.ts.startswith("2026-08-20"), (
         f"최근 줄이 먼저 와야 한다: {[h.line.ts for h in hits]}"
     )
+
+
+# --- 색인 최신성 (설계 §2.2·§7.2) ----------------------------------------------
+#
+# 색인에 **일부** 결과가 있으면 예전에는 거기서 끝났다. 그래서 방금 들어온 줄(예:
+# 재변환한 첨부)이 조용히 검색에서 빠졌다 — 오류도 0건도 아니라 「예전 것만 나오는」
+# 답이 된다. 그게 가장 찾기 어려운 실패다.
+def _candidate(doc_path, line_no, when="2026-08-01 09:00"):
+    return search_index.Candidate(doc_path=doc_path, line_no=line_no, spoken_at=when)
+
+
+@pytest.fixture
+def indexed(store, monkeypatch):
+    """색인이 첫 줄 하나만 알고 있는 상태."""
+    path = search_index.rel_path(
+        store.root / "channels" / "pilot" / "전산.md", store.root
+    )
+    doc = next(d for d in store.source_docs() if d.channel == MINE)
+    first = doc.raw_lines[0]
+    monkeypatch.setattr(
+        search_index, "candidates", lambda q, ch: [_candidate(path, first.lineno)]
+    )
+    return path, doc
+
+
+def test_stale_document_lines_are_merged_from_the_file(indexed, store, monkeypatch):
+    path, _doc = indexed
+    # 색인은 1줄만 알고 파일에는 2줄이 있다 → 낡았다.
+    monkeypatch.setattr(search_index, "indexed_counts", lambda paths: {path: 1})
+    got = store.search("기성금", _ctx(MINE))
+    assert len(got) == 2
+    assert any("3억" in h.line.text for h in got)
+
+
+def test_a_fresh_index_is_not_rescanned(indexed, store, monkeypatch):
+    """최신이면 파일을 다시 훑지 않는다. 매번 훑으면 색인이 무의미해진다."""
+    path, doc = indexed
+    scanned = []
+    original = ArchiveStore._scan
+
+    def _spy(self, query, tokens, docs, limit):
+        scanned.append(len(docs))
+        return original(self, query, tokens, docs, limit)
+
+    monkeypatch.setattr(ArchiveStore, "_scan", _spy)
+    monkeypatch.setattr(
+        search_index, "indexed_counts", lambda paths: {path: len(doc.raw_lines)}
+    )
+    got = store.search("기성금", _ctx(MINE))
+    assert len(got) == 1
+    assert scanned == []
+
+
+def test_unreadable_db_does_not_trigger_a_full_scan(indexed, store, monkeypatch):
+    """이미 색인 결과를 받은 뒤다. 두 번 부담을 지우는 대신 있는 것으로 답한다."""
+    monkeypatch.setattr(search_index, "indexed_counts", lambda paths: None)
+    got = store.search("기성금", _ctx(MINE))
+    assert len(got) == 1
+
+
+def test_merged_results_are_not_duplicated(indexed, store, monkeypatch):
+    """같은 줄이 색인과 파일 양쪽에서 오면 같은 사실이 두 번 인용된다."""
+    path, _doc = indexed
+    monkeypatch.setattr(search_index, "indexed_counts", lambda paths: {path: 0})
+    got = store.search("기성금", _ctx(MINE))
+    keys = [(str(h.doc.path), h.line.lineno) for h in got]
+    assert len(keys) == len(set(keys))
+
+
+def test_merged_results_keep_permission(indexed, store, monkeypatch):
+    """보완 경로가 권한을 우회하면 그게 가장 나쁜 회귀다."""
+    path, _ = indexed
+    monkeypatch.setattr(search_index, "indexed_counts", lambda paths: {path: 0})
+    got = store.search("기성금", _ctx(MINE))
+    assert all(h.doc.channel == MINE for h in got)
+
+
+def test_stale_and_fresh_use_the_same_score(indexed, store, monkeypatch):
+    """다른 점수를 쓰면 같은 질문에 경로에 따라 순서가 달라진다."""
+    path, _doc = indexed
+    monkeypatch.setattr(search_index, "indexed_counts", lambda paths: {path: 1})
+    got = store.search("기성금", _ctx(MINE))
+    for hit in got:
+        expected = search_index.score_line(
+            search_index.tokens_of("기성금"), "기성금",
+            hit.line.speaker, hit.line.text,
+        )
+        assert hit.score == expected
