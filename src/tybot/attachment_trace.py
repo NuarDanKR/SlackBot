@@ -76,7 +76,7 @@ STAGE_ACTION = {
     OBSERVED: "수집 이벤트나 백필 범위 문제다. `/수집상태` 로 채널을 먼저 본다.",
     STORED: "Slack 파일 다운로드 문제다. 봇 토큰과 `files:read` 스코프를 본다.",
     CONVERTED: "문서 변환 문제다. 변환기 설치와 `scripts/diagnose_attachments.py` 를 본다.",
-    SCREENED: "PII 로 수집을 거절한 파일이다. **정상 동작**이며 되살리지 않는다.",
+    SCREENED: "수집을 거절한 파일이다(PII 또는 사람의 거절). **정상 동작**이며 되살리지 않는다.",
     ARCHIVED: "변환은 됐는데 원문에 안 들어갔다. "
               "`scripts/convert_staged_attachments.py --apply` 로 반영한다.",
     INDEXED: "색인이 낡았다. `tybot-index.timer` 상태를 보거나 한 회차 돌린다.",
@@ -262,6 +262,14 @@ def _stored(meta: dict) -> StageResult:
     return StageResult(STORED, OK, f"sha256={digest[:12]}… object=yes")
 
 
+# 검수(`attachment_review`)가 **같은 `status` 필드를 덮어쓴다.** 그래서 변환에
+# 성공한 파일도 사람이 검수 대기로 넘기면 `pending_review` 가 되고, 처리 상태는
+# 사라진다. 이 값들을 변환 실패로 읽으면 멀쩡한 파일이 실패로 보인다(2026-09-11 실측).
+#
+# 그래서 변환 여부는 **`extracted.md` 로만** 판단하고, `status` 는 참고로만 쓴다.
+REVIEW_STATES = frozenset({"pending_review", "approved", "rejected"})
+
+
 def _converted(meta: dict, meta_path: Path) -> StageResult:
     status = str(meta.get("status") or "")
     if status == "pii_refused":
@@ -271,11 +279,17 @@ def _converted(meta: dict, meta_path: Path) -> StageResult:
         return StageResult(CONVERTED, SKIPPED, "code=unsupported-format")
     extracted = meta_path.parent / "extracted.md"
     if not meta.get("extracted") or not extracted.is_file():
+        note = ""
+        if status in REVIEW_STATES:
+            # 검수 상태가 처리 상태를 덮어썼을 수 있다. 그 사실을 밝힌다 — 담당자가
+            # `status` 만 보고 원인을 잘못 짚지 않게.
+            note = f" (status={status} — 검수가 처리 상태를 덮어썼다)"
+        elif status:
+            note = f" status={status}"
         code = str(meta.get("error") or "")
         return StageResult(
             CONVERTED, FAIL,
-            f"code=convert-failed{' status=' + status if status else ''}"
-            + (" (사유는 로그에 있다)" if code else ""),
+            f"code=convert-failed{note}" + (" (사유는 로그에 있다)" if code else ""),
         )
     try:
         body = [ln for ln in extracted.read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -288,9 +302,13 @@ def _converted(meta: dict, meta_path: Path) -> StageResult:
 
 
 def _screened(meta: dict) -> StageResult:
-    if str(meta.get("status") or "") == "pii_refused":
+    status = str(meta.get("status") or "")
+    if status == "pii_refused":
         # 실패가 아니라 **의도한 차단**이다. 되살리면 원칙 5 위반이다.
         return StageResult(SCREENED, FAIL, "code=pii-refused (의도된 차단)")
+    if status == "rejected":
+        # 사람이 보고 막았다. 같은 이유로 되살리지 않는다.
+        return StageResult(SCREENED, FAIL, "code=review-rejected (사람이 거절)")
     return StageResult(SCREENED, OK)
 
 

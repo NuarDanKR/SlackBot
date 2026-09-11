@@ -37,7 +37,7 @@ import argparse
 import os
 import pathlib
 import sys
-from collections import Counter
+from pathlib import Path
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
@@ -102,25 +102,34 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_INPUT
 
     store = ArchiveStore(archive)
-    # 같은 이름이 여럿이면 원문 줄로는 구별할 수 없다. 미리 세어 판정에 넘긴다.
-    by_name = Counter(str(m.get("name") or "") for _, m in staged)
-    line_cache: dict[tuple[str, str], list[str]] = {}
 
-    traces: list[at.AttachmentTrace] = []
+    # 같은 파일이 **여러 채널에 공유**되면 채널마다 따로 격리된다. 그건 모호함이
+    # 아니라 같은 파일이다 — 전체에서 이름을 세면 그 경우가 「같은 이름 2건」 으로
+    # 잘못 잡힌다(2026-09-11 실측). 그래서 **채널 안에서, 서로 다른 파일 ID 만** 센다.
+    seen: dict[tuple[str, str, str], set[str]] = {}
+    located: list[tuple[Path, dict, str, str]] = []
     for meta_path, meta in staged:
         parts = meta_path.parts
         workspace = parts[parts.index("workspaces") + 1]
         channel_id = parts[parts.index("channels") + 1]
+        key = (workspace, channel_id, str(meta.get("name") or ""))
+        seen.setdefault(key, set()).add(str(meta.get("slack_file_id") or meta_path.parent.name))
+        located.append((meta_path, meta, workspace, channel_id))
+
+    line_cache: dict[tuple[str, str], list[str]] = {}
+    traces: list[at.AttachmentTrace] = []
+    for meta_path, meta, workspace, channel_id in located:
         key = (workspace, channel_id)
         if key not in line_cache:
             line_cache[key] = _channel_lines(store, workspace, channel_id)
+        name_key = (workspace, channel_id, str(meta.get("name") or ""))
         traces.append(at.trace(
             meta,
             meta_path,
             workspace=workspace,
             channel_id=channel_id,
             doc_lines=line_cache[key],
-            same_name=by_name[str(meta.get("name") or "")],
+            same_name=len(seen[name_key]),
         ))
 
     counts = at.summarize(traces)
@@ -128,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.summary:
         for got in shown:
+            print(f"[{got.workspace}/{got.channel_id}]")
             print(got.report())
             print()
     print(f"=== 첨부 {len(traces)}건 — {at.summary_line(counts)}")

@@ -583,3 +583,35 @@ def test_old_metadata_falls_back_to_the_name(tmp_path):
     assert "archive_line_hashes" not in meta
     got = _trace(meta_path, meta, doc_lines=_archive_lines(REPORTS[0]))
     assert _status(got, at.ARCHIVED) == at.OK
+
+
+# --- 검수 상태가 처리 상태를 덮어쓴다 ------------------------------------------
+#
+# `attachment_review._write_status` 가 같은 `status` 필드에 `pending_review` 같은
+# 검수 상태를 쓴다. 그래서 변환에 성공한 파일도 검수 대기로 넘어가면 처리 상태가
+# 사라진다. 이걸 변환 실패로 읽으면 **멀쩡한 파일이 실패로 보인다**(2026-09-11 실측:
+# `공사팀 업무보고(2026.07월말…).hwp` 가 `convert-failed status=pending_review`).
+@pytest.mark.parametrize("status", ["pending_review", "approved"])
+def test_review_state_does_not_imply_conversion_failure(tmp_path, status):
+    meta_path, meta = _stage(tmp_path, status=status, extracted_lines=12)
+    got = _trace(meta_path, meta, doc_lines=_archive_lines(REPORTS[0]))
+    assert _status(got, at.CONVERTED) == at.OK
+    assert _status(got, at.ARCHIVED) == at.OK
+
+
+def test_review_state_with_no_extraction_names_the_overwrite(tmp_path):
+    """정말 변환이 안 된 경우다. 그래도 `status` 를 원인으로 짚게 두지 않는다."""
+    meta_path, meta = _stage(tmp_path, status="pending_review", extracted_lines=0)
+    stuck = _trace(meta_path, meta).first_failure
+    assert stuck and stuck.stage == at.CONVERTED
+    assert "검수가 처리 상태를 덮어썼다" in stuck.detail
+
+
+def test_human_rejection_is_a_deliberate_block(tmp_path):
+    """사람이 보고 막은 것이다. PII 차단과 같이 되살리지 않는다."""
+    meta_path, meta = _stage(tmp_path, status="rejected", extracted_lines=12)
+    got = _trace(meta_path, meta, doc_lines=_archive_lines(REPORTS[0]))
+    stuck = got.first_failure
+    assert stuck and stuck.stage == at.SCREENED
+    assert "review-rejected" in stuck.detail
+    assert "되살리지 않는다" in got.action()
