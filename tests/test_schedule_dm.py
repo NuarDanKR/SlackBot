@@ -107,6 +107,8 @@ class FakeConn:
             return "occurrence"
         if "as upcoming" in s:
             return "diagnose"
+        if "join schedule_folder_org fo on fo.org_code = e.org_code" in s:
+            return "entitled"
         return "?"
 
     def sql_for(self, needle: str) -> str:
@@ -591,3 +593,55 @@ def test_diagnosis_failure_does_not_break_planning(caplog):
     with caplog.at_level("WARNING", logger="tybot.schedule_dm"):
         dm._log_why_empty(Broken(), NOW)
     assert "확인하지 못했습니다" in caplog.text
+
+
+# --- 개인 자격 ----------------------------------------------------------------
+#
+# 2026-09-11: 사용자가 `/일정 알림` 을 켰는데 DM 이 오지 않았다. 설정은 저장됐고
+# 일정도 있었지만 `schedule_folder_org` 가 비어 있어 자격이 0이었다.
+#
+# 진단(`_log_empty_reason`)은 같은 사실을 이미 판단하지만 **서버 로그로만** 나간다.
+# 로그는 켠 사람이 볼 수 없는 곳이다. 그래서 켤 때 그 사람에게 말해야 한다.
+def test_entitled_counts_only_approved_and_enabled():
+    from tybot.schedule_dm import entitled_folders
+
+    conn = FakeConn(entitled=[{"n": 2}])
+    assert entitled_folders(conn, "3420-M") == 2
+    sql = conn.sql_for("schedule_folder_org")
+    # 승인(fo.enabled)과 폴더 사용(f.enabled) 둘 다 봐야 한다.
+    assert "fo.enabled" in sql
+    assert "f.enabled" in sql
+    assert "e.active" in sql
+
+
+def test_entitled_is_zero_when_nothing_is_approved():
+    from tybot.schedule_dm import entitled_folders
+
+    assert entitled_folders(FakeConn(entitled=[{"n": 0}]), "3420-M") == 0
+    assert entitled_folders(FakeConn(entitled=[]), "3420-M") == 0
+
+
+def test_entitled_needs_an_employee_number():
+    from tybot.schedule_dm import entitled_folders
+
+    conn = FakeConn()
+    assert entitled_folders(conn, "") == 0
+    assert conn.executed == []  # 빈 사번으로 DB 를 때리지 않는다
+
+
+def test_entitlement_uses_the_same_joins_as_the_planner():
+    """갈라지면 화면은 「받을 수 있다」 고 하는데 큐는 안 생긴다 — 조용한 침묵이다."""
+    from tybot.schedule_dm import ENTITLED_SQL, PLAN_SQL
+
+    for fragment in ("schedule_folder_org", "fo.enabled", "f.enabled", "e.active"):
+        assert fragment in ENTITLED_SQL, fragment
+        assert fragment in PLAN_SQL, fragment
+
+
+def test_not_entitled_notice_says_not_to_retry():
+    """다시 켜라고 하면 사람은 계속 다시 켠다. 기다릴 곳을 알려야 한다."""
+    from tybot.schedule_dm import NOT_ENTITLED
+
+    assert "오지 않습니다" in NOT_ENTITLED
+    assert "관리자" in NOT_ENTITLED
+    assert "다시 켤 필요는 없습니다" in NOT_ENTITLED

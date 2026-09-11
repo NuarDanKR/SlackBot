@@ -963,6 +963,7 @@ class WorkspaceBot:
     def _set_schedule_dm(self, body: dict, respond, *, minutes, turn_on: bool) -> None:
         """버튼으로 개인 일정 알림 설정을 바꾸고 같은 메시지를 갱신한다."""
         user_id = str((body.get("user") or {}).get("id") or "")
+        entitled: int | None = None
         with db_connect() as conn:
             if conn is None:
                 respond(text=schedule_dm.UNAVAILABLE, replace_original=True)
@@ -993,6 +994,16 @@ class WorkspaceBot:
                 respond(text=schedule_dm.UNAVAILABLE, replace_original=True)
                 return
 
+            # 켰다고 오는 것이 아니다. 승인된 폴더가 없으면 영원히 0건인데, 화면은
+            # 켜졌다고만 말한다 — 그 사람은 오지 않는 알림을 기다리고 봇을 안 믿게
+            # 된다. 같은 연결 안에서 자격을 확인해 사실을 함께 말한다.
+            if turn_on:
+                try:
+                    entitled = schedule_dm.entitled_folders(conn, emp_no)
+                except Exception as e:
+                    log.warning("[%s] 일정 폴더 자격 확인 실패: %s", self.workspace, e)
+                    entitled = None
+
         blocks = schedule_dm.settings_blocks(
             pref, workspace_label=pref.workspace if pref and pref.enabled else ""
         )
@@ -1008,6 +1019,11 @@ class WorkspaceBot:
                     "type": "mrkdwn",
                     "text": schedule_dm.moved_notice(previous.workspace),
                 }],
+            })
+        if turn_on and entitled == 0:
+            blocks.insert(1, {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": schedule_dm.NOT_ENTITLED},
             })
         respond(text="일정 알림 설정", blocks=blocks, replace_original=True)
 
@@ -1450,13 +1466,15 @@ class WorkspaceBot:
             return False
 
     def _pending_attachments(self, channel_id: str):
-        """이 채널의 검수 대기 목록과, 변환본이 들어간 파일 이름."""
+        """이 채널의 첨부 처리 내역과, 변환본이 들어간 파일 이름."""
         from ..answer import EXTRACTED_ATTACHMENT_RE as extracted_re
-        from ..attachment_review import PENDING, scan
+        from ..attachment_review import APPROVED, PII_REFUSED, REJECTED, scan
 
         items = [
-            a for a in scan(self.archive_dir, status=PENDING)
-            if a.workspace == self.workspace and a.channel_id == channel_id
+            a for a in scan(self.archive_dir)
+            if a.workspace == self.workspace
+            and a.channel_id == channel_id
+            and a.status not in {APPROVED, REJECTED, PII_REFUSED}
         ]
         extracted = {
             m.group("name")

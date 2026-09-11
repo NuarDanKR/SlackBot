@@ -227,6 +227,47 @@ def disable(conn, *, emp_no: str, actor: str) -> None:
     logger.info("일정 DM 수신 해제 emp=%s", emp_no)
 
 
+# --- 개인 자격 ---------------------------------------------------------------
+#
+# 알림을 켠 사람에게 "켜졌습니다" 만 말하면, 승인된 폴더가 없어도 켜진 것처럼 보인다.
+# 그 사람은 회의 30분 전에 오지 않는 알림을 기다리고, 안 오면 봇을 안 믿는다.
+#
+# `_log_empty_reason` 이 같은 사실을 이미 판단하지만 **서버 로그로만** 나간다.
+# 로그는 켠 사람이 볼 수 없는 곳이다.
+ENTITLED_SQL = """
+select count(distinct fo.source_folder_id) as n
+  from employee e
+  join schedule_folder_org fo on fo.org_code = e.org_code and fo.enabled
+  join schedule_folder f
+    on f.source_folder_id = fo.source_folder_id and f.enabled
+ where e.emp_no = %(emp_no)s and e.active
+"""
+
+
+def entitled_folders(conn, emp_no: str) -> int:
+    """이 사람이 받을 수 있는 일정 폴더 수. 0이면 켜도 아무것도 오지 않는다.
+
+    `PLAN_SQL` 과 **같은 조건**을 쓴다. 갈라지면 화면은 「받을 수 있다」 고 하는데
+    큐는 안 만들어지는 상태가 된다 — 그건 오류가 아니라 조용한 침묵으로 나타난다.
+    """
+    if not emp_no:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(ENTITLED_SQL, {"emp_no": emp_no})
+        row = cur.fetchone()
+    if row is None:
+        return 0
+    value = row.get("n") if isinstance(row, dict) else row[0]
+    return int(value or 0)
+
+
+NOT_ENTITLED = (
+    "⚠️ 설정은 저장했지만 *지금은 알림이 오지 않습니다.* 회원님 조직에 대해 승인된"
+    " 일정 폴더가 없습니다.\n"
+    "관리자가 그 폴더를 승인하면 그때부터 옵니다 — 이 설정을 다시 켤 필요는 없습니다."
+)
+
+
 # --- 큐 생성 -----------------------------------------------------------------
 #
 # 조직 트리를 부모·자식으로 넓히지 않는다. Oracle 폴더 ACL 에서 승인된 **정확한**
