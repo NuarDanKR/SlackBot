@@ -53,6 +53,95 @@ MAX_LIVE_MESSAGES = 50
 LIVE_MARK = "[실시간]"
 
 
+# --- 예산 (설계: hermes-integration-fidelity.md §3-C) -------------------------
+#
+# **찾는 것을 막지 않되, 끝없이 찾게 두지도 않는다.**
+#
+# 예전 프롬프트는 "검색 결과가 없다고 낱말을 바꿔 다시 부르지 마세요" 로 재검색을
+# 막았다. 그 규칙이 검색 실패와 자료 부재를 같은 것으로 만들었다 — 사람이 쓴 말과
+# 문서에 적힌 말이 다르기만 해도 없다고 답했다.
+#
+# 그래서 규칙이 아니라 **예산**으로 묶는다. 다시 찾는 것은 허용하고, 얼마나
+# 쓸 수 있는지는 코드가 센다. 예산이 끝나면 그 사실을 모델에게 문자열로 알려
+# 「지금까지 읽은 것으로 답하라」 로 보낸다.
+#
+# 그리고 **예산 소진과 자료 없음을 구별해서 밖으로 내보낸다.** 둘을 같은 답으로
+# 내면 "없다" 가 사실이 아닌 경우가 섞이고, 사용자는 그걸 알 방법이 없다.
+MAX_TOOL_CALLS = 12
+MAX_TOOL_CALLS_PER_TOOL = 6
+MAX_READ_CHARS = 120_000
+MAX_TOOL_SECONDS = 45.0
+
+BUDGET_EXHAUSTED = "budget-exhausted"
+
+
+@dataclass
+class ToolBudget:
+    """한 질문이 쓸 수 있는 도구 예산. **요청마다 새로 만든다.**"""
+
+    max_calls: int = MAX_TOOL_CALLS
+    max_per_tool: int = MAX_TOOL_CALLS_PER_TOOL
+    max_chars: int = MAX_READ_CHARS
+    max_seconds: float = MAX_TOOL_SECONDS
+    calls: int = 0
+    chars: int = 0
+    per_tool: dict = field(default_factory=dict)
+    started: float = 0.0
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.started:
+            import time
+
+            self.started = time.monotonic()
+
+    @property
+    def exhausted(self) -> bool:
+        return bool(self.reason)
+
+    @property
+    def elapsed(self) -> float:
+        import time
+
+        return time.monotonic() - self.started
+
+    def refuse(self, name: str) -> str:
+        """이 호출을 거절해야 하면 모델에게 보일 문자열. 통과면 빈 문자열."""
+        if self.calls >= self.max_calls:
+            self.reason = "calls"
+        elif self.per_tool.get(name, 0) >= self.max_per_tool:
+            # 한 도구만 계속 부르는 것은 대개 같은 자리를 맴도는 것이다.
+            # 전체 예산을 끝내지는 않는다 — 다른 도구는 아직 쓸 수 있다.
+            return (
+                f"({name} 호출 한도 {self.max_per_tool}회에 닿았습니다. "
+                "다른 도구를 쓰거나 지금까지 읽은 것으로 답하세요.)"
+            )
+        elif self.chars >= self.max_chars:
+            self.reason = "chars"
+        elif self.elapsed >= self.max_seconds:
+            self.reason = "time"
+        if self.reason:
+            return (
+                "(검색 예산을 다 썼습니다. 더 찾지 말고 지금까지 읽은 것으로 답하세요. "
+                "자료가 없다고 단정하지 말고, 어디까지 찾아봤는지 한 줄 적으세요.)"
+            )
+        return ""
+
+    def spend(self, name: str, text: str) -> None:
+        self.calls += 1
+        self.per_tool[name] = self.per_tool.get(name, 0) + 1
+        self.chars += len(text or "")
+
+    def summary(self) -> str:
+        """로그 한 줄. 업무 내용은 담지 않는다."""
+        per = ",".join(f"{k}={v}" for k, v in sorted(self.per_tool.items()))
+        return (
+            f"tool_calls={self.calls} chars={self.chars} "
+            f"elapsed_ms={int(self.elapsed * 1000)} per_tool={per or '-'} "
+            f"budget={self.reason or 'ok'}"
+        )
+
+
 @dataclass
 class Touched:
     """도구가 실제로 돌려준 것. 출처는 이것으로 만든다."""
@@ -195,14 +284,29 @@ class ToolBox:
     # 실시간 조회. 없으면 그 도구를 주지 않는다.
     live_fetch: Callable[[str, int], list[dict]] | None = None
     here: str = ""
+    # 이 요청이 쓸 수 있는 도구 예산. **요청마다 새 것**이라, 앞 질문이 다 쓴
+    # 예산이 다음 질문을 막지 않는다.
+    budget: ToolBudget = field(default_factory=ToolBudget)
 
     def run(self, name: str, args: dict) -> str:
         """도구 하나 실행. **예외를 밖으로 내지 않는다.**
 
         도구가 터지면 모델은 그것을 모른 채 답을 만든다. 오류도 문자열로
         돌려줘야 모델이 "그건 안 됐구나" 를 알고 다른 길을 찾는다.
+
+        예산이 끝났으면 실행하지 않고 그 사실을 돌려준다 — 같은 이유로,
+        예외가 아니라 문자열이다.
         """
+        refusal = self.budget.refuse(name)
+        if refusal:
+            log.info("도구 예산 거절 name=%s %s", name, self.budget.summary())
+            return refusal
         self.touched.calls.append(name)
+        out = self._dispatch(name, args)
+        self.budget.spend(name, out)
+        return out
+
+    def _dispatch(self, name: str, args: dict) -> str:
         try:
             if name == "search":
                 return self._search(args)

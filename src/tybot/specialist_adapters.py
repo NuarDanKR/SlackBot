@@ -144,6 +144,16 @@ def contract_meta(key: str) -> dict[str, str]:
     return out
 
 
+def supports_visual(key: str) -> bool:
+    """이 전문 봇이 이미지 원본을 받을 수 있다고 **계약에 적었는가**.
+
+    기본은 못 받는 것이다(막는 쪽이 기본값). 못 받는 봇에게 이미지를 보내면
+    모델이 그것을 무시하고 텍스트만으로 답하는데, 우리는 이미지를 근거로 쓴 답인
+    줄 알고 출처를 붙인다 — 답과 출처가 어긋나는 가장 조용한 길이다.
+    """
+    return contract_meta(key).get("visual", "").strip().lower() in ("yes", "true", "1")
+
+
 def prompt_version(key: str) -> str:
     """콘솔에 보일 프롬프트 버전. 읽지 못하면 빈 문자열."""
     return contract_meta(key).get("version", "")
@@ -214,12 +224,20 @@ class PromptSpecialist:
             )
             evidence = evidence[:MAX_EVIDENCE_CHARS]
 
+        # 시각 근거는 **텍스트 뒤에** 붙인다. 앞에 두면 프롬프트 캐시가 매번
+        # 깨지고(캐시는 접두사 일치), 이미지가 근거 텍스트보다 앞서 읽힌다.
+        body = f"근거:\n{evidence}\n\n질문: {request.question}"
+        content = (
+            [{"type": "text", "text": body}, *request.visual]
+            if getattr(request, "visual", ())
+            else body
+        )
         response = self._router.complete(
             [
                 Message("system", _governed_prompt(self.prompt)),
                 # 근거를 먼저, 질문을 뒤에. 캐시는 접두사 일치라 이 순서라야
                 # 같은 채널을 다시 물을 때 근거 부분이 캐시된다.
-                Message("user", f"근거:\n{evidence}\n\n질문: {request.question}"),
+                Message("user", content),
             ],
             model=self._model or None,
             # 사내 근거가 실린다. 전문가라고 민감도를 낮추지 않는다.
@@ -319,6 +337,11 @@ class ToolSpecialist:
         """무엇을 읽었나. 출처를 만드는 쪽이 읽는다."""
         return self._toolbox.touched
 
+    @property
+    def budget(self):
+        """이 요청이 쓴 도구 예산. **예산 소진과 자료 없음을 구별하는 근거다.**"""
+        return getattr(self._toolbox, "budget", None)
+
     def complete(self, request) -> str:
         from .gateway.base import Message, Sensitivity
         from .specialist_tools import specs
@@ -330,10 +353,13 @@ class ToolSpecialist:
         opening = f"질문: {request.question}"
         if seed:
             opening = f"이미 찾아 둔 근거:\n{seed}\n\n{opening}"
+        first: str | list = opening
+        if getattr(request, "visual", ()):
+            first = [{"type": "text", "text": opening}, *request.visual]
 
         messages: list = [
             Message("system", _governed_prompt(self.prompt)),
-            Message("user", opening),
+            Message("user", first),
         ]
 
         for _ in range(self._max_rounds):
@@ -368,7 +394,11 @@ class ToolSpecialist:
         #
         # 그래도 비면 빈 문자열을 돌려준다 — 계약 검사가 그것을 위반으로 보고
         # 마스터가 답한다. 모자란 채로 억지 문장을 만드는 것보다 낫다.
-        log.warning("전문가 도구 루프 상한 key=%s rounds=%d", self.key, self.rounds)
+        budget = self.budget
+        log.warning(
+            "전문가 도구 루프 상한 key=%s rounds=%d %s",
+            self.key, self.rounds, budget.summary() if budget else "-",
+        )
         messages.append(Message(
             "user",
             "더 찾지 말고 지금까지 읽은 것으로 답하세요. 모자라면 모자라다고 쓰세요.",

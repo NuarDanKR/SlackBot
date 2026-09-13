@@ -240,14 +240,64 @@ def test_the_router_row_carries_the_execution_mode():
     assert row.execution_mode == "tools"
 
 
-def test_the_query_reads_the_execution_mode():
-    import inspect
+class _FakeCursor:
+    """DB 행 하나를 돌려주는 최소 커서."""
 
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, *a, **k):
+        return None
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def cursor(self):
+        return _FakeCursor(self._rows)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+@pytest.mark.parametrize("mode", ["tools", "http", "prompt"])
+def test_a_db_row_keeps_its_execution_mode_all_the_way_to_the_object(monkeypatch, mode):
+    """**DB 행 → 런타임 객체**를 실제로 통과시킨다(설계 §9.4).
+
+    이 검사가 없어서 고장이 몇 주 동안 조용했다. SQL 에 열 이름이 있는지만 보는
+    검사와 `Specialist(...)` 를 손으로 만드는 검사는 둘 다 통과했는데, 정작 그
+    사이의 **행 매핑**이 빠져 있었다. 검사가 실제 경로를 지나지 않으면 그 검사는
+    통과해도 아무것도 보장하지 않는다.
+    """
     from tybot import specialist_router
 
-    source = inspect.getsource(specialist_router.available)
+    row = {
+        "key": "hermes", "name": "Hermes", "domain": "내부 기록",
+        "routing_hint": "", "adapter": "hermes", "model": "",
+        "min_confidence": 0.5, "rules": "", "execution_mode": mode,
+    }
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/none")
+    monkeypatch.setattr("psycopg.connect", lambda *a, **k: _FakeConn([row]))
+    specialist_router.clear_cache()
+    try:
+        (got,) = specialist_router.available("pilot")
+    finally:
+        specialist_router.clear_cache()
 
-    assert "execution_mode" in source, "쿼리가 실행 방식을 안 읽는다"
+    assert got.execution_mode == mode, "DB 가 말한 실행 방식이 런타임에서 사라졌다"
 
 
 def _registry_row(**kw):

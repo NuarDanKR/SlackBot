@@ -2265,6 +2265,8 @@ class WorkspaceBot:
             else None
         )
         started = time.monotonic()
+        # 이 요청의 판정을 QA 기록·전문 봇 호출과 잇는 값. 본문은 담지 않는다.
+        decision_id = master_planner.new_decision_id()
 
         # 👀 표시는 부가 기능이다. 실패해도 답변은 계속한다.
         with contextlib.suppress(Exception):
@@ -2337,6 +2339,14 @@ class WorkspaceBot:
                 subject_terms=list(ans.subject_terms) if ans else [],
                 context_parent_ids=list(ans.context_parent_ids) if ans else [],
                 context_resolution=(ans.context_resolution if ans else "none"),
+                decision_id=decision_id,
+                required_capability=(ans.required_capability if ans else ""),
+                # 업무 답변의 **최종 주체**. 비어 있으면 전문 봇이 답하지 못한 것이다.
+                final_responder=(ans.specialist if ans and ans.specialist else "none"),
+                attempted_specialists=(
+                    list(ans.attempted_specialists) if ans else []
+                ),
+                specialist_error_code=(ans.specialist_error_code if ans else ""),
             )
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
@@ -2386,7 +2396,9 @@ class WorkspaceBot:
 
         # 분해 결과를 오케스트레이션 판정으로 옮긴다. **여기서 LLM 을 다시 부르지
         # 않는다** — 남은 것은 검증과 매핑뿐이다(설계 §4).
-        decision = master_planner.from_intents(tasks, text=text, turns=turns)
+        decision = master_planner.from_intents(
+            tasks, text=text, turns=turns, decision_id=decision_id
+        )
         sections: list[str] = []
         ctx: RequestContext | None = None
         last: Answer | None = None
@@ -3108,7 +3120,7 @@ def specialist_hook(router, store=None, live_fetch=None):
     **전체에 하나**라, 봇 인스턴스에 매어 두면 마지막 봇의 것만 남는다.
     """
 
-    def hook(task, ctx, evidence: str):
+    def hook(task, ctx, evidence: str, *, visual: tuple = ()):
         workspace = getattr(ctx, "workspace", "") or ""
         if not workspace:
             return specialist_router.SpecialistOutcome(
@@ -3153,6 +3165,7 @@ def specialist_hook(router, store=None, live_fetch=None):
                 router=router,
                 toolbox_factory=make_toolbox,
                 live=bool(live_fetch),
+                visual=visual,
                 authorization_id=f"{workspace}:{getattr(ctx, 'role', '-') or '-'}",
             )
         except Exception as exc:

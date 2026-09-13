@@ -10,8 +10,9 @@
 """
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
+
+import pytest
 
 from tybot import specialist_router as sr
 from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity

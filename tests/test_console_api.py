@@ -1817,3 +1817,50 @@ def test_an_unreadable_version_does_not_break_the_list():
     """버전 하나 때문에 전문 봇 목록이 통째로 안 뜨면 그게 더 나쁘다."""
     assert console_app._deployed_prompt_version("없는어댑터") == ""
     assert console_app._deployed_prompt_version("") == ""
+
+
+def test_the_console_shows_declared_and_contract_execution_mode(client, monkeypatch):
+    """DB 가 `tools` 인데 실제로는 `prompt` 로 돌던 일이 있었다(2026-09-13).
+
+    오류가 나지 않아서 몇 주 동안 아무도 몰랐다. 둘을 같은 화면에 두면 갈린
+    순간이 눈에 보인다 — 그게 이 필드가 있는 유일한 이유다.
+    """
+    monkeypatch.setattr(
+        console_app.specialist_store, "list_specialists",
+        lambda: [{
+            "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+            "adapter": "hermes", "state": "enabled", "version": "1",
+            "execution_mode": "prompt", "rules": "",
+            "workspaces": ["fin"], "artifact_hashes": {},
+        }],
+    )
+    monkeypatch.setattr(console_app.specialist_store, "list_requests", lambda: [])
+    monkeypatch.setattr(console_app.specialist_store, "adapters", lambda: [])
+
+    row = client.get("/api/specialists", headers=member(client)).json()["specialists"][0]
+
+    assert row["executionMode"] == "prompt", "DB 가 선언한 것"
+    assert row["contractExecutionMode"] == "tools", "계약이 말하는 것"
+    assert row["executionMode"] != row["contractExecutionMode"], "갈린 것이 보여야 한다"
+    assert "internal_document_qa" in row["capabilities"]
+    assert row["supportsVisual"] is True
+    assert row["rulesSource"] == "file"
+
+
+def test_console_rules_source_says_which_one_actually_runs(client, monkeypatch):
+    """DB 규칙이 파일 계약보다 우선한다. 파일만 고치고 안 바뀌는 상황을 구별한다."""
+    monkeypatch.setattr(
+        console_app.specialist_store, "list_specialists",
+        lambda: [{
+            "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+            "adapter": "hermes", "state": "enabled", "version": "1",
+            "execution_mode": "tools", "rules": "콘솔에서 넣은 규칙",
+            "workspaces": ["fin"], "artifact_hashes": {},
+        }],
+    )
+    monkeypatch.setattr(console_app.specialist_store, "list_requests", lambda: [])
+    monkeypatch.setattr(console_app.specialist_store, "adapters", lambda: [])
+
+    row = client.get("/api/specialists", headers=member(client)).json()["specialists"][0]
+
+    assert row["rulesSource"] == "console"

@@ -350,13 +350,28 @@ def parse_decision(text: str, specialists: list[Specialist]) -> tuple[str, float
 
 # --- 판정 -------------------------------------------------------------------
 def route(question: str, workspace: str, router) -> Decision:
-    """어느 전문가에게 물을지 정한다. **실패는 전부 마스터로 접는다.**
+    """어느 전문가에게 물을지 **LLM 으로** 다시 판정한다.
+
+    ## 쓰지 말 것 (2026-09-14 사용 중단)
+
+    이 함수가 답변 경로의 **두 번째 확률적 판정**이었다. 첫 판정(`intent.plan()`)은
+    스레드 맥락을 보는데 여기는 현재 질문 문자열만 봐서, 근거가 미수금 문서로
+    복원돼도 "이전에 요청했던 내용" 이라는 문장만 보고 전문 봇을 골랐다. 게다가
+    여기서의 모든 실패가 `none`(마스터 직접 답변)으로 접혔다.
+
+    새 경로는 `serve()` 다 — 분해 단계에서 한 번 판정하고, 후보는 `select()` 가
+    결정적으로 고른다. 이 함수는 `Decision` 을 이미 들고 있는 측정 스크립트와
+    골든셋 비교를 위해 남긴다.
 
     `router` 는 `gateway.router.Router` — 모델 호출과 비용 상한을 그쪽이 소유한다.
     """
+    log.info("route() 는 사용 중단됐다 — 답변 경로는 serve() 를 쓴다")
     from .gateway.base import Message, Sensitivity
 
-    specialists = available(workspace)
+    try:
+        specialists = available(workspace)
+    except RegistryUnavailable as exc:
+        return _master(f"전문 봇 목록 조회 실패: {exc}")
     if not specialists:
         return _master("사용 가능한 전문가가 없습니다")
 
@@ -580,6 +595,7 @@ def serve(
     live: bool = False,
     record_call_row: bool = True,
     decision_id: str = "",
+    visual: tuple = (),
 ) -> SpecialistOutcome:
     """이 작업을 전문 봇에게 맡긴다. 실패하면 **다음 승인 후보**를 시도한다.
 
@@ -609,6 +625,21 @@ def serve(
             decision_id=decision_id,
         )
 
+    if visual:
+        # 이미지를 받을 수 있다고 **계약에 적은** 후보만 남긴다.
+        from .specialist_adapters import supports_visual
+
+        ranked = tuple(c for c in candidates if supports_visual(c.adapter or c.key))
+        if not ranked:
+            # **마스터가 대신 읽지 않는다.** 못 읽으면 못 읽는다고 말한다.
+            return SpecialistOutcome(
+                NO_CAPABILITY,
+                error_code="visual-unsupported",
+                attempted=tuple(c.key for c in candidates),
+                decision_id=decision_id,
+            )
+        candidates = ranked
+
     confidence = float(getattr(task, "routing_confidence", 0.0) or 0.0)
     # **신뢰도 미달은 장애가 아니다.** 후보 줄을 돌리지 않고 되묻는다 —
     # 모르는 채로 아무 봇이나 고르면 엉뚱한 분야가 사내 사실을 말하게 된다.
@@ -637,6 +668,7 @@ def serve(
             live=live,
             confidence=confidence or chosen.min_confidence,
             record_call_row=record_call_row,
+            visual=visual,
         )
         if answer is not None:
             return SpecialistOutcome(
@@ -667,6 +699,7 @@ def _run_one(
     live: bool,
     confidence: float,
     record_call_row: bool,
+    visual: tuple = (),
 ) -> tuple[SpecialistAnswer | None, str]:
     """후보 하나를 실제로 부른다. `(답, 사유코드)`."""
     import time
@@ -707,6 +740,7 @@ def _run_one(
             # 예전에는 "(검색 결과 없음)" 이라는 **가짜 근거 한 줄**을 만들어
             # 넣었다. 근거가 아닌 것을 근거 자리에 두면 그 자리를 믿을 수 없게 된다.
             allow_empty_evidence=chosen.execution_mode == "tools",
+            visual=tuple(visual or ()),
         )
         result = execute(
             adapter,
@@ -728,13 +762,22 @@ def _run_one(
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     ok = result is not None and result.text.strip()
+    # **도구를 몇 번 불렀는지 남긴다.** 없으면 답이 느릴 때 프롬프트를 고칠지
+    # 검색을 고칠지 판단할 근거가 없다(전문 봇 검증 문서의 1순위 빈틈이었다).
+    budget = getattr(adapter, "budget", None)
+    if budget is not None and not ok and budget.exhausted:
+        # 예산이 끝나서 못 답한 것과 자료가 없어서 못 답한 것은 다르다.
+        error_code = "search-budget-exhausted"
+    trace = f"capability-match:{chosen.execution_mode}"
+    if budget is not None:
+        trace = f"{trace} {budget.summary()}"
     try:
         if not record_call_row:
             raise _SkipRecord
         record_call(
             workspace=workspace,
             specialist=chosen.key,
-            routing_reason=f"capability-match:{chosen.execution_mode}",
+            routing_reason=trace,
             confidence=confidence,
             result=result.result if result else "error",
             elapsed_ms=elapsed_ms,

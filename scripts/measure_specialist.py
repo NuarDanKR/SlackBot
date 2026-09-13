@@ -220,32 +220,53 @@ class Probe:
         self.last_confidence: float | None = None
         self.last_reason = ""
 
-    def __call__(self, question, ctx, evidence):
+    def __call__(self, task, ctx, evidence, *, visual=()):
+        from tybot import master_planner
         from tybot import specialist_router as sr
 
         self.last_specialist = ""
         self.last_confidence = None
         self.last_reason = ""
 
-        decision = sr.route(question, ctx.workspace, self._router)
-        self.last_confidence = decision.confidence
-        self.last_reason = decision.reason
-        if decision.went_to_master:
-            return None
-        self.last_specialist = decision.specialist.key
-        return sr.ask(
-            decision,
-            question=question,
+        # 엔진은 `MasterTask` 를 준다. 문자열이 오면 사내 기록 질의응답으로 본다.
+        if isinstance(task, str):
+            task = master_planner.MasterTask(
+                kind=master_planner.FACTUAL,
+                original_fragment=task,
+                standalone_question=task,
+                required_capability=master_planner.INTERNAL_QA,
+                routing_confidence=1.0,
+            )
+        outcome = sr.serve(
+            task,
             workspace=ctx.workspace,
-            evidence=[evidence],
+            evidence=[evidence] if evidence and evidence.strip() else [],
             router=self._router,
-            fallback=lambda: "",
             authorization_id=f"measure:{ctx.workspace}",
             record_call_row=False,
+            visual=tuple(visual or ()),
         )
+        self.last_specialist = outcome.selected
+        self.last_confidence = getattr(task, "routing_confidence", None)
+        self.last_reason = f"{outcome.status}:{outcome.error_code or '-'}"
+        return outcome
 
 
 def run(rows: list[Row], store, router, hook) -> None:
+    """두 경로를 같은 자료·같은 권한으로 돌려 비교한다.
+
+    설계: `docs/design/hermes-integration-fidelity.md` §4
+
+    - **경로 2**: 전문 봇 어댑터를 직접 부르는 길(`special`)
+    - **경로 3**: TYBot 마스터를 포함한 전체 길
+
+    여기서 `master` 는 **전문 봇 없이** 만든 엔진이다. 운영 봇은 더 이상 이렇게
+    답하지 않는다(2026-09-14 정책) — 비교 기준선으로만 쓴다. 그 사실을 보고서에
+    적지 않으면, 없어진 경로의 숫자를 현재 동작으로 읽게 된다.
+
+    **경로 1**(다른 부서의 검증된 Hermes)은 여기서 돌리지 않는다. 그쪽 자료·자격을
+    자동으로 가져오지 않기 때문이다. 비교하지 않은 것은 비교하지 않았다고 적는다.
+    """
     for row in rows:
         scoped_store = CitationScopedStore(store, row.scope)
         master = AnswerEngine(scoped_store, router)

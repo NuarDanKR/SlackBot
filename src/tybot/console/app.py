@@ -816,6 +816,21 @@ def _deployed_prompt_version(adapter: str) -> str:
         return ""
 
 
+def _contract_field(row: dict, name: str) -> str:
+    """계약 파일 프론트매터 값. 못 읽으면 빈 문자열."""
+    try:
+        from ..specialist_adapters import contract_meta
+
+        return str(contract_meta(str(row.get("adapter") or "")).get(name) or "")
+    except Exception:  # noqa: BLE001 - 표시값 하나가 화면을 막지 않는다
+        return ""
+
+
+def _contract_capabilities(row: dict) -> list[str]:
+    raw = _contract_field(row, "capabilities")
+    return [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
+
+
 def _specialist_response(row: dict) -> dict:
     return {
         "key": row["key"],
@@ -835,6 +850,18 @@ def _specialist_response(row: dict) -> dict:
         # `prompt_version()` 은 만들어 두고 아무도 안 읽던 함수다. 만들고 안
         # 잇는 것이 우리가 가장 자주 겪은 고장이다.
         "deployedVersion": _deployed_prompt_version(str(row.get("adapter") or "")),
+        # **선언한 실행 방식과 계약이 말하는 실행 방식을 나란히 보인다.**
+        #
+        # DB 는 `tools` 인데 실제로는 `prompt` 로 돌던 일이 있었다(2026-09-13).
+        # 오류가 나지 않아서 몇 주 동안 아무도 몰랐다. 둘을 같은 화면에 두면
+        # 갈린 순간이 눈에 보인다.
+        "executionMode": row.get("execution_mode") or "prompt",
+        "contractExecutionMode": _contract_field(row, "execution_mode"),
+        "capabilities": _contract_capabilities(row),
+        "supportsVisual": _contract_field(row, "visual").lower() in ("yes", "true", "1"),
+        # 규칙이 **어디서** 오는가. DB 규칙이 파일 계약보다 우선하므로, 파일만
+        # 고치고 안 바뀌는 상황을 화면에서 구별할 수 있어야 한다.
+        "rulesSource": "console" if (row.get("rules") or "").strip() else "file",
         "contractVersion": row.get("contract_version") or "v1",
         "health": row.get("health") or "unknown",
         "errorCode": row.get("error_code") or "",

@@ -3,9 +3,15 @@
 > 작성: 2026-09-11  
 > 구현 담당: Claude  
 > 검증 담당: Codex  
-> 상태: 구현 완료 (2026-09-11) · Codex 검증 대기
+> 상태: 근거 복원 구현 완료 (2026-09-11) · B-44 전문 봇 전달 통합 필요
 
 ## 1. 문제와 목표
+
+2026-09-14 보완: 마스터의 독립형 질문 전달은
+[`master-specialist-orchestration.md`](master-specialist-orchestration.md), Hermes 도구
+연결과 범위 내 탐색은 [`hermes-integration-fidelity.md`](hermes-integration-fidelity.md)를
+함께 따른다. 특정 첨부 후속 질문의 범위를 유지하면서 일반 문서 종합에는 허용된
+검색·읽기를 제공한다.
 
 같은 Slack 스레드에서 사용자가 직전 답변을 이어서 물어도 현재 TYBot은 대화의
 지칭 범위를 안정적으로 유지하지 못한다.
@@ -68,7 +74,7 @@
   -> 현재 채널 범위와 교집합
   -> 현재 질문의 주제와 교집합
   -> 원문 및 현재 첨부 상태 재조회
-  -> Hermes 또는 마스터 답변 생성
+  -> 승인된 전문 봇 답변 생성 또는 전문 답변 unavailable
   -> 현재 조회 결과로 출처 재생성
 ```
 

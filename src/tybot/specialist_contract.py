@@ -76,6 +76,13 @@ class SpecialistRequest:
     # 검사를 통과시켰다. 근거가 아닌 것을 근거 자리에 두면 그 자리를 더 이상
     # 믿을 수 없게 된다 — 빈 것은 빈 채로 두고, 빈 것을 허용한다고 밝힌다.
     allow_empty_evidence: bool = False
+    # 권한·OCR·PII 검사를 모두 통과한 **이미지 원본 블록**. Messages API 에 그대로
+    # 넣을 모양이다.
+    #
+    # 예전에는 시각 근거가 있으면 전문 봇을 아예 건너뛰고 마스터가 이미지를 직접
+    # 읽어 답했다(2026-09-13 검증). 이미지 PDF 와 첨부 사진이 많은 업무에서는
+    # 그 길이 「업무 답변은 전문 봇만」 규칙의 가장 큰 구멍이었다.
+    visual: tuple = ()
 
     def __post_init__(self) -> None:
         if not self.question.strip():

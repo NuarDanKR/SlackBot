@@ -161,6 +161,17 @@ class Answer:
     #   transmitted_evidence - 모델에 실제 전달한 근거를 좌표로 남겼다
     #   prior_turn/topic/attachments - 이전 결과의 좌표를 다시 열어 좁혔다
     context_resolution: str = "none"
+    # --- 추적 (설계: master-specialist-orchestration.md §7) -------------------
+    #
+    # **업무 답변의 최종 주체를 값으로 남긴다.** 예전에는 `specialist` 가 비어
+    # 있으면 마스터가 답한 것이었는데, 그게 정상인지 고장인지 구별할 값이 없었다.
+    # 지금은 업무 답변에서 비어 있다는 것 자체가 정책 위반이고, 왜 그랬는지는
+    # `specialist_error_code` 와 `attempted_specialists` 가 말한다.
+    #
+    # 질문·근거 본문은 여기 넣지 않는다. 코드와 이름만이다.
+    specialist_error_code: str = ""
+    attempted_specialists: list[str] = field(default_factory=list)
+    required_capability: str = ""
 
     @property
     def doc_count(self) -> int:
@@ -309,17 +320,22 @@ class _Outcome:
     봇이 못 답한 것이고, 그러면 우리는 못 답한다고 말한다(설계 §5.2).
     """
 
-    __slots__ = ("answer", "clarification", "error_code", "status")
+    __slots__ = ("_attempted", "answer", "clarification", "error_code", "status")
 
-    def __init__(self, status, answer=None, error_code="", clarification=""):
+    def __init__(self, status, answer=None, error_code="", clarification="", attempted=()):
         self.status = status
         self.answer = answer
         self.error_code = error_code
         self.clarification = clarification
+        self._attempted = tuple(attempted or ())
 
     @property
     def ok(self) -> bool:
         return self.status == "success" and self.answer is not None
+
+    @property
+    def attempted(self) -> list:
+        return list(self._attempted)
 
     @classmethod
     def read(cls, value) -> _Outcome:
@@ -332,6 +348,7 @@ class _Outcome:
                 getattr(value, "answer", None),
                 str(getattr(value, "error_code", "") or ""),
                 str(getattr(value, "clarification", "") or ""),
+                tuple(getattr(value, "attempted", ()) or ()),
             )
         # 옛 훅: 답 객체를 그대로 준다.
         if str(getattr(value, "text", "") or "").strip():
@@ -651,6 +668,15 @@ class AnswerEngine:
         # 넣어 준다. 그래야 엔진 테스트가 DB 없이 돌고, 전문가가 없는 설치에서도
         # 이 파일이 그대로 쓰인다.
         self._specialist = specialist
+        if specialist is None:
+            # **이 상태에서는 마스터가 업무 답변을 쓴다.** 단위 테스트와 전문 봇을
+            # 도입하지 않은 설치를 위해 남겨 둔 길인데, 운영 봇이 실수로 여기에
+            # 들어오면 「업무 답변은 전문 봇만」 정책이 통째로 꺼진다 —
+            # 오류 없이. 그래서 기동 로그에 남긴다.
+            logger.warning(
+                "전문 봇 계층 없이 답변 엔진을 만든다 — 업무 답변을 마스터가 씁니다. "
+                "운영 봇이라면 `slack/pilot.specialist_hook()` 이 빠진 것이다."
+            )
         self._sensitivity = sensitivity
         self._max_hits = max_hits
         self._max_lines_per_channel = max_lines_per_channel
@@ -757,7 +783,7 @@ class AnswerEngine:
 
         return blocks, citations, parts, hits, total, document_evidence.coverage_block(got)
 
-    def _ask_specialist(self, task, question: str, ctx, evidence: str):
+    def _ask_specialist(self, task, question: str, ctx, evidence: str, *, visual=()):
         """전문 봇에게 한 번 맡긴다. 훅이 없으면 `None`.
 
         **훅이 있으면 반드시 결말이 나온다.** 성공이 아니면 실패지, 마스터가
@@ -765,8 +791,13 @@ class AnswerEngine:
         """
         if self._specialist is None:
             return None
+        self._last_capability = str(getattr(task, "required_capability", "") or "")
         try:
-            raw = self._specialist(task if task is not None else question, ctx, evidence)
+            target = task if task is not None else question
+            if visual:
+                raw = self._specialist(target, ctx, evidence, visual=tuple(visual))
+            else:
+                raw = self._specialist(target, ctx, evidence)
         except Exception as exc:  # noqa: BLE001 - 훅 장애도 결말이다
             logger.warning("전문 봇 훅 실패: %s", exc)
             return _Outcome("unavailable", error_code="hook-error")
@@ -805,20 +836,27 @@ class AnswerEngine:
 
     def _unavailable(self, outcome, *, hits=0, terms=None, stage="전문 봇 호출") -> Answer:
         """전문 봇이 못 답했다. **마스터가 대신 쓰지 않는다.**"""
+        trace = {
+            "specialist_error_code": outcome.error_code,
+            "attempted_specialists": list(getattr(outcome, "attempted", ()) or ()),
+        }
         if outcome.status == "clarify":
             return Answer(
                 outcome.clarification
                 or "어떤 자료를 기준으로 답해야 할지 확실하지 않습니다. 대상을 조금 더 알려주세요.",
                 [], None, 0.0, hits, "clarify",
                 terms=list(terms or []),
+                **trace,
             )
         logger.warning(
-            "전문 봇 답변 불가 status=%s code=%s", outcome.status, outcome.error_code
+            "전문 봇 답변 불가 status=%s code=%s attempted=%s",
+            outcome.status, outcome.error_code, trace["attempted_specialists"],
         )
         return Answer(
             unavailable_text(outcome, stage=stage),
             [], None, 0.0, hits, "specialist_unavailable",
             terms=list(terms or []),
+            **trace,
         )
 
     def summarize(
@@ -1015,6 +1053,8 @@ class AnswerEngine:
                     "answered",
                     withheld=withheld,
                     specialist=special.specialist,
+                    required_capability=getattr(self, "_last_capability", ""),
+                    attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(selected_hits, self._store.root),
                     attachment_refs=_attachment_refs(self._store.root, selected_hits),
                     subject_terms=list(terms or []),
@@ -1103,6 +1143,8 @@ class AnswerEngine:
                     "advice",
                     terms=list(terms or []),
                     specialist=special.specialist,
+                    required_capability=getattr(self, "_last_capability", ""),
+                    attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(hits, self._store.root),
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
@@ -1453,8 +1495,14 @@ class AnswerEngine:
         # 문장만 돌려준다(원칙 2·3).
         #
         # 전문가가 없거나 못 답하면 `None` 이고, 그때 마스터가 그대로 답한다.
-        if self._specialist is not None and not visual.any:
-            outcome = self._ask_specialist(task, q, ctx, _evidence_block(hits))
+        if self._specialist is not None:
+            # **시각 근거가 있어도 전문 봇이 답한다.** 예전에는 `not visual.any`
+            # 일 때만 불렀다 — 이미지 원본이 하나라도 선택되면 마스터 LLM 이
+            # 이미지를 직접 읽고 답했고, 이미지 PDF 가 많은 업무에서는 그 길이
+            # 「업무 답변은 전문 봇만」 규칙의 가장 큰 구멍이었다(설계 §6.5).
+            outcome = self._ask_specialist(
+                task, q, ctx, _evidence_block(hits), visual=visual.blocks
+            )
             special = outcome.answer if outcome is not None and outcome.ok else None
             if special is not None and not _specialist_documents_ok(
                 special, ctx, self._store
@@ -1481,6 +1529,8 @@ class AnswerEngine:
                     "answered",
                     specialist=special.specialist,
                     withheld=withheld,
+                    required_capability=getattr(self, "_last_capability", ""),
+                    attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(hits, self._store.root),
                     attachment_refs=_attachment_refs(self._store.root, hits),
                     subject_terms=list(terms or []),

@@ -77,6 +77,18 @@ class QARecord:
     subject_terms: list[str] = field(default_factory=list)
     context_parent_ids: list[str] = field(default_factory=list)
     context_resolution: str = "none"
+    # --- 오케스트레이션 추적 (설계: master-specialist-orchestration.md §7) -----
+    #
+    # **업무 질문은 성공 여부와 관계없이 남긴다.** 예전에는 전문 봇을 못 고른
+    # 경우가 아무 데도 안 남아서, 같은 질문이 왜 Hermes 대신 마스터로 갔는지
+    # 콘솔에서 판별할 수 없었다.
+    #
+    # `final_responder` 가 업무 답변에서 `none` 이면 그 자체가 정책 위반이다.
+    decision_id: str = ""
+    required_capability: str = ""
+    final_responder: str = ""
+    attempted_specialists: list[str] = field(default_factory=list)
+    specialist_error_code: str = ""
 
     @classmethod
     def build(cls, **kw) -> QARecord:
