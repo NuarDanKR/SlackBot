@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
 from tybot import specialist_router as sr
 from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity
@@ -97,11 +98,39 @@ def test_no_specialists_means_the_master_answers(monkeypatch):
     assert "전문가가 없" in decision.reason
 
 
-def test_a_database_failure_does_not_raise(monkeypatch):
-    """라우터가 죽어도 봇은 답한다."""
-    monkeypatch.setenv("DATABASE_URL", "postgresql://nowhere/none")
+def test_a_database_failure_is_not_an_empty_roster(monkeypatch):
+    """DB 장애와 「등록된 전문 봇이 없음」 은 **다른 값**이다(2026-09-14).
 
-    assert sr.available("pilot") == []
+    예전에는 둘 다 빈 목록이었다. 그래서 DB 가 죽으면 질문이 조용히 다른 경로로
+    흐르고 콘솔에는 아무 흔적도 남지 않았다 — 장애인데 정상 답으로 보였다.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nowhere/none")
+    sr.clear_cache()
+
+    with pytest.raises(sr.RegistryUnavailable):
+        sr.available("pilot")
+    sr.clear_cache()
+
+
+def test_a_registry_failure_becomes_a_named_outcome(monkeypatch):
+    """장애는 **결말**로 나온다. 마스터가 대신 답하지 않는다."""
+    monkeypatch.setattr(
+        sr, "available", lambda ws: (_ for _ in ()).throw(sr.RegistryUnavailable("죽음"))
+    )
+    task = SimpleNamespace(
+        required_capability="internal_document_qa",
+        suggested_specialist="",
+        routing_confidence=0.9,
+        question="회의록 정리해줘",
+    )
+
+    outcome = sr.serve(
+        task, workspace="pilot", evidence=["원문"], router=None, authorization_id="a:b"
+    )
+
+    assert outcome.status == sr.REGISTRY_ERROR
+    assert outcome.error_code == "registry-unavailable"
+    assert outcome.answer is None
 
 
 # --- 2. 실패는 마스터로 접힌다 -----------------------------------------------
@@ -298,9 +327,9 @@ def test_the_cache_stops_a_database_hit_per_question(monkeypatch):
     sr.clear_cache()
     monkeypatch.setattr("psycopg.connect", counting_connect)
 
-    sr.available("pilot")
-    sr.available("pilot")
-    sr.available("pilot")
+    for _ in range(3):
+        with pytest.raises(sr.RegistryUnavailable):
+            sr.available("pilot")
 
     assert calls["n"] == 1, "실패도 캐시한다 — 안 하면 DB 가 죽은 동안 매 질문 재시도한다"
     sr.clear_cache()

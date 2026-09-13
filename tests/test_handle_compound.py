@@ -43,11 +43,11 @@ class FakeEngine:
         self.plan_contexts: list[str] = []
         self.router = None  # compose 는 fallback 문구를 쓴다
 
-    def plan(self, text, *, conversation_context="", thread_has_refs=False):
+    def plan(self, text, *, conversation_context="", thread_has_refs=False, specialists=None):
         self.plan_contexts.append(conversation_context)
         return list(self._tasks)
 
-    def respond(self, question, ctx, intent, *, followup=None):
+    def respond(self, question, ctx, intent, *, followup=None, task=None):
         self.asked.append(question)
         return self._answers.pop(0)
 

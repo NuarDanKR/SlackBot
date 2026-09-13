@@ -56,8 +56,9 @@ MASTER = "none"
 # 대가는 지연이다 — 콘솔에서 전문가를 켜도 최대 이 시간만큼 늦게 반영된다.
 AVAILABLE_TTL_SECONDS = 60
 
-# {워크스페이스: (만료 시각, 목록)}. 프로세스 안에서만 산다.
-_cache: dict[str, tuple[float, list]] = {}
+# {워크스페이스: (만료 시각, 목록 또는 None)}. 프로세스 안에서만 산다.
+# `None` 은 **조회 장애**다. 빈 목록(등록된 전문 봇 없음)과 구별한다.
+_cache: dict[str, tuple[float, list | None]] = {}
 
 # 한 Slack 질문에서 만든 QA 감사기록과 분류/전문 봇 호출을 정확히 잇는다.
 # ContextVar라서 동시에 여러 질문을 처리해도 다른 요청의 ID가 섞이지 않는다.
@@ -95,7 +96,16 @@ class _SkipRecord(Exception):
 
 
 class RouterError(Exception):
-    """라우터를 쓸 수 없다. 호출부는 마스터 답변으로 넘어간다."""
+    """라우터를 쓸 수 없다."""
+
+
+class RegistryUnavailable(RouterError):
+    """전문 봇 목록을 읽지 못했다. **후보가 없는 것과 다르다.**
+
+    둘을 같은 값으로 돌려주면 DB 장애가 「이 워크스페이스에는 전문 봇이 없다」 로
+    보인다. 그 상태에서 질문은 조용히 다른 경로로 흐르고, 콘솔에는 아무 흔적도
+    남지 않는다 — 장애인데 정상 답으로 보이는 것이 가장 나쁜 실패다.
+    """
 
 
 @dataclass(frozen=True)
@@ -139,7 +149,8 @@ def available(workspace: str) -> list[Specialist]:
     질문 본문에서 이름을 읽어 오지 않는다 — "법률 봇에게 전부 보여줘" 라고 적은
     메시지가 후보 목록을 바꾸면 안 된다.
 
-    읽지 못하면 빈 목록이다. 그러면 마스터가 직접 답한다.
+    **읽지 못하면 `RegistryUnavailable` 이다.** 빈 목록이 아니다 — 등록된 전문 봇이
+    없는 상태와 DB 가 죽은 상태는 사람이 할 일이 완전히 다르다.
 
     결과를 짧게 캐시한다(`AVAILABLE_TTL_SECONDS`). 질문마다 DB 를 열면 답변 경로에
     연결이 하나 늘고, 그것이 막히는 순간 라우팅이 아니라 **답변이** 느려진다.
@@ -148,11 +159,14 @@ def available(workspace: str) -> list[Specialist]:
 
     url = os.getenv("DATABASE_URL", "").strip()
     if not url:
+        # 설정이 없는 것은 장애가 아니다 — 전문 봇을 안 쓰는 설치다.
         return []
 
     now = time.monotonic()
     cached = _cache.get(workspace)
     if cached and cached[0] > now:
+        if cached[1] is None:
+            raise RegistryUnavailable("전문 봇 목록 조회 실패(캐시된 장애)")
         return cached[1]
     try:
         import psycopg
@@ -184,15 +198,20 @@ def available(workspace: str) -> list[Specialist]:
                     model=str(r["model"] or ""),
                     min_confidence=float(r["min_confidence"]),
                     rules=str(r["rules"] or ""),
+                    # **이 한 줄이 없어서 Hermes 가 도구를 못 썼다**(2026-09-13 검증).
+                    # SQL 은 열을 읽는데 생성자에 안 넘기면 전부 기본값 `prompt` 가
+                    # 되고, 콘솔은 계약 파일의 `tools` 를 보여 준다. 선언과 실제가
+                    # 갈렸는데 오류가 안 났다 — 그래서 아무도 몰랐다.
+                    execution_mode=str(r["execution_mode"] or "prompt"),
                 )
                 for r in cur.fetchall()
             ]
-    except Exception as exc:  # noqa: BLE001 - 라우터 실패가 답변을 막으면 안 된다
-        log.warning("전문가 목록을 읽지 못해 마스터가 답합니다: %s", exc)
+    except Exception as exc:
+        log.warning("전문가 목록을 읽지 못했습니다: %s", exc)
         # 실패도 캐시한다. 안 하면 DB 가 죽은 동안 질문마다 연결을 다시 시도해
-        # 답변이 그만큼 늦어진다.
-        _cache[workspace] = (now + AVAILABLE_TTL_SECONDS, [])
-        return []
+        # 답변이 그만큼 늦어진다. **빈 목록이 아니라 장애 표식을 캐시한다.**
+        _cache[workspace] = (now + AVAILABLE_TTL_SECONDS, None)
+        raise RegistryUnavailable(str(exc)) from exc
 
     _cache[workspace] = (now + AVAILABLE_TTL_SECONDS, rows)
     return rows
@@ -212,6 +231,84 @@ def prompt_for(question: str, specialists: list[Specialist]) -> str:
     lines.append("")
     lines.append(f"질문: {question}")
     return "\n".join(lines)
+
+
+# --- 능력과 선택 (설계: master-specialist-orchestration.md §5.1) -------------
+#
+# 전문 봇이 **무엇을 할 수 있는지**는 계약 파일이 말한다(`subbots/<key>/contract/
+# prompt.md` 프론트매터의 `capabilities`). DB 열이 아니라 계약에 둔 이유는 하나다 —
+# 능력이 바뀌면 프롬프트도 바뀐다. 둘을 다른 곳에 두면 "능력은 늘렸는데 프롬프트는
+# 그대로" 가 오류 없이 생긴다.
+#
+# 계약에 없으면 분야 낱말로 짐작한다. 짐작도 안 되면 사내 기록 질의응답으로 본다 —
+# 지금 등록된 전문 봇은 전부 그 일을 한다.
+DOMAIN_CAPABILITY_HINTS = (
+    ("법률", "legal_analysis"),
+    ("legal", "legal_analysis"),
+    ("세무", "tax_analysis"),
+    ("회계", "tax_analysis"),
+    ("tax", "tax_analysis"),
+    ("건설", "construction_analysis"),
+    ("설계", "construction_analysis"),
+)
+
+
+def capabilities_of(specialist: Specialist) -> tuple[str, ...]:
+    """이 전문 봇이 맡을 수 있는 능력."""
+    from .master_planner import CAPABILITIES, INTERNAL_QA, INTERNAL_SUMMARY
+
+    declared: list[str] = []
+    try:
+        from .specialist_adapters import contract_meta
+
+        raw = str(contract_meta(specialist.adapter or specialist.key).get("capabilities") or "")
+        declared = [
+            part.strip().lower()
+            for part in raw.replace(";", ",").split(",")
+            if part.strip().lower() in CAPABILITIES
+        ]
+    except Exception as exc:  # noqa: BLE001 - 계약을 못 읽어도 선택은 돌아야 한다
+        log.info("계약 능력 선언을 읽지 못했습니다 key=%s: %s", specialist.key, exc)
+    if declared:
+        return tuple(dict.fromkeys(declared))
+
+    haystack = f"{specialist.domain} {specialist.routing_hint}".lower()
+    for word, capability in DOMAIN_CAPABILITY_HINTS:
+        if word in haystack:
+            return (capability,)
+    return (INTERNAL_QA, INTERNAL_SUMMARY)
+
+
+def select(task, specialists: list[Specialist]) -> tuple[Specialist, ...]:
+    """이 작업을 맡길 후보를 **순서대로**. LLM 을 다시 부르지 않는다.
+
+    설계 §5.1. 같은 검증된 작업과 같은 레지스트리 스냅샷이면 같은 순서가 나온다 —
+    그래야 "어제는 Hermes 로 갔는데 오늘은 아니다" 를 재현해서 고칠 수 있다.
+
+    첫 후보가 실패하면 호출부가 다음 후보로 넘어간다(§5.2). 그래서 하나가 아니라
+    **줄**을 돌려준다. 마스터가 대신 답하는 선택지는 이 줄에 없다.
+    """
+    capability = str(getattr(task, "required_capability", "") or "")
+    if not capability:
+        return ()
+    ranked: list[Specialist] = []
+    for item in specialists:
+        if capability in capabilities_of(item):
+            ranked.append(item)
+    if not ranked:
+        return ()
+    ranked.sort(key=lambda x: x.key)
+    suggested = str(getattr(task, "suggested_specialist", "") or "").strip().lower()
+    if suggested:
+        # 제안은 **후보 안에 있을 때만** 앞으로 당긴다. 목록 밖 이름은 모델이
+        # 지어낸 것이고, 지어낸 값을 신뢰하면 그 순간 선택의 입력이 모델 출력이 된다.
+        for i, item in enumerate(ranked):
+            if item.key == suggested:
+                ranked.insert(0, ranked.pop(i))
+                break
+        else:
+            log.info("후보에 없는 전문 봇 제안 무시: %r", suggested[:40])
+    return tuple(ranked)
 
 
 # --- 판정 파싱 --------------------------------------------------------------
@@ -404,8 +501,12 @@ def observe(question: str, workspace: str, router) -> Decision | None:
     import time
 
     # 캐시가 있으므로 `route()` 안에서 다시 불려도 연결이 늘지 않는다.
-    if not available(workspace):
-        return None
+    try:
+        if not available(workspace):
+            return None
+    except RegistryUnavailable as exc:
+        # 장애는 남긴다. 「전문가가 없다」 와 달리 사람이 고쳐야 하는 상태다.
+        return _master(f"전문 봇 목록 조회 실패: {exc}")
     started = time.monotonic()
     decision = route(question, workspace, router)
     record(
@@ -421,29 +522,153 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-# --- 실제 호출 --------------------------------------------------------------
-def ask(
-    decision: Decision,
+# --- 결과 종류 (설계: master-specialist-orchestration.md §5.2) ---------------
+#
+# 예전에는 이 전부가 하나로 접혔다 — 후보 없음, 낮은 신뢰도, 시간 초과, 계약 위반,
+# DB 장애가 모두 `None` 이 되고 마스터가 대신 답했다. 그래서 "왜 Hermes 가 아니라
+# 마스터가 답했나" 를 물으면 답할 수 없었다.
+#
+# 이제는 종류마다 사람이 할 일이 다르다.
+#   unavailable       전문 봇을 등록·승인해야 한다
+#   no_capability     이 능력을 맡을 봇이 없다
+#   registry_error    DB 를 고쳐야 한다
+#   clarify           사용자에게 되물어야 한다
+#   timeout/adapter   그 봇을 봐야 한다
+#   contract_violation 그 봇의 출력이 계약을 어겼다
+#   evidence_insufficient 자료가 없다 — 봇 문제가 아니다
+SUCCESS = "success"
+UNAVAILABLE = "unavailable"
+NO_CAPABILITY = "no_capability"
+REGISTRY_ERROR = "registry_error"
+CLARIFY = "clarify"
+EVIDENCE_INSUFFICIENT = "evidence_insufficient"
+
+
+@dataclass(frozen=True)
+class SpecialistOutcome:
+    """전문 봇 한 요청의 결말. **마스터가 대신 답하는 선택지는 없다.**"""
+
+    status: str
+    answer: SpecialistAnswer | None = None
+    error_code: str = ""
+    attempted: tuple[str, ...] = ()
+    selected: str = ""
+    decision_id: str = ""
+    clarification: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == SUCCESS and self.answer is not None
+
+    def log_line(self) -> str:
+        """업무 본문 없이 코드와 이름만(설계 §7)."""
+        return (
+            f"specialist_result={self.status} selected={self.selected or '-'} "
+            f"attempted={'|'.join(self.attempted) or '-'} "
+            f"error_code={self.error_code or '-'} decision={self.decision_id or '-'}"
+        )
+
+
+def serve(
+    task,
+    *,
+    workspace: str,
+    evidence: list[str],
+    router,
+    authorization_id: str,
+    toolbox_factory=None,
+    live: bool = False,
+    record_call_row: bool = True,
+    decision_id: str = "",
+) -> SpecialistOutcome:
+    """이 작업을 전문 봇에게 맡긴다. 실패하면 **다음 승인 후보**를 시도한다.
+
+    설계 §5. 마스터 LLM 이 대신 답하는 길은 여기에 없다 — 모두 실패하면
+    `unavailable` 로 닫고, 그 사유 코드가 콘솔에 남는다.
+
+    후보는 각각 **한 번씩만** 시도한다. 무한히 돌면 한 질문이 예산을 다 쓰고,
+    그건 그 질문 하나가 아니라 그날 전체 답변을 느리게 만든다.
+    """
+    try:
+        specialists = available(workspace)
+    except RegistryUnavailable as exc:
+        log.error("전문 봇 레지스트리 장애 ws=%s: %s", workspace, exc)
+        return SpecialistOutcome(
+            REGISTRY_ERROR, error_code="registry-unavailable", decision_id=decision_id
+        )
+    if not specialists:
+        return SpecialistOutcome(
+            UNAVAILABLE, error_code="no-specialist-registered", decision_id=decision_id
+        )
+
+    candidates = select(task, specialists)
+    if not candidates:
+        return SpecialistOutcome(
+            NO_CAPABILITY,
+            error_code=f"no-specialist-for:{getattr(task, 'required_capability', '') or '-'}",
+            decision_id=decision_id,
+        )
+
+    confidence = float(getattr(task, "routing_confidence", 0.0) or 0.0)
+    # **신뢰도 미달은 장애가 아니다.** 후보 줄을 돌리지 않고 되묻는다 —
+    # 모르는 채로 아무 봇이나 고르면 엉뚱한 분야가 사내 사실을 말하게 된다.
+    if confidence and confidence < candidates[0].min_confidence:
+        return SpecialistOutcome(
+            CLARIFY,
+            error_code="low-confidence",
+            selected="",
+            decision_id=decision_id,
+            clarification="어떤 자료를 기준으로 답해야 할지 확실하지 않습니다. 대상을 조금 더 알려주세요.",
+        )
+
+    question = str(getattr(task, "question", "") or getattr(task, "standalone_question", "") or "")
+    attempted: list[str] = []
+    last_code = ""
+    for chosen in candidates:
+        attempted.append(chosen.key)
+        answer, code = _run_one(
+            chosen,
+            question=question,
+            workspace=workspace,
+            evidence=evidence,
+            router=router,
+            authorization_id=authorization_id,
+            toolbox_factory=toolbox_factory,
+            live=live,
+            confidence=confidence or chosen.min_confidence,
+            record_call_row=record_call_row,
+        )
+        if answer is not None:
+            return SpecialistOutcome(
+                SUCCESS,
+                answer=answer,
+                attempted=tuple(attempted),
+                selected=chosen.key,
+                decision_id=decision_id,
+            )
+        last_code = code or last_code
+    return SpecialistOutcome(
+        UNAVAILABLE,
+        error_code=last_code or "specialist-failed",
+        attempted=tuple(attempted),
+        decision_id=decision_id,
+    )
+
+
+def _run_one(
+    chosen: Specialist,
     *,
     question: str,
     workspace: str,
     evidence: list[str],
     router,
-    fallback,
     authorization_id: str,
-    record_call_row: bool = True,
-    toolbox=None,
-    live: bool = False,
-) -> SpecialistAnswer | None:
-    """고른 전문가에게 묻는다. 마스터가 답할 자리면 `None`.
-
-    **근거는 이미 권한을 통과한 것만 들어온다.** 이 함수는 판정하지 않는다 —
-    `authorization_id` 는 그 판정을 가리키는 값이고, 나중에 "무엇이 전문가에게
-    갔나" 를 되짚는 근거가 된다(원칙 3).
-
-    실패는 전부 `fallback()` 으로 접힌다. 계약 위반·타임아웃·어댑터 오류 모두
-    `specialist_contract.execute()` 안에서 처리되고, 우리는 결과만 기록한다.
-    """
+    toolbox_factory,
+    live: bool,
+    confidence: float,
+    record_call_row: bool,
+) -> tuple[SpecialistAnswer | None, str]:
+    """후보 하나를 실제로 부른다. `(답, 사유코드)`."""
     import time
 
     from . import specialist_adapters
@@ -455,14 +680,14 @@ def ask(
         execute,
     )
 
-    if decision.specialist is None:
-        return None
-    chosen = decision.specialist
-
     started = time.monotonic()
     result = None
     adapter = None
+    error_code = ""
     try:
+        toolbox = None
+        if chosen.execution_mode == "tools" and toolbox_factory is not None:
+            toolbox = toolbox_factory()
         adapter = specialist_adapters.build(
             chosen.adapter, router, model=chosen.model, rules=chosen.rules,
             execution_mode=chosen.execution_mode, toolbox=toolbox, live=live,
@@ -474,45 +699,47 @@ def ask(
             for text in evidence
             if text.strip()
         )
-        # **도구형은 근거 없이도 돈다.** 스스로 찾는 것이 전제라, 마스터 검색이
-        # 0건이라고 전문가를 못 부르게 하면 그 봇의 값이 통째로 사라진다.
-        # 계약(`SpecialistRequest`)은 빈 근거를 거부하므로 자리표시 한 줄을 준다.
-        if not authorized and chosen.execution_mode == "tools":
-            authorized = (
-                AuthorizedEvidence.from_acl_filter(
-                    workspace=workspace,
-                    text="(마스터 검색 결과 없음 — 도구로 직접 찾으세요)",
-                    authorization_id=authorization_id,
-                ),
-            )
-        request = SpecialistRequest(question=question, evidence=authorized)
+        request = SpecialistRequest(
+            question=question,
+            evidence=authorized,
+            # **도구형은 근거 없이도 돈다.** 스스로 찾는 것이 전제라, 마스터 검색이
+            # 0건이라고 전문가를 못 부르게 하면 그 봇의 값이 통째로 사라진다.
+            # 예전에는 "(검색 결과 없음)" 이라는 **가짜 근거 한 줄**을 만들어
+            # 넣었다. 근거가 아닌 것을 근거 자리에 두면 그 자리를 믿을 수 없게 된다.
+            allow_empty_evidence=chosen.execution_mode == "tools",
+        )
         result = execute(
             adapter,
             request,
-            fallback=fallback,
-            confidence=decision.confidence,
+            fallback=lambda: "",
+            confidence=confidence,
             minimum_confidence=chosen.min_confidence,
         )
-    except (specialist_adapters.AdapterError, ContractViolation) as exc:
-        log.warning("전문가 호출을 준비하지 못했습니다 key=%s: %s", chosen.key, exc)
-    except Exception as exc:  # noqa: BLE001 - 전문가 하나가 답변을 막으면 안 된다
+        error_code = result.error_code
+    except specialist_adapters.AdapterError as exc:
+        error_code = str(exc).partition(":")[0].strip() or "adapter-build"
+        log.warning("전문가를 만들지 못했습니다 key=%s: %s", chosen.key, exc)
+    except ContractViolation as exc:
+        error_code = "contract-violation"
+        log.warning("전문가 요청이 계약을 어겼습니다 key=%s: %s", chosen.key, exc)
+    except Exception as exc:  # noqa: BLE001 - 후보 하나가 줄 전체를 막으면 안 된다
+        error_code = "adapter-error"
         log.warning("전문가 호출 실패 key=%s: %s", chosen.key, exc)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    # 측정 스크립트는 기록하지 않는다. 재생한 질문이 운영 통계에 섞이면
-    # 「전문가가 실제로 몇 번 답했나」 가 부풀고, 그 표를 믿을 수 없게 된다.
+    ok = result is not None and result.text.strip()
     try:
         if not record_call_row:
             raise _SkipRecord
         record_call(
             workspace=workspace,
             specialist=chosen.key,
-            routing_reason=decision.reason,
-            confidence=decision.confidence,
+            routing_reason=f"capability-match:{chosen.execution_mode}",
+            confidence=confidence,
             result=result.result if result else "error",
             elapsed_ms=elapsed_ms,
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
-            error_code=result.error_code if result else "adapter-build",
+            error_code="" if ok else (error_code or "adapter-build"),
             qa_record_id=_qa_record_id.get(),
         )
     except _SkipRecord:
@@ -520,18 +747,59 @@ def ask(
     except Exception as exc:  # noqa: BLE001 - 기록 실패가 답변을 막으면 안 된다
         log.warning("전문가 호출을 남기지 못했습니다: %s", exc)
 
-    # 계약을 못 지켰거나 만들지 못했으면 마스터가 답한다.
-    # `fallback` 이 빈 문자열을 주므로, 빈 답도 곧 「마스터가 답한다」 다.
-    if result is None or not result.text.strip():
-        return None
-    # 무엇을 읽었는지 함께 돌려준다. 도구형은 마스터가 고른 것과 다른 문서를
-    # 열 수 있고, 그때 마스터 검색 결과로 출처를 붙이면 답과 출처가 어긋난다.
+    if not ok:
+        return None, error_code or "empty-output"
     touched = getattr(adapter, "touched", None)
-    return SpecialistAnswer(
-        text=result.text,
-        specialist=chosen.key,
-        model=getattr(adapter, "last_model", "") or chosen.model,
-        cost_usd=getattr(adapter, "last_cost_usd", 0.0),
-        documents=tuple(getattr(touched, "documents", ()) or ()),
-        live_links=tuple(getattr(touched, "live_permalinks", ()) or ()),
+    return (
+        SpecialistAnswer(
+            text=result.text,
+            specialist=chosen.key,
+            model=getattr(adapter, "last_model", "") or chosen.model,
+            cost_usd=getattr(adapter, "last_cost_usd", 0.0),
+            documents=tuple(getattr(touched, "documents", ()) or ()),
+            live_links=tuple(getattr(touched, "live_permalinks", ()) or ()),
+        ),
+        "",
     )
+
+
+# --- 실제 호출 --------------------------------------------------------------
+def ask(
+    decision: Decision,
+    *,
+    question: str,
+    workspace: str,
+    evidence: list[str],
+    router,
+    fallback=None,
+    authorization_id: str,
+    record_call_row: bool = True,
+    toolbox=None,
+    live: bool = False,
+) -> SpecialistAnswer | None:
+    """고른 전문가에게 묻는다. 못 답하면 `None`.
+
+    **호환용이다.** 새 경로는 `serve()` 를 쓴다 — 후보 줄과 실패 종류를 함께
+    돌려주기 때문이다. 여기는 측정 스크립트(`scripts/measure_specialist.py`)처럼
+    이미 `Decision` 을 들고 있는 호출부를 위해 남긴다.
+
+    `fallback` 은 더 이상 쓰이지 않는다. 마스터 문장을 만드는 자리였고, 그 자리가
+    「전문 봇이 실패하면 마스터가 답한다」 정책의 구현이었다(설계 §6.3).
+    """
+    if decision.specialist is None:
+        return None
+    if fallback is not None:
+        log.info("ask(fallback=...) 은 무시된다 — 마스터 대체 답변은 없다")
+    answer, _code = _run_one(
+        decision.specialist,
+        question=question,
+        workspace=workspace,
+        evidence=evidence,
+        router=router,
+        authorization_id=authorization_id,
+        toolbox_factory=(lambda: toolbox) if toolbox is not None else None,
+        live=live,
+        confidence=decision.confidence,
+        record_call_row=record_call_row,
+    )
+    return answer

@@ -301,6 +301,63 @@ def _attachment_source_links(hits: list[SearchHit]) -> list[str]:
     return links
 
 
+class _Outcome:
+    """훅 결과를 한 모양으로 읽는다.
+
+    새 훅(`specialist_router.serve`)은 `SpecialistOutcome` 을 준다. 옛 훅은 답
+    하나 또는 `None` 을 준다. **`None` 은 「마스터가 답하라」 가 아니다** — 전문
+    봇이 못 답한 것이고, 그러면 우리는 못 답한다고 말한다(설계 §5.2).
+    """
+
+    __slots__ = ("answer", "clarification", "error_code", "status")
+
+    def __init__(self, status, answer=None, error_code="", clarification=""):
+        self.status = status
+        self.answer = answer
+        self.error_code = error_code
+        self.clarification = clarification
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "success" and self.answer is not None
+
+    @classmethod
+    def read(cls, value) -> _Outcome:
+        if value is None:
+            return cls("unavailable", error_code="specialist-no-answer")
+        status = getattr(value, "status", None)
+        if status is not None:
+            return cls(
+                str(status),
+                getattr(value, "answer", None),
+                str(getattr(value, "error_code", "") or ""),
+                str(getattr(value, "clarification", "") or ""),
+            )
+        # 옛 훅: 답 객체를 그대로 준다.
+        if str(getattr(value, "text", "") or "").strip():
+            return cls("success", value)
+        return cls("unavailable", error_code="empty-output")
+
+
+# 전문 봇이 못 답했을 때 **코드가** 내는 문구. 모델을 부르지 않는다.
+#
+# 예전에는 이 자리에서 마스터 LLM 이 같은 근거로 직접 답했다. 그래서 전문 봇이
+# 꺼져 있어도, 시간이 초과돼도, 계약을 어겨도 사용자 눈에는 정상 답이 나갔고
+# **아무도 고장을 몰랐다**(2026-09-13 검증). 답이 나가지 않는 편이 낫다 —
+# 사람이 고칠 수 있는 상태가 되기 때문이다.
+UNAVAILABLE_HEAD = "요청한 문서 답변을 생성할 수 없습니다."
+
+
+def unavailable_text(outcome, *, stage: str = "전문 봇 호출") -> str:
+    code = outcome.error_code or outcome.status or "unknown"
+    return (
+        f"{UNAVAILABLE_HEAD}\n"
+        f"처리 단계: {stage}\n"
+        f"사유 코드: {code}\n"
+        "원문과 첨부는 변경되지 않았습니다."
+    )
+
+
 def _specialist_documents_ok(special, ctx, store) -> bool:
     """전문가가 근거로 든 문서가 **지금 이 요청자에게 보이는 것**인가.
 
@@ -700,6 +757,70 @@ class AnswerEngine:
 
         return blocks, citations, parts, hits, total, document_evidence.coverage_block(got)
 
+    def _ask_specialist(self, task, question: str, ctx, evidence: str):
+        """전문 봇에게 한 번 맡긴다. 훅이 없으면 `None`.
+
+        **훅이 있으면 반드시 결말이 나온다.** 성공이 아니면 실패지, 마스터가
+        답할 신호가 아니다 — 그 구분이 없어서 모든 고장이 정상 답으로 보였다.
+        """
+        if self._specialist is None:
+            return None
+        try:
+            raw = self._specialist(task if task is not None else question, ctx, evidence)
+        except Exception as exc:  # noqa: BLE001 - 훅 장애도 결말이다
+            logger.warning("전문 봇 훅 실패: %s", exc)
+            return _Outcome("unavailable", error_code="hook-error")
+        return _Outcome.read(raw)
+
+    def _specialist_no_hits(self, outcome, q: str, ctx, *, terms=None) -> Answer:
+        """마스터도 전문 봇도 근거를 못 찾았다.
+
+        **「자료가 없다」 고 단정하지 않는다.** 검색 예산을 다 썼을 수도, 낱말이
+        어긋났을 수도 있다. 어디까지 찾아봤는지 밝혀야 사람이 이어서 찾는다.
+        """
+        if outcome.status == "clarify":
+            return self._unavailable(outcome, terms=terms)
+        if outcome.error_code in ("search-budget-exhausted",):
+            return Answer(
+                f"「{q}」 를 찾다가 검색 한도에 닿았습니다. 자료가 없다는 뜻은 아닙니다. "
+                "채널이나 기간을 좁혀 다시 물어보세요.",
+                [], None, 0.0, 0, "search_budget",
+                terms=list(terms or []),
+            )
+        if outcome.status in ("unavailable", "no_capability", "registry_error"):
+            return self._unavailable(outcome, terms=terms)
+        titles = self._store.titles(ctx)
+        if not titles:
+            return Answer(
+                "열람 권한 범위에 아카이브된 문서가 없습니다. "
+                "채널에 봇을 초대(`/invite`)하고 대화가 쌓이길 기다려 주세요.",
+                [], None, 0.0, 0, "no_access",
+            )
+        return Answer(
+            f"「{q}」 에 해당하는 원문을 찾지 못했습니다. 검색과 문서 읽기를 모두 "
+            "거쳤고, 추측으로 답하지 않습니다.",
+            [], None, 0.0, 0, "no_hits",
+            terms=list(terms or []),
+        )
+
+    def _unavailable(self, outcome, *, hits=0, terms=None, stage="전문 봇 호출") -> Answer:
+        """전문 봇이 못 답했다. **마스터가 대신 쓰지 않는다.**"""
+        if outcome.status == "clarify":
+            return Answer(
+                outcome.clarification
+                or "어떤 자료를 기준으로 답해야 할지 확실하지 않습니다. 대상을 조금 더 알려주세요.",
+                [], None, 0.0, hits, "clarify",
+                terms=list(terms or []),
+            )
+        logger.warning(
+            "전문 봇 답변 불가 status=%s code=%s", outcome.status, outcome.error_code
+        )
+        return Answer(
+            unavailable_text(outcome, stage=stage),
+            [], None, 0.0, hits, "specialist_unavailable",
+            terms=list(terms or []),
+        )
+
     def summarize(
         self,
         ctx: RequestContext,
@@ -710,6 +831,7 @@ class AnswerEngine:
         question: str | None = None,
         terms: list[str] | None = None,
         evidence_hits: list[SearchHit] | None = None,
+        task=None,
         document_query: list[str] | None = None,
         all_time: bool = False,
     ) -> Answer:
@@ -862,20 +984,21 @@ class AnswerEngine:
             # The adapter's final size guard must not silently cut a channel in half.
             # If no complete channel fits, the master handles the full evidence.
             specialist_evidence = "\n\n".join(selected_blocks)
-            special = (
-                self._specialist(
-                    question or f"최근 {days}일 진행 상황을 정리해 주세요.",
-                    ctx,
-                    specialist_evidence,
-                )
-                if specialist_evidence
-                else None
+            outcome = self._ask_specialist(
+                task,
+                question or f"최근 {days}일 진행 상황을 정리해 주세요.",
+                ctx,
+                specialist_evidence,
             )
-            if (
-                special is not None
-                and special.text.strip()
-                and _specialist_documents_ok(special, ctx, self._store)
+            special = outcome.answer if outcome is not None and outcome.ok else None
+            if special is not None and not _specialist_documents_ok(
+                special, ctx, self._store
             ):
+                # 계약 위반이다. **마스터가 대신 쓰지 않는다** — 답은 남고 근거만
+                # 빠지면 답변과 출처가 어긋난 채로 나간다(설계 §12).
+                outcome = _Outcome("unavailable", error_code="acl-source-violation")
+                special = None
+            if special is not None:
                 logger.info(
                     "summary ok(전문가) ws=%s specialist=%s model=%s docs=%d",
                     ctx.workspace,
@@ -897,7 +1020,12 @@ class AnswerEngine:
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
                 )
+            # 전문 봇 계층이 있는데 못 답했다. 여기서 끝난다.
+            return self._unavailable(outcome, hits=total, terms=terms)
 
+        # 전문 봇 계층이 **아예 없는** 설치의 길이다(단위 테스트·전문 봇 미도입).
+        # 운영 봇은 `slack/pilot.specialist_hook()` 을 항상 끼우므로 여기로 오지
+        # 않는다 — `tests/test_answer_invariants.py` 가 그것을 지킨다.
         summary_prompt = (
             "<원문>\n"
             + "\n\n".join(blocks)
@@ -931,17 +1059,57 @@ class AnswerEngine:
         )
 
     def advise(
-        self, question: str, ctx: RequestContext, *, terms: list[str] | None = None
+        self,
+        question: str,
+        ctx: RequestContext,
+        *,
+        terms: list[str] | None = None,
+        task=None,
     ) -> Answer:
         """판단·권고 요청 — 사내 사실은 원문만, 일반 판단은 LLM 지식 허용(라벨 부착).
 
         "출처 없으면 답하지 않는다"는 **사실 조회**의 규칙이다. 판단 요청에 그 규칙을 적용하면
         답을 못 하고, 반대로 라벨 없이 답하면 판단이 사내 사실로 오독된다. 그래서 둘을 분리한다.
+
+        **판단도 업무 답변이다.** 예전에는 이 경로만 전문 봇을 아예 부르지 않고
+        마스터가 처음부터 답했다(2026-09-13 검증). 사내 사실이 섞이는 답을
+        마스터가 쓰면, 다른 경로에서 막아 둔 것이 여기로 전부 샌다.
         """
         model, q = parse_model_flag(question)
         query = " ".join(terms) if terms else q
         hits = self._store.search(query, ctx, limit=self._max_hits) if query else []
 
+        if self._specialist is not None:
+            outcome = self._ask_specialist(task, q, ctx, _evidence_block(hits))
+            special = outcome.answer if outcome is not None and outcome.ok else None
+            if special is not None and not _specialist_documents_ok(
+                special, ctx, self._store
+            ):
+                outcome = _Outcome("unavailable", error_code="acl-source-violation")
+                special = None
+            if special is not None:
+                citations = _specialist_citations(special, hits, ctx)
+                citations += _attachment_source_links(hits)
+                logger.info(
+                    "advice ok(전문가) ws=%s specialist=%s hits=%d",
+                    ctx.workspace, special.specialist, len(hits),
+                )
+                return Answer(
+                    special.text,
+                    citations,
+                    special.model,
+                    special.cost_usd,
+                    len(hits),
+                    "advice",
+                    terms=list(terms or []),
+                    specialist=special.specialist,
+                    evidence_refs=refs_from_hits(hits, self._store.root),
+                    subject_terms=list(terms or []),
+                    context_resolution="transmitted_evidence",
+                )
+            return self._unavailable(outcome, hits=len(hits), terms=terms)
+
+        # 전문 봇 계층이 없는 설치의 길이다.
         evidence = (
             f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n"
             if hits
@@ -1017,6 +1185,7 @@ class AnswerEngine:
         intent: Intent | None = None,
         *,
         followup=None,
+        task=None,
     ) -> Answer:
         """아카이브로 답할 수 있는 의도를 처리한다.
 
@@ -1032,7 +1201,7 @@ class AnswerEngine:
         intent = intent or classify(q, self._router)
 
         if followup is not None and getattr(followup, "applied", False):
-            return self._respond_scoped(q, ctx, intent, followup, model=model)
+            return self._respond_scoped(q, ctx, intent, followup, model=model, task=task)
 
         if intent.kind == "summary":
             return self.summarize(
@@ -1050,9 +1219,10 @@ class AnswerEngine:
                 # 통째로 탈락해 `no_hits` 가 된다. 문서 집합에서는 거르는 게 아니라
                 # 문서별로 **고르는** 데 쓰인다.
                 terms=list(intent.terms) if intent.document_query else None,
+                task=task,
             )
         if intent.kind == "advice":
-            return self.advise(question, ctx, terms=intent.terms)
+            return self.advise(question, ctx, terms=intent.terms, task=task)
         if intent.kind == "smalltalk":
             return Answer(
                 "네, 대기 중입니다. 아카이브에 쌓인 원문으로 답할 수 있는 걸 물어보세요. "
@@ -1082,7 +1252,7 @@ class AnswerEngine:
             return Answer(
                 "봇 상태·사용법은 `상태` / `도움말` 로 확인하세요.", [], None, 0.0, 0, intent.kind
             )
-        return self.answer(question, ctx, terms=intent.terms)
+        return self.answer(question, ctx, terms=intent.terms, task=task)
 
     def _respond_scoped(
         self,
@@ -1092,6 +1262,7 @@ class AnswerEngine:
         followup,
         *,
         model: str | None = None,
+        task=None,
     ) -> Answer:
         """후속 질문 — 되살린 좌표 안에서만 답한다(설계 §9·§10·§13).
 
@@ -1131,11 +1302,14 @@ class AnswerEngine:
                 question=q,
                 terms=list(followup.topic_terms),
                 evidence_hits=hits,
+                task=task,
             )
         else:
             # advice 도 같은 길로 보낸다. 판단 요청이라고 범위를 넓히면 그 순간
             # 이 질문은 더 이상 후속 질문이 아니다.
-            ans = self.answer(q, ctx, terms=list(intent.terms), evidence_hits=hits)
+            ans = self.answer(
+                q, ctx, terms=list(intent.terms), evidence_hits=hits, task=task
+            )
 
         if status and hits:
             ans.text = f"{ans.text}\n\n{status}"
@@ -1167,6 +1341,7 @@ class AnswerEngine:
         *,
         terms: list[str] | None = None,
         evidence_hits: list[SearchHit] | None = None,
+        task=None,
     ) -> Answer:
         """구체 사실 질문 — 원문 검색 후 그 라인만 근거로 답한다.
 
@@ -1194,6 +1369,48 @@ class AnswerEngine:
                 [], None, 0.0, 0, "no_hits",
                 context_resolution="scoped_empty",
             )
+        if not hits and self._specialist is not None:
+            # **마스터 검색이 0건이어도 도구형 전문 봇은 스스로 찾을 수 있다.**
+            #
+            # 예전에는 여기서 곧바로 「찾지 못했습니다」 로 닫았다. 그래서 사람이
+            # 쓴 말과 문서에 적힌 말이 다르기만 해도("미수금"↔"미회수") 읽을 수
+            # 있는 문서를 옆에 두고 없다고 답했다. 검색 실패와 자료 부재를 같은
+            # 것으로 취급한 셈이다(설계 §3-C).
+            #
+            # 근거는 **빈 채로** 넘긴다. 「검색 결과 없음」 같은 가짜 근거 한 줄을
+            # 만들어 넣으면 근거 자리를 더 이상 믿을 수 없게 된다.
+            outcome = self._ask_specialist(task, q, ctx, "")
+            special = outcome.answer if outcome is not None and outcome.ok else None
+            if special is not None and not _specialist_documents_ok(
+                special, ctx, self._store
+            ):
+                outcome = _Outcome("unavailable", error_code="acl-source-violation")
+                special = None
+            if special is not None:
+                citations = _specialist_citations(special, [], ctx)
+                logger.info(
+                    "answer ok(전문가·빈 seed) ws=%s specialist=%s srcs=%d",
+                    ctx.workspace, special.specialist, len(citations),
+                )
+                return Answer(
+                    special.text,
+                    citations,
+                    special.model,
+                    special.cost_usd,
+                    0,
+                    "answered",
+                    specialist=special.specialist,
+                    subject_terms=list(terms or []),
+                    context_resolution="specialist_search",
+                )
+            # 전문 봇도 못 찾았다. **「찾지 못했다」 와 「없다」 를 구분해서** 남긴다.
+            logger.info(
+                "answer no_hits(전문가도 못 찾음) q=%r ws=%s code=%s",
+                q, ctx.workspace, outcome.error_code if outcome else "-",
+            )
+            if outcome is not None and outcome.status not in ("success",):
+                return self._specialist_no_hits(outcome, q, ctx, terms=terms)
+
         if not hits:
             # 3겹: 근거가 없으면 **다른 질문에 답하지 않는다.** 예전엔 최근 원문 요약으로 폴백했는데,
             # 아카이브와 무관한 질문에도 그럴듯한 딴 얘기를 내놓아 더 나빴다.
@@ -1237,12 +1454,14 @@ class AnswerEngine:
         #
         # 전문가가 없거나 못 답하면 `None` 이고, 그때 마스터가 그대로 답한다.
         if self._specialist is not None and not visual.any:
-            special = self._specialist(q, ctx, _evidence_block(hits))
-            if (
-                special is not None
-                and special.text.strip()
-                and _specialist_documents_ok(special, ctx, self._store)
+            outcome = self._ask_specialist(task, q, ctx, _evidence_block(hits))
+            special = outcome.answer if outcome is not None and outcome.ok else None
+            if special is not None and not _specialist_documents_ok(
+                special, ctx, self._store
             ):
+                outcome = _Outcome("unavailable", error_code="acl-source-violation")
+                special = None
+            if special is not None:
                 citations = _specialist_citations(special, hits, ctx)
                 citations += _attachment_source_links(hits)
                 logger.info(
@@ -1267,7 +1486,9 @@ class AnswerEngine:
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
                 )
+            return self._unavailable(outcome, hits=len(hits), terms=terms)
 
+        # 전문 봇 계층이 없는 설치의 길이다(위 `summarize()` 와 같다).
         user_content: str | list[dict] = prompt
         if visual.any:
             user_content = [{"type": "text", "text": prompt}, *visual.blocks]

@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from tybot import specialist_adapters as adapters
 from tybot.gateway.base import LLMResponse, ToolCall
 
@@ -212,17 +214,18 @@ def test_the_factory_defaults_to_prompt():
     assert isinstance(made, adapters.PromptSpecialist)
 
 
-def test_tools_mode_without_a_toolbox_falls_back_to_prompt(caplog):
-    """도구를 못 만든 사정 하나가 전문가를 통째로 끄면 안 된다 — 마스터가
-    고른 근거로라도 답하는 편이 낫다."""
-    with caplog.at_level("WARNING"):
-        made = adapters.build(
+def test_tools_mode_without_a_toolbox_is_refused():
+    """**선언과 실제가 갈릴 바에는 부르지 않는다**(2026-09-14).
+
+    예전에는 조용히 프롬프트로 내려갔다. 그래서 DB·계약·콘솔이 모두 `tools` 라고
+    말하는데 실제로 도는 것은 `prompt` 인 상태가 몇 주 동안 이어졌고, "왜 답이
+    부실하지" 를 되짚을 단서가 경고 한 줄뿐이었다.
+    """
+    with pytest.raises(adapters.AdapterError, match="toolbox-unavailable"):
+        adapters.build(
             "hermes", FakeRouter(_answer("답")), rules="규칙",
             execution_mode="tools", toolbox=None,
         )
-
-    assert isinstance(made, adapters.PromptSpecialist)
-    assert "프롬프트로 내려간다" in caplog.text
 
 
 def test_the_router_row_carries_the_execution_mode():
@@ -247,18 +250,144 @@ def test_the_query_reads_the_execution_mode():
     assert "execution_mode" in source, "쿼리가 실행 방식을 안 읽는다"
 
 
-def test_the_hook_builds_a_toolbox_for_tool_mode():
+def _registry_row(**kw):
+    from tybot.specialist_router import Specialist
+
+    base = dict(
+        key="hermes", name="H", domain="내부 기록", routing_hint="",
+        adapter="hermes", model="", min_confidence=0.5, rules="",
+        execution_mode="tools",
+    )
+    base.update(kw)
+    return Specialist(**base)
+
+
+def _task(**kw):
+    from types import SimpleNamespace
+
+    base = dict(
+        required_capability="internal_document_qa",
+        suggested_specialist="",
+        routing_confidence=0.9,
+        question="회의록 정리해줘",
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_a_tools_row_actually_receives_a_toolbox(monkeypatch):
+    """DB 행이 `tools` 면 런타임에 **도구 묶음이 실제로 전달된다.**
+
+    소스에 낱말이 있는지 보는 검사로는 이 고장을 못 잡는다 — 실제로 그랬다.
+    SQL 은 열을 읽는데 생성자에 안 넘겨서, 모든 전문 봇이 `prompt` 로 돌았다.
+    """
+    from tybot import specialist_adapters, specialist_router
+
+    seen = {}
+
+    class FakeAdapter:
+        touched = None
+        last_model = "m"
+        last_cost_usd = 0.0
+
+        def complete(self, request):
+            return "정리했습니다."
+
+    def fake_build(key, router, *, model="", rules="", execution_mode="prompt",
+                   toolbox=None, live=False):
+        seen["mode"] = execution_mode
+        seen["toolbox"] = toolbox
+        return FakeAdapter()
+
+    monkeypatch.setattr(specialist_adapters, "build", fake_build)
+    monkeypatch.setattr(specialist_router, "available", lambda ws: [_registry_row()])
+    monkeypatch.setattr(
+        specialist_router, "capabilities_of", lambda s: ("internal_document_qa",)
+    )
+    made = []
+    outcome = specialist_router.serve(
+        _task(),
+        workspace="pilot",
+        evidence=["원문"],
+        router=None,
+        authorization_id="pilot:member",
+        toolbox_factory=lambda: made.append(1) or "TOOLBOX",
+        record_call_row=False,
+    )
+
+    assert outcome.ok
+    assert seen["mode"] == "tools"
+    assert seen["toolbox"] == "TOOLBOX"
+    assert made == [1], "요청마다 새 묶음을 만들어야 한다"
+
+
+def test_a_prompt_row_gets_no_toolbox(monkeypatch):
+    """프롬프트형에게 도구를 주면 계약 밖의 능력을 쥐여 주는 것이다."""
+    from tybot import specialist_adapters, specialist_router
+
+    seen = {}
+
+    class FakeAdapter:
+        touched = None
+        last_model = "m"
+        last_cost_usd = 0.0
+
+        def complete(self, request):
+            return "정리했습니다."
+
+    monkeypatch.setattr(
+        specialist_adapters, "build",
+        lambda key, router, **kw: (seen.update(kw), FakeAdapter())[1],
+    )
+    monkeypatch.setattr(
+        specialist_router, "available", lambda ws: [_registry_row(execution_mode="prompt")]
+    )
+    monkeypatch.setattr(
+        specialist_router, "capabilities_of", lambda s: ("internal_document_qa",)
+    )
+
+    specialist_router.serve(
+        _task(),
+        workspace="pilot",
+        evidence=["원문"],
+        router=None,
+        authorization_id="pilot:member",
+        toolbox_factory=lambda: "TOOLBOX",
+        record_call_row=False,
+    )
+
+    assert seen["toolbox"] is None
+
+
+def test_the_hook_binds_the_request_context_into_the_toolbox():
     """`ctx` 를 묶은 새 묶음을 **요청마다** 만든다. 재사용하면 앞 요청의 권한으로
     읽게 된다."""
-    import inspect
+    from types import SimpleNamespace
 
     from tybot.slack import pilot
 
-    source = inspect.getsource(pilot.specialist_hook)
+    captured = {}
 
-    assert "ToolBox(" in source
-    assert "ctx=ctx" in source, "권한 컨텍스트를 안 묶는다"
-    assert "execution_mode" in source, "도구형인지 보지 않는다"
+    def fake_serve(task, **kw):
+        captured["factory"] = kw["toolbox_factory"]
+        from tybot.specialist_router import UNAVAILABLE, SpecialistOutcome
+
+        return SpecialistOutcome(UNAVAILABLE, error_code="테스트")
+
+    store = object()
+    ctx = SimpleNamespace(workspace="pilot", role="member", channel="#팀-전산_ABB110-회의")
+    hook = pilot.specialist_hook(router=None, store=store)
+    import tybot.specialist_router as sr
+
+    original, sr.serve = sr.serve, fake_serve
+    try:
+        hook("회의록 정리해줘", ctx, "원문")
+    finally:
+        sr.serve = original
+
+    box = captured["factory"]()
+    assert box.ctx is ctx, "권한 컨텍스트를 안 묶었다"
+    assert box.store is store
 
 
 def test_the_answer_cites_what_the_specialist_read():

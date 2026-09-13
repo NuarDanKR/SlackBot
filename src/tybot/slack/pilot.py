@@ -28,6 +28,7 @@ from .. import (
     daily_review,
     evidence_view,
     heartbeat,
+    master_planner,
     reviewers,
     schedule_dm,
     specialist_router,
@@ -445,6 +446,19 @@ class WorkspaceBot:
             channel_id=channel_id,
             channel=channel,
         )
+
+    def _specialist_roster(self) -> list:
+        """분해기에 보여 줄 전문 봇 목록. 못 읽으면 빈 목록이다.
+
+        **여기서 못 읽어도 답변은 진행된다** — 목록이 없으면 분해기가 전문 봇을
+        제안하지 못할 뿐이고, 실제 선택은 `specialist_router.serve()` 가 다시
+        확인한다. 그쪽에서 읽지 못하면 그때 `registry_error` 로 닫힌다.
+        """
+        try:
+            return list(specialist_router.available(self.workspace) or [])
+        except Exception as exc:
+            log.warning("[%s] 전문 봇 목록을 분해기에 싣지 못했습니다: %s", self.workspace, exc)
+            return []
 
     def _followup_resolver(self):
         """후속 질문 해석기. 스토어 하나를 공유하므로 봇당 하나만 만든다."""
@@ -2344,6 +2358,10 @@ class WorkspaceBot:
                 thread_has_refs=any(
                     turn.get("evidence_refs") or turn.get("attachment_refs") for turn in turns
                 ),
+                # **한 번의 판정**으로 분해와 전문 봇 선택을 함께 한다. 예전에는
+                # 여기서 분해하고 라우터가 LLM 을 한 번 더 불렀는데, 그 두 번째
+                # 판정은 스레드 맥락을 못 봤다(설계 §2).
+                specialists=self._specialist_roster(),
             )
         if not tasks:
             tasks = [Intent("search", source="regex", question=text)]
@@ -2366,11 +2384,15 @@ class WorkspaceBot:
             finish(self._ingest_channel(client, channel_id), intent=first, ans=None, ctx=None)
             return
 
+        # 분해 결과를 오케스트레이션 판정으로 옮긴다. **여기서 LLM 을 다시 부르지
+        # 않는다** — 남은 것은 검증과 매핑뿐이다(설계 §4).
+        decision = master_planner.from_intents(tasks, text=text, turns=turns)
         sections: list[str] = []
         ctx: RequestContext | None = None
         last: Answer | None = None
-        for task in tasks:
-            q = task.question or text
+        for master_task in decision.tasks:
+            task = master_task.intent
+            q = master_task.question or task.question or text
             if task.kind in SELF_KINDS:
                 sections.append(self._self_reply(task.kind, q, client=client, user_id=user_id))
                 continue
@@ -2395,7 +2417,7 @@ class WorkspaceBot:
                     log.exception("[%s] 후속 질문 해석 실패: %s", self.workspace, exc)
                     followup = None
             with specialist_router.bind_qa_record(qa_record_id):
-                ans = self.engine.respond(q, ctx, task, followup=followup)
+                ans = self.engine.respond(q, ctx, task, followup=followup, task=master_task)
             last = ans
             sections.append(ans.to_slack())
 
@@ -3072,74 +3094,74 @@ def _kst_stamp(ts: str) -> str:
 
 
 def specialist_hook(router, store=None, live_fetch=None):
-    """엔진이 근거를 모은 뒤 부를 훅을 만든다. 전문가 문장 또는 `None`.
+    """엔진이 근거를 모은 뒤 부를 훅. **전문 봇 호출의 결말**을 돌려준다.
 
-    **엔진은 전문가를 모른다.** 라우팅·DB·계약이 여기 있고 엔진은 결과만 받는다.
-    `None` 이면 마스터가 그대로 답한다.
+    예전에는 여기서 `route()` 가 LLM 을 **한 번 더** 불러 전문 봇을 골랐다. 그
+    두 번째 판정은 스레드 맥락을 못 봐서, 근거는 미수금 문서로 복원됐는데 라우터는
+    "이전에 요청했던 내용" 이라는 문장만 보고 골랐다(2026-09-13 검증). 지금은
+    분해 단계에서 한 번 판정하고, 여기서는 **코드가 후보를 확정**한다.
+
+    실패를 `None` 으로 접지 않는다. `None` 은 「마스터가 답하라」 로 읽혔고, 그
+    해석이 모든 고장을 정상 답으로 보이게 만들었다.
 
     워크스페이스는 `ctx` 에서 읽는다 — 엔진은 워크스페이스마다 하나가 아니라
     **전체에 하나**라, 봇 인스턴스에 매어 두면 마지막 봇의 것만 남는다.
-
-    **이 호출이 답변을 막는 일은 없어야 한다.** 라우팅도 전문가도 없어도 되는
-    기능이라, 예외를 통째로 삼키고 마스터로 넘긴다.
     """
 
-    def hook(question: str, ctx, evidence: str):
+    def hook(task, ctx, evidence: str):
         workspace = getattr(ctx, "workspace", "") or ""
         if not workspace:
-            return None
-        try:
-            decision = specialist_router.route(question, workspace, router)
-            if decision.went_to_master:
-                # 후보가 아예 없으면 기록하지 않는다 — 질문마다 `none` 행을 쌓으면
-                # 표가 잡음으로 차고, 정작 라우팅을 켰을 때 무엇이 새 판정인지
-                # 구별할 수 없다.
-                if specialist_router.available(workspace):
-                    specialist_router.record(decision, workspace=workspace, elapsed_ms=0)
-                return None
-            # 근거는 이미 `visible_docs` 를 통과한 것뿐이다(원칙 3).
-            # `authorization_id` 는 그 판정을 가리키고, 나중에 「무엇이 전문가에게
-            # 갔나」 를 되짚는 근거가 된다.
-            #
-            # 도구를 쓰는 전문가에게는 **요청마다 새 묶음**을 만든다. `ctx` 를
-            # 안에 가둬야 도구가 누구 권한으로 읽는지를 바꿀 수 없다.
-            toolbox = None
-            uses_tools = (
-                decision.specialist is not None
-                and decision.specialist.execution_mode == "tools"
+            return specialist_router.SpecialistOutcome(
+                specialist_router.UNAVAILABLE, error_code="no-workspace"
             )
-            if uses_tools and store is not None:
-                from ..specialist_tools import ToolBox
+        # 훅은 `MasterTask` 를 받는다. 옛 호출부는 질문 문자열을 준다 —
+        # 그때는 사내 기록 질의응답으로 본다(가장 좁은 기본값).
+        if isinstance(task, str):
+            from ..master_planner import INTERNAL_QA, MasterTask
 
-                # `live_fetch` 는 워크스페이스를 받아야 한다 — 엔진은 전체에
-                # 하나지만 Slack 클라이언트는 워크스페이스마다 다르다.
-                # 여기서 묶어 두면 도구는 채널 ID 만 알면 된다.
-                bound = (
-                    (lambda cid, n: live_fetch(workspace, cid, n))
-                    if live_fetch else None
-                )
-                toolbox = ToolBox(
-                    store=store, ctx=ctx, live_fetch=bound,
-                    here=getattr(ctx, "channel", "") or "",
-                )
-            return specialist_router.ask(
-                decision,
-                question=question,
+            task = MasterTask(
+                kind="factual",
+                original_fragment=task,
+                standalone_question=task,
+                required_capability=INTERNAL_QA,
+            )
+
+        def make_toolbox():
+            """도구를 쓰는 전문가에게 줄 **요청마다 새로운** 묶음.
+
+            `ctx` 를 안에 가둬야 도구가 누구 권한으로 읽는지를 바꿀 수 없다.
+            스토어가 없으면 만들지 않는다 — 그러면 `build()` 가
+            `toolbox-unavailable` 로 닫는다. 조용히 프롬프트로 내려가지 않는다.
+            """
+            if store is None:
+                return None
+            from ..specialist_tools import ToolBox
+
+            # `live_fetch` 는 워크스페이스를 받아야 한다 — 엔진은 전체에 하나지만
+            # Slack 클라이언트는 워크스페이스마다 다르다.
+            bound = (lambda cid, n: live_fetch(workspace, cid, n)) if live_fetch else None
+            return ToolBox(
+                store=store, ctx=ctx, live_fetch=bound,
+                here=getattr(ctx, "channel", "") or "",
+            )
+
+        try:
+            outcome = specialist_router.serve(
+                task,
                 workspace=workspace,
-                evidence=[evidence],
+                evidence=[evidence] if evidence and evidence.strip() else [],
                 router=router,
-                toolbox=toolbox,
-                # 실시간 조회는 Slack 클라이언트가 있을 때만 준다. 도구를 안 주면
-                # 모델이 못 부른다 — 프롬프트로 막는 것보다 확실하다.
+                toolbox_factory=make_toolbox,
                 live=bool(live_fetch),
-                # 전문가가 못 답하면 빈 문자열. 호출부가 그것을 「마스터가 답한다」
-                # 로 읽는다 — 여기서 마스터 답변을 만들면 답이 두 번 만들어진다.
-                fallback=lambda: "",
                 authorization_id=f"{workspace}:{getattr(ctx, 'role', '-') or '-'}",
             )
-        except Exception as e:
-            log.warning("[%s] 전문가 호출 실패: %s", workspace, e)
-            return None
+        except Exception as exc:
+            log.exception("[%s] 전문가 호출 실패: %s", workspace, exc)
+            return specialist_router.SpecialistOutcome(
+                specialist_router.UNAVAILABLE, error_code="hook-error"
+            )
+        log.info("[%s] %s", workspace, outcome.log_line())
+        return outcome
 
     return hook
 

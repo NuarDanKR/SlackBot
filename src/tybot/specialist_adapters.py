@@ -116,18 +116,37 @@ def load_prompt(key: str) -> str:
     return body
 
 
-def prompt_version(key: str) -> str:
-    """콘솔에 보일 프롬프트 버전. 읽지 못하면 빈 문자열."""
+def contract_meta(key: str) -> dict[str, str]:
+    """계약 파일 프론트매터. 읽지 못하면 빈 dict.
+
+    `version`, `execution_mode`, `capabilities` 가 여기 있다. **능력을 DB 가 아니라
+    계약에 둔 이유**는 능력이 바뀌면 프롬프트도 바뀌기 때문이다 — 둘을 다른 곳에
+    두면 "능력은 늘렸는데 프롬프트는 그대로" 가 오류 없이 생긴다.
+
+    의존성 없는 최소 파서다. `key: value` 한 줄짜리만 읽는다.
+    """
     path = contract_path(key)
     if path is None:
-        return ""
+        return {}
     try:
-        for line in path.read_text(encoding="utf-8").splitlines()[:10]:
-            if line.startswith("version:"):
-                return line.partition(":")[2].strip()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return ""
-    return ""
+        return {}
+    if not lines or lines[0].strip() != "---":
+        return {}
+    out: dict[str, str] = {}
+    for line in lines[1:30]:
+        if line.strip() == "---":
+            break
+        name, sep, value = line.partition(":")
+        if sep and name.strip() and not name.startswith(" "):
+            out[name.strip()] = value.strip()
+    return out
+
+
+def prompt_version(key: str) -> str:
+    """콘솔에 보일 프롬프트 버전. 읽지 못하면 빈 문자열."""
+    return contract_meta(key).get("version", "")
 
 
 def deployed_keys(console_keys: set[str] | None = None) -> set[str]:
@@ -231,17 +250,21 @@ def build(
 ):
     """어댑터 하나 만들기. 호출부는 어느 갈래인지 몰라도 된다.
 
-    `tools` 인데 도구 묶음이 없으면 **프롬프트로 내려간다.** 여기서 예외를 내면
-    도구를 못 만든 사정(스토어 없음 등) 하나가 전문가를 통째로 끄는데, 그보다는
-    마스터가 고른 근거로라도 답하는 편이 낫다.
+    **`tools` 인데 도구 묶음이 없으면 만들지 않는다.** 예전에는 프롬프트로
+    내려갔다. 「답이라도 나오는 편이 낫다」 는 판단이었는데, 실제로 일어난 일은
+    이랬다 — DB 는 `tools`, 계약 파일도 `tools`, 콘솔도 `tools` 라고 보여 주는데
+    실제로 도는 것은 `prompt` 였고, 경고 한 줄 말고는 아무 데도 흔적이 없었다.
+    그 상태로 몇 주가 지났고 "왜 답이 부실하지" 를 되짚을 단서가 없었다.
+
+    선언과 실제가 갈릴 바에는 **부르지 않는 편이 낫다.** 부르지 못하면 호출부가
+    `toolbox-unavailable` 로 닫고, 그 코드가 콘솔에 남는다.
     """
     if execution_mode == "tools":
         if toolbox is None:
-            log.warning("도구 묶음이 없어 프롬프트로 내려간다 key=%s", key)
-        else:
-            return ToolSpecialist(
-                key, router, toolbox=toolbox, model=model, rules=rules, live=live
-            )
+            raise AdapterError(f"toolbox-unavailable: 도구 묶음 없이 도구형을 부를 수 없습니다({key})")
+        return ToolSpecialist(
+            key, router, toolbox=toolbox, model=model, rules=rules, live=live
+        )
     return PromptSpecialist(key, router, model=model, rules=rules)
 
 

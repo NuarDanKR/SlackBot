@@ -69,10 +69,21 @@ class AuthorizedEvidence:
 class SpecialistRequest:
     question: str
     evidence: tuple[AuthorizedEvidence, ...]
+    # 도구형 전문 봇은 **스스로 찾는다.** 마스터 검색이 0건이라고 부르지 못하게
+    # 하면 그 봇의 값이 통째로 사라진다.
+    #
+    # 예전에는 "(마스터 검색 결과 없음)" 이라는 **가짜 근거 한 줄**을 만들어 이
+    # 검사를 통과시켰다. 근거가 아닌 것을 근거 자리에 두면 그 자리를 더 이상
+    # 믿을 수 없게 된다 — 빈 것은 빈 채로 두고, 빈 것을 허용한다고 밝힌다.
+    allow_empty_evidence: bool = False
 
     def __post_init__(self) -> None:
-        if not self.question.strip() or not self.evidence:
+        if not self.question.strip():
+            raise ContractViolation("질문이 필요합니다.")
+        if not self.evidence and not self.allow_empty_evidence:
             raise ContractViolation("질문과 권한 필터를 통과한 근거가 필요합니다.")
+        if not self.evidence:
+            return
         authorization_ids = {item.authorization_id for item in self.evidence}
         if len(authorization_ids) != 1:
             raise ContractViolation("서로 다른 권한 판정의 근거를 한 호출에 섞을 수 없습니다.")

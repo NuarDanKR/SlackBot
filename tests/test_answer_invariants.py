@@ -341,28 +341,56 @@ def test_the_specialist_only_sees_permitted_evidence(tmp_path):
         assert leak not in evidence, f"권한 밖 근거가 전문가에게 갔다: {leak}"
 
 
-def test_a_silent_specialist_falls_back_to_the_master(tmp_path):
-    """전문가가 못 답하면 마스터가 답한다. 답이 아예 안 나가면 안 된다."""
+def test_a_silent_specialist_never_becomes_a_master_answer(tmp_path):
+    """전문가가 못 답하면 **마스터가 대신 쓰지 않는다**(2026-09-14 정책).
+
+    예전에는 여기서 마스터 LLM 이 같은 근거로 직접 답했다. 그래서 전문 봇이
+    꺼져 있어도, 시간이 초과돼도 사용자 눈에는 정상 답이 나갔고 아무도 고장을
+    몰랐다. 답이 안 나가는 편이 낫다 — 사람이 고칠 수 있는 상태가 된다.
+    """
     engine = _engine_with(tmp_path, _Special(""))
+    provider = engine.router._providers["anthropic"]
+    before = len(provider.calls)
 
     answer = engine.answer("콘솔 배포 어떻게 됐어", _ctx(MINE))
 
-    assert answer.text.strip()
-    assert "출처:" in answer.to_slack()
+    assert answer.reason == "specialist_unavailable"
+    assert "사유 코드" in answer.text
+    assert "출처:" not in answer.to_slack(), "근거 없는 답에 출처를 붙이면 안 된다"
+    assert len(provider.calls) == before, "마스터가 업무 답변을 만들었다"
 
 
-def test_no_evidence_means_the_specialist_is_never_asked(tmp_path):
-    """근거가 0건이면 전문가에게도 묻지 않는다.
+def test_no_evidence_still_reaches_a_tool_using_specialist(tmp_path):
+    """근거 0건이어도 **도구형은 스스로 찾을 기회를 받는다**(설계 §3-C).
 
-    물으면 전문가가 근거 없이 문장을 만들고, 거기에 우리 출처가 붙는다.
+    예전에는 여기서 곧바로 「찾지 못했습니다」 로 닫았다. 사람이 쓴 말과 문서에
+    적힌 말이 다르기만 해도("미수금"↔"미회수") 읽을 수 있는 문서를 옆에 두고
+    없다고 답한 것이다 — 검색 실패와 자료 부재를 같은 것으로 취급했다.
+
+    **가짜 근거를 만들어 넣지는 않는다.** 빈 것은 빈 채로 간다.
     """
-    hook = _Special("아마 5억쯤 됩니다.")
+    hook = _Special("찾아보니 자료가 없습니다.")
     engine = _engine_with(tmp_path, hook)
 
-    answer = engine.answer("아무데도 없는 이야기 알려줘", _ctx(MINE))
+    engine.answer("아무데도 없는 이야기 알려줘", _ctx(MINE))
 
-    assert hook.seen == [], "근거 0건인데 전문가를 불렀다"
-    assert "5억" not in answer.to_slack()
+    assert [evidence for _q, evidence in hook.seen] == [
+        ""
+    ], "빈 근거 그대로 넘겨야 한다(가짜 한 줄 금지)"
+
+
+def test_an_empty_evidence_call_is_refused_for_a_prompt_specialist():
+    """프롬프트형에게는 빈 근거를 보내지 않는다.
+
+    스스로 찾지 못하는 봇에게 근거 없이 물으면 그 자리에서 지어낸다. 도구형만
+    빈 근거를 허용하고, 그 허용은 **계약이 명시**한다.
+    """
+    from tybot.specialist_contract import ContractViolation, SpecialistRequest
+
+    with pytest.raises(ContractViolation):
+        SpecialistRequest(question="무엇이든", evidence=())
+    # 도구형은 통과한다.
+    SpecialistRequest(question="무엇이든", evidence=(), allow_empty_evidence=True)
 
 
 # --- 요약 경로에도 전문가가 닿아야 한다 -------------------------------------
@@ -463,7 +491,7 @@ def test_a_pending_attachment_is_named_not_silently_dropped(tmp_path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(doc, encoding="utf-8")
 
-    engine = _engine_with(tmp_path, _Special(""))
+    engine = _engine_with(tmp_path, _Special("가정산서 내용을 정리했습니다."))
     answer = engine.answer("가정산서 내용 알려줘", _ctx(MINE))
 
     assert "가정산서.pdf" in answer.to_slack()

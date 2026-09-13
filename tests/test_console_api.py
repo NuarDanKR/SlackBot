@@ -1803,8 +1803,14 @@ def test_the_console_shows_the_deployed_contract_version(client, monkeypatch):
 
     row = client.get("/api/specialists", headers=member(client)).json()["specialists"][0]
 
+    from tybot.specialist_adapters import prompt_version
+
     assert row["version"] == "1", "승인 버전"
-    assert row["deployedVersion"] == "2", "실제 배포된 계약 버전"
+    # 계약 파일의 버전은 올라간다. **숫자를 못 박지 않는다** — 여기서 고정하면
+    # 계약을 고칠 때마다 무관한 테스트가 깨지고, 정작 보려던 것(승인 버전과
+    # 배포 버전이 **다르게** 보이는가)은 안 보인다.
+    assert row["deployedVersion"] == prompt_version("hermes")
+    assert row["deployedVersion"] != row["version"], "갈린 것이 보여야 한다"
 
 
 def test_an_unreadable_version_does_not_break_the_list():
