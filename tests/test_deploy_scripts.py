@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -337,3 +338,119 @@ def test_subbots_is_not_excluded_from_the_copy():
     )
 
     assert "subbots" not in excludes
+
+
+# --- 스키마 적용 (2026-09-14) --------------------------------------------------
+#
+# 배포 문서가 적용할 스키마 파일을 나열했는데 그 목록이 드리프트했다. 스키마 파일은
+# 18개인데 문서에는 7개만 있었고, `console_schema.sql` 과
+# `specialist_runtime_schema.sql` 은 **한 번도 적용되지 않았다.**
+#
+# 그래서 콘솔 「봇 분류 상태」 가 `column "qa_record_id" does not exist` 로 죽었다.
+# 빠진 것은 컬럼 9개와 표 4개였다 — 나머지는 그 화면을 아직 안 열어서 안 터졌을 뿐이다.
+#
+# 사람이 목록을 옮겨 적는 단계는 한 번은 빠진다. 그래서 여기서 막는다.
+APPLY_SCRIPT = ROOT / "deploy" / "apply-schema.sh"
+SQL_DIR = ROOT / "deploy" / "sql"
+
+
+def _listed_files() -> list[str]:
+    """`FILES=(...)` 안의 파일 이름들.
+
+    닫는 괄호를 문자열에서 찾지 않는다 — 주석에 `(멱등)` 처럼 괄호가 들어 있어서
+    거기서 잘린다. 줄 단위로 읽고 주석을 먼저 떼어 낸다.
+    """
+    out: list[str] = []
+    inside = False
+    for raw in APPLY_SCRIPT.read_text(encoding="utf-8").splitlines():
+        if not inside:
+            inside = raw.strip().startswith("FILES=(")
+            continue
+        code = raw.split("#", 1)[0].strip()
+        if code == ")":
+            break
+        if code:
+            out.append(code)
+    return out
+
+
+def _postgres_schemas() -> list[str]:
+    """Oracle 쪽(`oracle_*`·`export_*`)은 그룹웨어 DB 에서 DBA 가 돌린다."""
+    return sorted(
+        p.name for p in SQL_DIR.glob("*.sql")
+        if not p.name.startswith(("oracle_", "export_"))
+    )
+
+
+def test_every_postgres_schema_file_is_applied():
+    """새 스키마를 만들고 목록에 안 넣으면, 그 표는 영영 안 생긴다."""
+    missing = sorted(set(_postgres_schemas()) - set(_listed_files()))
+    assert not missing, f"apply-schema.sh 에 없는 스키마 파일: {missing}"
+
+
+def test_the_script_does_not_list_files_that_are_gone():
+    """없는 파일을 돌리면 스크립트가 통째로 멈춘다."""
+    ghosts = sorted(set(_listed_files()) - set(_postgres_schemas()))
+    assert not ghosts, f"파일이 없는데 목록에 있다: {ghosts}"
+
+
+def test_structure_comes_before_features():
+    """뒤 파일이 앞 파일의 표를 외래키로 참조한다. 알파벳 순으로 돌리면 깨진다."""
+    files = _listed_files()
+    assert files.index("index_schema.sql") < files.index("console_schema.sql")
+    for later in ("schedule_dm_schema.sql", "reviewer_schema.sql",
+                  "specialist_runtime_schema.sql"):
+        assert files.index("console_schema.sql") < files.index(later), later
+
+
+def test_data_migrations_run_last():
+    """구조가 다 선 뒤에 값을 고친다."""
+    files = _listed_files()
+    last_structure = max(
+        files.index(n) for n in files if n.endswith("_schema.sql")
+    )
+    for data in ("schedule_folder_acl_default.sql", "schedule_dm_fixed_ten.sql"):
+        assert files.index(data) > last_structure, data
+
+
+def test_the_script_stops_on_the_first_error():
+    """계속 돌리면 뒤 파일 오류가 줄줄이 나고 진짜 원인이 스크롤 위로 사라진다."""
+    body = APPLY_SCRIPT.read_text(encoding="utf-8")
+    assert "ON_ERROR_STOP=1" in body
+    assert "set -euo pipefail" in body
+
+
+def test_oracle_files_are_not_applied_to_postgres():
+    """섞으면 psql 이 문법 오류로 죽는다."""
+    listed = _listed_files()
+    assert not [n for n in listed if n.startswith(("oracle_", "export_"))]
+
+
+def test_the_deploy_doc_points_at_the_script():
+    """문서가 다시 파일을 나열하기 시작하면 같은 드리프트가 돌아온다."""
+    doc = (ROOT / "docs" / "deploy" / "rocky8.md").read_text(encoding="utf-8")
+    assert "apply-schema.sh" in doc
+    assert "check_schema_drift.py" in doc
+
+
+def test_drift_check_reads_every_schema_file():
+    """대조 도구가 일부 파일만 읽으면, 안 읽은 파일의 누락은 영영 안 보인다."""
+    body = (ROOT / "scripts" / "check_schema_drift.py").read_text(encoding="utf-8")
+    assert 'glob("*.sql")' in body
+    # 주석 처리된 예시를 요구사항으로 잡으면 없는 고장을 매번 보고한다.
+    assert "_uncommented" in body
+
+
+def test_declared_alter_statements_are_idempotent():
+    """`IF NOT EXISTS` 없이 쓰면 두 번째 적용에서 스크립트가 멈춘다."""
+    bad: list[str] = []
+    pattern = re.compile(r"^\s*ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN\s+(?!IF\s+NOT\s+EXISTS)",
+                         re.IGNORECASE | re.MULTILINE)
+    for name in _listed_files():
+        text = (SQL_DIR / name).read_text(encoding="utf-8")
+        body = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("--")
+        )
+        if pattern.search(body):
+            bad.append(name)
+    assert not bad, f"IF NOT EXISTS 없는 ADD COLUMN: {bad}"
