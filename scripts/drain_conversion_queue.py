@@ -93,16 +93,19 @@ def reconvert(meta_path: pathlib.Path, *, expected_sha256: str = "") -> tuple[bo
 
     raw_path = meta.get("object_path")
     if not raw_path or not pathlib.Path(raw_path).is_file():
+        _write_failure_meta(meta_path, meta, "original_missing", retryable=False)
         return False, "original_missing", False
 
     coverage = None
     try:
         raw = pathlib.Path(raw_path).read_bytes()
         if expected_sha256 and hashlib.sha256(raw).hexdigest() != expected_sha256:
+            _write_failure_meta(meta_path, meta, "original_changed", retryable=False)
             return False, "original_changed", False
         body, coverage = convert_with_coverage(str(meta.get("filetype") or ""), raw)
     except (ConvertError, OSError) as exc:
         code, retryable = failure_details(exc)
+        _write_failure_meta(meta_path, meta, code, retryable=retryable)
         return False, code, retryable
 
     text = "\n".join(body)
@@ -111,11 +114,28 @@ def reconvert(meta_path: pathlib.Path, *, expected_sha256: str = "") -> tuple[bo
         _write_meta(meta_path, meta, status="pii_refused", code="pii_refused", body=None)
         return False, "pii_refused", False
     if not text.strip():
+        _write_failure_meta(meta_path, meta, "empty_output", retryable=False)
         return False, "empty_output", False
 
     _write_meta(meta_path, meta, status="converted", code="", body=body,
                 coverage=coverage)
     return True, "", False
+
+
+def _write_failure_meta(
+    meta_path: pathlib.Path, meta: dict, code: str, *, retryable: bool
+) -> None:
+    """현재 실패 상태만 기록한다. 원본과 이전 유효 미리보기는 건드리지 않는다."""
+    meta.update({
+        "status": "download_or_extract_failed",
+        "conversion_state": "failed",
+        "error_code": code,
+        "retryable": retryable,
+        "reprocessed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    })
+    tmp = meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(meta_path)
 
 
 def _write_meta(meta_path: pathlib.Path, meta: dict, *, status: str, code: str, body,
@@ -303,10 +323,23 @@ def backfill(archive_dir: str, *, apply: bool) -> int:
         item for item in scan(archive_dir)
         if (item.conversion_failed or item.status == PII_REFUSED)
     ]
-    candidates = [item for item in items if item.status != PII_REFUSED]
-    skipped = len(items) - len(candidates)
+    policy_excluded = [item for item in items if item.status == PII_REFUSED]
+    technical = [item for item in items if item.status != PII_REFUSED]
+    unknown_channel = [
+        item for item in technical if not item.channel_id or item.channel_id == "unknown"
+    ]
+    located = [item for item in technical if item not in unknown_channel]
+    original_missing = [
+        item for item in located
+        if item.object_path is None or not item.object_path.is_file()
+    ]
+    candidates = [item for item in located if item not in original_missing]
 
-    print(f"실패 첨부 {len(items)}건 · 큐 대상 {len(candidates)}건 · 정책 제외 {skipped}건")
+    print(
+        f"실패 첨부 {len(items)}건 · 큐 대상 {len(candidates)}건 · "
+        f"정책 제외 {len(policy_excluded)}건 · 원본 없음 {len(original_missing)}건 · "
+        f"채널 미확인 {len(unknown_channel)}건"
+    )
     if not candidates:
         return EXIT_OK
     if not apply:
@@ -321,13 +354,15 @@ def backfill(archive_dir: str, *, apply: bool) -> int:
     added = 0
     for item in candidates:
         digest = item.sha256 or ""
-        if not digest and item.object_path:
+        if not digest:
+            # 위에서 존재를 확인했지만 검사와 읽기 사이에 파일이 사라질 수 있다.
             try:
-                digest = hashlib.sha256(pathlib.Path(item.object_path).read_bytes()).hexdigest()
+                digest = hashlib.sha256(item.object_path.read_bytes()).hexdigest()
             except OSError:
-                # enqueue는 좌표만 저장한다. 실제 실행이 original_missing으로 닫고,
-                # backfill 전체를 한 파일 때문에 중단하지 않는다.
-                digest = ""
+                print(
+                    f"  건너뜀(원본 소실): {item.workspace}/{item.channel_id}/{item.file_id}"
+                )
+                continue
         try:
             job_id = queue.enqueue(
                 workspace=item.workspace,
@@ -343,7 +378,10 @@ def backfill(archive_dir: str, *, apply: bool) -> int:
             return EXIT_INPUT
         if job_id:
             added += 1
-    print(f"큐에 올린 작업 {added}건. `--apply` 로 처리하거나 타이머를 기다리세요.")
+    print(
+        f"큐에 올린 작업 {added}건. 재처리는 `drain_conversion_queue.py --apply`를 "
+        "별도로 실행하거나 타이머를 기다리세요."
+    )
     return EXIT_OK
 
 
@@ -434,7 +472,10 @@ def main(argv: list[str] | None = None) -> int:
                 continue
         state = queue.fail(job.id, error_code=code, retryable=retryable)
         failed += 1
-        print(f"  실패({code}) -> {state}: {job.log_line()}")
+        print(
+            f"  실패({code}) -> {state}: job={job.id} ws={job.workspace} "
+            f"ch={job.channel_id} file={job.file_id} attempt={job.attempt_count}"
+        )
 
     print(f"\n처리 {len(jobs)}건 · 실패 {failed}건")
     return EXIT_FAILED if failed else EXIT_OK

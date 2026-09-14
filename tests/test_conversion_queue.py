@@ -288,6 +288,10 @@ def test_a_missing_original_is_not_retried_forever(tmp_path):
     ok, code, retryable = drain.reconvert(meta_path)
 
     assert (ok, code, retryable) == (False, "original_missing", False)
+    saved = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert saved["error_code"] == "original_missing"
+    assert saved["conversion_state"] == "failed"
+    assert saved["reprocessed_at"]
 
 
 def test_a_successful_reconversion_replaces_the_output(tmp_path, monkeypatch):
@@ -491,17 +495,60 @@ def test_backfill_forces_because_the_old_verdict_used_the_old_converter(tmp_path
     assert seen and seen[0]["force"] is True
 
 
-def _staged_review(tmp_path, file_id, *, status, error_code="") -> None:
+def test_backfill_does_not_queue_an_attachment_without_its_original(
+    tmp_path, monkeypatch, capsys
+):
+    import drain_conversion_queue as drain
+
+    _staged_review(
+        tmp_path, "F1", status="download_or_extract_failed", original=False
+    )
+    added = []
+    monkeypatch.setattr(queue, "enqueue", lambda **kw: added.append(kw) or 1)
+
+    drain.backfill(str(tmp_path / "archive"), apply=True)
+
+    assert added == []
+    assert "원본 없음 1건" in capsys.readouterr().out
+
+
+def test_backfill_does_not_queue_an_attachment_with_an_unknown_channel(
+    tmp_path, monkeypatch, capsys
+):
+    import drain_conversion_queue as drain
+
+    _staged_review(
+        tmp_path,
+        "F1",
+        status="download_or_extract_failed",
+        channel_id="unknown",
+    )
+    added = []
+    monkeypatch.setattr(queue, "enqueue", lambda **kw: added.append(kw) or 1)
+
+    drain.backfill(str(tmp_path / "archive"), apply=True)
+
+    assert added == []
+    assert "채널 미확인 1건" in capsys.readouterr().out
+
+
+def _staged_review(
+    tmp_path, file_id, *, status, error_code="", channel_id="C1", original=True
+) -> None:
     """`attachment_review.scan()` 이 읽는 모양으로 하나 만든다."""
     d = (
-        tmp_path / "staging" / "workspaces" / "pilot" / "channels" / "C1"
+        tmp_path / "staging" / "workspaces" / "pilot" / "channels" / channel_id
         / "attachments" / file_id
     )
     d.mkdir(parents=True, exist_ok=True)
+    object_path = d / "original.pdf"
+    if original:
+        object_path.write_bytes(b"pdf")
     (d / "metadata.json").write_text(
         json.dumps({
             "name": f"{file_id}.pdf", "filetype": "pdf", "status": status,
             "error_code": error_code, "retryable": False, "sha256": "abc123",
+            "object_path": str(object_path),
         }, ensure_ascii=False),
         encoding="utf-8",
     )

@@ -63,8 +63,10 @@ coverage가 부정확하면 사람에게 잘못된 실패 범위를 통지하게
 - `tybot-convert-retry.timer` enable 됨
 - `drain_conversion_queue.py --status` → `임대 회수 0건 / 큐가 비어 있습니다`
 
-**아직 서버에서 안 한 것**: 최신 커밋 배포 후 `--backfill --apply`. 그래서 **큐는 여전히 비어 있고
-재처리가 실제로 돈 적은 없다.** 첫 실행 결과를 보고 이 문서의 3-A 를 정해야 한다.
+**서버 실행 결과(2026-09-15)**: `--backfill --apply`로 5건을 등록하고 worker를
+실행했다. 성공은 0건이며 `original_missing` 3건, `conversion_failed` 2건으로
+종료됐다. 같은 파일 `F0BUSS8RLVA`가 실제 채널과 `unknown` 채널 양쪽에서 잡혔다.
+후속 보완으로 원본 없음과 채널 미확인 항목은 백필 큐에 넣지 않고 별도 집계한다.
 
 ```bash
 # Git 소스와 실제 배포 커밋을 따로 확인한다.
@@ -275,7 +277,7 @@ conversion: pending | running | succeeded | partial | failed | unsupported | blo
 
 | 위험 | 설명 |
 |---|---|
-| 큐가 한 번도 안 돌았다 | 서버에서 `--backfill --apply` 전이라 실제 동작 미확인. **첫 실행 로그를 보고 이 문서를 갱신한다** |
+| 큐 첫 실행 성공 0건 | 5건 중 원본 없음 3건·변환 실패 2건. 원본 없음·채널 미확인은 후속 코드에서 큐 대상 제외. 나머지 2건은 변환기 로그 확인 필요 |
 | `http` 실행 모드 | `serve()` 가 `http` 를 `prompt` 와 같은 길로 보낸다. 지금 `http` 로 등록하면 프롬프트형으로 돈다 |
 | 도구 예산 기본값 | `MAX_TOOL_CALLS=12` 등은 실측이 아니다. 긴 종합에서 일찍 끊길 수 있다. `tool_calls=`/`budget=` 로그로 조정 |
 | Linux 셸 테스트 | `test_specialist_runtime_*` 33건은 개발 PC 의 `bash` 가 WSL 런처라 실패한다. **서버에서 별도 확인 필요** |
@@ -432,12 +434,26 @@ sudo systemctl enable --now tybot-convert-alert.timer
   관리자 알림이 누락될 수 있었다.
 - kordoc 성공 시 상세 개수(외부 도구가 안 준다)
 - **상한을 없앴으므로 아카이브·색인이 커진다 — 성능 실측 필요**
-- 서버에서 `--backfill --apply` 미실행. **큐는 여전히 비어 있다**
+- 서버 백필 첫 실행은 완료했으나 **성공 0건**. 원본 없음 3건과 변환 실패 2건
+- 후속 수정 배포 뒤 `--backfill` 미리보기에서 큐 대상이 원본이 남은 2건으로
+  줄어드는지 확인하고, `conversion_failed` 2건의 worker 로그를 조사한다
 
 ### Codex 검증 (2026-09-15)
 
 - 전체 Python 테스트(Linux 전용 전문 봇 셸 테스트 제외): **1997 passed**
 - `ruff check src tests scripts`: 통과
 - 콘솔 프로덕션 빌드: 통과
-- 서버 운영 검증은 수행하지 않았다. 최신 배포 뒤 §0의 `/opt/tybot/... --backfill
-  --apply`와 알림 타이머 실제 전송을 별도로 확인해야 한다.
+- Codex가 서버에 직접 접속해 실행하지는 않았다. 오너가 제공한 첫 백필 결과는 위에
+  반영했으며, 이번 후속 수정 배포 뒤 §0의 `/opt/tybot/... --backfill` 미리보기와
+  알림 타이머 실제 전송을 별도로 확인해야 한다.
+
+### 서버 첫 백필 후 보완 (Codex/2026-09-15)
+
+- `original_missing`은 같은 파일을 다시 돌려도 복구되지 않으므로 큐 대상에서 제외
+- `channel_id=unknown`은 원문 반영 좌표를 결정할 수 없으므로 큐 대상에서 제외
+- 백필 요약에 정책 제외·원본 없음·채널 미확인을 각각 표시
+- worker 결과가 처리 전 `leased/reprocess_requested`를 출력하던 문제를 고쳐 실제
+  종료 상태와 오류 코드를 표시
+- 재처리 실패의 현재 오류 코드·재시도 가능 여부·처리 시각을 metadata에도 기록해
+  큐 DB와 콘솔 진단이 다른 상태를 보여 주지 않게 함. 원본과 기존 변환본은 보존
+- 검증: 변환 큐·알림 테스트 67건, Ruff 통과
