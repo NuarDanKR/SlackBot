@@ -482,6 +482,10 @@ def collected_docs(store: ArchiveStore | None = None) -> list[dict]:
                 "workspace": d.workspace,
                 "workspaceLabel": labels.get(d.workspace, d.workspace),
                 "channel": d.channel,
+                # 채널 ID. **이름이 아니라 이것으로 잇는다** — 이름은 바뀌고, 바뀌면
+                # 담당자·검토자가 조용히 다른 채널에 붙거나 사라진다.
+                # v1 문서에는 없다(빈 문자열).
+                "channelId": d.channel_id or "",
                 "path": d.path.relative_to(root).as_posix(),
                 "lines": len(d.raw_lines),
                 "bytes": size,

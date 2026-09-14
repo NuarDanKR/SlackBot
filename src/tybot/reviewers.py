@@ -246,3 +246,33 @@ def channels_without_reviewer(workspace_channels: dict[str, list[tuple[str, str]
                     "channelName": channel_name,
                 })
     return out
+
+
+def all_enabled() -> list[dict]:
+    """활성 검토자 전체. 콘솔 표가 한 번에 읽는다.
+
+    채널마다 따로 물으면 채널 수만큼 질의가 나간다 — 채널이 수십 개면 화면이 그만큼
+    느려지고, 그 느림이 「콘솔이 죽었다」 로 읽힌다.
+
+    DB 를 못 읽으면 **예외**다. 빈 목록으로 돌려주면 「검토자 없음」 과 구별되지 않아
+    화면이 전 채널을 빨강으로 칠한다.
+    """
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT workspace, channel_id, channel_name, reviewer_user, send_at, enabled
+              FROM channel_reviewer
+             WHERE enabled
+             ORDER BY workspace, channel_id, reviewer_user
+            """
+        )
+        return [
+            {
+                "workspace": str(r["workspace"]),
+                "channel_id": str(r["channel_id"]),
+                "channel_name": str(r.get("channel_name") or ""),
+                "reviewer_user": str(r["reviewer_user"]),
+                "send_at": r["send_at"].strftime("%H:%M") if r.get("send_at") else "",
+            }
+            for r in cur.fetchall()
+        ]

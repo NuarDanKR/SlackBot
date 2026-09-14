@@ -2749,3 +2749,84 @@
 .checkbox input {
   margin: 0;
 }
+
+/* --- 채널 관리 표 -----------------------------------------------------------
+ *
+ * 칸이 열한 개다. 화면을 넘치면 **가로로 스크롤한다** — 칸을 줄이면 담당자를 정할 때
+ * 필요한 판단 근거(활성도)가 사라지고, 그러면 표를 보는 의미가 없다.
+ * 세로로 접으면 한 번에 여러 줄을 고를 수 없다.
+ */
+.grid-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+table.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+table.grid th,
+table.grid td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+table.grid thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--text-2);
+  font-weight: 600;
+  /* 줄이 많아도 어느 칸인지 잃지 않게 머리글을 붙여 둔다. */
+  box-shadow: inset 0 -1px 0 var(--line-2);
+  z-index: 1;
+}
+
+table.grid tbody tr:hover {
+  background: var(--bg);
+}
+
+table.grid .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 채널명은 길다. 이 칸만 줄바꿈을 허용한다. */
+table.grid .wrap {
+  white-space: normal;
+  min-width: 260px;
+}
+
+/* 담당자가 없는 줄. 표에서 **먼저 눈에 띄어야** 하는 것이 그것이다. */
+table.grid tr.row-warn td {
+  background: var(--warn-soft);
+}
+
+table.grid .dim {
+  color: var(--text-3);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.note.warn {
+  color: var(--warn);
+}

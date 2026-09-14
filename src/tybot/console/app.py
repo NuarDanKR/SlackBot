@@ -35,6 +35,7 @@ from . import (
     account_store,
     answer_records,
     audit_store,
+    channel_admin,
     deploy_approval_store,
     env_settings,
     health,
@@ -203,6 +204,15 @@ class SpecialistProposalBody(BaseModel):
 class SpecialistImportBody(BaseModel):
     repositoryUrl: str = Field(min_length=1, max_length=300)
     release: str = Field(default="latest", min_length=1, max_length=100)
+
+
+class ChannelOwnerBody(BaseModel):
+    """채널 담당자 일괄 지정."""
+
+    owner: str = Field(min_length=1, max_length=40)
+    channels: list[str] = Field(min_length=1, max_length=500)   # "워크스페이스:채널ID"
+    # 기존 담당자는 그 채널을 만든 실제 요청자일 수 있다. 덮으려면 명시해야 한다.
+    overwrite: bool = False
 
 
 class SpecialistDecisionBody(BaseModel):
@@ -2359,3 +2369,84 @@ def _auth_error(_request, exc: AuthError) -> JSONResponse:
 
 
 mount_frontend()
+
+
+# ===========================================================================
+# 채널 관리 — 담당자를 한 화면에서 정한다
+# ===========================================================================
+#
+# 설계: docs/design/console-channel-admin.md
+#
+# 옛날에 만든 채널은 담당자가 없어 `/채널 수정` 이 안 된다. 담당자가 없으면 검토자도
+# 못 정하고, 그러면 첨부 검수 DM 도 안 간다. Slack 에서 채널마다 명령을 치게 하면
+# 수십 개를 하나씩 돌아야 해서 아무도 안 한다.
+@app.get("/api/channels")
+def channel_admin_rows(user: User) -> dict:
+    """채널 표. 관리자만 본다 — 채널 목록 자체가 조직 구조를 드러낸다(원칙 3)."""
+    _require_admin(user)
+    try:
+        rows, totals = channel_admin.snapshot()
+    except Exception as exc:  # 어느 조각이 없는지 사람에게 말한다
+        raise HTTPException(
+            status_code=503,
+            detail=f"채널 목록을 만들지 못했습니다: {exc}",
+        ) from exc
+    return {
+        "summary": totals,
+        "rows": [row.to_json() for row in rows],
+        # 담당자로 고를 수 있는 사람. 아무 문자열이나 받으면 오타가 그대로 저장되고,
+        # 그 채널은 계속 아무도 못 고친다.
+        "candidates": channel_admin.owner_candidates(),
+    }
+
+
+@app.post("/api/channels/owner")
+def set_channel_owner(
+    body: ChannelOwnerBody, request: Request, user: User
+) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+
+    targets: list[tuple[str, str, str]] = []
+    names = channel_admin.channel_names()
+    for raw in body.channels:
+        workspace, _, channel_id = str(raw).partition(":")
+        if not workspace or not channel_id:
+            raise HTTPException(status_code=422, detail=f"채널 형식이 올바르지 않습니다: {raw}")
+        targets.append((workspace, channel_id, names.get((workspace, channel_id), channel_id)))
+
+    if not channel_admin.is_known_user(body.owner):
+        raise HTTPException(
+            status_code=422,
+            detail="사번과 연결된 Slack 사용자만 담당자로 지정할 수 있습니다.",
+        )
+
+    try:
+        result = channel_admin.assign_owner(
+            channel_admin.owner_store(), targets, body.owner,
+            actor=user.email, overwrite=body.overwrite,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # 잠금 충돌 등
+        _audit_event(
+            actor=user.email, category="channel", action="set-owner",
+            target_type="channel", target_id=str(len(targets)), outcome="failed",
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    _audit_event(
+        actor=user.email, category="channel", action="set-owner",
+        target_type="channel", target_id=body.owner, outcome="succeeded",
+        metadata={
+            "changed": len(result.changed),
+            "skipped": len(result.skipped),
+            "overwrite": body.overwrite,
+        },
+    )
+    rows, totals = channel_admin.snapshot()
+    return {
+        "result": result.to_json(),
+        "summary": totals,
+        "rows": [row.to_json() for row in rows],
+    }

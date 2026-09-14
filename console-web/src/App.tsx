@@ -6,6 +6,7 @@ import { AuditEvents } from './pages/AuditEvents'
 import { ArchiveDiagnostics, CommandDiagnostics, FeedbackPage } from './pages/Diagnostics'
 import { AnswerRecords } from './pages/AnswerRecords'
 import { BatchTimers } from './pages/BatchTimers'
+import { Channels } from './pages/Channels'
 import { Collected } from './pages/Collected'
 import { ConsoleUsers } from './pages/ConsoleUsers'
 import { Dashboard } from './pages/Dashboard'
@@ -31,6 +32,7 @@ const NAV: NavGroup[] = [
     { path: '/collect', label: '수집 현황' },
     { path: '/collect/archive', label: '아카이브 진단' },
     { path: '/collect/documents', label: '원문 문서' },
+    { path: '/collect/channels', label: '채널 관리', minimum: 'admin' },
     { path: '/collect/summaries', label: '승인 요약 문서', capability: 'approvedSummaries' },
     { path: '/collect/reviews', label: '요약 검토 현황', capability: 'summaryReview' },
   ] },
@@ -151,6 +153,7 @@ export default function App() {
       {path === '/collect' && <Dashboard user={user} query={location.query} />}
       {path === '/collect/archive' && <ArchiveDiagnostics user={user} onToast={toast} />}
       {path === '/collect/documents' && <Collected user={user} query={location.query} onToast={toast} />}
+      {path === '/collect/channels' && <Channels onToast={toast} />}
       {(path === '/collect/summaries' || path === '/collect/reviews') && <><div className="page-head"><div><div className="crumb">수집</div><h1 className="page-title">화면을 준비하고 있습니다</h1><p className="page-note">기능이 활성화되었지만 이 버전의 콘솔에는 화면이 연결되지 않았습니다. 관리자에게 콘솔 배포 상태를 알려 주세요.</p></div></div></>}
       {path === '/answer' && <AnswerDashboard user={user} query={location.query} navigate={navigate} />}
       {path === '/answer/specialists' && <SpecialistAnalytics query={location.query} navigate={navigate} />}

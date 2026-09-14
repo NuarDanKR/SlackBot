@@ -6,7 +6,9 @@ Channel Manager를 대체하는 권한이 아니라, 봇의 이름 변경 API를
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import re
 import threading
 from dataclasses import dataclass
@@ -15,6 +17,8 @@ from pathlib import Path
 
 from .channels import COLLECT_PREFIXES, PREFIX_ALIASES, ChannelSpec, parse
 from .orgsearch import OrgHit, decode_value, option
+
+logger = logging.getLogger("tybot.channel_management")
 
 _OWNER_LOCK = threading.Lock()
 _SPACE_RE = re.compile(r"\s+")
@@ -638,11 +642,53 @@ def edit_from_view(view: dict) -> ChannelEdit:
     )
 
 
+class ChannelOwnerBusy(RuntimeError):
+    """담당자 기록을 지금 쓸 수 없다. 기다리지 않고 사람에게 돌려준다."""
+
+
 class ChannelOwnerStore:
-    """TYBot 생성 채널의 최초 요청자와 위임된 수정 담당자를 기록한다."""
+    """TYBot 생성 채널의 최초 요청자와 위임된 수정 담당자를 기록한다.
+
+    ## 잠금은 프로세스를 넘는다
+    `threading.Lock` 은 **한 프로세스 안에서만** 유효하다. 봇(`tybot`)과 콘솔
+    (`tybot-console`)은 다른 프로세스라, 콘솔이 쓰기 시작하면 이렇게 된다.
+
+    ```
+    콘솔   읽기 ──────── 쓰기(내 변경만 담긴 전체 파일)
+    봇          읽기 ── 쓰기(내 변경만 담긴 전체 파일)
+                                  ↑ 콘솔 변경이 사라진다
+    ```
+
+    원자적 교체는 **파일이 깨지는 것**만 막는다. 읽고-고치고-쓰는 사이의 분실은
+    막지 못한다. 그래서 쓰기는 `lock.FileLock` 으로 프로세스 간에도 잠근다.
+
+    못 잡으면 **실패로 답한다.** 조용히 덮어쓰면 다른 쪽 변경이 사라지고, 그건
+    화면에 성공으로 보인다.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """읽기-수정-쓰기 한 묶음. 같은 서버의 다른 프로세스도 기다린다."""
+        from .lock import AlreadyRunning, FileLock, LockUnavailable
+
+        with _OWNER_LOCK:          # 같은 프로세스 안의 스레드
+            lock = FileLock(self.path.with_suffix(".lock"), label="채널 담당자")
+            try:
+                with lock:         # 다른 프로세스
+                    yield
+                    return
+            except AlreadyRunning as exc:
+                raise ChannelOwnerBusy(
+                    "다른 작업이 채널 담당자 기록을 쓰는 중입니다. 잠시 후 다시 시도하세요."
+                ) from exc
+            except LockUnavailable as exc:
+                # 락 파일을 못 만드는 환경(권한·읽기전용). 여기서 멈추면 봇이 채널을
+                # 만들지 못한다. 스레드 락만으로 진행하고 그 사실을 남긴다.
+                logger.warning("채널 담당자 파일 잠금을 쓸 수 없다(%s) — 스레드 락만 사용", exc)
+            yield
 
     def _read(self) -> dict:
         try:
@@ -654,7 +700,7 @@ class ChannelOwnerStore:
         return data
 
     def record(self, workspace: str, channel_id: str, owner_user_id: str, name: str) -> None:
-        with _OWNER_LOCK:
+        with self._locked():
             data = self._read()
             key = f"{workspace}:{channel_id}"
             existing = data["channels"].get(key) or {}
@@ -664,10 +710,7 @@ class ChannelOwnerStore:
                 "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "manager_user_ids": list(existing.get("manager_user_ids") or []),
             }
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self.path)
+            self._save(data)
 
     def record_if_missing(
         self, workspace: str, channel_id: str, owner_user_id: str, name: str
@@ -679,7 +722,7 @@ class ChannelOwnerStore:
         """
         if not workspace or not channel_id or not owner_user_id:
             return False
-        with _OWNER_LOCK:
+        with self._locked():
             data = self._read()
             key = f"{workspace}:{channel_id}"
             existing = data["channels"].get(key)
@@ -694,11 +737,71 @@ class ChannelOwnerStore:
             data["channels"][key] = row
             version = data.get("version")
             data["version"] = max(version if isinstance(version, int) else 1, 2)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self.path)
+            self._save(data)
         return True
+
+    def _save(self, data: dict) -> None:
+        """원자적 교체. **호출자가 이미 잠금을 쥐고 있어야 한다.**"""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def set_owner(
+        self,
+        workspace: str,
+        channel_id: str,
+        owner_user_id: str,
+        *,
+        set_by: str,
+        name: str = "",
+        overwrite: bool = False,
+    ) -> bool:
+        """담당자를 지정한다. 바꿨으면 `True`.
+
+        **이미 담당자가 있으면 덮지 않는다**(`overwrite` 를 줘야 바뀐다). 기존 값은
+        그 채널을 만든 실제 요청자일 수 있고, 덮으면 그 사람이 권한을 잃는다.
+
+        위임 목록(`manager_user_ids`)은 건드리지 않는다 — 담당자를 바꾸는 것과
+        위임을 거두는 것은 다른 결정이다.
+        """
+        owner = str(owner_user_id or "").strip()
+        if not workspace or not channel_id or not owner:
+            raise ValueError("워크스페이스·채널·담당자가 모두 필요합니다.")
+        with self._locked():
+            data = self._read()
+            key = f"{workspace}:{channel_id}"
+            row = data["channels"].get(key)
+            row = row if isinstance(row, dict) else {}
+            current = str(row.get("owner_user_id") or "")
+            if current and not overwrite:
+                return False
+            if current == owner:
+                return False
+            row["owner_user_id"] = owner
+            if name:
+                row["name"] = name
+            row.setdefault("manager_user_ids", [])
+            row.setdefault("created_at", datetime.now(UTC).isoformat(timespec="seconds"))
+            # 누가 언제 정했는지 남긴다. 나중에 「이 사람이 왜 담당자인가」 를 답한다.
+            row["owner_source"] = "console"
+            row["owner_set_by"] = set_by
+            row["owner_set_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+            data["channels"][key] = row
+            data["version"] = max(int(data.get("version") or 1), 2)
+            self._save(data)
+        return True
+
+    def all(self) -> dict[tuple[str, str], dict]:
+        """`{(워크스페이스, 채널ID): 행}` 전체. 화면이 한 번 읽어 표를 만든다."""
+        with _OWNER_LOCK:
+            rows = self._read()["channels"]
+        out: dict[tuple[str, str], dict] = {}
+        for key, row in rows.items():
+            workspace, _, channel_id = str(key).partition(":")
+            if channel_id and isinstance(row, dict):
+                out[(workspace, channel_id)] = row
+        return out
 
     def owner_of(self, workspace: str, channel_id: str) -> str:
         """이 채널을 만든 사람. 없으면 빈 문자열.
@@ -732,7 +835,7 @@ class ChannelOwnerStore:
         managers = tuple(
             dict.fromkeys(str(user).strip() for user in manager_user_ids if str(user).strip())
         )
-        with _OWNER_LOCK:
+        with self._locked():
             data = self._read()
             key = f"{workspace}:{channel_id}"
             row = data["channels"].get(key)
@@ -743,10 +846,7 @@ class ChannelOwnerStore:
             row["managers_updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
             row["managers_updated_by"] = set_by
             data["version"] = 2
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self.path)
+            self._save(data)
         return managers
 
     def owners(self) -> dict[tuple[str, str], str]:

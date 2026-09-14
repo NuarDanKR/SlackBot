@@ -2044,3 +2044,164 @@ def test_console_rules_source_says_which_one_actually_runs(client, monkeypatch):
     row = client.get("/api/specialists", headers=member(client)).json()["specialists"][0]
 
     assert row["rulesSource"] == "console"
+
+
+# --- 채널 관리 (2026-09-15) -----------------------------------------------------
+#
+# 옛날에 만든 채널은 담당자가 없어 `/채널 수정` 이 안 된다. 담당자가 없으면 검토자도
+# 못 정하고, 그러면 첨부 검수 DM 도 안 간다. 표에서 한 번에 정한다.
+def _channel_rows(monkeypatch, rows=None, totals=None, candidates=None):
+    from tybot.console.channel_admin import ChannelRow
+
+    rows = rows if rows is not None else [
+        ChannelRow(workspace="tyit", workspace_label="전산팀",
+                   channel_id="C1", channel="#팀-전산_ABB155-주간보고")
+    ]
+    monkeypatch.setattr(
+        console_app.channel_admin, "snapshot",
+        lambda *a, **k: (rows, totals or {"channels": len(rows), "missingOwner": 1,
+                                          "missingReviewer": 1, "activeMissingOwner": 0}),
+    )
+    monkeypatch.setattr(
+        console_app.channel_admin, "owner_candidates",
+        lambda: candidates if candidates is not None else [
+            {"workspace": "tyit", "slackUser": "U1", "name": "단라운", "org": "전산팀"}
+        ],
+    )
+    return rows
+
+
+def test_channel_grid_lists_channels(client, monkeypatch):
+    _channel_rows(monkeypatch)
+    response = client.get("/api/channels", headers=owner(client))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["missingOwner"] == 1
+    assert body["rows"][0]["channel"] == "#팀-전산_ABB155-주간보고"
+    assert body["rows"][0]["needsOwner"] is True
+    assert body["candidates"][0]["slackUser"] == "U1"
+
+
+def test_channel_grid_is_admin_only(client, monkeypatch):
+    """채널 목록 자체가 조직 구조를 드러낸다(원칙 3)."""
+    _channel_rows(monkeypatch)
+    assert client.get("/api/channels", headers=member(client)).status_code == 403
+
+
+def test_channel_grid_says_which_piece_is_missing(client, monkeypatch):
+    """조용히 빈 표를 주면 「채널이 없다」 로 읽힌다."""
+    def _broken(*_a, **_k):
+        raise RuntimeError("검토자 DB 없음")
+
+    monkeypatch.setattr(console_app.channel_admin, "snapshot", _broken)
+    response = client.get("/api/channels", headers=owner(client))
+    assert response.status_code == 503
+    assert "검토자 DB 없음" in response.json()["detail"]
+
+
+def test_bulk_owner_assignment(client, monkeypatch):
+    seen: dict = {}
+
+    def _assign(_store, targets, owner_id, *, actor, overwrite):
+        seen.update(targets=targets, owner=owner_id, actor=actor, overwrite=overwrite)
+        return console_app.channel_admin.AssignResult(changed=["#a"])
+
+    _channel_rows(monkeypatch)
+    monkeypatch.setattr(console_app.channel_admin, "owner_store", lambda: object())
+    monkeypatch.setattr(console_app.channel_admin, "is_known_user", lambda _u: True)
+    monkeypatch.setattr(
+        console_app.channel_admin, "channel_names", lambda: {("tyit", "C1"): "#a"}
+    )
+    monkeypatch.setattr(console_app.channel_admin, "assign_owner", _assign)
+
+    response = client.post(
+        "/api/channels/owner",
+        json={"owner": "U1", "channels": ["tyit:C1"]},
+        headers=_write_headers(owner(client)),
+    )
+    assert response.status_code == 200
+    assert seen["targets"] == [("tyit", "C1", "#a")]
+    assert seen["overwrite"] is False
+    assert response.json()["result"]["changed"] == ["#a"]
+
+
+def test_unknown_owner_is_refused(client, monkeypatch):
+    """오타가 그대로 저장되면 그 채널은 계속 아무도 못 고친다."""
+    _channel_rows(monkeypatch)
+    monkeypatch.setattr(console_app.channel_admin, "is_known_user", lambda _u: False)
+    monkeypatch.setattr(console_app.channel_admin, "channel_names", lambda: {})
+
+    response = client.post(
+        "/api/channels/owner",
+        json={"owner": "UZZZZ", "channels": ["tyit:C1"]},
+        headers=_write_headers(owner(client)),
+    )
+    assert response.status_code == 422
+    assert "사번" in response.json()["detail"]
+
+
+def test_malformed_channel_key_is_refused(client, monkeypatch):
+    _channel_rows(monkeypatch)
+    monkeypatch.setattr(console_app.channel_admin, "is_known_user", lambda _u: True)
+    monkeypatch.setattr(console_app.channel_admin, "channel_names", lambda: {})
+
+    response = client.post(
+        "/api/channels/owner",
+        json={"owner": "U1", "channels": ["채널ID없음"]},
+        headers=_write_headers(owner(client)),
+    )
+    assert response.status_code == 422
+
+
+def test_owner_assignment_is_admin_only(client, monkeypatch):
+    _channel_rows(monkeypatch)
+    response = client.post(
+        "/api/channels/owner",
+        json={"owner": "U1", "channels": ["tyit:C1"]},
+        headers=_write_headers(member(client)),
+    )
+    assert response.status_code == 403
+
+
+def test_lock_conflict_is_reported_not_swallowed(client, monkeypatch):
+    """조용히 덮어쓰면 다른 쪽 변경이 사라지고, 화면에는 성공으로 보인다."""
+    from tybot.channel_management import ChannelOwnerBusy
+
+    def _busy(*_a, **_k):
+        raise ChannelOwnerBusy("다른 작업이 쓰는 중입니다.")
+
+    _channel_rows(monkeypatch)
+    monkeypatch.setattr(console_app.channel_admin, "owner_store", lambda: object())
+    monkeypatch.setattr(console_app.channel_admin, "is_known_user", lambda _u: True)
+    monkeypatch.setattr(console_app.channel_admin, "channel_names", lambda: {})
+    monkeypatch.setattr(console_app.channel_admin, "assign_owner", _busy)
+
+    response = client.post(
+        "/api/channels/owner",
+        json={"owner": "U1", "channels": ["tyit:C1"]},
+        headers=_write_headers(owner(client)),
+    )
+    assert response.status_code == 409
+
+
+def test_assignment_is_audited(client, monkeypatch):
+    """나중에 「이 사람이 왜 담당자인가」 를 답할 수 있어야 한다."""
+    events: list[dict] = []
+    _channel_rows(monkeypatch)
+    monkeypatch.setattr(console_app.channel_admin, "owner_store", lambda: object())
+    monkeypatch.setattr(console_app.channel_admin, "is_known_user", lambda _u: True)
+    monkeypatch.setattr(console_app.channel_admin, "channel_names", lambda: {})
+    monkeypatch.setattr(
+        console_app.channel_admin, "assign_owner",
+        lambda *a, **k: console_app.channel_admin.AssignResult(changed=["#a"]),
+    )
+    monkeypatch.setattr(console_app.audit_store, "record", lambda **kw: events.append(kw))
+
+    client.post(
+        "/api/channels/owner",
+        json={"owner": "U1", "channels": ["tyit:C1"]},
+        headers=_write_headers(owner(client)),
+    )
+    done = [e for e in events if e.get("category") == "channel"]
+    assert done and done[-1]["target_id"] == "U1"
+    assert done[-1]["metadata"]["changed"] == 1
