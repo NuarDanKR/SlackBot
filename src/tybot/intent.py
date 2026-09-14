@@ -82,7 +82,15 @@ STATUS_RE = re.compile(
     r"(수집|취합)\s*(현황|상태|건수|얼마나|몇)|몇\s*건|"
     r"(수집|취합)(했|됐)|(수집|취합)된(?!\s*[0-9A-Za-z가-힣]))"
 )
-HELP_RE = re.compile(r"(도움말|사용법|명령어|뭘\s*할\s*수|어떻게\s*써|\bhelp\b)")
+HELP_RE = re.compile(
+    r"(도움말|사용법|명령어|뭘\s*할\s*수|어떻게\s*써|"
+    r"(?:캔버스|canvas).*(?:읽|내용|답)|\bhelp\b)",
+    re.IGNORECASE,
+)
+CANVAS_CAPABILITY_RE = re.compile(
+    r"(?:캔버스|canvas).*(?:읽|내용|답)",
+    re.IGNORECASE,
+)
 # 봇의 '기억'을 묻는 질문. STATUS_RE 보다 먼저 검사한다 —
 # "이전에 네가 했던 답변" 류가 '(너) ... 상태' 패턴에 걸려 status 로 새는 일이 있었다.
 MEMORY_RE = re.compile(
@@ -696,6 +704,11 @@ def plan(
     두 가지를 물으면 **한쪽이 처리 경로에 도달조차 하지 못했다.** 분해를 분류기 책임으로
     옮겨 사람이 실제로 묻는 방식에 맞춘다.
     """
+    # 제품 기능의 가능 여부를 묻는 질문은 LLM이 업무 요약으로 오분류해도 결과가
+    # 달라져서는 안 된다. 특히 "캔버스 내용을 읽고 답해줘?"는 실제 운영에서
+    # 전체 사용법으로 빠졌던 문장이다.
+    if CANVAS_CAPABILITY_RE.search(text):
+        return [Intent("help", source="rule", question=text)]
     if router is None:
         return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)
 

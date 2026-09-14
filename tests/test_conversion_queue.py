@@ -251,6 +251,22 @@ def test_a_failed_reconversion_keeps_the_previous_output(tmp_path, monkeypatch):
     assert Path(json.loads(meta_path.read_text(encoding="utf-8"))["object_path"]).is_file()
 
 
+def test_reconversion_refuses_an_original_changed_after_enqueue(tmp_path, monkeypatch):
+    import hashlib
+
+    import drain_conversion_queue as drain
+
+    from tybot.archive import convert as convert_mod
+
+    meta_path = _staged(tmp_path, body=b"new content")
+    monkeypatch.setattr(convert_mod, "convert", lambda *_: pytest.fail("must not convert"))
+    old_digest = hashlib.sha256(b"old content").hexdigest()
+
+    ok, code, retryable = drain.reconvert(meta_path, expected_sha256=old_digest)
+
+    assert not ok and code == "original_changed" and not retryable
+
+
 def test_a_pii_blocked_attachment_is_not_unblocked_by_reprocessing(tmp_path):
     """정책 제외를 기술 실패처럼 자동 해제하지 않는다."""
     import drain_conversion_queue as drain
@@ -323,6 +339,65 @@ def test_an_empty_conversion_is_not_a_success(tmp_path, monkeypatch):
     ok, code, _retryable = drain.reconvert(meta_path)
 
     assert (ok, code) == (False, "empty_output")
+
+
+def test_reconversion_is_not_complete_until_archived_and_indexed(tmp_path, monkeypatch):
+    import drain_conversion_queue as drain
+
+    from tybot import search_index
+    from tybot.archive import writer
+    from tybot.archive.store import ArchiveStore
+
+    archive = tmp_path / "archive"
+    when = datetime(2026, 9, 14, 9, 0, tzinfo=writer.KST)
+    writer.ingest(
+        archive,
+        workspace="pilot",
+        channel="#팀-전산_test",
+        channel_id="C1",
+        messages=[writer.IncomingMessage(
+            ts=when,
+            speaker="홍길동",
+            text="[첨부:처리실패] 보고서.txt (txt, 1KB)",
+        )],
+        acl=["#팀-전산_test"],
+    )
+    meta_path = _staged(tmp_path)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.update({
+        "slack_file_id": "F1",
+        "declared_size": 1024,
+        "origin_message_ts": str(when.timestamp()),
+    })
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (meta_path.parent / "extracted.md").write_text(
+        "<!-- 로컬 재변환본 -->\n# 보고서.txt\n\n표 1행\n",
+        encoding="utf-8",
+    )
+    indexed = []
+    monkeypatch.setattr(search_index, "reindex", lambda docs, root: indexed.extend(docs) or {})
+    job = queue.Job(
+        id=1,
+        workspace="pilot",
+        channel_id="C1",
+        file_id="F1",
+        original_sha256="",
+        pipeline_version="1",
+        state="leased",
+        attempt_count=1,
+    )
+
+    assert drain.publish_reconversion(str(archive), meta_path, job) == (True, "", False)
+    # 재시도되어도 원문 줄은 늘어나지 않는다.
+    assert drain.publish_reconversion(str(archive), meta_path, job) == (True, "", False)
+
+    lines = [line.text for doc in ArchiveStore(archive).docs() for line in doc.raw_lines]
+    assert lines.count("[첨부추출:보고서.txt] 표 1행") == 1
+    saved = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert saved["archive_state"] == "archived"
+    assert saved["index_state"] == "succeeded"
+    assert saved["indexed_at"]
+    assert indexed
 
 
 # =============================================================================

@@ -8,6 +8,27 @@
 
 ## 0. 지금 어디까지 와 있나
 
+### Codex 후속 작업 (2026-09-14, 작업 트리)
+
+- `--backfill` 서버 오류는 기능 누락이 아니라 **서버 소스가 `9183fe4` 이전인 배포
+  불일치**다. 서버에서 `git rev-parse --short HEAD`와
+  `.venv/bin/python scripts/drain_conversion_queue.py --help`를 먼저 확인한다.
+- 재처리 큐는 이제 변환 미리보기만으로 성공 처리하지 않는다. 기존 첨부 원문에
+  멱등 추가하고, 반영 지문을 확인하고, 해당 문서를 검색 색인에 넣은 뒤 닫는다.
+- 콘솔 첨부 진단에 관리자 전용 단건 재처리 API와 확인 버튼을 추가했다. PII 정책
+  제외 문서에는 버튼을 노출하지 않는다.
+- 질문 시점의 채널 Canvas를 실시간 근거 도구에 포함했다. TYBot 답변 Canvas는
+  재귀 근거가 되지 않게 계속 제외한다.
+- 채널 Canvas 답변은 채널 읽기 권한을 부여하고, DM 답변은 요청자 권한을 부여하는
+  기존 경로를 검증했다. Markdown 표는 Slack의 300셀 제한에 맞춰 행 단위 분할한다.
+- "캔버스 내용을 읽고 답하느냐" 같은 기능 질의는 LLM 분류 전에 고정 처리하여
+  전체 사용법이 아니라 읽기 범위와 제약만 직접 답한다.
+- 명시적인 DM 후속 질문만 최근 2시간의 동일 사용자·워크스페이스·DM 문답 좌표를
+  연결한다. 새 DM 주제에는 과거 문맥을 섞지 않는다.
+- 검증: 관련 테스트 218건, 전체 테스트 1902건, `ruff`, 콘솔 타입 검사·빌드 통과.
+  Windows Git 가드 subprocess의 기존 UTF-8 디코딩 경고와 Starlette 경고만 남았다.
+- 아직 남음: A의 페이지·시트 coverage/`partial`, D의 채널 단위 최종 실패 알림.
+
 | 커밋 | 내용 |
 |---|---|
 | `4dbe625` | Codex 의 B-45 부분 구현 + 재처리 큐(스키마·정책·러너·타이머) |
@@ -56,8 +77,8 @@ sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --apply        
 ## 2. 우선순위 — 왜 이 순서인가
 
 1. **partial 상태·coverage** — 지금 "성공" 이 거짓일 수 있다. 가장 값이 크다.
-2. **색인 연계** — 변환은 됐는데 검색에서 못 찾는 상태가 완료로 집계된다.
-3. **콘솔 재처리 버튼** — 백엔드는 있고 사람이 쓸 자리만 없다.
+2. ~~**색인 연계** — 변환은 됐는데 검색에서 못 찾는 상태가 완료로 집계된다.~~
+3. ~~**콘솔 재처리 버튼** — 백엔드는 있고 사람이 쓸 자리만 없다.~~
 4. **알림** — 위 셋이 정확해진 뒤라야 알릴 내용이 맞다.
 5. 나머지(progress 고아 메시지, Node/V8, v1 이전)는 앞 인계 문서의 3·4·8 그대로.
 
@@ -105,6 +126,9 @@ conversion: pending | running | succeeded | partial | failed | unsupported | blo
 
 ### B. 색인 연계 (설계 §5 마지막 줄)
 
+**구현 완료(작업 트리, 배포 전).** 큐 워커가 원문 반영·지문 확인·해당 문서 재색인을
+모두 통과한 뒤에만 `succeeded`로 닫는다. 색인 실패는 `index_failed`로 재시도한다.
+
 **문제.** 변환에 성공해도 `search_index` 에 들어가기 전까지는 검색에서 못 찾는다.
 지금은 그 상태를 완료로 본다.
 
@@ -123,6 +147,9 @@ conversion: pending | running | succeeded | partial | failed | unsupported | blo
 **색인이 없는 설치에서 재처리가 영영 안 닫히면 안 된다** — 그때는 `not_applicable`.
 
 ### C. 콘솔 재처리 버튼 (설계 §6)
+
+**구현 완료(작업 트리, 배포 전).** 관리자 단건 재처리 API와 확인 UI를 추가했다.
+좌표만 감사하며 파일명·업무 본문은 감사 메타데이터에 넣지 않는다.
 
 백엔드는 있다. `conversion_queue.enqueue(..., force=True)` 가 그것이고
 `scripts/drain_conversion_queue.py --backfill` 이 같은 일을 CLI 로 한다.
@@ -169,7 +196,7 @@ conversion: pending | running | succeeded | partial | failed | unsupported | blo
 cd console-web; npm.cmd run build
 ```
 
-현재 기준선: **1883 passed**, ruff 0건.
+현재 기준선: **1902 passed**, ruff 0건(전문 봇 Linux 셸 테스트 2개 파일 제외).
 
 서버 쪽:
 

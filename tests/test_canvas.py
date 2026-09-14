@@ -1,7 +1,8 @@
 """캔버스 수집 — 확인 못 한 형식은 추측하지 않고 미변환으로 남긴다."""
 from __future__ import annotations
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from tybot.archive.canvas import canvas_file_id, canvas_lines
 
@@ -33,6 +34,7 @@ def _file(name="회의록 캔버스", mime="text/markdown"):
         "size": 1024,
         "mimetype": mime,
         "url_private_download": "https://files.slack.com/canvas",
+        "permalink": "https://example.slack.com/docs/F1",
     }
 
 
@@ -60,6 +62,7 @@ def test_markdown_canvas_is_collected():
     assert capture.lines[0].startswith("[캔버스:수집] 회의록 캔버스 [수집키:")
     assert "[캔버스본문:회의록 캔버스] # 주간회의" in capture.lines
     assert "[캔버스본문:회의록 캔버스] - 기성금 3억 청구" in capture.lines
+    assert capture.permalink == "https://example.slack.com/docs/F1"
 
 
 def test_tybot_answer_canvas_is_not_reingested():
@@ -138,3 +141,30 @@ def test_long_canvas_is_truncated():
         capture = canvas_lines(c, "C1", "xoxb-t")
     assert len(capture.lines) <= 302
     assert any("이하 생략" in ln for ln in capture.lines)
+
+
+def test_live_fetch_includes_current_canvas_without_archiving(monkeypatch):
+    from tybot.slack.pilot import WorkspaceBot
+
+    client = Mock()
+    client.conversations_history.return_value = {"messages": []}
+    capture = canvas_lines(
+        FakeClient(canvas_id="F1", file_obj=_file()), "C1", None
+    )
+    capture = type(capture)(
+        ["[캔버스:수집] 회의록", "[캔버스본문:회의록] 현황 정상"],
+        [], "key", "https://example.slack.com/docs/F1",
+    )
+    monkeypatch.setattr("tybot.slack.pilot.canvas_lines", lambda *args: capture)
+    bot = SimpleNamespace(
+        app=SimpleNamespace(client=client),
+        cfg=SimpleNamespace(bot_token="xoxb-test"),
+        workspace="pilot",
+        _user_name=lambda _client, _user: "사용자",
+    )
+
+    rows = WorkspaceBot.recent_messages(bot, "C1")
+
+    assert rows[-1]["speaker"] == "채널 Canvas"
+    assert "현황 정상" in rows[-1]["text"]
+    assert rows[-1]["permalink"] == "https://example.slack.com/docs/F1"

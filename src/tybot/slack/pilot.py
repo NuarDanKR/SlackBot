@@ -471,16 +471,32 @@ class WorkspaceBot:
         return got
 
     def _thread_turns(self, event: dict) -> list[dict]:
-        """같은 스레드의 이전 TYBot 문답. 구조화된 turn 목록이다."""
+        """같은 스레드 또는 명시적인 DM 후속 질문의 이전 TYBot 문답."""
         thread_ts = str(event.get("thread_ts") or "")
         channel_id = str(event.get("channel") or "")
         reader = getattr(self.qa_log, "context_for_thread", None)
-        if not thread_ts or not channel_id or not callable(reader):
+        if thread_ts and channel_id and callable(reader):
+            try:
+                return list(reader(self.workspace, channel_id, thread_ts) or [])
+            except Exception as exc:
+                log.warning("[%s] 스레드 문맥 조회 실패: %s", self.workspace, exc)
+                return []
+        # Slack DM의 일반 메시지는 매번 새 root라 thread_ts가 없다. 모든 DM에 과거
+        # 대화를 섞으면 새 주제가 오염되므로, 지칭어가 있는 후속 질문만 최근 본인
+        # 문답 좌표를 연결한다.
+        text = _clean(event.get("text", ""))
+        if (not channel_id.startswith("D")
+                or not re.search(r"(?:방금|아까|이전|앞서|위(?:의)?|그)\s*(?:답변|내용|질문)|다시\s*(?:정리|확인|작성|말)", text)):
+            return []
+        dm_reader = getattr(self.qa_log, "context_for_dm", None)
+        if not callable(dm_reader):
             return []
         try:
-            return list(reader(self.workspace, channel_id, thread_ts) or [])
+            return list(dm_reader(
+                self.workspace, channel_id, str(event.get("user") or "")
+            ) or [])
         except Exception as exc:
-            log.warning("[%s] 스레드 문맥 조회 실패: %s", self.workspace, exc)
+            log.warning("[%s] DM 문맥 조회 실패: %s", self.workspace, exc)
             return []
 
     @staticmethod
@@ -2807,6 +2823,15 @@ class WorkspaceBot:
             )
             return lead + BLANK + block if lead else block
         if kind == "help":
+            if re.search(r"(?:캔버스|canvas).*(?:읽|내용|답)", question, re.IGNORECASE):
+                return (
+                    "네. 채널에서 질문하면 그 채널의 현재 Canvas와 수집된 Canvas 스냅샷을 "
+                    "권한 범위 안에서 답변 근거로 읽습니다. DM에서는 현재 채널이 없으므로 "
+                    "채널 이름을 함께 적어야 하며, 본인이 접근 가능한 채널만 조회합니다. "
+                    "TYBot이 만든 답변 Canvas는 답변을 다시 근거로 쓰지 않도록 제외합니다. "
+                    "Canvas 조회 권한이나 다운로드가 실패한 경우에는 읽었다고 가장하지 않고 "
+                    "근거를 확보하지 못했다고 답합니다."
+                )
             return self._help()
         if kind == "smalltalk":
             return write_from_facts(
@@ -2951,6 +2976,19 @@ class WorkspaceBot:
                     if ts else ""
                 ),
             })
+        # 질문 시점의 채널 Canvas를 실시간 근거로 제공한다. 답변 중 아카이브에
+        # 쓰지는 않으며, TYBot이 만든 답변 Canvas는 canvas_lines가 제외한다.
+        canvas = canvas_lines(self.app.client, channel_id, self.cfg.bot_token)
+        if canvas.lines and canvas.lines[0].startswith("[캔버스:수집]"):
+            out.append({
+                "ts": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+                "speaker": "채널 Canvas",
+                "text": "\n".join(canvas.lines),
+                "is_bot": False,
+                "permalink": canvas.permalink,
+            })
+        for warning in canvas.warnings:
+            log.warning("[%s] 실시간 Canvas 조회 실패 ch=%s: %s", self.workspace, channel_id, warning)
         return out
 
     def connect(self) -> None:

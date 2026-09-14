@@ -12,15 +12,16 @@
    이것이라, `--status` 로도 먼저 돈다.
 2. 실행할 작업을 잡는다(`claim`). 같은 행을 두 프로세스가 집지 않는다.
 3. 좌표로 staging 메타데이터를 열어 **그 파일 하나만** 다시 변환한다.
-4. 성공하면 산출물을 원자적으로 바꾸고 작업을 닫는다. 실패하면 다음 시각을 잡는다.
+4. 기존 첨부 표시가 있는 원문에 변환본을 멱등하게 추가하고 반영을 확인한다.
+5. 해당 원문 문서를 검색 색인에 넣은 뒤에만 작업을 닫는다.
 
 ## 하지 않는 것
 
 - **원본을 지우지 않는다.** 재변환이 실패해도 다음 사람이 볼 것이 남아야 한다.
 - **이전 유효 산출물을 미리 지우지 않는다.** 새 결과가 검증을 통과한 뒤에만
   바꾼다. 먼저 지우면 실패했을 때 있던 것까지 사라진다.
-- **아카이브 원문(`## 원문`)을 고치지 않는다.** 재변환 결과의 아카이브 반영은
-  `convert_staged_attachments.py --apply` 가 기존 중복 방지 경로로 한다.
+- **아카이브의 기존 원문 줄을 고치지 않는다.** 재변환 결과는 기존 첨부 표시와
+  같은 시각·화자로 새 줄만 덧붙이며 `writer.ingest`의 중복 방지를 거친다.
 - `pii_refused` 는 건드리지 않는다. 정책 제외를 기술 실패처럼 자동 해제하지 않는다.
 
 종료 코드: `0` 정상 · `1` 처리 중 실패한 작업 있음 · `2` 입력·환경 오류
@@ -28,12 +29,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
 import socket
 import sys
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
@@ -69,7 +72,7 @@ def staging_meta(archive_dir: str, job: queue.Job) -> pathlib.Path:
     )
 
 
-def reconvert(meta_path: pathlib.Path) -> tuple[bool, str, bool]:
+def reconvert(meta_path: pathlib.Path, *, expected_sha256: str = "") -> tuple[bool, str, bool]:
     """파일 하나를 다시 변환한다. `(성공, 오류코드, 재시도가능)`.
 
     산출물은 **검증을 통과한 뒤에** 바꾼다. 먼저 지우면 실패했을 때 있던 것까지
@@ -94,6 +97,8 @@ def reconvert(meta_path: pathlib.Path) -> tuple[bool, str, bool]:
 
     try:
         raw = pathlib.Path(raw_path).read_bytes()
+        if expected_sha256 and hashlib.sha256(raw).hexdigest() != expected_sha256:
+            return False, "original_changed", False
         body = convert(str(meta.get("filetype") or ""), raw)
     except (ConvertError, OSError) as exc:
         code, retryable = failure_details(exc)
@@ -139,6 +144,136 @@ def _write_meta(meta_path: pathlib.Path, meta: dict, *, status: str, code: str, 
     tmp_preview.replace(preview)
 
 
+def publish_reconversion(
+    archive_dir: str,
+    meta_path: pathlib.Path,
+    job: queue.Job,
+) -> tuple[bool, str, bool]:
+    """검증된 재변환본을 기존 원문에 추가하고 검색 색인까지 확인한다.
+
+    변환 미리보기만 생긴 상태는 답변 가능한 상태가 아니다. 원래 첨부 표시의
+    시각·화자를 찾아 같은 채널 원문에 추가하며, 좌표가 모호하면 추측하지 않는다.
+    """
+    from tybot import search_index
+    from tybot.archive import writer
+    from tybot.archive.store import ArchiveStore
+    from tybot.attachment_trace import confirm_archived, line_hash
+
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        preview = (meta_path.parent / "extracted.md").read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        return False, "converted_output_unreadable", False
+
+    name = str(meta.get("name") or "").strip()
+    if not name:
+        return False, "attachment_name_missing", False
+    body = preview.splitlines()
+    if body and body[0].startswith("<!--"):
+        body.pop(0)
+    while body and not body[0].strip():
+        body.pop(0)
+    if body and body[0].startswith("# "):
+        body.pop(0)
+    rows = [line.strip() for line in body if line.strip()]
+    if not rows:
+        return False, "empty_output", False
+
+    store = ArchiveStore(pathlib.Path(archive_dir))
+    expected_ts = ""
+    raw_origin = str(meta.get("origin_message_ts") or "")
+    if raw_origin:
+        try:
+            expected_ts = datetime.fromtimestamp(float(raw_origin), tz=UTC).astimezone(
+                writer.KST
+            ).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError, OSError):
+            return False, "origin_timestamp_invalid", False
+
+    candidates = []
+    for doc in store.source_docs():
+        if doc.workspace != job.workspace or (doc.channel_id or "") != job.channel_id:
+            continue
+        for line in doc.raw_lines:
+            if (
+                name not in (line.text or "")
+                or not (line.text or "").startswith("[첨부:")
+                or (line.text or "").startswith("[첨부:재변환]")
+            ):
+                continue
+            if expected_ts and line.ts != expected_ts:
+                continue
+            candidates.append((doc, line))
+    coordinates = {
+        (str(doc.path), line.ts, line.speaker, doc.channel)
+        for doc, line in candidates
+    }
+    if not coordinates:
+        return False, "archive_origin_missing", False
+    if len(coordinates) != 1:
+        return False, "archive_origin_ambiguous", False
+    doc, source = candidates[0]
+    when = datetime.strptime(source.ts, "%Y-%m-%d %H:%M").replace(tzinfo=writer.KST)
+    filetype = str(meta.get("filetype") or pathlib.Path(name).suffix.lstrip(".")).lower()
+    size = max(1, int(meta.get("declared_size") or 0) // 1024)
+    texts = [f"[첨부:재변환] {name} ({filetype or '?'}, {size}KB)"]
+    texts.extend(f"[첨부추출:{name}] {row}" for row in rows)
+    messages = [
+        writer.IncomingMessage(ts=when, speaker=source.speaker, text=text)
+        for text in texts
+    ]
+    result = writer.ingest(
+        archive_dir,
+        workspace=job.workspace,
+        channel=doc.channel,
+        channel_id=job.channel_id,
+        messages=messages,
+    )
+    if result.refused:
+        return False, "pii_refused", False
+
+    staged = SimpleNamespace(
+        file_id=job.file_id,
+        line_hashes=[line_hash(text) for text in texts],
+        metadata_path=meta_path,
+    )
+    states = confirm_archived(
+        ArchiveStore(pathlib.Path(archive_dir)),
+        [staged],
+        workspace=job.workspace,
+        channel_id=job.channel_id,
+    )
+    if states.get(job.file_id) != "archived":
+        return False, "archive_write_unconfirmed", True
+
+    try:
+        refreshed = ArchiveStore(pathlib.Path(archive_dir))
+        changed_paths = {doc.path.resolve()}
+        changed_paths.update(pathlib.Path(path).resolve() for path in result.paths)
+        docs = [doc for doc in refreshed.docs() if doc.path.resolve() in changed_paths]
+        if not docs:
+            return False, "archive_document_missing", True
+        search_index.reindex(docs, refreshed.root)
+    except search_index.IndexError_:
+        _update_publish_meta(meta_path, index_state="failed", index_error_code="index_failed")
+        return False, "index_failed", True
+    _update_publish_meta(
+        meta_path,
+        index_state="succeeded",
+        index_error_code=None,
+        indexed_at=datetime.now(UTC).isoformat(timespec="seconds"),
+    )
+    return True, "", False
+
+
+def _update_publish_meta(meta_path: pathlib.Path, **fields) -> None:
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.update(fields)
+    tmp = meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(meta_path)
+
+
 def backfill(archive_dir: str, *, apply: bool) -> int:
     """이미 쌓여 있는 실패 첨부를 큐에 올린다.
 
@@ -175,12 +310,20 @@ def backfill(archive_dir: str, *, apply: bool) -> int:
 
     added = 0
     for item in candidates:
+        digest = item.sha256 or ""
+        if not digest and item.object_path:
+            try:
+                digest = hashlib.sha256(pathlib.Path(item.object_path).read_bytes()).hexdigest()
+            except OSError:
+                # enqueue는 좌표만 저장한다. 실제 실행이 original_missing으로 닫고,
+                # backfill 전체를 한 파일 때문에 중단하지 않는다.
+                digest = ""
         try:
             job_id = queue.enqueue(
                 workspace=item.workspace,
                 channel_id=item.channel_id,
                 file_id=item.file_id,
-                original_sha256=item.sha256 or "",
+                original_sha256=digest,
                 error_code=item.error_code or "reprocess_requested",
                 retryable=True,
                 force=True,
@@ -265,11 +408,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  건너뜀(메타데이터 없음): {job.log_line()}")
             failed += 1
             continue
-        ok, code, retryable = reconvert(meta_path)
+        ok, code, retryable = reconvert(meta_path, expected_sha256=job.original_sha256)
         if ok:
-            queue.succeed(job.id)
-            print(f"  변환 성공: {job.log_line()}")
-            continue
+            try:
+                ok, code, retryable = publish_reconversion(archive, meta_path, job)
+            except Exception as exc:  # noqa: BLE001 - 한 작업이 큐 전체를 멈추면 안 된다
+                print(
+                    f"  원문 반영 중 예외({type(exc).__name__}): {job.log_line()}",
+                    file=sys.stderr,
+                )
+                ok, code, retryable = False, "publish_failed", True
+            if ok:
+                queue.succeed(job.id)
+                print(f"  변환·원문 반영·색인 성공: {job.log_line()}")
+                continue
         state = queue.fail(job.id, error_code=code, retryable=retryable)
         failed += 1
         print(f"  실패({code}) -> {state}: {job.log_line()}")

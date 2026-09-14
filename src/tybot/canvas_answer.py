@@ -38,6 +38,8 @@ REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 SLACK_LINK_RE = re.compile(r"<(?P<url>https?://[^>|]+)\|(?P<label>[^>]+)>")
+TABLE_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
+MAX_TABLE_CELLS = 300
 
 
 @dataclass(frozen=True)
@@ -60,7 +62,52 @@ def markdown(body: str) -> str:
     converted = re.sub(r"(?m)^•\s+", "- ", converted)
     converted = re.sub(r"(?m)^\*([^*\n]+)\*:?\s*$", r"## \1", converted)
     converted = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"**\1**", converted)
+    converted = _split_large_tables(converted)
     return f"# {TITLE}\n\n{converted}\n"
+
+
+def _table_cells(line: str) -> list[str]:
+    """Split a conventional Markdown table row, preserving escaped pipes."""
+    marker = "\x00TYBOT_PIPE\x00"
+    protected = line.strip().replace(r"\|", marker).strip("|")
+    return [cell.strip().replace(marker, r"\|") for cell in protected.split("|")]
+
+
+def _is_table_separator(line: str) -> bool:
+    cells = _table_cells(line)
+    return bool(cells) and all(TABLE_SEPARATOR_RE.fullmatch(cell) for cell in cells)
+
+
+def _split_large_tables(text: str) -> str:
+    """Keep each Canvas Markdown table within Slack's 300-cell limit."""
+    lines = text.splitlines()
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        if index + 1 >= len(lines) or "|" not in lines[index] or not _is_table_separator(lines[index + 1]):
+            out.append(lines[index])
+            index += 1
+            continue
+        header, separator = lines[index], lines[index + 1]
+        columns = len(_table_cells(header))
+        data: list[str] = []
+        cursor = index + 2
+        while cursor < len(lines) and "|" in lines[cursor] and lines[cursor].strip():
+            data.append(lines[cursor])
+            cursor += 1
+        # The header counts as one row. Tables wider than the API limit cannot
+        # be split by rows without changing their meaning, so Canvas creation
+        # will fail and the existing readable-message fallback will be used.
+        rows_per_table = (MAX_TABLE_CELLS // columns) - 1 if columns else 0
+        if rows_per_table < 1 or (len(data) + 1) * columns <= MAX_TABLE_CELLS:
+            out.extend([header, separator, *data])
+        else:
+            for start in range(0, len(data), rows_per_table):
+                if start:
+                    out.append("")
+                out.extend([header, separator, *data[start:start + rows_per_table]])
+        index = cursor
+    return "\n".join(out)
 
 
 def create(client, body: str) -> CanvasResult:

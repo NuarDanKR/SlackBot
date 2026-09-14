@@ -635,6 +635,72 @@ def archive_diagnostics(user: User) -> dict:
     return {"checkedAt": report["checkedAt"], "section": section}
 
 
+class AttachmentReprocessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    workspace: str = Field(min_length=1, max_length=80)
+    channel_id: str = Field(min_length=1, max_length=80)
+    file_id: str = Field(min_length=1, max_length=160)
+
+
+@app.post("/api/diagnostics/archive/reprocess")
+def archive_attachment_reprocess(
+    payload: AttachmentReprocessRequest,
+    request: Request,
+    user: User,
+) -> dict:
+    """Queue one exact retained attachment for an administrator-requested retry."""
+    from .. import conversion_queue
+    from ..attachment_review import PII_REFUSED, scan
+
+    _require_admin(user)
+    _check_write_request(request)
+    if not user.may_see(payload.workspace):
+        raise HTTPException(status_code=403, detail="이 워크스페이스를 관리할 권한이 없습니다.")
+    matches = [
+        item for item in scan(reader.archive_dir())
+        if item.workspace == payload.workspace
+        and item.channel_id == payload.channel_id
+        and item.file_id == payload.file_id
+    ]
+    if len(matches) != 1:
+        raise HTTPException(status_code=404, detail="재처리할 첨부를 찾지 못했습니다.")
+    item = matches[0]
+    if item.status == PII_REFUSED:
+        raise HTTPException(status_code=409, detail="민감정보 정책으로 제외된 파일은 재처리할 수 없습니다.")
+    if not item.conversion_failed:
+        raise HTTPException(status_code=409, detail="현재 변환 실패 상태인 첨부만 재처리할 수 있습니다.")
+    if item.object_path is None or not item.object_path.is_file():
+        raise HTTPException(status_code=409, detail="보존된 원본이 없어 재처리할 수 없습니다.")
+    try:
+        digest = item.sha256 or hashlib.sha256(item.object_path.read_bytes()).hexdigest()
+        job_id = conversion_queue.enqueue(
+            workspace=item.workspace,
+            channel_id=item.channel_id,
+            file_id=item.file_id,
+            original_sha256=digest,
+            error_code=item.error_code or "reprocess_requested",
+            retryable=True,
+            force=True,
+        )
+    except (OSError, conversion_queue.QueueUnavailable) as exc:
+        logger.warning("첨부 재처리 요청 실패 workspace=%s channel=%s file=%s: %s",
+                       item.workspace, item.channel_id, item.file_id, exc)
+        raise HTTPException(status_code=503, detail="재처리 큐를 사용할 수 없습니다.") from exc
+    if job_id is None:
+        raise HTTPException(status_code=409, detail="이 첨부는 재처리 정책상 큐에 넣을 수 없습니다.")
+    _audit_event(
+        actor=user.email,
+        category="attachment",
+        action="request-reprocess",
+        target_type="attachment",
+        target_id=f"{item.workspace}:{item.channel_id}:{item.file_id}",
+        workspace=item.workspace,
+        outcome="requested",
+        metadata={"job_id": job_id, "previous_error_code": item.error_code or "unknown"},
+    )
+    return {"ok": True, "jobId": job_id, "state": "queued"}
+
+
 def _retry_states(items) -> dict[tuple[str, str, str], dict]:
     """이 첨부들의 재처리 상태를 한 번에 읽는다.
 

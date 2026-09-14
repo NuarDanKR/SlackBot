@@ -36,6 +36,21 @@ def test_canvas_markdown_converts_slack_source_links():
     assert "[보고서 원본](https://example.slack.com/F1)" in rendered
 
 
+def test_canvas_markdown_keeps_normal_tables():
+    table = "| 항목 | 금액 |\n| --- | ---: |\n| 기성 | 300 |"
+    assert table in markdown(table)
+
+
+def test_canvas_markdown_splits_tables_over_slacks_300_cell_limit():
+    header = "| A | B | C |"
+    separator = "| --- | --- | --- |"
+    body = "\n".join(f"| {i} | x | y |" for i in range(120))
+    rendered = markdown(f"{header}\n{separator}\n{body}")
+    assert rendered.count(header) == 2
+    assert rendered.count(separator) == 2
+    assert "| 119 | x | y |" in rendered
+
+
 def test_create_grants_current_conversation_and_returns_permalink():
     client = Mock()
     client.canvases_create.return_value = {"canvas_id": "F-CANVAS"}

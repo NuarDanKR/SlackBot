@@ -22,12 +22,16 @@ class FakeQALog:
     def __init__(self):
         self.root = "/tmp/qa"
         self.records = []
+        self.dm_context = []
 
     def recent_for_user(self, workspace, user_id):
         return [("2026-08-27T15:32", "현재상태")]
 
     def context_for_thread(self, workspace, channel_id, thread_ts):
         return []
+
+    def context_for_dm(self, workspace, channel_id, user):
+        return list(self.dm_context)
 
     def write(self, rec):
         self.records.append(rec)
@@ -268,6 +272,56 @@ def test_explicit_canvas_request_posts_canvas_link(monkeypatch):
     client.canvases_access_set.assert_called_once_with(
         canvas_id="F-CANVAS", access_level="read", channel_ids=["C1"]
     )
+
+
+def test_canvas_capability_question_answers_the_question_not_full_help():
+    bot = _bot([Intent("help", question="혹시 너 캔버스의 내용을 읽고 답해줘?")], [])
+    (reply,) = _handle(bot, "혹시 너 캔버스의 내용을 읽고 답해줘?")
+    assert "현재 Canvas" in reply
+    assert "DM에서는" in reply
+    assert "/피드백" not in reply
+
+
+def test_canvas_capability_question_bypasses_the_llm_planner():
+    from tybot.intent import plan
+
+    router = Mock()
+    got = plan("혹시 너 캔버스의 내용을 읽고 답해줘?", router)
+
+    assert [task.kind for task in got] == ["help"]
+    router.complete.assert_not_called()
+
+
+def test_explicit_dm_followup_uses_recent_own_dm_context():
+    ans = Answer("다시 정리했습니다", [], "m", 0.0, 1, "answered")
+    bot = _bot([
+        Intent(
+            "summary",
+            question="방금 답변 다시 정리해줘",
+            reference_mode="prior_turn",
+        )
+    ], [ans])
+    bot.qa_log.dm_context = [{
+        "question": "현황을 정리해줘", "subject_terms": ["현황"],
+        "evidence_refs": [], "attachment_refs": [], "legacy_answer": "이전 답변",
+    }]
+    sent = []
+    bot._handle(
+        {"text": "방금 답변 다시 정리해줘", "user": "U1", "channel": "D1", "ts": "1.0"},
+        Mock(), lambda **kw: sent.append(kw["text"]), in_channel=False,
+    )
+    assert "이전 질문: 현황을 정리해줘" in bot.engine.plan_contexts[0]
+
+
+def test_new_dm_topic_does_not_mix_previous_dm_context():
+    ans = Answer("새 답변", [], "m", 0.0, 1, "answered")
+    bot = _bot([Intent("search", question="새 계약 금액")], [ans])
+    bot.qa_log.dm_context = [{"question": "무관한 이전 질문"}]
+    bot._handle(
+        {"text": "새 계약 금액 알려줘", "user": "U1", "channel": "D1", "ts": "1.0"},
+        Mock(), lambda **kw: None, in_channel=False,
+    )
+    assert bot.engine.plan_contexts == [""]
 
 
 @pytest.mark.parametrize("kind", ["status", "help", "smalltalk", "out_of_scope"])

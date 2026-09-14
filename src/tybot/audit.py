@@ -23,6 +23,7 @@ MAX_TEXT = 4000  # 한 건이 로그를 잡아먹지 않게 상한
 # 스레드 문맥으로 읽을 최근 문답 수. 전문이 아니라 메타데이터라 3건보다 넉넉히 본다 —
 # 긴 답변 하나 때문에 앞선 관련 문답이 밀려나는 것이 예전 구조의 고장이었다.
 THREAD_TURNS = 10
+DM_CONTEXT_MINUTES = 120
 # 참조가 없는 **구형 레코드**에서만 싣는 답변 조각. 지칭어 해석 전용이다.
 LEGACY_ANSWER_CHARS = 600
 
@@ -239,6 +240,75 @@ class QALog:
             if not refs and not attachments:
                 # 구형 레코드. 좌표가 없으니 지칭어를 풀 실마리가 문장뿐이다.
                 # 짧게 잘라 **지칭 해석 전용**으로만 싣는다.
+                turn["legacy_answer"] = _clip(str(row.get("answer") or ""))[:LEGACY_ANSWER_CHARS]
+            out.append(turn)
+        return out
+
+    def context_for_dm(
+        self,
+        workspace: str,
+        channel_id: str,
+        user: str,
+        *,
+        limit: int = THREAD_TURNS,
+        minutes: int = DM_CONTEXT_MINUTES,
+    ) -> list[dict]:
+        """명시적인 DM 후속 질문에 쓸 최근 **본인 문답 좌표**를 시간순으로 돌려준다.
+
+        일반 채널에는 쓰지 않는다. DM이라도 새 질문에는 호출하지 않고 Slack 계층이
+        `방금/이전/그 답변` 같은 지칭어를 확인한 경우에만 호출한다.
+        """
+        from .evidence_refs import attachment_refs_from_json, refs_from_json
+
+        if not workspace or not channel_id.startswith("D") or not user or limit < 1:
+            return []
+        cutoff = datetime.now(KST) - timedelta(minutes=max(1, minutes))
+        rows: list[dict] = []
+        try:
+            for path in sorted(self.root.glob("qa-*.jsonl"), reverse=True)[:2]:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        row.get("workspace") != workspace
+                        or row.get("channel_id") != channel_id
+                        or row.get("user") != user
+                    ):
+                        continue
+                    try:
+                        recorded = datetime.fromisoformat(str(row.get("ts") or ""))
+                        if recorded.tzinfo is None:
+                            recorded = recorded.replace(tzinfo=KST)
+                    except ValueError:
+                        continue
+                    if recorded >= cutoff:
+                        rows.append(row)
+        except OSError as exc:
+            logger.warning("DM 문답 맥락 조회 실패: %s", exc)
+            return []
+        rows.sort(key=lambda row: str(row.get("ts") or ""))
+        out: list[dict] = []
+        for row in rows[-limit:]:
+            refs = refs_from_json(row.get("evidence_refs"))
+            attachments = attachment_refs_from_json(row.get("attachment_refs"))
+            turn: dict = {
+                "record_id": str(row.get("record_id") or ""),
+                "ts": str(row.get("ts") or ""),
+                "question": _clip(str(row.get("question") or "")),
+                "intent_kind": str(row.get("intent_kind") or ""),
+                "editing_text": str(row.get("answer") or ""),
+                "subject_terms": [
+                    str(term) for term in (row.get("subject_terms") or []) if str(term).strip()
+                ][:12],
+                "evidence_refs": refs,
+                "attachment_refs": attachments,
+                "context_parent_ids": [
+                    str(value) for value in (row.get("context_parent_ids") or []) if str(value).strip()
+                ][:8],
+            }
+            if not refs and not attachments:
                 turn["legacy_answer"] = _clip(str(row.get("answer") or ""))[:LEGACY_ANSWER_CHARS]
             out.append(turn)
         return out

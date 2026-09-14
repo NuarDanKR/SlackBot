@@ -67,6 +67,7 @@ TERMINAL_CODES = frozenset({
     "corrupt",
     "unsupported",
     "empty_output",
+    "original_changed",
 })
 # 환경이 복구될 때까지 멈추는 코드. 파일 문제가 아니라 **서버 문제**다.
 HOLD_CODES = frozenset({

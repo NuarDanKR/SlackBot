@@ -189,7 +189,7 @@ READ_DOCUMENT_DESCRIPTION = (
 )
 
 FETCH_RECENT_DESCRIPTION = (
-    "아직 아카이브에 들어오지 않은 **오늘 대화**를 Slack 에서 직접 가져온다. "
+    "아직 아카이브에 들어오지 않은 **오늘 대화와 현재 채널 Canvas**를 Slack 에서 직접 가져온다. "
     "수집은 주기적으로 돌기 때문에 방금 오간 이야기는 검색에 안 잡힌다. "
     "「방금」·「오늘」·「지금」 처럼 시점이 아주 최근일 때만 쓴다 — "
     "그 밖에는 검색이 더 정확하고 싸다. "
@@ -428,7 +428,7 @@ class ToolBox:
         if not rows:
             return f"({doc.channel} 에 아직 아카이브에 없는 새 대화가 없습니다)"
         return _clip(
-            f"# {doc.channel} — 아카이브에 아직 없는 최근 대화 {len(rows)}건\n"
+            f"# {doc.channel} — 아카이브에 아직 없는 최근 대화·Canvas {len(rows)}건\n"
             + "\n".join(rows)
         )
 

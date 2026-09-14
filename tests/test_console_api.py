@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -1387,6 +1388,59 @@ def test_admin_can_explicitly_preview_a_pii_blocked_image(client, env, monkeypat
     assert response.content.startswith(b"\x89PNG")
     assert audited[0]["action"] == "preview-quarantined-image"
     assert "name" not in audited[0]["metadata"]
+
+
+def test_admin_can_queue_one_exact_failed_attachment(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from tybot import attachment_review, conversion_queue
+
+    item = SimpleNamespace(
+        workspace="fin", channel_id="C1", file_id="F1", name="report.pdf",
+        status=attachment_review.DOWNLOAD_OR_EXTRACT_FAILED, conversion_failed=True,
+        object_path=Path(__file__), sha256="abc", error_code="converter_timeout",
+    )
+    monkeypatch.setattr(attachment_review, "scan", lambda _archive: [item])
+    queued = []
+    monkeypatch.setattr(conversion_queue, "enqueue", lambda **kwargs: queued.append(kwargs) or 17)
+    audited = []
+    monkeypatch.setattr(console_app, "_audit_event", lambda **event: audited.append(event))
+
+    response = client.post(
+        "/api/diagnostics/archive/reprocess",
+        headers=_write_headers(owner(client)),
+        json={"workspace": "fin", "channel_id": "C1", "file_id": "F1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "jobId": 17, "state": "queued"}
+    assert queued[0]["force"] is True and queued[0]["original_sha256"] == "abc"
+    assert audited[0]["action"] == "request-reprocess"
+    assert "name" not in audited[0]["metadata"]
+
+
+def test_attachment_reprocess_is_admin_only_and_pii_stays_blocked(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from tybot import attachment_review, conversion_queue
+
+    item = SimpleNamespace(
+        workspace="fin", channel_id="C1", file_id="F1", name="blocked.png",
+        status=attachment_review.PII_REFUSED, conversion_failed=False,
+        object_path=Path(__file__), sha256="abc", error_code="pii_refused",
+    )
+    monkeypatch.setattr(attachment_review, "scan", lambda _archive: [item])
+    monkeypatch.setattr(conversion_queue, "enqueue", lambda **_kwargs: pytest.fail("must not enqueue"))
+    payload = {"workspace": "fin", "channel_id": "C1", "file_id": "F1"}
+
+    assert client.post(
+        "/api/diagnostics/archive/reprocess",
+        headers=_write_headers(member(client)), json=payload,
+    ).status_code == 403
+    assert client.post(
+        "/api/diagnostics/archive/reprocess",
+        headers=_write_headers(owner(client)), json=payload,
+    ).status_code == 409
 
 
 def test_specialist_registry_is_developer_only(client, monkeypatch):

@@ -44,6 +44,7 @@ class CanvasCapture:
     lines: list[str]
     warnings: list[str]
     dedupe_key: str | None = None
+    permalink: str = ""
 
 
 def _key(channel_id: str, stage: str, payload: bytes = b"") -> str:
@@ -195,4 +196,4 @@ def canvas_lines(client, channel_id: str, bot_token: str | None) -> CanvasCaptur
     key = _key(channel_id, file_id, payload)
     out = [f"[캔버스:수집] {title} [수집키:{key}]"]
     out += [f"[캔버스본문:{title}] {ln}" for ln in lines]
-    return CanvasCapture(out, [], key)
+    return CanvasCapture(out, [], key, f.permalink or "")

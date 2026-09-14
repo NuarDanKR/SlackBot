@@ -143,6 +143,24 @@ def test_missing_log_dir_is_not_an_error(tmp_path):
     assert QALog(tmp_path / "없음").recent_for_user("pilot", "U1") == []
 
 
+def test_dm_context_is_limited_to_same_user_workspace_and_dm(tmp_path):
+    log = QALog(tmp_path, write_md=False)
+    log.write(_rec(channel_id="D1", user="U1", question="내 DM 질문"))
+    log.write(_rec(channel_id="D1", user="U2", question="남의 DM 질문"))
+    log.write(_rec(channel_id="D2", user="U1", question="다른 DM 질문"))
+    log.write(_rec(workspace="mgmt", channel_id="D1", user="U1", question="다른 WS 질문"))
+
+    rows = log.context_for_dm("pilot", "D1", "U1")
+
+    assert [row["question"] for row in rows] == ["내 DM 질문"]
+
+
+def test_dm_context_is_not_available_for_a_channel(tmp_path):
+    log = QALog(tmp_path, write_md=False)
+    log.write(_rec(channel_id="C1"))
+    assert log.context_for_dm("pilot", "C1", "U1") == []
+
+
 def test_thread_context_is_limited_to_the_same_workspace_channel_and_thread(tmp_path):
     log = QALog(tmp_path, write_md=False)
     common = dict(
