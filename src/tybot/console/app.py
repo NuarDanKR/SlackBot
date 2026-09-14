@@ -1284,15 +1284,35 @@ def decide_specialist_request(
 ) -> dict:
     _require_admin(user)
     _check_write_request(request)
+    # 자기 요청을 자기가 처리했는지 **기록에 남긴다.** 막지 않기로 한 이상, 나중에
+    # 「이건 왜 통과됐나」 를 답할 수 있어야 한다. 못 읽어도 결정은 막지 않는다 —
+    # 기록 실패가 운영을 멈추면 사람은 기록을 끄는 쪽을 택한다.
+    self_decided = False
+    try:
+        pending = next(
+            (r for r in specialist_store.list_requests() if r.get("id") == request_id),
+            None,
+        )
+        self_decided = bool(
+            pending and str(pending.get("requester") or "").lower() == user.email.lower()
+        )
+    except specialist_store.SpecialistStoreError:
+        logger.warning("요청자 확인 실패 request=%s", request_id)
     try:
         specialist_store.decide_request(
             request_id=request_id,
             actor=user.email,
             decision=decision,
             note=body.note,
-            # 전문 봇 개발자와 승인 관리자는 역할이 분리되어 있다. 과거 요청까지
-            # 포함해 요청자가 자신의 변경을 승인하는 경로를 열지 않는다.
-            allow_self=False,
+            # 관리자는 자기 요청도 처리할 수 있다(2026-09-14 오너 결정).
+            #
+            # 개발자와 승인자를 나누는 것이 원칙이지만, **관리자는 서버에 들어가
+            # SQL 을 칠 수 있다.** 콘솔에서 막으면 그쪽으로 도는 길만 열리고 그쪽은
+            # 기록이 남지 않는다. 막는 대신 남긴다 — 아래 감사 기록과 store 로그에
+            # 누가 자기 것을 처리했는지 찍힌다.
+            #
+            # 개발자(`developer`)는 그대로 다른 사람의 승인을 받는다.
+            allow_self=user.is_admin,
         )
         rows = specialist_store.list_specialists()
         requests = specialist_store.list_requests()
@@ -1305,6 +1325,7 @@ def decide_specialist_request(
     _audit_event(
         actor=user.email, category="specialist", action=decision,
         target_type="specialist-request", target_id=str(request_id), outcome="succeeded",
+        metadata={"selfDecided": self_decided},
     )
     return {
         "specialists": [_specialist_response(row) for row in rows],
@@ -2172,6 +2193,9 @@ def decide_deploy_request(
             approver=user.email,
             decision=body.decision,
             note=body.note,
+            # 위와 같은 이유. 반려는 누구나 자기 것을 할 수 있고, 승인만 관리자
+            # 예외다.
+            allow_self=user.is_admin,
         )
         if decision["approved"]:
             result = deploy_request.request_deploy(

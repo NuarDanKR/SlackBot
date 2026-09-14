@@ -269,3 +269,103 @@ def test_document_query_is_empty_for_non_summary():
     assert got.kind == "search"
     assert got.document_query == []
     assert not got.is_document_set
+
+
+# =============================================================================
+# 2026-09-14 실제 사고 — 기계적 분류가 스레드 후속 질문을 놓쳤다
+# =============================================================================
+
+
+def test_a_conjugated_action_verb_still_counts_as_a_request():
+    """표면형 목록은 한국어에서 반드시 샌다.
+
+    `찾아` 는 있는데 `찾고` 가 없어서, 스레드 안에서 이전 문답을 다 가진 채로
+    "저는 이전 대화를 기억하지 못해요" 라고 답했다.
+    """
+    from tybot.intent import apply_followup, plan_by_rule
+
+    text = (
+        "다시, 우리가 방금 나눴던 얘기중에 너가 제대로 못한 답변이 있어. "
+        "뭔지 찾고 제대로된 답을 얘기해봐"
+    )
+
+    (task,) = apply_followup(text, plan_by_rule(text), has_prior=True)
+
+    assert task.kind != "memory", "실행 요청이 기억 확인으로 샜다"
+    assert task.reference_mode != "none"
+
+
+@pytest.mark.parametrize(
+    "verb",
+    ["찾고", "찾을", "찾는", "정리하고", "확인해봐", "알려줄", "말해봐", "답해봐", "얘기해줘"],
+)
+def test_action_detection_survives_korean_conjugation(verb):
+    from tybot.intent import ACTION_RE
+
+    assert ACTION_RE.search(f"방금 그거 {verb}")
+
+
+def test_asking_whether_we_remember_is_still_a_memory_question():
+    """고친 쪽으로 너무 넓히면 기억 질문이 실행으로 샌다."""
+    from tybot.intent import apply_followup, plan_by_rule
+
+    for text in ("이전 답변 기억나?", "우리 대화 기억해?"):
+        (task,) = apply_followup(text, plan_by_rule(text), has_prior=True)
+        assert task.kind == "memory", text
+
+
+# --- 「이런 자료도 읽느냐」 ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "그럼 채널에 있는 폴더는?",
+        "캔버스의 내용도 읽고 답해주냐는거였어",
+        "첨부파일도 근거로 보나요?",
+        "이미지 읽을 수 있어?",
+        "엑셀 표도 인식해?",
+    ],
+)
+def test_asking_what_we_read_is_answered_not_searched(text):
+    """업무 내용이 아니라 **우리 범위**를 묻는 질문이다.
+
+    아카이브 검색으로 보내면 0건이 나오고 도움말이 나간다 — 사용자는 답을 못
+    받는다. 자료 종류마다 정규식을 하나씩 두면 반드시 새므로 한 부류로 묶는다.
+    """
+    from tybot.intent import is_source_capability, plan
+
+    assert is_source_capability(text), text
+    assert plan(text, None)[0].kind == "help"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "김해외동 기성금 얼마야?",
+        "이번주 요약해줘",
+        "광주도시철도 미수금 정리해줘",
+        # 자료 낱말이 들어 있고 물음표로 끝나지만 **업무 질문**이다. 길이 상한이
+        # 없으면 이런 문장이 통째로 기능 안내로 새고, 사용자는 답을 못 받는다.
+        "김해외동 현장에서 지난달에 올라온 문서 중에 기성금 관련된 게 얼마인지 알려줄 수 있어?",
+        "주간 보고 파일에 적힌 이번 분기 목표 금액이 정확히 얼마인지 확인해 줄 수 있을까요?",
+    ],
+)
+def test_a_business_question_is_not_mistaken_for_a_capability_question(text):
+    from tybot.intent import is_source_capability
+
+    assert not is_source_capability(text), text
+
+
+def test_the_scope_answer_names_what_we_do_not_read():
+    """「못 찾았습니다」 만 나가면 사용자는 **자료가 없다**고 읽는다.
+
+    실제로는 우리가 그 자리를 안 보는 것이고, 둘은 사람이 할 일이 완전히 다르다 —
+    하나는 자료를 올리는 것이고 하나는 우리에게 말하는 것이다.
+    """
+    from tybot.slack.pilot import SOURCE_SCOPE_ANSWER
+
+    assert "읽지 않는 것" in SOURCE_SCOPE_ANSWER
+    assert "폴더" in SOURCE_SCOPE_ANSWER, "물어본 것을 답하지 않는다"
+    assert "초대" in SOURCE_SCOPE_ANSWER, "왜 없는지와 어떻게 넣는지를 말해야 한다"
+    assert "수집" in SOURCE_SCOPE_ANSWER

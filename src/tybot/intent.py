@@ -87,6 +87,22 @@ HELP_RE = re.compile(
     r"(?:캔버스|canvas).*(?:읽|내용|답)|\bhelp\b)",
     re.IGNORECASE,
 )
+# **무엇을 근거로 읽느냐**를 묻는 질문. 캔버스 하나만 정규식으로 잡던 것을 넓혔다.
+#
+# 정규식을 자료 종류마다 하나씩 두면 반드시 샌다 — "캔버스 내용도 읽어?" 는
+# 잡히고 "그럼 채널에 있는 폴더는?" 은 새어 전체 사용법이 나갔다(2026-09-14).
+# 물어보는 **모양**은 하나다: 「이런 자료도 보느냐」.
+SOURCE_WORDS = (
+    "캔버스", "canvas", "폴더", "파일", "첨부", "문서", "이미지", "사진",
+    "표", "엑셀", "스프레드시트", "링크", "스레드", "댓글", "대화", "메시지",
+)
+SOURCE_CAPABILITY_RE = re.compile(
+    r"(?:" + "|".join(SOURCE_WORDS) + r")"
+    r"[^?]{0,40}?"
+    r"(?:읽|보|봐|답|근거|조회|참고|인식|가능|되나|되니|되냐|하냐|하니|해줘?\?)",
+    re.IGNORECASE,
+)
+
 CANVAS_CAPABILITY_RE = re.compile(
     r"(?:캔버스|canvas).*(?:읽|내용|답)",
     re.IGNORECASE,
@@ -195,10 +211,20 @@ FORMAT_CHANGE_RE = re.compile(
     r"(형식|포맷|bullet\s*point|불릿|글머리|목록|표로).*(바꿔|변경|답해|정리|보여)",
     re.IGNORECASE,
 )
-ACTION_RE = re.compile(
-    r"(요약|정리|확인|알려|보여|찾아|검색|비교|뽑아|추려|말해|설명|"
-    r"다시\s*(봐|보|확인|정리|요약|알려))"
+# **어간으로 잡는다.** 표면형 목록은 한국어에서 반드시 샌다 — `찾아` 는 있는데
+# `찾고` 가 없어서, "뭔지 찾고 제대로된 답을 얘기해봐" 가 실행 요청이 아닌 것으로
+# 읽혔다(2026-09-14 실제 발생). 그 질문은 스레드 안에 있었고 이전 문답도 있었는데
+# 봇은 "저는 이전 대화를 기억하지 못해요" 라고 답했다.
+#
+# 어간 뒤에 아무 어미나 올 수 있게 두고, **어미는 검사하지 않는다.** 어미를 세려
+# 들면 같은 실수를 활용형 수만큼 반복하게 된다.
+ACTION_STEMS = (
+    "요약", "정리", "확인", "알려", "알리", "보여", "찾", "검색", "조회",
+    "비교", "뽑", "추려", "말해", "말하", "설명", "답해", "답하", "얘기해",
+    "이야기해", "읽어", "열어", "골라", "세어", "짚어", "적어", "써줘",
 )
+ACTION_RE = re.compile("(" + "|".join(ACTION_STEMS) + ")")
+
 # 기억 **여부 자체**를 묻는 표현. 실행 동사가 없을 때만 memory 다.
 MEMORY_ONLY_RE = re.compile(
     r"(기억(나|해|하니|하고|되|할\s*수|력)|까먹|잊었|"
@@ -554,18 +580,50 @@ def topic_terms_of(text: str, terms: list[str] | None = None) -> list[str]:
     return out[:8]
 
 
+def is_source_capability(text: str) -> bool:
+    """「이런 자료도 근거로 읽느냐」 를 묻는가.
+
+    업무 내용을 묻는 것이 아니라 **우리 범위**를 묻는 것이다. 아카이브 검색으로
+    보내면 0건이 나오고 도움말이 나간다 — 사용자는 답을 못 받는다.
+
+    짧은 생략형("그럼 채널에 있는 폴더는?")도 같은 질문이다. 앞 문장에서 이미
+    「읽느냐」 를 물었기 때문에 동사가 생략된 것뿐이다.
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    if SOURCE_CAPABILITY_RE.search(body):
+        return True
+    # 동사가 생략된 짧은 되물음. 자료 낱말이 있고 질문 모양이면 같은 부류다.
+    if len(body) <= 40 and body.rstrip().endswith("?"):
+        return any(word in body for word in SOURCE_WORDS)
+    return False
+
+
 def followup_hint(text: str) -> tuple[str, bool]:
     """지칭 표현만 보고 `(reference_mode, include_attachment_status)` 를 정한다.
 
     같은 스레드에 이전 문답이 있을 때만 의미가 있다 — 호출자가 그것을 확인한다.
     분류 우선순위는 설계 §8 그대로다.
     """
+    # **동사 없는 생략형("그럼 ~는?")은 규칙으로 잡지 않는다.**
+    #
+    # 한 번 넣어 봤다가 뺐다. 「자기 주제가 없을 때만 좁힌다」 로 만들려 했는데
+    # `topic_terms_of()` 가 "그럼"·"채널"·"있는" 을 주제로 돌려줘서 판정이 거의
+    # 항상 빗나갔다. **반쯤 맞는 규칙은 안 맞는 규칙보다 나쁘다** — 언제 걸리는지
+    # 사람이 예측할 수 없고, 그게 이 분류기가 「기계적」 이라고 불린 이유다.
+    #
+    # 생략형 해석은 분해기(LLM)의 몫이다. 그쪽은 `<이전_스레드>` 를 보고, 못
+    # 풀면 `master_planner._standalone()` 이 이전 질문을 앞에 붙인다.
+    has_action = bool(ACTION_RE.search(text or ""))
     if not REFERENCE_RE.search(text or ""):
         return "none", False
-    has_action = bool(ACTION_RE.search(text))
     # 2순위: 기억 여부 자체를 묻는 것이면 기존 memory 동작을 유지한다.
-    if MEMORY_ONLY_RE.search(text) and not has_action:
-        return "none", False
+    #
+    # 따로 검사하지 않는다 — **실행 동사가 없으면 어차피 후속 질문이 아니다.**
+    # 한때 `MEMORY_ONLY_RE and not has_action` 을 앞에 뒀는데, 바로 아래 검사와
+    # 결과가 같아 되돌려도 아무 테스트가 안 깨졌다. 아무것도 안 하는 분기는
+    # 읽는 사람에게 「여기서 무언가 걸러진다」 고 잘못 말한다.
     if not has_action:
         return "none", False
     attachments = bool(ATTACHMENT_STATUS_RE.search(text))
@@ -707,7 +765,7 @@ def plan(
     # 제품 기능의 가능 여부를 묻는 질문은 LLM이 업무 요약으로 오분류해도 결과가
     # 달라져서는 안 된다. 특히 "캔버스 내용을 읽고 답해줘?"는 실제 운영에서
     # 전체 사용법으로 빠졌던 문장이다.
-    if CANVAS_CAPABILITY_RE.search(text):
+    if CANVAS_CAPABILITY_RE.search(text) or is_source_capability(text):
         return [Intent("help", source="rule", question=text)]
     if router is None:
         return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)

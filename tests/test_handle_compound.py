@@ -274,12 +274,27 @@ def test_explicit_canvas_request_posts_canvas_link(monkeypatch):
     )
 
 
-def test_canvas_capability_question_answers_the_question_not_full_help():
-    bot = _bot([Intent("help", question="혹시 너 캔버스의 내용을 읽고 답해줘?")], [])
-    (reply,) = _handle(bot, "혹시 너 캔버스의 내용을 읽고 답해줘?")
-    assert "현재 Canvas" in reply
-    assert "DM에서는" in reply
-    assert "/피드백" not in reply
+@pytest.mark.parametrize(
+    "question",
+    [
+        "혹시 너 캔버스의 내용을 읽고 답해줘?",
+        "그럼 채널에 있는 폴더는?",
+        "첨부파일도 근거로 보나요?",
+    ],
+)
+def test_a_source_scope_question_is_answered_not_given_the_full_help(question):
+    """「이런 자료도 읽느냐」 는 한 부류다. 자료마다 문장을 따로 두면 샌다.
+
+    캔버스만 적어 두었더니 "그럼 채널에 있는 폴더는?" 이 전체 사용법으로
+    빠졌다(2026-09-14 실제 발생).
+    """
+    bot = _bot([Intent("help", question=question)], [])
+    (reply,) = _handle(bot, question)
+
+    assert "Canvas" in reply
+    assert "읽지 않는 것" in reply, "안 보는 것을 말해야 사용자가 다음 행동을 안다"
+    assert "폴더" in reply
+    assert "/피드백" not in reply, "전체 사용법이 나갔다"
 
 
 def test_canvas_capability_question_bypasses_the_llm_planner():

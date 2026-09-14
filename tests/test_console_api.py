@@ -1702,7 +1702,31 @@ def test_the_router_default_model_is_registered():
     assert DEFAULT_ROUTER_MODEL in DEFAULT_REGISTRY
 
 
-def test_admin_approval_does_not_allow_self_approval(client, monkeypatch):
+# 2026-09-14 오너 결정: **관리자는 자기 요청도 처리한다.**
+#
+# 개발자와 승인자를 나누는 것이 원칙이지만, 관리자는 서버에 들어가 SQL 을 칠 수 있다.
+# 콘솔에서 막으면 그쪽으로 도는 길만 열리고 그쪽은 기록이 남지 않는다. 막는 대신
+# 남긴다 — 감사 기록에 `selfDecided` 가 붙는다.
+#
+# 개발자(`developer`)는 그대로 다른 사람의 승인을 받는다(엔드포인트가 관리자 전용이라
+# 개발자는 여기까지 오지 못한다).
+def _request_row(requester: str, request_id: int = 1) -> dict:
+    """`_specialist_request_response` 가 읽는 필드를 다 채운 요청 행."""
+    return {
+        "id": request_id,
+        "specialist": "hermes",
+        "proposal": {},
+        "checks": [],
+        "requester": requester,
+        "requested_at": "2026-09-14T09:00:00+09:00",
+        "state": "awaiting_approval",
+        "approver": None,
+        "decided_at": None,
+        "note": "",
+    }
+
+
+def test_admin_may_decide_their_own_specialist_request(client, monkeypatch):
     seen: dict = {}
     monkeypatch.setattr(
         console_app.specialist_store,
@@ -1719,7 +1743,95 @@ def test_admin_approval_does_not_allow_self_approval(client, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert seen["allow_self"] is False
+    assert seen["allow_self"] is True
+
+
+def test_self_decision_is_recorded_in_the_audit_trail(client, monkeypatch):
+    """막지 않기로 한 이상, 「이건 왜 통과됐나」 를 답할 수 있어야 한다."""
+    events: list[dict] = []
+    session = owner(client)   # 로그인 결과다. 이메일이 아니다.
+    monkeypatch.setattr(console_app.specialist_store, "decide_request", lambda **_: None)
+    monkeypatch.setattr(console_app.specialist_store, "list_specialists", lambda: [])
+    monkeypatch.setattr(
+        console_app.specialist_store, "list_requests",
+        lambda: [_request_row("dan@taeyoung.com")],
+    )
+    monkeypatch.setattr(console_app.audit_store, "record", lambda **kw: events.append(kw))
+
+    response = client.post(
+        "/api/specialists/requests/1/approve",
+        json={"note": "테스트"},
+        headers=_write_headers(session),
+    )
+
+    assert response.status_code == 200
+    done = [e for e in events if e.get("outcome") == "succeeded"]
+    assert done and done[-1]["metadata"]["selfDecided"] is True
+
+
+def test_another_persons_request_is_not_marked_as_self(client, monkeypatch):
+    events: list[dict] = []
+    monkeypatch.setattr(console_app.specialist_store, "decide_request", lambda **_: None)
+    monkeypatch.setattr(console_app.specialist_store, "list_specialists", lambda: [])
+    monkeypatch.setattr(
+        console_app.specialist_store, "list_requests",
+        lambda: [_request_row("other@taeyoung.com")],
+    )
+    monkeypatch.setattr(console_app.audit_store, "record", lambda **kw: events.append(kw))
+
+    client.post(
+        "/api/specialists/requests/1/approve",
+        json={"note": "테스트"},
+        headers=_write_headers(owner(client)),
+    )
+
+    done = [e for e in events if e.get("outcome") == "succeeded"]
+    assert done and done[-1]["metadata"]["selfDecided"] is False
+
+
+def test_requester_lookup_failure_does_not_block_the_decision(client, monkeypatch):
+    """기록 실패가 운영을 멈추면 사람은 기록을 끄는 쪽을 택한다."""
+    calls = {"n": 0}
+
+    def _broken():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise console_app.specialist_store.SpecialistStoreError("DB 없음")
+        return []
+
+    monkeypatch.setattr(console_app.specialist_store, "decide_request", lambda **_: None)
+    monkeypatch.setattr(console_app.specialist_store, "list_specialists", lambda: [])
+    monkeypatch.setattr(console_app.specialist_store, "list_requests", _broken)
+    monkeypatch.setattr(console_app.audit_store, "record", lambda **_: None)
+
+    response = client.post(
+        "/api/specialists/requests/1/approve",
+        json={"note": "테스트"},
+        headers=_write_headers(owner(client)),
+    )
+    assert response.status_code == 200
+
+
+def test_admin_may_decide_their_own_deploy_request(client, monkeypatch):
+    seen: dict = {}
+
+    def _decide(**kw):
+        seen.update(kw)
+        return {"approved": False}
+
+    monkeypatch.setattr(console_app.deploy_approval_store, "decide_request", _decide)
+    monkeypatch.setattr(
+        console_app.deploy_approval_store, "list_requests", lambda _scope: []
+    )
+
+    response = client.put(
+        "/api/deploy-requests/1/decision",
+        json={"decision": "reject", "note": "다시 올림"},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 200
+    assert seen["allow_self"] is True
 
 
 def test_admin_can_submit_a_specialist_change(client, monkeypatch):
