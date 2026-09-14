@@ -104,7 +104,7 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/drain_conversion_qu
 1. ~~**partial 상태·coverage**~~ **완료(Claude/2026-09-14)**
 2. ~~**색인 연계** — 변환은 됐는데 검색에서 못 찾는 상태가 완료로 집계된다.~~
 3. ~~**콘솔 재처리 버튼** — 백엔드는 있고 사람이 쓸 자리만 없다.~~
-4. **알림** — 위 셋이 정확해진 뒤라야 알릴 내용이 맞다.
+4. ~~**알림**~~ **완료(Claude/2026-09-15, `ced89fe`)**
 5. 나머지(progress 고아 메시지, Node/V8, v1 이전)는 앞 인계 문서의 3·4·8 그대로.
 
 ## 3. 다음 작업
@@ -228,6 +228,11 @@ conversion: pending | running | succeeded | partial | failed | unsupported | blo
 화면에 버튼이 보이면 사람은 눌러 보고 「안 된다」 만 겪는다. 아예 안 보이는 편이 낫다.
 
 ### D. 알림 — 채널 단위 묶음 (설계 §6)
+
+**구현 완료 (Claude / 2026-09-15, `ced89fe`).** `src/tybot/conversion_alerts.py` ·
+`deploy/sql/conversion_alert_schema.sql` · `scripts/send_conversion_alerts.py` ·
+`tybot-convert-alert.{service,timer}` · `tests/test_conversion_alerts.py`(25건).
+아래는 원래 지시이며, 지킨 내용은 부록 참조.
 
 - 파일별 중복 DM 금지. **채널 단위로 묶는다.**
 - 담을 것: 파일명, Slack 원본 링크, 오류 분류, 다음 조치. 그뿐이다.
@@ -378,3 +383,48 @@ tests/test_conversion_coverage.py 16건
   할 일이 달라진다 — 하나는 원본을 열어 보는 것이고 하나는 재변환이다.
 - **남은 것**: 외부 PPT 경로의 슬라이드 단위, kordoc 성공 시 상세 개수,
   검색 색인이 커진 뒤의 성능(상한을 없앴으므로 아카이브가 커진다 — 실측 필요).
+
+
+## 부록. D 구현 결과 + A 마무리 (Claude / 2026-09-15)
+
+### D. 채널 단위 알림 (`ced89fe`)
+
+- **검토를 막을 때만 알린다.** `failed`·`held`·`partial` 만. 큐에 재시도가 남았으면
+  안 알린다 — 곧 성공할 일로 부르면 사람은 그 DM 을 안 읽게 되고 정작 중요한 한
+  건도 묻힌다. `pii_refused` 는 정책이라 고칠 것이 없어 안 알린다
+- **`partial` 을 넣은 이유는 답이 나가기 때문**이다. 범위를 모르면 전부 본 줄 안다
+- **멱등 키 = 파일 목록 + 각 파일의 상태.** 이름이 바뀌어도 같은 건이고, 상태가
+  바뀌면(실패 → 부분 성공) 다시 알릴 값이 있어 새 키가 된다
+- **권한은 발송 직전에 다시 본다.** 등록 뒤 채널에서 빠진 사람에게 파일명을
+  보내면 그 자체가 유출이다. 확인 실패는 통과가 아니라 **차단**이다
+- 발송 기록 표에 파일명·본문 없음. 좌표·개수·상태 지문뿐
+- 큐를 못 읽어도 알림은 계속된다(`held` 판별만 생략)
+
+운영 전:
+
+```bash
+sudo cat /opt/tybot/deploy/sql/conversion_alert_schema.sql   | sudo -u postgres psql -p 55432 -d tyslackai -f -
+cd /opt/tybot && sudo -u tybot .venv/bin/python scripts/send_conversion_alerts.py
+sudo systemctl enable --now tybot-convert-alert.timer
+```
+
+### A. 외부 PPT coverage
+
+슬라이드 수를 pptx zip 항목에서 정확히 센다. **`converted` 는 채우지 않는다** —
+그려진 것과 읽은 것은 다르다. 렌더에서 쪽 수가 줄면 `render_lost_units`.
+
+### 되돌림 실험 14건 — 전부 잡힌다
+
+**한 건이 처음에 안 잡혔다.** `pii_refused` 가드는 그냥 차단 파일로는 어차피
+실패 상태가 아니라 그 분기를 지나지 않았다. **부분 변환 뒤 차단**으로 바꾸니 잡혔다.
+같은 함정을 이번 인계에서 세 번째 만났다 — 검사가 실제 분기를 안 지나면 그 검사는
+통과해도 아무것도 보장하지 않는다.
+
+### 남은 것
+
+- **B-46(긴급)**: 채널 파일 목록·Canvas 첨부·링크 수집
+- **B-47(신규)**: 의도 분류를 LLM 으로 —
+  [설계](../design/intent-classification-by-llm.md)
+- kordoc 성공 시 상세 개수(외부 도구가 안 준다)
+- **상한을 없앴으므로 아카이브·색인이 커진다 — 성능 실측 필요**
+- 서버에서 `--backfill --apply` 미실행. **큐는 여전히 비어 있다**
