@@ -134,13 +134,40 @@ def test_unknown_or_binary_format_is_never_ingested_as_text():
         assert "not_allowed" not in "\n".join(capture.lines)
 
 
-def test_long_canvas_is_truncated():
+def test_a_long_canvas_is_not_truncated_by_default():
+    """**자르면 뒤쪽이 아카이브에 영영 없어진다**(2026-09-14 오너 결정).
+
+    캔버스에 정리해 둔 표와 목록이 300줄을 넘는 일은 흔하다. 잘린 줄은 검색에도
+    안 걸리고, 사람은 그 사실을 알 방법이 없다.
+    """
     c = FakeClient(canvas_id="F1", file_obj=_file())
     body = ("줄\n" * 500).encode()
     with patch("tybot.archive.canvas.download_bytes", return_value=body):
         capture = canvas_lines(c, "C1", "xoxb-t")
-    assert len(capture.lines) <= 302
-    assert any("이하 생략" in ln for ln in capture.lines)
+
+    # 머리줄(`[캔버스:수집]`) 하나 + 본문 500줄
+    assert len(capture.lines) == 501
+    assert not any("이하 생략" in ln for ln in capture.lines)
+
+
+def test_a_canvas_limit_can_still_be_set_for_emergencies(monkeypatch):
+    """한 캔버스가 서버를 넘어뜨리면 그때 건다. 평소에는 걸지 않는다."""
+    import importlib
+
+    from tybot.archive import canvas as canvas_mod
+
+    monkeypatch.setenv("TYBOT_CANVAS_MAX_LINES", "10")
+    importlib.reload(canvas_mod)
+    try:
+        c = FakeClient(canvas_id="F1", file_obj=_file())
+        body = ("줄\n" * 500).encode()
+        with patch("tybot.archive.canvas.download_bytes", return_value=body):
+            capture = canvas_mod.canvas_lines(c, "C1", "xoxb-t")
+
+        assert any("이하 생략" in ln for ln in capture.lines)
+    finally:
+        monkeypatch.delenv("TYBOT_CANVAS_MAX_LINES", raising=False)
+        importlib.reload(canvas_mod)
 
 
 def test_live_fetch_includes_current_canvas_without_archiving(monkeypatch):

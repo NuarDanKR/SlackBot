@@ -254,7 +254,9 @@ def main(argv: list[str] | None = None) -> int:
             failed.append((item.name, reason))
             _record_result(item, status="pii_refused", error=reason)
             continue
-        rows = all_rows[:MAX_TEXT_LINES]
+        # **`0` 은 무제한이다.** `[:0]` 이면 「변환 결과가 비어 있다」 로
+        # 닫히고, 멀쩡한 문서가 실패로 기록된다.
+        rows = all_rows[:MAX_TEXT_LINES] if MAX_TEXT_LINES else all_rows
         if not rows:
             reason = "변환 결과가 비어 있다"
             failed.append((item.name, reason))

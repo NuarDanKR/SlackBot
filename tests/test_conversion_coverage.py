@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from tybot.archive import convert as cv
 
 
@@ -292,3 +294,86 @@ def test_collection_writes_coverage_into_the_metadata(tmp_path, monkeypatch):
     assert meta["coverage_converted"] == 1
     assert meta["missing_units"] == [2, 3, 4]
     assert meta["conversion_state"] == "partial", "부분을 성공으로 닫으면 안 된다"
+
+
+# =============================================================================
+# 폴백·슬라이드
+# =============================================================================
+
+
+def test_a_fallback_converter_is_not_equal_to_the_precise_one():
+    """폴백이 성공해도 **동등하다고 표시하지 않는다**(설계 §6).
+
+    글자는 나와도 도형·이미지 안의 값은 안 나온다. 그걸 성공으로 닫으면
+    사람은 전부 본 줄 안다.
+    """
+    from tybot.archive import external_convert as ext
+
+    cov = cv.Coverage()
+    cov.note(cv.FALLBACK_CONVERTER)
+
+    assert cov.state == cv.PARTIAL
+    assert ext.ExternalConverterUnavailable.code == "converter_missing"
+
+
+def test_a_slide_without_text_is_not_counted_as_read(monkeypatch):
+    """그림만 있는 슬라이드를 읽은 것으로 세면, 그 그림이 표일 때 답이 틀린다."""
+    pptx = pytest.importorskip("pptx")
+
+    prs = pptx.Presentation()
+    blank = prs.slide_layouts[6]
+    with_text = prs.slide_layouts[5]
+    slide = prs.slides.add_slide(with_text)
+    slide.shapes.title.text = "3분기 기성 현황"
+    prs.slides.add_slide(blank)
+
+    import io as _io
+
+    buf = _io.BytesIO()
+    prs.save(buf)
+
+    with cv.collect_coverage() as cov:
+        cv._pptx_basic(buf.getvalue())
+
+    assert cov.unit == "slide"
+    assert cov.total == 2
+    assert cov.converted == 1
+    assert 2 in cov.missing
+
+
+# =============================================================================
+# 답변 「근거」 줄
+# =============================================================================
+
+
+def test_the_evidence_note_names_partly_read_attachments():
+    """**실패와 다르다.** 이쪽은 답이 나가므로 범위를 안 밝히면 전부 본 줄 안다."""
+    from tybot.answer import Answer
+
+    answer = Answer(
+        "기성금은 3억입니다.", ["#현장, 📄doc.md(2026-09-10)"], "m", 0.0, 3, "answered",
+        terms=["기성금"],
+        partial_attachments=["정산서.pdf (확인 3/10쪽)"],
+    )
+
+    note = answer.evidence_note()
+
+    assert "일부만 읽은 첨부" in note
+    assert "확인 3/10쪽" in note
+    assert "자동 변환 실패" not in note, "못 읽은 것과 섞으면 할 일이 달라진다"
+
+
+def test_the_evidence_note_separates_failure_from_partial():
+    from tybot.answer import Answer
+
+    answer = Answer(
+        "정리했습니다.", ["#현장, 📄doc.md(2026-09-10)"], "m", 0.0, 3, "answered",
+        terms=["기성금"],
+        withheld=["암호문서.pdf"],
+        partial_attachments=["정산서.pdf (확인 3/10쪽)"],
+    )
+
+    note = answer.evidence_note()
+
+    assert "자동 변환 실패로 내용을 읽지 못한 첨부: 암호문서.pdf" in note
+    assert "일부만 읽은 첨부: 정산서.pdf" in note

@@ -141,6 +141,26 @@ def _run(
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
+# 시트 하나가 이보다 크면 벤더 스크립트가 **그 시트를 통째로 버린다.**
+# 사실상 무제한으로 둔다 — 잘린 것보다 통째로 없어지는 쪽이 훨씬 나쁘고,
+# 없어진 사실은 답변에 드러나지 않는다.
+XLSX_MAX_ROWS_DEFAULT = 10_000_000
+
+
+def _xlsx_max_rows() -> int:
+    """벤더 변환기에 넘길 행 상한. 0 이나 읽을 수 없는 값이면 기본값."""
+    import os
+
+    raw = (os.getenv("TYBOT_XLSX_MAX_ROWS") or "").strip()
+    if not raw:
+        return XLSX_MAX_ROWS_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return XLSX_MAX_ROWS_DEFAULT
+    return value if value > 0 else XLSX_MAX_ROWS_DEFAULT
+
+
 def xlsx_lines(data: bytes) -> list[str]:
     """Run the reviewed Hermes spreadsheet renderer and return searchable lines."""
     if not HERMES_XLSX.is_file():
@@ -163,8 +183,15 @@ def xlsx_lines(data: bytes) -> list[str]:
                 "attachment.xlsx",
                 "--out-dir",
                 str(output),
+                # **1,000 은 자르는 값이 아니라 버리는 값이었다.** 벤더 스크립트는
+                # 행 수가 넘으면 그 시트를 통째로 건너뛴다(`build_blocks`). 우리
+                # 정산서·기성 표는 대부분 그보다 크고, 그래서 시트가 통째로
+                # 사라진 채 「변환 성공」 이 됐다(2026-09-14 확인).
+                #
+                # 변환 단계에서는 자르지 않는다 — 자르면 아카이브에 영구히
+                # 없어진다. 값은 비상용으로만 환경변수에 남긴다.
                 "--max-rows",
-                "1000",
+                str(_xlsx_max_rows()),
             ],
             cwd=work,
         )
@@ -190,7 +217,8 @@ def xlsx_lines(data: bytes) -> list[str]:
 
         for key, label in (
             ("hidden_sheets", "숨긴 시트 제외"),
-            ("skipped_sheets", "행 상한 초과 시트 제외"),
+            # **이 줄이 뜨면 시트가 통째로 없어진 것이다.** 잘린 것이 아니다.
+            ("skipped_sheets", "행 상한 초과로 시트 통째 제외"),
             ("unmaskable_sheets", "개인정보 안전 판정 불가 시트 제외"),
             ("folded_date_sheets", "이전 날짜 시트 접음"),
         ):

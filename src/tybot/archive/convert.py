@@ -49,6 +49,26 @@ from .external_convert import (
 
 logger = logging.getLogger("tybot.convert")
 
+
+def _limit(name: str, default: int = 0) -> int:
+    """상한 환경변수. **`0` 은 무제한이다.**
+
+    기본이 무제한인 이유는 변환 손실이 되돌릴 수 없기 때문이다. 운영에서 한
+    파일이 서버를 넘어뜨리면 그때 값을 건다 — 미리 걸어 두면 평소에 조용히
+    자료가 사라지고, 사라진 줄도 모른다.
+    """
+    import os
+
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("%s 값을 읽지 못해 무제한으로 둔다: %r", name, raw[:20])
+        return 0
+
+
 # 파일 하나에서 가져올 줄 수 상한.
 #
 # 400 이던 것을 올렸다(2026-09-07). 가정산서 같은 표는 수천 행이고 **뒤에 합계가
@@ -58,14 +78,27 @@ logger = logging.getLogger("tybot.convert")
 # 올려도 답변 프롬프트가 커지지 않는다 — 근거로 들어가는 것은 **검색이 고른 줄**
 # 뿐이다(`AnswerEngine._max_hits`). 상한을 올리는 값은 「검색이 그 행을 찾을 수
 # 있게 하는 것」 이고, 비용은 아카이브 크기와 색인이다.
-MAX_LINES = 20_000
+# **변환 단계에서는 자르지 않는다**(2026-09-14 오너 결정).
+#
+# 여기서 자르면 **아카이브에 영구히 없어진다.** 답변 단계의 상한
+# (`AnswerEngine._max_hits`·`MAX_EVIDENCE_CHARS`)과는 다르다 — 그쪽은 요청마다
+# 다시 고르므로 손실이 아니고, 여기는 한 번 버리면 원본을 다시 올리기 전에는
+# 되돌릴 수 없다.
+#
+# 회사 파일은 크다. 1,000행이 넘는 시트, 수백 쪽짜리 보고서가 보통이고, 그것을
+# 잘라 넣으면 "봇이 숫자를 못 읽는다" 로 나타난다 — 실제로 그랬다.
+#
+# 상한은 **비상용으로만** 남긴다. `0` 이 기본이고 그 뜻은 무제한이다. 한 파일이
+# 서버를 넘어뜨리는 상황이 실제로 생기면 그때 환경변수로 건다.
+MAX_LINES = _limit("TYBOT_CONVERT_MAX_LINES")
 # 줄 수와 별개로 문자 수도 묶는다. 한 셀에 긴 메모가 든 파일은 줄 수가 적어도
 # 아카이브를 잡아먹는다. 텍스트 파일 상한(`files.MAX_TEXT_BYTES`)과 자릿수를 맞춘다.
-MAX_TOTAL_CHARS = 300_000
+MAX_TOTAL_CHARS = _limit("TYBOT_CONVERT_MAX_CHARS")
 # 접을 때 남길 머리와 꼬리. **꼬리를 남기는 것이 핵심이다** — 표의 합계가 거기 있다.
-FOLD_HEAD = 12_000
-FOLD_TAIL = 4_000
-MAX_CELL = 200  # 셀 한 칸 길이 상한
+FOLD_HEAD = _limit("TYBOT_CONVERT_FOLD_HEAD")
+FOLD_TAIL = _limit("TYBOT_CONVERT_FOLD_TAIL")
+# 셀 한 칸 길이. 긴 메모가 든 칸을 자르면 **그 칸의 뒷부분이 영영 없어진다.**
+MAX_CELL = _limit("TYBOT_CONVERT_MAX_CELL")
 CONVERTIBLE = {"xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp"}
 
 
@@ -75,7 +108,10 @@ class ConvertError(RuntimeError):
 
 def _clip(s: object) -> str:
     t = str(s).replace("\r", " ").replace("\n", " ").strip()
-    return t if len(t) <= MAX_CELL else t[:MAX_CELL] + "…"
+    if not MAX_CELL or len(t) <= MAX_CELL:
+        return t
+    _record("", flag=CELL_TRUNCATED)
+    return t[:MAX_CELL] + "…"
 
 
 def _finish(lines: list[str]) -> list[str]:
@@ -86,7 +122,7 @@ def _finish(lines: list[str]) -> list[str]:
     """
     lines = [ln for ln in lines if ln.strip()]
     total = len(lines)
-    if total > MAX_LINES:
+    if MAX_LINES and total > MAX_LINES:
         # 접은 것도 **덜 읽은 것**이다. 어느 형식이든 여기를 지나므로
         # 한 자리에서 남긴다.
         _record("", flag=LINE_LIMIT_REACHED)
@@ -97,11 +133,14 @@ def _finish(lines: list[str]) -> list[str]:
             *lines[-FOLD_TAIL:],
         ]
 
-    # 문자 수 상한. 줄 수가 적어도 셀에 긴 메모가 들면 여기서 걸린다.
+    # 문자 수 상한. **기본은 무제한** — 걸면 뒤가 통째로 사라진다.
+    if not MAX_TOTAL_CHARS:
+        return lines
     used = 0
     head: list[str] = []
     for line in lines:
         if used + len(line) > MAX_TOTAL_CHARS:
+            _record("", flag=CHAR_LIMIT_REACHED)
             head.append(f"…(문자 수 상한 {MAX_TOTAL_CHARS:,}자 도달, 이후 생략)")
             break
         head.append(line)
@@ -110,11 +149,13 @@ def _finish(lines: list[str]) -> list[str]:
 
 
 def _sheet_rows(wb) -> dict[str, tuple[list[tuple[int, list[str]]], int]]:
-    """시트별로 (머리+꼬리 행, 전체 행 수).
+    """시트별로 (남긴 행, 전체 행 수).
 
-    **한 번만 흘려 읽으면서 꼬리를 큐에 남긴다.** 앞에서 상한에 걸려 멈추면 표의
-    합계 행을 아예 읽지 못하는데, 사람이 묻는 값은 대개 그 합계다(2026-09-07 실측:
-    안전 상한이 꼬리 남기기를 무력화했다).
+    **기본은 전부 남긴다**(2026-09-14). 상한을 걸면 그 시트의 가운데가 아카이브에
+    영영 없어지고, 사람이 묻는 값이 하필 거기 있으면 「자료가 없다」 로 답한다.
+
+    상한을 걸었을 때만 머리와 꼬리를 남긴다. **꼬리가 핵심이다** — 표의 합계가
+    거기 있다. 앞에서 상한에 걸려 멈추면 합계를 아예 못 읽는다(2026-09-07 실측).
 
     행마다 절대 위치를 함께 준다 — 수식 폴백이 같은 칸끼리 맞추려면 위치가 필요하다.
     빈 셀은 빈 문자열로 남겨 자리를 지킨다.
@@ -124,18 +165,25 @@ def _sheet_rows(wb) -> dict[str, tuple[list[tuple[int, list[str]]], int]]:
     out: dict[str, tuple[list[tuple[int, list[str]]], int]] = {}
     for ws in wb.worksheets:
         head: list[tuple[int, list[str]]] = []
-        tail: deque[tuple[int, list[str]]] = deque(maxlen=FOLD_TAIL)
+        # `maxlen=0` 은 **전부 버린다.** 무제한을 0 으로 쓰는 우리 규칙과 뜻이
+        # 정반대라, 상한이 없을 때는 큐를 쓰지 않는다.
+        tail: deque[tuple[int, list[str]]] | None = (
+            deque(maxlen=FOLD_TAIL) if FOLD_TAIL else None
+        )
         total = 0
         for index, row in enumerate(ws.iter_rows(values_only=True)):
             cells = [_clip(c) if c is not None else "" for c in row]
             if not any(cells):
                 continue
             total += 1
-            if len(head) < FOLD_HEAD:
+            if not FOLD_HEAD or len(head) < FOLD_HEAD:
                 head.append((index, cells))
-            else:
+            elif tail is not None:
                 tail.append((index, cells))
-        picked = head + [item for item in tail if item[0] > (head[-1][0] if head else -1)]
+        picked = head
+        if tail:
+            last = head[-1][0] if head else -1
+            picked = head + [item for item in tail if item[0] > last]
         out[ws.title] = (picked, total)
     return out
 
@@ -192,7 +240,7 @@ def _xlsx_basic(data: bytes) -> list[str]:
         shown = 0
         previous = -1
         for index, row in rows:
-            if previous >= 0 and index > previous + 1 and shown >= FOLD_HEAD:
+            if FOLD_HEAD and previous >= 0 and index > previous + 1 and shown >= FOLD_HEAD:
                 # 가운데를 접었다는 사실을 그 자리에 남긴다. 뒤에 오는 것이 꼬리다.
                 out.append(f"…(가운데 {total - len(rows)}줄 생략, 총 {total}줄)")
             previous = index
@@ -250,7 +298,10 @@ def _pptx_basic(data: bytes) -> list[str]:
 
     prs = Presentation(io.BytesIO(data))
     out: list[str] = []
-    for i, slide in enumerate(prs.slides, 1):
+    slides = list(prs.slides)
+    empty: list[int] = []
+    for i, slide in enumerate(slides, 1):
+        before = len(out)
         out.append(f"[슬라이드 {i}]")
         for shape in slide.shapes:
             if getattr(shape, "has_text_frame", False):
@@ -263,6 +314,16 @@ def _pptx_basic(data: bytes) -> list[str]:
                     cells = [_clip(c.text) for c in row.cells if c.text.strip()]
                     if cells:
                         out.append(" | ".join(cells))
+        if len(out) == before + 1:
+            # 머리줄만 남았다 = 글자를 하나도 못 읽었다. **그림만 있는
+            # 슬라이드는 읽은 것으로 세지 않는다** — 그 그림이 표일 수 있다.
+            empty.append(i)
+    _record(
+        "slide",
+        total=len(slides),
+        converted=len(slides) - len(empty),
+        missing=tuple(empty),
+    )
     return _finish(out)
 
 
@@ -271,6 +332,7 @@ def _docx(data: bytes) -> list[str]:
         return _finish(kordoc_lines(data, "docx"))
     except (ExternalConverterUnavailable, ExternalConversionError) as exc:
         logger.warning("DOCX 정밀 변환기를 쓰지 못해 기본 변환으로 전환: %s", exc)
+        _record("", flag=FALLBACK_CONVERTER)
         return [f"[변환 안내] 문서 내 이미지 미해석: {exc}", *_docx_basic(data)]
 
 
@@ -279,6 +341,9 @@ def _pptx(data: bytes) -> list[str]:
         return _finish(office_pdf_lines(data, "pptx"))
     except (ExternalConverterUnavailable, ExternalConversionError) as exc:
         logger.warning("PPTX 시각 변환기를 쓰지 못해 기본 변환으로 전환: %s", exc)
+        # 폴백은 정밀 변환과 **동등하지 않다**(설계 §6). 글자는 나와도 도형·
+        # 이미지 안의 값은 안 나온다 — 그걸 성공으로 닫으면 사람은 전부 본 줄 안다.
+        _record("", flag=FALLBACK_CONVERTER)
         return [f"[변환 안내] 슬라이드 이미지·도형 미해석: {exc}", *_pptx_basic(data)]
 
 
@@ -388,6 +453,7 @@ def _hwpx(data: bytes) -> list[str]:
         return _finish(kordoc_lines(data, "hwpx"))
     except (ExternalConverterUnavailable, ExternalConversionError) as exc:
         logger.warning("HWPX 정밀 변환기를 쓰지 못해 기본 변환으로 전환: %s", exc)
+        _record("", flag=FALLBACK_CONVERTER)
         return [f"[변환 안내] HWPX 표·배치 단순화: {exc}", *_hwpx_basic(data)]
 
 
@@ -449,6 +515,11 @@ UNKNOWN = "unknown"
 # 품질 플래그. 숫자로 표현 못 하는 손실을 이름으로 남긴다.
 ROW_LIMIT_REACHED = "row_limit_reached"
 LINE_LIMIT_REACHED = "line_limit_reached"
+CELL_TRUNCATED = "cell_truncated"
+CHAR_LIMIT_REACHED = "char_limit_reached"
+# 정밀 변환기를 못 써서 기본 파서로 내려갔다. **동등하지 않다**(설계 §6) —
+# 글자는 나와도 표·도형·이미지 안의 값은 안 나온다.
+FALLBACK_CONVERTER = "fallback_converter"
 OCR_UNAVAILABLE = "ocr_unavailable"
 TITLE_ONLY = "title_only"
 

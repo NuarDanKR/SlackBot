@@ -113,13 +113,35 @@ def test_the_fold_note_reports_the_real_total(monkeypatch):
     assert "총 53줄" in note, note  # 시트 머리와 table 시작·끝도 검색 가능한 구조 줄이다
 
 
-def test_the_row_limit_is_high_enough_for_real_tables():
-    """400 이던 것을 올렸다. 가정산서는 수천 행이다.
+def test_conversion_does_not_truncate_by_default():
+    """**변환 단계에서 자르면 아카이브에 영구히 없어진다**(2026-09-14 오너 결정).
 
-    올려도 답변 프롬프트는 커지지 않는다 — 근거로 들어가는 것은 검색이 고른 줄뿐이다.
+    답변 단계의 상한(`AnswerEngine._max_hits`·`MAX_EVIDENCE_CHARS`)과 다르다 —
+    그쪽은 요청마다 다시 고르므로 손실이 아니다. 회사 파일은 크고, 잘라 넣으면
+    "봇이 숫자를 못 읽는다" 로 나타난다.
+
+    `0` 은 무제한이다. 비상용 환경변수만 남긴다.
     """
-    assert convert.MAX_LINES >= 20_000
-    assert convert.MAX_TOTAL_CHARS >= 300_000
+    assert convert.MAX_LINES == 0
+    assert convert.MAX_TOTAL_CHARS == 0
+    assert convert.MAX_CELL == 0
+    assert convert.FOLD_HEAD == 0
+    assert convert.FOLD_TAIL == 0
+
+
+def test_an_emergency_limit_can_still_be_set(monkeypatch):
+    """한 파일이 서버를 넘어뜨리는 상황이 실제로 생기면 그때 건다."""
+    monkeypatch.setenv("TYBOT_CONVERT_MAX_LINES", "500")
+
+    assert convert._limit("TYBOT_CONVERT_MAX_LINES") == 500
+    assert convert._limit("TYBOT_CONVERT_MAX_LINES", 0) == 500
+
+
+def test_a_broken_limit_value_falls_back_to_unlimited(monkeypatch):
+    """읽을 수 없는 값을 **0 으로 읽어 전부 자르면** 그게 최악이다."""
+    monkeypatch.setenv("TYBOT_CONVERT_MAX_LINES", "많이")
+
+    assert convert._limit("TYBOT_CONVERT_MAX_LINES") == 0
 
 
 # --- 매크로 ------------------------------------------------------------------
@@ -188,3 +210,6 @@ def test_the_two_paths_use_the_same_line_budget():
     assert files.MAX_TEXT_LINES == convert.MAX_LINES
     assert files.TEXT_FOLD_HEAD == convert.FOLD_HEAD
     assert files.TEXT_FOLD_TAIL == convert.FOLD_TAIL
+    # 둘 다 무제한이어야 한다. 한쪽만 열려 있으면 「csv 는 되는데 xlsx 는
+    # 안 된다」 같은 설명할 수 없는 차이가 된다.
+    assert files.MAX_TEXT_BYTES == 0

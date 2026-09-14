@@ -29,10 +29,21 @@ from typing import ClassVar
 from .files import DownloadError, SlackFile, download_bytes
 
 logger = logging.getLogger("tybot.canvas")
+
+
+def _canvas_limit() -> int:
+    """캔버스 줄 상한. **`0` 은 무제한.**"""
+    from .convert import _limit
+
+    return _limit("TYBOT_CANVAS_MAX_LINES")
+
 GENERATED_TITLE = "TYBot 정식 답변"
 
 MAX_CANVAS_BYTES = 1024 * 1024  # 캔버스 마크다운 상한(Slack 문서상 1 MiB)
-MAX_LINES = 300
+# **자르지 않는다**(2026-09-14). 300 이던 것을 없앴다 — 캔버스에 정리해 둔 표와
+# 목록이 300줄을 넘는 일은 흔하고, 잘린 뒤쪽은 아카이브에 영영 없어진다.
+# `0` 은 무제한이고, 비상용으로만 환경변수를 남긴다(`convert._limit` 와 같은 규칙).
+MAX_LINES = _canvas_limit()
 TEXT_MIMES = frozenset({"text/markdown", "text/plain"})
 HTML_MIMES = frozenset({"text/html", "application/xhtml+xml"})
 
@@ -141,7 +152,7 @@ def _to_lines(raw: bytes, mimetype: str) -> list[str]:
     lines = [ln for ln in lines if ln]
     if not lines:
         raise DownloadError("캔버스 본문이 비어 있거나 형식을 알아보지 못했다")
-    if len(lines) > MAX_LINES:
+    if MAX_LINES and len(lines) > MAX_LINES:
         lines = [*lines[:MAX_LINES], f"…(이하 생략, 총 {len(lines)}줄)"]
     return lines
 

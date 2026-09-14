@@ -142,6 +142,10 @@ class Answer:
     terms: list[str] = field(default_factory=list)
     # 근거에 언급됐지만 자동 변환하지 못한 첨부.
     withheld: list[str] = field(default_factory=list)
+    # 변환은 됐는데 **일부만** 읽은 첨부. `이름 (확인 3/10쪽)` 모양이다.
+    # 실패(`withheld`)와 다르다 — 이쪽은 답이 나가므로 범위를 밝히지 않으면
+    # 사람이 전부 본 줄 안다.
+    partial_attachments: list[str] = field(default_factory=list)
     # 어느 전문가가 문장을 만들었나. 비면 마스터다.
     #
     # **모델명으로는 구별할 수 없다.** 전문가에게 지정한 모델이 마스터 기본 모델과
@@ -205,6 +209,17 @@ class Answer:
             names = ", ".join(self.withheld[:3])
             more = f" 외 {len(self.withheld) - 3}건" if len(self.withheld) > 3 else ""
             bits.append(f"자동 변환 실패로 내용을 읽지 못한 첨부: {names}{more}")
+        if self.partial_attachments:
+            # **변환은 됐는데 다 읽지는 못한 첨부.** 실패와 다르다 — 본문이 있어서
+            # 답이 나가고, 그 답에 우리 출처가 붙는다. 어디까지 읽었는지 안 밝히면
+            # 사람은 전부 본 줄 안다.
+            shown = ", ".join(self.partial_attachments[:3])
+            more = (
+                f" 외 {len(self.partial_attachments) - 3}건"
+                if len(self.partial_attachments) > 3
+                else ""
+            )
+            bits.append(f"일부만 읽은 첨부: {shown}{more}")
         return f"_근거: {' · '.join(bits)}_" if bits else ""
 
     def to_slack(self, *, preserve_markdown: bool = False) -> str:
@@ -448,6 +463,36 @@ def _extracted_names(hits: list[SearchHit]) -> set[str]:
             got = EXTRACTED_ATTACHMENT_RE.match((line.text or "").strip())
             if got:
                 out.add(got.group("name"))
+    return out
+
+
+def _partial_attachments(root: Path, hits: list[SearchHit]) -> list[str]:
+    """근거에 쓰인 첨부 중 **일부만 읽은 것**. `이름 (확인 3/10쪽)`.
+
+    `_withheld_attachments()` 는 아예 못 읽은 것이고 이쪽은 읽긴 읽은 것이다.
+    둘을 같은 줄로 묶으면 「읽었는데 모자란 것」 이 「못 읽은 것」 으로 보이고,
+    사용자가 할 일이 달라진다 — 하나는 원본을 열어 보는 것이고 하나는 재변환이다.
+    """
+    names = _attachment_names(hits)
+    if not names:
+        return []
+    from . import attachment_review
+
+    try:
+        staged = attachment_review.scan(root)
+    except Exception as exc:  # noqa: BLE001 - 표시 한 줄이 답변을 막지 않는다
+        logger.warning("첨부 범위를 읽지 못했습니다: %s", exc)
+        return []
+    by_key = {(a.workspace, a.channel_id, a.name): a for a in staged}
+    out: list[str] = []
+    for workspace, channel_id, name in names:
+        item = by_key.get((workspace, channel_id, name))
+        if item is None or item.conversion_state != "partial":
+            continue
+        note = item.coverage_note
+        label = f"{name} ({note})" if note else name
+        if label not in out:
+            out.append(label)
     return out
 
 
@@ -1536,6 +1581,7 @@ class AnswerEngine:
         # 기본 근거는 변환된 텍스트다. 이미지 원본은 아래에서 같은 채널의 정확한 파일로
         # 식별되고 OCR·PII 검사를 통과한 경우에만 시각 입력으로 추가한다.
         withheld = _withheld_attachments(hits)
+        partial = _partial_attachments(self._store.root, hits)
         visual = _visual_originals(self._store.root, hits)
         prompt = f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"
         # 전문가에게 먼저 묻는다. **근거는 이미 권한을 통과한 것뿐**이고(위 검색이
@@ -1577,6 +1623,7 @@ class AnswerEngine:
                     "answered",
                     specialist=special.specialist,
                     withheld=withheld,
+                    partial_attachments=partial,
                     required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(hits, self._store.root),
@@ -1632,6 +1679,7 @@ class AnswerEngine:
         return Answer(
             resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits),
             "answered", terms=list(terms or []), withheld=withheld,
+            partial_attachments=partial,
             evidence_refs=refs_from_hits(hits, self._store.root),
             attachment_refs=_attachment_refs(self._store.root, hits),
             subject_terms=list(terms or []),

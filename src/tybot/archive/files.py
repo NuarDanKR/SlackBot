@@ -34,17 +34,28 @@ UNCONVERTED_EXTS = {
     "zip", "7z", "rar",  # 압축
 }
 
-MAX_TEXT_BYTES = 256 * 1024  # 원문에 넣는 텍스트 상한
+# **변환 단계에서는 자르지 않는다**(2026-09-14 오너 결정).
+# 자세한 이유는 `convert.MAX_LINES` 주석 참조 — 여기서 자르면 아카이브에 영구히
+# 없어진다. 문서 변환과 **같은 규칙·같은 기본값**을 쓴다. 두 경로가 갈리면
+# 「csv 는 되는데 xlsx 는 안 된다」 같은 설명할 수 없는 차이가 생긴다.
+def _text_limit(name: str) -> int:
+    """상한 환경변수. **`0` 은 무제한**(`convert._limit` 와 같은 규칙)."""
+    from .convert import _limit
+
+    return _limit(name)
+
+
+MAX_TEXT_BYTES = _text_limit("TYBOT_TEXT_MAX_BYTES")
 # 텍스트 파일에서 원문에 넣는 줄 수.
 #
 # 200 이던 것을 올렸다(2026-09-07). `csv`·`tsv` 가 여기로 오는데, 표는 **뒤에 합계가
 # 있어서** 앞 200줄만 남으면 정작 필요한 값이 빠진다. 문서 변환(`convert.MAX_LINES`)과
 # 같은 이유·같은 값으로 맞춘다 — 두 경로가 갈리면 「csv 는 되는데 xlsx 는 안 된다」
 # 같은 설명할 수 없는 차이가 생긴다.
-MAX_TEXT_LINES = 20_000
-# 접을 때 남길 머리와 꼬리. 꼬리가 합계다.
-TEXT_FOLD_HEAD = 12_000
-TEXT_FOLD_TAIL = 4_000
+MAX_TEXT_LINES = _text_limit("TYBOT_TEXT_MAX_LINES")
+# 접을 때 남길 머리와 꼬리. 꼬리가 합계다. 상한을 걸었을 때만 쓴다.
+TEXT_FOLD_HEAD = _text_limit("TYBOT_TEXT_FOLD_HEAD")
+TEXT_FOLD_TAIL = _text_limit("TYBOT_TEXT_FOLD_TAIL")
 DOWNLOAD_TIMEOUT = 20
 
 
@@ -225,7 +236,7 @@ def _fold_lines(lines: list[str]) -> tuple[list[str], bool]:
     접었으면 그 사실을 줄에 적으므로, 호출부는 「이하 생략」 을 또 붙이지 않는다
     (같은 말을 두 번 하면 어느 쪽이 진짜 상한인지 알 수 없다).
     """
-    if len(lines) <= MAX_TEXT_LINES:
+    if not MAX_TEXT_LINES or len(lines) <= MAX_TEXT_LINES:
         return lines, False
     dropped = len(lines) - TEXT_FOLD_HEAD - TEXT_FOLD_TAIL
     return (
@@ -239,8 +250,9 @@ def _fold_lines(lines: list[str]) -> tuple[list[str], bool]:
 
 
 def _decode_text(raw: bytes, declared_size: int) -> str:
-    truncated = len(raw) > MAX_TEXT_BYTES
-    text = raw[:MAX_TEXT_BYTES].decode("utf-8", errors="replace")
+    truncated = bool(MAX_TEXT_BYTES) and len(raw) > MAX_TEXT_BYTES
+    body = raw[:MAX_TEXT_BYTES] if MAX_TEXT_BYTES else raw
+    text = body.decode("utf-8", errors="replace")
     lines = text.splitlines()
     lines, folded = _fold_lines(lines)
     truncated = truncated and not folded
@@ -271,14 +283,17 @@ def download_text(f: SlackFile, bot_token: str) -> str:
     req = Request(f.url_private_download, headers={"Authorization": f"Bearer {bot_token}"})
     with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:
         ctype = (resp.headers.get("Content-Type") or "").lower()
-        raw = resp.read(MAX_TEXT_BYTES + 1)
+        # 상한이 없으면 끝까지 읽는다. **0 을 그대로 넘기지 않는다** —
+        # 0 은 무제한이라는 뜻이지 `read(1)` 이 아니다.
+        raw = resp.read(MAX_TEXT_BYTES + 1) if MAX_TEXT_BYTES else resp.read()
     # files:read 누락 시 Slack 은 로그인 페이지를 200 으로 돌려준다.
     if "text/html" in ctype and not f.is_text:
         raise DownloadError(f"{f.name}: HTML 응답 - files:read 스코프 또는 토큰 확인")
     if raw[:15].lstrip().lower().startswith(b"<!doctype html"):
         raise DownloadError(f"{f.name}: 로그인 페이지가 내려왔다 - files:read 스코프 확인")
-    truncated = len(raw) > MAX_TEXT_BYTES
-    text = raw[:MAX_TEXT_BYTES].decode("utf-8", errors="replace")
+    truncated = bool(MAX_TEXT_BYTES) and len(raw) > MAX_TEXT_BYTES
+    body = raw[:MAX_TEXT_BYTES] if MAX_TEXT_BYTES else raw
+    text = body.decode("utf-8", errors="replace")
     lines = text.splitlines()
     lines, folded = _fold_lines(lines)
     truncated = truncated and not folded
@@ -453,8 +468,11 @@ def stage_attachments(
         if extracted is not None:
             tag = "첨부본문" if f.is_text else "첨부추출"
             body_lines = [line.strip() for line in extracted.splitlines() if line.strip()]
-            truncated = len(body_lines) > MAX_TEXT_LINES
-            for line in body_lines[:MAX_TEXT_LINES]:
+            # **`0` 은 무제한이다.** `[:0]` 으로 읽으면 본문이 통째로 사라진다 —
+            # 상한을 없애는 변경에서 가장 조용한 실패가 여기였다.
+            truncated = bool(MAX_TEXT_LINES) and len(body_lines) > MAX_TEXT_LINES
+            kept = body_lines[:MAX_TEXT_LINES] if MAX_TEXT_LINES else body_lines
+            for line in kept:
                 own_lines.append(f"[{tag}:{f.name}] {line}")
             if truncated:
                 own_lines.append(f"[{tag}:{f.name}] …(이하 생략, 원본 링크에서 확인)")

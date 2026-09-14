@@ -337,14 +337,44 @@ tests/test_conversion_coverage.py 16건
 - 구형 metadata 검사가 `Attachment` 를 손으로 만들어 `_as_count()` 를 안 지났다
 - 수집 경로가 coverage 를 쓴다는 것을 아무도 확인하지 않았다
 
+### 상한 제거 (오너 지시 2026-09-14)
+
+**변환 단계에서는 자르지 않는다.** 여기서 자르면 아카이브에 영구히 없어진다 —
+답변 단계의 상한(`AnswerEngine._max_hits`·`MAX_EVIDENCE_CHARS`)과 다르다. 그쪽은
+요청마다 다시 고르므로 손실이 아니다.
+
+| 있던 상한 | 지금 | 비상용 환경변수 |
+|---|---|---|
+| `convert.MAX_LINES` 20,000 | 무제한 | `TYBOT_CONVERT_MAX_LINES` |
+| `convert.MAX_TOTAL_CHARS` 300,000 | 무제한 | `TYBOT_CONVERT_MAX_CHARS` |
+| `convert.MAX_CELL` 200 | 무제한 | `TYBOT_CONVERT_MAX_CELL` |
+| `convert.FOLD_HEAD/TAIL` 12,000/4,000 | 무제한 | `TYBOT_CONVERT_FOLD_HEAD/TAIL` |
+| `files.MAX_TEXT_BYTES` 256KB | 무제한 | `TYBOT_TEXT_MAX_BYTES` |
+| `files.MAX_TEXT_LINES` 20,000 | 무제한 | `TYBOT_TEXT_MAX_LINES` |
+| `canvas.MAX_LINES` 300 | 무제한 | `TYBOT_CANVAS_MAX_LINES` |
+| 외부 XLSX `--max-rows` 1,000 | 10,000,000 | `TYBOT_XLSX_MAX_ROWS` |
+
+**`0` 이 무제한이다.** 그래서 `[:LIMIT]` 로 자르던 자리를 전부 찾아 고쳤다 —
+`0` 이면 `[:0]` 이라 **본문이 통째로 사라진다.** 네 군데 있었고 그게 이 변경의
+가장 조용한 실패였다.
+
+마지막 줄이 특히 중요하다. 벤더 스크립트의 `--max-rows` 는 **자르는 값이 아니라
+버리는 값**이었다 — 행 수가 넘으면 그 시트를 통째로 건너뛴다(`build_blocks`).
+우리 정산서·기성 표는 대부분 1,000행을 넘고, 그래서 **시트가 통째로 사라진 채
+「변환 성공」** 이 됐다.
+
 ### A-잔여 (아직 안 한 것)
 
-- **PPT/PPTX 슬라이드 수** — 외부 변환(LibreOffice→PDF) 경로라 슬라이드 단위를
-  못 센다. 지금은 PDF 쪽 수로 잡힌다. 그림만 있는 슬라이드는 「글자 없는 쪽」 으로
-  미확인에 들어가지만, **슬라이드 번호와 쪽 번호가 같다고 보장할 수 없다.**
-- **HWP/HWPX** — kordoc 이 상세를 안 주므로 `unknown` 이다. 부분 실패를 명시할
-  방법이 없다.
-- **외부 XLSX 변환기(`--max-rows 1000`)** — 내부 openpyxl 경로만 행 상한을
-  기록한다. 외부 경로는 잘린 사실을 아직 못 받는다(`external_convert.py:166`).
-- **답변 「근거」 줄에 coverage 표시** — `attachment_review.status_line()` 까지는
-  갔지만 `Answer.evidence_note()` 에는 아직 안 붙였다.
+- ~~PPT/PPTX 슬라이드 수~~ **기본 경로는 완료** — `_pptx_basic` 이 슬라이드
+  단위로 센다. 글자 없는 슬라이드는 읽은 것으로 세지 않는다.
+  **외부 변환(LibreOffice→PDF) 경로는 여전히 쪽 단위**다 — 슬라이드 번호와 쪽
+  번호가 같다고 보장할 수 없다(**남은 것**).
+- ~~HWP/HWPX~~ **폴백 표시는 완료** — 정밀 변환기를 못 써서 기본 파서로 내려가면
+  `fallback_converter` 플래그가 붙고 `partial` 이 된다. 다만 kordoc 이 성공한
+  경우의 **상세 개수는 여전히 `unknown`**(**남은 것**).
+- ~~외부 XLSX 변환기 1,000행~~ **완료** — 사실상 무제한. 위 「상한 제거」 참조.
+- ~~답변 「근거」 줄에 coverage 표시~~ **완료** — `일부만 읽은 첨부: 정산서.pdf
+  (확인 3/10쪽)`. 못 읽은 것(`withheld`)과 **줄을 나눠** 적는다. 섞으면 사람이
+  할 일이 달라진다 — 하나는 원본을 열어 보는 것이고 하나는 재변환이다.
+- **남은 것**: 외부 PPT 경로의 슬라이드 단위, kordoc 성공 시 상세 개수,
+  검색 색인이 커진 뒤의 성능(상한을 없앴으므로 아카이브가 커진다 — 실측 필요).
