@@ -1314,6 +1314,10 @@ def test_archive_attachment_failures_are_workspace_scoped(client, monkeypatch):
             filetype="pdf",
             status=attachment_review.DOWNLOAD_OR_EXTRACT_FAILED,
             error="converter failed",
+            original_state="retained",
+            conversion_state="failed",
+            error_code="converter_timeout",
+            retryable=True,
             permalink="https://example.slack.com/files/F1",
             staged_at="2026-09-11T01:00:00+00:00",
             object_path=None,
@@ -1332,6 +1336,9 @@ def test_archive_attachment_failures_are_workspace_scoped(client, monkeypatch):
     items = response.json()["section"]["failedAttachments"]
     assert [item["name"] for item in items] == ["볼수있음.pdf"]
     assert "error" not in items[0]
+    assert items[0]["originalState"] == "retained"
+    assert items[0]["errorCode"] == "converter_timeout"
+    assert items[0]["retryable"] is True
 
 
 def test_admin_can_explicitly_preview_a_pii_blocked_image(client, env, monkeypatch):

@@ -45,6 +45,7 @@ FILES=(
   specialist_routing_schema.sql
   specialist_rules_schema.sql
   specialist_runtime_schema.sql
+  conversion_queue_schema.sql
   # 데이터 보정(멱등). 구조가 다 선 뒤에 돌린다.
   schedule_folder_acl_default.sql
   schedule_dm_fixed_ten.sql
@@ -75,6 +76,11 @@ for path in "$SQL_DIR"/*.sql; do
 done
 
 echo "== PostgreSQL 스키마 적용 (port=$PORT db=$DB, ${#FILES[@]}개)"
+if ((!DRY_RUN)); then
+  sudo -u tybot env TYBOT_ENV_FILE="${TYBOT_ENV_FILE:-/etc/tybot/tybot.env}" \
+    /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_schema_drift.py \
+    --target-only --expected-db "$DB" --expected-port "$PORT"
+fi
 for name in "${FILES[@]}"; do
   if ((DRY_RUN)); then
     echo "   [dry-run] $name"
@@ -83,7 +89,7 @@ for name in "${FILES[@]}"; do
   echo "-- $name"
   # ON_ERROR_STOP: 한 파일이 실패하면 거기서 멈춘다. 계속 돌리면 뒤 파일이 앞 파일의
   # 표를 못 찾아 오류가 줄줄이 나고, 진짜 원인이 스크롤 위로 사라진다.
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -p "$PORT" -d "$DB" -f "$SQL_DIR/$name"
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -p "$PORT" -d "$DB" < "$SQL_DIR/$name"
 done
 
 if ((DRY_RUN)); then
@@ -94,8 +100,9 @@ fi
 echo
 echo "== 대조: 선언과 실제가 같은가"
 if [[ -x /opt/tybot/.venv/bin/python ]]; then
-  sudo -u tybot /opt/tybot/.venv/bin/python \
-    /opt/tybot/scripts/check_schema_drift.py || true
+  sudo -u tybot env TYBOT_ENV_FILE="${TYBOT_ENV_FILE:-/etc/tybot/tybot.env}" \
+    /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_schema_drift.py
 else
   echo "(check_schema_drift.py 를 돌릴 파이썬을 찾지 못했다 — 직접 확인한다)"
+  exit 2
 fi

@@ -141,6 +141,45 @@ class AttachmentStorage:
 
     staging_dir: Path
     objects_dir: Path
+    # 재처리 큐가 읽을 좌표. 경로에서 되짚을 수도 있지만, `_safe_component()` 를
+    # 거친 뒤라 원래 값과 다를 수 있다 — 되짚은 값으로 큐 키를 만들면 같은 파일이
+    # 두 작업이 된다. 기본값을 둔 이유는 기존 호출부 호환뿐이다.
+    workspace: str = ""
+    channel_id: str = ""
+
+
+def queue_retry(
+    storage: AttachmentStorage,
+    *,
+    file_id: str,
+    original_sha256: str,
+    error_code: str,
+    retryable: bool,
+) -> None:
+    """다시 해 볼 만한 실패를 재처리 큐에 올린다.
+
+    **수집을 막지 않는다.** 큐가 없거나 DB 가 죽어도 첨부 수집 자체는 끝나야
+    한다 — 재처리는 나중에 할 수 있지만 놓친 원본은 되돌릴 수 없다(Slack
+    백필은 분당 1요청 제한이라 사실상 복구가 안 된다).
+
+    좌표를 모르면 올리지 않는다. 모르는 채로 올리면 워커가 열 파일을 찾지 못하고,
+    그 작업은 네 번 실패한 뒤 사람에게 넘어간다 — 잡음만 늘린다.
+    """
+    if not retryable or not storage.workspace or not storage.channel_id:
+        return
+    try:
+        from ..conversion_queue import enqueue
+
+        enqueue(
+            workspace=storage.workspace,
+            channel_id=storage.channel_id,
+            file_id=file_id,
+            original_sha256=original_sha256,
+            error_code=error_code,
+            retryable=retryable,
+        )
+    except Exception as exc:  # noqa: BLE001 - 큐 장애가 수집을 막으면 안 된다
+        logger.warning("재처리 큐에 올리지 못했다 file=%s: %s", file_id, exc)
 
 
 def attachment_storage(
@@ -154,6 +193,8 @@ def attachment_storage(
     return AttachmentStorage(
         staging_dir=archive.parent / "staging" / suffix,
         objects_dir=archive.parent / "objects" / suffix,
+        workspace=workspace,
+        channel_id=channel_id,
     )
 
 
@@ -263,6 +304,9 @@ def stage_attachments(
         extracted: str | None = None
         object_path: Path | None = None
         digest: str | None = None
+        original_retained = False
+        error_code = ""
+        retryable = False
 
         try:
             if not bot_token:
@@ -273,6 +317,7 @@ def stage_attachments(
             objects.mkdir(parents=True, exist_ok=True)
             object_path = objects / _safe_component(f.name)
             object_path.write_bytes(raw)
+            original_retained = True
 
             if f.is_text:
                 extracted = _decode_text(raw, f.size)
@@ -283,8 +328,16 @@ def stage_attachments(
         except (DownloadError, ConvertError, OSError) as exc:
             state = "download_or_extract_failed"
             error = str(exc)
+            from .external_convert import failure_details
+
+            error_code, retryable = failure_details(
+                exc, default="conversion_failed" if original_retained else "download_or_store_failed",
+            )
             own_warnings.append(error)
-            logger.warning("첨부 격리 저장 실패 %s: %s", f.name, exc)
+            logger.warning(
+                "첨부 처리 실패 file=%s original=%s: %s",
+                f.name, "retained" if original_retained else "missing", exc,
+            )
         except Exception as exc:
             state = "download_or_extract_failed"
             error = f"{f.name}: 예상하지 못한 오류 {exc.__class__.__name__}: {exc}"
@@ -307,6 +360,13 @@ def stage_attachments(
             metadata = {
                 "schema_version": 1,
                 "status": state,
+                "original_state": "retained" if original_retained else "missing",
+                "conversion_state": (
+                    "blocked" if state == "pii_refused" else
+                    "succeeded" if state == "converted" else
+                    "failed" if original_retained and error else
+                    "unsupported" if state == "unsupported" else "pending"
+                ),
                 "slack_file_id": f.id,
                 "name": f.name,
                 "filetype": f.filetype,
@@ -317,6 +377,8 @@ def stage_attachments(
                 "object_path": str(object_path) if object_path else None,
                 "extracted": extracted is not None,
                 "error": error,
+                "error_code": "pii_refused" if state == "pii_refused" else error_code,
+                "retryable": retryable if state != "pii_refused" else False,
                 "staged_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 # --- 추적 좌표(§5). 없는 값은 넣지 않는다 — 구형 metadata 와
                 # 구별되어야 하고, 빈 문자열은 「모른다」 를 「없다」 로 바꾼다.
@@ -332,6 +394,13 @@ def stage_attachments(
             }
             (staged / "metadata.json").write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            queue_retry(
+                storage,
+                file_id=file_id,
+                original_sha256=digest or "",
+                error_code=str(metadata["error_code"] or ""),
+                retryable=bool(metadata["retryable"]),
             )
             if extracted is not None:
                 (staged / "extracted.md").write_text(

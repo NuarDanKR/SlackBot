@@ -3,6 +3,23 @@ from unittest.mock import Mock
 from tybot.canvas_answer import TITLE, create, grant_channel, grant_user, markdown, parse_request
 
 
+def test_long_answers_use_canvas_unless_message_requested():
+    from tybot.canvas_answer import automatic
+
+    assert automatic("x" * 1200, "정리해줘")
+    assert automatic("\n".join(["line"] * 20), "정리해줘")
+    assert not automatic("short", "정리해줘")
+    assert not automatic("x" * 1200, "메시지로 답변해줘")
+
+
+def test_message_normalizes_headings_and_bold_but_preserves_code():
+    from tybot.canvas_answer import message
+
+    assert message("## 제목\n**강조**\n`**code**`\n```\n# code\n```") == (
+        "*제목*\n*강조*\n`**code**`\n```\n# code\n```"
+    )
+
+
 def test_canvas_is_only_requested_by_explicit_phrases():
     assert parse_request("주간 현황을 캔버스로 답변해") == (True, "주간 현황을")
     assert parse_request("메시지 말고 정식 답변해 예산 현황") == (True, "예산 현황")

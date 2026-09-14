@@ -607,6 +607,7 @@ def archive_diagnostics(user: User) -> dict:
     if not user.all_workspaces:
         failed = [item for item in failed if item.workspace in user.workspaces]
     failed.sort(key=lambda item: item.staged_at, reverse=True)
+    retries = _retry_states(failed[:200])
     section = dict(report["sections"]["archive"])
     section["attachmentFailures"] = len(failed)
     section["failedAttachments"] = [
@@ -618,13 +619,61 @@ def archive_diagnostics(user: User) -> dict:
             "filetype": item.filetype,
             "status": item.status,
             "reason": public_failure_reason(item),
+            "originalState": item.original_state,
+            "conversionState": item.conversion_state,
+            "errorCode": item.error_code,
+            "retryable": item.retryable,
             "permalink": item.permalink,
             "stagedAt": item.staged_at,
+            # 재처리 큐가 아는 것. **없으면 `null` 이다** — 빈 문자열로 두면
+            # 「큐에 없음」 과 「큐를 못 읽음」 이 같아 보인다.
+            **_retry_fields(retries.get((item.workspace, item.channel_id, item.file_id))),
             "previewable": user.is_admin and _attachment_preview_type(item.object_path) is not None,
         }
         for item in failed[:200]
     ]
     return {"checkedAt": report["checkedAt"], "section": section}
+
+
+def _retry_states(items) -> dict[tuple[str, str, str], dict]:
+    """이 첨부들의 재처리 상태를 한 번에 읽는다.
+
+    파일마다 DB 를 열면 200건짜리 화면이 연결 200개를 만든다. 큐를 못 읽어도
+    **화면은 떠야 한다** — 재처리 상태 하나 때문에 진단 전체가 막히면, 정작
+    보려던 실패 목록을 못 본다.
+    """
+    if not items:
+        return {}
+    try:
+        from ..conversion_queue import pending_for
+    except Exception:  # noqa: BLE001 - 큐 모듈이 없어도 화면은 뜬다
+        return {}
+    out: dict[tuple[str, str, str], dict] = {}
+    for item in items:
+        try:
+            got = pending_for(item.workspace, item.channel_id, item.file_id)
+        except Exception as exc:  # noqa: BLE001 - 큐 장애가 진단을 막지 않는다
+            logger.warning("재처리 상태를 읽지 못했습니다: %s", exc)
+            return out
+        if got:
+            out[(item.workspace, item.channel_id, item.file_id)] = got
+    return out
+
+
+def _retry_fields(row: dict | None) -> dict:
+    if not row:
+        return {"retryState": None, "retryAttempts": None, "nextRetryAt": None}
+    return {
+        # `held` 는 환경 문제이고 `failed` 는 그 파일을 포기한 것이다. 화면에서도
+        # 갈라 보여야 사람이 무엇을 할지 안다.
+        "retryState": str(row.get("state") or ""),
+        "retryAttempts": int(row.get("attempt_count") or 0),
+        "nextRetryAt": (
+            row["next_attempt_at"].isoformat()
+            if row.get("next_attempt_at") and hasattr(row["next_attempt_at"], "isoformat")
+            else None
+        ),
+    }
 
 
 def _attachment_preview_type(path: Path | None) -> str | None:

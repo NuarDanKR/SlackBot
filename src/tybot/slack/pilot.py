@@ -2204,9 +2204,16 @@ class WorkspaceBot:
             )
             return
 
+        from .progress import RequestProgress
+
+        progress = RequestProgress(
+            client, say, channel=str(event.get("channel") or ""),
+            root_ts=str(event.get("thread_ts") or event.get("ts") or ""),
+        )
         started = time.monotonic()
+        progress.start()
         try:
-            self._handle_request(event, client, say, in_channel=in_channel)
+            self._handle_request(event, client, progress.send, in_channel=in_channel)
         except Exception as e:
             # Slack 이 거부한 이유를 첫 줄에 남긴다. 트레이스백 30줄을 읽어야
             # 'restricted_action_read_only_channel' 을 찾는 상황을 만들지 않는다.
@@ -2219,9 +2226,9 @@ class WorkspaceBot:
             with contextlib.suppress(Exception):
                 ts = event.get("thread_ts") or event.get("ts")
                 if self.reply_in_thread or event.get("thread_ts"):
-                    response_ts = _response_ts(say(text=reply, thread_ts=ts))
+                    response_ts = _response_ts(progress.send(text=reply, thread_ts=ts))
                 else:
-                    response_ts = _response_ts(say(text=reply))
+                    response_ts = _response_ts(progress.send(text=reply))
             rec = QARecord.build(
                 record_id=str(event.get("_tybot_qa_record_id") or uuid.uuid4().hex),
                 workspace=self.workspace,
@@ -2244,6 +2251,8 @@ class WorkspaceBot:
                 error=type(e).__name__,
             )
             self.qa_log.write(rec)
+        finally:
+            progress.close()
 
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
         # 처리 시작부터 하나의 ID를 공유해야 분류 호출과 최종 질문·답변 원본을
@@ -2276,23 +2285,32 @@ class WorkspaceBot:
 
         def finish(reply: str, *, intent: Intent, ans: Answer | None, ctx: RequestContext | None):
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
+            from ..canvas_answer import automatic, message
+
+            use_canvas = canvas_requested or (
+                ans is not None and ans.reason in ("answered", "advice")
+                and automatic(reply, raw_text)
+            )
             if ans is not None and ctx is not None and (ctx.channel_id or ctx.channel):
                 reply = f"{reply}\n\n{CHANNEL_SCOPE_NOTICE}"
             # 아카이브 근거로 답한 경우에만 '근거 보기' 를 붙인다. 버튼이 있는데
             # 눌러도 아무것도 안 나오면 없는 것만 못하다.
-            fallback_kw = {"text": reply}
-            if thread_ts:
-                fallback_kw["thread_ts"] = thread_ts
+            fallback_kw = {"text": message(reply)}
+            delivery_thread = thread_ts or (
+                str(event.get("thread_ts") or event.get("ts") or "") if use_canvas else None
+            )
+            if delivery_thread:
+                fallback_kw["thread_ts"] = delivery_thread
             kw = dict(fallback_kw)
             canvas = None
-            if canvas_requested and ans is not None:
+            if use_canvas and ans is not None:
                 try:
                     canvas = create_answer_canvas(client, reply)
                     kw = {
                         "text": f"정식 답변을 Canvas로 작성했습니다: <{canvas.permalink}|Canvas 열기>"
                     }
-                    if thread_ts:
-                        kw["thread_ts"] = thread_ts
+                    if delivery_thread:
+                        kw["thread_ts"] = delivery_thread
                     if not channel_id.startswith("D"):
                         grant_canvas_channel(client, canvas.canvas_id, channel_id)
                 except Exception as exc:
@@ -2301,7 +2319,7 @@ class WorkspaceBot:
                     kw = fallback_kw
             elif ans is not None and ans.terms:
                 kw["blocks"] = evidence_view.blocks(
-                    reply, ans.terms, workspace=self.workspace
+                    message(reply), ans.terms, workspace=self.workspace
                 )
             response = say(**kw)
             if canvas is not None and channel_id.startswith("D"):
@@ -2436,7 +2454,7 @@ class WorkspaceBot:
             with specialist_router.bind_qa_record(qa_record_id):
                 ans = self.engine.respond(q, ctx, task, followup=followup, task=master_task)
             last = ans
-            sections.append(ans.to_slack())
+            sections.append(ans.to_slack(preserve_markdown=True))
             task_traces.append(
                 {
                     "task_index": master_task.task_index,

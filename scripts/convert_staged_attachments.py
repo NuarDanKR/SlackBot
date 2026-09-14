@@ -80,12 +80,23 @@ def _parse_ts(raw: str) -> datetime | None:
     return None
 
 
-def _record_result(item, *, status: str, error: str = "", body: list[str] | None = None) -> None:
+def _record_result(item, *, status: str, error: str = "", body: list[str] | None = None,
+                   failure: BaseException | None = None) -> None:
     """재변환 결과를 콘솔이 읽는 메타데이터와 미리보기에 함께 반영한다."""
     try:
+        from tybot.archive.external_convert import failure_details
+
+        code, retryable = failure_details(failure) if failure else ("conversion_failed" if error else "", False)
         meta = json.loads(item.meta_path.read_text(encoding="utf-8"))
         meta.update({
             "status": status,
+            "original_state": "retained" if item.object_path and Path(item.object_path).is_file() else "missing",
+            "conversion_state": (
+                "blocked" if status == "pii_refused" else
+                "succeeded" if body is not None else "failed"
+            ),
+            "error_code": "pii_refused" if status == "pii_refused" else code,
+            "retryable": retryable if status != "pii_refused" else False,
             "error": error or None,
             "extracted": body is not None,
             "reprocessed_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -152,6 +163,9 @@ def main(argv: list[str] | None = None) -> int:
     todo: list[tuple] = []
     counts: Counter[str] = Counter()
     for item in items:
+        if item.status == "pii_refused":
+            counts["정책 제외(재변환 안 함)"] += 1
+            continue
         if item.name in extracted.get(item.channel_id, set()):
             counts["이미 변환됨"] += 1
             continue
@@ -224,15 +238,23 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ConvertError) as exc:
             reason = f"{type(exc).__name__}: {exc}"
             failed.append((item.name, reason))
-            _record_result(item, status="download_or_extract_failed", error=reason)
+            _record_result(item, status="download_or_extract_failed", error=reason, failure=exc)
             continue
         except Exception as exc:  # noqa: BLE001 - 한 파일 실패가 나머지를 막지 않는다
             reason = f"예상치 못한 오류 {type(exc).__name__}: {exc}"
             failed.append((item.name, reason))
-            _record_result(item, status="download_or_extract_failed", error=reason)
+            _record_result(item, status="download_or_extract_failed", error=reason, failure=exc)
             continue
 
-        rows = [line.strip() for line in body if line.strip()][:MAX_TEXT_LINES]
+        all_rows = [line.strip() for line in body if line.strip()]
+        refused = next((reason for row in all_rows if (reason := writer.screen(row))), None)
+        if refused:
+            refused_total += 1
+            reason = f"수집 제외 대상({refused})"
+            failed.append((item.name, reason))
+            _record_result(item, status="pii_refused", error=reason)
+            continue
+        rows = all_rows[:MAX_TEXT_LINES]
         if not rows:
             reason = "변환 결과가 비어 있다"
             failed.append((item.name, reason))

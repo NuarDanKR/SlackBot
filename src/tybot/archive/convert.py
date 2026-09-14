@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 import zipfile
 
@@ -410,4 +411,21 @@ def convert(filetype: str, data: bytes) -> list[str]:
         raise ConvertError(f"'{filetype}' 은 변환 대상이 아니다")
     if not data:
         raise ConvertError("빈 파일")
+    if os.getenv("TYBOT_CONVERT_SPOOL"):
+        from pathlib import Path
+
+        from .conversion_worker import request
+
+        try:
+            return request(Path(os.environ["TYBOT_CONVERT_SPOOL"]), filetype.lower(), data)
+        except ExternalConversionError as exc:
+            raise ConvertError(str(exc)) from exc
+    return convert_local(filetype, data)
+
+
+def convert_local(filetype: str, data: bytes) -> list[str]:
+    """Worker entry point; never routes back into the spool client."""
+    fn = _HANDLERS.get(filetype.lower())
+    if fn is None or not data:
+        raise ConvertError("Unsupported or empty document")
     return fn(data)

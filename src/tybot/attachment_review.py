@@ -58,6 +58,10 @@ class Attachment:
     # 언제 올라온 것인가. **하루치를 밀어 주려면 필요하다** — 오늘 올라온 것과
     # 밀린 것을 한 목록에 섞으면 오늘 것이 묻힌다.
     staged_at: str = ""
+    original_state: str = "unknown"
+    conversion_state: str = "unknown"
+    error_code: str = ""
+    retryable: bool = False
 
     @property
     def is_approved(self) -> bool:
@@ -101,6 +105,10 @@ def _from_meta(meta: dict, meta_path: Path, workspace: str, channel_id: str) -> 
         error=str(meta.get("error") or ""),
         extracted=bool(meta.get("extracted")),
         staged_at=str(meta.get("staged_at") or ""),
+        original_state=str(meta.get("original_state") or "unknown"),
+        conversion_state=str(meta.get("conversion_state") or "unknown"),
+        error_code=str(meta.get("error_code") or ""),
+        retryable=meta.get("retryable") is True and meta.get("status") != PII_REFUSED,
     )
 
 

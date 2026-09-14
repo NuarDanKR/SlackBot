@@ -277,3 +277,23 @@ def test_self_kinds_answer_without_touching_the_archive(kind):
     (reply,) = _handle(bot, "질문")
     assert reply.strip()
     assert bot.engine.asked == []
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_long_answer_automatically_creates_canvas_or_readable_fallback(monkeypatch, fails):
+    text = "## 주간 현황\n" + "**진행 중**\n" * 22
+    ans = Answer(text, [], "m", 0.0, 1, "answered")
+    bot = _bot([Intent("summary", question="정리해줘")], [ans])
+    created = Mock(return_value=CanvasResult("FC", "https://example.slack.com/FC"))
+    if fails:
+        created.side_effect = RuntimeError("canvas unavailable")
+    monkeypatch.setattr("tybot.slack.pilot.create_answer_canvas", created)
+    (reply,) = _handle(bot, "정리해줘")
+    created.assert_called_once()
+    assert "## 주간 현황" in created.call_args.args[1]
+    if fails:
+        assert "## " not in reply
+        assert "**진행 중**" not in reply
+        assert "*진행 중*" in reply
+    else:
+        assert "Canvas 열기" in reply

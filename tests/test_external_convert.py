@@ -73,11 +73,44 @@ def test_run_overrides_inherited_home(monkeypatch, tmp_path):
 
     def fake_subprocess_run(command, **kwargs):
         seen.update(kwargs)
-        return subprocess.CompletedProcess(command, 0, "", "")
+        from unittest.mock import Mock
 
-    monkeypatch.setattr(ext.subprocess, "run", fake_subprocess_run)
+        return Mock(returncode=0, communicate=Mock(return_value=("", "")))
+
+    monkeypatch.setattr(ext.subprocess, "Popen", fake_subprocess_run)
     monkeypatch.setenv("HOME", "/root")
 
     ext._run(["soffice", "--version"], cwd=tmp_path, home=tmp_path)
 
     assert seen["env"]["HOME"] == str(tmp_path)
+
+
+def test_native_crash_is_not_misreported_as_oom(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    process = Mock(returncode=-6, communicate=Mock(return_value=("", "V8_Fatal secret")))
+    monkeypatch.setattr(ext.subprocess, "Popen", lambda *a, **kw: process)
+    with pytest.raises(ext.ExternalConversionError) as got:
+        ext._run(["kordoc"], cwd=tmp_path)
+    assert got.value.code == "converter_crashed"
+    assert not got.value.retryable
+    assert "secret" not in str(got.value)
+
+
+def test_timeout_reaps_converter(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    process = Mock(pid=12345)
+    process.communicate.side_effect = [subprocess.TimeoutExpired("converter", 120), ("", "")]
+    monkeypatch.setattr(ext.subprocess, "Popen", lambda *a, **kw: process)
+    killpg = Mock()
+    monkeypatch.setattr(ext.os, "killpg", killpg, raising=False)
+    with pytest.raises(ext.ExternalConversionError) as got:
+        ext._run(["kordoc"], cwd=tmp_path)
+    assert got.value.code == "converter_timeout"
+    assert got.value.retryable
+    assert process.communicate.call_count == 2
+    if ext.os.name == "posix":
+        killpg.assert_called_once_with(12345, ext.signal.SIGKILL)
+    else:
+        process.kill.assert_called_once()

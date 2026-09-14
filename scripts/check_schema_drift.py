@@ -120,6 +120,9 @@ def live(conn) -> tuple[set[tuple[str, str]], set[str], set[str]]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="스키마 선언 ↔ 실제 DB 대조 (읽기 전용)")
     ap.add_argument("--verbose", action="store_true", help="대조한 항목 전부 출력")
+    ap.add_argument("--target-only", action="store_true")
+    ap.add_argument("--expected-db")
+    ap.add_argument("--expected-port", type=int)
     args = ap.parse_args(argv)
 
     load_env_file()
@@ -135,6 +138,16 @@ def main(argv: list[str] | None = None) -> int:
 
     want_columns, want_tables = declared()
     with psycopg.connect(url, row_factory=psycopg.rows.dict_row) as conn:
+        if args.target_only:
+            info = conn.info
+            if (info.host not in ("127.0.0.1", "localhost", "::1")
+                    and not info.host.startswith("/")):
+                print("로컬 DB 연결이 아니므로 마이그레이션을 중단합니다.")
+                return EXIT_INPUT
+            if info.dbname != args.expected_db or info.port != args.expected_port:
+                print("봇 DB와 스키마 적용 대상이 다릅니다.")
+                return EXIT_INPUT
+            return EXIT_OK
         have_columns, have_tables, denied = live(conn)
 
     missing_tables = sorted(

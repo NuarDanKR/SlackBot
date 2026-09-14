@@ -1,0 +1,12 @@
+[Unit]
+Description=TYBot 첨부 변환 재처리 주기 실행
+
+[Timer]
+# 5분 간격. 큐의 backoff(1분·5분·30분)가 실제 간격을 정하므로 이 주기는
+# **깨우는 역할**이다. 더 자주 돌려도 작업이 없으면 바로 끝난다.
+OnCalendar=*:0/5
+Persistent=true
+RandomizedDelaySec=45
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,33 @@
+[Unit]
+Description=TYBot local document conversion worker
+After=local-fs.target
+
+[Service]
+Type=simple
+User=tybot-convert
+Group=tybot-convert
+WorkingDirectory=/var/lib/tybot-convert
+Environment=HOME=/var/lib/tybot-convert
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tybot-convert/.venv/bin/python -m tybot.archive.conversion_worker
+Restart=on-failure
+RestartSec=5
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=-/etc/tybot -/var/lib/tybot -/opt/tybot
+ReadOnlyPaths=/var/lib/tybot-convert/in
+ReadWritePaths=/var/lib/tybot-convert/out
+# Node/V8 requires executable allocations. This exception is local to this worker.
+MemoryDenyWriteExecute=false
+MemoryMax=2G
+TasksMax=64
+RestrictAddressFamilies=AF_UNIX
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

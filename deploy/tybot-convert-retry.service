@@ -1,0 +1,29 @@
+[Unit]
+Description=TYBot 첨부 변환 재처리 큐 비우기 (B-45)
+Documentation=file:///opt/tybot/docs/deploy/rocky8.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python scripts/drain_conversion_queue.py --apply --limit 20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-convert-retry
+# 변환기 자체 상한(120초) × 처리 건수보다 넉넉해야 한다. 여기서 끊기면 잡아 둔
+# 임대가 만료될 때까지 그 작업이 멈춘다.
+TimeoutStartSec=1800
+
+# 재처리는 **staging 안에서만** 쓴다. 원문 아카이브는 읽기 전용이다 —
+# 재변환이 과거 `## 원문` 을 고치는 길을 만들지 않는다(원칙 1).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tybot/staging
+ReadOnlyPaths=/var/lib/tybot/archive /var/lib/tybot/objects

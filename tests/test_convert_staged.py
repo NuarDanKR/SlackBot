@@ -91,6 +91,7 @@ def _raw_block(path: Path) -> list[str]:
 
 
 def _run(mod, archive, monkeypatch, capsys, *args):
+    monkeypatch.setattr(mod, "load_env_file", lambda: None)
     monkeypatch.setenv("ARCHIVE_DIR", str(archive))
     code = mod.main(list(args))
     return code, capsys.readouterr().out
@@ -159,6 +160,37 @@ def test_the_original_lines_are_untouched(mod, tmp_path, monkeypatch, capsys):
     for line in before:
         assert line in after, f"원문 줄이 바뀌었다: {line}"
     assert len(after) > len(before), "덧붙여지지 않았다"
+
+
+def test_policy_screening_includes_rows_after_limit(mod, tmp_path, monkeypatch, capsys):
+    archive = _archive(tmp_path, ["[첨부:처리실패] report.xlsx (xlsx, 10KB)"])
+    _stage(tmp_path, name="report.xlsx", file_id="F1")
+    monkeypatch.setattr(mod, "MAX_TEXT_LINES", 1)
+    monkeypatch.setattr(mod, "convert", lambda *args: ["allowed", "blocked"])
+    monkeypatch.setattr(mod.writer, "screen", lambda text: "policy" if "blocked" in text else None)
+    _run(mod, archive, monkeypatch, capsys, "--apply")
+    meta = json.loads(next((tmp_path / "staging").rglob("metadata.json")).read_text("utf-8"))
+    assert meta["status"] == "pii_refused"
+    assert not meta["retryable"]
+    assert "allowed" not in next(archive.rglob("*.md")).read_text("utf-8")
+
+
+def test_retry_preserves_typed_failure(mod, tmp_path, monkeypatch, capsys):
+    from tybot.archive.external_convert import ExternalConversionError
+
+    archive = _archive(tmp_path, ["[첨부:처리실패] report.xlsx (xlsx, 10KB)"])
+    _stage(tmp_path, name="report.xlsx", file_id="F1")
+    def fail(*args):
+        try:
+            raise ExternalConversionError("timeout", code="converter_timeout", retryable=True)
+        except ExternalConversionError as exc:
+            raise mod.ConvertError("conversion failed") from exc
+    monkeypatch.setattr(mod, "convert", fail)
+    _run(mod, archive, monkeypatch, capsys, "--apply")
+    meta = json.loads(next((tmp_path / "staging").rglob("metadata.json")).read_text("utf-8"))
+    assert meta["error_code"] == "converter_timeout"
+    assert meta["retryable"]
+    assert meta["original_state"] == "retained"
 
 
 def test_running_twice_does_not_double_up(mod, tmp_path, monkeypatch, capsys):

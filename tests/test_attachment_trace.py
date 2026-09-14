@@ -527,6 +527,28 @@ def test_staging_without_origin_omits_the_fields(tmp_path):
     meta = at.read_metadata(item.metadata_path)
     assert "origin_message_ts" not in meta
     assert "origin_thread_ts" not in meta
+    assert meta["original_state"] == "missing"
+
+
+def test_conversion_failure_preserves_original_state(tmp_path, monkeypatch):
+    from tybot.archive import files
+    from tybot.archive.convert import ConvertError
+
+    monkeypatch.setattr(files, "download_bytes", lambda *a: b"original")
+
+    def fail(*args):
+        raise ConvertError("converter crashed")
+
+    monkeypatch.setattr(files, "convert", fail)
+    storage = files.attachment_storage(tmp_path / "archive", WS, CH)
+    (item,) = files.stage_attachments(
+        [{"id": "F9", "name": "report.pdf", "filetype": "pdf", "size": 8}],
+        "test-token", storage,
+    )
+    meta = at.read_metadata(item.metadata_path)
+    assert meta["original_state"] == "retained"
+    assert meta["conversion_state"] == "failed"
+    assert Path(meta["object_path"]).read_bytes() == b"original"
 
 
 def test_warnings_stay_with_their_own_file(tmp_path):

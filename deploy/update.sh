@@ -84,6 +84,9 @@ fi
 log "배포"
 TYBOT_INSTALL_HINTS=0 bash "$SRC/deploy/install.sh"
 
+log "스키마 적용 및 앱 계정 검사"
+bash "$APP/deploy/apply-schema.sh"
+
 # 무엇이 배포됐는지 남긴다. 다음 회차가 이 값으로 "소스는 최신인데 /opt 는 옛것"
 # 상태를 알아채고, 새 커밋이 없어도 배포한다.
 git rev-parse HEAD > "$APP/.deployed-commit"

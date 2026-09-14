@@ -1,10 +1,36 @@
-"""사용자가 명시적으로 요청한 경우에만 독립 Slack Canvas로 답한다."""
+"""Explicit or long-form answers use Canvas; messages use Slack mrkdwn."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
 TITLE = "TYBot 정식 답변"
+AUTO_CANVAS_CHARS = 1200
+AUTO_CANVAS_LINES = 20
+
+
+def automatic(body: str, request: str) -> bool:
+    if re.search(r"(메시지로|메시지에|캔버스\s*(말고|쓰지|사용하지))", request):
+        return False
+    return (len(body.strip()) >= AUTO_CANVAS_CHARS
+            or len([line for line in body.splitlines() if line.strip()]) >= AUTO_CANVAS_LINES)
+
+
+def message(body: str) -> str:
+    """Normalize Markdown prose without rewriting fenced or inline code."""
+    from .evidence_view import fix_markdown_tables
+
+    parts = re.split(r"(```[\s\S]*?```|`[^`\n]+`)", body)
+    for index in range(0, len(parts), 2):
+        text = parts[index]
+        if "|" in text:
+            leading = text[:len(text) - len(text.lstrip())]
+            trailing = text[len(text.rstrip()):]
+            text = leading + fix_markdown_tables(text).strip() + trailing
+        text = re.sub(r"(?m)^#{1,6}[ \t]+(.+?)[ \t]*$", r"*\1*", text)
+        text = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", text)
+        parts[index] = text
+    return "".join(parts)
 REQUEST_RE = re.compile(
     r"(?:캔버스로\s*(?:답변|작성)(?:해\s*줘|해주세요|해줘|해)?|"
     r"메시지\s*말고\s*정식\s*답변(?:해\s*줘|해주세요|해줘|해)?|"

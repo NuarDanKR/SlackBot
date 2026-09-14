@@ -22,6 +22,10 @@ export function ArchiveDiagnostics() {
       filetype: string
       status: string
       reason: string
+      originalState?: string
+      conversionState?: string
+      errorCode?: string
+      retryable?: boolean
       permalink: string
       stagedAt: string
       previewable: boolean
@@ -34,7 +38,7 @@ export function ArchiveDiagnostics() {
   return <><PageHead crumb="수집 · 아카이브 진단" title="아카이브 진단" note="형식이 깨졌거나 수집이 밀린 원문을 확인합니다." aside={<><CheckedAt value={res.data.checkedAt} /><Level value={d.level} /></>} />
     <Section title="진단 결과"><div className="metrics overview-metrics"><Metric k="수집 문서" v={fmt.int(d.documents)} unit="건" /><Metric k="깨진 문서" v={fmt.int(d.brokenDocuments)} unit="건" /><Metric k="첨부 확인 필요" v={fmt.int(d.attachmentFailures)} unit="건" /><Metric k="수집 밀림" v={fmt.int(d.staleWorkspaces)} unit="개" /></div><Problems items={d.problems} /></Section>
     <Section title="첨부 변환·차단 확인" lead="자동 변환에 실패했거나 민감정보 검사에서 차단된 첨부입니다. 원본은 격리 보관되며 자동으로 외부 LLM에 전송되지 않습니다.">
-      <div className="table-wrap"><table className="table"><thead><tr><th>시각</th><th>워크스페이스</th><th>채널</th><th>파일</th><th>실패·차단 사유</th><th>원본 확인</th></tr></thead><tbody>{d.failedAttachments.length ? d.failedAttachments.map((item, index) => { const preview = `/api/diagnostics/archive/attachment-preview?workspace=${encodeURIComponent(item.workspace)}&channel_id=${encodeURIComponent(item.channelId)}&file_id=${encodeURIComponent(item.fileId)}`; return <tr key={`${item.workspace}-${item.channelId}-${item.fileId}-${index}`}><td>{fmt.dayClock(item.stagedAt)}</td><td className="mono">{item.workspace}</td><td className="mono">{item.channelId}</td><td>{item.name}<div className="subtle mono">{item.filetype || '-'}</div></td><td>{item.reason}</td><td><div className="attachment-actions">{item.previewable && <a href={preview} target="_blank" rel="noreferrer">이미지 확인</a>}{item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer">Slack에서 보기</a>}{!item.previewable && !item.permalink && '-'}</div></td></tr> }) : <tr><td colSpan={6}>확인이 필요한 첨부가 없습니다.</td></tr>}</tbody></table></div>
+      <div className="table-wrap"><table className="table"><thead><tr><th>시각</th><th>워크스페이스</th><th>채널</th><th>파일</th><th>실패·차단 사유</th><th>원본 확인</th></tr></thead><tbody>{d.failedAttachments.length ? d.failedAttachments.map((item, index) => { const preview = `/api/diagnostics/archive/attachment-preview?workspace=${encodeURIComponent(item.workspace)}&channel_id=${encodeURIComponent(item.channelId)}&file_id=${encodeURIComponent(item.fileId)}`; return <tr key={`${item.workspace}-${item.channelId}-${item.fileId}-${index}`}><td>{fmt.dayClock(item.stagedAt)}</td><td className="mono">{item.workspace}</td><td className="mono">{item.channelId}</td><td>{item.name}<div className="subtle mono">{item.filetype || '-'}</div></td><td>{item.reason}{item.errorCode && <div className="subtle mono">{item.errorCode}</div>}<div className="subtle">{item.originalState === 'retained' ? '원본 보존됨' : item.originalState === 'missing' ? '원본 없음' : '원본 상태 미확인'} · {item.retryable ? '재시도 가능 (예약 아님)' : '운영자 확인 필요'}</div></td><td><div className="attachment-actions">{item.previewable && <a href={preview} target="_blank" rel="noreferrer">이미지 확인</a>}{item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer">Slack에서 보기</a>}{!item.previewable && !item.permalink && '-'}</div></td></tr> }) : <tr><td colSpan={6}>확인이 필요한 첨부가 없습니다.</td></tr>}</tbody></table></div>
     </Section>
     <Section title="문서 검사 분포" lead="전체 문서 중 스키마 검사를 통과한 문서와 실패한 문서를 비교합니다.">
       <MiniBars label="문서 검사 결과" items={[{ label: '검사 통과', value: Math.max(0, d.documents - d.brokenDocuments), tone: 'ok' }, { label: '형식 오류', value: d.brokenDocuments, tone: 'bad' }]} />

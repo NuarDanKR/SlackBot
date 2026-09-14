@@ -508,6 +508,29 @@ def test_the_runtime_schema_grants_its_tables():
         assert table.upper() in granted, table
 
 
+def test_every_created_table_is_named_in_a_grant():
+    """**GRANT 라는 낱말이 있는지만 보면 부족하다.**
+
+    시퀀스에만 GRANT 를 주고 표는 빼먹어도 낱말 검사는 통과한다. 그 상태로
+    배포하면 표는 있는데 봇에게는 안 보이고, 그 사실은 그 화면을 누가 열 때까지
+    아무도 모른다 — `specialist_call` 에서 실제로 그랬다.
+    """
+    offenders: list[str] = []
+    for name in _listed_files():
+        tables = _created_tables(_sql(name))
+        if not tables:
+            continue
+        code = _code(name).upper()
+        granted = code.split("ON TABLE", 1)[1] if "ON TABLE" in code else ""
+        for table in sorted(tables):
+            if table.upper() not in granted:
+                offenders.append(f"{name}:{table}")
+    assert not offenders, (
+        f"만들었지만 GRANT 에 이름이 없는 표: {offenders}. "
+        "표가 있어도 봇에게는 없는 것과 같다."
+    )
+
+
 def test_grants_are_guarded_by_role_existence():
     """개발 DB 에 그 역할이 없으면 스키마 적용이 통째로 실패한다."""
     for name in _listed_files():

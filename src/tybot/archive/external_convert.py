@@ -7,10 +7,12 @@ are deliberately not allowed in the ingestion path.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -19,10 +21,30 @@ from pathlib import Path
 
 class ExternalConverterUnavailable(RuntimeError):
     """The optional converter is not installed on this host."""
+    code = "converter_missing"
+    retryable = False
 
 
 class ExternalConversionError(RuntimeError):
     """An installed converter could not produce a usable document."""
+
+    def __init__(self, message: str, *, code="conversion_failed", retryable=False):
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
+def failure_details(exc: BaseException, *, default="conversion_failed") -> tuple[str, bool]:
+    """Preserve typed failures through ConvertError wrappers without storing stderr."""
+    seen: set[int] = set()
+    cause: BaseException | None = exc
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        code = getattr(cause, "code", None)
+        if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,64}", code):
+            return code, bool(getattr(cause, "retryable", False))
+        cause = cause.__cause__
+    return default, False
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -78,22 +100,45 @@ def _run(
     if home is not None:
         environment["HOME"] = str(home)
     try:
-        return subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=cwd,
             env=environment,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=COMMAND_TIMEOUT,
-            check=False,
+            start_new_session=os.name == "posix",
         )
-    except subprocess.TimeoutExpired as exc:
-        raise ExternalConversionError(f"문서 변환이 {COMMAND_TIMEOUT}초를 초과했습니다") from exc
     except OSError as exc:
-        raise ExternalConversionError(f"문서 변환기 실행 실패: {exc}") from exc
+        raise ExternalConversionError(
+            "문서 변환기를 실행하지 못했습니다",
+            code="converter_start_failed",
+        ) from exc
+    try:
+        stdout, stderr = process.communicate(timeout=COMMAND_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        if os.name == "posix":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        process.communicate()
+        raise ExternalConversionError(
+            f"문서 변환이 {COMMAND_TIMEOUT}초를 초과했습니다",
+            code="converter_timeout", retryable=True,
+        ) from exc
+    if process.returncode != 0:
+        code = "converter_crashed" if process.returncode < 0 else "conversion_failed"
+        # A V8 fatal message is a crash, not proof of OOM or a particular policy.
+        if "Fatal error" in stderr or "V8_Fatal" in stderr:
+            code = "converter_crashed"
+        raise ExternalConversionError(
+            f"변환기 비정상 종료 code={code} exit={process.returncode}", code=code,
+        )
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def xlsx_lines(data: bytes) -> list[str]:
