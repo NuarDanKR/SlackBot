@@ -143,11 +143,14 @@ PII 자동 해제 / 빈 산출물을 성공으로 / 경로 탈출 / 스키마 �
 
 ### 운영 전 할 일
 
+서버에는 `python` 이 PATH 에 없다(Rocky 8 은 `python3` 뿐이고, 그것도 시스템
+파이썬이라 이 프로젝트 의존성이 없다). **venv 를 경로로 부른다.**
+
 ```bash
-sudo cat deploy/sql/conversion_queue_schema.sql   | sudo -u postgres psql -p 55432 -d tyslackai -f -
-python scripts/check_schema_drift.py          # 적용됐는지 확인
+sudo cat /opt/tybot/deploy/sql/conversion_queue_schema.sql   | sudo -u postgres psql -p 55432 -d tyslackai -f -
+cd /opt/tybot && sudo -u tybot .venv/bin/python scripts/check_schema_drift.py
 sudo systemctl enable --now tybot-convert-retry.timer
-python scripts/drain_conversion_queue.py --status
+cd /opt/tybot && sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --status
 ```
 
 타이머를 켜지 않으면 **작업만 쌓이고 아무것도 돌지 않는다.** `install.sh` 가 꺼진

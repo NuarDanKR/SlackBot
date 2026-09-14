@@ -50,11 +50,14 @@ _2026-08-31 · 설계 근거는 [`../design/oracle-sync.md`](../design/oracle-sy
 `--- 레거시 Oracle ---` 절) 아래로 같은 일을 한다. `SELECT` 만 실행하고,
 민감해 보이는 컬럼은 이름만 보여주고 값은 조회하지 않는다.
 
+서버에는 `python` 이 PATH 에 없다(Rocky 8 은 `python3` 뿐이고 의존성도 없다).
+
 ```bash
-python scripts/oracle_probe.py                    # 조직·인사로 보이는 객체 찾기
-python scripts/oracle_probe.py --table HR_DEPT    # 그 객체의 컬럼 + 행 수
-python scripts/oracle_probe.py --sample HR_EMP    # 표본 5행(전부 마스킹)
-python scripts/oracle_probe.py --tree HR_DEPT --code DEPT_CD --parent UP_DEPT_CD --name DEPT_NM
+cd /opt/tybot
+sudo -u tybot .venv/bin/python scripts/oracle_probe.py                    # 조직·인사로 보이는 객체 찾기
+sudo -u tybot .venv/bin/python scripts/oracle_probe.py --table HR_DEPT    # 그 객체의 컬럼 + 행 수
+sudo -u tybot .venv/bin/python scripts/oracle_probe.py --sample HR_EMP    # 표본 5행(전부 마스킹)
+sudo -u tybot .venv/bin/python scripts/oracle_probe.py --tree HR_DEPT --code DEPT_CD --parent UP_DEPT_CD --name DEPT_NM
 ```
 
 ```sql
@@ -213,7 +216,7 @@ wc -l org.jsonl emp.jsonl
 깨질 수 있으므로 기계로 검사한다.**
 
 ```bash
-python3 -c "
+/opt/tybot/.venv/bin/python -c "
 import json,sys
 bad=0
 for i,l in enumerate(open('org.jsonl',encoding='utf-8'),1):

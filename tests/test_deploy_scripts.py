@@ -275,6 +275,36 @@ def test_docs_never_call_psql_without_the_port():
     assert not bad, f"psql 호출에 포트가 없다: {bad}"
 
 
+# 운영 절차가 적히는 곳. 여기 적힌 명령은 **서버에 그대로 붙여 넣는다.**
+# 설계 문서(`docs/design/`)는 개발 PC 기준이라 제외한다.
+OPERATIONAL_DOCS = ("docs/deploy", "docs/verification")
+
+
+def test_operational_docs_call_python_through_the_venv():
+    """서버에는 `python` 이 없다. Rocky 8 은 `python3` 뿐이고 의존성도 없다.
+
+    `bash: python: command not found` 가 나오면 사람은 **파이썬이 안 깔렸다**고
+    읽는다. 실제로는 깔려 있고 이름이 다를 뿐인데, 그 오해가 설치 절차를 처음부터
+    다시 밟게 만든다(2026-09-14 실제로 그랬다).
+    """
+    bad: list[str] = []
+    for folder in OPERATIONAL_DOCS:
+        base = ROOT / folder
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.md"):
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                code = line.strip()
+                # 붙여 넣는 명령만 본다. 산문 속 언급은 대상이 아니다.
+                if not code.startswith(("python ", "python3 ", "$ python ")):
+                    continue
+                bad.append(f"{path.relative_to(ROOT)}:{i}")
+    assert not bad, (
+        f"venv 를 거치지 않는 python 호출: {bad}. "
+        "서버에서는 `.venv/bin/python` 으로 부른다."
+    )
+
+
 def test_docs_never_hand_a_locked_path_to_psql():
     """`psql -f` 는 **psql 프로세스가** 읽는다. 그 프로세스는 postgres 계정이다.
 

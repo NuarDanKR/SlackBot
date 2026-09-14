@@ -20,8 +20,10 @@ ruff check src tests scripts   # All checks passed
 **주장** — `#<본부|실|팀|현장|프로젝트>-<조직명>_<조직코드>-<업무>` 형식만 수집한다.
 구 형식(`#팀_자금(ABB540)_주간보고`)은 **폐기**해 인식하지 않는다.
 
+개발 PC 에서 확인한 것이다(서버에서는 `.venv/bin/python`).
+
 ```bash
-python - <<'EOF'
+.venv/bin/python - <<'EOF'
 import sys; sys.path.insert(0, "src")
 from tybot.channels import parse, should_collect
 for n in ["#팀-전산_ABB110-주간회의", "#현장-김해외동_180182-채팅방",

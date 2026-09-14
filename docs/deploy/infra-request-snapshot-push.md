@@ -106,15 +106,17 @@ sudo chown root:root /etc/tybot/oracle.env
 sudo chmod 600       /etc/tybot/oracle.env
 
 # 4-2. Instant Client 는 필요 없다 — python-oracledb thin 모드가 12.1 을 지원한다.
-pip install oracledb
+#      **서버에는 `python`·`pip` 이 PATH 에 없다.** venv 를 경로로 부른다.
+/opt/tybot/.venv/bin/pip install oracledb
 
 # 4-3. 조직·인사 — 야간 1회
-python scripts/oracle_export.py --out /var/lib/tybot/snapshots
-python -m tybot.orgsync
+cd /opt/tybot
+sudo -u tybot .venv/bin/python scripts/oracle_export.py --out /var/lib/tybot/snapshots
+sudo -u tybot .venv/bin/python -m tybot.orgsync
 
 # 4-4. 일정 — live 1분, reconcile 매시간
-python scripts/schedule_export.py --out /var/lib/tybot/schedule --mode live --horizon-hours 48
-python scripts/schedule_export.py --out /var/lib/tybot/schedule --mode reconcile --horizon-days 30
+sudo -u tybot .venv/bin/python scripts/schedule_export.py --out /var/lib/tybot/schedule --mode live --horizon-hours 48
+sudo -u tybot .venv/bin/python scripts/schedule_export.py --out /var/lib/tybot/schedule --mode reconcile --horizon-days 30
 ```
 
 **추출 → 파일 → 반영 두 단계를 유지합니다.** 직접 조회니 한 번에 밀어 넣을 수도
@@ -132,7 +134,7 @@ python scripts/schedule_export.py --out /var/lib/tybot/schedule --mode reconcile
 |---|---|---|
 | 1 | 봇서버에서 `nc -zv 172.16.10.20 1523` | 열림 |
 | 2 | 다른 DMZ 서버에서 같은 명령 | **차단** |
-| 3 | 봇서버에서 `python scripts/oracle_export.py --out /tmp/t` | 조직 1,370 · 인사 1,129행 |
+| 3 | 봇서버에서 `.venv/bin/python scripts/oracle_export.py --out /tmp/t` | 조직 1,370 · 인사 1,129행 |
 | 4 | 봇서버에서 `SELECT count(*) FROM COVI_SMART4J.SYS_OBJECT_USER` | **ORA-00942** |
 | 5 | 같은 계정으로 `INSERT`/`UPDATE` 시도 | **권한 없음** |
 | 6 | 봇서버에서 Oracle 외 내부망 IP 로 `nc -zv` | **차단** (구멍이 1개인지 확인) |
