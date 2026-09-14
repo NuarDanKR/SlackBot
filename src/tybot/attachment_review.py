@@ -62,6 +62,10 @@ class Attachment:
     conversion_state: str = "unknown"
     error_code: str = ""
     retryable: bool = False
+    # 원본 내용의 지문. **재처리 큐 키의 일부다** — 같은 이름으로 다른 내용이
+    # 다시 올라오면 그것은 다른 작업이고, 없으면 새 파일의 실패가 옛 파일의
+    # 성공에 가려진다. 구형 metadata 에는 없어서 빈 문자열이 될 수 있다.
+    sha256: str = ""
 
     @property
     def is_approved(self) -> bool:
@@ -109,6 +113,7 @@ def _from_meta(meta: dict, meta_path: Path, workspace: str, channel_id: str) -> 
         conversion_state=str(meta.get("conversion_state") or "unknown"),
         error_code=str(meta.get("error_code") or ""),
         retryable=meta.get("retryable") is True and meta.get("status") != PII_REFUSED,
+        sha256=str(meta.get("sha256") or ""),
     )
 
 

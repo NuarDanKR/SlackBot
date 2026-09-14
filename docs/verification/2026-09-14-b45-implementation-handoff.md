@@ -160,11 +160,32 @@ cd /opt/tybot && sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.p
 타이머를 켜지 않으면 **작업만 쌓이고 아무것도 돌지 않는다.** `install.sh` 가 꺼진
 타이머를 이름과 함께 알리므로 설치 로그에서 보인다.
 
+### 이미 쌓인 실패를 큐에 넣기 (backfill)
+
+`enqueue` 는 **앞으로 들어올** 실패에만 걸린다. 이미 staging 에 있는 실패는 큐에
+없어서, 타이머는 도는데 재처리되는 것이 하나도 없는 상태가 된다(2026-09-14 서버에서
+`큐가 비어 있습니다` 로 확인).
+
+```bash
+cd /opt/tybot
+# 1) 무엇이 들어갈지 먼저 본다
+sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --backfill
+# 2) 넣는다
+sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --backfill --apply
+# 3) 바로 한 번 돌린다(타이머를 기다려도 된다)
+sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --apply
+```
+
+`force` 로 넣는다 — 그때의 「되풀이해도 소용없다」 는 판정은 **그때의 변환기**를
+기준으로 한 것이고, 변환기를 고친 뒤에는 결과가 달라질 수 있다. `pii_refused` 만은
+넣지 않는다(정책 제외는 변환기와 무관하다).
+
 ### 이 구현이 하지 않는 것
 
 - **부분 성공(partial) 과 페이지·시트 coverage** — 상태는 succeeded/failed 둘뿐이다.
 - **index generation 연계** — 변환 성공만 하고 검색에서 못 찾는 상태를 아직 구별하지 않는다.
 - **관리자 재처리 버튼** — 콘솔은 상태를 **보여 주기만** 한다. 큐에 넣는 API 는 없다.
-- **회로 차단기가 claim 을 막지는 않는다.** 상태를 기록하고 half-open 판정을
-  제공하지만, 워커가 그것을 읽어 건너뛰는 배선은 아직 없다(**남은 위험**).
+- ~~회로 차단기가 claim 을 막지 않는다~~ **연결함** — `claim()` 이 열린 회로의
+  변환기 작업을 집지 않고, 집었으면 임대와 시도 횟수를 되돌린다. 회로 표를 못
+  읽어도 재처리는 계속된다.
 - **실제 PostgreSQL 통합검증** — SQL 은 문법 대조와 코드/스키마 parity 테스트만 거쳤다.

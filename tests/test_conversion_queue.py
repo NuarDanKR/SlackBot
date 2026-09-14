@@ -350,3 +350,228 @@ def test_the_lease_owner_must_be_named():
     """회수할 때 누구 것이었는지 모르면 원인을 되짚을 수 없다."""
     with pytest.raises(ValueError):
         queue.claim("   ")
+
+
+# =============================================================================
+# 사람이 요청한 재처리 (backfill)
+# =============================================================================
+
+
+def test_a_forced_enqueue_still_refuses_policy_exclusions(monkeypatch):
+    """`force` 는 자동 판정을 넘는 것이지 **정책을 넘는 것이 아니다.**
+
+    버튼 하나로 PII 검사가 우회되면 그 검사는 더 이상 검사가 아니다.
+    """
+    called = []
+    monkeypatch.setattr(queue, "_connect", lambda: called.append(1))
+
+    got = queue.enqueue(
+        workspace="pilot", channel_id="C1", file_id="F1",
+        error_code="pii_refused", retryable=True, force=True,
+    )
+
+    assert got is None
+    assert called == [], "DB 를 열지도 않아야 한다"
+
+
+def test_backfill_lists_before_it_writes(tmp_path, capsys):
+    """`--apply` 없이는 아무것도 넣지 않는다. 수백 건이 한 번에 들어갈 수 있다."""
+    import drain_conversion_queue as drain
+
+    _staged_review(tmp_path, "F1", status="download_or_extract_failed")
+
+    code = drain.backfill(str(tmp_path / "archive"), apply=False)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "큐 대상 1건" in out
+    assert "--apply" in out
+
+
+def test_backfill_skips_policy_exclusions(tmp_path, monkeypatch, capsys):
+    """정책 제외는 변환기와 무관하다. 변환기를 고쳐도 결과가 같다."""
+    import drain_conversion_queue as drain
+
+    _staged_review(tmp_path, "F1", status="pii_refused")
+    _staged_review(tmp_path, "F2", status="download_or_extract_failed")
+    added = []
+    monkeypatch.setattr(queue, "enqueue", lambda **kw: added.append(kw["file_id"]) or 1)
+
+    drain.backfill(str(tmp_path / "archive"), apply=True)
+
+    assert added == ["F2"]
+    assert "정책 제외 1건" in capsys.readouterr().out
+
+
+def test_backfill_forces_because_the_old_verdict_used_the_old_converter(tmp_path, monkeypatch):
+    """그때 「되풀이해도 소용없다」 고 본 근거는 **그때의 변환기**였다."""
+    import drain_conversion_queue as drain
+
+    _staged_review(tmp_path, "F1", status="download_or_extract_failed", error_code="unsupported")
+    seen = []
+    monkeypatch.setattr(queue, "enqueue", lambda **kw: seen.append(kw) or 1)
+
+    drain.backfill(str(tmp_path / "archive"), apply=True)
+
+    assert seen and seen[0]["force"] is True
+
+
+def _staged_review(tmp_path, file_id, *, status, error_code="") -> None:
+    """`attachment_review.scan()` 이 읽는 모양으로 하나 만든다."""
+    d = (
+        tmp_path / "staging" / "workspaces" / "pilot" / "channels" / "C1"
+        / "attachments" / file_id
+    )
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "metadata.json").write_text(
+        json.dumps({
+            "name": f"{file_id}.pdf", "filetype": "pdf", "status": status,
+            "error_code": error_code, "retryable": False, "sha256": "abc123",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+# =============================================================================
+# 회로 차단기가 실제로 막는다
+# =============================================================================
+
+
+class _FakeCursor:
+    """실행한 SQL 을 기록하고 준비된 행을 돌려주는 최소 커서."""
+
+    def __init__(self, script: list):
+        self._script = script
+        self.executed: list[tuple[str, tuple]] = []
+        self._rows: list[dict] = []
+        self.rowcount = 0
+
+    def execute(self, sql, params=()):
+        self.executed.append((" ".join(sql.split()), params))
+        self._rows = self._script.pop(0) if self._script else []
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, script):
+        self.cursors: list[_FakeCursor] = []
+        self._script = script
+        self.committed = False
+
+    def cursor(self):
+        cur = _FakeCursor(self._script)
+        self.cursors.append(cur)
+        return cur
+
+    def commit(self):
+        self.committed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _fake_db(monkeypatch, script):
+    """`_connect()` 가 돌려줄 연결을 갈아 끼운다. 호출마다 같은 대본을 이어 쓴다."""
+    conns: list[_FakeConn] = []
+    shared = list(script)
+
+    def connect():
+        conn = _FakeConn(shared)
+        conns.append(conn)
+        return conn
+
+    monkeypatch.setattr(queue, "_connect", connect)
+    return conns
+
+
+def test_an_open_breaker_stops_the_worker_from_claiming_its_jobs(monkeypatch):
+    """**기록만 하고 안 읽으면 아무 일도 하지 않는다.**
+
+    환경이 고장났는데 계속 집으면 시도 횟수만 갉아먹고, 정작 고친 뒤에는 남은
+    횟수가 없어 그 파일이 영영 `failed` 로 닫힌다.
+    """
+    opened = datetime.now(UTC) - timedelta(seconds=30)
+    job_row = {
+        "id": 7, "workspace": "pilot", "channel_id": "C1", "file_id": "F1",
+        "original_sha256": "abc", "pipeline_version": "1", "state": "leased",
+        "attempt_count": 1, "error_code": "converter_crashed",
+        "converter": "hwp5txt", "converter_version": "1.2", "next_attempt_at": None,
+    }
+    conns = _fake_db(monkeypatch, [
+        # 1) open_breakers() 의 SELECT
+        [{"converter": "hwp5txt", "converter_version": "1.2",
+          "state": "open", "opened_at": opened}],
+        # 2) claim 의 UPDATE ... RETURNING
+        [job_row],
+        # 3) 되돌리는 UPDATE
+        [],
+    ])
+
+    jobs = queue.claim("host:1")
+
+    assert jobs == [], "회로가 열린 변환기의 작업을 돌려주면 안 된다"
+    statements = [sql for cur in conns[-1].cursors for sql, _ in cur.executed]
+    # 되돌리는 UPDATE 는 임대를 풀고 시도 횟수를 되돌린다. 잡는 질의(SELECT ...
+    # state = 'queued')와 구별해야 하므로 **되돌림의 표식**으로 고른다.
+    returned = [s for s in statements if "attempt_count - 1" in s]
+    assert returned, (
+        "잡은 것을 되돌리지 않았다 — 임대만 잡고 있으면 그 시간만큼 다른 "
+        "프로세스도 못 집고, 돌리지도 않은 시도가 상한을 갉아먹는다"
+    )
+    assert "lease_owner = ''" in returned[0]
+
+
+def test_a_breaker_past_its_probe_window_lets_the_job_through(monkeypatch):
+    """사람이 고쳤을 수 있다. 한 건은 흘려 보내 확인한다."""
+    opened = datetime.now(UTC) - timedelta(seconds=queue.BREAKER_PROBE_SECONDS + 60)
+    job_row = {
+        "id": 7, "workspace": "pilot", "channel_id": "C1", "file_id": "F1",
+        "original_sha256": "abc", "pipeline_version": "1", "state": "leased",
+        "attempt_count": 1, "error_code": "", "converter": "hwp5txt",
+        "converter_version": "1.2", "next_attempt_at": None,
+    }
+    _fake_db(monkeypatch, [
+        [{"converter": "hwp5txt", "converter_version": "1.2",
+          "state": "open", "opened_at": opened}],
+        [job_row],
+    ])
+
+    jobs = queue.claim("host:1")
+
+    assert [j.id for j in jobs] == [7]
+
+
+def test_claiming_still_works_when_the_breaker_table_cannot_be_read(monkeypatch):
+    """회로를 못 읽는 것이 재처리를 통째로 멈추는 이유가 되면 안 된다."""
+    job_row = {
+        "id": 9, "workspace": "pilot", "channel_id": "C1", "file_id": "F2",
+        "original_sha256": "", "pipeline_version": "1", "state": "leased",
+        "attempt_count": 1, "error_code": "", "converter": "", "converter_version": "",
+        "next_attempt_at": None,
+    }
+    calls = {"n": 0}
+    shared = [[job_row]]
+
+    def connect():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise queue.QueueUnavailable("회로 표를 못 읽음")
+        return _FakeConn(shared)
+
+    monkeypatch.setattr(queue, "_connect", connect)
+
+    assert [j.id for j in queue.claim("host:1")] == [9]

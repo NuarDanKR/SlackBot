@@ -74,6 +74,13 @@ HOLD_CODES = frozenset({
     "converter_policy_denied",
 })
 
+# 사람이 명시적으로 요청해도 큐에 넣지 않는 코드.
+#
+# `pii_refused` 하나다. **정책 제외를 기술 실패처럼 푸는 길을 만들지 않는다** —
+# 버튼 하나로 우회되면 그 검사는 더 이상 검사가 아니다. 오탐이라면 검사 규칙을
+# 고치거나 사람이 원본을 직접 확인하는 것이 맞다.
+FORCE_BLOCKED = frozenset({"pii_refused"})
+
 # 같은 변환기·버전이 연달아 이만큼 실패하면 회로를 연다.
 BREAKER_THRESHOLD = 5
 # 열린 회로가 스스로 닫히지는 않는다. 다만 이 시간이 지나면 **한 건만** 흘려
@@ -217,15 +224,26 @@ def enqueue(
     converter: str = "",
     converter_version: str = "",
     pipeline_version: str = PIPELINE_VERSION,
+    force: bool = False,
 ) -> int | None:
     """실패한 변환을 큐에 올린다. 되풀이하면 안 되는 것은 올리지 않는다.
 
     같은 좌표가 이미 있으면 **새 행을 만들지 않는다.** 한 파일이 여러 번 실패할
     때마다 행이 늘면, 큐 길이가 장애 규모가 아니라 재시도 횟수를 뜻하게 된다.
 
+    `force` 는 **사람이 명시적으로 요청한 재처리**다. 자동 판정이 「되풀이해도
+    소용없다」 고 본 것도 넣는다 — 그 판정의 근거는 그때의 변환기였고, 변환기를
+    고친 뒤에는 결과가 달라질 수 있기 때문이다. 자동 경로는 이것을 쓰지 않는다.
+
+    `force` 로도 `pii_refused` 는 넣지 않는다(`FORCE_BLOCKED`). 정책 제외를
+    버튼 하나로 푸는 길을 만들면 그 검사는 더 이상 검사가 아니다.
+
     돌려주는 값은 작업 ID. 큐에 올리지 않았으면 `None`.
     """
-    if not is_retryable(error_code, retryable):
+    if (error_code or "").strip() in FORCE_BLOCKED:
+        log.info("정책 제외라 큐에 올리지 않는다 code=%s file=%s", error_code, file_id)
+        return None
+    if not force and not is_retryable(error_code, retryable):
         log.info(
             "재시도 대상이 아니라 큐에 올리지 않는다 code=%s file=%s",
             error_code or "-", file_id,
@@ -260,6 +278,23 @@ def enqueue(
     return int(row["id"]) if row else None
 
 
+def open_breakers(*, now=None) -> set[tuple[str, str]]:
+    """지금 통과시키면 안 되는 `(변환기, 버전)`.
+
+    **회로를 기록만 하고 읽지 않으면 아무 일도 하지 않는다.** 그 상태로 두면
+    표만 늘고 같은 환경 오류가 계속 쌓인다 — 만들고 안 잇는 것이 우리가 가장
+    자주 겪은 고장이다.
+    """
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM conversion_breaker WHERE state = 'open'")
+        rows = cur.fetchall()
+    return {
+        (str(row["converter"]), str(row.get("converter_version") or ""))
+        for row in rows
+        if not breaker_allows(str(row["state"]), row.get("opened_at"), now=now)
+    }
+
+
 def claim(owner: str, *, limit: int = 5, lease_seconds: int = LEASE_SECONDS) -> list[Job]:
     """실행할 작업을 잡는다. **한 번에 하나의 프로세스만 잡는다.**
 
@@ -271,6 +306,14 @@ def claim(owner: str, *, limit: int = 5, lease_seconds: int = LEASE_SECONDS) -> 
         raise ValueError("작업을 잡는 주체를 남기지 않으면 회수할 때 누구 것인지 모른다")
     now = datetime.now(UTC)
     expires = now + timedelta(seconds=lease_seconds)
+    # **열린 회로의 변환기는 건너뛴다.** 환경이 고장났는데 계속 집으면 시도 횟수만
+    # 갉아먹고, 정작 고친 뒤에는 남은 횟수가 없어 그 파일이 영영 `failed` 로 닫힌다.
+    #
+    # `half-open` 시간이 지난 회로는 여기에 없다 — 한 건은 흘려 보내 확인한다.
+    try:
+        blocked = open_breakers(now=now)
+    except QueueUnavailable:
+        blocked = set()
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -291,8 +334,27 @@ def claim(owner: str, *, limit: int = 5, lease_seconds: int = LEASE_SECONDS) -> 
             (now, max(1, limit), owner.strip(), expires),
         )
         jobs = [_job(row) for row in cur.fetchall()]
+        held_back = [j for j in jobs if (j.converter, j.converter_version) in blocked]
+        if held_back:
+            # 잡았지만 돌리지 않는다. **바로 되돌린다** — 임대만 잡아 두면 그
+            # 시간만큼 다른 프로세스도 못 집는다.
+            cur.execute(
+                """
+                UPDATE conversion_job
+                   SET state = 'queued', lease_owner = '', lease_expires_at = NULL,
+                       attempt_count = GREATEST(attempt_count - 1, 0),
+                       next_attempt_at = now() + make_interval(secs => %s),
+                       updated_at = now()
+                 WHERE id = ANY(%s)
+                """,
+                (BREAKER_PROBE_SECONDS, [j.id for j in held_back]),
+            )
+            log.warning(
+                "회로가 열려 %d건을 되돌린다 converters=%s",
+                len(held_back), sorted({j.converter for j in held_back}),
+            )
         conn.commit()
-    return jobs
+    return [j for j in jobs if (j.converter, j.converter_version) not in blocked]
 
 
 def reclaim_expired() -> int:

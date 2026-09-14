@@ -139,6 +139,61 @@ def _write_meta(meta_path: pathlib.Path, meta: dict, *, status: str, code: str, 
     tmp_preview.replace(preview)
 
 
+def backfill(archive_dir: str, *, apply: bool) -> int:
+    """이미 쌓여 있는 실패 첨부를 큐에 올린다.
+
+    **이것이 없으면 이번 작업이 아무것도 고치지 못한다.** `enqueue` 는 앞으로
+    들어올 실패에만 걸리므로, 이미 staging 에 있는 실패는 큐에 없다 — 큐는 비어
+    있고 타이머는 도는데 재처리되는 것이 하나도 없는 상태가 된다.
+
+    **`force` 로 올린다.** 그때의 자동 판정은 그때의 변환기를 기준으로 한 것이고,
+    변환기를 고친 뒤에는 결과가 달라질 수 있다. 다만 `pii_refused` 는 올리지
+    않는다 — 정책 제외는 변환기와 무관하다.
+
+    기본은 판정만. `--apply` 가 있어야 실제로 넣는다.
+    """
+    from tybot.attachment_review import PII_REFUSED, scan
+
+    items = [
+        item for item in scan(archive_dir)
+        if (item.conversion_failed or item.status == PII_REFUSED)
+    ]
+    candidates = [item for item in items if item.status != PII_REFUSED]
+    skipped = len(items) - len(candidates)
+
+    print(f"실패 첨부 {len(items)}건 · 큐 대상 {len(candidates)}건 · 정책 제외 {skipped}건")
+    if not candidates:
+        return EXIT_OK
+    if not apply:
+        for item in candidates[:20]:
+            print(f"  {item.workspace}/{item.channel_id}/{item.file_id} "
+                  f"{item.name} ({item.error_code or item.status})")
+        if len(candidates) > 20:
+            print(f"  … 외 {len(candidates) - 20}건")
+        print("\n실제로 넣으려면 `--apply` 를 붙이세요.")
+        return EXIT_OK
+
+    added = 0
+    for item in candidates:
+        try:
+            job_id = queue.enqueue(
+                workspace=item.workspace,
+                channel_id=item.channel_id,
+                file_id=item.file_id,
+                original_sha256=item.sha256 or "",
+                error_code=item.error_code or "reprocess_requested",
+                retryable=True,
+                force=True,
+            )
+        except queue.QueueUnavailable as exc:
+            print(f"큐를 쓸 수 없습니다: {exc}", file=sys.stderr)
+            return EXIT_INPUT
+        if job_id:
+            added += 1
+    print(f"큐에 올린 작업 {added}건. `--apply` 로 처리하거나 타이머를 기다리세요.")
+    return EXIT_OK
+
+
 def show_status() -> int:
     reclaimed = queue.reclaim_expired()
     counts = queue.summary()
@@ -162,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--apply", action="store_true", help="실제로 다시 변환한다")
     ap.add_argument("--status", action="store_true", help="큐 상태만 보여준다")
+    ap.add_argument("--backfill", action="store_true",
+                    help="이미 쌓인 실패 첨부를 큐에 올린다(사람이 요청한 재처리)")
     ap.add_argument("--limit", type=int, default=20, help="한 번에 처리할 작업 수")
     ap.add_argument("--archive", default="")
     args = ap.parse_args(argv)
@@ -180,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.status:
             return show_status()
+        if args.backfill:
+            return backfill(archive, apply=args.apply)
 
         queue.reclaim_expired()
         if not args.apply:
