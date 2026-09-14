@@ -258,6 +258,59 @@ def kordoc_lines(data: bytes, suffix: str, *, force_ocr: bool = False) -> list[s
         return lines
 
 
+def _slide_count(data: bytes) -> int | None:
+    """pptx 안의 슬라이드 수. 셀 수 없으면 `None`.
+
+    zip 항목 이름만 센다 — python-pptx 를 부르면 전체를 파싱하느라 큰 파일에서
+    느리고, 여기서 필요한 것은 **개수 하나**뿐이다.
+    """
+    import io as _io
+    import re as _re
+    import zipfile as _zipfile
+
+    try:
+        with _zipfile.ZipFile(_io.BytesIO(data)) as zf:
+            names = zf.namelist()
+    except Exception:  # noqa: BLE001 - 개수를 못 세는 것이 변환 실패는 아니다
+        return None
+    pattern = _re.compile(r"^ppt/slides/slide\d+\.xml$")
+    count = sum(1 for name in names if pattern.match(name))
+    return count or None
+
+
+def _pdf_page_count(data: bytes) -> int | None:
+    import io as _io
+
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(_io.BytesIO(data)).pages)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _record_render_coverage(source: bytes, pdf_data: bytes, suffix: str) -> None:
+    """LibreOffice 렌더에서 **슬라이드가 사라졌는지** 본다.
+
+    여기서 `converted` 를 채우지 않는 이유: PDF 로 그려졌다는 것과 그 안의 글자를
+    읽었다는 것은 다르다. 그림만 있는 슬라이드는 쪽으로는 남지만 kordoc 이
+    아무것도 못 뽑을 수 있다 — 그걸 「읽었다」 로 세면 모르는 것을 안다고 적는 셈이다.
+
+    그래서 **총 개수만** 남기고, 렌더에서 실제로 줄어든 경우에만 표시한다.
+    """
+    if suffix.lstrip(".").lower() not in ("pptx", "ppt"):
+        return
+    slides = _slide_count(source)
+    if slides is None:
+        return
+    from .convert import RENDER_LOST_UNITS, _record
+
+    pages = _pdf_page_count(pdf_data)
+    _record("slide", total=slides)
+    if pages is not None and pages < slides:
+        _record("", flag=RENDER_LOST_UNITS)
+
+
 def office_pdf_lines(data: bytes, suffix: str) -> list[str]:
     """Render an office document to PDF, then parse its visual representation."""
     soffice = _binary("LIBREOFFICE_BIN", "soffice", "libreoffice")
@@ -289,6 +342,7 @@ def office_pdf_lines(data: bytes, suffix: str) -> list[str]:
             detail = (result.stderr or result.stdout).strip()[:300]
             raise ExternalConversionError(f"LibreOffice PDF 변환 실패: {detail or '출력 없음'}")
         pdf_data = pdf.read_bytes()
+        _record_render_coverage(data, pdf_data, suffix)
         try:
             lines = kordoc_lines(pdf_data, "pdf")
         except ExternalConversionError:

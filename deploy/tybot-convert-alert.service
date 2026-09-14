@@ -1,0 +1,25 @@
+[Unit]
+Description=TYBot 첨부 변환 실패·부분 누락 알림 (B-45)
+Documentation=file:///opt/tybot/docs/deploy/rocky8.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python scripts/send_conversion_alerts.py --apply
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-convert-alert
+TimeoutStartSec=900
+
+# 알림은 **읽기만** 한다. staging 에도 쓰지 않는다 — 발송 기록은 DB 에 남는다.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/tybot/archive /var/lib/tybot/staging

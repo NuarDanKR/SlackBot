@@ -520,6 +520,8 @@ CHAR_LIMIT_REACHED = "char_limit_reached"
 # 정밀 변환기를 못 써서 기본 파서로 내려갔다. **동등하지 않다**(설계 §6) —
 # 글자는 나와도 표·도형·이미지 안의 값은 안 나온다.
 FALLBACK_CONVERTER = "fallback_converter"
+# 렌더 과정에서 단위(슬라이드·쪽)가 줄었다. 원본에 있던 것이 산출물에 없다.
+RENDER_LOST_UNITS = "render_lost_units"
 OCR_UNAVAILABLE = "ocr_unavailable"
 TITLE_ONLY = "title_only"
 

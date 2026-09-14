@@ -46,6 +46,7 @@ FILES=(
   specialist_rules_schema.sql
   specialist_runtime_schema.sql
   conversion_queue_schema.sql
+  conversion_alert_schema.sql
   # 데이터 보정(멱등). 구조가 다 선 뒤에 돌린다.
   schedule_folder_acl_default.sql
   schedule_dm_fixed_ten.sql

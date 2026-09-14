@@ -377,3 +377,78 @@ def test_the_evidence_note_separates_failure_from_partial():
 
     assert "자동 변환 실패로 내용을 읽지 못한 첨부: 암호문서.pdf" in note
     assert "일부만 읽은 첨부: 정산서.pdf" in note
+
+
+def test_a_slide_count_is_read_from_the_pptx_itself():
+    """python-pptx 를 부르지 않고 zip 항목만 센다 — 필요한 것은 개수 하나다."""
+    pptx = pytest.importorskip("pptx")
+    import io as _io
+
+    prs = pptx.Presentation()
+    for _ in range(3):
+        prs.slides.add_slide(prs.slide_layouts[6])
+    buf = _io.BytesIO()
+    prs.save(buf)
+
+    from tybot.archive.external_convert import _slide_count
+
+    assert _slide_count(buf.getvalue()) == 3
+    assert _slide_count(b"not a zip") is None
+
+
+def test_the_external_ppt_path_records_slides_without_claiming_it_read_them():
+    """**그려진 것과 읽은 것은 다르다.**
+
+    그림만 있는 슬라이드는 PDF 쪽으로는 남지만 kordoc 이 아무것도 못 뽑을 수
+    있다. 그걸 「읽었다」 로 세면 모르는 것을 안다고 적는 셈이다.
+    """
+    pptx = pytest.importorskip("pptx")
+    import io as _io
+
+    from tybot.archive import external_convert as ext
+
+    prs = pptx.Presentation()
+    for _ in range(4):
+        prs.slides.add_slide(prs.slide_layouts[6])
+    buf = _io.BytesIO()
+    prs.save(buf)
+
+    with cv.collect_coverage() as cov:
+        ext._record_render_coverage(buf.getvalue(), _pdf(["a", "b", "c", "d"]), "pptx")
+
+    assert cov.unit == "slide"
+    assert cov.total == 4
+    assert cov.converted is None, "그려졌다고 읽은 것이 아니다"
+    assert cov.state == cv.UNKNOWN
+
+
+def test_a_slide_lost_during_rendering_is_flagged():
+    """원본에 있던 슬라이드가 산출물에 없으면 그 사실이 남아야 한다."""
+    pptx = pytest.importorskip("pptx")
+    import io as _io
+
+    from tybot.archive import external_convert as ext
+
+    prs = pptx.Presentation()
+    for _ in range(4):
+        prs.slides.add_slide(prs.slide_layouts[6])
+    buf = _io.BytesIO()
+    prs.save(buf)
+
+    with cv.collect_coverage() as cov:
+        # 렌더 결과가 2쪽뿐이다 — 두 슬라이드가 사라졌다.
+        ext._record_render_coverage(buf.getvalue(), _pdf(["a", "b"]), "pptx")
+
+    assert cv.RENDER_LOST_UNITS in cov.flags
+    assert cov.state == cv.PARTIAL
+
+
+def test_render_coverage_is_only_for_slide_formats():
+    """docx 를 슬라이드로 세면 그 숫자가 거짓이 된다."""
+    from tybot.archive import external_convert as ext
+
+    with cv.collect_coverage() as cov:
+        ext._record_render_coverage(b"whatever", _pdf(["a"]), "docx")
+
+    assert cov.unit == ""
+    assert cov.total is None

@@ -1,0 +1,12 @@
+[Unit]
+Description=TYBot 변환 알림 주기 실행
+
+[Timer]
+# 업무 시간에만, 한 시간에 한 번. 재시도 중인 것은 알리지 않으므로 더 자주
+# 돌릴 이유가 없고, 밤중 DM 은 읽히지 않는다.
+OnCalendar=Mon..Fri 09,10,11,12,13,14,15,16,17,18:05:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

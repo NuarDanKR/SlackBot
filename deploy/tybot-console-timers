@@ -4,6 +4,7 @@ set -euo pipefail
 
 UNITS=(
   tybot-collect.timer
+  tybot-convert-alert.timer
   tybot-convert-retry.timer
   tybot-schedule-dm.timer
   tybot-index.timer
