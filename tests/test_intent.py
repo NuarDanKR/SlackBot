@@ -369,3 +369,16 @@ def test_the_scope_answer_names_what_we_do_not_read():
     assert "폴더" in SOURCE_SCOPE_ANSWER, "물어본 것을 답하지 않는다"
     assert "초대" in SOURCE_SCOPE_ANSWER, "왜 없는지와 어떻게 넣는지를 말해야 한다"
     assert "수집" in SOURCE_SCOPE_ANSWER
+
+
+def test_the_scope_answer_does_not_overclaim_canvas():
+    """Canvas 를 「읽는다」 고만 적으면 **안에 걸린 파일까지** 읽는 줄 안다.
+
+    실측(2026-09-14): 본문 글자만 받고, 안에 걸린 파일은 내려받지도 변환하지도
+    않는다. HTML Canvas 는 링크 대상(URL)까지 버린다 — 라벨만 남는다.
+    그 차이를 안 밝히면 「이름은 보이는데 내용은 없다」 를 사용자가 버그로 읽는다.
+    """
+    from tybot.slack.pilot import SOURCE_SCOPE_ANSWER
+
+    assert "Canvas 안에" in SOURCE_SCOPE_ANSWER
+    assert "따라가지 않습니다" in SOURCE_SCOPE_ANSWER
