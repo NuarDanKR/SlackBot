@@ -161,4 +161,40 @@ ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS runtime_version text NOT NU
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS http_status integer;
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS fallback_reason text NOT NULL DEFAULT '';
 
+-- 권한. **이게 빠져서 표가 있는데도 「없다」 로 보였다**(2026-09-14).
+-- `information_schema` 는 권한 필터가 걸린 뷰라, GRANT 가 없으면 그 표가 아예 안
+-- 보인다. 그래서 콘솔은 「표가 없다」 는 오류를 내고, 스키마를 다시 적용해도
+-- 아무것도 달라지지 않는다.
+--
+-- 표를 `postgres` 로 만들면 소유자도 postgres 가 된다. 소유자가 다르면 GRANT 는
+-- 자동으로 따라오지 않으므로 여기서 명시한다 — `review_digest_sent` 에서 같은 일을
+-- 겪었다.
+DO $$
+DECLARE
+    seq_name text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE'
+                ' specialist_source, specialist_build, specialist_deployment,'
+                ' specialist_runtime_secret TO tyslackai';
+        -- bigserial 시퀀스도 함께. 없으면 INSERT 만 권한 오류로 죽는다.
+        --
+        -- `ALL SEQUENCES IN SCHEMA public` 은 쓰지 않는다 — 다른 파일이 만든 남의
+        -- 시퀀스까지 건드려서, 적용하는 역할이 그것들의 소유자가 아니면 **파일 전체가
+        -- 실패한다.** 이 파일이 만든 표에 딸린 것만 정확히 준다.
+        FOR seq_name IN
+            SELECT quote_ident(n.nspname) || '.' || quote_ident(s.relname)
+              FROM pg_class s
+              JOIN pg_namespace n ON n.oid = s.relnamespace
+              JOIN pg_depend d ON d.objid = s.oid AND d.deptype = 'a'
+              JOIN pg_class t ON t.oid = d.refobjid
+             WHERE s.relkind = 'S' AND t.relname = ANY(ARRAY['specialist_source', 'specialist_build',
+                 'specialist_deployment', 'specialist_runtime_secret'])
+        LOOP
+            EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE ' || seq_name || ' TO tyslackai';
+        END LOOP;
+    END IF;
+END
+$$;
+
 COMMIT;

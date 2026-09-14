@@ -454,3 +454,82 @@ def test_declared_alter_statements_are_idempotent():
         if pattern.search(body):
             bad.append(name)
     assert not bad, f"IF NOT EXISTS 없는 ADD COLUMN: {bad}"
+
+
+# --- 권한 (2026-09-14) ---------------------------------------------------------
+#
+# `apply-schema.sh` 가 표를 다 만들었는데 콘솔은 여전히 「표가 없다」 고 했다.
+# 표는 있었다 — `postgres` 가 만들어 소유자가 postgres 였고 GRANT 가 없었다.
+#
+# `information_schema` 는 **권한 필터가 걸린 뷰**라서, 권한이 없는 표는 아예 안 보인다.
+# 그래서 「권한 없음」 이 「없음」 으로 보고됐고, 조치까지 틀리게 안내했다 —
+# 스키마를 다시 적용해도 아무것도 달라지지 않는다.
+#
+# `review_digest_sent` 에서 같은 일을 겪었다. 이번이 두 번째다.
+def _sql(name: str) -> str:
+    return (SQL_DIR / name).read_text(encoding="utf-8")
+
+
+def _code(name: str) -> str:
+    """주석을 뺀 SQL. 문서의 GRANT 예시가 실제 GRANT 로 잡히면 안 된다."""
+    return "\n".join(
+        ln for ln in _sql(name).splitlines() if not ln.lstrip().startswith("--")
+    )
+
+
+def _created_tables(body: str) -> set[str]:
+    lines = [ln for ln in body.splitlines() if not ln.lstrip().startswith("--")]
+    return set(
+        re.findall(
+            r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)",
+            "\n".join(lines), re.IGNORECASE,
+        )
+    )
+
+
+def test_schemas_that_create_tables_also_grant_them():
+    """표만 만들고 GRANT 를 안 주면, 봇에게는 그 표가 없는 것과 같다."""
+    offenders: list[str] = []
+    for name in _listed_files():
+        if not _created_tables(_sql(name)):
+            continue
+        if "GRANT" not in _code(name).upper():
+            offenders.append(name)
+    assert not offenders, (
+        f"표를 만들면서 GRANT 가 없는 스키마: {offenders}. "
+        "소유자가 다르면 권한은 자동으로 따라오지 않는다."
+    )
+
+
+def test_the_runtime_schema_grants_its_tables():
+    granted = _code("specialist_runtime_schema.sql").upper().split("GRANT", 1)[1]
+    for table in ("specialist_source", "specialist_build",
+                  "specialist_deployment", "specialist_runtime_secret"):
+        assert table.upper() in granted, table
+
+
+def test_grants_are_guarded_by_role_existence():
+    """개발 DB 에 그 역할이 없으면 스키마 적용이 통째로 실패한다."""
+    for name in _listed_files():
+        code = _code(name)
+        if "GRANT" not in code.upper():
+            continue
+        assert "pg_roles" in code, f"{name}: 역할 확인 없이 GRANT 한다"
+
+
+def test_drift_check_does_not_use_information_schema():
+    """권한 필터가 걸린 뷰다. 「권한 없음」 이 「없음」 으로 보고된다."""
+    body = (ROOT / "scripts" / "check_schema_drift.py").read_text(encoding="utf-8")
+    code = "\n".join(
+        ln for ln in body.splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert "information_schema" not in code
+    assert "pg_class" in code
+    assert "has_table_privilege" in code
+
+
+def test_drift_check_separates_denied_from_missing():
+    """조치가 다르다 — 없으면 스키마 적용, 권한이면 GRANT 다."""
+    body = (ROOT / "scripts" / "check_schema_drift.py").read_text(encoding="utf-8")
+    assert "denied" in body
+    assert "GRANT" in body

@@ -428,3 +428,40 @@ COMMIT;
 --   GRANT SELECT ON workspace, workspace_readable, workspace_secret, harness_file TO tybot_bot;
 --   GRANT INSERT ON usage_call TO tybot_bot;
 --   GRANT SELECT, INSERT, UPDATE, DELETE ON archive_doc, archive_course TO tybot_bot;
+
+-- 권한. 소유자가 다르면 GRANT 는 **자동으로 따라오지 않는다.**
+--
+-- 표를 `postgres` 로 만들면 소유자도 postgres 가 되고, 봇 역할은 그 표를 못 읽는다.
+-- 그런데 `information_schema` 는 권한 필터가 걸린 뷰라서 **표가 아예 안 보이고**,
+-- 화면에는 「표가 없다」 는 오류가 나간다. 스키마를 다시 적용해도 달라지지 않는다.
+-- `review_digest_sent`(2026-09-11)·`specialist_source`(2026-09-14) 에서 두 번 겪었다.
+--
+-- 역할이 없는 개발 DB 에서도 적용이 통째로 실패하지 않도록 존재를 확인하고 준다.
+DO $$
+DECLARE
+    seq_name text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE workspace, workspace_readable, workspace_secret, console_user, console_user_workspace, harness_file, harness_version, harness_request,'
+                ' deploy_request, deploy_event, archive_doc, archive_course, usage_call, usage_daily, anomaly, archive_read_audit,'
+                ' specialist_bot, specialist_workspace, specialist_change_request, specialist_call, console_audit_event TO tyslackai';
+        -- bigserial 시퀀스도 함께. 없으면 INSERT 만 권한 오류로 죽는다.
+        --
+        -- `ALL SEQUENCES IN SCHEMA public` 은 쓰지 않는다 — 다른 파일이 만든 남의
+        -- 시퀀스까지 건드려서, 적용하는 역할이 그것들의 소유자가 아니면 **파일 전체가
+        -- 실패한다.** 이 파일이 만든 표에 딸린 것만 정확히 준다.
+        FOR seq_name IN
+            SELECT quote_ident(n.nspname) || '.' || quote_ident(s.relname)
+              FROM pg_class s
+              JOIN pg_namespace n ON n.oid = s.relnamespace
+              JOIN pg_depend d ON d.objid = s.oid AND d.deptype = 'a'
+              JOIN pg_class t ON t.oid = d.refobjid
+             WHERE s.relkind = 'S' AND t.relname = ANY(ARRAY['workspace', 'workspace_readable', 'workspace_secret', 'console_user', 'console_user_workspace', 'harness_file', 'harness_version', 'harness_request',
+                 'deploy_request', 'deploy_event', 'archive_doc', 'archive_course', 'usage_call', 'usage_daily', 'anomaly', 'archive_read_audit',
+                 'specialist_bot', 'specialist_workspace', 'specialist_change_request', 'specialist_call', 'console_audit_event'])
+        LOOP
+            EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE ' || seq_name || ' TO tyslackai';
+        END LOOP;
+    END IF;
+END
+$$;

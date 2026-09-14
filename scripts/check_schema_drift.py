@@ -76,21 +76,45 @@ def declared() -> tuple[dict[tuple[str, str], str], dict[str, str]]:
     return columns, tables
 
 
-def live(conn) -> tuple[set[tuple[str, str]], set[str]]:
+# `information_schema` 를 쓰지 않는다. **권한 필터가 걸린 뷰**라서, 내 역할에 권한이
+# 없는 표는 아예 안 보인다. 그래서 「권한 없음」 이 「없음」 으로 보고됐다
+# (2026-09-14 실측: 표 4개를 「없다」 고 했는데 실제로는 있고 GRANT 만 빠져 있었다).
+#
+# 틀린 조치를 안내하는 것은 안내가 없는 것보다 나쁘다 — 담당자가 스키마를 다시
+# 적용하고 아무것도 안 바뀌는 것을 보게 된다. `pg_catalog` 에는 그 필터가 없다.
+def live(conn) -> tuple[set[tuple[str, str]], set[str], set[str]]:
+    """실제 표·컬럼, 그리고 **권한이 없는 표**. 셋을 구별해야 조치가 갈린다."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT table_name, column_name FROM information_schema.columns"
-            " WHERE table_schema = 'public'"
+            """
+            SELECT c.relname AS table_name, a.attname AS column_name
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              JOIN pg_attribute a ON a.attrelid = c.oid
+             WHERE n.nspname = 'public' AND c.relkind = 'r'
+               AND a.attnum > 0 AND NOT a.attisdropped
+            """
         )
         columns = {
             (str(r["table_name"]), str(r["column_name"])) for r in cur.fetchall()
         }
         cur.execute(
-            "SELECT table_name FROM information_schema.tables"
-            " WHERE table_schema = 'public'"
+            """
+            SELECT c.relname AS table_name,
+                   has_table_privilege(current_user, c.oid, 'SELECT') AS can_read,
+                   has_table_privilege(current_user, c.oid, 'INSERT') AS can_write
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = 'public' AND c.relkind = 'r'
+            """
         )
-        tables = {str(r["table_name"]) for r in cur.fetchall()}
-    return columns, tables
+        rows = [dict(r) for r in cur.fetchall()]
+    tables = {str(r["table_name"]) for r in rows}
+    denied = {
+        str(r["table_name"]) for r in rows
+        if not (r["can_read"] and r["can_write"])
+    }
+    return columns, tables, denied
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
 
     want_columns, want_tables = declared()
     with psycopg.connect(url, row_factory=psycopg.rows.dict_row) as conn:
-        have_columns, have_tables = live(conn)
+        have_columns, have_tables, denied = live(conn)
 
     missing_tables = sorted(
         (t, f) for t, f in want_tables.items() if t not in have_tables
@@ -139,9 +163,24 @@ def main(argv: list[str] | None = None) -> int:
         for table, column, source in missing_columns:
             print(f"   {table}.{column}   ← {source}")
 
-    if not missing_tables and not missing_columns:
+    # 선언된 표 중 **권한이 없는 것.** 표가 없는 것과 조치가 다르다 — 스키마를 다시
+    # 적용해도 아무것도 안 바뀐다. GRANT 가 필요하다.
+    no_access = sorted(name for name in want_tables if name in denied)
+    if no_access:
+        print(f"\n🟠 표는 있는데 봇 역할이 읽거나 쓸 수 없는 것 {len(no_access)}개:")
+        for table in no_access:
+            print(f"   {table}")
+        print("\n   스키마 재적용으로는 안 고쳐진다. GRANT 가 필요하다:")
+        print("   sudo -u postgres psql -p 55432 -d tyslackai -c \\")
+        print(f'     "GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(no_access)}'
+              ' TO tyslackai"')
+
+    if not missing_tables and not missing_columns and not no_access:
         print("\n✅ 선언과 실제가 같다.")
         return EXIT_OK
+    if not missing_tables and not missing_columns:
+        # 권한만 문제다. 아래 「적용할 파일」 안내는 틀린 조치가 된다.
+        return EXIT_DRIFT
 
     files = sorted({f for _, f in missing_tables} | {f for _, _, f in missing_columns})
     print("\n적용할 파일 — 스키마 파일이 진실이다. 여기서 직접 ALTER 하지 않는다:")

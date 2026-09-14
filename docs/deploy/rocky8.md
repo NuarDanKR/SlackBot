@@ -552,8 +552,12 @@ sudo -u postgres psql -p 55432 -d tyslackai -c "\dx" | grep bigm
 ### 스키마는 스크립트로 한 번에 적용한다
 
 ```bash
-sudo /opt/tybot/deploy/apply-schema.sh
+sudo bash /opt/tybot/deploy/apply-schema.sh
 ```
+
+`bash` 를 앞에 붙인다. 실행 권한 비트는 배포 경로에 따라 달라질 수 있는데, 그때
+`command not found` 가 나면 원인이 파일 없음인지 권한인지 구별되지 않는다.
+파일이 아직 없으면 코드를 먼저 배포한다 — `sudo /opt/tybot/deploy/update.sh`.
 
 **개별 파일을 손으로 나열하지 않는다.** 예전에는 이 문서가 적용할 파일을 나열했는데
 그 목록이 드리프트했다 — 스키마 파일은 18개인데 문서에는 7개만 있었고, `console_schema.sql`
