@@ -3,6 +3,10 @@
 상태: 부분 구현, 미커밋·미배포. 전체 B-45 완료 아님.
 설계: `docs/design/operational-warning-recovery-and-answer-progress.md`.
 
+> **다음 작업 인계(2026-09-14, Claude → Codex):**
+> [`2026-09-14-b45-next-handoff-for-codex.md`](2026-09-14-b45-next-handoff-for-codex.md)
+> — 남은 것은 거기에 우선순위와 함께 있다. 이 문서는 **이미 한 것**의 기록이다.
+
 ## 최신 체크포인트 (후속 작업)
 
 - `conversion_worker.py`: UUID spool 요청/응답, 만료 검사, 확장자 허용 목록,

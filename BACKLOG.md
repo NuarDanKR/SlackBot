@@ -145,7 +145,9 @@ _최종 갱신: 2026-08-31_
 
 **구현 진행중 (Codex/2026-09-14). 운영 변경 미실행.**
 
-진행·검증·잔여 작업: [B-45 구현 인계](docs/verification/2026-09-14-b45-implementation-handoff.md).
+진행·검증: [B-45 구현 인계](docs/verification/2026-09-14-b45-implementation-handoff.md).
+**다음 작업**: [Codex 인계](docs/verification/2026-09-14-b45-next-handoff-for-codex.md)
+(partial coverage → 색인 연계 → 콘솔 재처리 버튼 → 알림 순).
 
 후속 구현: 자동 Canvas·스레드 진행 안내, 변환 오류 코드 통합, 선택 활성화 worker/spool,
 콘솔 첨부 상태 표시. worker 운영 준비는 [별도 절차](docs/deploy/conversion-worker.md) 참조.
