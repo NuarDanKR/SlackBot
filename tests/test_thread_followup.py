@@ -165,7 +165,9 @@ def engine(world):
         },
         cost_guard=CostGuard(10.0),
     )
-    return AnswerEngine(ArchiveStore(world), router), fake
+    return AnswerEngine(
+        ArchiveStore(world), router, allow_master_business_answers=True
+    ), fake
 
 
 def _ctx(*, channels=(GJ,), channel_id=GJ_ID, channel=GJ, is_root=False):

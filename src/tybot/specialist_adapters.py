@@ -283,7 +283,11 @@ def build(
         return ToolSpecialist(
             key, router, toolbox=toolbox, model=model, rules=rules, live=live
         )
-    return PromptSpecialist(key, router, model=model, rules=rules)
+    if execution_mode == "prompt":
+        return PromptSpecialist(key, router, model=model, rules=rules)
+    raise AdapterError(
+        f"unsupported-execution-mode: 지원하지 않는 실행 방식입니다({execution_mode})"
+    )
 
 
 # --- 도구를 갖춘 전문가 (A+) --------------------------------------------------

@@ -49,7 +49,9 @@ def engine(tmp_path):
         registry={"claude-sonnet-5": ModelSpec("claude-sonnet-5", "anthropic", 3.0, 15.0, Sensitivity.CONFIDENTIAL)},
         cost_guard=__import__("tybot.gateway.cost", fromlist=["CostGuard"]).CostGuard(10.0),
     )
-    return AnswerEngine(ArchiveStore(tmp_path), router), fake
+    return AnswerEngine(
+        ArchiveStore(tmp_path), router, allow_master_business_answers=True
+    ), fake
 
 
 def _ctx(channels=("#현장_김해외동(180182)_채팅방",)):

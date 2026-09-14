@@ -269,7 +269,9 @@ def run(rows: list[Row], store, router, hook) -> None:
     """
     for row in rows:
         scoped_store = CitationScopedStore(store, row.scope)
-        master = AnswerEngine(scoped_store, router)
+        master = AnswerEngine(
+            scoped_store, router, allow_master_business_answers=True
+        )
         special = AnswerEngine(scoped_store, router, specialist=hook)
         ctx = RequestContext(
             workspace=row.workspace, channels=frozenset(row.channels)

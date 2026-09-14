@@ -19,7 +19,7 @@ key = "hermes"
 name = "Hermes — 내부 기록"
 domain = "내부 문서"
 adapter = "hermes"
-contract_version = "v1"
+contract_version = "v4"
 version = "2"
 
 # prompt | tools | http

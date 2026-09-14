@@ -89,6 +89,10 @@ class QARecord:
     final_responder: str = ""
     attempted_specialists: list[str] = field(default_factory=list)
     specialist_error_code: str = ""
+    planner_model: str = ""
+    # One request may contain several business tasks. Keep only routing metadata;
+    # questions, evidence, and answer bodies remain in the parent QA record.
+    task_traces: list[dict] = field(default_factory=list)
 
     @classmethod
     def build(cls, **kw) -> QARecord:

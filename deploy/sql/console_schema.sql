@@ -377,19 +377,37 @@ CREATE TABLE IF NOT EXISTS specialist_call (
     routing_reason  text NOT NULL DEFAULT '',
     confidence      numeric(5, 4),
     result          text NOT NULL
-                    CHECK (result IN ('success', 'fallback', 'error', 'contract_violation')),
+                    CHECK (result IN ('success', 'fallback', 'error', 'contract_violation',
+                                     'evidence_insufficient')),
     elapsed_ms      integer NOT NULL DEFAULT 0 CHECK (elapsed_ms >= 0),
     cost_usd        numeric(12, 6) NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),
     error_code      text NOT NULL DEFAULT '',
-    qa_record_id    text NOT NULL DEFAULT ''
+    qa_record_id    text NOT NULL DEFAULT '',
+    decision_id     text NOT NULL DEFAULT '',
+    task_index      integer NOT NULL DEFAULT 0 CHECK (task_index >= 0),
+    task_kind       text NOT NULL DEFAULT '',
+    required_capability text NOT NULL DEFAULT ''
 );
 
 -- 기존 설치에도 질문·답변 감사기록과의 연결 열을 추가한다. 본문은 중복 저장하지 않는다.
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS qa_record_id text NOT NULL DEFAULT '';
+ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS decision_id text NOT NULL DEFAULT '';
+ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS task_index integer NOT NULL DEFAULT 0;
+ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS task_kind text NOT NULL DEFAULT '';
+ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS required_capability text NOT NULL DEFAULT '';
+ALTER TABLE specialist_call DROP CONSTRAINT IF EXISTS specialist_call_task_index_check;
+ALTER TABLE specialist_call ADD CONSTRAINT specialist_call_task_index_check
+    CHECK (task_index >= 0);
+ALTER TABLE specialist_call DROP CONSTRAINT IF EXISTS specialist_call_result_check;
+ALTER TABLE specialist_call ADD CONSTRAINT specialist_call_result_check
+    CHECK (result IN ('success', 'fallback', 'error', 'contract_violation',
+                     'evidence_insufficient'));
 
 CREATE INDEX IF NOT EXISTS specialist_call_recent ON specialist_call (at DESC);
 CREATE INDEX IF NOT EXISTS specialist_call_scope
     ON specialist_call (workspace, specialist, at DESC);
+CREATE INDEX IF NOT EXISTS specialist_call_decision
+    ON specialist_call (decision_id, task_index);
 
 CREATE TABLE IF NOT EXISTS console_audit_event (
     id          bigserial PRIMARY KEY,

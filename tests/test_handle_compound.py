@@ -180,6 +180,30 @@ def test_audit_record_keeps_every_intent():
     assert rec.intent_kind == "memory+status"
 
 
+def test_audit_preserves_each_business_task_result():
+    tasks = [
+        Intent("summary", question="summarize", planner_model="planner-test"),
+        Intent("search", question="find"),
+    ]
+    answers = [
+        Answer("summary", [], "specialist-test", 0.0, 1, "answered",
+               specialist="hermes", attempted_specialists=["hermes"]),
+        Answer("unavailable", [], "", 0.0, 0, "unavailable",
+               attempted_specialists=["hermes"], specialist_error_code="timeout"),
+    ]
+    bot = _bot(tasks, answers)
+    _handle(bot, "summarize and find")
+
+    (rec,) = bot.qa_log.records
+    assert rec.decision_id
+    assert rec.planner_model == "planner-test"
+    assert [trace["task_index"] for trace in rec.task_traces] == [0, 1]
+    assert [trace["final_responder"] for trace in rec.task_traces] == ["hermes", "none"]
+    assert [trace["result"] for trace in rec.task_traces] == ["answered", "unavailable"]
+    assert rec.task_traces[1]["error_code"] == "timeout"
+    assert all(trace["required_capability"] for trace in rec.task_traces)
+
+
 def test_write_intent_runs_alone_even_if_plan_adds_more():
     """수집이 섞여 오면 수집만 실행한다 - 모호한 쓰기는 실행하지 않는다."""
     tasks = [Intent("ingest", question="수집해"), Intent("summary", question="요약")]

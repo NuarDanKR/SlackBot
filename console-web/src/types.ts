@@ -198,6 +198,18 @@ export interface AnswerRecordDetail extends AnswerRecordSummary {
   error: string
   requestTs: string
   responseTs: string
+  decisionId: string
+  plannerModel: string
+  taskTraces: {
+    task_index: number
+    task_kind: string
+    required_capability: string
+    routing_confidence: number
+    final_responder: string
+    attempted_specialists: string[]
+    result: string
+    error_code: string
+  }[]
   feedback: {
     id: string
     at: string
@@ -333,12 +345,16 @@ export interface SpecialistCall {
   specialist: string
   routingReason: string
   confidence: number | null
-  result: 'success' | 'fallback' | 'error' | 'contract_violation'
+  result: 'success' | 'fallback' | 'error' | 'contract_violation' | 'evidence_insufficient'
   elapsedMs: number
   costUsd: number
   errorCode: string
   /** 동일 처리 건의 질문·답변 감사기록. 빈 값이면 연결 기능 도입 전 기록이다. */
   qaRecordKey: string
+  decisionId: string
+  taskIndex: number
+  taskKind: string
+  requiredCapability: string
 }
 
 export interface SpecialistRequest {

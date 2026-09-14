@@ -1091,6 +1091,10 @@ def specialist_calls(
                 "result": row["result"], "elapsedMs": row["elapsed_ms"],
                 "costUsd": float(row["cost_usd"]), "errorCode": row["error_code"],
                 "qaRecordKey": str(row.get("qa_record_id") or ""),
+                "decisionId": str(row.get("decision_id") or ""),
+                "taskIndex": int(row.get("task_index") or 0),
+                "taskKind": str(row.get("task_kind") or ""),
+                "requiredCapability": str(row.get("required_capability") or ""),
             }
             for row in rows
         ]

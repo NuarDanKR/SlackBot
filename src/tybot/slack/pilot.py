@@ -2267,6 +2267,8 @@ class WorkspaceBot:
         started = time.monotonic()
         # 이 요청의 판정을 QA 기록·전문 봇 호출과 잇는 값. 본문은 담지 않는다.
         decision_id = master_planner.new_decision_id()
+        planner_model = ""
+        task_traces: list[dict] = []
 
         # 👀 표시는 부가 기능이다. 실패해도 답변은 계속한다.
         with contextlib.suppress(Exception):
@@ -2347,6 +2349,8 @@ class WorkspaceBot:
                     list(ans.attempted_specialists) if ans else []
                 ),
                 specialist_error_code=(ans.specialist_error_code if ans else ""),
+                planner_model=planner_model,
+                task_traces=list(task_traces),
             )
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
@@ -2399,6 +2403,7 @@ class WorkspaceBot:
         decision = master_planner.from_intents(
             tasks, text=text, turns=turns, decision_id=decision_id
         )
+        planner_model = decision.planner_model
         sections: list[str] = []
         ctx: RequestContext | None = None
         last: Answer | None = None
@@ -2432,6 +2437,18 @@ class WorkspaceBot:
                 ans = self.engine.respond(q, ctx, task, followup=followup, task=master_task)
             last = ans
             sections.append(ans.to_slack())
+            task_traces.append(
+                {
+                    "task_index": master_task.task_index,
+                    "task_kind": master_task.kind,
+                    "required_capability": master_task.required_capability,
+                    "routing_confidence": master_task.routing_confidence,
+                    "final_responder": ans.specialist or "none",
+                    "attempted_specialists": list(ans.attempted_specialists),
+                    "result": ans.reason,
+                    "error_code": ans.specialist_error_code,
+                }
+            )
 
         if dropped:
             sections.append(truncated_notice(dropped))
@@ -3167,6 +3184,7 @@ def specialist_hook(router, store=None, live_fetch=None):
                 live=bool(live_fetch),
                 visual=visual,
                 authorization_id=f"{workspace}:{getattr(ctx, 'role', '-') or '-'}",
+                decision_id=str(getattr(task, "decision_id", "") or ""),
             )
         except Exception as exc:
             log.exception("[%s] 전문가 호출 실패: %s", workspace, exc)

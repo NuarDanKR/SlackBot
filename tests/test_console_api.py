@@ -1408,6 +1408,10 @@ def test_specialist_call_links_to_the_exact_qa_record(client, monkeypatch):
             "cost_usd": 0.002,
             "error_code": "",
             "qa_record_id": "qa-exact-7",
+            "decision_id": "decision-7",
+            "task_index": 1,
+            "task_kind": "analysis",
+            "required_capability": "legal_analysis",
         }],
     )
 
@@ -1415,6 +1419,9 @@ def test_specialist_call_links_to_the_exact_qa_record(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["calls"][0]["qaRecordKey"] == "qa-exact-7"
+    assert response.json()["calls"][0]["decisionId"] == "decision-7"
+    assert response.json()["calls"][0]["taskIndex"] == 1
+    assert response.json()["calls"][0]["requiredCapability"] == "legal_analysis"
 
 
 def test_specialist_change_requires_csrf(client):

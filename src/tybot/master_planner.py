@@ -100,6 +100,8 @@ class MasterTask:
     required_capability: str = ""
     suggested_specialist: str = ""
     routing_confidence: float = 0.0
+    decision_id: str = ""
+    task_index: int = 0
     parent_record_ids: tuple[str, ...] = ()
     topic_terms: tuple[str, ...] = ()
     document_query: tuple[str, ...] = ()
@@ -201,8 +203,9 @@ def from_intents(
     allowed_parents = {
         str(turn.get("record_id") or "") for turn in (turns or []) if turn.get("record_id")
     }
+    resolved_decision_id = decision_id or new_decision_id()
     out: list[MasterTask] = []
-    for task in tasks:
+    for task_index, task in enumerate(tasks):
         kind = KIND_MAP.get(task.kind, SYSTEM)
         fragment = task.question or text
         # 부모 ID 는 **이 스레드에 실제로 있는 것만** 받는다. 모델이 지어낸 ID 가
@@ -220,6 +223,8 @@ def from_intents(
                 required_capability=capability_for(kind, task.required_capability),
                 suggested_specialist=(task.suggested_specialist or "").strip().lower(),
                 routing_confidence=float(task.routing_confidence or 0.0),
+                decision_id=resolved_decision_id,
+                task_index=task_index,
                 parent_record_ids=parents,
                 topic_terms=tuple(task.topic_terms or ()),
                 document_query=tuple(task.document_query or task.terms or ()),
@@ -228,8 +233,12 @@ def from_intents(
         )
     return MasterDecision(
         tasks=tuple(out),
-        planner_model=planner_model,
-        decision_id=decision_id or new_decision_id(),
+        planner_model=(
+            planner_model
+            or next((str(getattr(task, "planner_model", "") or "") for task in tasks
+                     if getattr(task, "planner_model", "")), "")
+        ),
+        decision_id=resolved_decision_id,
     )
 
 

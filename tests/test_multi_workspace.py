@@ -361,7 +361,9 @@ def _engine(tmp_path):
         },
         cost_guard=CostGuard(10.0),
     )
-    return AnswerEngine(ArchiveStore(tmp_path), router), fake
+    return AnswerEngine(
+        ArchiveStore(tmp_path), router, allow_master_business_answers=True
+    ), fake
 
 
 def _today_doc(ws, channel, visibility, line):

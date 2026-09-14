@@ -100,7 +100,9 @@ def _make_engine(tmp_path, router):
         p = tmp_path / "channels" / "pilot" / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(body, encoding="utf-8")
-    return AnswerEngine(ArchiveStore(tmp_path), router)
+    return AnswerEngine(
+        ArchiveStore(tmp_path), router, allow_master_business_answers=True
+    )
 
 
 def _engine(tmp_path, provider):
@@ -498,13 +500,12 @@ def test_a_pending_attachment_is_named_not_silently_dropped(tmp_path):
     assert "자동 변환 실패" in answer.to_slack(), "왜 원본을 안 읽었는지 말해야 한다"
 
 
-def test_an_engine_without_a_specialist_layer_says_so_at_startup(tmp_path, caplog):
-    """전문 봇 계층이 없으면 마스터가 업무 답변을 쓴다 — **조용하면 안 된다.**
+def test_an_engine_without_a_specialist_layer_fails_closed(tmp_path):
+    """훅 누락은 마스터 업무 답변으로 조용히 강등되지 않는다."""
+    engine = _engine_with(tmp_path, None)
 
-    운영 봇이 실수로 그 상태로 뜨면 「업무 답변은 전문 봇만」 정책이 통째로
-    꺼지는데, 오류는 나지 않는다. 기동 로그 한 줄이 그것을 드러낸다.
-    """
-    with caplog.at_level("WARNING"):
-        _engine_with(tmp_path, None)
+    answer = engine.answer("콘솔 배포 어떻게 됐어", _ctx(MINE))
 
-    assert "전문 봇 계층 없이" in caplog.text
+    assert answer.reason == "specialist_unavailable"
+    assert answer.specialist_error_code == "specialist-layer-missing"
+    assert engine._router._providers["anthropic"].calls == []

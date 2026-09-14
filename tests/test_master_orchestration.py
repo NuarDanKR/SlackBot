@@ -145,6 +145,120 @@ def test_a_low_confidence_routing_asks_instead_of_answering(tmp_path):
     assert provider.calls == []
 
 
+def test_zero_confidence_never_becomes_the_minimum_passing_score(monkeypatch):
+    """누락·실패를 뜻하는 0은 falsy 우회로 전문 봇에 들어가면 안 된다."""
+    monkeypatch.setattr(specialist_router, "available", lambda workspace: [_row()])
+    monkeypatch.setattr(
+        specialist_router,
+        "_run_one",
+        lambda *args, **kwargs: pytest.fail("신뢰도 0인데 전문 봇을 호출했다"),
+    )
+
+    outcome = specialist_router.serve(
+        _task(routing_confidence=0.0),
+        workspace="pilot",
+        evidence=["원문"],
+        router=None,
+        authorization_id="pilot:member",
+    )
+
+    assert outcome.status == specialist_router.CLARIFY
+    assert outcome.error_code == "low-confidence"
+
+
+def test_rule_fallback_confidence_is_closed_by_the_real_router(monkeypatch):
+    """planner 장애의 규칙 폴백도 실제 선택 계층에서 실행되지 않는다."""
+    from tybot import intent
+
+    planned = intent.plan("미수금 현황을 알려줘", None)
+    decision = master_planner.from_intents(planned, text="미수금 현황을 알려줘")
+    monkeypatch.setattr(specialist_router, "available", lambda workspace: [_row()])
+
+    outcome = specialist_router.serve(
+        decision.tasks[0],
+        workspace="pilot",
+        evidence=["원문"],
+        router=None,
+        authorization_id="pilot:member",
+    )
+
+    assert decision.tasks[0].routing_confidence == 0.0
+    assert outcome.status == specialist_router.CLARIFY
+
+
+def test_tools_success_without_any_touched_evidence_is_not_an_answer(monkeypatch):
+    """그럴듯한 문장이 있어도 실제로 읽은 근거가 없으면 근거 부족이다."""
+    from tybot import specialist_adapters
+
+    class EmptyEvidenceAdapter:
+        touched = SimpleNamespace(documents=(), live_permalinks=())
+        last_model = "m"
+        last_cost_usd = 0.0
+
+        def complete(self, request):
+            return "관련 자료가 없습니다."
+
+    monkeypatch.setattr(
+        specialist_router,
+        "available",
+        lambda workspace: [_row(execution_mode="tools")],
+    )
+    monkeypatch.setattr(
+        specialist_adapters,
+        "build",
+        lambda *args, **kwargs: EmptyEvidenceAdapter(),
+    )
+
+    outcome = specialist_router.serve(
+        _task(),
+        workspace="pilot",
+        evidence=[],
+        router=None,
+        authorization_id="pilot:member",
+        toolbox_factory=object,
+        record_call_row=False,
+    )
+
+    assert outcome.status == specialist_router.EVIDENCE_INSUFFICIENT
+    assert outcome.error_code == "evidence_insufficient"
+    assert outcome.answer is None
+
+
+def test_specialist_call_keeps_decision_and_task_coordinates(monkeypatch):
+    from tybot import specialist_adapters
+    from tybot.console import specialist_store
+
+    class Adapter:
+        touched = SimpleNamespace(documents=(), live_permalinks=())
+        last_model = "m"
+        last_cost_usd = 0.0
+
+        def complete(self, request):
+            return "근거에 따른 답"
+
+    written = []
+    monkeypatch.setattr(specialist_router, "available", lambda workspace: [_row()])
+    monkeypatch.setattr(
+        specialist_adapters, "build", lambda *args, **kwargs: Adapter()
+    )
+    monkeypatch.setattr(specialist_store, "record_call", lambda **kwargs: written.append(kwargs))
+    task = _task(decision_id="abc123", task_index=2)
+
+    outcome = specialist_router.serve(
+        task,
+        workspace="pilot",
+        evidence=["원문"],
+        router=None,
+        authorization_id="pilot:member",
+    )
+
+    assert outcome.status == specialist_router.SUCCESS
+    assert written[0]["decision_id"] == "abc123"
+    assert written[0]["task_index"] == 2
+    assert written[0]["task_kind"] == "factual"
+    assert written[0]["required_capability"] == "internal_document_qa"
+
+
 def test_a_source_outside_the_acl_is_discarded_without_a_master_rewrite(tmp_path):
     """권한 밖 출처를 든 답은 버린다. **마스터가 대신 쓰지도 않는다.**"""
     other = SimpleNamespace(workspace="other", path=tmp_path / "남의문서.md")
@@ -253,7 +367,10 @@ def test_a_parent_record_id_outside_the_thread_is_refused():
 
 def test_each_subquestion_keeps_its_own_standalone_question():
     tasks = [
-        Intent("search", question="김해외동 기성금 얼마야"),
+        Intent(
+            "search", question="김해외동 기성금 얼마야",
+            planner_model="claude-haiku-4-5",
+        ),
         Intent("summary", question="전산팀 진행 상황"),
     ]
 
@@ -262,6 +379,9 @@ def test_each_subquestion_keeps_its_own_standalone_question():
     assert len(decision.tasks) == 2
     assert decision.tasks[0].standalone_question == "김해외동 기성금 얼마야"
     assert decision.tasks[1].standalone_question == "전산팀 진행 상황"
+    assert decision.planner_model == "claude-haiku-4-5"
+    assert [task.task_index for task in decision.tasks] == [0, 1]
+    assert all(task.decision_id == decision.decision_id for task in decision.tasks)
 
 
 # =============================================================================
@@ -491,7 +611,14 @@ def test_the_audit_record_names_the_final_responder(tmp_path):
             request_ts="1", response_ts="2", thread_ts="T1", channel_type="channel",
             error="", decision_id="abc123", required_capability="internal_document_qa",
             final_responder="hermes", attempted_specialists=["hermes"],
-            specialist_error_code="",
+            specialist_error_code="", planner_model="claude-haiku-4-5",
+            task_traces=[{
+                "task_index": 0, "task_kind": "factual",
+                "required_capability": "internal_document_qa",
+                "routing_confidence": 0.9, "final_responder": "hermes",
+                "attempted_specialists": ["hermes"], "result": "answered",
+                "error_code": "",
+            }],
         )
     )
 
@@ -500,6 +627,8 @@ def test_the_audit_record_names_the_final_responder(tmp_path):
     assert row["decision_id"] == "abc123"
     assert row["final_responder"] == "hermes"
     assert row["attempted_specialists"] == ["hermes"]
+    assert row["planner_model"] == "claude-haiku-4-5"
+    assert row["task_traces"][0]["task_kind"] == "factual"
 
 
 def test_the_specialist_outcome_log_line_has_no_business_text():

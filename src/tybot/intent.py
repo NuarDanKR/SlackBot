@@ -251,6 +251,7 @@ class Intent:
     required_capability: str = ""
     suggested_specialist: str = ""
     routing_confidence: float = 0.0
+    planner_model: str = ""
     # --- 문서 집합 요약 (설계: document-pipeline-trace-and-report-summary.md §9)
     #
     # `days` 를 0 이나 큰 수로 덮어쓰지 않는다. **범위를 따로 들고** 있어야
@@ -748,6 +749,7 @@ def plan(
                     required_capability=str(item.get("capability") or "").strip(),
                     suggested_specialist=str(item.get("specialist") or "").strip(),
                     routing_confidence=_clamp_confidence(item.get("confidence")),
+                    planner_model=str(getattr(resp, "model", "") or ""),
                 )
             )
         if not tasks:

@@ -605,6 +605,7 @@ def serve(
     후보는 각각 **한 번씩만** 시도한다. 무한히 돌면 한 질문이 예산을 다 쓰고,
     그건 그 질문 하나가 아니라 그날 전체 답변을 느리게 만든다.
     """
+    decision_id = decision_id or str(getattr(task, "decision_id", "") or "")
     try:
         specialists = available(workspace)
     except RegistryUnavailable as exc:
@@ -643,7 +644,7 @@ def serve(
     confidence = float(getattr(task, "routing_confidence", 0.0) or 0.0)
     # **신뢰도 미달은 장애가 아니다.** 후보 줄을 돌리지 않고 되묻는다 —
     # 모르는 채로 아무 봇이나 고르면 엉뚱한 분야가 사내 사실을 말하게 된다.
-    if confidence and confidence < candidates[0].min_confidence:
+    if confidence < candidates[0].min_confidence:
         return SpecialistOutcome(
             CLARIFY,
             error_code="low-confidence",
@@ -666,9 +667,13 @@ def serve(
             authorization_id=authorization_id,
             toolbox_factory=toolbox_factory,
             live=live,
-            confidence=confidence or chosen.min_confidence,
+            confidence=confidence,
             record_call_row=record_call_row,
             visual=visual,
+            decision_id=decision_id,
+            task_index=int(getattr(task, "task_index", 0) or 0),
+            task_kind=str(getattr(task, "kind", "") or ""),
+            required_capability=str(getattr(task, "required_capability", "") or ""),
         )
         if answer is not None:
             return SpecialistOutcome(
@@ -679,6 +684,14 @@ def serve(
                 decision_id=decision_id,
             )
         last_code = code or last_code
+        if code == EVIDENCE_INSUFFICIENT:
+            return SpecialistOutcome(
+                EVIDENCE_INSUFFICIENT,
+                error_code=EVIDENCE_INSUFFICIENT,
+                attempted=tuple(attempted),
+                selected=chosen.key,
+                decision_id=decision_id,
+            )
     return SpecialistOutcome(
         UNAVAILABLE,
         error_code=last_code or "specialist-failed",
@@ -700,6 +713,10 @@ def _run_one(
     confidence: float,
     record_call_row: bool,
     visual: tuple = (),
+    decision_id: str = "",
+    task_index: int = 0,
+    task_kind: str = "",
+    required_capability: str = "",
 ) -> tuple[SpecialistAnswer | None, str]:
     """후보 하나를 실제로 부른다. `(답, 사유코드)`."""
     import time
@@ -761,13 +778,28 @@ def _run_one(
         log.warning("전문가 호출 실패 key=%s: %s", chosen.key, exc)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    ok = result is not None and result.text.strip()
+    ok = bool(result is not None and result.text.strip())
     # **도구를 몇 번 불렀는지 남긴다.** 없으면 답이 느릴 때 프롬프트를 고칠지
     # 검색을 고칠지 판단할 근거가 없다(전문 봇 검증 문서의 1순위 빈틈이었다).
     budget = getattr(adapter, "budget", None)
     if budget is not None and not ok and budget.exhausted:
         # 예산이 끝나서 못 답한 것과 자료가 없어서 못 답한 것은 다르다.
         error_code = "search-budget-exhausted"
+    touched = getattr(adapter, "touched", None)
+    touched_documents = tuple(getattr(touched, "documents", ()) or ())
+    touched_live = tuple(getattr(touched, "live_permalinks", ()) or ())
+    if (
+        ok
+        and chosen.execution_mode == "tools"
+        and not evidence
+        and not visual
+        and not touched_documents
+        and not touched_live
+    ):
+        # A tools specialist may phrase "nothing found" as a valid sentence.  It is
+        # still not an evidence-backed answer and must not be reported as success.
+        ok = False
+        error_code = EVIDENCE_INSUFFICIENT
     trace = f"capability-match:{chosen.execution_mode}"
     if budget is not None:
         trace = f"{trace} {budget.summary()}"
@@ -779,11 +811,19 @@ def _run_one(
             specialist=chosen.key,
             routing_reason=trace,
             confidence=confidence,
-            result=result.result if result else "error",
+            result=(
+                EVIDENCE_INSUFFICIENT
+                if error_code == EVIDENCE_INSUFFICIENT
+                else (result.result if result else "error")
+            ),
             elapsed_ms=elapsed_ms,
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
             error_code="" if ok else (error_code or "adapter-build"),
             qa_record_id=_qa_record_id.get(),
+            decision_id=decision_id,
+            task_index=task_index,
+            task_kind=task_kind,
+            required_capability=required_capability,
         )
     except _SkipRecord:
         pass
@@ -792,15 +832,14 @@ def _run_one(
 
     if not ok:
         return None, error_code or "empty-output"
-    touched = getattr(adapter, "touched", None)
     return (
         SpecialistAnswer(
             text=result.text,
             specialist=chosen.key,
             model=getattr(adapter, "last_model", "") or chosen.model,
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
-            documents=tuple(getattr(touched, "documents", ()) or ()),
-            live_links=tuple(getattr(touched, "live_permalinks", ()) or ()),
+            documents=touched_documents,
+            live_links=touched_live,
         ),
         "",
     )

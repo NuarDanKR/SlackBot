@@ -71,7 +71,9 @@ def engine(tmp_path):
         },
         cost_guard=CostGuard(10.0),
     )
-    return AnswerEngine(ArchiveStore(tmp_path), router), fake
+    return AnswerEngine(
+        ArchiveStore(tmp_path), router, allow_master_business_answers=True
+    ), fake
 
 
 def test_summary_covers_only_member_channels(engine):
@@ -189,7 +191,9 @@ def test_the_citation_names_the_file_the_line_came_from(tmp_path):
         encoding="utf-8",
     )
 
-    engine = AnswerEngine(ArchiveStore(tmp_path), _bare_router())
+    engine = AnswerEngine(
+        ArchiveStore(tmp_path), _bare_router(), allow_master_business_answers=True
+    )
     answer = engine.summarize(
         RequestContext(workspace="pilot", channels=frozenset({channel})), days=7
     )
@@ -218,7 +222,9 @@ def test_a_single_day_citation_has_no_span_suffix(tmp_path):
         _v2_doc(channel, "C1", today, [("09:00", "예산 확정")]), encoding="utf-8"
     )
 
-    engine = AnswerEngine(ArchiveStore(tmp_path), _bare_router())
+    engine = AnswerEngine(
+        ArchiveStore(tmp_path), _bare_router(), allow_master_business_answers=True
+    )
     answer = engine.summarize(
         RequestContext(workspace="pilot", channels=frozenset({channel})), days=7
     )

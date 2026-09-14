@@ -382,7 +382,8 @@ def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""SELECT id, at, workspace, specialist, routing_reason, confidence,
-                           result, elapsed_ms, cost_usd, error_code, qa_record_id
+                           result, elapsed_ms, cost_usd, error_code, qa_record_id,
+                           decision_id, task_index, task_kind, required_capability
                       FROM specialist_call {where} ORDER BY at DESC LIMIT %s""",
                 params,
             )
@@ -395,20 +396,25 @@ def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "
 
 def record_call(*, workspace: str, specialist: str, routing_reason: str, confidence: float | None,
                 result: str, elapsed_ms: int, cost_usd: float, error_code: str = "",
-                qa_record_id: str = "") -> None:
+                qa_record_id: str = "", decision_id: str = "", task_index: int = 0,
+                task_kind: str = "", required_capability: str = "") -> None:
     """Record non-sensitive routing metadata for a specialist adapter."""
-    if result not in {"success", "fallback", "error", "contract_violation"}:
+    if result not in {
+        "success", "fallback", "error", "contract_violation", "evidence_insufficient"
+    }:
         raise SpecialistStoreError("지원하지 않는 전문 봇 호출 결과입니다.")
     try:
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO specialist_call
                     (workspace, specialist, routing_reason, confidence, result,
-                     elapsed_ms, cost_usd, error_code, qa_record_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                     elapsed_ms, cost_usd, error_code, qa_record_id, decision_id,
+                     task_index, task_kind, required_capability)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (workspace, specialist, routing_reason[:200], confidence, result,
                  max(0, elapsed_ms), max(0, cost_usd), error_code[:100],
-                 qa_record_id.strip().lower()),
+                 qa_record_id.strip().lower(), decision_id.strip().lower(),
+                 max(0, int(task_index)), task_kind[:40], required_capability[:100]),
             )
     except Exception as exc:
         raise SpecialistStoreError(f"전문 봇 호출 기록 저장 실패: {exc}") from exc

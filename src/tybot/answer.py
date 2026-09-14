@@ -659,6 +659,7 @@ class AnswerEngine:
         max_hits: int = 20,
         max_lines_per_channel: int = 60,
         specialist=None,
+        allow_master_business_answers: bool = False,
     ) -> None:
         self._store = store
         self._router = router
@@ -668,14 +669,12 @@ class AnswerEngine:
         # 넣어 준다. 그래야 엔진 테스트가 DB 없이 돌고, 전문가가 없는 설치에서도
         # 이 파일이 그대로 쓰인다.
         self._specialist = specialist
-        if specialist is None:
-            # **이 상태에서는 마스터가 업무 답변을 쓴다.** 단위 테스트와 전문 봇을
-            # 도입하지 않은 설치를 위해 남겨 둔 길인데, 운영 봇이 실수로 여기에
-            # 들어오면 「업무 답변은 전문 봇만」 정책이 통째로 꺼진다 —
-            # 오류 없이. 그래서 기동 로그에 남긴다.
+        self._allow_master_business_answers = bool(allow_master_business_answers)
+        if specialist is None and self._allow_master_business_answers:
+            # 비교 측정과 구형 단위 테스트에서만 명시적으로 여는 호환 경로다.
             logger.warning(
-                "전문 봇 계층 없이 답변 엔진을 만든다 — 업무 답변을 마스터가 씁니다. "
-                "운영 봇이라면 `slack/pilot.specialist_hook()` 이 빠진 것이다."
+                "전문 봇 계층 없이 마스터 업무 답변을 명시적으로 허용했습니다. "
+                "운영 서비스에서는 사용하면 안 됩니다."
             )
         self._sensitivity = sensitivity
         self._max_hits = max_hits
@@ -791,7 +790,6 @@ class AnswerEngine:
         """
         if self._specialist is None:
             return None
-        self._last_capability = str(getattr(task, "required_capability", "") or "")
         try:
             target = task if task is not None else question
             if visual:
@@ -803,23 +801,36 @@ class AnswerEngine:
             return _Outcome("unavailable", error_code="hook-error")
         return _Outcome.read(raw)
 
-    def _specialist_no_hits(self, outcome, q: str, ctx, *, terms=None) -> Answer:
+    def _specialist_no_hits(self, outcome, q: str, ctx, *, terms=None, task=None) -> Answer:
         """마스터도 전문 봇도 근거를 못 찾았다.
 
         **「자료가 없다」 고 단정하지 않는다.** 검색 예산을 다 썼을 수도, 낱말이
         어긋났을 수도 있다. 어디까지 찾아봤는지 밝혀야 사람이 이어서 찾는다.
         """
         if outcome.status == "clarify":
-            return self._unavailable(outcome, terms=terms)
+            return self._unavailable(outcome, terms=terms, task=task)
+        if outcome.status == "evidence_insufficient":
+            return Answer(
+                f"「{q}」에 답할 권한 범위의 근거를 확보하지 못했습니다. "
+                "자료가 없다고 단정하지 않습니다.",
+                [], None, 0.0, 0, "evidence_insufficient",
+                terms=list(terms or []),
+                specialist_error_code="evidence_insufficient",
+                attempted_specialists=list(getattr(outcome, "attempted", ()) or ()),
+                required_capability=str(getattr(task, "required_capability", "") or ""),
+            )
         if outcome.error_code in ("search-budget-exhausted",):
             return Answer(
                 f"「{q}」 를 찾다가 검색 한도에 닿았습니다. 자료가 없다는 뜻은 아닙니다. "
                 "채널이나 기간을 좁혀 다시 물어보세요.",
                 [], None, 0.0, 0, "search_budget",
                 terms=list(terms or []),
+                specialist_error_code="search-budget-exhausted",
+                attempted_specialists=list(getattr(outcome, "attempted", ()) or ()),
+                required_capability=str(getattr(task, "required_capability", "") or ""),
             )
         if outcome.status in ("unavailable", "no_capability", "registry_error"):
-            return self._unavailable(outcome, terms=terms)
+            return self._unavailable(outcome, terms=terms, task=task)
         titles = self._store.titles(ctx)
         if not titles:
             return Answer(
@@ -834,11 +845,16 @@ class AnswerEngine:
             terms=list(terms or []),
         )
 
-    def _unavailable(self, outcome, *, hits=0, terms=None, stage="전문 봇 호출") -> Answer:
+    def _unavailable(
+        self, outcome, *, hits=0, terms=None, stage="전문 봇 호출", task=None
+    ) -> Answer:
         """전문 봇이 못 답했다. **마스터가 대신 쓰지 않는다.**"""
         trace = {
             "specialist_error_code": outcome.error_code,
             "attempted_specialists": list(getattr(outcome, "attempted", ()) or ()),
+            "required_capability": str(
+                getattr(task, "required_capability", "") or ""
+            ),
         }
         if outcome.status == "clarify":
             return Answer(
@@ -962,6 +978,7 @@ class AnswerEngine:
                 "추측으로 답하지 않습니다.",
                 [], None, 0.0, 0, "no_hits",
                 context_resolution="scoped_empty",
+                required_capability=str(getattr(task, "required_capability", "") or ""),
             )
         if not blocks:
             titles = [doc.channel for doc in visible_docs]
@@ -1020,7 +1037,7 @@ class AnswerEngine:
             specialist_coverage = _with_omitted(coverage, omitted)
 
             # The adapter's final size guard must not silently cut a channel in half.
-            # If no complete channel fits, the master handles the full evidence.
+            # A tools specialist can retrieve further evidence within its budget.
             specialist_evidence = "\n\n".join(selected_blocks)
             outcome = self._ask_specialist(
                 task,
@@ -1053,7 +1070,7 @@ class AnswerEngine:
                     "answered",
                     withheld=withheld,
                     specialist=special.specialist,
-                    required_capability=getattr(self, "_last_capability", ""),
+                    required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(selected_hits, self._store.root),
                     attachment_refs=_attachment_refs(self._store.root, selected_hits),
@@ -1061,7 +1078,15 @@ class AnswerEngine:
                     context_resolution="transmitted_evidence",
                 )
             # 전문 봇 계층이 있는데 못 답했다. 여기서 끝난다.
-            return self._unavailable(outcome, hits=total, terms=terms)
+            return self._unavailable(outcome, hits=total, terms=terms, task=task)
+
+        if not self._allow_master_business_answers:
+            return self._unavailable(
+                _Outcome("unavailable", error_code="specialist-layer-missing"),
+                hits=total,
+                terms=terms,
+                task=task,
+            )
 
         # 전문 봇 계층이 **아예 없는** 설치의 길이다(단위 테스트·전문 봇 미도입).
         # 운영 봇은 `slack/pilot.specialist_hook()` 을 항상 끼우므로 여기로 오지
@@ -1143,13 +1168,21 @@ class AnswerEngine:
                     "advice",
                     terms=list(terms or []),
                     specialist=special.specialist,
-                    required_capability=getattr(self, "_last_capability", ""),
+                    required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(hits, self._store.root),
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
                 )
-            return self._unavailable(outcome, hits=len(hits), terms=terms)
+            return self._unavailable(outcome, hits=len(hits), terms=terms, task=task)
+
+        if not self._allow_master_business_answers:
+            return self._unavailable(
+                _Outcome("unavailable", error_code="specialist-layer-missing"),
+                hits=len(hits),
+                terms=terms,
+                task=task,
+            )
 
         # 전문 봇 계층이 없는 설치의 길이다.
         evidence = (
@@ -1444,6 +1477,10 @@ class AnswerEngine:
                     specialist=special.specialist,
                     subject_terms=list(terms or []),
                     context_resolution="specialist_search",
+                    required_capability=str(
+                        getattr(task, "required_capability", "") or ""
+                    ),
+                    attempted_specialists=list(outcome.attempted),
                 )
             # 전문 봇도 못 찾았다. **「찾지 못했다」 와 「없다」 를 구분해서** 남긴다.
             logger.info(
@@ -1451,7 +1488,7 @@ class AnswerEngine:
                 q, ctx.workspace, outcome.error_code if outcome else "-",
             )
             if outcome is not None and outcome.status not in ("success",):
-                return self._specialist_no_hits(outcome, q, ctx, terms=terms)
+                return self._specialist_no_hits(outcome, q, ctx, terms=terms, task=task)
 
         if not hits:
             # 3겹: 근거가 없으면 **다른 질문에 답하지 않는다.** 예전엔 최근 원문 요약으로 폴백했는데,
@@ -1529,14 +1566,22 @@ class AnswerEngine:
                     "answered",
                     specialist=special.specialist,
                     withheld=withheld,
-                    required_capability=getattr(self, "_last_capability", ""),
+                    required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(hits, self._store.root),
                     attachment_refs=_attachment_refs(self._store.root, hits),
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
                 )
-            return self._unavailable(outcome, hits=len(hits), terms=terms)
+            return self._unavailable(outcome, hits=len(hits), terms=terms, task=task)
+
+        if not self._allow_master_business_answers:
+            return self._unavailable(
+                _Outcome("unavailable", error_code="specialist-layer-missing"),
+                hits=len(hits),
+                terms=terms,
+                task=task,
+            )
 
         # 전문 봇 계층이 없는 설치의 길이다(위 `summarize()` 와 같다).
         user_content: str | list[dict] = prompt

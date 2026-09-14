@@ -32,6 +32,18 @@ class FakeRouter:
         return response
 
 
+def test_http_mode_is_refused_instead_of_silently_becoming_prompt():
+    with pytest.raises(adapters.AdapterError, match="unsupported-execution-mode"):
+        adapters.build("hermes", FakeRouter(_answer("답")), execution_mode="http")
+
+
+def test_search_instructions_allow_bounded_synonym_retry():
+    from tybot.specialist_tools import SEARCH_DESCRIPTION
+
+    assert "동의어" in SEARCH_DESCRIPTION
+    assert "낱말을 바꿔 다시 부르지" not in SEARCH_DESCRIPTION
+
+
 def _answer(text, cost=0.001):
     return LLMResponse(text=text, model="claude-opus-5", provider="anthropic",
                        input_tokens=10, output_tokens=5, cost_usd=cost)

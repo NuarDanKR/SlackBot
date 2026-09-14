@@ -265,6 +265,9 @@ def detail(row: dict, feedback: list[dict]) -> dict:
         "error": str(row.get("error") or ""),
         "requestTs": str(row.get("request_ts") or ""),
         "responseTs": str(row.get("response_ts") or ""),
+        "decisionId": str(row.get("decision_id") or ""),
+        "plannerModel": str(row.get("planner_model") or ""),
+        "taskTraces": list(row.get("task_traces") or []),
         "qualityReasons": quality_reasons(row),
         "feedback": visible_feedback,
     }

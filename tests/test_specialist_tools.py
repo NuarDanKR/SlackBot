@@ -140,20 +140,21 @@ def test_the_tools_never_read_files_directly():
 
 
 # --- 검색 규칙 (Hermes 에서 가져온 것) ---------------------------------------
-def test_an_empty_result_reports_per_word_counts():
-    """없다고만 하면 모델이 낱말을 바꿔 다시 부른다 — 그게 가장 흔한 낭비다."""
+def test_an_empty_result_reports_counts_and_allows_bounded_retry():
+    """0건이면 동의어 탐색을 허용하되 동일 검색 반복은 막는다."""
     box = _box(_store())
 
     got = box.run("search", {"query": "존재하지 않는 낱말"})
 
     assert "낱말별" in got
-    assert "낱말을 바꿔 다시 부르지 말고" in got
+    assert "동의어" in got
+    assert "같은 검색은 반복하지" in got
 
 
-def test_the_search_description_carries_the_rule():
-    """설명문이 곧 규칙이다. 시스템 프롬프트에 적으면 모델이 그 도구를 부르는
-    순간에 읽지 않는다."""
-    assert "다시 부르지 말고" in tools.SEARCH_DESCRIPTION
+def test_the_search_description_carries_the_bounded_retry_rule():
+    """설명문에서 동의어 재검색과 반복 제한을 함께 전달한다."""
+    assert "동의어" in tools.SEARCH_DESCRIPTION
+    assert "같은 검색을 반복하지" in tools.SEARCH_DESCRIPTION
 
 
 def test_where_narrows_to_a_channel():
