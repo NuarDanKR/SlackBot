@@ -208,7 +208,7 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
       .catch(() => undefined)
   }
   return <><PageHead crumb="관리 · 전문 봇" title="전문 봇 관리"
-    note="전문 봇 등록·변경 요청을 만들고 검토합니다. 관리자가 만든 요청도 다른 관리자의 승인을 받아야 적용됩니다." />
+    note="전문 봇 등록·변경 요청을 만들고 검토합니다. 개발자가 만든 요청은 관리자의 승인을 받아야 적용됩니다. 관리자가 자기 요청을 처리하면 감사 기록에 남습니다." />
     {error && <div className="notice bad"><div><div className="notice-title">처리하지 못했습니다.</div><div className="notice-detail">{error}</div></div></div>}
     <Section title="전문 봇 계약 가져오기" lead="Git 릴리스 또는 계약 ZIP에서 검증된 파일만 읽습니다. 저장소 코드와 ZIP의 실행 파일은 실행하거나 TYBot 소스 폴더에 복사하지 않습니다.">
       <div className="card card-pad">
