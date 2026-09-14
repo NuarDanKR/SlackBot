@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 
+log = logging.getLogger("tybot.console.deploy_approval_store")
 
 class DeployApprovalError(RuntimeError):
     """A deployment approval transition was rejected."""
@@ -148,7 +150,24 @@ def create_request(*, workspace: str, requester: str, reason: str) -> int:
         raise DeployApprovalError(f"배포 요청 저장 실패: {exc}") from exc
 
 
-def decide_request(*, request_id: int, approver: str, decision: str, note: str) -> dict:
+def decide_request(
+    *, request_id: int, approver: str, decision: str, note: str,
+    allow_self: bool = False,
+) -> dict:
+    """배포 요청을 승인·반려한다.
+
+    ## 반려는 자기 요청도 할 수 있다
+    자기 제안을 거두는 것은 **변경을 적용하는 것이 아니라 없애는 것**이다. 2인 검토는
+    변경이 들어가는 것을 막으려는 규칙이므로 반려에는 적용할 이유가 없다.
+
+    막아 두면 요청자가 자기 요청을 취소하지 못해 큐에 영원히 남고, 고쳐서 다시 올리는
+    길도 함께 막힌다 — 실제로 그렇게 됐다(2026-09-14).
+
+    ## 승인은 `allow_self` 가 있을 때만
+    관리자에게 주는 예외다. 서버에 root 로 들어가 SQL 을 칠 수 있는 사람에게 두 명을
+    강제하면, 콘솔을 놔두고 그쪽으로 도는 길만 열린다 — 그쪽은 기록이 남지 않는다.
+    막는 대신 남긴다(`specialist_store.decide_request` 와 같은 판단).
+    """
     if decision not in {"approve", "reject"}:
         raise DeployApprovalError("승인 또는 반려만 선택할 수 있습니다.")
     note = note.strip()[:500]
@@ -161,8 +180,17 @@ def decide_request(*, request_id: int, approver: str, decision: str, note: str) 
                 raise DeployApprovalError("배포 요청을 찾을 수 없습니다.")
             if row["state"] != "awaiting_approval":
                 raise DeployApprovalError("이미 처리됐거나 승인할 수 없는 요청입니다.")
-            if str(row["requester"]).lower() == approver.lower():
+            # **반려는 막지 않는다.** 아래 조건 순서가 중요하다 — 예전에는 승인·반려를
+            # 가리지 않고 먼저 걸러서, 요청자가 자기 요청을 취소조차 못 했다.
+            is_self = str(row["requester"]).lower() == approver.lower()
+            if is_self and decision == "approve" and not allow_self:
                 raise DeployApprovalError("자신이 만든 배포 요청은 직접 승인할 수 없습니다.")
+            if is_self:
+                # 누가 자기 것을 처리했는지 로그에 남긴다. 막지 않는 대신 남긴다.
+                log.warning(
+                    "자기 배포 요청 처리 request=%s actor=%s decision=%s",
+                    request_id, approver, decision,
+                )
             if decision == "reject":
                 cur.execute(
                     """

@@ -6,6 +6,7 @@ prompts, or arbitrary endpoints; those remain reviewed application code.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 
@@ -25,6 +26,8 @@ ALLOWED_ADAPTERS = {
     "construction": {"name": "건설 전문 봇", "domain": "건설", "contracts": ("v1",)},
 }
 
+
+logger = logging.getLogger("tybot.console.specialist_store")
 
 def _deployed() -> set[str]:
     """런타임이 실제로 있는 어댑터. 읽지 못하면 빈 집합 — 없다고 본다."""
@@ -292,8 +295,16 @@ def decide_request(
             row = cur.fetchone()
             if row is None or row["state"] != "awaiting_approval":
                 raise SpecialistStoreError("처리할 수 있는 전문 봇 변경 요청이 아닙니다.")
-            if not allow_self and str(row["requester"]).lower() == actor.lower():
+            # 반려는 자기 요청도 할 수 있다. 거두는 것은 변경을 적용하는 것이 아니라
+            # 없애는 것이라, 2인 검토가 막으려는 일이 아니다.
+            is_self = str(row["requester"]).lower() == actor.lower()
+            if is_self and decision == "approve" and not allow_self:
                 raise SpecialistStoreError("자신이 만든 요청은 직접 승인할 수 없습니다.")
+            if is_self:
+                logger.warning(
+                    "자기 전문 봇 요청 처리 request=%s actor=%s decision=%s",
+                    request_id, actor, decision,
+                )
             state = "approved" if decision == "approve" else "rejected"
             if decision == "approve":
                 p = dict(row["proposal"])
