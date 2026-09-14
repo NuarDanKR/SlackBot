@@ -30,11 +30,14 @@ hwpx 는 사용자가 올린 zip 안의 XML 이다. 표준 파서는 외부 엔�
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import io
 import logging
 import os
 import re
 import zipfile
+from dataclasses import dataclass
 
 from .external_convert import (
     ExternalConversionError,
@@ -84,6 +87,9 @@ def _finish(lines: list[str]) -> list[str]:
     lines = [ln for ln in lines if ln.strip()]
     total = len(lines)
     if total > MAX_LINES:
+        # 접은 것도 **덜 읽은 것**이다. 어느 형식이든 여기를 지나므로
+        # 한 자리에서 남긴다.
+        _record("", flag=LINE_LIMIT_REACHED)
         dropped = total - FOLD_HEAD - FOLD_TAIL
         lines = [
             *lines[:FOLD_HEAD],
@@ -175,7 +181,12 @@ def _xlsx_basic(data: bytes) -> list[str]:
             wb2.close()
 
     out: list[str] = []
+    # **시트와 행을 센다.** 가운데를 접은 표는 「전부 읽었다」 가 아니다 —
+    # 사람이 묻는 값이 하필 접힌 자리에 있으면 「자료가 없다」 로 답하게 된다.
+    _record("sheet", total=len(values), converted=len(values))
     for title, (rows, total) in values.items():
+        if total > len(rows):
+            _record("", flag=ROW_LIMIT_REACHED)
         out.append(f"[시트] {title}")
         source = dict(formulas.get(title, ([], 0))[0])
         shown = 0
@@ -281,15 +292,32 @@ def _pdf(data: bytes) -> list[str]:
     if getattr(reader, "is_encrypted", False):
         raise ConvertError("암호가 걸린 PDF - 변환하지 않음")
     out: list[str] = []
+    # **쪽마다 읽었는지 센다.** 한 쪽이 실패해도 전체를 막지 않는 것은 맞지만,
+    # 그 사실을 아무 데도 안 남기면 3쪽만 읽은 10쪽 문서가 「성공」 이 된다.
+    total_pages = len(reader.pages)
+    read_pages: list[int] = []
+    missing_pages: list[int] = []
     for i, page in enumerate(reader.pages, 1):
         try:
             text = page.extract_text() or ""
         except Exception:  # noqa: BLE001 - 한 페이지 실패가 전체를 막지 않는다
+            missing_pages.append(i)
             continue
         lines = [_clip(ln) for ln in text.splitlines() if ln.strip()]
         if lines:
             out.append(f"[{i}쪽]")
             out.extend(lines)
+            read_pages.append(i)
+        else:
+            # 글자가 없는 쪽. 그림만 있는 쪽일 수도, 추출이 실패한 것일 수도
+            # 있다 — **어느 쪽인지 모르므로 읽었다고 세지 않는다.**
+            missing_pages.append(i)
+    _record(
+        "page",
+        total=total_pages,
+        converted=len(read_pages),
+        missing=tuple(missing_pages),
+    )
     extracted_chars = sum(len(line) for line in out if not line.startswith("["))
     if out and extracted_chars < 200:
         try:
@@ -297,6 +325,8 @@ def _pdf(data: bytes) -> list[str]:
         except (ExternalConverterUnavailable, ExternalConversionError) as exc:
             logger.warning("PDF 본문이 짧지만 OCR을 쓰지 못함: %s", exc)
             out.insert(0, f"[변환 안내] 이미지 본문 OCR 미사용: {exc}")
+            # 글자가 모자란데 OCR 도 못 썼다. 읽은 것이 원본의 전부라고 말할 수 없다.
+            _record("", flag=OCR_UNAVAILABLE)
     if not out:
         try:
             return _finish(kordoc_lines(data, "pdf", force_ocr=True))
@@ -398,6 +428,149 @@ _HANDLERS = {
     "jpeg": lambda data: _image(data, "jpeg"),
     "webp": lambda data: _image(data, "webp"),
 }
+
+
+# --- 얼마나 읽었나 (B-45 §5·§6) ----------------------------------------------
+#
+# **「본문이 나왔다」 와 「다 읽었다」 는 다르다.** 10쪽 PDF 에서 3쪽만 읽혀도 지금은
+# 성공이고, 그 답에 우리 출처가 붙는다. 사람은 전부 본 줄 안다.
+#
+# 모르는 개수는 `None` 이다. **0 이나 100% 로 만들지 않는다** — 모르는 것을 안다고
+# 적으면 그 숫자는 더 이상 근거가 아니다. 외부 변환기가 상세를 안 주면 `None` 이고,
+# 그때는 `partial` 도 `succeeded` 도 단정하지 않는다.
+_coverage: contextvars.ContextVar[Coverage | None] = contextvars.ContextVar(
+    "tybot_convert_coverage", default=None
+)
+
+SUCCEEDED = "succeeded"
+PARTIAL = "partial"
+UNKNOWN = "unknown"
+
+# 품질 플래그. 숫자로 표현 못 하는 손실을 이름으로 남긴다.
+ROW_LIMIT_REACHED = "row_limit_reached"
+LINE_LIMIT_REACHED = "line_limit_reached"
+OCR_UNAVAILABLE = "ocr_unavailable"
+TITLE_ONLY = "title_only"
+
+
+@dataclass
+class Coverage:
+    """이번 변환이 원본의 얼마를 읽었나.
+
+    `unit` 은 세는 단위다(`page`·`sheet`). 셀 수 없는 형식에서는 빈 문자열이고
+    개수도 `None` 이다 — HWP 처럼 외부 도구가 상세를 안 주는 경우다.
+    """
+
+    unit: str = ""
+    total: int | None = None
+    converted: int | None = None
+    # 못 읽은 단위 번호. **본문은 넣지 않는다** — 좌표만이다.
+    missing: tuple[int, ...] = ()
+    flags: tuple[str, ...] = ()
+
+    def note(self, flag: str) -> None:
+        if flag not in self.flags:
+            self.flags = (*self.flags, flag)
+
+    @property
+    def state(self) -> str:
+        """`succeeded` · `partial` · `unknown`.
+
+        플래그만 있어도 `partial` 이다 — 행 상한에 걸린 시트는 숫자로는 전부
+        읽은 것처럼 보이지만 실제로는 잘렸다.
+        """
+        if self.missing or self.flags:
+            return PARTIAL
+        if self.total is None or self.converted is None:
+            return UNKNOWN
+        return SUCCEEDED if self.converted >= self.total else PARTIAL
+
+    def summary(self) -> str:
+        """사람에게 보일 한 줄. 모르면 모른다고 쓴다."""
+        if self.total is None or self.converted is None:
+            return "확인 범위 미상" if self.flags else ""
+        unit = {"page": "쪽", "sheet": "시트"}.get(self.unit, "개")
+        line = f"확인 {self.converted}/{self.total}{unit}"
+        if self.missing:
+            shown = ", ".join(str(n) for n in self.missing[:8])
+            more = f" 외 {len(self.missing) - 8}" if len(self.missing) > 8 else ""
+            line += f" · 미확인 {shown}{more}{unit}"
+        return line
+
+    def to_json(self) -> dict:
+        """metadata 에 실을 모양. 모르는 값은 `null` 로 남는다."""
+        return {
+            "coverage_unit": self.unit or None,
+            "coverage_total": self.total,
+            "coverage_converted": self.converted,
+            "missing_units": list(self.missing[:50]),
+            "quality_flags": list(self.flags),
+            "coverage_state": self.state,
+        }
+
+
+def current_coverage() -> Coverage | None:
+    """지금 변환의 coverage. 변환 밖에서는 `None`."""
+    return _coverage.get()
+
+
+def _record(unit: str, *, total: int | None = None, converted: int | None = None,
+            missing=(), flag: str = "") -> None:
+    """변환 함수들이 부르는 기록 자리. 수집 중이 아니면 아무 일도 안 한다."""
+    cov = _coverage.get()
+    if cov is None:
+        return
+    if unit:
+        cov.unit = unit
+    if total is not None:
+        cov.total = total
+    if converted is not None:
+        cov.converted = converted
+    if missing:
+        cov.missing = tuple(dict.fromkeys((*cov.missing, *missing)))
+    if flag:
+        cov.note(flag)
+
+
+@contextlib.contextmanager
+def collect_coverage():
+    """이 블록 안의 변환이 얼마나 읽었는지 모은다.
+
+    **호출부가 `convert()` 를 그대로 부를 수 있게** 하는 이음매다. 호출부를
+    `convert_with_coverage()` 로 바꾸면 그 함수를 갈아 끼우던 테스트가 조용히
+    무력해진다 — 실제로 그랬다(`test_image_is_ocr_converted_...`).
+    """
+    cov = Coverage()
+    token = _coverage.set(cov)
+    try:
+        yield cov
+    finally:
+        _coverage.reset(token)
+
+
+def convert_with_coverage(filetype: str, data: bytes) -> tuple[list[str], Coverage]:
+    """변환 + **얼마나 읽었는지**.
+
+    `convert()` 의 반환형(`list[str]`)을 바꾸지 않는 이유는 호출부가 여럿이고,
+    그중 하나라도 놓치면 조용히 깨지기 때문이다. 필요한 쪽만 이 함수를 쓴다.
+    """
+    with collect_coverage() as cov:
+        lines = convert(filetype, data)
+    if lines and not _has_body(lines):
+        # 제목만 있고 본문이 없다. **성공이 아니다**(설계 §5).
+        cov.note(TITLE_ONLY)
+    return lines, cov
+
+
+# 구조 표시 줄. 이것만 있으면 본문을 읽은 것이 아니다.
+_MARKER_PREFIXES = ("[", "#")
+
+
+def _has_body(lines: list[str]) -> bool:
+    return any(
+        line.strip() and not line.strip().startswith(_MARKER_PREFIXES)
+        for line in lines
+    )
 
 
 def can_convert(filetype: str) -> bool:

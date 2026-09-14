@@ -66,6 +66,25 @@ class Attachment:
     # 다시 올라오면 그것은 다른 작업이고, 없으면 새 파일의 실패가 옛 파일의
     # 성공에 가려진다. 구형 metadata 에는 없어서 빈 문자열이 될 수 있다.
     sha256: str = ""
+    # 얼마나 읽었나. **모르면 `None`** 이다 — 구형 metadata 에는 아예 없다.
+    coverage_unit: str = ""
+    coverage_total: int | None = None
+    coverage_converted: int | None = None
+    missing_units: tuple[int, ...] = ()
+    quality_flags: tuple[str, ...] = ()
+
+    @property
+    def coverage_note(self) -> str:
+        """사람에게 보일 한 줄. 모르면 빈 문자열이다."""
+        if self.coverage_total is None or self.coverage_converted is None:
+            return ""
+        unit = {"page": "쪽", "sheet": "시트"}.get(self.coverage_unit, "개")
+        note = f"확인 {self.coverage_converted}/{self.coverage_total}{unit}"
+        if self.missing_units:
+            shown = ", ".join(str(n) for n in self.missing_units[:8])
+            more = f" 외 {len(self.missing_units) - 8}" if len(self.missing_units) > 8 else ""
+            note += f" · 미확인 {shown}{more}{unit}"
+        return note
 
     @property
     def is_approved(self) -> bool:
@@ -114,7 +133,24 @@ def _from_meta(meta: dict, meta_path: Path, workspace: str, channel_id: str) -> 
         error_code=str(meta.get("error_code") or ""),
         retryable=meta.get("retryable") is True and meta.get("status") != PII_REFUSED,
         sha256=str(meta.get("sha256") or ""),
+        coverage_unit=str(meta.get("coverage_unit") or ""),
+        coverage_total=_as_count(meta.get("coverage_total")),
+        coverage_converted=_as_count(meta.get("coverage_converted")),
+        missing_units=tuple(
+            int(n) for n in (meta.get("missing_units") or []) if str(n).isdigit()
+        ),
+        quality_flags=tuple(str(f) for f in (meta.get("quality_flags") or []) if str(f)),
     )
+
+
+def _as_count(value) -> int | None:
+    """개수. **모르는 것을 0 으로 만들지 않는다.**"""
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def scan(archive_dir: Path | str, *, status: str | None = None) -> list[Attachment]:
@@ -209,6 +245,8 @@ def public_failure_reason(item: Attachment) -> str:
 
 # 사람에게 보일 상태 이름. **현재 메타데이터가 유일한 기준이다**(설계 §11) —
 # 과거 대화나 아카이브에 「처리실패」라고 적혀 있어도 지금 변환됐으면 변환된 것이다.
+PARTIAL = "partial"
+
 STATUS_LABELS = {
     CONVERTED: "변환 완료",
     APPROVED: "변환 완료",
@@ -226,6 +264,9 @@ def status_label(item: Attachment) -> str:
     """이 첨부의 **지금** 상태 한 낱말."""
     if item.status in FAILURE_STATES or item.status == PII_REFUSED:
         return STATUS_LABELS.get(item.status, "변환 실패")
+    if item.conversion_state == PARTIAL:
+        # **「변환 완료」 라고 하면 안 된다.** 본문이 나왔다고 다 읽은 것이 아니다.
+        return "부분 변환"
     if item.extracted:
         # 추출 텍스트가 아카이브에 들어갔다는 것이 곧 변환에 성공했다는 뜻이다.
         return STATUS_LABELS[CONVERTED]
@@ -240,7 +281,8 @@ def status_line(item: Attachment) -> str:
     name = item.name or item.file_id
     if item.status in FAILURE_STATES or item.status == PII_REFUSED:
         return f"{name} — {label}: {public_failure_reason(item)}"
-    return f"{name} — {label}"
+    note = item.coverage_note
+    return f"{name} — {label} ({note})" if note else f"{name} — {label}"
 
 
 def _write_status(item: Attachment, status: str, *, actor: str, note: str) -> Attachment:

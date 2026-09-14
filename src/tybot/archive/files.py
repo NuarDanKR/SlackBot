@@ -148,6 +148,19 @@ class AttachmentStorage:
     channel_id: str = ""
 
 
+def _converted_state(coverage) -> str:
+    """변환은 됐는데 **다 읽었는가**.
+
+    `coverage` 가 없거나(구형 경로) 개수를 모르면 예전처럼 `succeeded` 다 —
+    모르는 것을 `partial` 로 단정하면 멀쩡한 문서가 전부 미확인으로 보인다.
+    """
+    if coverage is None:
+        return "succeeded"
+    from .convert import PARTIAL
+
+    return "partial" if coverage.state == PARTIAL else "succeeded"
+
+
 def queue_retry(
     storage: AttachmentStorage,
     *,
@@ -307,6 +320,7 @@ def stage_attachments(
         original_retained = False
         error_code = ""
         retryable = False
+        coverage = None
 
         try:
             if not bot_token:
@@ -322,7 +336,13 @@ def stage_attachments(
             if f.is_text:
                 extracted = _decode_text(raw, f.size)
             elif f.is_convertible:
-                extracted = "\n".join(convert(f.filetype, raw))
+                # `convert` 를 **모듈 수준 이름 그대로** 부른다. 다른 함수로
+                # 바꾸면 이 이름을 갈아 끼우던 테스트가 조용히 무력해진다 —
+                # 실제로 그랬다(`test_image_is_ocr_converted_...`).
+                from .convert import collect_coverage
+
+                with collect_coverage() as coverage:
+                    extracted = "\n".join(convert(f.filetype, raw))
             if extracted is not None:
                 state = "converted"
         except (DownloadError, ConvertError, OSError) as exc:
@@ -361,9 +381,11 @@ def stage_attachments(
                 "schema_version": 1,
                 "status": state,
                 "original_state": "retained" if original_retained else "missing",
+                # **「본문이 나왔다」 와 「다 읽었다」 는 다르다.** 10쪽 중 3쪽만
+                # 읽혀도 예전에는 `succeeded` 였고, 그 답에 우리 출처가 붙었다.
                 "conversion_state": (
                     "blocked" if state == "pii_refused" else
-                    "succeeded" if state == "converted" else
+                    _converted_state(coverage) if state == "converted" else
                     "failed" if original_retained and error else
                     "unsupported" if state == "unsupported" else "pending"
                 ),
@@ -380,6 +402,9 @@ def stage_attachments(
                 "error_code": "pii_refused" if state == "pii_refused" else error_code,
                 "retryable": retryable if state != "pii_refused" else False,
                 "staged_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                # 얼마나 읽었나. **모르는 값은 `null`** 이다 — 0 이나 100% 로
+                # 만들면 모르는 것을 안다고 적는 셈이다.
+                **(coverage.to_json() if coverage is not None else {}),
                 # --- 추적 좌표(§5). 없는 값은 넣지 않는다 — 구형 metadata 와
                 # 구별되어야 하고, 빈 문자열은 「모른다」 를 「없다」 로 바꾼다.
                 **({"origin_message_ts": origin.message_ts}

@@ -78,7 +78,7 @@ def reconvert(meta_path: pathlib.Path, *, expected_sha256: str = "") -> tuple[bo
     산출물은 **검증을 통과한 뒤에** 바꾼다. 먼저 지우면 실패했을 때 있던 것까지
     사라지고, 그건 재처리가 자료를 늘리는 게 아니라 줄이는 일이 된다.
     """
-    from tybot.archive.convert import ConvertError, convert
+    from tybot.archive.convert import ConvertError, convert_with_coverage
     from tybot.archive.external_convert import failure_details
     from tybot.archive.writer import screen
 
@@ -95,11 +95,12 @@ def reconvert(meta_path: pathlib.Path, *, expected_sha256: str = "") -> tuple[bo
     if not raw_path or not pathlib.Path(raw_path).is_file():
         return False, "original_missing", False
 
+    coverage = None
     try:
         raw = pathlib.Path(raw_path).read_bytes()
         if expected_sha256 and hashlib.sha256(raw).hexdigest() != expected_sha256:
             return False, "original_changed", False
-        body = convert(str(meta.get("filetype") or ""), raw)
+        body, coverage = convert_with_coverage(str(meta.get("filetype") or ""), raw)
     except (ConvertError, OSError) as exc:
         code, retryable = failure_details(exc)
         return False, code, retryable
@@ -112,16 +113,25 @@ def reconvert(meta_path: pathlib.Path, *, expected_sha256: str = "") -> tuple[bo
     if not text.strip():
         return False, "empty_output", False
 
-    _write_meta(meta_path, meta, status="converted", code="", body=body)
+    _write_meta(meta_path, meta, status="converted", code="", body=body,
+                coverage=coverage)
     return True, "", False
 
 
-def _write_meta(meta_path: pathlib.Path, meta: dict, *, status: str, code: str, body) -> None:
+def _write_meta(meta_path: pathlib.Path, meta: dict, *, status: str, code: str, body,
+                coverage=None) -> None:
     """메타데이터와 미리보기를 **원자적으로** 바꾼다."""
+    from tybot.archive.convert import PARTIAL
+
+    converted_state = "succeeded"
+    if coverage is not None and coverage.state == PARTIAL:
+        # 다 읽지 못했다. **성공으로 닫으면 그 답에 우리 출처가 붙는다.**
+        converted_state = "partial"
+    meta.update(coverage.to_json() if coverage is not None else {})
     meta.update({
         "status": status,
         "conversion_state": "blocked" if status == "pii_refused" else
-                            "succeeded" if body is not None else "failed",
+                            converted_state if body is not None else "failed",
         "error_code": code,
         "retryable": False,
         "error": None if body is not None else meta.get("error"),

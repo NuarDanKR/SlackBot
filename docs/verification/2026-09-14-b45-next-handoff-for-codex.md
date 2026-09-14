@@ -1,4 +1,4 @@
-# B-45 다음 작업 인계 (Claude → Codex, 2026-09-14)
+# B-45 다음 작업 인계 (Codex → Claude, 2026-09-14)
 
 앞 인계: [`2026-09-14-b45-implementation-handoff.md`](2026-09-14-b45-implementation-handoff.md)
 설계: [`operational-warning-recovery-and-answer-progress.md`](../design/operational-warning-recovery-and-answer-progress.md)
@@ -8,11 +8,11 @@
 
 ## 0. 지금 어디까지 와 있나
 
-### Codex 후속 작업 (2026-09-14, 작업 트리)
+### Codex 완료 작업 (2026-09-14, 커밋 반영됨)
 
 - `--backfill` 서버 오류는 기능 누락이 아니라 **서버 소스가 `9183fe4` 이전인 배포
-  불일치**다. 서버에서 `git rev-parse --short HEAD`와
-  `.venv/bin/python scripts/drain_conversion_queue.py --help`를 먼저 확인한다.
+  불일치**다. Git 체크아웃은 `/var/lib/tybot/src`, 실행 배포본은 `/opt/tybot`이다.
+  `/opt/tybot`에서 `git` 명령을 실행하지 않는다.
 - 재처리 큐는 이제 변환 미리보기만으로 성공 처리하지 않는다. 기존 첨부 원문에
   멱등 추가하고, 반영 지문을 확인하고, 해당 문서를 검색 색인에 넣은 뒤 닫는다.
 - 콘솔 첨부 진단에 관리자 전용 단건 재처리 API와 확인 버튼을 추가했다. PII 정책
@@ -29,6 +29,26 @@
   Windows Git 가드 subprocess의 기존 UTF-8 디코딩 경고와 Starlette 경고만 남았다.
 - 아직 남음: A의 페이지·시트 coverage/`partial`, D의 채널 단위 최종 실패 알림.
 
+### Claude가 이번에 맡을 범위
+
+아래 순서대로 진행한다. A가 끝나기 전에는 D를 시작하지 않는다. 알림이 참조할
+coverage가 부정확하면 사람에게 잘못된 실패 범위를 통지하게 된다.
+
+1. **A: 부분 변환 coverage와 `partial` 상태**
+2. **D: 채널 단위 최종 실패/부분 누락 알림과 Hermes 검토 DM coverage**
+3. **잔여 안정화: progress 고아 메시지, Node/V8 변환 장애, v1 아카이브 5건 이전**
+
+이번 인계에서 다시 구현하지 않을 것:
+
+- Canvas 실시간 읽기·공개 범위·표 분할
+- DM 후속 문맥
+- 콘솔 단건 재처리 버튼/API
+- 큐 SHA 검증, 원문 반영, 반영 확인, 검색 재색인
+
+병행 작업자가 수정할 수 있는 `specialist_store.py`, `deploy_approval_store.py`와 관련
+테스트는 이 작업 때문에 정리하거나 되돌리지 않는다. 미추적
+`.claude/settings.local.json`도 수정·커밋하지 않는다.
+
 | 커밋 | 내용 |
 |---|---|
 | `4dbe625` | Codex 의 B-45 부분 구현 + 재처리 큐(스키마·정책·러너·타이머) |
@@ -43,14 +63,19 @@
 - `tybot-convert-retry.timer` enable 됨
 - `drain_conversion_queue.py --status` → `임대 회수 0건 / 큐가 비어 있습니다`
 
-**아직 서버에서 안 한 것**: `--backfill --apply`. 그래서 **큐는 여전히 비어 있고
+**아직 서버에서 안 한 것**: 최신 커밋 배포 후 `--backfill --apply`. 그래서 **큐는 여전히 비어 있고
 재처리가 실제로 돈 적은 없다.** 첫 실행 결과를 보고 이 문서의 3-A 를 정해야 한다.
 
 ```bash
-cd /opt/tybot
-sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --backfill          # 판정만
-sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --backfill --apply   # 넣기
-sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --apply              # 한 번 돌리기
+# Git 소스와 실제 배포 커밋을 따로 확인한다.
+git -C /var/lib/tybot/src rev-parse --short HEAD
+cat /opt/tybot/.deployed-commit
+grep -n -- '--backfill' /opt/tybot/scripts/drain_conversion_queue.py
+
+# 최신 배포본에 --backfill이 보인 뒤 실행한다.
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/drain_conversion_queue.py --backfill
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/drain_conversion_queue.py --backfill --apply
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/drain_conversion_queue.py --apply
 ```
 
 ## 1. 이 저장소에서 지켜야 할 것 (사람이 아니라 코드가 강제한다)
@@ -76,7 +101,7 @@ sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --apply        
 
 ## 2. 우선순위 — 왜 이 순서인가
 
-1. **partial 상태·coverage** — 지금 "성공" 이 거짓일 수 있다. 가장 값이 크다.
+1. ~~**partial 상태·coverage**~~ **완료(Claude/2026-09-14)**
 2. ~~**색인 연계** — 변환은 됐는데 검색에서 못 찾는 상태가 완료로 집계된다.~~
 3. ~~**콘솔 재처리 버튼** — 백엔드는 있고 사람이 쓸 자리만 없다.~~
 4. **알림** — 위 셋이 정확해진 뒤라야 알릴 내용이 맞다.
@@ -85,6 +110,10 @@ sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --apply        
 ## 3. 다음 작업
 
 ### A. partial 상태와 페이지·시트 coverage (설계 §5·§6)
+
+**구현 완료 (Claude / 2026-09-14).** `convert.Coverage` + `collect_coverage()`
+컨텍스트로 모은다. `convert()` 의 반환형은 **그대로 뒀다** — 호출부가 여럿이라
+바꾸면 하나만 놓쳐도 조용히 깨진다. 아래 남은 것은 §A-잔여 참조.
 
 **문제.** 지금 `conversion_state` 는 `succeeded | failed | blocked | unsupported |
 pending` 뿐이다. 10페이지 PDF 에서 3페이지만 읽혀도 `succeeded` 다. 그 답변에
@@ -123,6 +152,39 @@ conversion: pending | running | succeeded | partial | failed | unsupported | blo
 
 완료 판정: 3페이지만 읽힌 PDF 가 `partial` 로 남고, 콘솔과 답변의 「근거」 줄에
 확인 못 한 범위가 보인다. 표·그림만 있는 슬라이드가 성공으로 집계되지 않는다.
+
+#### A 구현 체크리스트
+
+1. `convert()`의 기존 `list[str]` 계약은 유지한다. 새 `ConversionResult` 또는
+   선택적 `convert_with_coverage()`를 추가하고 기존 호출은 얇은 호환 래퍼로 둔다.
+2. coverage 필드는 숫자를 아는 형식에서만 채운다. 추출기가 전체 개수를 제공하지
+   않으면 `null`로 둔다. `missing_units`에는 페이지/시트 번호 같은 비민감 좌표만
+   넣고 본문·파일 내용은 넣지 않는다.
+3. PDF는 전체 페이지 수, 텍스트/OCR에 성공한 페이지 수, 실패 페이지를 기록한다.
+   한 페이지라도 실패하면 본문이 있어도 `partial`이다.
+4. XLSX는 전체 시트 수와 처리한 시트 수를 기록한다. 외부 변환기의 1000행 제한에
+   걸린 시트는 `quality_flags`에 `row_limit_reached`를 남기고 `partial`로 판정한다.
+5. PPT/PPTX는 전체 슬라이드 수를 알 수 있을 때만 기록한다. 제목만 추출되고 본문,
+   표, 그림 설명이 하나도 없는 슬라이드는 성공으로 세지 않는다.
+6. HWP/HWPX·OCR처럼 외부 도구가 상세 coverage를 주지 않으면 숫자는 `null`이고,
+   도구가 부분 실패를 명시한 경우에만 `partial`로 둔다.
+7. `archive/files.py`, `convert_staged_attachments.py`,
+   `drain_conversion_queue.py`가 같은 결과 판정 함수를 사용하게 한다. 실시간 수집과
+   재처리의 상태가 달라지면 안 된다.
+8. `attachment_review.py`, `attachment_trace.py`, 콘솔 진단 API/UI에 coverage를
+   전달한다. 답변 근거 안내에는 `확인 3/10페이지 · 미확인 4~10페이지`처럼 범위만
+   표시하고 원문을 복제하지 않는다.
+9. 기존 metadata에는 필드가 없으므로 `unknown`/`null`로 읽는다. 마이그레이션을
+   이유로 기존 파일을 다시 쓰지 않는다.
+
+필수 합성 테스트:
+
+- PDF 10페이지 중 3페이지 성공 → `partial`, `3/10`, 누락 7개
+- XLSX 다중 시트 중 한 시트 실패 → `partial`
+- XLSX 1000행 절단 → `row_limit_reached`, 성공 금지
+- 빈 결과·제목만 결과 → `failed` 또는 `partial`, `succeeded` 금지
+- 전체 개수 미상 → `null`; 0/0이나 100% 표시 금지
+- 구형 metadata를 읽어도 콘솔과 답변이 깨지지 않음
 
 ### B. 색인 연계 (설계 §5 마지막 줄)
 
@@ -178,6 +240,32 @@ conversion: pending | running | succeeded | partial | failed | unsupported | blo
 `review_digest_schema.sql`). 착수 전에 `git log -- src/tybot/daily_review.py` 로
 최근 변경을 확인한다.
 
+#### D 구현 체크리스트
+
+1. 알림 이벤트에는 `workspace/channel_id/file_id/error_code/coverage/permalink`만
+   저장한다. 파일 본문, 질문, 요약, 토큰은 저장하지 않는다.
+2. `queued`와 첫 일시 실패는 알리지 않는다. `failed`, `held`, 검토를 막는
+   `partial`만 대상으로 한다.
+3. 같은 채널의 대상 파일을 한 건의 DM으로 묶고, 동일 상태·동일 pipeline version은
+   다시 보내지 않는 멱등 키를 둔다.
+4. 수신자는 DB의 채널 관리자와 검토자다. Slack 표시명으로 추측하지 말고 저장된
+   사용자 ID를 사용하며, 발송 직전에 채널 접근 권한을 다시 확인한다.
+5. 메시지는 파일명, 원본 Slack 링크, 비민감 오류 분류, 다음 조치, coverage만 담는다.
+   원본 링크가 없으면 링크를 만들어 내지 않는다.
+6. Hermes 검토 DM은 요약에 사용한 첨부의 coverage를 붙인다. 누락이 검토 판단을
+   방해하면 승인 버튼보다 경고를 먼저 보이고, 읽지 못한 범위를 명시한다.
+7. 알림 실패가 변환 큐 상태를 되돌리면 안 된다. 별도 전달 상태로 재시도한다.
+
+필수 합성 테스트:
+
+- 같은 채널의 최종 실패 3건 → DM 1건
+- 두 채널 실패 → 권한 있는 담당자에게 채널별 1건
+- 첫 retryable 실패 → DM 0건
+- 동일 이벤트 재실행 → 중복 DM 0건
+- 채널 접근 권한이 사라진 사용자 → DM 0건
+- 감사/DB/로그에 파일 본문·질문·시크릿 없음
+- Hermes 검토 DM에 `partial` 범위가 표시되고 완전 변환으로 오인시키지 않음
+
 ## 4. 알고 있는 위험
 
 | 위험 | 설명 |
@@ -214,3 +302,49 @@ journalctl -u tybot-convert-retry --since -1h
   시도했는지가 다음 사람에게 가장 필요한 정보다.
 - 서버에서만 확인할 수 있는 것은 **미검증으로 명시**한다. 통과로 간주하지 않는다.
 - 업무 원문·질문 본문은 저장소에 커밋하지 않는다. 합성 fixture 와 비민감 집계만.
+
+
+## 부록. A 구현 결과 (Claude / 2026-09-14)
+
+```
+src/tybot/archive/convert.py      Coverage · collect_coverage() · convert_with_coverage()
+                                  PDF 쪽 단위, XLSX 시트·행 상한, 줄 접기 플래그
+src/tybot/archive/files.py        수집 시 metadata 에 coverage 기록, partial 판정
+scripts/drain_conversion_queue.py 재변환도 같은 판정
+src/tybot/attachment_review.py    `부분 변환` 이름표 + `확인 3/10쪽` 한 줄
+tests/test_conversion_coverage.py 16건
+```
+
+### 지킨 것
+
+- **모르는 개수는 `null`.** 0 이나 100% 로 만들지 않는다. 외부 도구가 상세를 안
+  주면 `unknown` 이고, `partial` 도 `succeeded` 도 단정하지 않는다.
+- **플래그만으로도 `partial`** — 행 상한에 걸린 시트는 숫자로는 전부 읽은 것처럼
+  보인다(`row_limit_reached`·`line_limit_reached`·`ocr_unavailable`·`title_only`).
+- **글자 없는 쪽을 읽은 것으로 세지 않는다.** 그림만 있는 쪽인지 추출 실패인지
+  모르기 때문이다.
+- `convert()` 반환형 불변. 호출부는 `collect_coverage()` 로 감싸기만 한다 —
+  `convert_with_coverage()` 로 바꿨더니 그 이름을 갈아 끼우던 테스트가 조용히
+  무력해졌다(`test_image_is_ocr_converted_...`). 이음매를 지키는 쪽으로 되돌렸다.
+
+### 되돌림 실험 8건 — 전부 잡힌다
+
+**처음엔 4건이 안 잡혔다.** 전부 「그 경로를 테스트가 안 지난다」 였다.
+
+- PDF 예외 분기(손상된 쪽)를 빈 쪽 검사가 대신하고 있었다 → `pypdf.PdfReader` 를
+  갈아 끼워 실제로 터지는 쪽을 만들었다
+- `title_only` 는 `_has_body()` 를 직접 부르는 검사뿐이라 **배선을 증명하지 못했다**
+- 구형 metadata 검사가 `Attachment` 를 손으로 만들어 `_as_count()` 를 안 지났다
+- 수집 경로가 coverage 를 쓴다는 것을 아무도 확인하지 않았다
+
+### A-잔여 (아직 안 한 것)
+
+- **PPT/PPTX 슬라이드 수** — 외부 변환(LibreOffice→PDF) 경로라 슬라이드 단위를
+  못 센다. 지금은 PDF 쪽 수로 잡힌다. 그림만 있는 슬라이드는 「글자 없는 쪽」 으로
+  미확인에 들어가지만, **슬라이드 번호와 쪽 번호가 같다고 보장할 수 없다.**
+- **HWP/HWPX** — kordoc 이 상세를 안 주므로 `unknown` 이다. 부분 실패를 명시할
+  방법이 없다.
+- **외부 XLSX 변환기(`--max-rows 1000`)** — 내부 openpyxl 경로만 행 상한을
+  기록한다. 외부 경로는 잘린 사실을 아직 못 받는다(`external_convert.py:166`).
+- **답변 「근거」 줄에 coverage 표시** — `attachment_review.status_line()` 까지는
+  갔지만 `Answer.evidence_note()` 에는 아직 안 붙였다.
