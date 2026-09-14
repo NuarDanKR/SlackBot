@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
+from tybot.answer import AnswerEngine
 from tybot.compose import join_sections, truncated_notice, write_from_facts
 from tybot.intent import ARCHIVE_KINDS, KINDS, MAX_TASKS, SELF_KINDS, WRITE_KINDS, plan
 
@@ -129,6 +131,30 @@ def test_planner_prompt_asks_for_task_list():
     system = router.calls[0][0].content
     assert '"tasks"' in system
     assert "하위질문" in system
+
+
+def test_answer_engine_plan_accepts_and_forwards_specialist_roster():
+    router = FakeRouter([_tasks({
+        "kind": "summary",
+        "question": "주간 보고 요약",
+        "capability": "internal_document_summary",
+        "specialist": "hermes",
+        "confidence": 0.9,
+    })])
+    engine = AnswerEngine(store=None, router=router)
+    roster = [SimpleNamespace(
+        key="hermes",
+        name="Hermes",
+        domain="내부 문서",
+        routing_hint="보고서 요약",
+    )]
+
+    (task,) = engine.plan("주간 보고를 요약해줘", specialists=roster)
+
+    assert task.suggested_specialist == "hermes"
+    user = router.calls[0][1].content
+    assert "<전문봇>" in user
+    assert "hermes: Hermes / 내부 문서 — 보고서 요약" in user
 
 
 def test_thread_context_is_for_reference_resolution_not_evidence():

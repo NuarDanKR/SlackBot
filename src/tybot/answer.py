@@ -1234,6 +1234,7 @@ class AnswerEngine:
         *,
         conversation_context: str = "",
         thread_has_refs: bool = False,
+        specialists=None,
     ) -> list[Intent]:
         """복합 질문을 하위질문 목록으로 분해한다(1차 LLM, 실패 시 규칙).
 
@@ -1246,6 +1247,7 @@ class AnswerEngine:
             self._router,
             conversation_context=conversation_context,
             thread_has_refs=thread_has_refs,
+            specialists=specialists,
         )
 
     @property
