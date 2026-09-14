@@ -153,6 +153,10 @@ sudo systemctl enable --now tybot-convert-retry.timer
 cd /opt/tybot && sudo -u tybot .venv/bin/python scripts/drain_conversion_queue.py --status
 ```
 
+`console_schema.sql` 도 함께 적용해야 한다 — 오케스트레이션 추적 컬럼
+(`specialist_call.decision_id`·`required_capability`·`task_kind`·`task_index`)이
+거기 선언돼 있다. `check_schema_drift.py` 가 빠진 것을 이름으로 알려 준다.
+
 타이머를 켜지 않으면 **작업만 쌓이고 아무것도 돌지 않는다.** `install.sh` 가 꺼진
 타이머를 이름과 함께 알리므로 설치 로그에서 보인다.
 

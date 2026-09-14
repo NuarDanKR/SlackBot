@@ -163,12 +163,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--apply", action="store_true", help="실제로 다시 변환한다")
     ap.add_argument("--status", action="store_true", help="큐 상태만 보여준다")
     ap.add_argument("--limit", type=int, default=20, help="한 번에 처리할 작업 수")
-    ap.add_argument("--archive", default=os.getenv("ARCHIVE_DIR", "./archive"))
-    ap.add_argument("--env", default=os.getenv("TYBOT_ENV_FILE", ""))
+    ap.add_argument("--archive", default="")
     args = ap.parse_args(argv)
 
-    if args.env:
-        load_env_file(args.env)
+    # **설정 파일을 먼저 읽는다.** 다른 운영 스크립트와 같은 순서다
+    # (`TYBOT_ENV_FILE` → `/etc/tybot/tybot.env` → 저장소 `.env`).
+    #
+    # 안 읽으면 손으로 돌릴 때 `DATABASE_URL 이 없습니다` 가 나온다. systemd 는
+    # unit 에 경로를 박아 두니 거기서만 돌고, 사람이 같은 명령을 쳤을 때는
+    # 실패한다 — **서비스는 되는데 사람은 안 되는** 가장 헷갈리는 모양이다.
+    load_env_file()
+    # 설정을 읽은 **뒤에** 기본값을 정한다. 먼저 정하면 `.env` 의 ARCHIVE_DIR 이
+    # 무시되고 현재 디렉터리 밑을 본다.
+    archive = args.archive or os.getenv("ARCHIVE_DIR", "./archive")
 
     try:
         if args.status:
@@ -192,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = 0
     for job in jobs:
-        meta_path = staging_meta(args.archive, job)
+        meta_path = staging_meta(archive, job)
         if not meta_path.is_file():
             # 좌표는 있는데 파일이 없다. **되풀이하지 않는다** — 같은 결과가 나온다.
             queue.fail(job.id, error_code="staging_missing", retryable=False)

@@ -305,6 +305,27 @@ def test_operational_docs_call_python_through_the_venv():
     )
 
 
+def test_scripts_that_need_the_database_load_the_env_file():
+    """설정을 안 읽으면 **systemd 에서는 되고 사람 손으로는 안 된다.**
+
+    unit 은 `TYBOT_ENV_FILE` 을 박아 두니 그쪽에서만 돌고, 같은 명령을 사람이
+    치면 `DATABASE_URL 이 없습니다` 가 나온다. 가장 헷갈리는 모양이다 —
+    "서비스는 멀쩡한데 왜 나만 안 되지" 로 시간을 버린다(2026-09-14 실제로 그랬다).
+    """
+    offenders: list[str] = []
+    for path in sorted((ROOT / "scripts").glob("*.py")):
+        code = path.read_text(encoding="utf-8")
+        needs_db = "DATABASE_URL" in code or "conversion_queue" in code
+        if not needs_db or "def main(" not in code:
+            continue
+        if "load_env_file()" not in code:
+            offenders.append(path.name)
+    assert not offenders, (
+        f"DB 를 쓰면서 설정 파일을 안 읽는 스크립트: {offenders}. "
+        "`load_env_file()` 을 main 에서 부른다."
+    )
+
+
 def test_docs_never_hand_a_locked_path_to_psql():
     """`psql -f` 는 **psql 프로세스가** 읽는다. 그 프로세스는 postgres 계정이다.
 
