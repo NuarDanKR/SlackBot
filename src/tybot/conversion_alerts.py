@@ -236,8 +236,11 @@ def recipients(workspace: str, channel_id: str, *, owner_of=None) -> list[str]:
         except Exception as exc:  # noqa: BLE001
             log.warning("채널 관리자를 읽지 못했습니다: %s", exc)
             owner = ""
-        if owner:
-            out.append(owner)
+        if isinstance(owner, str):
+            if owner:
+                out.append(owner)
+        else:
+            out.extend(str(user) for user in (owner or []) if str(user))
     return list(dict.fromkeys(user for user in out if user))
 
 

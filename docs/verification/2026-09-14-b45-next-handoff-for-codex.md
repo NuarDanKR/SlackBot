@@ -423,8 +423,21 @@ sudo systemctl enable --now tybot-convert-alert.timer
 ### 남은 것
 
 - **B-46(긴급)**: 채널 파일 목록·Canvas 첨부·링크 수집
-- **B-47(신규)**: 의도 분류를 LLM 으로 —
-  [설계](../design/intent-classification-by-llm.md)
+- ~~**B-47(신규)**: 의도 분류를 LLM 으로~~ **구현 완료(Codex/2026-09-15)** —
+  기존 planner 호출에 `reference_mode`·`asks_about_our_sources`를 추가하고, 정상 LLM
+  경로의 정규식 가로채기·후속 질문 덮어쓰기를 제거했다. 기간·권한·capability 검증은
+  코드에 남겼고 LLM 장애 때 후속 범위를 규칙으로 추측하지 않는다.
+- **B-45 알림 보완(Codex/2026-09-15)**: 알림 실행기가 `channel-owners.json`의
+  전체 TYBot 담당자를 수신자 계산에 전달한다. 기존 구현은 검토자만 전달해 채널
+  관리자 알림이 누락될 수 있었다.
 - kordoc 성공 시 상세 개수(외부 도구가 안 준다)
 - **상한을 없앴으므로 아카이브·색인이 커진다 — 성능 실측 필요**
 - 서버에서 `--backfill --apply` 미실행. **큐는 여전히 비어 있다**
+
+### Codex 검증 (2026-09-15)
+
+- 전체 Python 테스트(Linux 전용 전문 봇 셸 테스트 제외): **1997 passed**
+- `ruff check src tests scripts`: 통과
+- 콘솔 프로덕션 빌드: 통과
+- 서버 운영 검증은 수행하지 않았다. 최신 배포 뒤 §0의 `/opt/tybot/... --backfill
+  --apply`와 알림 타이머 실제 전송을 별도로 확인해야 한다.

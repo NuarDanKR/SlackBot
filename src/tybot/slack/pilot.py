@@ -2445,7 +2445,13 @@ class WorkspaceBot:
             task = master_task.intent
             q = master_task.question or task.question or text
             if task.kind in SELF_KINDS:
-                sections.append(self._self_reply(task.kind, q, client=client, user_id=user_id))
+                sections.append(self._self_reply(
+                    task.kind,
+                    q,
+                    client=client,
+                    user_id=user_id,
+                    asks_about_our_sources=task.asks_about_our_sources,
+                ))
                 continue
             # 아카이브 근거 답변은 엔진 출력을 **그대로** 쓴다 - 출처가 붙어 있으므로
             # 문장을 다시 만들면 본문과 출처가 어긋날 수 있다(원칙 2).
@@ -2797,7 +2803,15 @@ class WorkspaceBot:
             "쓰기_불가_경로": self.path_problems or "없음",
         }
 
-    def _self_reply(self, kind: str, question: str, *, client, user_id: str) -> str:
+    def _self_reply(
+        self,
+        kind: str,
+        question: str,
+        *,
+        client,
+        user_id: str,
+        asks_about_our_sources: bool = False,
+    ) -> str:
         """봇 자신에 대한 답변. 사실은 코드가, 문장은 LLM 이 만든다.
 
         데이터가 촘촘한 답변(status/help)은 결정적 블록을 유지한다 - 모델이 다시 쓰면
@@ -2823,9 +2837,7 @@ class WorkspaceBot:
             )
             return lead + BLANK + block if lead else block
         if kind == "help":
-            from ..intent import is_source_capability
-
-            if is_source_capability(question):
+            if asks_about_our_sources:
                 return SOURCE_SCOPE_ANSWER
             return self._help()
         if kind == "smalltalk":

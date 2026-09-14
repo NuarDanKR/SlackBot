@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -288,7 +289,9 @@ def test_a_source_scope_question_is_answered_not_given_the_full_help(question):
     캔버스만 적어 두었더니 "그럼 채널에 있는 폴더는?" 이 전체 사용법으로
     빠졌다(2026-09-14 실제 발생).
     """
-    bot = _bot([Intent("help", question=question)], [])
+    bot = _bot([Intent(
+        "help", question=question, asks_about_our_sources=True
+    )], [])
     (reply,) = _handle(bot, question)
 
     assert "Canvas" in reply
@@ -297,14 +300,20 @@ def test_a_source_scope_question_is_answered_not_given_the_full_help(question):
     assert "/피드백" not in reply, "전체 사용법이 나갔다"
 
 
-def test_canvas_capability_question_bypasses_the_llm_planner():
+def test_canvas_capability_question_uses_the_llm_planner_decision():
     from tybot.intent import plan
 
-    router = Mock()
+    router = SimpleNamespace(complete=Mock(return_value=SimpleNamespace(
+        text='{"tasks":[{"kind":"help","question":"캔버스를 읽나요?",'
+             '"asks_about_our_sources":true,"reference_mode":"none"}]}',
+        model="planner",
+        cost_usd=0.0,
+    )))
     got = plan("혹시 너 캔버스의 내용을 읽고 답해줘?", router)
 
     assert [task.kind for task in got] == ["help"]
-    router.complete.assert_not_called()
+    assert got[0].asks_about_our_sources
+    router.complete.assert_called_once()
 
 
 def test_explicit_dm_followup_uses_recent_own_dm_context():

@@ -74,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n실제로 보내려면 `--apply` 를 붙이세요.")
         return EXIT_OK
 
+    from tybot import heartbeat
+    from tybot.channel_management import ChannelOwnerStore
     from tybot.slack.pilot import build_bots
 
     bots = build_bots()
@@ -83,8 +85,17 @@ def main(argv: list[str] | None = None) -> int:
         for bot in bots
         for cid, name in getattr(bot, "_chan_cache", {}).items()
     }
+    responsible = ChannelOwnerStore(
+        heartbeat.state_dir() / "channel-owners.json"
+    ).responsibles()
     result = alerts.run(
-        clients, archive_dir=archive, channel_names=names, queue_state=queue_state
+        clients,
+        archive_dir=archive,
+        channel_names=names,
+        owner_of=lambda workspace, channel_id: responsible.get(
+            (workspace, channel_id), ()
+        ),
+        queue_state=queue_state,
     )
     print(
         f"발송 {result.sent}건 · 건너뜀 {result.skipped}건 · "

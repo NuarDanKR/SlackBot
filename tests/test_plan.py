@@ -128,16 +128,66 @@ def test_same_kind_is_merged_with_union_of_terms():
     assert set(task.terms) == {"김해외동", "기성금"}
 
 
-def test_days_is_clamped():
+def test_llm_days_are_ignored_and_period_comes_from_the_question():
     router = FakeRouter([_tasks({"kind": "summary", "question": "요약", "days": 99999})])
-    (task,) = plan("요약", router)
-    assert task.days == 365
+    (task,) = plan("최근 3일 요약", router)
+    assert task.days == 3
 
 
 def test_bad_days_uses_default():
     router = FakeRouter([_tasks({"kind": "summary", "question": "요약", "days": "이번주"})])
     (task,) = plan("요약", router)
     assert task.days == 7
+
+
+def test_llm_reference_mode_is_accepted_only_with_prior_context():
+    payload = _tasks({
+        "kind": "search",
+        "question": "그 금액은?",
+        "reference_mode": "prior_turn",
+        "terms": ["금액"],
+    })
+    with_context = plan("그 금액은?", FakeRouter([payload]), conversation_context="이전 질문")
+    without_context = plan("그 금액은?", FakeRouter([payload]))
+
+    assert with_context[0].reference_mode == "prior_turn"
+    assert without_context[0].reference_mode == "none"
+
+
+def test_llm_reference_mode_populates_only_execution_metadata():
+    router = FakeRouter([_tasks({
+        "kind": "search",
+        "question": "그 미수금 문서는?",
+        "reference_mode": "prior_topic",
+        "terms": ["미수금"],
+    })])
+
+    (task,) = plan("그 미수금 문서는?", router, conversation_context="이전 질문")
+
+    assert task.reference_mode == "prior_topic"
+    assert task.topic_terms == ["미수금"]
+    assert not task.include_attachment_status
+
+
+def test_llm_source_scope_decision_is_not_overridden_by_regex():
+    router = FakeRouter([_tasks({
+        "kind": "search",
+        "question": "그럼 채널에 있는 폴더는?",
+        "asks_about_our_sources": True,
+    })])
+
+    (task,) = plan("그럼 채널에 있는 폴더는?", router)
+
+    assert task.kind == "help"
+    assert task.asks_about_our_sources
+
+
+def test_llm_failure_does_not_guess_a_followup_scope():
+    router = FakeRouter([RuntimeError("down"), RuntimeError("down")])
+
+    (task,) = plan("그 문서 다시 확인해줘", router, conversation_context="이전 질문")
+
+    assert task.reference_mode == "none"
 
 
 def test_planner_prompt_asks_for_task_list():
@@ -194,7 +244,13 @@ def test_thread_context_is_for_reference_resolution_not_evidence():
 
 
 def test_a_singular_failed_attachment_follow_up_cannot_expand_to_channel_summary():
-    router = FakeRouter([_tasks({"kind": "summary", "question": "처리 실패 문서 정리"})])
+    router = FakeRouter([_tasks({
+        "kind": "search",
+        "question": "처리 실패 문서 정리",
+        "standalone_question": "202512 미수금관리보고.pdf 내용을 확인해줘",
+        "reference_mode": "prior_attachments",
+        "terms": ["202512 미수금관리보고.pdf"],
+    })])
     context = (
         "이전 봇 답변: _근거: 문서 4건 · 자동 변환 실패로 내용을 읽지 못한 첨부: "
         "202512 미수금관리보고.pdf_"
@@ -205,7 +261,8 @@ def test_a_singular_failed_attachment_follow_up_cannot_expand_to_channel_summary
 
     assert task.kind == "search"
     assert task.terms == ["202512 미수금관리보고.pdf"]
-    assert task.source == "context"
+    assert task.source == "llm"
+    assert task.reference_mode == "prior_attachments"
 
 
 def test_singular_failed_attachment_context_also_works_when_planner_is_down():
@@ -215,7 +272,8 @@ def test_singular_failed_attachment_context_also_works_when_planner_is_down():
                    conversation_context=context)
 
     assert task.kind == "search"
-    assert task.terms == ["가정산서.pdf"]
+    assert task.reference_mode == "none"
+    assert "가정산서.pdf" not in task.terms
 
 
 # --- 의도 분류 집합 ----------------------------------------------------------

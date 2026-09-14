@@ -331,3 +331,15 @@ def test_a_duplicate_recipient_is_told_once(monkeypatch):
     )
 
     assert alerts.recipients("pilot", "C1", owner_of=lambda ws, ch: "U1") == ["U1"]
+
+
+def test_all_stored_channel_responsibles_receive_the_alert(monkeypatch):
+    from tybot import reviewers as reviewers_mod
+
+    monkeypatch.setattr(reviewers_mod, "reviewers_for", lambda ws, ch: [])
+
+    got = alerts.recipients(
+        "pilot", "C1", owner_of=lambda ws, ch: ("U-OWNER", "U-MANAGER")
+    )
+
+    assert got == ["U-OWNER", "U-MANAGER"]
