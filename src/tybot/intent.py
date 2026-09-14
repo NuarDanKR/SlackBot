@@ -183,6 +183,10 @@ REFERENCE_RE = re.compile(
     r"처리\s*(가\s*)?(안\s*된|되지\s*않은|실패한|못한)\s*(문서|파일)?)"
 )
 # 무언가를 **하라는** 말. 기억 여부를 묻는 문장과 가르는 기준이다.
+FORMAT_CHANGE_RE = re.compile(
+    r"(형식|포맷|bullet\s*point|불릿|글머리|목록|표로).*(바꿔|변경|답해|정리|보여)",
+    re.IGNORECASE,
+)
 ACTION_RE = re.compile(
     r"(요약|정리|확인|알려|보여|찾아|검색|비교|뽑아|추려|말해|설명|"
     r"다시\s*(봐|보|확인|정리|요약|알려))"
@@ -234,6 +238,7 @@ class Intent:
     # 질문의 근거는 「현재 권한 ∩ 현재 채널 ∩ 이전 답변의 원문 참조 ∩ 현재 주제」
     # 의 교집합뿐이다. 복원에 실패해도 채널 전체로 되돌아가지 않는다.
     reference_mode: str = "none"  # none | prior_turn | prior_topic | prior_attachments
+    format_only: bool = False
     topic_terms: list[str] = field(default_factory=list)
     include_attachment_status: bool = False
     # 어느 QA 레코드를 이어 가는가. **LLM 이 정하지 않는다** — 같은 워크스페이스·
@@ -583,7 +588,8 @@ def apply_followup(text: str, tasks: list[Intent], *, has_prior: bool) -> list[I
     """후속 질문이면 **하나의 참조 범위를 공유하는 한 건**으로 합친다."""
     if not has_prior or not tasks:
         return tasks
-    mode, attachments = followup_hint(text)
+    formatting = bool(REFERENCE_RE.search(text) and FORMAT_CHANGE_RE.search(text))
+    mode, attachments = ("prior_turn", False) if formatting else followup_hint(text)
     if mode == "none":
         return tasks
     kind = _followup_kind(tasks)
@@ -604,7 +610,15 @@ def apply_followup(text: str, tasks: list[Intent], *, has_prior: bool) -> list[I
         reference_mode=mode,
         topic_terms=topic_terms_of(text, terms),
         include_attachment_status=attachments,
+        standalone_question=tasks[0].standalone_question,
+        required_capability=tasks[0].required_capability,
+        suggested_specialist=tasks[0].suggested_specialist,
+        routing_confidence=min(t.routing_confidence for t in tasks),
+        planner_model=tasks[0].planner_model,
     )
+    if formatting:
+        merged.topic_terms = []
+        merged.format_only = True
     if mode == "prior_topic" and not merged.topic_terms:
         # 주제를 못 뽑았으면 「직전 결과」 로 내려간다. 빈 주제로 교집합을 잡으면
         # 아무것도 안 남고, 그건 근거가 없는 게 아니라 우리가 못 고른 것이다.

@@ -72,6 +72,18 @@ class Request:
     evidence = ()
 
 
+def test_formatting_uses_one_call_without_search_tools():
+    request = Request()
+    request.editing_text = "amount 123"
+    router = FakeRouter(_answer("- amount 123"))
+    box = FakeBox()
+    assert _specialist(router, box).complete(request) == "- amount 123"
+    assert len(router.calls) == 1
+    assert not router.calls[0]["tools"]
+    assert not box.ran
+    assert "amount 123" in router.calls[0]["messages"][1].content
+
+
 def _specialist(router, box, **kw):
     return adapters.ToolSpecialist(
         "hermes", router, toolbox=box, rules="너는 기록 담당자다.", **kw

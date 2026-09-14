@@ -198,6 +198,21 @@ def _resolver(world):
     return ThreadFollowupResolver(ArchiveStore(world), archive_dir=world)
 
 
+def test_editing_text_requires_all_prior_evidence_to_remain_authorized(world, engine):
+    eng, _ = engine
+    ctx = _ctx()
+    first = eng.answer("미수금", ctx, terms=["미수금"])
+    turn = _turn(first, question="미수금")
+    turn["editing_text"] = "amount 123"
+    intent = Intent("summary", reference_mode="prior_turn", format_only=True)
+    resolved = _resolver(world).resolve(intent, ctx, turns=[turn])
+    assert resolved.editing_text == "amount 123"
+    from dataclasses import replace
+
+    denied = _resolver(world).resolve(intent, replace(ctx, channels=frozenset()), turns=[turn])
+    assert denied.editing_text == ""
+
+
 # --- 실제 대화 회귀 (설계 §16) -----------------------------------------------
 
 

@@ -102,6 +102,7 @@ class MasterTask:
     routing_confidence: float = 0.0
     decision_id: str = ""
     task_index: int = 0
+    editing_text: str = ""
     parent_record_ids: tuple[str, ...] = ()
     topic_terms: tuple[str, ...] = ()
     document_query: tuple[str, ...] = ()

@@ -56,6 +56,21 @@ def test_llm_split_returns_two_tasks():
     assert all(t.source == "llm" for t in tasks)
 
 
+def test_format_followup_keeps_planner_decision():
+    from tybot.intent import Intent, apply_followup
+
+    task = Intent("summary", routing_confidence=0.9, planner_model="planner",
+                  suggested_specialist="hermes", required_capability="internal_document_summary")
+    (got,) = apply_followup("이전 답변 형식을 bullet point 형식으로 바꿔서 답해줘",
+                            [task], has_prior=True)
+    assert got.format_only
+    assert got.reference_mode == "prior_turn"
+    assert got.topic_terms == []
+    assert got.routing_confidence == 0.9
+    assert got.suggested_specialist == "hermes"
+    assert got.planner_model == "planner"
+
+
 def test_unknown_kind_is_dropped_not_guessed():
     router = FakeRouter([
         _tasks({"kind": "정체불명"}, {"kind": "status", "question": "상태"})

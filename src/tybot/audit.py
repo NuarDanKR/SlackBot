@@ -226,6 +226,7 @@ class QALog:
                 "ts": str(row.get("ts") or ""),
                 "question": _clip(str(row.get("question") or "")),
                 "intent_kind": str(row.get("intent_kind") or ""),
+                "editing_text": str(row.get("answer") or ""),
                 "subject_terms": [
                     str(t) for t in (row.get("subject_terms") or []) if str(t).strip()
                 ][:12],

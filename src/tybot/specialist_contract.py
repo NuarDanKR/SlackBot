@@ -83,6 +83,7 @@ class SpecialistRequest:
     # 읽어 답했다(2026-09-13 검증). 이미지 PDF 와 첨부 사진이 많은 업무에서는
     # 그 길이 「업무 답변은 전문 봇만」 규칙의 가장 큰 구멍이었다.
     visual: tuple = ()
+    editing_text: str = ""
 
     def __post_init__(self) -> None:
         if not self.question.strip():

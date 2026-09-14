@@ -54,6 +54,7 @@ class ResolvedFollowup:
     # 사용자에게 물을 후보. 파일명은 담당자가 봐야 하므로 남기지만 본문은 열지 않는다.
     choices: list[str] = field(default_factory=list)
     refs_requested: int = 0
+    editing_text: str = ""
 
     @property
     def applied(self) -> bool:
@@ -206,6 +207,9 @@ class ThreadFollowupResolver:
             dropped_codes=dropped,
             refs_requested=len(refs),
         )
+        # Old prose may be edited only after all its original references pass ACL again.
+        if refs and hits and not dropped and len(hits) == len(refs):
+            result.editing_text = str(selected[-1].get("editing_text") or "")
         if (
             mode == "prior_attachments"
             and len(attachments) > 1

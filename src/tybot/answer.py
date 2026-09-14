@@ -1357,6 +1357,15 @@ class AnswerEngine:
             )
 
         hits = list(followup.evidence_hits)
+        if intent.format_only:
+            from dataclasses import replace
+
+            if not followup.editing_text or task is None:
+                return Answer(
+                    "이전 답변과 원문 접근 권한을 모두 확인하지 못해 형식을 변경할 수 없습니다.",
+                    [], None, 0.0, 0, "no_hits",
+                )
+            task = replace(task, editing_text=followup.editing_text)
         asked_status = bool(intent.include_attachment_status)
         status = _attachment_status_block(followup.attachments, asked=asked_status)
 

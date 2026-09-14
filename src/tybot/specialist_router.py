@@ -672,6 +672,7 @@ def serve(
             visual=visual,
             decision_id=decision_id,
             task_index=int(getattr(task, "task_index", 0) or 0),
+            editing_text=str(getattr(task, "editing_text", "") or ""),
             task_kind=str(getattr(task, "kind", "") or ""),
             required_capability=str(getattr(task, "required_capability", "") or ""),
         )
@@ -715,6 +716,7 @@ def _run_one(
     visual: tuple = (),
     decision_id: str = "",
     task_index: int = 0,
+    editing_text: str = "",
     task_kind: str = "",
     required_capability: str = "",
 ) -> tuple[SpecialistAnswer | None, str]:
@@ -758,6 +760,7 @@ def _run_one(
             # 넣었다. 근거가 아닌 것을 근거 자리에 두면 그 자리를 믿을 수 없게 된다.
             allow_empty_evidence=chosen.execution_mode == "tools",
             visual=tuple(visual or ()),
+            editing_text=editing_text,
         )
         result = execute(
             adapter,
@@ -765,6 +768,7 @@ def _run_one(
             fallback=lambda: "",
             confidence=confidence,
             minimum_confidence=chosen.min_confidence,
+            timeout_seconds=90,
         )
         error_code = result.error_code
     except specialist_adapters.AdapterError as exc:
