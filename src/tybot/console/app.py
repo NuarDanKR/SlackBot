@@ -1800,14 +1800,54 @@ def get_workspaces(user: User) -> dict:
     except workspace_store.WorkspaceStoreError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     env_keys = _env_token_keys()
-    return {"workspaces": [_workspace_response(row, env_keys) for row in rows]}
+    # 상한은 두 겹이다. 워크스페이스 칸만 보여 주면, 전체 상한에서 막히는 날
+    # **화면에 있는 정보만으로는 원인에 닿을 수 없다**(2026-09-15).
+    budget = reader.cost_budget({row["key"]: row["limit_usd"] for row in rows})
+    return {
+        "workspaces": [_workspace_response(row, env_keys) for row in rows],
+        "budget": budget,
+    }
+
+
+def _needs_restart(before: dict | None, body: WorkspaceBody) -> bool:
+    """이 변경에 봇 재시작이 필요한가.
+
+    **상한만 바꿨으면 필요 없다.** 봇이 60초 TTL 로 DB 에서 다시 읽는다
+    (`gateway/budget.py`). 그런데도 매번 재시작을 걸면, 상한 한 칸 고치자고 답변이
+    끊기고 — 사람은 그걸 알기 때문에 **상한을 안 고친다.**
+
+    나머지(토큰·등급·상태·표시 이름·열람 대상)는 기동 시 한 번 읽는 값이라 필요하다.
+    **모르면 필요한 쪽으로 친다** — 안 해도 될 재시작보다 안 먹는 설정이 나쁘다.
+    """
+    if before is None:
+        return True
+    if body.botToken or body.appToken:
+        return True
+    return (
+        str(before.get("label") or "") != body.label
+        or str(before.get("role") or "") != body.role
+        or str(before.get("state") or "") != body.state
+        or sorted(str(v).lower() for v in (before.get("readable") or []))
+        != sorted(v.strip().lower() for v in (body.readable or []))
+    )
 
 
 @app.put("/api/workspaces/{key}")
 def put_workspace(key: str, body: WorkspaceBody, request: Request, user: User) -> dict:
     _require_admin(user)
     _check_write_request(request)
+    restart_needed = True
     try:
+        # 바꾸기 전 모습을 먼저 본다. 무엇이 달라졌는지 알아야 재시작이 필요한지
+        # 판단할 수 있다. 못 읽으면 필요한 쪽으로 친다.
+        try:
+            before = next(
+                (r for r in workspace_store.list_workspaces()
+                 if str(r["key"]).lower() == key.strip().lower()),
+                None,
+            )
+        except workspace_store.WorkspaceStoreError:
+            before = None
         workspace_store.save_workspace(
             actor=user.email,
             key=key,
@@ -1819,7 +1859,9 @@ def put_workspace(key: str, body: WorkspaceBody, request: Request, user: User) -
             bot_token=body.botToken,
             app_token=body.appToken,
         )
-        request_restart(user.email, [f"WORKSPACE_REGISTRY:{key.strip().lower()}"])
+        restart_needed = _needs_restart(before, body)
+        if restart_needed:
+            request_restart(user.email, [f"WORKSPACE_REGISTRY:{key.strip().lower()}"])
         rows = workspace_store.list_workspaces()
     except workspace_store.WorkspaceStoreError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1841,7 +1883,11 @@ def put_workspace(key: str, body: WorkspaceBody, request: Request, user: User) -
         metadata={"role": body.role, "state": body.state},
     )
     env_keys = _env_token_keys()
-    return {"workspaces": [_workspace_response(row, env_keys) for row in rows], "restartPending": True}
+    return {
+        "workspaces": [_workspace_response(row, env_keys) for row in rows],
+        "budget": reader.cost_budget({row["key"]: row["limit_usd"] for row in rows}),
+        "restartPending": restart_needed,
+    }
 
 
 # ---------------------------------------------------------------------------

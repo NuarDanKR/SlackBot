@@ -40,6 +40,11 @@ def _effective_env() -> dict[str, str]:
     return values
 
 
+def effective_env() -> dict[str, str]:
+    """os.environ + 콘솔 관리 덮어쓰기. 봇이 보는 것과 같은 값이다."""
+    return _effective_env()
+
+
 def snapshot() -> dict:
     values = _effective_env()
     default_model = values.get("DEFAULT_MODEL", "claude-sonnet-5")

@@ -992,6 +992,100 @@ def test_admin_can_save_workspace_without_returning_plain_tokens(client, monkeyp
     assert response.json()["workspaces"][0]["botTokenMask"] == "xoxb-1234…cdef"
 
 
+def _payload(**over) -> dict:
+    """저장 요청 한 벌. 기본은 **현재 DB 행과 똑같은 값**이다."""
+    body = {
+        "label": "전산팀", "role": "member", "state": "enabled",
+        "limitUsd": 2, "readable": ["mgmt"],
+    }
+    body.update(over)
+    return body
+
+
+def _save_and_get(client, monkeypatch, payload, *, rows=None):
+    monkeypatch.setattr(console_app.workspace_store, "save_workspace", lambda **_v: None)
+    monkeypatch.setattr(
+        console_app.workspace_store, "list_workspaces", lambda: rows or [_workspace_row()]
+    )
+    restarts = []
+    monkeypatch.setattr(console_app, "request_restart", lambda a, c: restarts.append(c))
+    response = client.put(
+        "/api/workspaces/tyit", json=payload, headers=_write_headers(owner(client))
+    )
+    assert response.status_code == 200, response.text
+    return response.json(), restarts
+
+
+def test_changing_only_the_limit_does_not_restart_the_bot(client, monkeypatch):
+    """봇이 60초 TTL 로 다시 읽는다. 매번 재시작하면 사람은 상한을 아예 안 고친다."""
+    body, restarts = _save_and_get(client, monkeypatch, _payload(limitUsd=10))
+
+    assert restarts == []
+    assert body["restartPending"] is False
+
+
+def test_changing_a_token_still_restarts_the_bot(client, monkeypatch):
+    body, restarts = _save_and_get(client, monkeypatch, _payload(
+        botToken='xoxb-secret-value-1234', appToken='xapp-secret-value-1234',
+    ))
+
+    assert restarts == [["WORKSPACE_REGISTRY:tyit"]]
+    assert body["restartPending"] is True
+
+
+def test_changing_the_state_still_restarts_the_bot(client, monkeypatch):
+    _, restarts = _save_and_get(client, monkeypatch, _payload(state="disabled"))
+    assert restarts
+
+
+def test_changing_the_readable_scope_still_restarts_the_bot(client, monkeypatch):
+    _, restarts = _save_and_get(client, monkeypatch, _payload(readable=[]))
+    assert restarts
+
+
+def test_an_unknown_workspace_restarts_because_we_cannot_tell(client, monkeypatch):
+    """모르면 필요한 쪽으로 친다 — 안 해도 될 재시작보다 안 먹는 설정이 나쁘다."""
+    row = _workspace_row()
+    row["key"] = "other"
+    _, restarts = _save_and_get(client, monkeypatch, _payload(), rows=[row])
+    assert restarts
+
+
+# --- 두 겹의 상한을 한 자리에서 보여 준다 ---------------------------------
+def test_the_workspace_list_carries_both_limits(client, monkeypatch):
+    """워크스페이스 상한만 보여 주면, 전체 상한에서 막히는 날 원인에 닿을 수 없다."""
+    monkeypatch.setenv("DAILY_COST_LIMIT_USD", "5")
+    row = _workspace_row()
+    row["limit_usd"] = 10
+    monkeypatch.setattr(console_app.workspace_store, "list_workspaces", lambda: [row])
+    monkeypatch.setattr(console_app.reader, "_spend_by_workspace_today", lambda: {"tyit": 4.5})
+    monkeypatch.setattr(console_app.reader, "_spent_today_from_state", lambda a=None: 4.92)
+
+    budget = client.get("/api/workspaces", headers=owner(client)).json()["budget"]
+
+    assert budget["globalLimitUsd"] == 5.0
+    assert budget["workspaceTotalUsd"] == 10.0
+    assert budget["overcommitted"] is True
+    assert budget["spentTodayUsd"] == 4.92
+    assert budget["spentByWorkspace"] == {"tyit": 4.5}
+
+
+def test_a_workspace_without_a_limit_is_counted_as_unset_not_as_zero(client, monkeypatch):
+    """0 을 합계에 더하면 「여유 있다」 로 읽히는데, 실제로는 전체 상한을 혼자 쓴다."""
+    monkeypatch.setenv("DAILY_COST_LIMIT_USD", "50")
+    rows = [_workspace_row(), {**_workspace_row(), "key": "mgmt", "limit_usd": 0}]
+    monkeypatch.setattr(console_app.workspace_store, "list_workspaces", lambda: rows)
+    monkeypatch.setattr(console_app.reader, "_spend_by_workspace_today", lambda: {})
+    monkeypatch.setattr(console_app.reader, "_spent_today_from_state", lambda a=None: 0.0)
+
+    budget = client.get("/api/workspaces", headers=owner(client)).json()["budget"]
+
+    assert budget["workspaceTotalUsd"] == 2.0
+    assert budget["configuredCount"] == 1
+    assert budget["unlimitedCount"] == 1
+    assert budget["overcommitted"] is False
+
+
 def test_developer_cannot_save_workspace(client, monkeypatch):
     called = False
 

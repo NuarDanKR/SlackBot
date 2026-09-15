@@ -364,6 +364,61 @@ def _spent_today_from_state(
         return None
 
 
+def global_cost_limit_usd() -> float:
+    """봇에 실제로 걸리는 **전체** 상한. 바깥 테두리다.
+
+    봇이 보는 것과 같은 값이어야 한다 — `os.environ`(systemd EnvironmentFile)에
+    콘솔이 관리하는 덮어쓰기 파일을 얹은 것. 한쪽만 보면 화면의 숫자와 막는 숫자가
+    갈라진다.
+    """
+    from .env_settings import effective_env
+
+    try:
+        return float(effective_env().get("DAILY_COST_LIMIT_USD", "50") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def cost_budget(limits: dict[str, float]) -> dict:
+    """워크스페이스 상한들과 전체 상한을 한 자리에서 본다.
+
+    `limits` 는 `{워크스페이스 키: 상한}` — 콘솔이 DB 에서 읽은 그대로.
+
+    ## 왜 합계를 같이 보여 주나
+    상한은 두 겹인데 **화면에서는 한 겹만 보였다.** 2026-09-15 에 경영본부 상한을
+    $10 으로 올려도 막혔다 — 전체 상한이 $5 였기 때문이다. 그 $5 는 이 화면 어디에도
+    없었으므로, 사람이 볼 수 있는 정보만으로는 원인에 닿을 수 없었다.
+
+    그래서 **합계와 전체 상한을 나란히** 둔다. 합계가 전체를 넘으면 안쪽 칸들은
+    장식이다 — 그 사실을 숫자 옆에서 말한다.
+    """
+    values = {
+        str(key).lower(): float(value or 0.0)
+        for key, value in (limits or {}).items()
+    }
+    configured = {k: v for k, v in values.items() if v > 0}
+    total = round(sum(configured.values()), 6)
+    global_limit = global_cost_limit_usd()
+    spend = _spend_by_workspace_today()
+    spent_total = _spent_today_from_state()
+    if spent_total is None:
+        spent_total = sum(spend.values())
+
+    return {
+        "globalLimitUsd": round(global_limit, 6),
+        # 상한이 설정된 워크스페이스들의 합. 0(미설정)은 더하지 않는다 —
+        # 더하면 "합계가 작으니 여유 있다" 로 읽히는데 실제로는 그 워크스페이스가
+        # 전체 상한을 통째로 쓸 수 있다.
+        "workspaceTotalUsd": total,
+        "configuredCount": len(configured),
+        "unlimitedCount": len(values) - len(configured),
+        # 합계가 전체를 넘으면 안쪽 칸은 닿을 수 없다.
+        "overcommitted": bool(global_limit > 0 and total > global_limit),
+        "spentTodayUsd": round(float(spent_total), 6),
+        "spentByWorkspace": {k: round(v, 6) for k, v in sorted(spend.items())},
+    }
+
+
 def usage_snapshot(
     allowed: frozenset[str] | set[str] | None = None,
     *,
