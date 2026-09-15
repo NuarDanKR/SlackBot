@@ -68,7 +68,10 @@ def _archive(tmp_path: Path, lines: list[str], *, day="2026-09-07") -> Path:
     return tmp_path / "archive"
 
 
-def _stage(tmp_path, *, name, file_id, data=b"x", ws="tyit", ch="C1"):
+def _stage(
+    tmp_path, *, name, file_id, data=b"x", ws="tyit", ch="C1",
+    status="pending_review",
+):
     suffix = f"workspaces/{ws}/channels/{ch}/attachments/{file_id}"
     staged = tmp_path / "staging" / suffix
     staged.mkdir(parents=True, exist_ok=True)
@@ -76,7 +79,7 @@ def _stage(tmp_path, *, name, file_id, data=b"x", ws="tyit", ch="C1"):
     obj.parent.mkdir(parents=True, exist_ok=True)
     obj.write_bytes(data)
     (staged / "metadata.json").write_text(json.dumps({
-        "schema_version": 1, "status": "pending_review", "slack_file_id": file_id,
+        "schema_version": 1, "status": status, "slack_file_id": file_id,
         "name": name, "filetype": name.rsplit(".", 1)[-1], "mimetype": "",
         "declared_size": len(data), "object_path": str(obj),
         "staged_at": "2026-09-07T09:00:00+09:00",
@@ -286,3 +289,100 @@ def test_the_index_reminder_is_printed(mod, tmp_path, monkeypatch, capsys):
     _, out = _run(mod, archive, monkeypatch, capsys, "--apply")
 
     assert "tybot-index" in out
+
+
+def test_pii_refused_is_not_rechecked_without_an_explicit_flag(
+    mod, tmp_path, monkeypatch, capsys
+):
+    archive = _archive(tmp_path, ["[첨부:수집제외] 일정.png (png, 10KB)"])
+    _stage(tmp_path, name="일정.png", file_id="F1", status="pii_refused")
+    monkeypatch.setattr(
+        mod, "convert", lambda *args: pytest.fail("must not recheck implicitly")
+    )
+
+    _, out = _run(mod, archive, monkeypatch, capsys, "--apply")
+
+    assert "정책 제외(재변환 안 함): 1건" in out
+
+
+def test_pii_recheck_dry_run_does_not_touch_the_file(
+    mod, tmp_path, monkeypatch, capsys
+):
+    archive = _archive(tmp_path, ["[첨부:수집제외] 일정.png (png, 10KB)"])
+    _stage(tmp_path, name="일정.png", file_id="F1", status="pii_refused")
+    meta_path = next((tmp_path / "staging").rglob("metadata.json"))
+    before = meta_path.read_text(encoding="utf-8")
+
+    _, out = _run(mod, archive, monkeypatch, capsys, "--recheck-pii")
+
+    assert "PII 재판정 대상 (판정만 함)" in out
+    assert meta_path.read_text(encoding="utf-8") == before
+
+
+def test_pii_recheck_releases_only_a_file_that_passes_the_new_screen(
+    mod, tmp_path, monkeypatch, capsys
+):
+    archive = _archive(tmp_path, ["[첨부:수집제외] 일정.png (png, 10KB)"])
+    _stage(tmp_path, name="일정.png", file_id="F1", status="pii_refused")
+    monkeypatch.setattr(
+        mod, "convert", lambda *args: ["9월 일정", "9/22 등기부등본 제출"]
+    )
+
+    _, out = _run(mod, archive, monkeypatch, capsys, "--recheck-pii", "--apply")
+
+    assert "변환한 파일 1건" in out
+    meta = json.loads(
+        next((tmp_path / "staging").rglob("metadata.json")).read_text("utf-8")
+    )
+    assert meta["status"] == "converted"
+    assert meta["screen_version"] == 2
+    assert meta["screen_result"] == "passed_with_notice"
+    assert "등기부등본 제출" in next(archive.rglob("*.md")).read_text("utf-8")
+
+
+def test_pii_recheck_keeps_a_high_risk_document_blocked(
+    mod, tmp_path, monkeypatch, capsys
+):
+    archive = _archive(tmp_path, ["[첨부:수집제외] scan.pdf (pdf, 10KB)"])
+    _stage(tmp_path, name="scan.pdf", file_id="F1", status="pii_refused")
+    monkeypatch.setattr(
+        mod,
+        "convert",
+        lambda *args: [
+            "등기사항전부증명서",
+            "표제부 소재지번",
+            "갑구 순위번호 등기목적 권리자 및 기타사항",
+            "을구 순위번호 등기목적 권리자 및 기타사항",
+        ],
+    )
+
+    _, out = _run(mod, archive, monkeypatch, capsys, "--recheck-pii", "--apply")
+
+    assert "변환한 파일 0건" in out
+    meta = json.loads(
+        next((tmp_path / "staging").rglob("metadata.json")).read_text("utf-8")
+    )
+    assert meta["status"] == "pii_refused"
+    assert meta["screen_result"] == "blocked"
+    assert "[첨부추출:scan.pdf]" not in next(archive.rglob("*.md")).read_text("utf-8")
+
+
+def test_pii_recheck_keeps_the_policy_block_when_conversion_fails(
+    mod, tmp_path, monkeypatch, capsys
+):
+    archive = _archive(tmp_path, ["[첨부:수집제외] scan.pdf (pdf, 10KB)"])
+    _stage(tmp_path, name="scan.pdf", file_id="F1", status="pii_refused")
+
+    def fail(*args):
+        raise mod.ConvertError("OCR 실패")
+
+    monkeypatch.setattr(mod, "convert", fail)
+    _run(mod, archive, monkeypatch, capsys, "--recheck-pii", "--apply")
+
+    meta = json.loads(
+        next((tmp_path / "staging").rglob("metadata.json")).read_text("utf-8")
+    )
+    assert meta["status"] == "pii_refused"
+    assert meta["conversion_state"] == "blocked"
+    assert meta["retryable"] is False
+    assert meta["extracted"] is False

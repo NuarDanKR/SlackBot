@@ -46,7 +46,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tybot.archive import writer
-from tybot.archive.convert import ConvertError, can_convert, convert
+from tybot.archive.convert import (
+    ConvertError,
+    Coverage,
+    can_convert,
+    collect_coverage,
+    convert,
+)
 from tybot.archive.store import ArchiveStore
 from tybot.archive.writer import KST, doc_path
 from tybot.attachment_review import scan
@@ -83,18 +89,28 @@ def _parse_ts(raw: str) -> datetime | None:
 
 def _record_result(item, *, status: str, error: str = "", body: list[str] | None = None,
                    failure: BaseException | None = None,
-                   screen_result: ScreenResult | None = None) -> None:
+                   screen_result: ScreenResult | None = None,
+                   coverage: Coverage | None = None) -> None:
     """재변환 결과를 콘솔이 읽는 메타데이터와 미리보기에 함께 반영한다."""
     try:
         from tybot.archive.external_convert import failure_details
 
-        code, retryable = failure_details(failure) if failure else ("conversion_failed" if error else "", False)
+        code, retryable = (
+            failure_details(failure)
+            if failure
+            else ("conversion_failed" if error else "", False)
+        )
         meta = json.loads(item.meta_path.read_text(encoding="utf-8"))
         meta.update({
             "status": status,
-            "original_state": "retained" if item.object_path and Path(item.object_path).is_file() else "missing",
+            "original_state": (
+                "retained"
+                if item.object_path and Path(item.object_path).is_file()
+                else "missing"
+            ),
             "conversion_state": (
                 "blocked" if status == "pii_refused" else
+                "partial" if body is not None and coverage and coverage.state == "partial" else
                 "succeeded" if body is not None else "failed"
             ),
             "error_code": "pii_refused" if status == "pii_refused" else code,
@@ -103,6 +119,7 @@ def _record_result(item, *, status: str, error: str = "", body: list[str] | None
             "extracted": body is not None,
             "reprocessed_at": datetime.now(UTC).isoformat(timespec="seconds"),
             **(ScreenMetadata.of(screen_result).to_json() if screen_result else {}),
+            **(coverage.to_json() if coverage else {}),
         })
         tmp = item.meta_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -128,6 +145,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="실제로 아카이브에 넣는다. 없으면 판정만 한다")
     ap.add_argument("--workspace", default="", help="한 워크스페이스만")
     ap.add_argument("--limit", type=int, default=0, help="처리할 최대 파일 수(0=전부)")
+    ap.add_argument(
+        "--recheck-pii",
+        action="store_true",
+        help=(
+            "기존 pii_refused 파일만 보존 원본으로 재변환·재판정한다. "
+            "--apply가 없으면 대상만 표시한다"
+        ),
+    )
     args = ap.parse_args(argv)
 
     load_env_file()
@@ -166,10 +191,14 @@ def main(argv: list[str] | None = None) -> int:
     todo: list[tuple] = []
     counts: Counter[str] = Counter()
     for item in items:
-        if item.status == "pii_refused":
+        is_pii_recheck = item.status == "pii_refused" and args.recheck_pii
+        if args.recheck_pii and item.status != "pii_refused":
+            counts["재판정 대상 아님"] += 1
+            continue
+        if item.status == "pii_refused" and not args.recheck_pii:
             counts["정책 제외(재변환 안 함)"] += 1
             continue
-        if item.name in extracted.get(item.channel_id, set()):
+        if not is_pii_recheck and item.name in extracted.get(item.channel_id, set()):
             counts["이미 변환됨"] += 1
             continue
         if not can_convert(_suffix(item.name)):
@@ -199,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
             counts["그 날 원문 파일을 찾지 못함"] += 1
             continue
         todo.append((item, (when, speaker, channel, workspace)))
+        if is_pii_recheck:
+            counts["PII 재판정 대상"] += 1
 
     print(f"아카이브: {root}")
     print(f"검수 폴더의 첨부 {len(items)}건")
@@ -220,13 +251,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.apply:
         print()
-        print("=== 변환하면 채워질 것 (판정만 함)")
+        print(
+            "=== PII 재판정 대상 (판정만 함)"
+            if args.recheck_pii else "=== 변환하면 채워질 것 (판정만 함)"
+        )
         for item, (ts, _, channel, _) in todo[:40]:
             print(f"  - {item.name} [{_suffix(item.name)}] {channel} {ts}")
         if len(todo) > 40:
             print(f"  … 외 {len(todo) - 40}건")
         print()
-        print("실제로 채우려면: --apply")
+        command = "--recheck-pii --apply" if args.recheck_pii else "--apply"
+        print(f"실제로 채우려면: {command}")
         return 0
 
     # --- 실제로 채운다 --------------------------------------------------------
@@ -235,23 +270,36 @@ def main(argv: list[str] | None = None) -> int:
     refused_total = 0
 
     for item, (ts, speaker, channel, workspace) in todo:
+        coverage = None
         try:
             data = Path(item.object_path).read_bytes()
-            body = convert(_suffix(item.name), data)
+            with collect_coverage() as coverage:
+                body = convert(_suffix(item.name), data)
         except (OSError, ConvertError) as exc:
             reason = f"{type(exc).__name__}: {exc}"
             failed.append((item.name, reason))
-            _record_result(item, status="download_or_extract_failed", error=reason, failure=exc)
+            # 재판정 도중 변환까지 실패했다고 기존 정책 차단을 풀면 안 된다.
+            failure_status = "pii_refused" if args.recheck_pii else "download_or_extract_failed"
+            _record_result(
+                item, status=failure_status, error=reason, failure=exc,
+                coverage=coverage,
+            )
             continue
         except Exception as exc:  # noqa: BLE001 - 한 파일 실패가 나머지를 막지 않는다
             reason = f"예상치 못한 오류 {type(exc).__name__}: {exc}"
             failed.append((item.name, reason))
-            _record_result(item, status="download_or_extract_failed", error=reason, failure=exc)
+            failure_status = "pii_refused" if args.recheck_pii else "download_or_extract_failed"
+            _record_result(
+                item, status=failure_status, error=reason, failure=exc,
+                coverage=coverage,
+            )
             continue
 
         all_rows = [line.strip() for line in body if line.strip()]
         screen_result = screen_document(
-            "\n".join(all_rows), filename=item.name, coverage_state="unknown"
+            "\n".join(all_rows),
+            filename=item.name,
+            coverage_state=coverage.state if coverage else "unknown",
         )
         if screen_result.blocked:
             refused_total += 1
@@ -260,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
             _record_result(
                 item, status="pii_refused", error=reason,
                 screen_result=screen_result,
+                coverage=coverage,
             )
             continue
         # **`0` 은 무제한이다.** `[:0]` 이면 「변환 결과가 비어 있다」 로
@@ -268,7 +317,10 @@ def main(argv: list[str] | None = None) -> int:
         if not rows:
             reason = "변환 결과가 비어 있다"
             failed.append((item.name, reason))
-            _record_result(item, status="download_or_extract_failed", error=reason)
+            failure_status = "pii_refused" if args.recheck_pii else "download_or_extract_failed"
+            _record_result(
+                item, status=failure_status, error=reason, coverage=coverage,
+            )
             continue
 
         # 변환 사실을 먼저 한 줄. 원래의 `[첨부:검수대기]` 줄은 **그대로 둔다** —
@@ -319,7 +371,8 @@ def main(argv: list[str] | None = None) -> int:
             _record_result(item, status="pii_refused", error=reason)
             continue
         _record_result(
-            item, status="converted", body=rows, screen_result=screen_result
+            item, status="converted", body=rows, screen_result=screen_result,
+            coverage=coverage,
         )
         done += 1
         print(f"  {channel}: {result.written}줄 추가"

@@ -867,6 +867,33 @@ journalctl -u tybot-collect -n 40
 
 ## 8. 운영 명령
 
+### 기존 PII 차단 첨부 재판정
+
+PII 판정 규칙을 배포해도 과거에 `pii_refused`로 분류된 첨부는 자동으로 풀리지 않는다.
+보존 원본을 현재 변환기와 현재 문서 단위 판정기로 다시 검사한 뒤 통과한 파일만
+아카이브에 추가한다. 먼저 전 워크스페이스의 대상만 확인한다.
+
+```bash
+cd /opt/tybot
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env \
+  /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/convert_staged_attachments.py --recheck-pii
+```
+
+목록을 확인한 뒤 적용하고 검색 색인을 갱신한다.
+
+```bash
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env \
+  /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/convert_staged_attachments.py --recheck-pii --apply
+sudo systemctl start tybot-index
+```
+
+한 워크스페이스만 처리하려면 두 명령에 `--workspace tyit`처럼 키를 지정한다.
+원본이 없거나 현재 변환기로 읽지 못한 파일은 기존 `pii_refused` 상태를 유지한다.
+문서 구조가 실제 등기사항증명서 등 고위험 문서와 일치하는 경우도 계속 차단된다.
+재판정은 원문 표시 줄을 수정하지 않고 새 첨부 추출 줄만 추가한다.
+
 | 확인 | 명령 |
 |---|---|
 | 상태 | `systemctl status tybot` |
