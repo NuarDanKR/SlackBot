@@ -167,7 +167,13 @@ def test_policy_screening_includes_rows_after_limit(mod, tmp_path, monkeypatch, 
     _stage(tmp_path, name="report.xlsx", file_id="F1")
     monkeypatch.setattr(mod, "MAX_TEXT_LINES", 1)
     monkeypatch.setattr(mod, "convert", lambda *args: ["allowed", "blocked"])
-    monkeypatch.setattr(mod.writer, "screen", lambda text: "policy" if "blocked" in text else None)
+    monkeypatch.setattr(
+        mod,
+        "screen_document",
+        lambda text, **kw: mod.ScreenResult(
+            "blocked" in text, "policy" if "blocked" in text else ""
+        ),
+    )
     _run(mod, archive, monkeypatch, capsys, "--apply")
     meta = json.loads(next((tmp_path / "staging").rglob("metadata.json")).read_text("utf-8"))
     assert meta["status"] == "pii_refused"

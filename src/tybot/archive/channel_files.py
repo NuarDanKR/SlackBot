@@ -78,6 +78,7 @@ class ChannelFileScan:
     channel_id: str
     total: int = 0            # 목록에서 본 파일 수
     known: int = 0            # 이미 staging 기록이 있는 파일
+    generated_excluded: int = 0  # TYBot이 만든 답변 Canvas(재귀 수집 금지)
     candidates: list[dict] = field(default_factory=list)  # 미수집 파일의 raw 이벤트
     warnings: list[str] = field(default_factory=list)
     truncated: bool = False   # 페이지 상한에 걸려 끝까지 못 읽었다
@@ -92,7 +93,23 @@ class ChannelFileScan:
             tail = f"파일 목록 {self.total}건 이상(상한에 걸려 끝까지 못 읽음)"
         else:
             tail = f"파일 목록 {self.total}건"
-        return f"{tail} · 수집됨 {self.known}건 · 미수집 {self.missing}건"
+        generated = (
+            f" · TYBot 생성 제외 {self.generated_excluded}건"
+            if self.generated_excluded else ""
+        )
+        return f"{tail} · 수집됨 {self.known}건 · 미수집 {self.missing}건{generated}"
+
+
+def _generated_canvas(raw: dict) -> bool:
+    """파일 목록에 섞인 TYBot 답변 Canvas인가.
+
+    ``files.list`` 경로에는 본문이 없으므로 제목과 생성 ID만 쓴다. 본문 Disclaimer
+    검사는 Canvas 다운로드 경로에서 한 번 더 수행한다.
+    """
+    from .canvas import is_generated_canvas
+
+    title = str(raw.get("title") or raw.get("name") or "")
+    return is_generated_canvas(title, str(raw.get("id") or ""))
 
 
 def scan(client, channel_id: str, storage: AttachmentStorage) -> ChannelFileScan:
@@ -126,6 +143,9 @@ def scan(client, channel_id: str, storage: AttachmentStorage) -> ChannelFileScan
                 continue
             seen.add(file_id)
             out.total += 1
+            if _generated_canvas(raw):
+                out.generated_excluded += 1
+                continue
             if already_staged(storage, file_id):
                 out.known += 1
                 continue
@@ -161,7 +181,9 @@ def collect(
     """
     candidates = [
         raw for raw in scan_result.candidates
-        if raw.get("id") and not already_staged(storage, str(raw["id"]))
+        if raw.get("id")
+        and not _generated_canvas(raw)
+        and not already_staged(storage, str(raw["id"]))
     ]
     if not candidates:
         return []

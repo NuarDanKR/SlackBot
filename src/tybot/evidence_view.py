@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .channels import source_label
+
 ACTION_SHOW = "tybot_show_evidence"
 
 # 한 화면에 보여줄 줄 수. 넘치면 더 보여주는 대신 검색을 좁히라고 안내한다.
@@ -115,9 +117,11 @@ def report(lines: list[EvidenceLine], *, query: str, own_workspace: str = "") ->
     out = [head, ""]
     last_channel = ""
     for line in shown:
-        label = line.channel
+        # 출처와 **같은 이름**으로 보여야 한다. 여기만 채널명이면 사람이
+        # 「출처에 적힌 그 자료」 를 이 패널에서 못 찾는다.
+        label = source_label(line.channel)
         if line.workspace and line.workspace != own_workspace:
-            label = f"[{line.workspace}] {line.channel}"
+            label = f"{label} ({line.workspace})"
         if label != last_channel:
             out.append(f"*{label}*")
             last_channel = label

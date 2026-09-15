@@ -104,13 +104,19 @@ class SearchHit:
     def citation(self, *, with_workspace: bool = False) -> str:
         """출처 문자열 (4겹: 출처 강제).
 
-        다른 워크스페이스 자료를 인용할 때는 워크스페이스를 함께 밝힌다 -
-        읽는 사람이 "이건 우리 자료가 아니다"를 알 수 있어야 한다.
+        채널명이 아니라 **조직 이름**으로 보인다 — `[전산팀]공지`. 예전에는
+        `[tyit]#팀-전산_abb155-공지` 였는데, 그건 사람이 아니라 우리가 만든
+        키라서 출처만 보고 어느 조직 자료인지 알 수 없었다.
+
+        다른 워크스페이스 자료는 **끝에 밝힌다.** 앞자리는 조직이 가져갔지만
+        「이건 우리 자료가 아니다」 를 지우면 안 된다(원칙 4).
         """
+        from ..channels import source_label
+
         date = self.line.ts.split()[0] if self.line.ts else ""
-        prefix = f"[{self.doc.workspace}] " if with_workspace else ""
         source = self.line.source_path or self.doc.path
-        return f"{prefix}{self.doc.channel}, 📄{source.name}({date})"
+        tail = f" ({self.doc.workspace})" if with_workspace else ""
+        return f"{source_label(self.doc.channel)}{tail}, 📄{source.name}({date})"
 
 
 class SchemaError(ValueError):

@@ -104,6 +104,36 @@ def test_scan_only_never_calls_the_download_pipeline(tmp_path, monkeypatch):
     assert result.missing == 1
 
 
+def test_tybot_generated_canvas_is_not_a_collection_candidate(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+    storage = attachment_storage(tmp_path / "archive", "pilot", "C1")
+    generated = _file("F-CANVAS")
+    generated.update({"name": "공지 일정 정리 · TYBot", "filetype": "quip"})
+
+    result = channel_files.scan(FileClient([[generated, _file("F1")]]), "C1", storage)
+
+    assert [item["id"] for item in result.candidates] == ["F1"]
+    assert result.generated_excluded == 1
+    assert "TYBot 생성 제외 1건" in result.summary()
+
+
+def test_collect_rechecks_generated_canvas_before_download(tmp_path, monkeypatch):
+    from tybot.canvas_answer import remember_generated
+
+    monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+    storage = attachment_storage(tmp_path / "archive", "pilot", "C1")
+    generated = _file("F-CANVAS")
+    result = channel_files.ChannelFileScan("C1", candidates=[generated])
+    remember_generated("F-CANVAS", workspace="pilot", channel_id="C1")
+    monkeypatch.setattr(
+        channel_files,
+        "stage_attachments",
+        lambda *args, **kwargs: pytest.fail("must not collect a generated Canvas"),
+    )
+
+    assert channel_files.collect(result, "xoxb-test", storage, workspace="pilot") == []
+
+
 def test_canvas_reference_requires_an_explicit_channel_share():
     client = type("Client", (), {
         "files_info": lambda self, file: {"file": {"id": file, "channels": []}}

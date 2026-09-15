@@ -299,6 +299,19 @@ class Intent:
     # 찾을 **문서 종류**. `terms` 는 본문에서 찾을 주제어이고, 이쪽은 파일명에서
     # 찾을 이름 조각이다. 본문에 그 문구가 없는 보고서를 놓치지 않으려면 둘이 필요하다.
     document_query: list[str] = field(default_factory=list)
+    # --- 표시 산출물 제안 (설계: pii-guardrail-and-canvas-artifacts.md §3.1) ------
+    #
+    # **전부 제안이다.** 검증은 `master_planner.artifact_for()` 가 한다 — 열거형
+    # 밖이거나 지금 배포가 지원하지 않는 동작이면 안전한 기본값(메시지 답변)으로
+    # 접힌다. 「캔버스에 캘린더로」 같은 말은 **업무 질문이 아니라 표시 요청**이라
+    # 전문 봇에 그대로 보내면 "그건 내 역할이 아니다" 만 돌아온다.
+    research_question: str = ""
+    artifact_delivery: str = ""
+    artifact_operation: str = ""
+    artifact_layout: str = ""
+    artifact_title: str = ""
+    # 사용자가 「억 단위로」 처럼 **명시한** 표시 단위. 추측하지 않는다.
+    target_unit: str = ""
 
     @property
     def query(self) -> str:
@@ -444,10 +457,45 @@ PLANNER_PROMPT = CLASSIFIER_PROMPT.replace(
 - `asks_about_our_sources`: 업무 내용이 아니라 TYBot이 Canvas·파일·폴더·링크 같은
   자료를 근거로 읽는지 묻는 질문이면 true. 이때 kind는 help.
 
+**표시 요청과 업무 질문을 분리한다.** "Canvas에 캘린더로 작성해줘" 는 두 가지다 —
+근거에서 찾을 사실(업무 질문)과 그것을 어떻게 보여 줄지(표시). 전문 봇은 사실만
+답한다. 표시는 호출자가 한다.
+
+- `research_question`: **Canvas·문서 생성 지시를 뺀** 사실 질문. 전문 봇이 근거에서
+  답할 문장이다. 예) "우리 팀 공지 채널 내용을 Canvas에 캘린더로 작성해줘" →
+  "현재 채널 공지에서 일정 항목의 날짜·내용·관련 공지를 근거와 함께 정리해줘"
+- `artifact_delivery`: `message` | `canvas`. 사용자가 문서·Canvas 산출물을 요청한
+  경우만 `canvas`. 확신이 없으면 `message`.
+- `artifact_operation`: `answer_document`(새 문서를 만들어 달라) |
+  `edit_existing_canvas`(이미 있는 Canvas를 고쳐 달라) |
+  `create_calendar_events`(실제 캘린더에 일정을 등록해 달라).
+- `artifact_layout`: `auto` | `report` | `table` | `timeline` | `calendar_grid`.
+- `artifact_title`: 그 문서의 제목. 한 줄, 링크·Markdown 문법 없이. 질문에 없던
+  사람 이름·금액·날짜를 **새로 넣지 않는다.** 모르면 빈 문자열.
+- `target_unit`: 사용자가 **명시한** 금액 단위(`원`/`천원`/`백만원`/`억원`)만.
+  말하지 않았으면 빈 문자열. 추측해서 정하지 않는다.
+
+`캘린더`라는 낱말 하나로 정하지 말고 **무엇을 해 달라는 것인지** 본다.
+
+| 사용자 의도 | 판정 |
+|---|---|
+| "공지 일정을 Canvas에 달력 형태로 정리" | canvas / answer_document / calendar_grid |
+| "이 일정을 실제 캘린더에 등록해줘" | create_calendar_events |
+| "캘린더에 있는 일정이 뭐야" | message / 산출물 없음 |
+| "채널 Canvas의 캘린더를 고쳐줘" | canvas / edit_existing_canvas |
+| "공사기간을 한눈에 비교해줘" | 문맥에 따라 table 또는 timeline |
+
+지금 실행할 수 있는 동작은 `<지원_산출물>` 에 적힌 것뿐이다. 거기 없는 동작으로
+판정해도 된다 — 코드가 그것을 보고 「지원하지 않는다」 고 사람에게 알린다.
+**실행한 척하지 않기 위해** 있는 그대로 판정하는 것이 낫다.
+
 JSON 만 출력한다. 설명·코드펜스 금지.
 {"tasks": [{"kind": "...", "question": "...", "standalone_question": "...",
   "capability": "...", "specialist": "...", "confidence": 0.0,
   "reference_mode": "none", "asks_about_our_sources": false,
+  "research_question": "...", "artifact_delivery": "message",
+  "artifact_operation": "answer_document", "artifact_layout": "auto",
+  "artifact_title": "", "target_unit": "",
   "days": 7, "terms": ["..."]}]}""",
 )
 
@@ -724,6 +772,19 @@ def specialists_block(specialists) -> str:
     return "<전문봇>\n" + "\n".join(rows) + "\n</전문봇>"
 
 
+def artifacts_block() -> str:
+    """지금 **실제로 실행할 수 있는** 산출물 동작 목록.
+
+    프롬프트에 「무엇이든 할 수 있다」 고 적어 두면 planner 는 할 수 없는 것을
+    고르고, 그 뒤 코드가 조용히 메시지 답변으로 접는다 — 사람에게는 **요청이
+    무시된 것**으로 보인다. 목록을 주고, 지원 밖이면 그렇게 말한다.
+    """
+    from .master_planner import SUPPORTED_OPERATIONS
+
+    rows = "\n".join(f"- {op}" for op in SUPPORTED_OPERATIONS)
+    return f"<지원_산출물>\n{rows}\n</지원_산출물>"
+
+
 def plan(
     text: str,
     router: Router | None,
@@ -748,6 +809,9 @@ def plan(
             f"<현재_질문>\n{text}\n</현재_질문>"
         )
     roster = specialists_block(specialists)
+    # 지원 목록과 전문 봇 목록은 **질문보다 앞**이다. 프롬프트 캐시는 접두사
+    # 일치라, 질문이 앞이면 질문마다 캐시가 깨진다.
+    user_text = f"{artifacts_block()}\n\n{user_text}"
     if roster:
         user_text = f"{roster}\n\n{user_text}"
     messages = [Message("system", PLANNER_PROMPT), Message("user", user_text)]
@@ -816,6 +880,14 @@ def plan(
                     topic_terms=(terms[:8] if reference_mode == "prior_topic" else []),
                     include_attachment_status=(reference_mode == "prior_attachments"),
                     asks_about_our_sources=asks_about_sources,
+                    # 표시 제안. **여기서 검증하지 않는다** — 열거형·제목·지원
+                    # 여부는 `master_planner.artifact_for()` 한 곳에서 본다.
+                    research_question=str(item.get("research_question") or "").strip(),
+                    artifact_delivery=str(item.get("artifact_delivery") or "").strip(),
+                    artifact_operation=str(item.get("artifact_operation") or "").strip(),
+                    artifact_layout=str(item.get("artifact_layout") or "").strip(),
+                    artifact_title=str(item.get("artifact_title") or "").strip(),
+                    target_unit=str(item.get("target_unit") or "").strip(),
                 )
             )
         if not tasks:

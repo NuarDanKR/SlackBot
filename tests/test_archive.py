@@ -55,9 +55,36 @@ def test_search_returns_raw_lines_only(tmp_path):
 
 
 def test_citation_format(tmp_path):
+    """규칙 밖 이름은 **그대로** 남는다 — 지어내면 사람이 찾아갈 수 없다."""
     _write(tmp_path)
     hit = ArchiveStore(tmp_path).search("기성금", _ctx())[0]
     assert hit.citation() == "#팀_자금(ABB540)_주간보고, 📄주간보고.md(2026-08-12)"
+
+
+def test_citation_shows_the_organisation_and_keeps_the_workspace_behind_it():
+    """출처 앞자리는 **조직 이름**이고, 다른 워크스페이스라는 사실은 뒤에 남는다.
+
+    앞자리를 조직에 내주면서 「이건 우리 자료가 아니다」 까지 지우면 원칙 4 가
+    무너진다 — 사람이 남의 워크스페이스 자료를 자기 것으로 읽는다.
+    """
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from tybot.archive.store import SearchHit
+
+    doc = SimpleNamespace(
+        workspace="tyit", channel="#팀-전산_ABB155-공지", path=Path("2026-09-01.md")
+    )
+    line = SimpleNamespace(
+        ts="2026-09-01 10:00", source_path=None, lineno=1,
+        speaker="사람", text="공지", workspace="tyit", channel=doc.channel,
+    )
+    hit = SearchHit(doc=doc, line=line, score=1)
+
+    assert hit.citation() == "[전산팀]공지, 📄2026-09-01.md(2026-09-01)"
+    assert hit.citation(with_workspace=True) == (
+        "[전산팀]공지 (tyit), 📄2026-09-01.md(2026-09-01)"
+    )
 
 
 def test_acl_blocks_non_member(tmp_path):
@@ -97,11 +124,14 @@ def test_ingest_skips_bot_output_and_pii(tmp_path):
         ],
         acl=["#팀_자금(ABB540)_주간보고"],
     )
-    assert r.written == 1
+    # 주민등록번호 줄만 거부한다. **"등기부등본 첨부합니다" 는 사람의 발언이다** —
+    # 단어 하나로 대화를 버리면 사람이 한 말이 아카이브에서 사라진다(설계 §2.4).
+    assert r.written == 2
     assert r.skipped_bot == 1
-    assert len(r.refused) == 2
+    assert len(r.refused) == 1
     text = r.path.read_text(encoding="utf-8")
     assert "태봇" not in text and "900101" not in text
+    assert "등기부등본 첨부합니다" in text
     validate(text, path=str(r.path))
 
 

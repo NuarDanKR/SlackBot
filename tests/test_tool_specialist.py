@@ -481,7 +481,9 @@ def test_the_answer_cites_what_the_specialist_read():
 
     got = _specialist_citations(special, [], ctx)
 
-    assert got == ["#팀-전산_ABB110-주간회의, 📄2026-09-01.md"]
+    # 채널명이 아니라 **조직 이름**이 출처에 남는다 — `#팀-전산_ABB110-주간회의`
+    # 는 우리가 만든 키지 사람이 부르는 이름이 아니다.
+    assert got == ["[전산팀]주간회의, 📄2026-09-01.md"]
 
 
 def test_live_evidence_cites_slack_not_the_archive():

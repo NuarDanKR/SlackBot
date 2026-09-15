@@ -25,6 +25,7 @@ import uuid
 from datetime import UTC, datetime
 
 from .. import (
+    canvas_harness,
     daily_review,
     evidence_view,
     heartbeat,
@@ -32,6 +33,7 @@ from .. import (
     reviewers,
     schedule_dm,
     specialist_router,
+    summary_review,
 )
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
@@ -313,6 +315,34 @@ CHANNEL_SCOPE_NOTICE = (
 )
 MAX_THREAD_CONTEXT_CHARS = 6000
 
+# 판정은 됐지만 지금 배포가 못 하는 산출물 동작. **조용히 다른 것을 해 주지
+# 않는다** — 한 일과 요청이 어긋나면 사람은 봇이 한 일을 믿을 수 없게 된다(§3.2).
+UNSUPPORTED_ARTIFACT = {
+    "edit_existing_canvas": (
+        "_기존 Canvas 수정은 아직 지원하지 않습니다. 위 내용을 새 Canvas로 만들려면 "
+        "`캔버스로 답변해줘` 라고 말씀해 주세요._"
+    ),
+    "create_calendar_events": (
+        "_실제 캘린더에 일정을 등록하는 기능은 없습니다. 위 일정을 문서로 정리하려면 "
+        "`캔버스로 답변해줘` 라고 말씀해 주세요._"
+    ),
+}
+
+
+def _object_phrase(title: str) -> str:
+    """`{제목}을` / `{제목}를`. 제목이 없으면 「정식 답변을」.
+
+    받침 유무로만 고른다 — 숫자·영문으로 끝나는 제목은 **조사를 붙이지 않는다.**
+    틀린 조사를 붙이느니 없는 편이 읽기 낫다.
+    """
+    name = (title or "").strip()
+    if not name:
+        return "정식 답변을"
+    last = name[-1]
+    if not ("가" <= last <= "힣"):
+        return f"{name} 문서를"
+    return f"{name}{'을' if (ord(last) - 0xAC00) % 28 else '를'}"
+
 
 def _response_ts(response) -> str:
     try:
@@ -368,6 +398,9 @@ class WorkspaceBot:
         self.engine = engine
         self.qa_log = qa_log
         self.feedback_log = FeedbackLog(qa_log.root)
+        summary_review.register_slack_handlers(
+            self.app, workspace=self.workspace, feedback_log=self.feedback_log
+        )
         self._started = datetime.now(UTC)
         self._last_ingest_at: datetime | None = None
         self._ingested = 0
@@ -2316,14 +2349,23 @@ class WorkspaceBot:
         with contextlib.suppress(Exception):
             client.reactions_add(channel=channel_id, timestamp=event["ts"], name="eyes")
 
+        # 표시 요청. 판정 전에는 **기본값(메시지)** 이다 — 아직 모르는 것을
+        # Canvas 로 만들지 않는다. `decision` 이 나오면 그 값으로 바뀐다.
+        artifact = master_planner.ArtifactRequest()
+
         def finish(reply: str, *, intent: Intent, ans: Answer | None, ctx: RequestContext | None):
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
             from ..canvas_answer import automatic, message
 
-            use_canvas = canvas_requested or (
+            use_canvas = artifact.wants_canvas or (
                 ans is not None and ans.reason in ("answered", "advice")
                 and automatic(reply, raw_text)
             )
+            if artifact.unsupported_operation:
+                # **실행한 척하지 않는다.** 판정은 됐지만 지금 못 하는 동작이라
+                # 사람에게 그렇게 말한다(설계 §3.2).
+                notice = UNSUPPORTED_ARTIFACT.get(artifact.unsupported_operation, "")
+                reply = f"{reply}\n\n{notice}".rstrip()
             if ans is not None and ctx is not None and (ctx.channel_id or ctx.channel):
                 reply = f"{reply}\n\n{CHANNEL_SCOPE_NOTICE}"
             # 아카이브 근거로 답한 경우에만 '근거 보기' 를 붙인다. 버튼이 있는데
@@ -2336,11 +2378,36 @@ class WorkspaceBot:
                 fallback_kw["thread_ts"] = delivery_thread
             kw = dict(fallback_kw)
             canvas = None
+            harness = None
             if use_canvas and ans is not None:
+                # 표의 **표시 형식**만 결정적으로 통일한다. 사실은 손대지 않고,
+                # 확신이 없으면 그 표를 원문 그대로 둔다(설계 §5).
+                #
+                # 프롬프트로 형식을 맞췄다고 치지 않는다 — 실제로 같은 표 안에서
+                # `억`과 `백만원`이 섞여 나왔다.
                 try:
-                    canvas = create_answer_canvas(client, reply)
+                    harness = canvas_harness.apply(reply, target_unit=artifact.target_unit)
+                    reply = harness.text
+                except Exception as exc:
+                    log.warning("[%s] 하네스 적용 실패(원문 유지): %s", self.workspace, exc)
+                    harness = None
+                try:
+                    canvas = create_answer_canvas(
+                        client, reply,
+                        title=artifact.canvas_title,
+                        provenance={
+                            "workspace": self.workspace,
+                            "channel_id": channel_id,
+                            "qa_record_id": qa_record_id,
+                        },
+                    )
+                    # 링크 메시지에 **실제 제목**을 쓴다. "정식 답변" 만 있으면
+                    # 스레드에 링크가 여러 개일 때 어느 것이 무엇인지 모른다.
                     kw = {
-                        "text": f"정식 답변을 Canvas로 작성했습니다: <{canvas.permalink}|Canvas 열기>"
+                        "text": (
+                            f"{_object_phrase(artifact.title)} Canvas로 작성했습니다: "
+                            f"<{canvas.permalink}|Canvas 열기>"
+                        )
                     }
                     if delivery_thread:
                         kw["thread_ts"] = delivery_thread
@@ -2402,6 +2469,17 @@ class WorkspaceBot:
                 specialist_error_code=(ans.specialist_error_code if ans else ""),
                 planner_model=planner_model,
                 task_traces=list(task_traces),
+                # 산출물 추적. **본문 없이 코드·개수·버전만**(설계 §E).
+                delivery_mode="canvas" if canvas is not None else "message",
+                artifact_layout=artifact.layout,
+                artifact_operation=artifact.unsupported_operation or artifact.operation,
+                title_source=artifact.title_source,
+                harness_version=(harness.version if harness else 0),
+                harness_result=(harness.result if harness else ""),
+                target_unit=artifact.target_unit,
+                converted_cell_count=(harness.converted_cells if harness else 0),
+                format_retry_count=(ans.format_retry_count if ans else 0),
+                guardrail_result=(ans.guardrail_result if ans else ""),
             )
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
@@ -2452,9 +2530,16 @@ class WorkspaceBot:
         # 분해 결과를 오케스트레이션 판정으로 옮긴다. **여기서 LLM 을 다시 부르지
         # 않는다** — 남은 것은 검증과 매핑뿐이다(설계 §4).
         decision = master_planner.from_intents(
-            tasks, text=text, turns=turns, decision_id=decision_id
+            tasks, text=text, turns=turns, decision_id=decision_id,
+            # 「캔버스로 답변해줘」 라는 **명시 요청**은 LLM 판정보다 세다.
+            # 분류기가 죽어도 사용자가 말한 것은 살아 있어야 한다(설계 §3.1 B).
+            canvas_requested=canvas_requested,
         )
         planner_model = decision.planner_model
+        # 표시 요청은 **첫 작업의 것**을 쓴다. 복합 질문이라도 산출물은 하나이고,
+        # 작업마다 다른 형식으로 만들면 한 문서 안에서 형식이 뒤섞인다.
+        if decision.tasks:
+            artifact = decision.tasks[0].artifact
         sections: list[str] = []
         ctx: RequestContext | None = None
         last: Answer | None = None

@@ -139,6 +139,7 @@ _최종 갱신: 2026-08-31_
 | [B-46](#b-46) | **채널 파일 목록·Canvas 첨부·링크 수집** | **긴급** | 구현 완료·운영 검증 대기 (Codex/2026-09-15) | B-45 |
 | [B-47](#b-47) | **의도 분류를 LLM 이 한다 — 규칙은 검증·폴백만** | 높음 | 구현 완료·운영 검증 대기 (Codex/2026-09-15) | B-44 |
 | [B-48](#b-48) | XLSB 문서 변환 지원 | 높음 | 진단 완료·착수 대기 (오너 지시 2026-09-15) | B-41 |
+| [B-49](#b-49) | **PII 오탐 개선·AI 제목·Canvas 산출물 렌더링** | **높음** | 코드 QA 완료·운영 검증 대기 (Claude+Codex/2026-09-15) | B-41, B-44, B-46 |
 | [B-26](#b-26) | 복합 기억 질문의 하위 워크스페이스 조회 누락 | 높음 | 완료 (Codex/2026-08-27) | B-07 |
 
 ---
@@ -275,6 +276,54 @@ sudo -u tybot /opt/tybot/.venv/bin/python \
 - 수식·표·다중 시트 보존 수준과 PII 검사를 XLSX와 같은 fixture로 검증한다
 - 지원 전에는 반복 재처리하지 않고 `unsupported`로 명확히 표시한다
 - 임시 운영 방법은 사용자가 `.xlsx`로 변환해 다시 올리는 것이다
+
+---
+
+## B-49
+### PII 오탐 개선·AI 제목·Canvas 산출물 렌더링
+
+**우선 높음 · 코드 QA 완료·운영 검증 대기 (Claude+Codex/2026-09-15) · 의존 B-41, B-44, B-46**
+
+`등기부등본`이라는 단어 하나만 있는 비민감 일정 이미지가 파일 전체 차단되고,
+생성 Canvas 제목은 모두 `TYBot 정식 답변`이라 구별되지 않는다. 또한 “Canvas에
+캘린더로 작성” 요청을 Hermes가 실행 요청으로 받아 역할 밖이라고 거절한다.
+
+보안 기능을 끄지 않고 직접 식별자·실제 고위험 문서와 일반 용어 언급을 분리한다.
+마스터는 문맥으로 Canvas·실제 캘린더·기존 문서 편집과 적절한 표 형태를 구분하고,
+요청을 근거 조사와 표시 산출물로 나눈다. Hermes가 작성한 근거 답변을 TYBot이
+AI 제목·Disclaimer·표를 갖춘 새 Canvas로 전달한다. 날짜·기간·금액·비율은 결정적
+답변 하네스가 원문 정밀도와 값을 보존하며 형식을 통일한다. Hermes 소스는 수정하지 않는다.
+
+상세 설계와 테스트 기준:
+[PII 가드레일 오탐 개선과 TYBot Canvas 산출물](docs/design/pii-guardrail-and-canvas-artifacts.md)
+
+구현 기록: [2026-09-15 B-49 구현](docs/verification/2026-09-15-b49-implementation.md)
+
+Codex QA 및 남은 항목:
+[2026-09-15 B-49 Codex QA](docs/verification/2026-09-15-b49-codex-qa.md)
+
+남은 구현은 `HarnessCell.source_id`를 실제 `EvidenceRef`와 연결하는 구조화 출력 계약이다.
+현재 숫자·날짜 역검증은 동작하지만 셀별 근거 좌표 검증은 운영 완료로 보지 않는다.
+
+### 구현된 것 (2026-09-15)
+
+| 축 | 자리 |
+|---|---|
+| A. 증거 기반 PII 판정 | `src/tybot/pii_screen.py` · `archive/writer.screen` 은 직접 식별자만 |
+| B. 산출물 판정 | `intent.py` planner JSON + `master_planner.artifact_for()` |
+| C. 전문 봇 요청 분리 | `MasterTask.research_question` · `specialist_router.display_hint_for()` |
+| D. Canvas 생성 | `canvas_answer.create(title=, provenance=)` · `canvas_harness.py` |
+| E. 추적 | `QARecord` 에 `delivery_mode`·`harness_result` 등 비민감 값만 |
+
+### 남은 것 — 운영 확인
+
+- [ ] 실제 Slack 에서 일반 용어 포함 이미지 통과 / 실제 PII fixture 차단
+- [ ] 채널 Canvas 공유 범위와 동적 제목 Canvas 재수집 금지
+- [ ] 이미 만들어진 `TYBot 정식 답변` Canvas 가 계속 제외되는지
+
+**주의** — `create_calendar_events`·`edit_existing_canvas` 는 **판정만 되고 실행되지
+않는다.** 지원 목록(`master_planner.SUPPORTED_OPERATIONS`)에 넣기 전에는 사람에게
+지원하지 않는다고 답한다. 실행한 척하지 않는 것이 이 구조의 요점이다.
 
 ---
 

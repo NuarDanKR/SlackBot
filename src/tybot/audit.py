@@ -94,6 +94,20 @@ class QARecord:
     # One request may contain several business tasks. Keep only routing metadata;
     # questions, evidence, and answer bodies remain in the parent QA record.
     task_traces: list[dict] = field(default_factory=list)
+    # --- 산출물·판정 추적 (설계: pii-guardrail-and-canvas-artifacts.md §E) ------
+    #
+    # **본문은 하나도 남기지 않는다.** 코드·개수·버전뿐이다. 원문값을 여기 넣으면
+    # 감사 기록이 근거의 사본이 되고, 권한 경계가 두 곳으로 갈린다.
+    delivery_mode: str = "message"
+    artifact_layout: str = ""
+    artifact_operation: str = ""
+    title_source: str = ""
+    harness_version: int = 0
+    harness_result: str = ""
+    target_unit: str = ""
+    converted_cell_count: int = 0
+    format_retry_count: int = 0
+    guardrail_result: str = ""
 
     @classmethod
     def build(cls, **kw) -> QARecord:

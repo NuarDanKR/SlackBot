@@ -96,6 +96,57 @@ class ChannelSpec:
     def label(self) -> str:
         return f"{self.prefix} {self.org_name}({self.org_code}) · {self.task or '-'}"
 
+    def source_label(self) -> str:
+        """출처에 보일 이름. `[전산팀]공지` · 현장은 `[ABB155]김해외동-채팅방`.
+
+        **사람이 읽는 조직 이름을 쓴다.** 예전에는 채널명을 그대로 붙여서
+        `[tyit]#팀-전산_abb155-공지` 가 됐는데, 그건 사람이 아니라 우리가 만든
+        키다 — 출처를 보고 **어느 조직 자료인지** 바로 알 수 없었다.
+
+        현장은 다르게 쓴다. 현장은 조직명만으로는 어느 현장인지 좁혀지지 않고,
+        사내에서는 **현장 코드로 부른다.** 그래서 코드를 앞에 두고 현장명을
+        업무 앞에 붙인다.
+        """
+        if self.kind == "site":
+            body = f"{self.org_name}-{self.task}" if self.task else self.org_name
+            return f"[{self.org_code}]{body}"
+        return f"[{self.org_display()}]{self.task}"
+
+    def org_display(self) -> str:
+        """조직명 + 종류 접미사. `전산` → `전산팀`.
+
+        조직명에 이미 접미사가 있으면 덧붙이지 않는다 — `전산팀팀` 이 되면
+        사람이 읽다가 걸린다.
+        """
+        suffix = ORG_SUFFIX.get(self.prefix, "")
+        if not suffix or self.org_name.endswith(suffix):
+            return self.org_name
+        return f"{self.org_name}{suffix}"
+
+
+# 두문자 → 조직명 뒤에 붙일 말. **현장은 여기 없다** — 현장은 코드로 부른다.
+#
+# `업무` 채널은 조직이 아니라 협업 채널이고 **주관 팀의 코드를 빌린다**. 그래서
+# 조직명 자리에 적힌 주관 팀 이름을 그대로 쓴다.
+ORG_SUFFIX: dict[str, str] = {
+    "본부": "본부",
+    "실": "실",
+    "본사팀": "팀",
+    "팀": "팀",
+    "업무": "팀",
+    "프로젝트": "팀",
+}
+
+
+def source_label(channel: str) -> str:
+    """채널명 → 출처 표시. 규칙에 안 맞으면 **원래 이름 그대로**.
+
+    못 알아본 채널의 출처를 지어내지 않는다 — 사람이 확인하러 갈 때 그 이름으로
+    찾아야 한다(원칙 2).
+    """
+    spec = parse(channel)
+    return spec.source_label() if spec else (channel or "").strip()
+
 
 def parse(channel: str) -> ChannelSpec | None:
     """채널명을 해석한다. 규칙에 안 맞으면 None(= 수집 대상 아님)."""

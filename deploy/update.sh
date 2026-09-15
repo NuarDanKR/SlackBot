@@ -94,6 +94,10 @@ chmod 644 "$APP/.deployed-commit"
 
 systemctl restart tybot
 
+# 검토자를 지정해도 발송 타이머가 꺼져 있으면 아무 DM도 가지 않는다. 이 기능은
+# 채널 설정에서 매일 발송한다고 명시하므로 배포가 실행기를 함께 활성화한다.
+systemctl enable --now tybot-review-dm.timer
+
 # 콘솔은 별도 프로세스이므로 따로 재시작한다.
 if [[ "$WITH_CONSOLE" == "1" ]] && systemctl is-enabled --quiet tybot-console 2>/dev/null; then
   systemctl restart tybot-console || log '콘솔 재시작 실패 — journalctl -u tybot-console 확인'

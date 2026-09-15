@@ -38,7 +38,33 @@ def _canvas_limit() -> int:
 
     return _limit("TYBOT_CANVAS_MAX_LINES")
 
+# 예전 고정 제목. 이미 만들어진 Canvas 가 남아 있으므로 계속 본다.
 GENERATED_TITLE = "TYBot 정식 답변"
+
+
+def is_generated_canvas(title: str, canvas_id: str = "", body: str = "") -> bool:
+    """봇이 만든 답변 Canvas 인가. **세 겹 중 하나만 맞아도 제외한다.**
+
+    제목이 질문마다 달라지면서(설계 §4) 예전 `title.startswith(...)` 한 겹으로는
+    우리 문서를 못 알아보게 됐다. 못 알아보는 순간 봇 답변이 다시 근거로 수집된다
+    — 원칙 1(요약 재귀 금지)이 조용히 깨지는 자리다.
+
+    1. 제목 접미사 ` · TYBot` — 사람이 제목을 고치면 사라질 수 있다
+    2. 기록한 canvas_id — 디스크 유실·재설치로 사라질 수 있다
+    3. 본문 첫 블록의 Disclaimer — 사람이 지울 수 있다
+
+    한 겹씩은 다 뚫린다. 그래서 셋을 함께 본다.
+    """
+    from ..canvas_answer import DISCLAIMER_MARK, TITLE_SUFFIX, is_generated
+
+    name = (title or "").strip()
+    if name.startswith(GENERATED_TITLE) or name.endswith(TITLE_SUFFIX.strip()):
+        return True
+    if canvas_id and is_generated(canvas_id):
+        return True
+    # 본문은 **앞쪽만** 본다. Disclaimer 는 첫 블록이고, 뒤까지 뒤지면 우리 답변을
+    # 인용한 사람 문서까지 제외된다.
+    return DISCLAIMER_MARK in (body or "")[:2000]
 
 MAX_CANVAS_BYTES = 1024 * 1024  # 캔버스 마크다운 상한(Slack 문서상 1 MiB)
 # **자르지 않는다**(2026-09-14). 300 이던 것을 없앴다 — 캔버스에 정리해 둔 표와
@@ -282,6 +308,12 @@ def canvas_lines(client, channel_id: str, bot_token: str | None) -> CanvasCaptur
         return _unconverted(
             channel_id, title, f"{file_id}:download", f"캔버스 {title}: {e}"
         )
+
+    # 본문을 받고 나서 **한 번 더** 본다. 제목을 사람이 고쳤거나 기록이 유실된
+    # 경우, Disclaimer 가 마지막 방어선이다(원칙 1).
+    if is_generated_canvas(title, file_id, "\n".join(lines[:20])):
+        logger.info("봇이 만든 답변 Canvas 수집 제외(본문 표식) %s", file_id)
+        return CanvasCapture([], [])
 
     payload = "\n".join(lines).encode()
     key = _key(channel_id, file_id, payload)

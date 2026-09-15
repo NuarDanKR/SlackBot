@@ -41,6 +41,7 @@ FILES=(
   schedule_dm_schema.sql
   reviewer_schema.sql
   review_digest_schema.sql
+  summary_review_schema.sql
   llm_secret_schema.sql
   specialist_routing_schema.sql
   specialist_rules_schema.sql

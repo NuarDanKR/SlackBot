@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from ..pii_screen import ScreenMetadata
 from .convert import ConvertError, can_convert, convert
 
 logger = logging.getLogger("tybot.files")
@@ -401,14 +402,27 @@ def stage_attachments(
             own_warnings.append(error)
             logger.exception("첨부 격리 저장 중 예외 %s", f.name)
 
+        screen_result = None
         if extracted is not None:
-            # 한 줄만 거부하고 나머지를 넣으면 금지 문서가 부분 수집된다. 첨부 단위로 막는다.
-            from .writer import screen
+            # **파일명과 추출문 전체를 함께** 본다. 한 줄만 보면 "등기부등본 제출
+            # 일정" 이라고 적힌 일정표가 등기부등본 원문과 구별되지 않는다 —
+            # 그래서 비민감 일정표가 통째로 막혔다(설계 §2.1).
+            #
+            # 막을 때는 여전히 **첨부 단위**다. 한 줄만 빼고 나머지를 넣으면 금지
+            # 문서가 부분 수집된다.
+            from ..pii_screen import screen_document
 
-            refused = next((reason for line in extracted.splitlines() if (reason := screen(line))), None)
-            if refused:
+            screen_result = screen_document(
+                extracted,
+                filename=f.name,
+                coverage_state=(coverage.state if coverage is not None else ""),
+            )
+            for finding in screen_result.findings:
+                if finding.severity == "notice":
+                    own_warnings.append(f"{f.name}: {finding.label}({finding.code})")
+            if screen_result.blocked:
                 state = "pii_refused"
-                error = f"{f.name}: 수집 제외 대상({refused})"
+                error = f"{f.name}: 수집 제외 대상({screen_result.reason})"
                 own_warnings.append(error)
                 extracted = None
 
@@ -437,6 +451,10 @@ def stage_attachments(
                 "extracted": extracted is not None,
                 "error": error,
                 "error_code": "pii_refused" if state == "pii_refused" else error_code,
+                # 판정 근거는 **코드만** 남긴다. OCR 본문·번호 일부·사람 이름을
+                # 감사 metadata 에 복제하지 않는다(설계 §2.4).
+                **(ScreenMetadata.of(screen_result).to_json()
+                   if screen_result is not None else {}),
                 "retryable": retryable if state != "pii_refused" else False,
                 "staged_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 # 얼마나 읽었나. **모르는 값은 `null`** 이다 — 0 이나 100% 로

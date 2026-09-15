@@ -143,10 +143,12 @@ def test_staged_attachment_is_outside_search_archive(tmp_path, monkeypatch):
 def test_staged_attachment_rejects_all_extracted_lines_when_any_line_contains_pii(
     tmp_path, monkeypatch
 ):
+    """직접 식별자 한 줄이면 **첨부 전체**를 막는다. 부분 수집은 하지 않는다."""
     archive = tmp_path / "archive"
     storage = attachment_storage(archive, "pilot", "C123")
     monkeypatch.setattr(
-        "tybot.archive.files.download_bytes", lambda *_: "일반 내용\n계약자 명단".encode()
+        "tybot.archive.files.download_bytes",
+        lambda *_: "일반 내용\n계약자 900101-1234567".encode(),
     )
     raw_file = {
         "id": "F-PII",
@@ -159,11 +161,46 @@ def test_staged_attachment_rejects_all_extracted_lines_when_any_line_contains_pi
     lines, warnings = stage_files([raw_file], "xoxb-test", storage)
 
     assert lines == ["[첨부:수집제외] 자료.txt (txt, 1KB)"]
-    assert warnings and "계약자 명단" in warnings[0]
+    assert warnings and "주민등록번호" in warnings[0]
     metadata = json.loads(
         (storage.staging_dir / "F-PII" / "metadata.json").read_text("utf-8")
     )
     assert metadata["status"] == "pii_refused"
+    assert metadata["screen_result"] == "blocked"
+    assert metadata["screen_codes"] == ["resident-registration-number"]
+    # 감사 metadata 에 번호가 복제되면 막은 의미가 없다(설계 §2.4).
+    assert "900101" not in json.dumps(metadata, ensure_ascii=False)
+
+
+def test_sensitive_term_alone_is_collected_with_a_notice(tmp_path, monkeypatch):
+    """"계약자 명단 취합 예정" 은 **일정 문장**이다. 단어 하나로 막지 않는다.
+
+    예전에는 이 파일이 통째로 `pii_refused` 였고, 봇은 그 일정에 대해
+    "자료가 없다" 고 답했다(설계 §2.1).
+    """
+    archive = tmp_path / "archive"
+    storage = attachment_storage(archive, "pilot", "C123")
+    monkeypatch.setattr(
+        "tybot.archive.files.download_bytes",
+        lambda *_: "9월 공정 일정\n계약자 명단 취합 예정".encode(),
+    )
+    raw_file = {
+        "id": "F-TERM",
+        "name": "9월일정.txt",
+        "filetype": "txt",
+        "size": 30,
+        "url_private_download": "https://example.invalid/file",
+    }
+
+    lines, _ = stage_files([raw_file], "xoxb-test", storage)
+
+    assert any("계약자 명단 취합 예정" in line for line in lines)
+    metadata = json.loads(
+        (storage.staging_dir / "F-TERM" / "metadata.json").read_text("utf-8")
+    )
+    assert metadata["status"] == "converted"
+    assert metadata["screen_result"] == "passed_with_notice"
+    assert "sensitive-term-mentioned" in metadata["screen_codes"]
 
 
 def test_image_is_ocr_converted_without_waiting_for_a_command(

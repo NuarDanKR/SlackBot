@@ -29,6 +29,7 @@ specialist_router.route() 전문 봇 선택 — 현재 질문 문자열만 본�
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 
@@ -87,6 +88,176 @@ DEFAULT_CAPABILITY = {
 }
 
 
+# --- 표시 산출물 (설계: pii-guardrail-and-canvas-artifacts.md §3) ---------------
+#
+# 「Canvas에 캘린더로 작성해줘」 는 **두 가지 요청**이다 — 근거에서 찾을 사실과,
+# 그것을 어떻게 보여 줄지. 예전에는 이 문장이 통째로 전문 봇에 갔고, Hermes 는
+# "Canvas 편집은 내 역할이 아니다" 라고 답했다. 근거 추출은 성공했는데 산출물
+# 요청 때문에 답이 실패로 끝났다.
+DELIVERY_MESSAGE = "message"
+DELIVERY_CANVAS = "canvas"
+DELIVERIES = (DELIVERY_MESSAGE, DELIVERY_CANVAS)
+
+OP_ANSWER_DOCUMENT = "answer_document"
+OP_EDIT_CANVAS = "edit_existing_canvas"
+OP_CREATE_EVENTS = "create_calendar_events"
+OPERATIONS = (OP_ANSWER_DOCUMENT, OP_EDIT_CANVAS, OP_CREATE_EVENTS)
+
+# **지금 배포가 실제로 할 수 있는 것.** 나머지는 판정될 수는 있어도 실행되지
+# 않는다 — 실행한 척하지 않고 지원 여부를 알린다(§3.1).
+SUPPORTED_OPERATIONS = (OP_ANSWER_DOCUMENT,)
+
+LAYOUTS = ("auto", "report", "table", "timeline", "calendar_grid")
+
+# 금액 표시 단위. **사용자가 말한 것만** 받는다(§5.4).
+UNITS = ("원", "천원", "백만원", "억원")
+
+MAX_TITLE_CHARS = 60
+# 예전 고정 제목. 이 값이 제목으로 돌아오면 아무것도 고른 게 아니다.
+LEGACY_TITLE = "TYBot 정식 답변"
+
+# 제목에 남기면 안 되는 것. 제목은 Slack 목록에 한 줄로 보이는 자리라, 문법이
+# 섞이면 깨진 문자열로 보이고 링크가 섞이면 클릭 유도가 된다.
+_TITLE_BANNED = re.compile(r"[\r\n\t<>|`*_#\[\]]|https?://|캔버스|canvas", re.IGNORECASE)
+# 제목이 **새로 만든** 사실인지 보는 거친 검사. 숫자와 직함은 질문에 있던 것만.
+_TITLE_NUMBER = re.compile(r"\d[\d,.]*")
+# `김 부장` 처럼 **성 한 글자 + 직함**도 잡는다. 사람 이름은 제목에서 가장 조용히
+# 새로 생기는 값이라, 넓게 잡고 질문에 있는지 확인하는 편이 낫다.
+_TITLE_PERSON = re.compile(r"[가-힣]{1,4}\s*(부장|과장|차장|대리|사원|팀장|소장|이사|상무|전무|사장|대표)")
+
+
+@dataclass(frozen=True)
+class ArtifactRequest:
+    """결과를 **어떻게 보여 줄지**. 무엇을 답할지가 아니다.
+
+    값은 전부 코드가 검증한 뒤의 것이다. planner 가 준 원본은 `Intent` 에 남는다.
+    """
+
+    delivery: str = DELIVERY_MESSAGE
+    operation: str = OP_ANSWER_DOCUMENT
+    layout: str = "auto"
+    title: str = ""
+    title_source: str = "fallback"
+    target_unit: str = ""
+    # 판정은 됐지만 지금 실행할 수 없는 동작. **빈 문자열이 아니면 실행하지
+    # 않고 사람에게 알린다** — 조용히 다른 것을 해 주면 한 일과 요청이 어긋난다.
+    unsupported_operation: str = ""
+
+    @property
+    def wants_canvas(self) -> bool:
+        """새 답변 Canvas 를 만들어야 하는가."""
+        return (
+            self.delivery == DELIVERY_CANVAS
+            and self.operation == OP_ANSWER_DOCUMENT
+            and not self.unsupported_operation
+        )
+
+    @property
+    def canvas_title(self) -> str:
+        """Canvas metadata 제목. 핵심은 AI 가 쓰고 **생성 주체 표식은 남긴다.**
+
+        접미사는 `canvas_answer` 한 곳에서만 정의한다 — 만드는 쪽과 수집에서
+        제외하는 쪽이 다른 값을 들면 우리가 만든 문서를 우리가 다시 수집한다.
+        """
+        from .canvas_answer import TITLE_SUFFIX
+
+        return f"{self.title}{TITLE_SUFFIX}" if self.title else ""
+
+
+def _clean_title(raw: str, *, question: str) -> tuple[str, str]:
+    """(검증된 제목, 출처). 못 쓰면 빈 제목과 `fallback`.
+
+    **고쳐서 쓰지 않는다.** 이상한 제목을 다듬어 넣으면 그 제목이 모델이 쓴
+    것인지 우리가 만든 것인지 구별할 수 없게 된다.
+    """
+    original = raw or ""
+    # **줄바꿈은 정규화 전에 본다.** `" ".join(split())` 이 먼저 지나가면 여러
+    # 줄짜리 제목이 한 줄로 바뀌어 검사를 통과한다 — 제목은 한 줄이어야 한다.
+    if _TITLE_BANNED.search(original):
+        return "", "fallback"
+    title = " ".join(original.split())
+    if not title or len(title) > MAX_TITLE_CHARS:
+        return "", "fallback"
+    if title.startswith(LEGACY_TITLE):
+        return "", "fallback"
+    # 질문에 없던 숫자·직함을 제목이 **새로 만들면** 그것은 근거 없는 사실이다.
+    asked = question or ""
+    asked_numbers = set(_TITLE_NUMBER.findall(asked))
+    if any(n not in asked_numbers for n in _TITLE_NUMBER.findall(title)):
+        return "", "fallback"
+    if any(m.group(0) not in asked for m in _TITLE_PERSON.finditer(title)):
+        return "", "fallback"
+    return title, "planner"
+
+
+def _fallback_title(question: str, *, layout: str = "auto") -> str:
+    """검증 가능한 결정적 대체 제목.
+
+    질문을 그대로 자르면 ``Canvas에 ...`` 같은 산출물 지시나 Markdown 문법이
+    메타데이터 제목으로 다시 들어갈 수 있다. AI 제목 검증이 실패한 경로에서도
+    제목 계약은 동일하게 지킨다.
+    """
+    head = re.sub(r"https?://\S+", " ", question or "", flags=re.IGNORECASE)
+    head = re.sub(r"캔버스|canvas", " ", head, flags=re.IGNORECASE)
+    head = re.sub(r"[\r\n\t<>|`*_#\[\]]", " ", head)
+    head = re.sub(r"\s*·\s*TYBot\s*$", "", head, flags=re.IGNORECASE)
+    head = " ".join(head.split())[:40].strip(" ,.?!")
+    if head and not head.startswith(LEGACY_TITLE) and not _TITLE_BANNED.search(head):
+        return head
+    defaults = {
+        "calendar_grid": "업무 일정 정리",
+        "timeline": "업무 일정 정리",
+        "table": "업무 현황 정리",
+        "report": "업무 보고",
+    }
+    return defaults.get(layout, "업무 답변")
+
+
+def artifact_for(task: Intent, *, canvas_requested: bool = False) -> ArtifactRequest:
+    """planner 제안 → 검증된 표시 요청.
+
+    `canvas_requested` 는 사용자가 「캔버스로 답변해줘」 라고 **명시한** 경우다.
+    LLM 이 죽어도 그 명시 요청은 살아 있어야 한다 — 규칙이 할 수 있는 것은
+    거기까지다. `캘린더` 같은 표면형으로 layout 이나 쓰기 동작을 정하지 않는다.
+    """
+    delivery = (task.artifact_delivery or "").strip().lower()
+    if delivery not in DELIVERIES:
+        delivery = DELIVERY_CANVAS if canvas_requested else DELIVERY_MESSAGE
+    elif canvas_requested:
+        # 명시 요청은 판정보다 세다. 사용자가 말한 것을 모델 판정으로 덮지 않는다.
+        delivery = DELIVERY_CANVAS
+
+    operation = (task.artifact_operation or "").strip().lower()
+    if operation not in OPERATIONS:
+        operation = OP_ANSWER_DOCUMENT
+    unsupported = "" if operation in SUPPORTED_OPERATIONS else operation
+    if unsupported:
+        log.info("지원하지 않는 산출물 동작 판정: %s", unsupported)
+
+    layout = (task.artifact_layout or "").strip().lower()
+    if layout not in LAYOUTS:
+        layout = "auto"
+
+    question = task.question or task.standalone_question or ""
+    title, source = _clean_title(task.artifact_title, question=question)
+    if not title:
+        title = _fallback_title(task.research_question or question, layout=layout)
+
+    unit = (task.target_unit or "").strip()
+    if unit not in UNITS:
+        unit = ""
+
+    return ArtifactRequest(
+        delivery=delivery,
+        operation=operation,
+        layout=layout,
+        title=title,
+        title_source=source,
+        target_unit=unit,
+        unsupported_operation=unsupported,
+    )
+
+
 @dataclass(frozen=True)
 class MasterTask:
     """하나의 하위 요청. **범위를 넓히는 값은 하나도 들어 있지 않다.**"""
@@ -107,6 +278,11 @@ class MasterTask:
     topic_terms: tuple[str, ...] = ()
     document_query: tuple[str, ...] = ()
     clarification: str = ""
+    # **Canvas 생성 지시를 뺀** 사실 질문. 전문 봇에는 이 문장이 간다 — 산출물
+    # 요청을 그대로 보내면 "그건 내 역할이 아니다" 만 돌아온다(설계 §3.3).
+    research_question: str = ""
+    # 결과를 어떻게 보여 줄지. 검증은 `artifact_for()` 가 이미 끝냈다.
+    artifact: ArtifactRequest = field(default_factory=ArtifactRequest)
     # 기간·첨부 상태처럼 결정적 코드가 계산한 값을 그대로 들고 다닌다.
     intent: Intent | None = field(default=None, compare=False, repr=False)
 
@@ -117,8 +293,12 @@ class MasterTask:
 
     @property
     def question(self) -> str:
-        """전문 봇과 검색에 줄 문장."""
-        return self.standalone_question or self.original_fragment
+        """전문 봇과 검색에 줄 문장.
+
+        `research_question` 이 있으면 그것이 먼저다 — 산출물 지시가 빠진 문장이
+        전문 봇에게 답할 수 있는 형태이기 때문이다.
+        """
+        return self.research_question or self.standalone_question or self.original_fragment
 
 
 @dataclass(frozen=True)
@@ -188,6 +368,17 @@ def _standalone(task: Intent, text: str, turns: list[dict] | None) -> str:
     return f"{prior} — 이어서: {current}" if prior else current
 
 
+def _research_question(task: Intent, standalone: str) -> str:
+    """산출물 지시를 뺀 사실 질문.
+
+    planner 가 줬으면 그것이다. 안 줬으면 **비워 둔다** — 정규식으로 「Canvas에」
+    를 잘라 내면 반쯤 맞는 문장이 되고, 그 문장으로 검색하면 묻지 않은 자료가
+    섞인다. 못 푼 것은 못 푼 대로 두고 원래 문장을 쓴다.
+    """
+    got = (task.research_question or "").strip()
+    return got if got and got != standalone else ""
+
+
 def from_intents(
     tasks: list[Intent],
     *,
@@ -195,6 +386,7 @@ def from_intents(
     turns: list[dict] | None = None,
     planner_model: str = "",
     decision_id: str = "",
+    canvas_requested: bool = False,
 ) -> MasterDecision:
     """분해 결과를 오케스트레이션 판정으로 옮긴다.
 
@@ -214,13 +406,16 @@ def from_intents(
         parents = tuple(
             pid for pid in (task.referenced_record_ids or ()) if pid in allowed_parents
         )
+        standalone = (
+            _standalone(task, text, turns) if kind in BUSINESS_KINDS else fragment
+        )
         out.append(
             MasterTask(
                 kind=kind,
                 original_fragment=fragment,
-                standalone_question=(
-                    _standalone(task, text, turns) if kind in BUSINESS_KINDS else fragment
-                ),
+                standalone_question=standalone,
+                research_question=_research_question(task, standalone),
+                artifact=artifact_for(task, canvas_requested=canvas_requested),
                 required_capability=capability_for(kind, task.required_capability),
                 suggested_specialist=(task.suggested_specialist or "").strip().lower(),
                 routing_confidence=float(task.routing_confidence or 0.0),
@@ -251,19 +446,31 @@ __all__ = [
     "CAPABILITIES",
     "CLARIFY",
     "CONSTRUCTION",
+    "DELIVERIES",
+    "DELIVERY_CANVAS",
+    "DELIVERY_MESSAGE",
     "FACTUAL",
     "INTERNAL_QA",
     "INTERNAL_SUMMARY",
+    "LAYOUTS",
     "LEGAL",
+    "OPERATIONS",
+    "OP_ANSWER_DOCUMENT",
+    "OP_CREATE_EVENTS",
+    "OP_EDIT_CANVAS",
     "SELF_KINDS",
     "SUMMARY",
+    "SUPPORTED_OPERATIONS",
     "SYSTEM",
     "TASK_KINDS",
     "TAX",
+    "UNITS",
     "WRITE",
     "WRITE_KINDS",
+    "ArtifactRequest",
     "MasterDecision",
     "MasterTask",
+    "artifact_for",
     "capability_for",
     "from_intents",
     "new_decision_id",

@@ -52,6 +52,7 @@ from tybot.archive.writer import KST, doc_path
 from tybot.attachment_review import scan
 from tybot.envfile import load_env_file
 from tybot.paths import archive_dir
+from tybot.pii_screen import ScreenMetadata, ScreenResult, screen_document
 
 # `> [2026-09-07 09:00] 홍길동: [첨부:검수대기] 가정산서.xlsx (xlsx, 900KB)`
 STAGED_RE = re.compile(r"^\[첨부:(?P<state>[^\]]*)\]\s*(?P<name>.+?)\s*\(")
@@ -81,7 +82,8 @@ def _parse_ts(raw: str) -> datetime | None:
 
 
 def _record_result(item, *, status: str, error: str = "", body: list[str] | None = None,
-                   failure: BaseException | None = None) -> None:
+                   failure: BaseException | None = None,
+                   screen_result: ScreenResult | None = None) -> None:
     """재변환 결과를 콘솔이 읽는 메타데이터와 미리보기에 함께 반영한다."""
     try:
         from tybot.archive.external_convert import failure_details
@@ -100,6 +102,7 @@ def _record_result(item, *, status: str, error: str = "", body: list[str] | None
             "error": error or None,
             "extracted": body is not None,
             "reprocessed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            **(ScreenMetadata.of(screen_result).to_json() if screen_result else {}),
         })
         tmp = item.meta_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -247,12 +250,17 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         all_rows = [line.strip() for line in body if line.strip()]
-        refused = next((reason for row in all_rows if (reason := writer.screen(row))), None)
-        if refused:
+        screen_result = screen_document(
+            "\n".join(all_rows), filename=item.name, coverage_state="unknown"
+        )
+        if screen_result.blocked:
             refused_total += 1
-            reason = f"수집 제외 대상({refused})"
+            reason = f"수집 제외 대상({screen_result.reason})"
             failed.append((item.name, reason))
-            _record_result(item, status="pii_refused", error=reason)
+            _record_result(
+                item, status="pii_refused", error=reason,
+                screen_result=screen_result,
+            )
             continue
         # **`0` 은 무제한이다.** `[:0]` 이면 「변환 결과가 비어 있다」 로
         # 닫히고, 멀쩡한 문서가 실패로 기록된다.
@@ -310,7 +318,9 @@ def main(argv: list[str] | None = None) -> int:
             failed.append((item.name, reason))
             _record_result(item, status="pii_refused", error=reason)
             continue
-        _record_result(item, status="converted", body=rows)
+        _record_result(
+            item, status="converted", body=rows, screen_result=screen_result
+        )
         done += 1
         print(f"  {channel}: {result.written}줄 추가"
               + (f" · PII 거절 {len(result.refused)}줄" if result.refused else ""))

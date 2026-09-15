@@ -36,10 +36,9 @@
 
 ## 종류를 나눠 둔 이유
 
-`kind` 로 첨부(`attachment`)와 요약 후보(`summary`)를 가른다. 둘은 **같은 사람에게
-같은 시각에** 가야 하지만, 요약 후보 생성(B-37 2단계)은 아직 없다. 지금 한 종류만
-보내고, 생기면 같은 발송 시각·같은 이력 테이블에 얹는다 — 각자 타이머를 기르면
-검토자는 하루에 DM 을 두 번 받는다.
+`kind` 로 첨부(`attachment`)와 요약 후보(`summary`)를 가른다. 둘은 같은 실행기와
+발송 시각을 쓰며, 각 종류의 발송 이력을 같은 테이블에 남긴다. 요약 후보는 Hermes
+계약으로 만들고 원문 대조를 통과한 것만 보낸다.
 """
 from __future__ import annotations
 
@@ -514,7 +513,7 @@ def _channels(conn) -> list[tuple[str, str, str, time]]:
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="검토자에게 하루치 첨부 검수를 보낸다")
+    ap = argparse.ArgumentParser(description="검토자에게 첨부와 요약 후보 검토를 보낸다")
     ap.add_argument("--dry-run", action="store_true", help="보내지 않고 건수만 센다")
     args = ap.parse_args(argv)
 
@@ -570,6 +569,9 @@ def main(argv: list[str] | None = None) -> int:
             from slack_sdk import WebClient
 
             clients = {c.key: WebClient(token=c.bot_token) for c in configs}
+        owners = ChannelOwnerStore(
+            heartbeat.state_dir() / "channel-owners.json"
+        ).responsibles()
         result = run(
             conn,
             clients,
@@ -578,15 +580,55 @@ def main(argv: list[str] | None = None) -> int:
             extracted_for=extracted_for,
             # 검토자를 안 정한 채널은 개설자에게 간다. 안 그러면 그 채널 첨부는
             # 아무도 확인하지 않고, 아무 일도 안 일어난다.
-            owners=ChannelOwnerStore(
-                heartbeat.state_dir() / "channel-owners.json"
-            ).responsibles(),
+            owners=owners,
         )
+
+        summary_result = None
+        if not args.dry_run:
+            from . import summary_review
+            from .config import cost_state_path
+            from .gateway import cost
+            from .gateway.base import Message, Sensitivity
+            from .gateway.budget import WorkspaceLimits
+            from .gateway.router import Router
+
+            router = Router.from_default_registry(
+                daily_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
+                default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
+                cost_state_path=cost_state_path(os.getenv("QA_LOG_DIR", "./qa-log")),
+                workspace_limits=WorkspaceLimits(),
+            )
+
+            def complete_summary(system: str, user: str, workspace: str) -> str:
+                with cost.attribute_to(workspace):
+                    response = router.complete(
+                        [Message("system", system), Message("user", user)],
+                        sensitivity=Sensitivity.CONFIDENTIAL,
+                        max_tokens=4096,
+                    )
+                return response.text
+
+            summary_result = summary_review.run(
+                conn,
+                clients,
+                archive=store,
+                channels=channels,
+                owners=owners,
+                complete=complete_summary,
+            )
 
     logger.info(
         "검토 하루치 sent=%d skipped=%d failed=%d 받는사람없음=%d",
         result.sent, result.skipped, result.failed, result.no_recipient,
     )
+    if summary_result is not None:
+        logger.info(
+            "요약 검토 generated=%d sent=%d skipped=%d failed=%d",
+            summary_result.generated,
+            summary_result.sent,
+            summary_result.skipped,
+            summary_result.failed,
+        )
     return 0
 
 

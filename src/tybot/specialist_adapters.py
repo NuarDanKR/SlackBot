@@ -88,6 +88,23 @@ def _governed_prompt(prompt: str) -> str:
     return prompt.rstrip() + MASTER_OUTPUT_POLICY
 
 
+def _with_display_hint(body: str, request) -> str:
+    """표시 힌트를 질문 **뒤에** 붙인다(설계 §3.3).
+
+    형식 안내일 뿐이고 **동작 요청이 아니다.** 전문 봇이 할 일은 근거에서 사실을
+    쓰는 것 하나다 — Canvas 생성·공유는 호출자가 한다. 그래서 힌트 끝에 그 말을
+    명시한다. 없으면 모델이 "Canvas를 만들 수 없다" 는 실행 거절로 답한다.
+    """
+    hint = str(getattr(request, "display_hint", "") or "").strip()
+    if not hint:
+        return body
+    return (
+        f"{body}\n\n"
+        f"표시 힌트: {hint}\n"
+        "Canvas 생성과 공유는 호출자가 담당한다. 너는 근거로 사실만 답한다."
+    )
+
+
 class AdapterError(Exception):
     """어댑터를 만들 수 없다. 호출부는 마스터 답변으로 넘어간다."""
 
@@ -228,7 +245,7 @@ class PromptSpecialist:
 
         # 시각 근거는 **텍스트 뒤에** 붙인다. 앞에 두면 프롬프트 캐시가 매번
         # 깨지고(캐시는 접두사 일치), 이미지가 근거 텍스트보다 앞서 읽힌다.
-        body = f"근거:\n{evidence}\n\n질문: {request.question}"
+        body = _with_display_hint(f"근거:\n{evidence}\n\n질문: {request.question}", request)
         content = (
             [{"type": "text", "text": body}, *request.visual]
             if getattr(request, "visual", ())
@@ -375,7 +392,7 @@ class ToolSpecialist:
         # 마스터가 이미 고른 근거가 있으면 함께 준다. 없어도 된다 —
         # 도구로 스스로 찾는 것이 이 어댑터의 전제다.
         seed = "\n\n".join(item.text for item in request.evidence)[:MAX_EVIDENCE_CHARS]
-        opening = f"질문: {request.question}"
+        opening = _with_display_hint(f"질문: {request.question}", request)
         if seed:
             opening = f"이미 찾아 둔 근거:\n{seed}\n\n{opening}"
         first: str | list = opening

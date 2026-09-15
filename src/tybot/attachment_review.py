@@ -72,6 +72,19 @@ class Attachment:
     coverage_converted: int | None = None
     missing_units: tuple[int, ...] = ()
     quality_flags: tuple[str, ...] = ()
+    # PII 판정 결과(설계 §2.4). **코드만** 담는다 — 본문·번호·이름은 없다.
+    # 구형 metadata 에는 아예 없어서 `screen_version` 은 0 이 될 수 있다.
+    screen_version: int = 0
+    screen_result: str = ""
+    screen_codes: tuple[str, ...] = ()
+
+    @property
+    def screen_note(self) -> str:
+        """사람에게 보일 한 줄. 판정이 없거나 그냥 통과면 빈 문자열이다."""
+        if self.screen_result in ("", "passed"):
+            return ""
+        label = "차단" if self.screen_result == "blocked" else "주의"
+        return f"{label}: {', '.join(self.screen_codes)}" if self.screen_codes else label
 
     @property
     def coverage_note(self) -> str:
@@ -140,6 +153,9 @@ def _from_meta(meta: dict, meta_path: Path, workspace: str, channel_id: str) -> 
             int(n) for n in (meta.get("missing_units") or []) if str(n).isdigit()
         ),
         quality_flags=tuple(str(f) for f in (meta.get("quality_flags") or []) if str(f)),
+        screen_version=int(meta.get("screen_version") or 0),
+        screen_result=str(meta.get("screen_result") or ""),
+        screen_codes=tuple(str(c) for c in (meta.get("screen_codes") or []) if str(c)),
     )
 
 
@@ -281,8 +297,10 @@ def status_line(item: Attachment) -> str:
     name = item.name or item.file_id
     if item.status in FAILURE_STATES or item.status == PII_REFUSED:
         return f"{name} — {label}: {public_failure_reason(item)}"
-    note = item.coverage_note
-    return f"{name} — {label} ({note})" if note else f"{name} — {label}"
+    # 통과했지만 민감 용어가 있던 파일은 **표시는 남긴다**(설계 §2.4). 막지
+    # 않았다는 것과 아무 일도 없었다는 것은 다르다.
+    parts = [x for x in (item.coverage_note, item.screen_note) if x]
+    return f"{name} — {label} ({' · '.join(parts)})" if parts else f"{name} — {label}"
 
 
 def _write_status(item: Attachment, status: str, *, actor: str, note: str) -> Attachment:

@@ -394,7 +394,9 @@ def test_summary_marks_other_workspace_in_sources(tmp_path):
     evidence = fake.calls[0][1].content
     assert "[pilot] 채널 #파일럿_공개" in evidence  # 근거에 소유 워크스페이스 표기
     assert "### 채널 #경영_내부" in evidence  # 자기 워크스페이스는 태그 없음
-    assert any(c.startswith("[pilot] ") for c in ans.citations)
+    # 출처의 앞자리는 **조직 이름**이 가져갔다. 다른 워크스페이스 자료라는 사실은
+    # 뒤에 남는다 — 지우면 「이건 우리 자료가 아니다」 를 알 수 없다(원칙 4).
+    assert any("(pilot)," in c for c in ans.citations)
 
 
 def test_summary_named_workspace_excludes_other_visible_workspaces(tmp_path, monkeypatch):
@@ -424,7 +426,7 @@ def test_summary_named_workspace_excludes_other_visible_workspaces(tmp_path, mon
     assert "전산팀 업무" in evidence
     assert "파일럿 업무" not in evidence
     assert "경영 업무" not in evidence
-    assert all(c.startswith("[tyit] ") for c in ans.citations)
+    assert all("(tyit)," in c for c in ans.citations)
 
 
 def test_named_workspace_filter_uses_db_metadata_without_workspace_env(monkeypatch):

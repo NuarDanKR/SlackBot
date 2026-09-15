@@ -84,6 +84,12 @@ class SpecialistRequest:
     # 그 길이 「업무 답변은 전문 봇만」 규칙의 가장 큰 구멍이었다.
     visual: tuple = ()
     editing_text: str = ""
+    # **표시 힌트**. 「Markdown 표로 답하라」 같은 형식 안내뿐이다(설계 §3.3).
+    #
+    # Canvas 를 만들라는 **동작 요청은 여기 오지 않는다.** 전문 봇에 그걸 보내면
+    # "Canvas 편집은 내 역할이 아니다" 라는 실행 거절이 돌아오고, 근거 추출이
+    # 성공했는데도 답이 실패로 끝난다. 생성·공유는 호출자 몫이다.
+    display_hint: str = ""
 
     def __post_init__(self) -> None:
         if not self.question.strip():

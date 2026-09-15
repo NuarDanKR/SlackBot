@@ -1,6 +1,14 @@
 from unittest.mock import Mock
 
-from tybot.canvas_answer import TITLE, create, grant_channel, grant_user, markdown, parse_request
+from tybot.canvas_answer import (
+    DISCLAIMER,
+    TITLE,
+    create,
+    grant_channel,
+    grant_user,
+    markdown,
+    parse_request,
+)
 
 
 def test_long_answers_use_canvas_unless_message_requested():
@@ -30,7 +38,10 @@ def test_canvas_is_only_requested_by_explicit_phrases():
 def test_canvas_markdown_converts_slack_source_links():
     body = "*결론*\n답변\n\n출처:\n• <https://example.slack.com/F1|보고서 원본>"
     rendered = markdown(body)
-    assert rendered.startswith(f"# {TITLE}")
+    # 본문 첫 블록은 Disclaimer 다. **H1 제목은 넣지 않는다** — Slack 이 Canvas
+    # 제목을 따로 보여 주므로 예전 형식은 같은 제목을 두 번 보여 줬다(설계 §4).
+    assert rendered.startswith(DISCLAIMER)
+    assert f"# {TITLE}" not in rendered
     assert "## 결론" in rendered
     assert "- [보고서 원본]" in rendered
     assert "[보고서 원본](https://example.slack.com/F1)" in rendered

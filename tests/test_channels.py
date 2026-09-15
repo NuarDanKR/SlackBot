@@ -151,3 +151,48 @@ def test_we_still_create_only_one_shape():
 def test_the_retired_paren_format_is_still_rejected():
     """`_` 를 허용해도 구 형식이 되살아나면 안 된다 — 괄호는 조직코드가 아니다."""
     assert parse("#팀_자금(ABB540)_주간보고") is None
+
+
+# --- 출처 표시 이름 -----------------------------------------------------------
+#
+# 오너 지시(2026-09-15): 출처를 `[tyit]#팀-전산_abb155-공지` 가 아니라
+# `[전산팀]공지` 로 남긴다. 현장은 `[조직코드]현장명-업무명`.
+def test_source_label_uses_the_organisation_not_the_channel_key():
+    from tybot.channels import source_label
+
+    assert source_label("#팀-전산_abb155-공지") == "[전산팀]공지"
+    assert source_label("#본사팀-전산_ABB155-공지") == "[전산팀]공지"
+    assert source_label("#본부-건축_AAA100-주간보고") == "[건축본부]주간보고"
+    assert source_label("#실-감사_AAB200-점검") == "[감사실]점검"
+
+
+def test_site_channels_are_named_by_their_code():
+    """현장은 조직명만으로 안 좁혀진다. 사내에서도 **코드로 부른다.**"""
+    from tybot.channels import source_label
+
+    assert source_label("#현장-김해외동_180182-채팅방") == "[180182]김해외동-채팅방"
+
+
+def test_task_channels_borrow_the_owning_team_name():
+    """`업무` 는 조직이 아니라 협업 채널이고 주관 팀 코드를 빌린다."""
+    from tybot.channels import source_label
+
+    assert source_label("#업무-전산_ABB155-ERP이관") == "[전산팀]ERP이관"
+
+
+def test_an_org_name_that_already_ends_with_the_suffix_is_not_doubled():
+    """`전산팀팀` 이 되면 사람이 읽다가 걸린다."""
+    from tybot.channels import source_label
+
+    assert source_label("#본사팀-전산팀_ABB155-공지") == "[전산팀]공지"
+
+
+def test_an_unrecognised_channel_keeps_its_own_name():
+    """못 알아본 채널의 출처를 지어내지 않는다.
+
+    사람이 확인하러 갈 때 **그 이름으로** 찾아야 한다(원칙 2).
+    """
+    from tybot.channels import source_label
+
+    assert source_label("#잡담방") == "#잡담방"
+    assert source_label("#팀_자금(ABB540)_주간보고") == "#팀_자금(ABB540)_주간보고"

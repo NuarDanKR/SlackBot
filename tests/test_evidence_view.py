@@ -84,19 +84,21 @@ def test_report_shows_raw_lines_verbatim():
 def test_report_groups_by_channel():
     lines = [_line(), _line(text="다른 줄"), _line(channel="#현장-김해외동_1800249-채팅방")]
     text = report(lines, query="기성금", own_workspace="mgmt")
-    assert text.count("*#본사팀-전산_ABB110-회의*") == 1
-    assert "*#현장-김해외동_1800249-채팅방*" in text
+    # 출처와 **같은 이름**으로 묶인다. 현장은 코드로 부른다.
+    assert text.count("*[전산팀]회의*") == 1
+    assert "*[1800249]김해외동-채팅방*" in text
 
 
 def test_other_workspace_is_marked():
     """읽는 사람이 '이건 우리 자료가 아니다' 를 알아야 한다."""
     text = report([_line(workspace="pilot")], query="기성금", own_workspace="mgmt")
-    assert "[pilot]" in text
+    # 앞자리는 조직 이름이 가져갔고, 워크스페이스는 뒤에 남는다.
+    assert "(pilot)" in text
 
 
 def test_own_workspace_is_not_marked():
     text = report([_line(workspace="mgmt")], query="기성금", own_workspace="mgmt")
-    assert "[mgmt]" not in text
+    assert "(mgmt)" not in text
 
 
 def test_timestamp_is_trimmed():

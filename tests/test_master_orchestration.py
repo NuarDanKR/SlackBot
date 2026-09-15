@@ -487,6 +487,42 @@ def test_every_candidate_is_tried_at_most_once(monkeypatch):
     assert outcome.status == specialist_router.UNAVAILABLE
 
 
+def test_execution_refusal_retry_keeps_count_and_total_cost(monkeypatch):
+    """형식 보정 재호출도 횟수와 비용에서 사라지지 않는다."""
+    from tybot import specialist_adapters
+
+    class RefuseThenAnswer:
+        touched = None
+        last_model = "m"
+        last_cost_usd = 0.0
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            self.last_cost_usd = 0.01 * self.calls
+            if self.calls == 1:
+                return "Canvas를 생성할 수 없습니다."
+            return "근거에서 확인한 일정입니다."
+
+    adapter = RefuseThenAnswer()
+    monkeypatch.setattr(specialist_adapters, "build", lambda *a, **kw: adapter)
+    monkeypatch.setattr(specialist_router, "available", lambda ws: [_row()])
+    monkeypatch.setattr(
+        specialist_router, "capabilities_of", lambda s: ("internal_document_qa",)
+    )
+
+    outcome = specialist_router.serve(
+        _task(), workspace="pilot", evidence=["원문"], router=None,
+        authorization_id="pilot:member", record_call_row=False,
+    )
+
+    assert outcome.ok
+    assert outcome.answer.format_retry_count == 1
+    assert outcome.answer.cost_usd == pytest.approx(0.03)
+
+
 # =============================================================================
 # §6.5 시각 근거
 # =============================================================================

@@ -425,6 +425,8 @@ class SpecialistAnswer:
     documents: tuple = ()
     # 아직 아카이브에 없는 실시간 대화의 Slack 링크(2026-09-11 원칙 개정).
     live_links: tuple[str, ...] = ()
+    # 실행 지시를 거절해 형식 보정을 다시 요청한 횟수. 현재 상한은 1이다.
+    format_retry_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -675,6 +677,7 @@ def serve(
             editing_text=str(getattr(task, "editing_text", "") or ""),
             task_kind=str(getattr(task, "kind", "") or ""),
             required_capability=str(getattr(task, "required_capability", "") or ""),
+            display_hint=display_hint_for(task),
         )
         if answer is not None:
             return SpecialistOutcome(
@@ -701,6 +704,50 @@ def serve(
     )
 
 
+# layout → 형식 안내. **동작 요청이 아니다.** 전문 봇은 사실만 쓰고, Canvas 생성과
+# 공유는 호출자가 한다(설계 §3.3).
+DISPLAY_HINTS = {
+    "calendar_grid": (
+        "반복되는 일정은 날짜/내용/관련 공지/비고 열의 Markdown 표로 답하라. "
+        "날짜는 근거에 적힌 정밀도를 그대로 쓴다."
+    ),
+    "timeline": "시간 순서가 드러나게 시작·종료와 내용을 Markdown 표로 답하라.",
+    "table": "같은 필드가 반복되면 Markdown 표로 답하라. 열은 2~8개로 유지한다.",
+    "report": "결론을 먼저 쓰고 근거를 문단으로 잇는다.",
+}
+
+
+# 전문 봇이 **사실이 없어서**가 아니라 **동작을 못 해서** 거절한 문장.
+#
+# "자료가 없습니다" 와 구별해야 한다. 전자는 우리가 고칠 수 있고 후자는 아니다.
+_REFUSAL_RE = re.compile(
+    r"(캔버스|canvas|문서)[^.\n]{0,20}(만들|생성|작성|편집|수정)[^.\n]{0,20}"
+    r"(못|불가|없|어렵|않습니다|아닙니다)"
+    r"|(제|내)\s*(역할|권한|기능)\s*(이|은|가)?\s*아닙",
+    re.IGNORECASE,
+)
+REFUSAL_CORRECTION = (
+    "Canvas를 생성하지 마라. 제공된 근거로 사실을 답하는 것만 네 역할이다."
+)
+
+
+def is_execution_refusal(text: str) -> bool:
+    """실행 거절인가. **첫 문단만** 본다 — 본문 중간의 주석까지 보면 오탐이 난다."""
+    head = "\n".join((text or "").strip().splitlines()[:3])
+    return bool(_REFUSAL_RE.search(head))
+
+
+def display_hint_for(task) -> str:
+    """이 작업의 표시 힌트. 없으면 빈 문자열이다.
+
+    `auto` 는 힌트를 만들지 않는다 — **모르면서 지시하면** 전문 봇이 자료에 맞지
+    않는 형식에 답을 억지로 끼워 넣는다.
+    """
+    artifact = getattr(task, "artifact", None)
+    layout = str(getattr(artifact, "layout", "") or "")
+    return DISPLAY_HINTS.get(layout, "")
+
+
 def _run_one(
     chosen: Specialist,
     *,
@@ -719,6 +766,7 @@ def _run_one(
     editing_text: str = "",
     task_kind: str = "",
     required_capability: str = "",
+    display_hint: str = "",
 ) -> tuple[SpecialistAnswer | None, str]:
     """후보 하나를 실제로 부른다. `(답, 사유코드)`."""
     import time
@@ -736,6 +784,7 @@ def _run_one(
     result = None
     adapter = None
     error_code = ""
+    format_retry_count = 0
     try:
         toolbox = None
         if chosen.execution_mode == "tools" and toolbox_factory is not None:
@@ -761,6 +810,7 @@ def _run_one(
             allow_empty_evidence=chosen.execution_mode == "tools",
             visual=tuple(visual or ()),
             editing_text=editing_text,
+            display_hint=display_hint,
         )
         result = execute(
             adapter,
@@ -771,6 +821,44 @@ def _run_one(
             timeout_seconds=90,
         )
         error_code = result.error_code
+        if result.result == "success" and is_execution_refusal(result.text):
+            # 전문 봇이 "Canvas는 못 만든다" 는 **실행 거절**로 답했다. 근거는
+            # 이미 찾았는데 산출물 요청 때문에 답이 통째로 버려진다 — 그래서 한
+            # 번만 보정해 다시 묻는다.
+            #
+            # **한 번뿐이다.** 무한 재시도는 한 질문이 그날 예산을 다 쓰게 하고,
+            # 보정 뒤에도 사실 답변이 없으면 마스터가 대신 만들지 않는다(§3.3).
+            log.info("전문 봇 실행 거절 감지 key=%s - 1회 보정 요청", chosen.key)
+            format_retry_count = 1
+            previous_cost = float(getattr(adapter, "last_cost_usd", 0.0) or 0.0)
+            retried = execute(
+                adapter,
+                SpecialistRequest(
+                    question=question,
+                    evidence=authorized,
+                    allow_empty_evidence=chosen.execution_mode == "tools",
+                    visual=tuple(visual or ()),
+                    editing_text=editing_text,
+                    display_hint=REFUSAL_CORRECTION,
+                ),
+                fallback=lambda: "",
+                confidence=confidence,
+                minimum_confidence=chosen.min_confidence,
+                timeout_seconds=90,
+            )
+            # ToolSpecialist는 라운드 비용을 누적하지만 PromptSpecialist는 호출마다
+            # 마지막 비용으로 교체한다. 보정 호출도 실제 비용이므로 첫 호출을 잃지
+            # 않는다.
+            if chosen.execution_mode != "tools":
+                adapter.last_cost_usd = (
+                    previous_cost + float(getattr(adapter, "last_cost_usd", 0.0) or 0.0)
+                )
+            if retried.result == "success" and not is_execution_refusal(retried.text):
+                result = retried
+                error_code = retried.error_code
+            else:
+                result = None
+                error_code = "specialist-output-unusable"
     except specialist_adapters.AdapterError as exc:
         error_code = str(exc).partition(":")[0].strip() or "adapter-build"
         log.warning("전문가를 만들지 못했습니다 key=%s: %s", chosen.key, exc)
@@ -844,6 +932,7 @@ def _run_one(
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
             documents=touched_documents,
             live_links=touched_live,
+            format_retry_count=format_retry_count,
         ),
         "",
     )

@@ -22,6 +22,10 @@ from .store import (
 
 KST = timezone(timedelta(hours=9))
 
+# 예전 키워드 목록. **판정에 쓰지 않는다** — `pii_screen` 이 대신한다.
+#
+# 지우지 않고 남기는 이유는 진단 도구가 「무엇을 위험 용어로 보는가」 를 읽기
+# 때문이다. 이 목록으로 차단하던 시절에 일정표가 통째로 막혔다(설계 §2.1).
 PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\d{6}\s*[-–]\s*[1-4]\d{6}"), "주민등록번호 형식"),
     (re.compile(r"등기부\s*등본"), "등기부등본"),
@@ -46,11 +50,18 @@ class IncomingMessage:
 
 
 def screen(text: str) -> str | None:
-    """PII/제외 대상이면 사유 반환, 아니면 None."""
-    for pat, name in PII_PATTERNS:
-        if pat.search(text):
-            return name
-    return None
+    """줄 단위 PII 검사. 제외 대상이면 사유 반환, 아니면 None.
+
+    **직접 식별자만 본다**(`pii_screen.screen_line`). 예전에는 `등기부등본` 이라는
+    일반 명사도 같은 수준으로 막아서, 사람이 "등기부등본 제출 예정" 이라고 **말한
+    것**까지 아카이브에서 사라졌다. 줄 하나로는 문서인지 언급인지 알 수 없다.
+
+    문서 전체의 유형 판정은 `pii_screen.screen_document()` 가 파일명과 추출문을
+    함께 보고 한다. 이 함수는 호환을 위해 남는 얇은 wrapper 다.
+    """
+    from ..pii_screen import screen_line
+
+    return screen_line(text)
 
 
 def _slugify(value: str) -> str:

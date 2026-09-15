@@ -13,6 +13,7 @@ from . import document_evidence, documents
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
 from .attachment_review import find_sendable, status_line
+from .channels import source_label
 from .evidence_refs import refs_from_hits
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
@@ -176,6 +177,8 @@ class Answer:
     specialist_error_code: str = ""
     attempted_specialists: list[str] = field(default_factory=list)
     required_capability: str = ""
+    format_retry_count: int = 0
+    guardrail_result: str = ""
 
     @property
     def doc_count(self) -> int:
@@ -439,8 +442,8 @@ def _specialist_citations(special, hits: list[SearchHit], ctx) -> list[str]:
     if documents:
         out = []
         for doc in documents[:5]:
-            prefix = f"[{doc.workspace}] " if doc.workspace != ctx.workspace else ""
-            out.append(f"{prefix}{doc.channel}, 📄{doc.path.name}")
+            tail = f" ({doc.workspace})" if doc.workspace != ctx.workspace else ""
+            out.append(f"{source_label(doc.channel)}{tail}, 📄{doc.path.name}")
     else:
         out = [
             h.citation(with_workspace=h.doc.workspace != ctx.workspace)
@@ -539,6 +542,37 @@ def _visual_originals(root: Path, hits: list[SearchHit]) -> documents.Attached:
         if item is not None:
             items.append(item)
     return documents.collect(items)
+
+def _guardrail_result(root: Path, hits: list[SearchHit]) -> str:
+    """선택 근거에 연결된 첨부의 가장 강한 PII 판정 결과.
+
+    QA에는 상태 코드만 남긴다. 구형 첨부처럼 판정 metadata가 없거나 파일을
+    정확히 하나로 잇지 못하면 빈 값으로 두어, 모르는 상태를 ``passed``로
+    만들지 않는다.
+    """
+    names = set(_attachment_names(hits))
+    if not names:
+        return ""
+    from . import attachment_review
+
+    try:
+        staged = attachment_review.scan(root)
+    except Exception as exc:  # noqa: BLE001 - 추적 실패가 답변을 막으면 안 된다
+        logger.warning("첨부 가드레일 결과 조회 실패: %s", exc)
+        return ""
+    rank = {"passed": 1, "passed_with_notice": 2, "blocked": 3}
+    states: list[str] = []
+    for coordinates in names:
+        matches = [
+            item for item in staged
+            if (item.workspace, item.channel_id, item.name) == coordinates
+        ]
+        # 같은 이름으로 여러 파일이 올라온 경우 어느 판정이 이번 근거 것인지
+        # 알 수 없다. 가장 강한 값을 임의 선택하지 않고 unknown(빈 값)으로 둔다.
+        if len(matches) == 1 and matches[0].screen_result in rank:
+            states.append(matches[0].screen_result)
+    return max(states, key=rank.get) if states else ""
+
 
 def _attachment_refs(root: Path, hits: list[SearchHit]):
     """근거 줄에 보이는 첨부를 **staging 메타데이터의 file_id** 로 잇는다.
@@ -675,6 +709,8 @@ def _blocks_from_hits(hits: list[SearchHit], ctx) -> tuple[list, list, list, int
     for (workspace, channel), group in grouped.items():
         group = sorted(group, key=lambda h: (h.line.ts or "", h.line.lineno))
         ws_tag = "" if workspace == ctx.workspace else f"[{workspace}] "
+        # 출처에서는 **조직 이름이 앞자리**라, 워크스페이스는 뒤로 민다(원칙 4).
+        ws_suffix = "" if workspace == ctx.workspace else f" ({workspace})"
         body = "\n".join(f"[{h.line.ts}] {h.line.speaker}: {h.line.text}" for h in group)
         block = f"### {ws_tag}채널 {channel}\n{body}"
         blocks.append(block)
@@ -688,7 +724,9 @@ def _blocks_from_hits(hits: list[SearchHit], ctx) -> tuple[list, list, list, int
             if key in seen:
                 continue
             seen.add(key)
-            doc_citations.append(f"{ws_tag}{channel}, 📄{source.name}({date})")
+            doc_citations.append(
+                f"{source_label(channel)}{ws_suffix}, 📄{source.name}({date})"
+            )
         citations.extend(doc_citations)
         parts.append((block, doc_citations, group))
     return blocks, citations, parts, total
@@ -1007,6 +1045,7 @@ class AnswerEngine:
             body = "\n".join(f"[{ln.ts}] {ln.speaker}: {ln.text}" for ln in recent)
             # 다른 워크스페이스 자료임을 근거와 출처 양쪽에 밝힌다.
             ws_tag = "" if doc.workspace == ctx.workspace else f"[{doc.workspace}] "
+            ws_suffix = "" if doc.workspace == ctx.workspace else f" ({doc.workspace})"
             block = f"### {ws_tag}채널 {doc.channel}\n{body}"
             blocks.append(block)
 
@@ -1019,7 +1058,9 @@ class AnswerEngine:
                 if source_key in seen_sources:
                     continue
                 seen_sources.add(source_key)
-                doc_citations.append(f"{ws_tag}{doc.channel}, 📄{source.name}({date})")
+                doc_citations.append(
+                    f"{source_label(doc.channel)}{ws_suffix}, 📄{source.name}({date})"
+                )
             citations.extend(doc_citations)
             specialist_parts.append((block, doc_citations, recent_hits))
 
@@ -1123,6 +1164,8 @@ class AnswerEngine:
                     "answered",
                     withheld=withheld,
                     specialist=special.specialist,
+                    format_retry_count=int(getattr(special, "format_retry_count", 0) or 0),
+                    guardrail_result=_guardrail_result(self._store.root, selected_hits),
                     required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(selected_hits, self._store.root),
@@ -1221,6 +1264,8 @@ class AnswerEngine:
                     "advice",
                     terms=list(terms or []),
                     specialist=special.specialist,
+                    format_retry_count=int(getattr(special, "format_retry_count", 0) or 0),
+                    guardrail_result=_guardrail_result(self._store.root, hits),
                     required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
                     evidence_refs=refs_from_hits(hits, self._store.root),
@@ -1539,6 +1584,7 @@ class AnswerEngine:
                     0,
                     "answered",
                     specialist=special.specialist,
+                    format_retry_count=int(getattr(special, "format_retry_count", 0) or 0),
                     subject_terms=list(terms or []),
                     context_resolution="specialist_search",
                     required_capability=str(
@@ -1630,6 +1676,8 @@ class AnswerEngine:
                     len(hits),
                     "answered",
                     specialist=special.specialist,
+                    format_retry_count=int(getattr(special, "format_retry_count", 0) or 0),
+                    guardrail_result=_guardrail_result(self._store.root, hits),
                     withheld=withheld,
                     partial_attachments=partial,
                     required_capability=str(getattr(task, "required_capability", "") or ""),
