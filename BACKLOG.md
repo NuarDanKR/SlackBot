@@ -237,6 +237,12 @@ DB 재처리 큐(claim/lease/backoff/circuit breaker)는 구현했다(Claude/202
 운영 검증 전이다. Canvas 첨부는 `files.info`에서 현재 채널 공유가 명시된 파일만
 허용하며, 공유 정보를 확인할 수 없으면 수집하지 않는다.
 
+2026-09-15 후속으로 `scripts/backfill_channel_history.py`를 추가했다. 봇이 현재 참여한
+수집 대상 채널에 한해 초대 이전 메시지와 스레드 답글을 페이지 끝까지 읽고, 현재 Canvas와
+채널 파일 탭을 함께 동기화한다. 채널별 체크포인트와 실패 스레드 재시도 목록을
+`STATE_DIR/history-backfill.json`에 남기며 기본 실행은 조회 전용이다. Slack이 제공하지
+않는 Canvas 과거 수정 이력은 복원 범위가 아니다.
+
 ### 운영 명령
 
 채널 파일 탭 백필은 기본이 조회 전용이다. 채널 없는 `files.list`는 호출하지 않는다.

@@ -78,7 +78,7 @@ def test_mismatch_report_shows_the_expected_format():
     text = report(ChannelFacts(channel="#점심메뉴"))
     assert "조직코드" in text
     assert "#팀-전산_ABB110-주간회의" in text
-    assert "소급 수집되지 않습니다" in text  # 기대치를 미리 낮춘다
+    assert "자동 소급되지 않으며" in text  # 상시 수집과 관리자 백필을 구분한다
 
 
 def test_collecting_report_shows_archive_stats():

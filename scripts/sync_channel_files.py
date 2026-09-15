@@ -19,7 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
 from tybot import search_index
 from tybot.archive import writer
-from tybot.archive.channel_files import collect, scan
+from tybot.archive.channel_files import ChannelFileScan, collect, scan
 from tybot.archive.files import attachment_storage
 from tybot.archive.store import ArchiveStore
 from tybot.attachment_trace import confirm_archived
@@ -132,12 +132,34 @@ def sync_workspace(
             stats["failed"] += 1
         if not apply or not result.candidates:
             continue
-        staged = collect(result, cfg.bot_token, storage, workspace=cfg.key)
-        stats["collected"] += len(staged)
-        written, complete = _publish(archive, cfg, channel, staged)
-        stats["written"] += written
-        if not complete:
-            stats["failed"] += 1
+        candidate_count = len(result.candidates)
+        for item_index, candidate in enumerate(result.candidates, start=1):
+            file_name = str(candidate.get("name") or candidate.get("id") or "이름 없음")
+            declared_size = int(candidate.get("size") or 0)
+            print(
+                f"  [{item_index}/{candidate_count}] {file_name} "
+                f"({declared_size // 1024:,}KB) 처리 중...",
+                flush=True,
+            )
+            single = ChannelFileScan(channel_id=channel_id, candidates=[candidate])
+            staged = collect(single, cfg.bot_token, storage, workspace=cfg.key)
+            if not staged:
+                print("    건너뜀(다른 수집 경로에서 이미 처리됨)", flush=True)
+                continue
+            stats["collected"] += len(staged)
+            try:
+                written, complete = _publish(archive, cfg, channel, staged)
+            except Exception as exc:  # noqa: BLE001 - 다음 실행에서 진단할 파일을 표시한다
+                log.error("[%s] %s 원문 반영 실패: %s", cfg.key, file_name, exc)
+                stats["failed"] += 1
+                print("    실패(원문 반영)", flush=True)
+                continue
+            stats["written"] += written
+            warnings = [warning for staged_item in staged for warning in staged_item.warnings]
+            if not complete:
+                stats["failed"] += 1
+            result_label = "완료" if complete and not warnings else "검토 필요"
+            print(f"    {result_label} · 원문 {written}줄", flush=True)
     return stats
 
 
@@ -159,16 +181,20 @@ def main(argv: list[str] | None = None) -> int:
 
     total = {key: 0 for key in ("channels", "listed", "known", "missing", "collected",
                                 "written", "failed")}
-    for cfg in workspaces:
-        got = sync_workspace(
-            cfg,
-            args.archive,
-            apply=args.apply,
-            channel_ids=set(args.channel) or None,
-            pace=max(0.0, args.pace),
-        )
-        for key in total:
-            total[key] += got[key]
+    try:
+        for cfg in workspaces:
+            got = sync_workspace(
+                cfg,
+                args.archive,
+                apply=args.apply,
+                channel_ids=set(args.channel) or None,
+                pace=max(0.0, args.pace),
+            )
+            for key in total:
+                total[key] += got[key]
+    except KeyboardInterrupt:
+        print("\n중단했습니다. 완료된 파일은 반영됐으며 같은 명령으로 이어서 실행할 수 있습니다.")
+        return 130
     print(
         "\n채널 {channels}개 · 파일 {listed}건 · 기존 {known}건 · 미수집 {missing}건 · "
         "수집 {collected}건 · 원문 {written}줄 · 실패 {failed}건".format(**total)

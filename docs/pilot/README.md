@@ -146,9 +146,12 @@ Slack 에는 기본 투표 기능이 없어서 직접 만들었다.
 - `수집`/`전체수집` 은 분류를 거치지 않는 **명시 명령**이다 — LLM 판단으로 수집이 트리거되면 안 되기 때문.
 
 ### 수집 범위 — 알아야 할 것
-1. **실시간이 본선.** Slack이 2025-05 이후 생성된 비-마켓플레이스 앱의 `conversations.history` 를
-   **분당 1요청 / 회당 15건**으로 제한한다. 과거 대화 대량 백필은 사실상 불가.
-   대신 `message.channels`/`message.groups` 이벤트로 앞으로의 대화를 전부 잡는다.
+1. **실시간이 본선.** `message.channels`/`message.groups` 이벤트로 앞으로의 대화를
+   빠짐없이 잡는다. 과거 대화는 자동 소급하지 않지만 관리자가
+   `scripts/backfill_channel_history.py`를 명시 실행해 메시지·스레드·파일·현재 Canvas를
+   채널별 체크포인트 방식으로 가져올 수 있다. Slack 내부용 커스텀 앱은 현재
+   `conversations.history`/`conversations.replies` Tier 3 대상이지만, 실제 워크스페이스의
+   429 응답에 맞춰 `--pace`를 보수적으로 설정한다.
 2. **채널 이름이 수집 여부를 정한다.** `#<본부|실|팀|현장|프로젝트>-<조직명>_<조직코드>-<업무>`
    형식이면 공개 채널은 봇이 **스스로 참여**한다(`/invite` 불필요). 규칙 밖 이름(잡담·개인 채널)은
    수집하지 않는다. 새 채널·이름 변경은 `channel_created`·`channel_rename` 이벤트로 즉시 반영된다.
@@ -185,10 +188,41 @@ Workspace Admin/Owner는 Slack `users.info`로 자동 확인하며 워크스페�
 | **실시간**(기본) | 규칙에 맞고 봇이 초대된 채널의 대화·첨부 | 초대 이전 과거는 못 본다 |
 | **정기 배치**(`tybot-collect.timer`) | 규칙 채널의 단절 구간·캔버스 스냅샷 | 채널당 매시 15건, 스레드 답글 제외 |
 | **수동 `수집`** | ① 새로 초대한 채널의 최근 대화<br>② **스레드 답글**(다른 두 경로가 놓치는 부분)<br>③ 권한·쓰기 동작 확인 | 요청당 15건, 스레드 5개 |
+| **관리자 소급 수집** | 봇 초대 이전의 채널 메시지·전체 스레드·파일 탭·현재 Canvas | 명시 실행 전용, 봇이 현재 참여한 규칙 채널만, Canvas 과거 수정 이력 제외 |
 
 수동 `수집` 이 여전히 필요한 이유는 ②다. `conversations.history` 는 **스레드 답글을 주지 않는다.**
 실시간 수집은 답글을 잡지만, 봇이 없던 기간의 답글은 `conversations.replies` 로만 가져올 수 있고
-그걸 호출하는 건 수동 `수집` 뿐이다.
+관리자 소급 수집은 이를 전체 페이지에 대해 수행한다. 일반 사용자의 즉시 확인에는 수동 `수집`,
+운영자가 과거 전체를 복구할 때는 소급 수집 스크립트를 쓴다.
+
+#### 초대 이전 자료 소급 수집
+
+기본 실행은 대상과 체크포인트만 출력한다. `--workspace`를 생략하면 DB에 등록된 모든
+워크스페이스, `--channel`을 생략하면 봇이 참여한 모든 수집 대상 채널을 처리한다.
+
+```bash
+# 특정 채널 미리보기 / 실제 실행
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/backfill_channel_history.py \
+  --workspace tyit --channel C0BQUGRHV2A
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/backfill_channel_history.py \
+  --workspace tyit --channel C0BQUGRHV2A --apply
+
+# 지정 워크스페이스 전체. --workspace는 반복할 수 있다.
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/backfill_channel_history.py \
+  --workspace pilot --workspace mgmt --workspace tyit --apply
+
+# 등록된 모든 워크스페이스의 참여 채널 전체
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/backfill_channel_history.py --apply
+```
+
+긴 작업은 중단해도 같은 명령으로 이어진다. 단계적으로 실행하려면 `--max-pages 10`처럼
+채널당 페이지 수를 제한한다. 비공개 채널과 아직 봇이 참여하지 않은 채널은 Slack API가
+내용을 주지 않으므로 먼저 봇을 초대해야 한다. 재실행은 멱등이며, 체크포인트부터 다시
+검사하려는 경우에만 `--restart`를 사용한다.
 
 ### 답변 범위는 질문자 권한
 질문자가 멤버인 채널만 근거로 쓴다. 전 채널 통합조회가 필요하면 `.env` 의 `EXEC_USERS` 에
