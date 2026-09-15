@@ -2830,3 +2830,16 @@ table.grid .dim {
 .note.warn {
   color: var(--warn);
 }
+
+.channel-job-log {
+  max-height: 240px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text-2);
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

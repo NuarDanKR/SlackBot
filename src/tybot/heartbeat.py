@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -52,6 +52,9 @@ class BotStatus:
     updated_at: str
     # 아카이브·감사기록에 쓸 수 없는 상태면 사유. 정상이면 None
     write_problem: str | None = None
+    # 원문이 아직 없는 채널도 콘솔에서 관리·백필할 수 있게 ID와 이름만 싣는다.
+    # 메시지, 파일명, 구성원 정보는 상태 파일에 넣지 않는다.
+    channel_rows: list[dict[str, str | bool]] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)

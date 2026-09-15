@@ -36,6 +36,7 @@ from . import (
     answer_records,
     audit_store,
     channel_admin,
+    collection_jobs,
     deploy_approval_store,
     env_settings,
     health,
@@ -213,6 +214,13 @@ class ChannelOwnerBody(BaseModel):
     channels: list[str] = Field(min_length=1, max_length=500)   # "워크스페이스:채널ID"
     # 기존 담당자는 그 채널을 만든 실제 요청자일 수 있다. 덮으려면 명시해야 한다.
     overwrite: bool = False
+
+
+class ChannelCollectionJobBody(BaseModel):
+    """콘솔에서 시작하는 고정된 채널 수집 작업."""
+
+    mode: Literal["files", "history"]
+    channels: list[str] = Field(min_length=1, max_length=500)
 
 
 class SpecialistDecisionBody(BaseModel):
@@ -2368,9 +2376,6 @@ def _auth_error(_request, exc: AuthError) -> JSONResponse:
     return JSONResponse(status_code=401, content={"detail": str(exc)})
 
 
-mount_frontend()
-
-
 # ===========================================================================
 # 채널 관리 — 담당자를 한 화면에서 정한다
 # ===========================================================================
@@ -2450,3 +2455,52 @@ def set_channel_owner(
         "summary": totals,
         "rows": [row.to_json() for row in rows],
     }
+
+
+@app.get("/api/channels/collection-jobs/latest")
+def latest_channel_collection_job(user: User) -> dict:
+    _require_admin(user)
+    return {"job": collection_jobs.latest()}
+
+
+@app.post("/api/channels/collection-jobs", status_code=202)
+def start_channel_collection_job(
+    body: ChannelCollectionJobBody, request: Request, user: User
+) -> dict:
+    """선택한 실제 채널에 대해 파일 또는 과거 전체 수집을 시작한다."""
+    _require_admin(user)
+    _check_write_request(request)
+
+    rows, _totals = channel_admin.snapshot()
+    known = {
+        (row.workspace, row.channel_id)
+        for row in rows
+        if row.workspace and row.channel_id
+    }
+    targets: list[tuple[str, str]] = []
+    for raw in body.channels:
+        workspace, separator, channel_id = str(raw).partition(":")
+        target = (workspace, channel_id)
+        if not separator or target not in known:
+            raise HTTPException(status_code=422, detail=f"관리 대상이 아닌 채널입니다: {raw}")
+        targets.append(target)
+
+    try:
+        job = collection_jobs.start(body.mode, targets, actor=user.email)
+    except collection_jobs.CollectionJobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email,
+        category="collection",
+        action="channel-files" if body.mode == "files" else "channel-history",
+        target_type="channel",
+        target_id=str(job["id"]),
+        outcome="requested",
+        metadata={"target_count": len(set(targets))},
+    )
+    return {"job": job}
+
+
+# 정적 `/` 마운트는 모든 `/api/*` 라우트보다 반드시 뒤에 둔다. Starlette는 등록
+# 순서대로 라우트를 찾으므로 앞에 두면 이후 API가 정적 파일의 404로 가로채진다.
+mount_frontend()

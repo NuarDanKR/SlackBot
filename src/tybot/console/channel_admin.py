@@ -137,7 +137,7 @@ def build_rows(
                 channel=channel,
             )
             by_channel[key] = row
-        row.documents += 1
+        row.documents += int(doc.get("documents", 1))
         row.lines += int(doc.get("lines") or 0)
         row.attachment_lines += int(doc.get("attachmentLines") or 0)
         last = str(doc.get("lastIngestedAt") or "")
@@ -301,13 +301,48 @@ def snapshot(days: int = 365) -> tuple[list[ChannelRow], dict]:
     """화면이 쓰는 표와 머리글 숫자."""
     from . import reader
 
+    docs = reader.collected_docs()
+    docs.extend(heartbeat_channel_rows())
     rows = build_rows(
-        reader.collected_docs(),
+        docs,
         owners=owner_store().all(),
         reviewers=reviewer_map(),
         answers=answer_counts(days),
     )
     return rows, summary(rows)
+
+
+def heartbeat_channel_rows() -> list[dict]:
+    """봇이 현재 참여한 채널 중 아직 원문 문서가 없는 채널도 표에 보탠다.
+
+    콘솔이 Slack API를 직접 부르면 화면을 열 때마다 토큰과 rate limit을 쓰게 된다.
+    봇 heartbeat에는 채널 ID·이름만 있고 업무 본문은 없다.
+    """
+    from .. import heartbeat
+
+    status_root = heartbeat.state_dir() / "status"
+    rows: list[dict] = []
+    if not status_root.is_dir():
+        return rows
+    for path in sorted(status_root.glob("*.json")):
+        workspace = path.stem
+        status = heartbeat.read(workspace) or {}
+        for channel in status.get("channel_rows") or []:
+            channel_id = str(channel.get("id") or "")
+            name = str(channel.get("name") or "")
+            if channel_id and name:
+                rows.append(
+                    {
+                        "workspace": workspace,
+                        "workspaceLabel": workspace,
+                        "channelId": channel_id,
+                        "channel": name,
+                        "documents": 0,
+                        "lines": 0,
+                        "attachmentLines": 0,
+                    }
+                )
+    return rows
 
 
 # --- 담당자로 고를 수 있는 사람 -------------------------------------------------

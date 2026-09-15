@@ -49,6 +49,40 @@ def test_one_row_per_channel_not_per_document():
     assert row.lines == 45
 
 
+def test_a_heartbeat_only_channel_is_visible_without_becoming_a_document():
+    (row,) = _rows([
+        _doc(documents=0, lines=0, attachmentLines=0, lastIngestedAt="")
+    ])
+
+    assert row.channel_id == "C1"
+    assert row.documents == 0
+    assert row.lines == 0
+
+
+def test_heartbeat_channels_are_available_before_the_first_archive_document(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    status = tmp_path / "status" / "tyit.json"
+    status.parent.mkdir(parents=True)
+    status.write_text(
+        '{"channel_rows":[{"id":"C_NEW","name":"#팀-전산_abb155-신규"}]}',
+        encoding="utf-8",
+    )
+
+    assert ca.heartbeat_channel_rows() == [
+        {
+            "workspace": "tyit",
+            "workspaceLabel": "tyit",
+            "channelId": "C_NEW",
+            "channel": "#팀-전산_abb155-신규",
+            "documents": 0,
+            "lines": 0,
+            "attachmentLines": 0,
+        }
+    ]
+
+
 def test_channels_are_joined_by_id_not_name():
     """이름은 바뀐다. 이름으로 이으면 담당자가 조용히 다른 채널에 붙는다."""
     docs = [_doc(channel="#옛이름", channel_id="C1"), _doc(channel="#새이름", channel_id="C1")]

@@ -19,7 +19,7 @@
  * 검토자는 채널 소유자가 Slack 에서 정합니다. 여기서도 바꾸면 같은 결정이 두 곳에서
  * 나고, 누가 정했는지가 흐려집니다.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
 import { Empty, Failed, Loading, Metric, PageHead, Section, agoLabel } from '../components/primitives'
@@ -69,6 +69,19 @@ interface AssignResult {
   ok: boolean
 }
 
+interface CollectionJob {
+  id: string
+  mode: 'files' | 'history'
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  targetCount: number
+  createdAt: string
+  startedAt: string | null
+  finishedAt: string | null
+  exitCode: number | null
+  errorCode: string | null
+  logTail: string[]
+}
+
 const key = (row: ChannelRow) => `${row.workspace}:${row.channelId}`
 
 /** 사람 이름을 붙여 보여 줍니다. 모르는 ID 는 ID 그대로 — 지어내지 않습니다. */
@@ -79,12 +92,22 @@ function personLabel(id: string, people: Map<string, Candidate>): string {
 
 export function Channels({ onToast }: { onToast: (message: string) => void }) {
   const resource = useResource<ChannelsPayload>('/api/channels')
+  const jobResource = useResource<{ job: CollectionJob | null }>('/api/channels/collection-jobs/latest')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [owner, setOwner] = useState('')
   const [overwrite, setOverwrite] = useState(false)
-  const [filter, setFilter] = useState<'missing' | 'all'>('missing')
+  const [filter, setFilter] = useState<'missing' | 'all'>('all')
   const [busy, setBusy] = useState(false)
+  const [collectionBusy, setCollectionBusy] = useState(false)
   const [result, setResult] = useState<AssignResult | null>(null)
+  const job = jobResource.data?.job ?? null
+  const jobActive = job?.status === 'queued' || job?.status === 'running'
+
+  useEffect(() => {
+    if (!jobActive) return
+    const timer = window.setInterval(jobResource.reload, 3000)
+    return () => window.clearInterval(timer)
+  }, [jobActive, job?.id, jobResource.reload])
 
   const people = useMemo(() => {
     const map = new Map<string, Candidate>()
@@ -127,7 +150,7 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     setResult(null)
     try {
       const body = { owner, channels: [...selected], overwrite }
-      const got = await api.post<{ result: AssignResult }>('/api/channels/owner', body)
+      const got = await api.securePost<{ result: AssignResult }>('/api/channels/owner', body)
       setResult(got.result)
       onToast(got.result.message)
       setSelected(new Set())
@@ -141,12 +164,38 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     }
   }
 
+  async function startCollection(mode: 'files' | 'history') {
+    if (selected.size === 0 || jobActive) return
+    if (
+      mode === 'history' &&
+      !window.confirm(
+        `선택한 ${selected.size}개 채널의 과거 메시지·스레드·파일·현재 Canvas를 소급 수집합니다. 계속할까요?`,
+      )
+    )
+      return
+    setCollectionBusy(true)
+    try {
+      const got = await api.securePost<{ job: CollectionJob }>('/api/channels/collection-jobs', {
+        mode,
+        channels: [...selected],
+      })
+      onToast(mode === 'files' ? '채널 파일 수집을 시작했습니다.' : '과거 전체 수집을 시작했습니다.')
+      jobResource.reload()
+      if (got.job.status === 'failed') onToast('수집 작업을 시작하지 못했습니다.')
+    } catch (e) {
+      const error = e as ApiError
+      onToast(error.message || '수집 작업을 시작하지 못했습니다.')
+    } finally {
+      setCollectionBusy(false)
+    }
+  }
+
   return (
     <>
       <PageHead
         crumb="수집 · 채널"
         title="채널 관리"
-        note="채널 담당자를 정합니다. 담당자가 없는 채널은 `/채널 수정` 이 되지 않고, 검토자도 정할 수 없어 첨부 검수 DM 이 아무에게도 가지 않습니다."
+        note="채널 담당자를 정하고, 선택한 채널의 파일 동기화와 봇 초대 이전 데이터 소급 수집을 실행합니다."
       />
 
       <Section title="현황">
@@ -191,7 +240,10 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
             <input
               type="checkbox"
               checked={filter === 'missing'}
-              onChange={(e) => setFilter(e.target.checked ? 'missing' : 'all')}
+              onChange={(e) => {
+                setFilter(e.target.checked ? 'missing' : 'all')
+                setSelected(new Set())
+              }}
             />
             담당자 없는 채널만
           </label>
@@ -221,9 +273,60 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
         )}
       </Section>
 
+      <Section
+        title="수집 작업"
+        lead="선택한 채널의 파일 탭만 동기화하거나, 봇 초대 이전 메시지와 스레드까지 소급 수집합니다. 작업은 한 번에 하나만 실행됩니다."
+      >
+        <div className="toolbar">
+          <button
+            type="button"
+            className="btn"
+            disabled={collectionBusy || jobActive || selected.size === 0}
+            onClick={() => startCollection('files')}
+          >
+            {selected.size}개 채널 파일 수집
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={collectionBusy || jobActive || selected.size === 0}
+            onClick={() => startCollection('history')}
+          >
+            {selected.size}개 채널 과거 전체 수집
+          </button>
+          {jobActive && <span className="chip info">수집 실행 중</span>}
+        </div>
+        {job && (
+          <div className={`notice ${job.status === 'failed' ? 'bad' : ''}`}>
+            <div className="notice-kind">
+              {job.mode === 'files' ? '파일 수집' : '과거 전체 수집'}
+            </div>
+            <div>
+              <div className="notice-title">
+                {job.status === 'queued' && '실행 대기'}
+                {job.status === 'running' && `실행 중 · 대상 ${job.targetCount}개 채널`}
+                {job.status === 'completed' && `완료 · 대상 ${job.targetCount}개 채널`}
+                {job.status === 'failed' && `실패 · ${job.errorCode ?? '원인 미확인'}`}
+              </div>
+              {job.logTail.length > 0 && (
+                <pre className="channel-job-log">{job.logTail.join('\n')}</pre>
+              )}
+            </div>
+          </div>
+        )}
+        {jobResource.error && <p className="note warn">작업 상태를 읽지 못했습니다: {jobResource.error.message}</p>}
+      </Section>
+
       <Section title={`채널 ${rows.length}개`}>
         {rows.length === 0 ? (
-          <Empty title="해당하는 채널이 없습니다" note="담당자가 모두 지정되어 있습니다." />
+          <Empty
+            title="해당하는 채널이 없습니다"
+            note={
+              filter === 'missing'
+                ? '담당자가 모두 지정되어 있습니다.'
+                : '봇이 참여한 수집 대상 채널이 없습니다.'
+            }
+          />
         ) : (
           <div className="grid-scroll">
             <table className="grid">

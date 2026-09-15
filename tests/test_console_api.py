@@ -2205,3 +2205,65 @@ def test_assignment_is_audited(client, monkeypatch):
     done = [e for e in events if e.get("category") == "channel"]
     assert done and done[-1]["target_id"] == "U1"
     assert done[-1]["metadata"]["changed"] == 1
+
+
+def test_channel_collection_job_starts_for_known_channels(client, monkeypatch):
+    _channel_rows(monkeypatch)
+    seen = {}
+
+    def _start(mode, targets, *, actor):
+        seen.update(mode=mode, targets=targets, actor=actor)
+        return {"id": "a" * 32, "status": "queued", "mode": mode}
+
+    monkeypatch.setattr(console_app.collection_jobs, "start", _start)
+    response = client.post(
+        "/api/channels/collection-jobs",
+        json={"mode": "history", "channels": ["tyit:C1"]},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 202
+    assert seen["mode"] == "history"
+    assert seen["targets"] == [("tyit", "C1")]
+
+
+def test_channel_collection_job_rejects_unknown_channels(client, monkeypatch):
+    _channel_rows(monkeypatch)
+    monkeypatch.setattr(
+        console_app.collection_jobs,
+        "start",
+        lambda *args, **kwargs: pytest.fail("unknown channel must not start a process"),
+    )
+
+    response = client.post(
+        "/api/channels/collection-jobs",
+        json={"mode": "files", "channels": ["tyit:C999"]},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 422
+
+
+def test_channel_collection_jobs_are_admin_only(client, monkeypatch):
+    _channel_rows(monkeypatch)
+    assert (
+        client.get("/api/channels/collection-jobs/latest", headers=member(client)).status_code
+        == 403
+    )
+
+
+def test_channel_api_is_registered_before_the_static_frontend(tmp_path, monkeypatch):
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setenv("CONSOLE_DIST", str(tmp_path))
+
+    console_app.mount_frontend()
+
+    channel_index = next(
+        index for index, route in enumerate(console_app.app.routes)
+        if getattr(route, "path", None) == "/api/channels"
+    )
+    frontend_index = max(
+        index for index, route in enumerate(console_app.app.routes)
+        if getattr(route, "name", None) == "console"
+    )
+    assert channel_index < frontend_index

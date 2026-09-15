@@ -3181,6 +3181,7 @@ class WorkspaceBot:
         호출하면 콘솔에도 토큰이 필요해지고 rate limit 을 나눠 쓰게 된다.
         """
         channels = uninvited = 0
+        channel_rows: list[dict[str, str | bool]] = []
         try:
             client = self.app.client
             res = client.conversations_list(
@@ -3189,6 +3190,17 @@ class WorkspaceBot:
             found = res.get("channels", [])
             channels = sum(1 for c in found if c.get("is_member"))
             uninvited = len(found) - channels
+            channel_rows = [
+                {
+                    "id": str(channel.get("id") or ""),
+                    "name": "#" + str(channel.get("name") or ""),
+                    "is_private": bool(channel.get("is_private")),
+                }
+                for channel in found
+                if channel.get("is_member")
+                and channel.get("id")
+                and should_collect("#" + str(channel.get("name") or ""))
+            ]
         except Exception as e:
             log.debug("채널 수를 세지 못했습니다(상태 파일): %s", e)
 
@@ -3207,6 +3219,7 @@ class WorkspaceBot:
                     f"{label}: {why}" for label, why in self.path_problems.items()
                 )
                 or None,
+                channel_rows=channel_rows,
             )
         )
 
