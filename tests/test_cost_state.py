@@ -41,7 +41,8 @@ def test_state_file_shape_is_readable(tmp_path):
     CostGuard(10.0, state_path=state).record(1.25)
 
     data = json.loads(state.read_text(encoding="utf-8"))
-    assert data == {"day": TODAY, "spent_usd": 1.25}
+    # 워크스페이스 칸이 늘었다. 전체 누적은 그대로 사람이 읽을 수 있어야 한다.
+    assert data == {"day": TODAY, "spent_usd": 1.25, "by_workspace": {}}
 
 
 def test_broken_state_file_does_not_block(tmp_path, caplog):

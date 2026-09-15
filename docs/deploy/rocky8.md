@@ -165,7 +165,10 @@ SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 ANTHROPIC_API_KEY=sk-ant-...
 DEFAULT_MODEL=claude-haiku-4-5-20251001
-DAILY_COST_LIMIT_USD=5
+DAILY_COST_LIMIT_USD=5                 # ← 전 워크스페이스 **합산** 상한(바깥 테두리).
+                                       #    콘솔의 워크스페이스별 상한은 이 안쪽 칸이다.
+                                       #    이 값이 작으면 워크스페이스 상한을 올려도
+                                       #    여기서 먼저 막힌다 — 워크스페이스가 늘면 같이 올린다
 PILOT_WORKSPACE=pilot
 BOT_NAME=tybot
 ARCHIVE_DIR=/var/lib/tybot/archive     # ← 서버 경로. 빠뜨리면 /opt/tybot/archive 로 가고
@@ -739,7 +742,7 @@ sudo -u tybot .venv/bin/python scripts/schedule_folder_approve.py revoke <폴더
 | SELinux 관련 거부 | `sudo ausearch -m avc -ts recent`. 표준 경로(`/var/lib`)를 쓰면 보통 발생하지 않음. **enforcing 을 끄지 말고** 원인부터 확인 |
 | `conversations.history` 실패/느림 | Slack 신규 앱 제한(분당 1요청/15건). 정상 — 백필은 느리고, 실시간 수집이 본선 |
 | 비공개 채널이 안 보임 | 해당 채널에서 `/invite @tybot`. 봇은 초대 없이 비공개 채널을 목록조차 못 본다 |
-| 답변이 오늘 갑자기 끊김 | 일별 비용 상한. `journalctl -u tybot \| grep 한도` / `DAILY_COST_LIMIT_USD` 조정 |
+| 답변이 오늘 갑자기 끊김 | 일별 비용 상한. `journalctl -u tybot \| grep 한도` — **오류 문구가 어느 상한인지 말한다.** 「워크스페이스 ... 상한」 이면 콘솔 > 워크스페이스 관리에서 올린다(재시작 불필요, 1분 내 반영). 「전체 ... 상한」 이면 `DAILY_COST_LIMIT_USD` 를 올리고 `systemctl restart tybot` |
 
 ---
 

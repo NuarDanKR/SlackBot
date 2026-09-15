@@ -91,6 +91,7 @@ from ..feedback import (
 from ..feedback import (
     validation_errors as feedback_errors,
 )
+from ..gateway import cost
 from ..identity import backfill as identity_backfill
 from ..identity import ensure as ensure_identity
 from ..intent import (
@@ -552,6 +553,20 @@ class WorkspaceBot:
 
     # --- 핸들러 -----------------------------------------------------------
     def _register(self) -> None:
+        @self.app.middleware
+        def attribute_cost(next):
+            """이 워크스페이스에서 들어온 일의 LLM 비용을 이 워크스페이스에 단다.
+
+            **핸들러마다 걸지 않고 여기 한 곳에 건다.** 핸들러는 서른 개가 넘고
+            계속 늘어난다 — 한 군데만 빠지면 그 경로의 비용은 아무에게도 안 달리고,
+            그 사실은 화면에 「정상」 으로 보인다.
+
+            `App` 은 워크스페이스마다 하나다. 그래서 여기서 `self.workspace` 가
+            곧 이 요청의 주인이다.
+            """
+            with cost.attribute_to(self.workspace):
+                next()
+
         @self.app.shortcut("create_work_channel")
         def on_create_shortcut(ack, body, client):
             ack()
@@ -3211,8 +3226,17 @@ class WorkspaceBot:
                 realtime=self.realtime,
                 channels=channels,
                 uninvited_channels=uninvited,
-                spend_today_usd=round(self.engine.spent_today(), 6),
-                limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
+                # **이 워크스페이스의 값이어야 한다.** 전에는 전체 누적과 전체
+                # 환경변수를 워크스페이스 칸에 그대로 넣었다 — 화면은 "경영본부
+                # $4.92 / $10" 처럼 보였지만 $4.92 는 전 워크스페이스 합계였고
+                # $10 은 아무도 안 보는 숫자였다(2026-09-15).
+                spend_today_usd=round(self.engine.spent_today_for(self.workspace), 6),
+                limit_usd=(
+                    self.engine.limit_for(self.workspace)
+                    # 워크스페이스 상한이 없으면 걸리는 것은 전체 상한이다.
+                    # 그걸 그대로 보여 준다 — 빈 칸으로 두면 "상한 없음" 으로 읽힌다.
+                    or float(os.getenv("DAILY_COST_LIMIT_USD", "50"))
+                ),
                 started_at=self._started.astimezone(KST).isoformat(timespec="seconds"),
                 updated_at=heartbeat.now_iso(),
                 write_problem="; ".join(
@@ -3371,6 +3395,7 @@ def specialist_hook(router, store=None, live_fetch=None):
 
 def build_bots() -> list[WorkspaceBot]:
     """설정을 읽어 워크스페이스별 봇을 만든다. 공유 자원은 한 번만 생성한다."""
+    from ..gateway.budget import WorkspaceLimits
     from ..gateway.router import Router
 
     archive_dir = os.getenv("ARCHIVE_DIR", "./archive")
@@ -3386,6 +3411,9 @@ def build_bots() -> list[WorkspaceBot]:
         default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
         # 재시작해도 당일 누적이 유지되어야 상한이 실제로 상한 역할을 한다.
         cost_state_path=cost_state_path(str(qa_log.root)),
+        # 워크스페이스별 상한. **콘솔에서 바꾸면 재시작 없이 먹어야 한다** —
+        # 안 그러면 사람은 화면에서 올린 숫자가 먹었다고 믿고 계속 막힌다.
+        workspace_limits=WorkspaceLimits(),
     )
     # 실시간 조회는 워크스페이스별 클라이언트가 필요한데 엔진은 전체에 하나다.
     # 등록부를 먼저 만들고 봇이 생긴 뒤 채운다 — 훅이 만들어질 때는 아직 봇이 없다.

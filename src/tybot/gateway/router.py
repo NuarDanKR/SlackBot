@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from .base import (
     LLMResponse,
@@ -14,7 +14,7 @@ from .base import (
     ToolSpec,
     error_reason,
 )
-from .cost import CostGuard
+from .cost import CostGuard, current_workspace
 
 logger = logging.getLogger("tybot.gateway")
 
@@ -92,6 +92,7 @@ class Router:
         providers: dict[str, Provider] | None = None,
         cost_state_path: str | None = None,
         fallback_models: Sequence[str] | None = None,
+        workspace_limits: Callable[[], Mapping[str, float]] | None = None,
     ) -> Router:
         """기본 레지스트리로 라우터 생성.
 
@@ -99,6 +100,10 @@ class Router:
         테스트에서는 fake provider dict 를 주입한다.
 
         cost_state_path 를 주면 당일 누적 비용이 재시작에도 유지된다(운영 기본값).
+
+        workspace_limits 를 주면 **워크스페이스별 상한**이 전체 상한 안쪽에서
+        따로 걸린다. 안 주면 전체 상한 하나만 본다 — 그러면 한 워크스페이스가
+        지갑을 다 쓰고 나머지가 굶어도 아무 데도 안 보인다.
         """
         if providers is None:
             from .providers import build_default_providers
@@ -113,7 +118,11 @@ class Router:
         return cls(
             providers=providers,
             registry=dict(DEFAULT_REGISTRY),
-            cost_guard=CostGuard(daily_limit_usd, state_path=cost_state_path),
+            cost_guard=CostGuard(
+                daily_limit_usd,
+                state_path=cost_state_path,
+                workspace_limits=workspace_limits,
+            ),
             default_model=default_model,
             fallback_models=fallback_models,
         )
@@ -121,6 +130,14 @@ class Router:
     @property
     def spent_today(self) -> float:
         return self._cost.spent_today
+
+    def spent_today_for(self, workspace: str) -> float:
+        """이 워크스페이스의 당일 누적. 화면이 「누가 썼나」 를 말할 근거다."""
+        return self._cost.spent_by_workspace().get(workspace.strip().lower(), 0.0)
+
+    def limit_for(self, workspace: str) -> float | None:
+        """이 워크스페이스에 실제로 걸리는 상한. 없으면 `None`(전체 상한만)."""
+        return self._cost.limit_for(workspace)
 
     @property
     def default_model(self) -> str:
@@ -223,13 +240,19 @@ class Router:
         else:
             raise last_error if last_error else UnknownModel("호출할 모델이 없습니다")
         self._cost.record(resp.cost_usd)
+        # **어느 워크스페이스가 썼는지 로그에 남긴다.** 안 남기면 「누가 지갑을
+        # 비웠나」 를 사후에 되짚을 수 없다 — 2026-09-15 에 그 질문에 답하지 못했다.
+        workspace = current_workspace()
         logger.info(
-            "llm_call model=%s provider=%s in=%d out=%d cost=$%.4f spent_today=$%.2f",
+            "llm_call model=%s provider=%s ws=%s in=%d out=%d cost=$%.4f"
+            " ws_today=$%.2f spent_today=$%.2f",
             resp.model,
             resp.provider,
+            workspace or "-",
             resp.input_tokens,
             resp.output_tokens,
             resp.cost_usd,
+            self._cost.spent_by_workspace().get(workspace, 0.0),
             self._cost.spent_today,
         )
         return resp

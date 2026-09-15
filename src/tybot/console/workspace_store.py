@@ -308,3 +308,25 @@ def record_runtime_result(key: str, error: str | None) -> None:
         raise
     except Exception as exc:
         raise WorkspaceStoreError(f"워크스페이스 연결 상태 기록 실패: {exc}") from exc
+
+
+def limits_by_workspace() -> dict[str, float]:
+    """워크스페이스별 일별 상한. 봇이 **매 호출 전에** 참고한다.
+
+    `list_workspaces()` 와 따로 두는 이유: 저쪽은 토큰 마스크·읽기 권한까지 조인해
+    오는 무거운 조회다. 상한은 답변 경로에서 자주 읽으므로 필요한 두 칸만 가져온다.
+
+    `state` 는 보지 않는다 — 멈춘 워크스페이스는 애초에 호출을 안 한다. 여기서까지
+    거르면 「상한은 있는데 안 걸린다」 는 경우가 생기고, 그 원인은 화면에 안 보인다.
+    """
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT key, limit_usd FROM workspace")
+            return {
+                str(row["key"]).lower(): float(row["limit_usd"] or 0.0)
+                for row in cur.fetchall()
+            }
+    except WorkspaceStoreError:
+        raise
+    except Exception as exc:
+        raise WorkspaceStoreError(f"워크스페이스 상한 조회 실패: {exc}") from exc

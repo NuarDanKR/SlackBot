@@ -91,6 +91,11 @@ def bot_section(rows: list[dict]) -> dict:
             level = _worst(level, "warn")
             problems.append(f"초대되지 않은 채널 {uninvited}개 — 그 채널은 수집되지 않습니다")
 
+        budget, budget_level = _budget_problem(row)
+        if budget:
+            level = _worst(level, budget_level)
+            problems.append(budget)
+
         items.append({
             "workspace": row.get("key"),
             "label": row.get("label") or row.get("key"),
@@ -103,6 +108,44 @@ def bot_section(rows: list[dict]) -> dict:
         "level": _worst(*[i["level"] for i in items]) if items else "unknown",
         "workspaces": items,
     }
+
+
+# 상한은 두 겹이다: 전체(`DAILY_COST_LIMIT_USD`)가 바깥, 워크스페이스별이 안쪽.
+# **어느 쪽에 닿았는지 화면이 말해야 한다.** 2026-09-15 에 경영본부가 막혔을 때
+# 오류는 "일별 비용 상한 초과" 라고만 했고, 사람은 콘솔에서 워크스페이스 상한을
+# $2 → $5 → $10 으로 올렸다. 실제로 걸린 것은 전체 상한이었고 아무것도 달라지지
+# 않았다. 화면이 그걸 미리 말해 주는 자리가 여기다.
+BUDGET_WARN = 0.80   # 이만큼 쓰면 오늘 안에 닿을 가능성이 크다
+
+
+def _budget_problem(row: dict) -> tuple[str, str]:
+    """이 워크스페이스가 상한에 닿았는지. 닿을 상한이 무엇인지까지 말한다."""
+    try:
+        spent = float(row.get("spendTodayUsd") or 0.0)
+        limit = float(row.get("limitUsd") or 0.0)
+    except (TypeError, ValueError):
+        return "", "ok"
+    if limit <= 0:
+        return "", "ok"
+
+    global_limit = float(os.getenv("DAILY_COST_LIMIT_USD", "50") or 0)
+    # 워크스페이스 상한이 전체 상한보다 크면 그 상한은 **닿을 수 없다.**
+    # 올려도 안 먹는 숫자를 화면에 두면 사람은 그 숫자를 계속 올린다.
+    if global_limit > 0 and limit > global_limit:
+        return (
+            f"워크스페이스 상한 ${limit:.2f} 이 전체 상한 ${global_limit:.2f} 보다 큽니다"
+            " — 먼저 전체 상한(DAILY_COST_LIMIT_USD)에서 막힙니다",
+            "warn",
+        )
+    if spent >= limit:
+        return (
+            f"오늘 상한을 다 썼습니다(${spent:.2f} / ${limit:.2f})"
+            " — 이 워크스페이스는 더 답하지 못합니다",
+            "bad",
+        )
+    if spent >= limit * BUDGET_WARN:
+        return (f"오늘 상한의 {spent / limit:.0%} 를 썼습니다(${spent:.2f} / ${limit:.2f})", "warn")
+    return "", "ok"
 
 
 # ---------------------------------------------------------------------------

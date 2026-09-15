@@ -288,21 +288,75 @@ def _read_qa_records(days: int) -> list[dict]:
 
 
 def _spend_by_workspace_today() -> dict[str, float]:
+    """워크스페이스별 당일 누적.
+
+    **막는 숫자와 보이는 숫자가 같아야 한다.** 감사기록(JSONL)에는 답변 한 건의
+    비용만 남는다 — 의도 분류·전문 봇 라우팅처럼 답변 앞에서 부르는 호출은 안 남는다.
+    상한을 거는 쪽(`CostGuard`)은 그 전부를 센다. 그래서 화면이 JSONL 만 보면
+    **사람이 보는 사용액보다 실제로 깎이는 쪽이 항상 크다** — "아직 여유 있는데 왜
+    막히나" 가 된다(2026-09-15).
+
+    그래서 봇이 남긴 상태 파일을 먼저 본다. 두 값이 다 있으면 **큰 쪽**을 쓴다 —
+    상태 파일이 작다면 그 파일이 뭔가를 잃은 것이고(옛 형식에서 재시작), 작은 쪽을
+    보여 주면 실제 사용액을 낮춰 말하게 된다.
+    """
     today = _now().date().isoformat()
     out: dict[str, float] = defaultdict(float)
     for rec in _read_qa_records(1):
         if str(rec.get("ts", ""))[:10] == today:
             out[str(rec.get("workspace", ""))] += float(rec.get("cost_usd") or 0)
+    for key, value in (_workspace_spend_from_state() or {}).items():
+        out[key] = max(out.get(key, 0.0), value)
     return dict(out)
 
 
-def _spent_today_from_state() -> float | None:
-    """봇이 남긴 당일 누적. 감사기록 합계보다 이쪽이 정확하다(분류 호출까지 포함)."""
+def _cost_state_today() -> dict | None:
+    """봇이 남긴 당일 비용 상태. 오늘 것이 아니거나 못 읽으면 None."""
     try:
         data = json.loads(Path(cost_state_path()).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(data, dict):
+        return None
     if str(data.get("day")) != _now().date().isoformat():
+        return {}  # 어제 기록 — 오늘 누적은 0
+    return data
+
+
+def _workspace_spend_from_state() -> dict[str, float]:
+    data = _cost_state_today()
+    if data is None:
+        return {}
+    raw = data.get("by_workspace")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            out[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _spent_today_from_state(
+    allowed: frozenset[str] | set[str] | None = None,
+) -> float | None:
+    """봇이 남긴 당일 누적. 감사기록 합계보다 이쪽이 정확하다(분류 호출까지 포함).
+
+    `allowed` 를 주면 그 워크스페이스들의 누적만 더한다. 워크스페이스별 칸이 생기기
+    전에는 이 값이 전 워크스페이스 합산뿐이라 좁혀진 요청에서는 쓸 수 없었고,
+    그래서 그 화면만 JSONL 합계로 떨어져 **같은 화면의 두 숫자가 다른 뜻**이었다.
+    """
+    data = _cost_state_today()
+    if data is None:
+        return None
+    if allowed is not None:
+        spend = _workspace_spend_from_state()
+        if not spend:
+            return None  # 옛 형식 — 좁혀서 답할 근거가 없다
+        return sum(value for key, value in spend.items() if key in allowed)
+    if not data:
         return 0.0
     try:
         return float(data.get("spent_usd") or 0)
@@ -370,10 +424,10 @@ def usage_snapshot(
     values = sorted(per_day.values())
     baseline = values[len(values) // 2] if values else 0.0
 
-    # 당일 누적은 봇이 남긴 상태 파일이 더 정확하다(분류 호출까지 포함). 다만 그 값은
-    # **전 워크스페이스 합산**이라, 범위가 좁혀진 요청에는 쓸 수 없다.
+    # 당일 누적은 봇이 남긴 상태 파일이 더 정확하다(분류 호출까지 포함).
+    # 이제 워크스페이스별로도 남으므로 범위가 좁혀진 요청에도 쓴다.
     is_today = period_start == today_date and period_end == today_date
-    spent = _spent_today_from_state() if allowed is None and is_today else None
+    spent = _spent_today_from_state(allowed) if is_today else None
     if spent is None:
         spent = sum(float(r.get("cost_usd") or 0) for r in period_rows)
 

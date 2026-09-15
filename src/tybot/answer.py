@@ -730,11 +730,13 @@ class AnswerEngine:
         import os
 
         from .config import cost_state_path
+        from .gateway.budget import WorkspaceLimits
 
         router = Router.from_default_registry(
             daily_limit_usd=float(os.getenv("DAILY_COST_LIMIT_USD", "50")),
             default_model=os.getenv("DEFAULT_MODEL", "claude-sonnet-5"),
             cost_state_path=cost_state_path(),
+            workspace_limits=WorkspaceLimits(),
         )
         return cls(ArchiveStore(archive_dir), router, **kw)
 
@@ -743,6 +745,12 @@ class AnswerEngine:
 
     def spent_today(self) -> float:
         return self._router.spent_today
+
+    def spent_today_for(self, workspace: str) -> float:
+        return self._router.spent_today_for(workspace)
+
+    def limit_for(self, workspace: str) -> float | None:
+        return self._router.limit_for(workspace)
 
     def _document_set_blocks(
         self, visible_docs, ctx, *, cutoff: str, terms, wanted: list[str]
