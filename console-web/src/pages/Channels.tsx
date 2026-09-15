@@ -82,6 +82,10 @@ interface CollectionJob {
   logTail: string[]
 }
 
+type IssueFilter = 'all' | 'missing-owner' | 'missing-reviewer' | 'active-missing-owner'
+type ChannelSort = 'priority' | 'channel' | 'answers' | 'last-answer' | 'last-ingested' | 'documents' | 'lines'
+type SortDirection = 'asc' | 'desc'
+
 const key = (row: ChannelRow) => `${row.workspace}:${row.channelId}`
 
 /** 사람 이름을 붙여 보여 줍니다. 모르는 ID 는 ID 그대로 — 지어내지 않습니다. */
@@ -95,8 +99,14 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
   const jobResource = useResource<{ job: CollectionJob | null }>('/api/channels/collection-jobs/latest')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [owner, setOwner] = useState('')
+  const [ownerMenuOpen, setOwnerMenuOpen] = useState(false)
+  const [ownerSearch, setOwnerSearch] = useState('')
   const [overwrite, setOverwrite] = useState(false)
-  const [filter, setFilter] = useState<'missing' | 'all'>('all')
+  const [channelSearch, setChannelSearch] = useState('')
+  const [workspaceFilter, setWorkspaceFilter] = useState('')
+  const [issueFilter, setIssueFilter] = useState<IssueFilter>('all')
+  const [sortBy, setSortBy] = useState<ChannelSort>('priority')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [busy, setBusy] = useState(false)
   const [collectionBusy, setCollectionBusy] = useState(false)
   const [result, setResult] = useState<AssignResult | null>(null)
@@ -117,8 +127,74 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
 
   const rows = useMemo(() => {
     const all = resource.data?.rows ?? []
-    return filter === 'missing' ? all.filter((r) => r.needsOwner) : all
-  }, [resource.data, filter])
+    const originalOrder = new Map(all.map((row, index) => [key(row), index]))
+    const search = channelSearch.trim().toLocaleLowerCase('ko-KR')
+    const filtered = all.filter((row) => {
+      if (workspaceFilter && row.workspace !== workspaceFilter) return false
+      if (issueFilter === 'missing-owner' && !row.needsOwner) return false
+      if (issueFilter === 'missing-reviewer' && !row.needsReviewer) return false
+      if (issueFilter === 'active-missing-owner' && !(row.needsOwner && row.answers > 0)) return false
+      if (!search) return true
+      const peopleText = [row.owner, ...row.managers, ...row.reviewers]
+        .map((id) => personLabel(id, people))
+        .join(' ')
+      return [row.workspace, row.workspaceLabel, row.channel, peopleText]
+        .join(' ')
+        .toLocaleLowerCase('ko-KR')
+        .includes(search)
+    })
+    const direction = sortDirection === 'asc' ? 1 : -1
+    return [...filtered].sort((a, b) => {
+      const workspaceOrder = a.workspaceLabel.localeCompare(b.workspaceLabel, 'ko-KR')
+        || a.workspace.localeCompare(b.workspace, 'ko-KR')
+      if (workspaceOrder) return workspaceOrder
+      if (sortBy === 'priority') {
+        return (originalOrder.get(key(a)) ?? 0) - (originalOrder.get(key(b)) ?? 0)
+      }
+      let compared = 0
+      if (sortBy === 'channel') compared = a.channel.localeCompare(b.channel, 'ko-KR')
+      if (sortBy === 'answers') compared = a.answers - b.answers
+      if (sortBy === 'last-answer') compared = a.lastAnswerAt.localeCompare(b.lastAnswerAt)
+      if (sortBy === 'last-ingested') compared = a.lastIngestedAt.localeCompare(b.lastIngestedAt)
+      if (sortBy === 'documents') compared = a.documents - b.documents
+      if (sortBy === 'lines') compared = a.lines - b.lines
+      return compared * direction || a.channel.localeCompare(b.channel, 'ko-KR')
+    })
+  }, [channelSearch, issueFilter, people, resource.data, sortBy, sortDirection, workspaceFilter])
+
+  const workspaces = useMemo(() => {
+    const found = new Map<string, string>()
+    for (const row of resource.data?.rows ?? []) found.set(row.workspace, row.workspaceLabel)
+    return [...found].map(([workspace, label]) => ({ workspace, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'ko-KR'))
+  }, [resource.data])
+
+  const groupedRows = useMemo(() => {
+    const groups: { workspace: string; label: string; rows: ChannelRow[] }[] = []
+    for (const row of rows) {
+      const last = groups.at(-1)
+      if (!last || last.workspace !== row.workspace) {
+        groups.push({ workspace: row.workspace, label: row.workspaceLabel, rows: [row] })
+      } else {
+        last.rows.push(row)
+      }
+    }
+    return groups
+  }, [rows])
+
+  const ownerCandidates = useMemo(() => {
+    const term = ownerSearch.trim().toLocaleLowerCase('ko-KR')
+    const all = resource.data?.candidates ?? []
+    if (!term) return all
+    return all.filter((candidate) =>
+      [candidate.name, candidate.org, candidate.workspace, candidate.slackUser]
+        .join(' ')
+        .toLocaleLowerCase('ko-KR')
+        .includes(term),
+    )
+  }, [ownerSearch, resource.data])
+
+  const selectedOwner = resource.data?.candidates.find((candidate) => candidate.slackUser === owner)
 
   if (resource.loading) return <Loading what="채널 목록" />
   if (resource.error)
@@ -199,7 +275,7 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
       />
 
       <Section title="현황">
-        <div className="metrics">
+        <div className="metrics channel-metrics">
           <Metric k="채널" v={String(totals.channels)} unit="개" />
           <Metric k="담당자 없음" v={String(totals.missingOwner)} unit="개" />
           <Metric k="검토자 없음" v={String(totals.missingReviewer)} unit="개" />
@@ -213,40 +289,87 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
       </Section>
 
       <Section title="담당자 일괄 지정">
-        <div className="toolbar">
-          <label>
-            담당자
-            <select value={owner} onChange={(e) => setOwner(e.target.value)}>
-              <option value="">— 고르세요 —</option>
-              {resource.data.candidates.map((c) => (
-                <option key={`${c.workspace}:${c.slackUser}`} value={c.slackUser}>
-                  {c.name} · {c.org} ({c.workspace})
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
+        <div className="channel-owner-panel">
+          <div className="field channel-owner-field">
+            <label className="field-label" htmlFor="channel-owner-picker">담당자</label>
+            <div
+              className="channel-owner-picker"
+              onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                  setOwnerMenuOpen(false)
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') setOwnerMenuOpen(false)
+              }}
+            >
+              <button
+                id="channel-owner-picker"
+                className="input channel-owner-trigger"
+                type="button"
+                role="combobox"
+                aria-expanded={ownerMenuOpen}
+                aria-controls="channel-owner-options"
+                onClick={() => setOwnerMenuOpen((open) => !open)}
+              >
+                <span className={selectedOwner ? '' : 'channel-owner-placeholder'}>
+                  {selectedOwner
+                    ? `${selectedOwner.name} · ${selectedOwner.org} (${selectedOwner.workspace})`
+                    : '담당자를 검색해 선택하세요'}
+                </span>
+                <span aria-hidden="true">⌄</span>
+              </button>
+              {ownerMenuOpen && (
+                <div className="channel-owner-menu" id="channel-owner-options">
+                  <input
+                    className="input channel-owner-search"
+                    type="search"
+                    value={ownerSearch}
+                    autoFocus
+                    placeholder="이름, 조직 또는 워크스페이스 검색"
+                    aria-label="담당자 검색"
+                    onChange={(event) => setOwnerSearch(event.target.value)}
+                  />
+                  <div className="channel-owner-options" role="listbox">
+                    {ownerCandidates.map((candidate) => (
+                      <button
+                        className={`channel-owner-option ${owner === candidate.slackUser ? 'is-selected' : ''}`}
+                        type="button"
+                        role="option"
+                        aria-selected={owner === candidate.slackUser}
+                        key={`${candidate.workspace}:${candidate.slackUser}`}
+                        onClick={() => {
+                          setOwner(candidate.slackUser)
+                          setOwnerSearch('')
+                          setOwnerMenuOpen(false)
+                        }}
+                      >
+                        <strong>{candidate.name}</strong>
+                        <span>{candidate.org || '조직 미등록'} · {candidate.workspace}</span>
+                      </button>
+                    ))}
+                    {ownerCandidates.length === 0 && (
+                      <div className="channel-owner-empty">검색 결과가 없습니다.</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="channel-owner-settings">
+            <label className="checkbox">
             <input
               type="checkbox"
               checked={overwrite}
               onChange={(e) => setOverwrite(e.target.checked)}
             />
             이미 담당자가 있어도 바꾸기
-          </label>
-          <button type="button" disabled={busy || !owner || selected.size === 0} onClick={assign}>
+            </label>
+            <span className="channel-selection-count">현재 {selected.size}개 채널 선택</span>
+          </div>
+          <button className="btn btn-primary channel-owner-submit" type="button" disabled={busy || !owner || selected.size === 0} onClick={assign}>
             {busy ? '지정 중…' : `${selected.size}개 채널에 지정`}
           </button>
-          <label>
-            <input
-              type="checkbox"
-              checked={filter === 'missing'}
-              onChange={(e) => {
-                setFilter(e.target.checked ? 'missing' : 'all')
-                setSelected(new Set())
-              }}
-            />
-            담당자 없는 채널만
-          </label>
         </div>
         {resource.data.candidates.length === 0 && (
           <p className="note warn">
@@ -317,15 +440,53 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
         {jobResource.error && <p className="note warn">작업 상태를 읽지 못했습니다: {jobResource.error.message}</p>}
       </Section>
 
-      <Section title={`채널 ${rows.length}개`}>
+      <Section
+        title={`채널 ${rows.length}개`}
+        note={`전체 ${totals.channels}개 중 표시`}
+      >
+        <div className="channel-table-tools">
+          <div className="field channel-table-search">
+            <label className="field-label" htmlFor="channel-search">채널 또는 담당자 검색</label>
+            <input id="channel-search" className="input" type="search" value={channelSearch} placeholder="채널명, 담당자, 검토자" onChange={(event) => { setChannelSearch(event.target.value); setSelected(new Set()) }} />
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="channel-workspace-filter">워크스페이스</label>
+            <select id="channel-workspace-filter" className="input" value={workspaceFilter} onChange={(event) => { setWorkspaceFilter(event.target.value); setSelected(new Set()) }}>
+              <option value="">전체 워크스페이스</option>
+              {workspaces.map((workspace) => <option key={workspace.workspace} value={workspace.workspace}>{workspace.label} ({workspace.workspace})</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="channel-issue-filter">관리 상태</label>
+            <select id="channel-issue-filter" className="input" value={issueFilter} onChange={(event) => { setIssueFilter(event.target.value as IssueFilter); setSelected(new Set()) }}>
+              <option value="all">모든 채널</option>
+              <option value="missing-owner">담당자 없음</option>
+              <option value="missing-reviewer">검토자 없음</option>
+              <option value="active-missing-owner">사용 중·담당자 없음</option>
+            </select>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="channel-sort">정렬</label>
+            <div className="channel-sort-control">
+              <select id="channel-sort" className="input" value={sortBy} onChange={(event) => { const next = event.target.value as ChannelSort; setSortBy(next); setSortDirection(next === 'channel' ? 'asc' : 'desc') }}>
+                <option value="priority">관리 우선순위</option>
+                <option value="channel">채널명</option>
+                <option value="answers">답변 수</option>
+                <option value="last-answer">마지막 답변</option>
+                <option value="last-ingested">마지막 수집</option>
+                <option value="documents">문서 수</option>
+                <option value="lines">원문 줄 수</option>
+              </select>
+              <button className="btn channel-sort-direction" type="button" disabled={sortBy === 'priority'} aria-label={sortDirection === 'desc' ? '현재 내림차순, 오름차순으로 변경' : '현재 오름차순, 내림차순으로 변경'} onClick={() => setSortDirection((direction) => direction === 'desc' ? 'asc' : 'desc')}>
+                {sortBy === 'priority' ? '우선순위 고정' : sortDirection === 'desc' ? '내림차순 ↓' : '오름차순 ↑'}
+              </button>
+            </div>
+          </div>
+        </div>
         {rows.length === 0 ? (
           <Empty
             title="해당하는 채널이 없습니다"
-            note={
-              filter === 'missing'
-                ? '담당자가 모두 지정되어 있습니다.'
-                : '봇이 참여한 수집 대상 채널이 없습니다.'
-            }
+            note="검색어 또는 필터를 바꾸어 다시 확인해 주세요."
           />
         ) : (
           <div className="grid-scroll">
@@ -335,7 +496,6 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                   <th>
                     <input type="checkbox" checked={allChecked} onChange={toggleAll} />
                   </th>
-                  <th>워크스페이스</th>
                   <th>채널</th>
                   <th>담당자</th>
                   <th>검토자</th>
@@ -347,8 +507,16 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                   <th>마지막 답변</th>
                 </tr>
               </thead>
-              <tbody>
-                {rows.map((row) => (
+              {groupedRows.map((group) => (
+                <tbody key={group.workspace}>
+                  <tr className="channel-workspace-row">
+                    <th colSpan={10} scope="rowgroup">
+                      <span>{group.label}</span>
+                      <span className="channel-workspace-key">{group.workspace}</span>
+                      <span className="channel-workspace-count">{group.rows.length}개 채널</span>
+                    </th>
+                  </tr>
+                  {group.rows.map((row) => (
                   <tr key={key(row)} className={row.needsOwner ? 'row-warn' : undefined}>
                     <td>
                       <input
@@ -359,7 +527,6 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                         title={row.channelId ? '' : '채널 ID 를 모릅니다(옛 아카이브 형식)'}
                       />
                     </td>
-                    <td>{row.workspaceLabel}</td>
                     <td className="wrap">{row.channel}</td>
                     <td>
                       {row.owner ? (
@@ -388,8 +555,9 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                     <td className="num">{row.answers}</td>
                     <td>{row.lastAnswerAt ? agoLabel(row.lastAnswerAt) : '—'}</td>
                   </tr>
-                ))}
-              </tbody>
+                  ))}
+                </tbody>
+              ))}
             </table>
           </div>
         )}

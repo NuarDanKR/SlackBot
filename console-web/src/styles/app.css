@@ -2760,10 +2760,14 @@
   overflow-x: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
+  background: var(--surface);
 }
 
 table.grid {
+  /* 전역 `.grid { display: grid }`보다 구체적으로 HTML 표 레이아웃을 복구한다. */
+  display: table;
   width: 100%;
+  min-width: 1180px;
   border-collapse: collapse;
   font-size: 13px;
   white-space: nowrap;
@@ -2825,6 +2829,251 @@ table.grid .dim {
   gap: 6px;
   color: var(--text-2);
   font-size: 13px;
+}
+
+.channel-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 18px 0;
+}
+
+.channel-metrics > div {
+  min-width: 0;
+  padding: 4px 20px;
+}
+
+.channel-metrics > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.channel-owner-panel {
+  display: grid;
+  grid-template-columns: minmax(300px, 480px) minmax(220px, 1fr) auto;
+  align-items: end;
+  gap: 18px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.channel-owner-field {
+  min-width: 0;
+}
+
+.channel-owner-picker {
+  position: relative;
+}
+
+.channel-owner-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 40px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.channel-owner-placeholder {
+  color: var(--text-3);
+}
+
+.channel-owner-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 100%;
+  min-width: 320px;
+  padding: 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.channel-owner-search {
+  width: 100%;
+}
+
+.channel-owner-options {
+  max-height: 264px;
+  margin-top: 7px;
+  overflow-y: auto;
+}
+
+.channel-owner-option {
+  display: grid;
+  width: 100%;
+  gap: 3px;
+  padding: 10px 11px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.channel-owner-option:hover,
+.channel-owner-option.is-selected {
+  background: var(--sunk);
+}
+
+.channel-owner-option.is-selected {
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+.channel-owner-option span,
+.channel-owner-empty,
+.channel-selection-count {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.channel-owner-empty {
+  padding: 20px 12px;
+  text-align: center;
+}
+
+.channel-owner-settings {
+  display: flex;
+  min-height: 40px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.channel-owner-settings input,
+.channel-list-filter input,
+table.grid input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand-solid);
+}
+
+.channel-owner-submit {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.channel-list-filter {
+  min-height: 32px;
+  color: var(--text-2);
+}
+
+.channel-table-tools {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.4fr) minmax(190px, 0.8fr) minmax(180px, 0.8fr) minmax(280px, 1fr);
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface);
+}
+
+.channel-table-tools .input {
+  width: 100%;
+  min-height: 40px;
+  color: var(--text);
+}
+
+.channel-sort-control {
+  display: grid;
+  grid-template-columns: minmax(145px, 1fr) auto;
+  gap: 8px;
+}
+
+.channel-sort-direction {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+table.grid .channel-workspace-row th {
+  padding: 11px 14px;
+  border-top: 1px solid var(--line-2);
+  border-bottom: 1px solid var(--line-2);
+  background: var(--sunk);
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+}
+
+table.grid tbody:first-of-type .channel-workspace-row th {
+  border-top: 0;
+}
+
+.channel-workspace-key,
+.channel-workspace-count {
+  margin-left: 8px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.channel-workspace-count {
+  float: right;
+  font-family: var(--font-body);
+}
+
+@media (max-width: 980px) {
+  .channel-owner-panel {
+    grid-template-columns: minmax(280px, 1fr) auto;
+  }
+  .channel-owner-settings {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .channel-table-tools {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .channel-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .channel-metrics > div:nth-child(3) {
+    border-left: 0;
+  }
+  .channel-metrics > div:nth-child(n + 3) {
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+  .channel-owner-panel {
+    grid-template-columns: 1fr;
+  }
+  .channel-owner-settings,
+  .channel-owner-submit {
+    grid-column: auto;
+    grid-row: auto;
+  }
+  .channel-owner-submit {
+    width: 100%;
+  }
+  .channel-table-tools {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .channel-metrics {
+    grid-template-columns: 1fr;
+  }
+  .channel-metrics > div + div,
+  .channel-metrics > div:nth-child(3) {
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+  .channel-owner-menu {
+    min-width: 0;
+  }
 }
 
 .note.warn {
