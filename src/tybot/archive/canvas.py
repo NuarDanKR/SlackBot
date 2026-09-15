@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import ClassVar
@@ -56,6 +57,14 @@ class CanvasCapture:
     warnings: list[str]
     dedupe_key: str | None = None
     permalink: str = ""
+    # 캔버스 본문이 **확실히** 가리키는 Slack 파일 ID(B-46).
+    #
+    # 캔버스에 정리해 둔 표·정산서가 근거에 안 들어가던 것을 고치기 위한 값이다.
+    # 본문에는 파일 **이름**만 남아서 검색은 걸리고 내용은 없었다 — 가장 헷갈리는
+    # 모양이다.
+    #
+    # **추측해서 넣지 않는다.** Slack 파일 URL 형태로 확실히 잡히는 것만 담는다.
+    file_ids: tuple[str, ...] = ()
 
 
 def _key(channel_id: str, stage: str, payload: bytes = b"") -> str:
@@ -87,6 +96,7 @@ class _TextExtractor(HTMLParser):
         self.parts: list[str] = []
         self._buf: list[str] = []
         self._ignored_depth = 0
+        self._pending_href = ""
 
     def handle_starttag(self, tag: str, attrs) -> None:
         if tag in {"script", "style"}:
@@ -96,6 +106,16 @@ class _TextExtractor(HTMLParser):
             return
         if tag in self.BLOCK_TAGS:
             self._flush()
+        if tag == "a":
+            # **링크 대상을 버리지 않는다**(B-46).
+            #
+            # 예전에는 속성을 통째로 무시해서 `<a href="…">기성금 정산표</a>` 가
+            # `기성금 정산표` 로만 남았다. **라벨은 남고 대상은 사라진다** —
+            # 검색에는 걸리는데 열 수가 없고, 사람은 봇이 자료를 못 읽는다고 읽는다.
+            #
+            # 대상을 **따라가지는 않는다.** 여기 남기는 것은 출처 표시와 사람
+            # 확인용이다(설계: 외부 URL 본문 크롤링은 하지 않는다).
+            self._pending_href = _safe_href(dict(attrs).get("href"))
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style"} and self._ignored_depth:
@@ -103,6 +123,13 @@ class _TextExtractor(HTMLParser):
             return
         if self._ignored_depth:
             return
+        if tag == "a":
+            # 라벨 바로 뒤에 대상을 붙인다. 라벨이 없으면 대상만 남긴다 —
+            # 빈 링크도 사람이 눌러 볼 수 있는 단서다.
+            href = self._pending_href
+            self._pending_href = ""
+            if href:
+                self._buf.append(f"<{href}>")
         if tag in self.BLOCK_TAGS:
             self._flush()
 
@@ -118,6 +145,59 @@ class _TextExtractor(HTMLParser):
     def close(self) -> None:
         super().close()
         self._flush()
+
+
+# 원문에 남겨도 되는 링크 구성표.
+#
+# `javascript:`·`data:` 는 남기지 않는다. 원문은 사람이 읽고 **눌러 보는** 자리라,
+# 실행 가능한 구성표를 그대로 두면 아카이브가 그것을 나르는 통로가 된다.
+SAFE_LINK_SCHEMES = ("http://", "https://", "mailto:", "slack://")
+MAX_HREF_CHARS = 500
+
+
+def _safe_href(value: object) -> str:
+    """원문에 남길 링크. 남길 수 없으면 빈 문자열.
+
+    **고쳐서 남기지 않는다** — 이상한 값을 다듬어 넣으면 그 줄이 원문인지 우리가
+    만든 것인지 구별할 수 없게 된다. 통과하거나 버리거나 둘 중 하나다.
+    """
+    href = str(value or "").strip()
+    if not href or len(href) > MAX_HREF_CHARS:
+        return ""
+    if any(ch in href for ch in ("<", ">", "\n", "\r", "|")):
+        # 원문 줄 형식(`> [ts] 사람: 내용`)과 인용 문법을 깨뜨린다.
+        return ""
+    lowered = href.lower()
+    return href if lowered.startswith(SAFE_LINK_SCHEMES) else ""
+
+
+# 캔버스 본문 안의 Slack 파일 링크. **두 형태만 받는다.**
+#
+# 맨몸 `F0ABCDE` 토큰은 받지 않는다 — 엑셀 셀 주소나 문서 번호일 수 있고, 그것을
+# 파일로 읽으면 없는 파일을 찾느라 실패가 쌓인다. 확실한 것만 받고 나머지는
+# 「미확인」 으로 둔다.
+SLACK_FILE_REFS = (
+    # https://<team>.slack.com/files/<user>/<FID>/<name>
+    re.compile(r"slack\.com/files/[^/\s]+/(F[A-Z0-9]{6,})", re.IGNORECASE),
+    # https://files.slack.com/files-pri/<T...>-<FID>/<name>
+    re.compile(r"files\.slack\.com/files-[a-z]+/T[A-Z0-9]+-(F[A-Z0-9]{6,})", re.IGNORECASE),
+)
+
+
+def file_refs(lines: list[str], *, exclude: str = "") -> tuple[str, ...]:
+    """캔버스 줄에서 Slack 파일 ID 를 뽑는다. 순서는 처음 나온 차례.
+
+    `exclude` 는 캔버스 자신의 파일 ID 다. 캔버스도 파일이라 본문에 자기 링크가
+    있으면 **자기를 첨부로 수집**하게 된다 — 그러면 같은 내용이 두 벌 들어간다.
+    """
+    found: list[str] = []
+    for line in lines:
+        for pattern in SLACK_FILE_REFS:
+            for match in pattern.finditer(line):
+                file_id = match.group(1).upper()
+                if file_id != (exclude or "").upper() and file_id not in found:
+                    found.append(file_id)
+    return tuple(found)
 
 
 def canvas_file_id(client, channel_id: str) -> str | None:
@@ -207,4 +287,4 @@ def canvas_lines(client, channel_id: str, bot_token: str | None) -> CanvasCaptur
     key = _key(channel_id, file_id, payload)
     out = [f"[캔버스:수집] {title} [수집키:{key}]"]
     out += [f"[캔버스본문:{title}] {ln}" for ln in lines]
-    return CanvasCapture(out, [], key, f.permalink or "")
+    return CanvasCapture(out, [], key, f.permalink or "", file_refs(lines, exclude=file_id))

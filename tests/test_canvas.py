@@ -4,7 +4,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from tybot.archive.canvas import canvas_file_id, canvas_lines
+from tybot.archive.canvas import _to_lines, canvas_file_id, canvas_lines, file_refs
 
 
 class FakeClient:
@@ -195,3 +195,50 @@ def test_live_fetch_includes_current_canvas_without_archiving(monkeypatch):
     assert rows[-1]["speaker"] == "채널 Canvas"
     assert "현황 정상" in rows[-1]["text"]
     assert rows[-1]["permalink"] == "https://example.slack.com/docs/F1"
+def test_html_canvas_keeps_the_link_target():
+    lines = _to_lines(
+        b'<p><a href="https://example.com/report">report</a></p>',
+        "text/html",
+    )
+
+    assert lines == ["report <https://example.com/report>"]
+
+
+def test_canvas_file_refs_only_accept_explicit_slack_file_urls():
+    lines = [
+        "https://workspace.slack.com/files/U123/F0ABCDEF/report.xlsx",
+        "bare token F0NOTFILE must not be followed",
+        "https://files.slack.com/files-pri/T123-F0GHIJKL/report.pdf",
+    ]
+
+    assert file_refs(lines) == ("F0ABCDEF", "F0GHIJKL")
+
+
+def test_canvas_file_refs_exclude_the_canvas_itself():
+    lines = ["https://workspace.slack.com/files/U123/F0ABCDEF/canvas"]
+
+    assert file_refs(lines, exclude="F0ABCDEF") == ()
+
+
+def test_canvas_attachment_without_confirmed_channel_share_is_blocked(tmp_path, monkeypatch):
+    from tybot.slack import pilot
+
+    client = Mock()
+    client.files_info.return_value = {"file": {"id": "F2", "channels": [], "groups": []}}
+    bot = SimpleNamespace(
+        archive_dir=str(tmp_path / "archive"),
+        workspace="pilot",
+        cfg=SimpleNamespace(bot_token="xoxb-test"),
+    )
+    monkeypatch.setattr(
+        pilot,
+        "stage_attachments",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not stage")),
+    )
+
+    messages, warnings, staged = pilot.WorkspaceBot._stage_referenced_files(
+        bot, client, "C1", ["F2"], speaker="캔버스 첨부"
+    )
+
+    assert messages == [] and staged == []
+    assert "공유 여부를 확인할 수 없어" in warnings[0]

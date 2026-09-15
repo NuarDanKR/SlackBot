@@ -424,7 +424,10 @@ sudo systemctl enable --now tybot-convert-alert.timer
 
 ### 남은 것
 
-- **B-46(긴급)**: 채널 파일 목록·Canvas 첨부·링크 수집
+- ~~**B-46(긴급)**: 채널 파일 목록·Canvas 첨부·링크 수집~~
+  **구현 완료·운영 검증 대기(Codex/2026-09-15)** — 채널별 `files.list` 조회 전용
+  미리보기와 명시적 `--apply`, 기존 staging·PII·원문 반영 확인·즉시 재색인을
+  연결했다. Canvas HTML 링크와 명시적 Slack 파일 URL 첨부도 처리한다.
 - ~~**B-47(신규)**: 의도 분류를 LLM 으로~~ **구현 완료(Codex/2026-09-15)** —
   기존 planner 호출에 `reference_mode`·`asks_about_our_sources`를 추가하고, 정상 LLM
   경로의 정규식 가로채기·후속 질문 덮어쓰기를 제거했다. 기간·권한·capability 검증은
@@ -437,6 +440,8 @@ sudo systemctl enable --now tybot-convert-alert.timer
 - 서버 백필 첫 실행은 완료했으나 **성공 0건**. 원본 없음 3건과 변환 실패 2건
 - 후속 수정 배포 뒤 `--backfill` 미리보기에서 큐 대상이 원본이 남은 2건으로
   줄어드는지 확인하고, `conversion_failed` 2건의 worker 로그를 조사한다
+- 채널 파일은 배포 뒤 `scripts/sync_channel_files.py --workspace <키>`로 미리 본 후
+  `--apply`한다. 운영 절차는 `docs/deploy/channel-file-sync.md` 참조
 
 ### Codex 검증 (2026-09-15)
 

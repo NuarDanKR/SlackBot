@@ -164,3 +164,44 @@ def test_periodic_collect_captures_canvas_idempotently(tmp_path):
         encoding="utf-8"
     )
     assert md.count("[캔버스본문:회의록] same canvas") == 1
+
+
+def test_periodic_collect_stages_a_canvas_attachment_shared_to_the_channel(tmp_path):
+    client = FakeClient(
+        channels=[{"id": "C1", "name": "팀-전산_ABB110-회의", "is_member": True}],
+        history={"C1": []},
+        canvas={"C1": "F-CANVAS"},
+    )
+
+    def files_info(file):
+        if file == "F-CANVAS":
+            return {"file": {
+                "id": file,
+                "name": "회의록",
+                "filetype": "canvas",
+                "size": 100,
+                "mimetype": "text/markdown",
+                "url_private_download": "https://files.slack.com/canvas",
+            }}
+        return {"file": {
+            "id": "FATTACH01",
+            "name": "근거.txt",
+            "filetype": "txt",
+            "size": 20,
+            "mimetype": "text/plain",
+            "url_private_download": "https://files.slack.com/attachment",
+            "channels": ["C1"],
+        }}
+
+    client.files_info = files_info
+    canvas_body = b"https://workspace.slack.com/files/U1/FATTACH01/evidence.txt"
+    with patch("tybot.archive.canvas.download_bytes", return_value=canvas_body), patch(
+        "tybot.archive.files.download_bytes", return_value=b"attachment evidence"
+    ):
+        result = _run(tmp_path, client)
+
+    assert result["written"] >= 3
+    md = next((tmp_path / "workspaces" / "pilot").glob("channels/*/raw/*.md")).read_text(
+        encoding="utf-8"
+    )
+    assert "[첨부본문:근거.txt] attachment evidence" in md

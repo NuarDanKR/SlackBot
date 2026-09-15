@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 
 from .archive import writer
 from .archive.canvas import canvas_lines
+from .archive.channel_files import ChannelFileScan, referenced_files
+from .archive.channel_files import collect as collect_channel_files
 from .archive.files import (
     AttachmentOrigin,
     attachment_storage,
@@ -156,6 +158,24 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
                 )
                 for line in canvas.lines
             )
+        if canvas.file_ids:
+            events, warnings = referenced_files(client, ch["id"], canvas.file_ids)
+            for warning in warnings:
+                log.warning("[%s] %s 캔버스 첨부: %s", cfg.key, name, warning)
+            if events:
+                canvas_files = collect_channel_files(
+                    ChannelFileScan(channel_id=ch["id"], candidates=events),
+                    cfg.bot_token,
+                    storage,
+                    workspace=cfg.key,
+                )
+                staged.extend(canvas_files)
+                now = datetime.now(UTC)
+                msgs.extend(
+                    writer.IncomingMessage(ts=now, speaker="캔버스 첨부", text=line)
+                    for item in canvas_files
+                    for line in item.lines
+                )
         for warning in canvas.warnings:
             log.warning("[%s] %s 캔버스 처리 경고: %s", cfg.key, name, warning)
         if not msgs:

@@ -37,6 +37,8 @@ from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
 from ..archive.canvas import canvas_lines
+from ..archive.channel_files import ChannelFileScan, referenced_files
+from ..archive.channel_files import collect as collect_channel_files
 from ..archive.files import (
     AttachmentOrigin,
     attachment_storage,
@@ -2536,6 +2538,45 @@ class WorkspaceBot:
                     log.warning("첨부 처리 경고 ch=%s: %s", channel_id, w)
         return out
 
+    def _stage_referenced_files(
+        self, client, channel_id: str, file_ids, *, speaker: str
+    ) -> tuple[list, list[str], list]:
+        """파일 ID 목록 → 격리·변환된 원문 줄.
+
+        **`files.info` 로 실물을 확인하고 나서** 수집한다. ID 만 믿고 내려받으면
+        캔버스에 적힌 남의 워크스페이스 파일까지 따라갈 수 있다.
+
+        기존 `stage_attachments` 를 그대로 쓴다 — 중복 방지·PII 검사·변환이 전부
+        그 경로에 있고, 새 입구를 만들면서 검사를 새로 짜면 **그 입구만
+        헐거워진다.** 평면 `stage_files` 가 아니라 이쪽인 이유는 파일↔줄 연결이
+        남아야 원문 반영을 확인할 수 있기 때문이다(§6).
+
+        돌려주는 세 번째 값은 그 staged 목록이다. `self._pending_attachments` 에
+        얹지 않는다 — 그 칸은 **메시지 한 건**의 첨부 자리이고, 캔버스는 메시지가
+        아니다. 섞으면 엉뚱한 원문에 대고 반영을 확인하게 된다.
+        """
+        out: list = []
+        warnings: list[str] = []
+        events, warnings = referenced_files(client, channel_id, file_ids)
+        if not events:
+            return out, warnings, []
+
+        storage = attachment_storage(self.archive_dir, self.workspace, channel_id)
+        staged = collect_channel_files(
+            ChannelFileScan(channel_id=channel_id, candidates=events),
+            self.cfg.bot_token,
+            storage,
+            workspace=self.workspace,
+        )
+        now = datetime.now(UTC)
+        for item in staged:
+            warnings.extend(item.warnings)
+            out.extend(
+                writer.IncomingMessage(ts=now, speaker=speaker, text=line)
+                for line in item.lines
+            )
+        return out, warnings, staged
+
     def _ingest_live(self, client, event) -> None:
         """실시간 원문 append. 실패해도 봇은 계속 살아 있어야 한다."""
         channel = self._channel_name(client, event.get("channel", ""))
@@ -2550,6 +2591,7 @@ class WorkspaceBot:
                 self.archive_dir,
                 workspace=self.workspace,
                 channel=channel,
+                channel_id=event.get("channel", ""),
                 messages=msgs,
                 acl=[channel],
             )
@@ -2563,7 +2605,7 @@ class WorkspaceBot:
             log.warning("제외 대상으로 미저장 ch=%s 사유=%s", channel, r.refused[0][1])
         self._confirm_attachments(event.get("channel", ""))
 
-    def _confirm_attachments(self, channel_id: str) -> None:
+    def _confirm_attachments(self, channel_id: str, staged: list | None = None) -> None:
         """첨부 줄이 **원문에 실제로 들어갔는지** 확인해 metadata 에 남긴다.
 
         `r.written` 을 근거로 쓰지 않는다 — 이미 같은 줄이 있으면 0 이고, 그건 멱등
@@ -2572,10 +2614,11 @@ class WorkspaceBot:
         실패해도 수집을 막지 않는다. 원문이 진실이고 metadata 는 그 사본이다. 기록에
         실패하면 진단에서 `pending` 으로 남아 「모른다」 로 보이는데, 그게 사실이다.
         """
-        staged = getattr(self, "_pending_attachments", None)
+        if staged is None:
+            staged = getattr(self, "_pending_attachments", None)
+            self._pending_attachments = []
         if not staged:
             return
-        self._pending_attachments = []
         try:
             confirm_archived(
                 self.store, staged,
@@ -2637,6 +2680,21 @@ class WorkspaceBot:
                 for ln in canvas.lines
             )
             canvas_note = f"캔버스 {len(canvas.lines)}줄 포함"
+        # 캔버스 **안에 걸린 파일**도 같은 격리·변환·PII 검사 경로로 넣는다(B-46).
+        #
+        # 예전에는 본문 글자만 읽어서, 캔버스에 정리해 둔 표·정산서가 근거에
+        # 들어가지 않았다. 이름은 본문에 남으므로 **검색은 걸리고 내용은 없는**
+        # 상태였고, 그게 가장 헷갈리는 모양이다.
+        canvas_staged: list = []
+        if canvas.file_ids:
+            got, warns, canvas_staged = self._stage_referenced_files(
+                client, channel_id, canvas.file_ids, speaker="캔버스 첨부"
+            )
+            msgs.extend(got)
+            for w in warns:
+                log.warning("[%s] 캔버스 첨부 %s", self.workspace, w)
+            if got:
+                canvas_note = f"{canvas_note} · 캔버스 첨부 {len(canvas.file_ids)}건".strip(" ·")
         for w in canvas.warnings:
             log.warning("[%s] %s", self.workspace, w)
             canvas_note = f"캔버스 처리 경고: {w}"
@@ -2646,11 +2704,18 @@ class WorkspaceBot:
                 self.archive_dir,
                 workspace=self.workspace,
                 channel=channel,
+                channel_id=channel_id,
                 messages=msgs,
                 acl=[channel],
             )
         except Exception as e:
             return f"형식 검사 실패로 이번 취합을 롤백했습니다: {e}"
+
+        # 캔버스 첨부만 반영을 확인한다. 메시지 첨부는 `_messages_from` 이 한 건씩
+        # 덮어써서 마지막 것만 남고, 그 하나를 확인하면 **나머지가 확인된 것처럼
+        # 보인다** — 백필 경로의 별도 문제라 여기서 손대지 않는다.
+        if canvas_staged:
+            self._confirm_attachments(channel_id, staged=canvas_staged)
 
         out = [f"{channel}: 원문 {r.written}건 저장 (봇 발언 {r.skipped_bot}건 제외)"]
         if canvas_note:

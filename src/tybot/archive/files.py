@@ -222,6 +222,26 @@ def attachment_storage(
     )
 
 
+def staged_dir(storage: AttachmentStorage, file_id: str) -> Path:
+    """그 파일의 staging 디렉터리. **중복 방지 키가 곧 이 경로다.**
+
+    `stage_attachments()` 가 쓰는 규칙과 **같은 함수**를 지나야 한다. 파일 목록
+    경로(B-46)가 자기 나름의 키를 만들면 같은 파일이 두 벌 들어오는데, 그때
+    원문에는 같은 내용이 두 번 적히고 우리는 그것을 두 근거로 센다.
+    """
+    return storage.staging_dir / _safe_component(file_id)
+
+
+def already_staged(storage: AttachmentStorage, file_id: str) -> bool:
+    """이미 한 번 처리한 파일인가.
+
+    **성공했는가가 아니다.** 실패했더라도 기록은 있고, 재시도는 큐의 몫이다
+    (`conversion_queue`). 여기서 「실패했으니 다시 받자」 로 판단하면 같은 파일을
+    매 수집마다 다시 내려받는다.
+    """
+    return (staged_dir(storage, file_id) / "metadata.json").exists()
+
+
 def _safe_component(value: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value).strip("._")
     return safe or "unnamed"
@@ -325,7 +345,9 @@ def stage_attachments(
         # 경고도 파일별로 모은다. 한 리스트에 섞으면 어느 파일의 경고인지 사라진다.
         own_warnings: list[str] = []
         file_id = _safe_component(f.id or hashlib.sha256(f.name.encode()).hexdigest()[:16])
-        staged = storage.staging_dir / file_id
+        # **중복 방지 키는 한 함수에서만 나온다.** 파일 목록 경로(B-46)가 같은
+        # `staged_dir()` 로 「이미 봤나」 를 판단한다.
+        staged = staged_dir(storage, file_id)
         objects = storage.objects_dir / file_id
         state = "unsupported"
         error: str | None = None
