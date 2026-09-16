@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -16,6 +17,14 @@ from tybot import daily_review as dr
 from tybot.attachment_review import APPROVED, PENDING, REJECTED
 
 KST = timezone(timedelta(hours=9))
+
+
+def test_operational_entrypoint_only_sends_summary_reviews():
+    """첨부 변환 상세를 다시 검토자 DM에 연결하지 못하게 운영 진입점을 고정한다."""
+    source = inspect.getsource(dr.main)
+
+    assert "summary_review.run(" in source
+    assert "result = run(" not in source
 
 
 def _stage(tmp_path, *, name, file_id, status=PENDING, staged_at="2026-09-08T09:00:00+09:00",

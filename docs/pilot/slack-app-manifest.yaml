@@ -95,6 +95,14 @@ settings:
       - message.groups     # 비공개 채널 실시간 수집(봇이 초대된 곳만)
       - channel_created    # 새 공개 채널 - 이름이 규칙에 맞으면 즉시 자동 참여
       - channel_rename     # 이름을 규칙에 맞게 고치면 그때부터 수집
+      # 보관·삭제된 채널은 근거에서 뺀다(B-51). 원문은 지우지 않는다 —
+      # 없앤 채널의 이야기가 오늘 답에 섞이면 출처를 눌러도 확인할 수 없다.
+      - channel_archive
+      - channel_unarchive
+      - channel_deleted
+      - group_archive      # 비공개 채널. 봇이 멤버인 곳만 온다
+      - group_unarchive
+      - group_deleted
       - reaction_added     # TYBot 답변 👍/👎 피드백
       - reaction_removed   # 피드백 취소도 append-only 이벤트로 기록
       - app_home_opened    # 첫 사용 안내를 App Home에서 한 번 표시

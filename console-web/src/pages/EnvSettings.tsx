@@ -12,6 +12,13 @@ interface EnvSettingsData {
   realtimeIngest: boolean
   autojoinChannels: boolean
   replyInThread: boolean
+  /** 보관·삭제된 채널의 원문을 답변 근거로 쓸지. 기본은 쓰지 않습니다. */
+  includeRetiredChannels: boolean
+  retiredChannels?: {
+    available: boolean
+    count: number
+    items: { workspace: string; channel: string; reason: string; at: string }[]
+  }
   defaultModel: string
   models: { id: string; provider: string; maxSensitivity: 'public' | 'internal' | 'confidential' }[]
   changed?: string[]
@@ -26,6 +33,7 @@ function preview(data: EnvSettingsData): string {
     `REALTIME_INGEST=${data.realtimeIngest ? '1' : '0'}`,
     `AUTOJOIN_CHANNELS=${data.autojoinChannels ? '1' : '0'}`,
     `REPLY_IN_THREAD=${data.replyInThread ? '1' : '0'}`,
+    `INCLUDE_RETIRED_CHANNELS=${data.includeRetiredChannels ? '1' : '0'}`,
     `DEFAULT_MODEL=${data.defaultModel}`,
   ].join('\n')
 }
@@ -101,6 +109,7 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
         realtimeIngest: draft.realtimeIngest,
         autojoinChannels: draft.autojoinChannels,
         replyInThread: draft.replyInThread,
+        includeRetiredChannels: draft.includeRetiredChannels,
         defaultModel: draft.defaultModel,
       })
       setDraft(copySettings(saved))
@@ -164,6 +173,35 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
             />
             <span><b>스레드로 답변</b><span className="field-help">채널 본문 대신 질문 메시지의 스레드에 답합니다.</span></span>
           </label>
+          <label className="check-line">
+            <input
+              type="checkbox"
+              checked={draft.includeRetiredChannels}
+              disabled={!draft.editable}
+              onChange={(e) => setDraft({ ...draft, includeRetiredChannels: e.target.checked })}
+            />
+            <span>
+              <b>보관·삭제된 채널도 근거로 사용</b>
+              <span className="field-help">
+                Slack 에서 보관하거나 지운 채널의 원문까지 답변과 요약의 근거로 씁니다.
+                원문은 어느 쪽이든 지우지 않으며, 켜면 출처에 <code>(보관 채널)</code> 표시가 붙습니다.
+                {draft.retiredChannels?.available
+                  ? ` 현재 기록된 채널 ${draft.retiredChannels.count}개.`
+                  : ''}
+              </span>
+            </span>
+          </label>
+          {draft.includeRetiredChannels && (
+            <div className="notice watch">
+              <div>
+                <div className="notice-title">없앤 채널의 내용이 답변에 섞입니다</div>
+                <div className="notice-detail">
+                  사람이 출처를 눌러도 채널이 없어 확인하지 못할 수 있습니다. 과거 자료를
+                  함께 봐야 하는 기간에만 켜 두세요.
+                </div>
+              </div>
+            </div>
+          )}
         </div>
         <div className="card card-pad model-setting">
           <div className="field">

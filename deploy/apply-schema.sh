@@ -42,6 +42,7 @@ FILES=(
   reviewer_schema.sql
   review_digest_schema.sql
   summary_review_schema.sql
+  summary_review_canvas_schema.sql   # B-50. summary_review_candidate 를 참조한다
   llm_secret_schema.sql
   specialist_routing_schema.sql
   specialist_rules_schema.sql

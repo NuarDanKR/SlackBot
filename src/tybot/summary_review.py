@@ -19,7 +19,28 @@ OPEN_STATES = ("pending", "deferred")
 ACTION_APPROVE = "tybot_summary_review_approve"
 ACTION_REJECT = "tybot_summary_review_reject"
 ACTION_DEFER = "tybot_summary_review_defer"
+ACTION_APPROVE_ALL = "tybot_summary_review_approve_all"
 REJECT_CALLBACK = "tybot_summary_review_reject_modal"
+
+# --- Canvas 회차 (B-50) --------------------------------------------------------
+#
+# 검토자는 긴 요약과 근거를 **Canvas 에서 읽고**, 결정은 **DM 버튼**에서 한다.
+# Canvas 안에는 Block Kit 버튼을 넣을 수 없어서 두 화면을 역할로 나눴다.
+#
+# 렌더러 버전은 `content_hash` 에 들어간다. 렌더 규칙이 바뀌면 같은 후보라도 다른
+# 문서가 되므로, 버전을 안 섞으면 「같은 회차인데 내용이 다른」 Canvas 가 생긴다.
+RENDERER_VERSION = 1
+ARTIFACT_STATES = ("creating", "ready", "partial", "completed", "failed", "ambiguous")
+# 반려 모달의 「틀린 부분」. **필수 선택**이다 — 무엇이 틀렸는지 분류가 없으면
+# 나중에 같은 실수를 세어 볼 수가 없다.
+WRONG_PARTS = (
+    ("number", "숫자·금액"),
+    ("date", "날짜·기간"),
+    ("fact", "사실관계"),
+    ("missing", "누락"),
+    ("other", "기타"),
+)
+MAX_CORRECTION = 2000
 MAX_CANDIDATES = 10
 MAX_SOURCE_CHARS = 40_000
 MAX_APPROVED_CHARS = 8_000
@@ -31,6 +52,15 @@ log = logging.getLogger("tybot.summary_review")
 
 class SummaryReviewError(RuntimeError):
     pass
+
+
+class AmbiguousProjection(SummaryReviewError):
+    """전체 예상 요약을 **확정적으로** 만들 수 없다.
+
+    후보가 바꾸려는 기존 문장을 못 찾았거나 두 번 찾았다는 뜻이다. 어느 쪽이든
+    「어느 문장이 바뀌는지」 를 우리가 모른다 — 그 상태로 예상본을 그리면 사람은
+    바뀌지 않을 문장이 바뀐다고 읽는다. Canvas 를 포기하고 후보 DM 으로 간다.
+    """
 
 
 @dataclass(frozen=True)
@@ -52,14 +82,36 @@ class Proposal:
     evidence_locator: str
 
 
+def _as_uuid(value) -> uuid.UUID | None:
+    """UUID 로 못 읽으면 `None`. **예외를 올리지 않는다.**
+
+    Slack 버튼 값과 모달 metadata 는 밖에서 온 문자열이다. 잘못된 값 하나가
+    핸들러를 죽이면 그 사람의 DM 은 영영 아무 반응이 없다 — 막되, 조용히 막는다.
+    """
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 def _normalized(value: str) -> str:
     value = re.sub(r"[`*_\"'“”‘’]", "", value or "")
     value = re.sub(r"^[\s>•◦∙]+", "", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
+NUMBER_RE = re.compile(
+    r"(?<![가-힣A-Za-z])\d[\d,.]*(?:백만원|억원|천원|만원|개월|%|억|만|원|일|년)?"
+)
+
+
+def _number_values(value: str) -> list[str]:
+    """검토 화면에 보여 줄 숫자를 원문 순서로, 중복 없이 돌려준다."""
+    return list(dict.fromkeys(match.group(0) for match in NUMBER_RE.finditer(value or "")))
+
+
 def _numbers(value: str) -> set[str]:
-    return set(re.findall(r"(?<![가-힣A-Za-z])\d[\d,.]*(?:%|억|만|원|개월|일|년)?", value or ""))
+    return set(_number_values(value))
 
 
 def parse_proposals(raw: str, source: list[SourceLine],
@@ -99,6 +151,11 @@ def parse_proposals(raw: str, source: list[SourceLine],
         # 새로 만든 숫자는 원문 인용이나 기존 승인 문장에 실제로 있어야 한다.
         if not _numbers(proposed) <= (_numbers(quote) | _numbers(current)):
             continue
+        # 숫자가 든 신규 쟁점을 모델이 `new_issue` 로 분류해도 검토 화면에서는
+        # 반드시 숫자 확인 대상으로 먼저 보여 준다. 사실은 바꾸지 않고 분류만
+        # 결정적으로 보정한다.
+        if _numbers(proposed):
+            kind = "number_or_schedule"
         accepted.append(Proposal(
             kind=kind,
             current_text=current,
@@ -227,6 +284,247 @@ class Store:
             )
             return list(cur.fetchall())
 
+    # --- Canvas 회차 (B-50) ---------------------------------------------------
+    def reviewer_recipients(self, workspace: str, channel_id: str) -> list[str]:
+        """이 회차를 받을 사람. **검토자만.**
+
+        채널 담당자·개설자를 자동으로 넣지 않는다(설계 §6). 담당자도 보려면
+        검토자로 등록한다 — 「담당이니까 당연히」 로 권한을 넓히면, 권한이 어디서
+        생겼는지 아무도 설명할 수 없게 된다.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT reviewer_user FROM channel_reviewer
+                WHERE workspace=%s AND channel_id=%s AND enabled ORDER BY reviewer_user""",
+                (workspace, channel_id),
+            )
+            rows = cur.fetchall()
+        out = [
+            str(r.get("reviewer_user") if isinstance(r, dict) else r[0]) for r in rows
+        ]
+        return [user for user in dict.fromkeys(out) if user]
+
+    def begin_artifact(self, *, workspace: str, channel_id: str, channel_name: str,
+                       review_date: date, source_digest: str, digest: str,
+                       rows: list[dict]) -> tuple[str, str]:
+        """회차 행을 **Canvas 보다 먼저** 잡는다. `(artifact_id, state)`.
+
+        순서를 뒤집으면 안 된다. Slack 이 Canvas 를 만들고 응답만 유실됐을 때,
+        DB 에 아무 흔적이 없으면 다음 실행이 같은 회차의 Canvas 를 또 만든다.
+
+        이미 있는 회차면 그 행을 그대로 돌려준다 — 재실행의 멱등성이 여기 걸려
+        있다. 후보 매핑도 그때 만든 것을 유지한다(번호가 바뀌면 안 된다).
+        """
+        artifact_id = uuid.uuid4()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO summary_review_artifact
+                (id,workspace,channel_id,channel_name,review_date,source_digest,content_hash)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (workspace,channel_id,review_date,source_digest) DO NOTHING
+                RETURNING id""",
+                (artifact_id, workspace, channel_id, channel_name, review_date,
+                 source_digest, digest),
+            )
+            created = cur.fetchone()
+            if created is None:
+                cur.execute(
+                    """SELECT id,state FROM summary_review_artifact
+                    WHERE workspace=%s AND channel_id=%s AND review_date=%s
+                    AND source_digest=%s""",
+                    (workspace, channel_id, review_date, source_digest),
+                )
+                row = cur.fetchone()
+                self.conn.commit()
+                if row is None:
+                    raise SummaryReviewError("회차 행을 찾지 못했습니다.")
+                get = row.get if isinstance(row, dict) else None
+                return (str(get("id") if get else row[0]),
+                        str(get("state") if get else row[1]))
+            for position, candidate in enumerate(ordered_rows(rows), start=1):
+                cur.execute(
+                    """INSERT INTO summary_review_artifact_candidate
+                    (artifact_id,candidate_id,position) VALUES (%s,%s,%s)
+                    ON CONFLICT DO NOTHING""",
+                    (artifact_id, candidate.get("id"), position),
+                )
+        self.conn.commit()
+        # DB 상태와 구별되는 호출 결과다. 기존 `creating` 행은 이전 실행이 Slack
+        # 호출 전후에 끊긴 것일 수 있지만, `new` 는 이 호출이 방금 만든 행이라
+        # 안전하게 Canvas 생성을 시작할 수 있다.
+        return str(artifact_id), "new"
+
+    def artifact_rows(self, artifact_id: str) -> list[dict]:
+        """이 회차의 후보. **저장된 번호 순서**로 돌려준다.
+
+        `pending()` 을 다시 조회하지 않는다 — 그 사이 상태가 바뀌면 번호가 밀리고,
+        사람이 "3번" 이라고 한 것이 다른 후보를 가리키게 된다.
+        """
+        key = _as_uuid(artifact_id)
+        if key is None:
+            return []
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT c.*, m.position FROM summary_review_artifact_candidate m
+                JOIN summary_review_candidate c ON c.id=m.candidate_id
+                WHERE m.artifact_id=%s ORDER BY m.position""",
+                (key,),
+            )
+            return list(cur.fetchall())
+
+    def mark_artifact(self, artifact_id: str, state: str, *, canvas_id: str = "",
+                      permalink: str = "", error_code: str = "") -> None:
+        if state not in ARTIFACT_STATES:
+            raise SummaryReviewError(f"알 수 없는 회차 상태입니다: {state}")
+        key = _as_uuid(artifact_id)
+        if key is None:
+            return
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """UPDATE summary_review_artifact SET state=%s,
+                canvas_id=COALESCE(NULLIF(%s,''),canvas_id),
+                canvas_permalink=COALESCE(NULLIF(%s,''),canvas_permalink),
+                error_code=NULLIF(%s,''),
+                ready_at=CASE WHEN %s='ready' THEN now() ELSE ready_at END
+                WHERE id=%s""",
+                (state, canvas_id, permalink, error_code, state, key),
+            )
+        self.conn.commit()
+
+    def artifact(self, artifact_id: str) -> dict | None:
+        key = _as_uuid(artifact_id)
+        if key is None:
+            return None
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT * FROM summary_review_artifact WHERE id=%s", (key,))
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def record_delivery(self, artifact_id: str, recipient: str, *, dm_channel: str = "",
+                        message_ts: str = "", state: str = "sent",
+                        error_code: str = "") -> None:
+        key = _as_uuid(artifact_id)
+        if key is None:
+            return
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO summary_review_delivery
+                (artifact_id,recipient,dm_channel,message_ts,state,sent_at,error_code)
+                VALUES (%s,%s,NULLIF(%s,''),NULLIF(%s,''),%s,
+                        CASE WHEN %s='sent' THEN now() END, NULLIF(%s,''))
+                ON CONFLICT (artifact_id,recipient) DO UPDATE SET
+                dm_channel=COALESCE(excluded.dm_channel,summary_review_delivery.dm_channel),
+                message_ts=COALESCE(excluded.message_ts,summary_review_delivery.message_ts),
+                state=excluded.state, sent_at=COALESCE(excluded.sent_at,summary_review_delivery.sent_at),
+                error_code=excluded.error_code""",
+                (key, recipient, dm_channel, message_ts, state, state, error_code),
+            )
+        self.conn.commit()
+
+    def deliveries(self, artifact_id: str) -> list[dict]:
+        key = _as_uuid(artifact_id)
+        if key is None:
+            return []
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT recipient,dm_channel,message_ts,state FROM summary_review_delivery
+                WHERE artifact_id=%s AND state='sent' ORDER BY recipient""",
+                (key,),
+            )
+            return list(cur.fetchall())
+
+    def delivery_sent(self, artifact_id: str, recipient: str) -> bool:
+        """이 수신자에게 **이 회차** DM을 보냈는가."""
+        key = _as_uuid(artifact_id)
+        if key is None or not recipient:
+            return False
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT 1 FROM summary_review_delivery
+                WHERE artifact_id=%s AND recipient=%s AND state='sent'""",
+                (key, recipient),
+            )
+            return cur.fetchone() is not None
+
+    def may_decide(self, artifact_id: str, recipient: str, workspace: str) -> bool:
+        """이 사람이 **이 회차를** 받았는가.
+
+        날짜 단위 발송 이력이 아니라 회차 단위로 본다. 이력은 「그날 무언가를
+        받았다」 만 알고 어느 Canvas 였는지 모른다 — 다른 회차의 권한이다.
+        """
+        key = _as_uuid(artifact_id)
+        if key is None or not recipient:
+            return False
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT 1 FROM summary_review_delivery d
+                JOIN summary_review_artifact a ON a.id=d.artifact_id
+                WHERE d.artifact_id=%s AND d.recipient=%s AND d.state='sent'
+                AND a.workspace=%s""",
+                (key, recipient, workspace),
+            )
+            return cur.fetchone() is not None
+
+    def refresh_artifact_state(self, artifact_id: str) -> str:
+        """후보 집계로 회차 상태를 다시 계산한다.
+
+        **하나라도 `deferred` 면 완료가 아니다.** 보류는 결정이 아니라 미룬 것이다.
+        """
+        key = _as_uuid(artifact_id)
+        if key is None:
+            return ""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT count(*) AS total,
+                count(*) FILTER (WHERE c.state IN ('approved','rejected')) AS decided,
+                count(*) FILTER (WHERE c.state='deferred') AS deferred
+                FROM summary_review_artifact_candidate m
+                JOIN summary_review_candidate c ON c.id=m.candidate_id
+                WHERE m.artifact_id=%s""",
+                (key,),
+            )
+            row = cur.fetchone() or {}
+            get = row.get if isinstance(row, dict) else None
+            total = int((get("total") if get else row[0]) or 0)
+            decided = int((get("decided") if get else row[1]) or 0)
+            deferred = int((get("deferred") if get else row[2]) or 0)
+            if not total or not decided:
+                state = "ready"
+            elif decided == total and not deferred:
+                state = "completed"
+            else:
+                state = "partial"
+            cur.execute(
+                """UPDATE summary_review_artifact SET state=%s,
+                decided_at=CASE WHEN %s='completed' THEN now() ELSE decided_at END
+                WHERE id=%s AND state NOT IN ('failed','ambiguous')""",
+                (state, state, key),
+            )
+        self.conn.commit()
+        return state
+
+    def approve_all(
+        self, artifact_id: str, *, workspace: str, actor: str
+    ) -> tuple[list[str], int]:
+        """아직 결정되지 않은 후보만 승인. `(승인한 후보 ID, 건너뜀)`.
+
+        **이미 반려된 후보를 덮어쓰지 않는다.** 다른 검토자가 먼저 "틀리다" 라고
+        한 것을 "전체 맞다" 한 번으로 뒤집으면, 그 사람이 적은 정정사항이 아무
+        효력 없이 남는다.
+        """
+        approved: list[str] = []
+        skipped = 0
+        for row in self.artifact_rows(artifact_id):
+            if str(row.get("state") or "") not in OPEN_STATES:
+                skipped += 1
+                continue
+            if self.decide(str(row.get("id")), workspace=workspace, actor=actor,
+                           decision="approved", artifact_id=artifact_id):
+                approved.append(str(row.get("id")))
+            else:
+                skipped += 1
+        return approved, skipped
+
     def candidate_channel(self, candidate_id: str, workspace: str) -> str:
         try:
             key = uuid.UUID(candidate_id)
@@ -241,7 +539,18 @@ class Store:
         return str((row.get("channel_id") if isinstance(row, dict) else row[0]) if row else "")
 
     def decide(self, candidate_id: str, *, workspace: str, actor: str, decision: str,
-               correction: str = "", defer_until: date | None = None) -> bool:
+               correction: str = "", defer_until: date | None = None,
+               artifact_id: str = "") -> bool:
+        """후보 하나를 결정한다. 이미 누가 결정했으면 `False`.
+
+        **조건부 UPDATE 한 문장이 잠금이다.** `state IN ('pending','deferred')` 가
+        WHERE 에 있으므로, 두 검토자가 동시에 눌러도 행 잠금을 먼저 잡은 쪽만
+        바꾸고 나머지는 0행을 받는다. 읽고 나서 쓰면 그 사이가 벌어진다.
+
+        권한은 `artifact_id` 가 있으면 **그 회차를 받았는지**로 본다(설계 §4.3).
+        없으면 예전 날짜 단위 발송 이력으로 본다 — Canvas 실패 폴백 DM 과 이미
+        보낸 옛 DM 이 그 형식이다.
+        """
         if decision not in {"approved", "rejected", "deferred"}:
             raise SummaryReviewError("지원하지 않는 검토 결정입니다.")
         try:
@@ -250,17 +559,30 @@ class Store:
             raise SummaryReviewError("잘못된 요약 후보 식별자입니다.") from exc
         if decision == "rejected" and len(correction.strip()) < MIN_CORRECTION:
             raise SummaryReviewError("반려할 때는 정정 사항을 입력해야 합니다.")
+        artifact_key = _as_uuid(artifact_id) if artifact_id else None
+        if artifact_id and artifact_key is None:
+            raise SummaryReviewError("잘못된 요약 검토 회차 식별자입니다.")
         with self.conn.cursor() as cur:
             cur.execute(
                 """UPDATE summary_review_candidate SET state=%s, decided_at=CASE WHEN %s='deferred' THEN NULL ELSE now() END,
                 decided_by=%s, correction=%s, defer_until=%s WHERE id=%s AND workspace=%s
-                AND state IN ('pending','deferred') AND EXISTS (
-                    SELECT 1 FROM review_digest_sent sent
-                    WHERE sent.workspace=summary_review_candidate.workspace
-                    AND sent.channel_id=summary_review_candidate.channel_id
-                    AND sent.recipient=%s AND sent.kind='summary'
+                AND state IN ('pending','deferred') AND (
+                    (%s::uuid IS NOT NULL AND EXISTS (
+                        SELECT 1 FROM summary_review_delivery d
+                        JOIN summary_review_artifact_candidate m
+                          ON m.artifact_id=d.artifact_id
+                        WHERE d.artifact_id=%s AND d.recipient=%s AND d.state='sent'
+                        AND m.candidate_id=summary_review_candidate.id
+                    ))
+                    OR (%s::uuid IS NULL AND EXISTS (
+                        SELECT 1 FROM review_digest_sent sent
+                        WHERE sent.workspace=summary_review_candidate.workspace
+                        AND sent.channel_id=summary_review_candidate.channel_id
+                        AND sent.recipient=%s AND sent.kind='summary'
+                    ))
                 ) RETURNING *""",
-                (decision, decision, actor, correction.strip(), defer_until, key, workspace, actor),
+                (decision, decision, actor, correction.strip(), defer_until, key, workspace,
+                 artifact_key, artifact_key, actor, artifact_key, actor),
             )
             row = cur.fetchone()
             if row and decision == "approved":
@@ -285,12 +607,28 @@ class Store:
 
 
 def candidate_blocks(channel_name: str, rows: list[dict]) -> list[dict]:
-    out = [{"type": "section", "text": {"type": "mrkdwn", "text": f"*{channel_name} - 요약 검토 {len(rows)}건*\n근거 원문과 후보를 확인해 주세요."}}]
+    numeric_count = sum(
+        str(row.get("kind") or "") == "number_or_schedule" for row in rows
+    )
+    heading = (
+        f"*{channel_name} - 요약 검토 {len(rows)}건*\n"
+        f"숫자·금액·비율·날짜 확인 {numeric_count}건 · 나머지 쟁점 "
+        f"{len(rows) - numeric_count}건\n"
+        "특히 숫자는 후보와 근거 원문이 한 자리까지 같은지 확인해 주세요."
+    )
+    out = [{"type": "section", "text": {"type": "mrkdwn", "text": heading}}]
     labels = {"number_or_schedule": "숫자·일정", "new_issue": "새 쟁점", "closed_issue": "끝난 쟁점"}
-    for row in rows:
+    ordered = sorted(
+        rows,
+        key=lambda row: str(row.get("kind") or "") != "number_or_schedule",
+    )
+    for row in ordered:
         get = row.get
         cid = str(get("id"))
         body = f"*{labels.get(str(get('kind')), '요약')}*\n*후보* {get('proposed_text')}\n*근거* {get('evidence_author')} · {get('evidence_at')}\n>{get('evidence_quote')}"
+        values = _number_values(str(get("proposed_text") or ""))
+        if values:
+            body = f"*확인할 값* `{'` · `'.join(values)}`\n" + body
         if get("current_text"):
             body = f"*현재* {get('current_text')}\n" + body
         out.extend([
@@ -305,19 +643,344 @@ def candidate_blocks(channel_name: str, rows: list[dict]) -> list[dict]:
     return out
 
 
-def reject_modal(candidate_id: str) -> dict:
+# --- Canvas 렌더 (설계 §2.1) ---------------------------------------------------
+#
+# **LLM 을 다시 부르지 않는다.** 예상 요약본은 지금 승인된 항목과 이번 후보를
+# 결정적 코드가 조합해 만든다. 여기서 모델을 부르면 사람이 검토하려는 문장이
+# 검토 화면에서 또 바뀐다 — 무엇을 승인한 것인지 알 수 없게 된다.
+KIND_LABELS = {
+    "number_or_schedule": "숫자·일정",
+    "new_issue": "새 쟁점",
+    "closed_issue": "끝난 쟁점",
+}
+
+
+def ordered_rows(rows: list[dict]) -> list[dict]:
+    """Canvas·DM 에 보일 순서. **숫자 후보가 먼저다.**
+
+    숫자는 한 자리만 틀려도 답이 바뀌는데, 목록 아래쪽에 있으면 끝까지 안 보고
+    닫는다. 같은 종류 안에서는 생성 순서를 지킨다 — 매번 순서가 바뀌면 사람이
+    어제 본 것과 대조할 수 없다.
+    """
+    return sorted(rows, key=lambda row: str(row.get("kind") or "") != "number_or_schedule")
+
+
+def projected_summary(approved: list[str], rows: list[dict]) -> list[str]:
+    """이번 후보를 **가상 적용한** 전체 요약. 아직 승인된 문서가 아니다.
+
+    - `current_text` 가 있는 후보: 그 문장을 `proposed_text` 로 교체
+    - `current_text` 가 없는 후보: 끝에 추가
+    - `closed_issue`: 기존 문장을 종결 문장으로 교체하되 **임의로 지우지 않는다**
+
+    같은 `current_text` 가 두 번 나오거나 아예 없으면 `AmbiguousProjection`.
+    """
+    out = list(approved)
+    for row in ordered_rows(rows):
+        current = str(row.get("current_text") or "").strip()
+        proposed = str(row.get("proposed_text") or "").strip()
+        if not proposed:
+            continue
+        if not current:
+            out.append(proposed)
+            continue
+        hits = [i for i, body in enumerate(out) if body.strip() == current]
+        if len(hits) != 1:
+            raise AmbiguousProjection(
+                f"바꿀 기존 문장을 {len(hits)}개 찾았습니다(1개여야 합니다)."
+            )
+        out[hits[0]] = proposed
+    return out
+
+
+def content_hash(approved: list[str], rows: list[dict]) -> str:
+    """이 회차의 지문. **렌더러 버전과 후보 순서까지** 넣는다.
+
+    후보 내용이 같아도 순서가 다르면 다른 문서다 — 사람이 "3번" 이라고 부르는
+    것이 달라지기 때문이다.
+    """
+    payload = {
+        "renderer": RENDERER_VERSION,
+        "approved": list(approved),
+        "candidates": [
+            [str(row.get("id")), str(row.get("kind") or ""),
+             str(row.get("current_text") or ""), str(row.get("proposed_text") or "")]
+            for row in ordered_rows(rows)
+        ],
+    }
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def canvas_title(*, channel_label: str, review_date: date, artifact_id: str) -> str:
+    """`2026-09-16 전산팀장보고 요약 검토 [a1b2c3d4]`.
+
+    Artifact ID 앞 8자를 넣는다 — 같은 채널·같은 날 회차가 둘이 되는 상황(다른
+    source digest)에서 사람이 어느 것을 보는지 구별할 수 있어야 한다.
+    접미사 ` · TYBot` 은 `canvas_answer` 가 붙인다(수집 제외 표식).
+    """
+    short = str(artifact_id).replace("-", "")[:8]
+    return f"{review_date} {channel_label} 요약 검토 [{short}]"
+
+
+def _numbers_table(rows: list[dict]) -> list[str]:
+    """숫자·금액·비율·날짜 확인표. **환산하거나 정밀도를 올리지 않는다.**"""
+    out = [
+        "| 번호 | 구분 | 확인할 값 | 요약 후보 | 근거 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for index, row in enumerate(ordered_rows(rows), start=1):
+        values = _number_values(str(row.get("proposed_text") or ""))
+        if not values:
+            continue
+        out.append(
+            f"| {index} | {KIND_LABELS.get(str(row.get('kind')), '요약')} "
+            f"| {', '.join(values)} | {_cell(row.get('proposed_text'))} "
+            f"| {_cell(row.get('evidence_author'))} · {_cell(row.get('evidence_at'))} |"
+        )
+    return out if len(out) > 2 else []
+
+
+def _cell(value) -> str:
+    """표 한 칸. 줄바꿈과 `|` 만 지운다 — **내용은 고치지 않는다.**"""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text.replace("|", r"\|")
+
+
+def canvas_markdown(
+    *, channel_label: str, review_date: date, rows: list[dict], approved: list[str]
+) -> str:
+    """검토용 Canvas 본문. Disclaimer 는 `canvas_answer.markdown()` 이 붙인다.
+
+    **후보에 없는 설명·평가·결론을 만들지 않는다.** 여기서 문장을 지어내면 사람이
+    승인한 것과 문서에 적힌 것이 갈린다.
+    """
+    ordered = ordered_rows(rows)
+    numeric = sum(str(row.get("kind") or "") == "number_or_schedule" for row in ordered)
+    parts = [
+        f"## {channel_label} · {review_date} 요약 검토",
+        f"후보 {len(ordered)}건 — 숫자·일정 {numeric}건 · 나머지 쟁점 {len(ordered) - numeric}건",
+        "",
+        "## 검토 전 예상 요약본",
+        "",
+        "> 아래는 **이번 후보를 모두 반영했다고 가정한** 모습입니다. 아직 승인된"
+        " 문서가 아니며, DM 에서 결정한 후보만 실제로 반영됩니다.",
+        "",
+    ]
+    parts += [f"- {line}" for line in projected_summary(approved, ordered)] or ["- (없음)"]
+
+    table = _numbers_table(ordered)
+    if table:
+        parts += ["", "## 숫자·날짜 확인", ""]
+        parts += table
+
+    rest = [row for row in ordered if not _number_values(str(row.get("proposed_text") or ""))]
+    if rest:
+        parts += ["", "## 나머지 쟁점", ""]
+        parts += [
+            f"{index}. {_cell(row.get('proposed_text'))}"
+            for index, row in enumerate(ordered, start=1)
+            if row in rest
+        ]
+
+    parts += ["", "## 후보별 근거 원문", ""]
+    for index, row in enumerate(ordered, start=1):
+        parts.append(f"### {index}. {KIND_LABELS.get(str(row.get('kind')), '요약')}")
+        if row.get("current_text"):
+            parts.append(f"- 현재: {_cell(row.get('current_text'))}")
+        parts.append(f"- 후보: {_cell(row.get('proposed_text'))}")
+        parts.append(
+            f"- 근거: {_cell(row.get('evidence_author'))} · {_cell(row.get('evidence_at'))}"
+        )
+        # **검증을 통과한 인용만** 싣는다. 첨부에서 뽑은 문장이라도 XML·OCR 덤프를
+        # 그대로 옮기지 않는다 — 그건 근거가 아니라 원본의 사본이다.
+        parts.append(f"> {_cell(row.get('evidence_quote'))}")
+        parts.append("")
+
+    parts += [
+        "## 검토 방법",
+        "",
+        "- 이 문서는 읽기용입니다. 결정은 TYBot DM 의 버튼에서 합니다.",
+        "- 후보 하나가 부분적으로만 맞아도 **틀리다** 로 처리하고 올바른 전체 문장을 적어 주세요.",
+        "- 승인 요약은 파생 문서이며 원문이나 답변 검색 근거를 바꾸지 않습니다.",
+    ]
+    return "\n".join(parts)
+
+
+def canvas_review_blocks(
+    *, channel_label: str, review_date: date, permalink: str,
+    artifact_id: str, rows: list[dict],
+) -> list[dict]:
+    """DM 제어 화면. **후보·근거 원문을 다시 복제하지 않는다.**
+
+    긴 내용은 Canvas 에 있다. 여기 또 실으면 두 화면이 어긋날 때 어느 쪽이 맞는지
+    알 수 없고, DM 이 길어져 버튼이 화면 밖으로 밀린다.
+    """
+    ordered = ordered_rows(rows)
+    numeric = sum(str(row.get("kind") or "") == "number_or_schedule" for row in ordered)
+    head = (
+        f"*{channel_label} · {review_date} 요약 검토 {len(ordered)}건*\n"
+        f"숫자 확인 {numeric}건 · 일반 쟁점 {len(ordered) - numeric}건"
+    )
+    out: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": head}},
+        {"type": "actions", "elements": [
+            {"type": "button", "action_id": "tybot_summary_review_open_canvas",
+             "text": {"type": "plain_text", "text": "Canvas에서 전체 요약과 근거 읽기"},
+             "url": permalink, "value": artifact_id},
+            {"type": "button", "action_id": ACTION_APPROVE_ALL,
+             "text": {"type": "plain_text", "text": "전체 맞다"},
+             "style": "primary", "value": artifact_id},
+        ]},
+    ]
+    for index, row in enumerate(ordered, start=1):
+        value = _button_value(artifact_id, str(row.get("id")))
+        out.extend([
+            {"type": "section", "text": {"type": "mrkdwn",
+                                         "text": _dm_headline(index, row)}},
+            {"type": "actions", "block_id": f"decide_{index}", "elements": [
+                {"type": "button", "action_id": ACTION_APPROVE, "value": value,
+                 "text": {"type": "plain_text", "text": "맞다"}, "style": "primary"},
+                {"type": "button", "action_id": ACTION_REJECT, "value": value,
+                 "text": {"type": "plain_text", "text": "틀리다"}, "style": "danger"},
+                {"type": "button", "action_id": ACTION_DEFER, "value": value,
+                 "text": {"type": "plain_text", "text": "나중에"}},
+            ]},
+        ])
+    out.append({"type": "context", "elements": [{"type": "mrkdwn",
+        "text": "승인 요약은 파생 문서이며 원문이나 답변 검색 근거를 변경하지 않습니다."}]})
+    return out
+
+
+def _dm_headline(index: int, row: dict) -> str:
+    """DM 한 줄. 값이 있으면 값만, 없으면 문장 앞머리만 보인다."""
+    label = KIND_LABELS.get(str(row.get("kind")), "요약")
+    values = _number_values(str(row.get("proposed_text") or ""))
+    tail = " · ".join(f"`{v}`" for v in values) if values else _cell(row.get("proposed_text"))[:80]
+    return f"*{index}. {label}* · {tail}"
+
+
+DECISION_LABELS = {
+    "approved": "맞음",
+    "rejected": "수정 필요",
+    "deferred": "내일 다시 확인",
+}
+
+
+def _with_decisions(blocks: list[dict], rows: list[dict]) -> list[dict]:
+    """결정된 후보의 버튼을 상태 줄로 바꾼다(설계 §8).
+
+    **정정 본문은 넣지 않는다.** 누가 무엇으로 결정했는지만 보인다 — 정정은 그
+    사람의 판단이고, 다른 검토자에게 퍼뜨리면 다음 판단이 그 문장에 끌린다.
+    """
+    decided = {
+        f"decide_{index}": row
+        for index, row in enumerate(ordered_rows(rows), start=1)
+        if str(row.get("state") or "") not in ("", "pending")
+    }
+    out: list[dict] = []
+    for block in blocks:
+        row = decided.get(str(block.get("block_id") or ""))
+        if block.get("type") != "actions" or row is None:
+            out.append(block)
+            continue
+        state = str(row.get("state") or "")
+        who = str(row.get("decided_by") or "")
+        label = DECISION_LABELS.get(state, state)
+        tail = f" · <@{who}>" if who and state != "deferred" else ""
+        out.append({"type": "context", "elements": [
+            {"type": "mrkdwn", "text": f"{label}{tail}"}
+        ]})
+    return out
+
+
+def _button_value(artifact_id: str, candidate_id: str) -> str:
+    """버튼이 들고 다니는 좌표. **회차와 후보를 함께** 실어야 권한을 볼 수 있다.
+
+    후보 ID 만 실으면 「이 사람이 이 회차를 받았는가」 를 확인할 수 없고, 날짜
+    단위 발송 이력으로 대신 보게 된다 — 그건 다른 회차의 권한이다.
+    """
+    return json.dumps({"a": artifact_id, "c": candidate_id}, ensure_ascii=False)
+
+
+def parse_button_value(raw: str) -> tuple[str, str]:
+    """버튼 값 → `(artifact_id, candidate_id)`.
+
+    옛 형식(후보 ID 문자열)도 받는다 — Canvas 실패 폴백 DM 이 그 형식을 쓰고,
+    이미 보낸 DM 도 남아 있다.
+    """
+    text = str(raw or "").strip()
+    if not text.startswith("{"):
+        return "", text
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return "", ""
+    return str(data.get("a") or ""), str(data.get("c") or "")
+
+
+def reject_modal(
+    candidate_id: str, *, artifact_id: str = "", position: int = 0, headline: str = ""
+) -> dict:
+    """반려 모달. `private_metadata` 는 **JSON 이다.**
+
+    예전에는 후보 ID 문자열 하나였다. 회차까지 실어야 권한을 볼 수 있는데, 문자열을
+    이어 붙이면 구분자가 값 안에 들어갔을 때 조용히 잘못 갈린다.
+    """
+    blocks: list[dict] = []
+    if headline:
+        # 무엇을 반려하는지 보이지 않으면 사람은 다른 후보에 정정을 적는다.
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": headline[:2900]}})
+    blocks += [
+        {"type": "input", "block_id": "wrong_part",
+         "label": {"type": "plain_text", "text": "틀린 부분"},
+         "element": {"type": "static_select", "action_id": "wrong_part",
+                     "placeholder": {"type": "plain_text", "text": "고르세요"},
+                     "options": [
+                         {"text": {"type": "plain_text", "text": label}, "value": code}
+                         for code, label in WRONG_PARTS
+                     ]}},
+        {"type": "input", "block_id": "correction",
+         "label": {"type": "plain_text", "text": "올바른 내용/정정사항"},
+         "element": {"type": "plain_text_input", "action_id": "correction",
+                     "multiline": True, "min_length": MIN_CORRECTION,
+                     "max_length": MAX_CORRECTION}},
+    ]
     return {"type": "modal", "callback_id": REJECT_CALLBACK,
-            "private_metadata": candidate_id,
+            "private_metadata": json.dumps(
+                {"artifact_id": artifact_id, "candidate_id": candidate_id,
+                 "position": position}, ensure_ascii=False),
             "title": {"type": "plain_text", "text": "요약 후보 반려"},
             "submit": {"type": "plain_text", "text": "반려"},
             "close": {"type": "plain_text", "text": "취소"},
-            "blocks": [{"type": "input", "block_id": "correction",
-                        "label": {"type": "plain_text", "text": "정정 사항"},
-                        "element": {"type": "plain_text_input", "action_id": "correction", "multiline": True, "min_length": MIN_CORRECTION, "max_length": 2000}}]}
+            "blocks": blocks}
+
+
+def reject_metadata(view: dict) -> dict:
+    """모달의 `private_metadata`. 옛 형식(후보 ID 문자열)도 읽는다."""
+    raw = str(view.get("private_metadata") or "").strip()
+    if not raw.startswith("{"):
+        return {"artifact_id": "", "candidate_id": raw, "position": 0}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {"artifact_id": "", "candidate_id": "", "position": 0}
+    return {
+        "artifact_id": str(data.get("artifact_id") or ""),
+        "candidate_id": str(data.get("candidate_id") or ""),
+        "position": int(data.get("position") or 0),
+    }
 
 
 def correction_from_view(view: dict) -> str:
     return str(((view.get("state") or {}).get("values") or {}).get("correction", {}).get("correction", {}).get("value") or "").strip()
+
+
+def wrong_part_from_view(view: dict) -> str:
+    """고른 「틀린 부분」 코드. 안 골랐으면 빈 문자열이고, 그건 제출 거절 사유다."""
+    block = ((view.get("state") or {}).get("values") or {}).get("wrong_part") or {}
+    selected = (block.get("wrong_part") or {}).get("selected_option") or {}
+    code = str(selected.get("value") or "")
+    return code if code in {c for c, _ in WRONG_PARTS} else ""
 
 
 def contract_prompt() -> str:
@@ -335,9 +998,16 @@ def default_defer_date(today: date) -> date:
 def channel_source(archive, workspace: str, channel_id: str, watermark: str,
                    start_at: str = "") -> list[SourceLine]:
     """한 채널의 새 원문만 가져온다. 승인 요약과 봇 출력은 읽지 않는다."""
+    from .channel_lifecycle import include_retired, keep
+
+    allow_retired = include_retired()
     rows: list[SourceLine] = []
     for doc in archive.docs():
         if doc.workspace != workspace or str(doc.channel_id or "") != channel_id:
+            continue
+        # 보관·삭제된 채널의 원문은 **요약 후보를 만들지 않는다**(B-51).
+        # 없앤 채널의 이야기가 오늘 요약에 들어가면 검토자는 출처를 확인할 수 없다.
+        if not keep(doc, allow_retired=allow_retired):
             continue
         for line in doc.raw_lines:
             source = line.source_path or doc.path
@@ -429,12 +1099,163 @@ class RunResult:
     sent: int = 0
     skipped: int = 0
     failed: int = 0
+    # Canvas 회차 수치(B-50). **폴백을 성공과 섞지 않는다** — 섞으면 Canvas 가
+    # 계속 실패하는데도 「잘 보내지고 있다」 로 보인다.
+    canvas_created: int = 0
+    canvas_fallback: int = 0
+    canvas_ambiguous: int = 0
 
 
-def run(conn, clients: dict, *, archive, channels, owners, complete,
+def _canvas_round(
+    store: Store, client, *, workspace: str, channel_id: str, channel_label: str,
+    rows: list[dict], review_date: date, recipients: list[str], result: RunResult,
+) -> dict | None:
+    """이 회차의 Canvas 를 만들고 좌표를 돌려준다. 못 만들면 `None`(폴백).
+
+    **순서를 지킨다**(설계 §5). Artifact 행 → Canvas 생성 → 권한 → 상태 기록.
+    Canvas 를 먼저 만들면 응답이 유실됐을 때 다음 실행이 하나 더 만든다.
+    """
+    from . import canvas_answer
+
+    digest = str(rows[0].get("source_digest") or "") if rows else ""
+    approved = store.approved(workspace, channel_id)
+    try:
+        body_hash = content_hash(approved, rows)
+        body = canvas_markdown(
+            channel_label=channel_label, review_date=review_date,
+            rows=rows, approved=approved,
+        )
+    except AmbiguousProjection as exc:
+        # 예상본을 확정할 수 없다. **그려서 보여 주지 않는다** — 바뀌지 않을 문장이
+        # 바뀐다고 읽히면 사람이 그것을 승인한다.
+        log.warning("요약 예상본 모호 ws=%s ch=%s: %s", workspace, channel_id, exc)
+        result.canvas_ambiguous += 1
+        return None
+
+    artifact_id, state = store.begin_artifact(
+        workspace=workspace, channel_id=channel_id, channel_name=channel_label,
+        review_date=review_date, source_digest=digest, digest=body_hash, rows=rows,
+    )
+    if state == "ambiguous":
+        # 지난 실행이 API 와 DB 사이에서 죽었다. **자동으로 다시 만들지 않는다** —
+        # Slack 이 이미 만들었을 수 있고, 그러면 같은 회차 Canvas 가 둘이 된다.
+        log.warning("모호 상태 회차라 Canvas 를 다시 만들지 않는다 id=%s", artifact_id)
+        result.canvas_ambiguous += 1
+        return None
+    existing = store.artifact(artifact_id) or {}
+    if state in ("ready", "partial", "completed") and existing.get("canvas_id"):
+        # 이미 만든 회차다. 재실행에서 **하나만** 존재해야 한다.
+        return {
+            "artifact_id": artifact_id,
+            "canvas_id": str(existing.get("canvas_id") or ""),
+            "permalink": str(existing.get("canvas_permalink") or ""),
+        }
+    if state == "creating":
+        # 이 호출이 만든 행은 `new` 다. 기존 `creating` 은 이전 실행이 API 전후
+        # 어디에서 끊겼는지 알 수 없다. 재생성하면 중복 Canvas가 될 수 있다.
+        store.mark_artifact(artifact_id, "ambiguous", error_code="canvas-create-interrupted")
+        result.canvas_ambiguous += 1
+        return None
+    if state == "failed" and existing.get("canvas_id"):
+        # Canvas 생성은 끝났고 권한 부여만 실패한 회차. 새 문서를 만들지 않고
+        # 같은 문서에 현재 검토자 권한을 다시 부여한다.
+        try:
+            canvas_answer.grant_users(client, str(existing["canvas_id"]), recipients)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("검토 Canvas 권한 재부여 실패 ws=%s: %s", workspace, type(exc).__name__)
+            return None
+        store.mark_artifact(artifact_id, "ready")
+        return {
+            "artifact_id": artifact_id,
+            "canvas_id": str(existing.get("canvas_id") or ""),
+            "permalink": str(existing.get("canvas_permalink") or ""),
+        }
+    if state == "failed":
+        # Slack이 명백히 생성을 거절해 Canvas ID가 없는 경우만 다시 만든다.
+        store.mark_artifact(artifact_id, "creating")
+    elif state != "new":
+        # 정상 상태인데 Canvas 좌표가 없거나 알 수 없는 상태다.
+        store.mark_artifact(artifact_id, "ambiguous", error_code="canvas-state-unknown")
+        result.canvas_ambiguous += 1
+        return None
+
+    try:
+        canvas = canvas_answer.create(
+            client, body,
+            title=canvas_title(
+                channel_label=channel_label, review_date=review_date,
+                artifact_id=artifact_id,
+            ) + canvas_answer.TITLE_SUFFIX,
+            provenance={
+                "workspace": workspace,
+                "channel_id": channel_id,
+                "qa_record_id": f"summary-review:{artifact_id}",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - Slack 오류 종류가 여러 가지다
+        # **만들어졌는지 확실하지 않으면 `ambiguous`.** 명백한 거절만 `failed` 로
+        # 두고 다시 시도한다. 중복 Canvas 보다 발송 지연을 택한다.
+        code, state_after = _canvas_failure(exc)
+        store.mark_artifact(artifact_id, state_after, error_code=code)
+        log.warning("검토 Canvas 생성 실패 ws=%s ch=%s code=%s", workspace, channel_id, code)
+        if state_after == "ambiguous":
+            result.canvas_ambiguous += 1
+        return None
+
+    try:
+        canvas_answer.grant_users(client, canvas.canvas_id, recipients)
+    except Exception as exc:  # noqa: BLE001
+        # 권한을 못 줬으면 링크를 보내도 열리지 않는다. Canvas 는 이미 있으므로
+        # ID 는 기록하고, 이번 회차는 후보 DM 으로 간다.
+        store.mark_artifact(
+            artifact_id, "failed", canvas_id=canvas.canvas_id,
+            permalink=canvas.permalink, error_code="canvas-access-failed",
+        )
+        log.warning("검토 Canvas 권한 부여 실패 ws=%s: %s", workspace, type(exc).__name__)
+        return None
+
+    store.mark_artifact(
+        artifact_id, "ready", canvas_id=canvas.canvas_id, permalink=canvas.permalink
+    )
+    result.canvas_created += 1
+    return {
+        "artifact_id": artifact_id,
+        "canvas_id": canvas.canvas_id,
+        "permalink": canvas.permalink,
+    }
+
+
+# Slack 이 **분명히 거절한** 경우. 이때만 Canvas 가 안 만들어진 것이 확실하다.
+_CLEAR_REFUSALS = (
+    "invalid_auth", "not_authed", "missing_scope", "account_inactive",
+    "channel_not_found", "invalid_arguments", "invalid_canvas",
+    "canvas_disabled", "free_team_not_allowed", "restricted_action",
+)
+
+
+def _canvas_failure(exc: Exception) -> tuple[str, str]:
+    """`(오류 코드, 다음 상태)`.
+
+    타임아웃·연결 끊김은 **만들어졌는지 모른다.** 그걸 `failed` 로 두고 재시도하면
+    같은 회차의 Canvas 가 둘이 된다.
+    """
+    text = str(exc)
+    code = next((name for name in _CLEAR_REFUSALS if name in text), "")
+    if code:
+        return code, "failed"
+    return f"canvas-unknown:{type(exc).__name__}", "ambiguous"
+
+
+def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         now: datetime | None = None) -> RunResult:
-    """설정 시각이 지난 채널의 후보를 만들고 검토자에게 민다."""
-    from .daily_review import due, recipients
+    """설정 시각이 지난 채널의 후보를 만들고 **검토자에게** 민다.
+
+    `owners` 는 더 이상 수신자를 만들지 않는다. 호출부 호환으로만 남긴다 —
+    담당자를 자동으로 넣으면 그 사람이 승인 권한을 갖는데, 아무도 그 권한을
+    준 적이 없다(설계 §6). 담당자도 보려면 검토자로 등록한다.
+    """
+    del owners
+    from .daily_review import due
 
     now = now or datetime.now(KST)
     on = now.astimezone(KST).date()
@@ -466,11 +1287,37 @@ def run(conn, clients: dict, *, archive, channels, owners, complete,
         if client is None:
             result.failed += 1
             continue
-        for recipient in recipients(
-            workspace, channel_id, owner=owners.get((workspace, channel_id), "")
-        ):
-            if _already_sent(conn, workspace=workspace, channel_id=channel_id,
-                             recipient=recipient, on=on):
+        label = channel_name or channel_id
+        # **검토자만** 받는다. 담당자를 자동으로 넣지 않는다(설계 §6) — 담당이라는
+        # 이유로 권한이 넓어지면 그 권한이 어디서 왔는지 아무도 설명할 수 없다.
+        targets = db.reviewer_recipients(workspace, channel_id)
+        if not targets:
+            result.skipped += 1
+            continue
+        # Canvas 를 **먼저 한 번** 만들고 모든 수신자가 같은 것을 본다.
+        round_info = None
+        try:
+            round_info = _canvas_round(
+                db, client, workspace=workspace, channel_id=channel_id,
+                channel_label=label, rows=rows, review_date=on,
+                recipients=targets, result=result,
+            )
+        except Exception as exc:  # noqa: BLE001 - Canvas 실패가 검토 전체를 막지 않는다
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            log.warning("검토 Canvas 처리 실패 ws=%s code=%s", workspace, type(exc).__name__)
+        if round_info is None:
+            result.canvas_fallback += 1
+        artifact_rows = db.artifact_rows(round_info["artifact_id"]) if round_info else rows
+
+        for recipient in targets:
+            already_sent = (
+                db.delivery_sent(round_info["artifact_id"], recipient)
+                if round_info else
+                _already_sent(conn, workspace=workspace, channel_id=channel_id,
+                              recipient=recipient, on=on)
+            )
+            if already_sent:
                 result.skipped += 1
                 continue
             try:
@@ -478,12 +1325,37 @@ def run(conn, clients: dict, *, archive, channels, owners, complete,
                 dm = (opened.get("channel") or {}).get("id")
                 if not dm:
                     raise SummaryReviewError("DM 채널을 열지 못했습니다.")
-                client.chat_postMessage(
-                    channel=dm, text=f"요약 검토 후보 {len(rows)}건",
-                    blocks=candidate_blocks(channel_name or channel_id, rows),
+                if round_info:
+                    blocks = canvas_review_blocks(
+                        channel_label=label, review_date=on,
+                        permalink=round_info["permalink"],
+                        artifact_id=round_info["artifact_id"], rows=artifact_rows,
+                    )
+                else:
+                    # 폴백은 **요약 후보와 근거만**이다. 첨부 변환 상세 DM 으로
+                    # 돌아가지 않는다(인계 문서).
+                    blocks = candidate_blocks(label, rows)
+                posted = client.chat_postMessage(
+                    channel=dm, text=f"요약 검토 후보 {len(artifact_rows)}건",
+                    blocks=blocks,
                 )
-                _mark_sent(conn, workspace=workspace, channel_id=channel_id,
-                           recipient=recipient, on=on, count=len(rows))
+                if round_info:
+                    # 결정 권한의 근거다. **보낸 뒤에** 남긴다 — 먼저 남기면
+                    # 못 받은 사람이 결정할 수 있게 된다.
+                    db.record_delivery(
+                        round_info["artifact_id"], recipient, dm_channel=str(dm),
+                        message_ts=str((posted or {}).get("ts") or ""), state="sent",
+                    )
+                    # 옛 날짜 단위 이력은 호환용이다. 회차 발송 기록이 권한과
+                    # 멱등성의 기준이므로 이 기록 실패로 정상 DM을 실패 처리하거나
+                    # `sent` delivery를 덮어쓰지 않는다.
+                    with contextlib.suppress(Exception):
+                        _mark_sent(conn, workspace=workspace, channel_id=channel_id,
+                                   recipient=recipient, on=on,
+                                   count=len(artifact_rows))
+                else:
+                    _mark_sent(conn, workspace=workspace, channel_id=channel_id,
+                               recipient=recipient, on=on, count=len(artifact_rows))
                 result.sent += 1
             except Exception as exc:  # noqa: BLE001 - Slack 오류 종류가 여러 가지다
                 with contextlib.suppress(Exception):
@@ -492,8 +1364,39 @@ def run(conn, clients: dict, *, archive, channels, owners, complete,
                     "요약 검토 DM 실패 ws=%s ch=%s code=%s",
                     workspace, channel_id, type(exc).__name__,
                 )
+                if round_info:
+                    with contextlib.suppress(Exception):
+                        db.record_delivery(
+                            round_info["artifact_id"], recipient, state="failed",
+                            error_code=type(exc).__name__,
+                        )
                 result.failed += 1
     return result
+
+
+def last_round(conn, *, workspace: str, channel_id: str) -> tuple[str, str]:
+    """이 채널의 **마지막 회차** 상태와 실패 코드. 회차가 없으면 `("", "")`.
+
+    진단이 읽는다. 표가 아직 없는 설치에서도 죽지 않아야 한다 — 스키마를 안 올린
+    상태에서 `/채널 상태` 가 통째로 실패하면 진단이 가장 필요할 때 침묵한다.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.summary_review_artifact') AS present")
+        row = cur.fetchone()
+        present = (row.get("present") if isinstance(row, dict) else row[0]) if row else None
+        if not present:
+            return "", ""
+        cur.execute(
+            """SELECT state,error_code FROM summary_review_artifact
+            WHERE workspace=%s AND channel_id=%s ORDER BY created_at DESC LIMIT 1""",
+            (workspace, channel_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return "", ""
+    get = row.get if isinstance(row, dict) else None
+    return (str(get("state") if get else row[0] or ""),
+            str((get("error_code") if get else row[1]) or ""))
 
 
 def _connect():
@@ -507,7 +1410,12 @@ def _connect():
 def register_slack_handlers(app, *, workspace: str, feedback_log) -> None:
     """기존 Socket Mode 앱에 검토 버튼을 등록한다."""
     def record(candidate_id: str, actor: str, kind: str, channel_id: str,
-               text: str = "") -> None:
+               text: str = "", *, code: str = "", artifact_id: str = "") -> None:
+        """정정사항은 **피드백 로그에만** 남긴다(설계 §3.1).
+
+        감사 기록에는 회차·후보 ID, 분류 코드, 결정자만 간다 — 사람이 쓴 정정
+        문장이 감사 metadata 로 복제되면 그 자리가 근거의 사본이 된다.
+        """
         feedback_log.write(
             workspace=workspace, channel_id=channel_id,
             qa_record_id=f"summary:{candidate_id}",
@@ -516,61 +1424,179 @@ def register_slack_handlers(app, *, workspace: str, feedback_log) -> None:
         try:
             from .console import audit_store
             audit_store.record(
-                actor=actor, category="summary-review", action=kind,
-                target_type="summary-candidate", target_id=candidate_id,
+                actor=actor, category="summary-review",
+                action=f"{kind}:{code}" if code else kind,
+                target_type="summary-candidate",
+                target_id=f"{artifact_id}/{candidate_id}" if artifact_id else candidate_id,
                 workspace=workspace,
             )
         except Exception:  # noqa: BLE001 - 감사 실패가 이미 끝난 결정을 되돌리면 안 된다
             pass
 
-    @app.action(ACTION_APPROVE)
-    def approve(ack, body, respond):
-        ack()
-        cid = str(((body.get("actions") or [{}])[0]).get("value") or "")
-        actor = str((body.get("user") or {}).get("id") or "")
+    def refresh_dms(store: Store, client, artifact_id: str) -> None:
+        """결정 뒤 모든 수신자 DM 을 같은 상태로 맞춘다(설계 §8).
+
+        **정정 본문은 옮기지 않는다.** 다른 검토자의 DM 에는 결정 상태만 보인다 —
+        정정은 그 사람이 쓴 판단이고, 그것을 퍼뜨리면 다음 검토가 그 문장에 끌린다.
+
+        실패해도 **결정을 되돌리지 않는다.** 이미 DB 에 반영된 사실이다.
+        """
+        if not artifact_id:
+            return
+        try:
+            artifact = store.artifact(artifact_id) or {}
+            rows = store.artifact_rows(artifact_id)
+            targets = store.deliveries(artifact_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("DM 갱신 준비 실패 code=%s", type(exc).__name__)
+            return
+        blocks = canvas_review_blocks(
+            channel_label=str(artifact.get("channel_name") or artifact.get("channel_id") or ""),
+            review_date=artifact.get("review_date"),
+            permalink=str(artifact.get("canvas_permalink") or ""),
+            artifact_id=artifact_id, rows=rows,
+        )
+        blocks = _with_decisions(blocks, rows)
+        for target in targets:
+            get = target.get if isinstance(target, dict) else None
+            channel = str((get("dm_channel") if get else target[1]) or "")
+            ts = str((get("message_ts") if get else target[2]) or "")
+            if not channel or not ts:
+                continue
+            try:
+                client.chat_update(channel=channel, ts=ts, blocks=blocks,
+                                   text="요약 검토 상태가 갱신되었습니다")
+            except Exception as exc:  # noqa: BLE001 - 갱신 실패가 결정을 되돌리면 안 된다
+                log.warning("검토 DM 갱신 실패 code=%s", type(exc).__name__)
+
+    def settle(cid: str, artifact_id: str, actor: str, kind: str, text: str = "",
+               *, code: str = "") -> str:
+        """결정 하나를 적용하고 DM 을 갱신한다. 사람에게 보일 한 줄을 돌려준다."""
+        decision = {"positive": "approved", "negative": "rejected", "defer": "deferred"}[kind]
         with _connect() as conn:
             store = Store(conn)
             changed = store.decide(
-                cid, workspace=workspace, actor=actor, decision="approved"
+                cid, workspace=workspace, actor=actor, decision=decision,
+                correction=text,
+                defer_until=(default_defer_date(datetime.now(KST).date())
+                             if decision == "deferred" else None),
+                artifact_id=artifact_id,
             )
             channel_id = store.candidate_channel(cid, workspace)
-        if changed:
-            record(cid, actor, "positive", channel_id)
-        respond(text="승인했습니다." if changed else "이미 다른 검토자가 처리한 후보입니다.", replace_original=False)
+            if changed and artifact_id:
+                store.refresh_artifact_state(artifact_id)
+        if not changed:
+            return "이미 다른 검토자가 처리했습니다."
+        if kind != "defer":
+            record(cid, actor, kind, channel_id, text, code=code, artifact_id=artifact_id)
+        return {
+            "positive": "승인했습니다.",
+            "negative": ("반려했습니다. 정정사항은 검토 기록에 남겼으며 원문이나 "
+                         "답변 근거를 자동으로 바꾸지 않습니다."),
+            "defer": "내일 다시 알려드리겠습니다.",
+        }[kind]
 
-    @app.action(ACTION_DEFER)
-    def defer(ack, body, respond):
+    @app.action("tybot_summary_review_open_canvas")
+    def open_canvas(ack):
+        # URL 버튼은 Slack 이 링크를 열어 준다. 우리가 할 일은 응답뿐이다.
         ack()
-        cid = str(((body.get("actions") or [{}])[0]).get("value") or "")
+
+    @app.action(ACTION_APPROVE)
+    def approve(ack, body, respond, client):
+        ack()
+        artifact_id, cid = parse_button_value(
+            ((body.get("actions") or [{}])[0]).get("value")
+        )
+        actor = str((body.get("user") or {}).get("id") or "")
+        reply = settle(cid, artifact_id, actor, "positive")
+        if artifact_id:
+            with _connect() as conn:
+                refresh_dms(Store(conn), client, artifact_id)
+        respond(text=reply, replace_original=False)
+
+    @app.action(ACTION_APPROVE_ALL)
+    def approve_all(ack, body, respond, client):
+        ack()
+        artifact_id = str(((body.get("actions") or [{}])[0]).get("value") or "")
         actor = str((body.get("user") or {}).get("id") or "")
         with _connect() as conn:
-            changed = Store(conn).decide(
-                cid, workspace=workspace, actor=actor, decision="deferred",
-                defer_until=default_defer_date(datetime.now(KST).date()),
+            store = Store(conn)
+            if not store.may_decide(artifact_id, actor, workspace):
+                respond(text="이 검토 회차의 수신자가 아닙니다.", replace_original=False)
+                return
+            rows = store.artifact_rows(artifact_id)
+            approved_ids, skipped = store.approve_all(
+                artifact_id, workspace=workspace, actor=actor
             )
-        respond(text="내일 다시 알려드리겠습니다." if changed else "이미 처리한 후보입니다.", replace_original=False)
+            store.refresh_artifact_state(artifact_id)
+            channels = {str(r.get("channel_id") or "") for r in rows}
+        approved_set = set(approved_ids)
+        for row in rows:
+            if str(row.get("id") or "") in approved_set:
+                record(
+                    str(row.get("id")),
+                    actor,
+                    "positive",
+                    next(iter(channels), ""),
+                    artifact_id=artifact_id,
+                )
+        if artifact_id:
+            with _connect() as conn:
+                refresh_dms(Store(conn), client, artifact_id)
+        tail = f" · 이미 처리된 {skipped}건은 건너뛰었습니다." if skipped else ""
+        respond(text=f"{len(approved_ids)}건을 승인했습니다.{tail}", replace_original=False)
+
+    @app.action(ACTION_DEFER)
+    def defer(ack, body, respond, client):
+        ack()
+        artifact_id, cid = parse_button_value(
+            ((body.get("actions") or [{}])[0]).get("value")
+        )
+        actor = str((body.get("user") or {}).get("id") or "")
+        reply = settle(cid, artifact_id, actor, "defer")
+        if artifact_id:
+            with _connect() as conn:
+                refresh_dms(Store(conn), client, artifact_id)
+        respond(text=reply, replace_original=False)
 
     @app.action(ACTION_REJECT)
     def reject(ack, body, client):
         ack()
-        cid = str(((body.get("actions") or [{}])[0]).get("value") or "")
-        client.views_open(trigger_id=body["trigger_id"], view=reject_modal(cid))
+        artifact_id, cid = parse_button_value(
+            ((body.get("actions") or [{}])[0]).get("value")
+        )
+        position, headline = 0, ""
+        if artifact_id:
+            # 무엇을 반려하는지 모달에 보여 준다. 없으면 다른 후보에 정정을 적는다.
+            with contextlib.suppress(Exception), _connect() as conn:
+                for row in Store(conn).artifact_rows(artifact_id):
+                    if str(row.get("id")) == cid:
+                        position = int(row.get("position") or 0)
+                        headline = _dm_headline(position, row)
+                        break
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view=reject_modal(cid, artifact_id=artifact_id, position=position,
+                              headline=headline),
+        )
 
     @app.view(REJECT_CALLBACK)
-    def reject_submit(ack, body, view):
+    def reject_submit(ack, body, view, client):
         correction = correction_from_view(view)
+        wrong_part = wrong_part_from_view(view)
+        errors = {}
+        if not wrong_part:
+            errors["wrong_part"] = "틀린 부분을 골라 주세요."
         if len(correction) < MIN_CORRECTION:
-            ack(response_action="errors", errors={"correction": "올바른 내용을 구체적으로 적어 주세요."})
+            errors["correction"] = "올바른 내용을 구체적으로 적어 주세요."
+        if errors:
+            ack(response_action="errors", errors=errors)
             return
         ack()
-        cid = str(view.get("private_metadata") or "")
+        meta = reject_metadata(view)
         actor = str((body.get("user") or {}).get("id") or "")
-        with _connect() as conn:
-            store = Store(conn)
-            changed = store.decide(
-                cid, workspace=workspace, actor=actor, decision="rejected",
-                correction=correction,
-            )
-            channel_id = store.candidate_channel(cid, workspace)
-        if changed:
-            record(cid, actor, "negative", channel_id, correction)
+        settle(meta["candidate_id"], meta["artifact_id"], actor, "negative", correction,
+               code=wrong_part)
+        if meta["artifact_id"]:
+            with _connect() as conn:
+                refresh_dms(Store(conn), client, meta["artifact_id"])

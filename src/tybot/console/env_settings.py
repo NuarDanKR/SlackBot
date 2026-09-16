@@ -21,7 +21,37 @@ MANAGED_STATIC_KEYS = {
     "AUTOJOIN_CHANNELS",
     "REPLY_IN_THREAD",
     "DEFAULT_MODEL",
+    # 보관·삭제된 채널의 원문을 근거로 쓸 것인가(B-51). **기본은 아니다.**
+    "INCLUDE_RETIRED_CHANNELS",
 }
+
+
+def _retired_summary() -> dict:
+    """보관·삭제로 기록된 채널 요약. 화면이 **무엇이 빠지는지** 보여야 한다.
+
+    설정만 보여 주면 「켜면 뭐가 달라지는지」 를 알 수 없다. 건수와 목록을 함께
+    준다 — 채널 이름과 사유뿐이고 원문은 없다.
+    """
+    from ..channel_lifecycle import registry
+
+    try:
+        rows = registry().all()
+    except Exception:  # noqa: BLE001 - 설정 화면이 기록 하나로 죽으면 안 된다
+        return {"available": False, "count": 0, "items": []}
+    return {
+        "available": True,
+        "count": len(rows),
+        "items": [
+            {
+                "workspace": row.workspace,
+                "channel": row.channel or row.channel_id,
+                "reason": row.reason,
+                "at": row.at,
+            }
+            # 화면에 다 실을 이유가 없다. 건수는 위에 있고 목록은 표본이다.
+            for row in rows[:50]
+        ],
+    }
 
 
 def _truthy(value: str | None, default: bool) -> bool:
@@ -56,6 +86,9 @@ def snapshot() -> dict:
         "realtimeIngest": _truthy(values.get("REALTIME_INGEST"), True),
         "autojoinChannels": _truthy(values.get("AUTOJOIN_CHANNELS"), True),
         "replyInThread": _truthy(values.get("REPLY_IN_THREAD"), True),
+        # 켜면 없앤 채널의 자료도 답변 근거가 된다. 출처에 `(보관 채널)` 이 붙는다.
+        "includeRetiredChannels": _truthy(values.get("INCLUDE_RETIRED_CHANNELS"), False),
+        "retiredChannels": _retired_summary(),
         "defaultModel": default_model,
         "models": [
             {
@@ -77,6 +110,7 @@ def _validate(payload: dict) -> dict[str, str]:
         "REALTIME_INGEST": "1" if payload.get("realtimeIngest") else "0",
         "AUTOJOIN_CHANNELS": "1" if payload.get("autojoinChannels") else "0",
         "REPLY_IN_THREAD": "1" if payload.get("replyInThread") else "0",
+        "INCLUDE_RETIRED_CHANNELS": "1" if payload.get("includeRetiredChannels") else "0",
         "DEFAULT_MODEL": model,
     }
 

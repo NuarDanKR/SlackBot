@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 
 from .. import (
     canvas_harness,
+    channel_lifecycle,
     daily_review,
     evidence_view,
     heartbeat,
@@ -1034,6 +1035,34 @@ class WorkspaceBot:
             if joined:
                 log.info("[%s] 새 채널 수집 시작: %s", self.workspace, joined)
 
+        # --- 채널 보관·삭제 (B-51) -------------------------------------------
+        #
+        # 원문은 지우지 않는다(원칙 1). **근거로 쓰는 것만** 멈춘다.
+        # 이벤트로 즉시 반영하고, 봇이 꺼져 있던 사이의 변화는 기동 시 대조가 잡는다.
+        @self.app.event("channel_archive")
+        def on_channel_archived(event, client):
+            self._retire_channel(client, event, channel_lifecycle.ARCHIVED)
+
+        @self.app.event("group_archive")
+        def on_group_archived(event, client):
+            self._retire_channel(client, event, channel_lifecycle.ARCHIVED)
+
+        @self.app.event("channel_deleted")
+        def on_channel_deleted(event, client):
+            self._retire_channel(client, event, channel_lifecycle.DELETED)
+
+        @self.app.event("group_deleted")
+        def on_group_deleted(event, client):
+            self._retire_channel(client, event, channel_lifecycle.DELETED)
+
+        @self.app.event("channel_unarchive")
+        def on_channel_unarchived(event, client):
+            self._restore_channel(client, event)
+
+        @self.app.event("group_unarchive")
+        def on_group_unarchived(event, client):
+            self._restore_channel(client, event)
+
         @self.app.event("channel_rename")
         def on_channel_renamed(event, client):
             # 이름을 규칙에 맞게 고친 순간부터 수집 대상이 된다.
@@ -1819,6 +1848,22 @@ class WorkspaceBot:
                     self.workspace, channel_id, e,
                 )
 
+        # 마지막 요약 검토 **회차** 상태. Canvas 가 계속 실패해 폴백만 나가는
+        # 상태를 「DM 은 나갔다」 로 덮지 않기 위한 값이다(B-50).
+        review_canvas = None
+        review_canvas_error = ""
+        if found:
+            try:
+                with db_connect() as conn:
+                    if conn is not None:
+                        review_canvas, review_canvas_error = summary_review.last_round(
+                            conn, workspace=self.workspace, channel_id=channel_id
+                        )
+            except Exception as e:
+                log.warning(
+                    "[%s] 요약 회차 조회 실패 ch=%s: %s", self.workspace, channel_id, e
+                )
+
         waiting = None
         try:
             waiting = len(daily_review.blocked(
@@ -1846,6 +1891,8 @@ class WorkspaceBot:
             send_at=send_at,
             last_digest=last_digest,
             reviewer_since=reviewer_since,
+            review_canvas=review_canvas,
+            review_canvas_error=review_canvas_error,
             waiting_attachments=waiting,
             # **권한 판정은 `/채널 수정` 과 같은 함수를 쓴다.** 갈리면 수정은
             # 거절되는데 화면은 초록으로 뜬다(2026-09-08 실측). 화면이 자기
@@ -1854,6 +1901,65 @@ class WorkspaceBot:
             owner=self._human_owner(channel_id),
             admin_exists=bool(self.channel_admin_users),
         )
+
+    def _retire_channel(self, client, event: dict, reason: str) -> None:
+        """이 채널을 근거에서 뺀다. **원문은 그대로 둔다.**
+
+        기록에 실패해도 봇은 계속 답한다 — 다음 대조가 다시 시도한다.
+        """
+        channel_id = str(event.get("channel") or "")
+        if not channel_id:
+            return
+        name = self._chan_cache.get(channel_id, "")
+        if not name:
+            with contextlib.suppress(Exception):
+                name = self._channel_name(client, channel_id)
+        try:
+            channel_lifecycle.mark(
+                self.workspace, channel_id, channel=name, reason=reason
+            )
+            log.info("[%s] 채널 %s ch=%s — 근거에서 제외", self.workspace, reason, channel_id)
+        except Exception as e:  # 기록 실패가 봇을 멈추면 안 된다
+            log.warning("[%s] 보관 채널 기록 실패 ch=%s: %s", self.workspace, channel_id, e)
+
+    def _restore_channel(self, client, event: dict) -> None:
+        """보관 해제. 기록을 지워 다시 근거가 되게 한다."""
+        channel_id = str(event.get("channel") or "")
+        if not channel_id:
+            return
+        with contextlib.suppress(Exception):
+            if channel_lifecycle.restore(self.workspace, channel_id):
+                log.info("[%s] 채널 보관 해제 ch=%s — 근거 복귀", self.workspace, channel_id)
+
+    def retired_sweep(self) -> None:
+        """기동 시 한 번. **봇이 꺼져 있던 사이**의 보관·삭제를 따라잡는다.
+
+        이벤트만 쓰면 내려가 있던 동안의 변화를 영영 놓친다 — 그 채널 자료는
+        계속 답에 나오고, 아무도 왜 나오는지 모른다.
+
+        아카이브가 아는 채널만 본다. 워크스페이스 전체를 훑어 기록을 만들면 수집
+        대상이 아닌 채널까지 쌓인다.
+        """
+        known = sorted({
+            (str(doc.channel_id or ""), doc.channel)
+            for doc in self.store.docs()
+            if doc.workspace == self.workspace and doc.channel
+        })
+        if not known:
+            return
+        try:
+            got = channel_lifecycle.reconcile(
+                self.app.client, self.workspace, known=known
+            )
+        except Exception as e:  # 대조 실패가 기동을 막으면 안 된다
+            log.warning("[%s] 보관 채널 대조 실패: %s", self.workspace, e)
+            return
+        if got["archived"] or got["deleted"] or got["restored"]:
+            log.info(
+                "[%s] 보관 채널 대조 archived=%d deleted=%d restored=%d checked=%d",
+                self.workspace, got["archived"], got["deleted"],
+                got["restored"], got["checked"],
+            )
 
     def _human_owner(self, channel_id: str) -> str:
         """이 채널을 고칠 수 있는 **사람**. 없으면 빈 문자열.
@@ -2007,8 +2113,8 @@ class WorkspaceBot:
                     done.append(f"검토자 → {who} · 매일 {rows[0].send_at:%H:%M}")
                 else:
                     done.append(
-                        "검토자 → 전부 해제. **이 채널은 요약을 반영하지 않고, "
-                        "읽지 못한 첨부도 아무에게도 가지 않습니다.**"
+                        "검토자 → 전부 해제. **이 채널은 요약 후보를 보내거나 "
+                        "반영하지 않습니다.**"
                     )
             except reviewers.ReviewerError as e:
                 failed.append(f"검토자 저장 실패 — {e}")
@@ -2094,7 +2200,7 @@ class WorkspaceBot:
             log.error("[%s] 채널 소유권 기록 실패 channel=%s: %s", self.workspace, channel_id, e)
 
         # 검토자를 **여기서 저장한다.** 나중에 정하게 두면 안 정한 채널이 쌓이고,
-        # 그 채널은 요약이 반영되지 않고 읽지 못한 첨부도 아무에게도 가지 않는다.
+        # 그 채널은 요약 후보가 아무에게도 가지 않고 반영되지 않는다.
         # 저장 실패는 삼키지 않는다 - 채널은 만들어졌는데 검토가 안 물린 상태다.
         reviewer_error = ""
         if request.reviewers:
@@ -2127,7 +2233,7 @@ class WorkspaceBot:
         if reviewer_error:
             suffix += (
                 "\n⚠️ **요약 검토자를 저장하지 못했습니다** — " + reviewer_error
-                + " 지금은 요약이 반영되지 않고 읽지 못한 첨부도 가지 않습니다. "
+                + " 지금은 요약 후보를 보내거나 반영하지 않습니다. "
                 "`/채널 수정` 으로 다시 지정해 주세요."
             )
         elif request.reviewers:
@@ -3175,6 +3281,9 @@ class WorkspaceBot:
         self._handler.connect()
         self.autojoin_sweep()
         self.identity_sweep()
+        # 봇이 꺼져 있던 사이의 보관·삭제를 따라잡는다(B-51). 이벤트만 쓰면
+        # 그 동안의 변화를 영영 놓치고, 없앤 채널 자료가 계속 답에 나온다.
+        self.retired_sweep()
         log.info(
             "워크스페이스 연결 — %s / 실시간수집=%s / 크로스열람=%s",
             self.cfg.masked(),

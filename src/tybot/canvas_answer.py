@@ -264,3 +264,20 @@ def grant_user(client, canvas_id: str, user_id: str) -> None:
     client.canvases_access_set(
         canvas_id=canvas_id, access_level="read", user_ids=[user_id]
     )
+
+
+def grant_users(client, canvas_id: str, user_ids: list[str]) -> None:
+    """여러 사람에게 **한 번의 호출로** 읽기 권한을 준다.
+
+    한 사람씩 부르면 중간에 실패했을 때 「일부만 볼 수 있는 문서」 가 남는다 —
+    누가 보고 누가 못 보는지 DB 에 흔적도 없다. 한 번에 주고, 실패하면 전부
+    실패로 다룬다.
+
+    **채널 공유를 하지 않는다.** 검토 문서는 그 회차 수신자만 본다(설계 §6).
+    """
+    unique = [uid for uid in dict.fromkeys(user_ids or []) if uid]
+    if not unique:
+        raise ValueError("권한을 줄 사용자가 없습니다")
+    client.canvases_access_set(
+        canvas_id=canvas_id, access_level="read", user_ids=unique
+    )

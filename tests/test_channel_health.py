@@ -31,6 +31,7 @@ def _facts(**kw) -> ch.HealthFacts:
         "send_at": "09:00",
         "waiting_attachments": 0,
         "last_digest": "2026-09-10",
+        "review_canvas": "ready",
     }
     base.update(kw)
     return ch.HealthFacts(**base)
@@ -92,20 +93,22 @@ def test_an_unreadable_reviewer_db_is_not_reported_as_none():
     assert "확인하지 못했습니다" in check.detail
 
 
-# --- 첨부는 검토자 유무로 뜻이 달라진다 --------------------------------------
-def test_waiting_attachments_with_a_reviewer_are_on_their_way():
+# --- 첨부 진단은 검토자 DM과 분리한다 -----------------------------------------
+def test_waiting_attachments_are_checked_in_the_console_not_dm():
     check = _find(_facts(waiting_attachments=3), "첨부")
 
     assert check.mark == ch.WARN
-    assert "09:00" in check.fix, "언제 가는지 말해야 사람이 기다릴 수 있다"
+    assert "DM으로 보내지 않습니다" in check.fix
+    assert "아카이브 진단" in check.fix
 
 
-def test_waiting_attachments_without_a_reviewer_go_nowhere():
-    """받을 사람이 없으면 그 파일들은 **영영 안 읽힌다.** 그건 경고가 아니라 고장이다."""
+def test_attachment_diagnostics_do_not_depend_on_a_reviewer():
+    """첨부 운영 진단은 요약 검토자 지정 여부와 무관하게 콘솔에 남는다."""
     check = _find(_facts(waiting_attachments=3, reviewers=[]), "첨부")
 
-    assert check.mark == ch.BAD
-    assert "받을 사람이 없습니다" in check.detail
+    assert check.mark == ch.WARN
+    assert "3건" in check.detail
+    assert "아카이브 진단" in check.fix
 
 
 # --- 화면 --------------------------------------------------------------------
@@ -420,7 +423,7 @@ def test_a_powerless_viewer_is_not_sent_to_a_command_that_will_refuse():
     )
 
     assert "/채널 수정" not in check.fix
-    assert "요청" in check.fix
+    assert "아카이브 진단" in check.fix
 
 
 def test_the_screen_and_the_edit_command_share_one_verdict():
@@ -610,3 +613,33 @@ def test_reviewer_set_today_is_not_yet_a_failure():
 def test_reviewer_set_long_ago_and_never_sent_is_a_failure():
     facts = _facts(last_digest="", reviewer_since="2026-01-01")
     assert _find(facts, "검토 DM").mark == ch.BAD
+
+
+# --- 요약 검토 Canvas (B-50) ---------------------------------------------------
+def test_an_ambiguous_round_blocks_and_says_a_human_must_look():
+    """`ambiguous` 는 **사람이 확인해야** 다음으로 간다. 자동 재생성은 안 한다."""
+    check = _find(_facts(review_canvas="ambiguous"), "검토 Canvas")
+    assert check.mark == ch.BAD
+    assert "확실하지 않" in check.detail
+    assert "자동으로 다시 만들지 않습니다" in (check.fix or "")
+
+
+def test_a_failed_round_warns_but_does_not_block():
+    """Canvas 실패는 검토를 막지 않는다 — 후보 DM 으로 폴백한다."""
+    check = _find(
+        _facts(review_canvas="failed", review_canvas_error="missing_scope"),
+        "검토 Canvas",
+    )
+    assert check.mark == ch.WARN
+    assert "missing_scope" in check.detail
+
+
+def test_an_unreadable_round_is_unknown_not_green():
+    """못 읽은 것을 정상으로 칠하면 화면이 거짓말한다."""
+    assert _find(_facts(review_canvas=None), "검토 Canvas").mark == ch.UNKNOWN
+
+
+def test_a_channel_without_reviewers_does_not_complain_about_canvas():
+    """검토자가 없으면 회차가 없는 것이 당연하다 — `check_reviewer` 가 이미 말했다."""
+    check = _find(_facts(reviewers=[], review_canvas=None), "검토 Canvas")
+    assert check.mark == ch.OK

@@ -62,8 +62,7 @@ class ChannelRequest:
     visibility: str = "private"
     members: tuple[str, ...] = ()
     # 요약 검토자와 보낼 시각. **생성 시점에 정한다** — 나중에 정하게 두면
-    # 안 정한 채널이 쌓이고, 그 채널들은 요약이 반영되지 않고 읽지 못한 첨부도
-    # 아무에게도 가지 않는다(조용히).
+    # 안 정한 채널이 쌓이면 요약 후보가 아무에게도 가지 않고 반영되지 않는다.
     reviewers: tuple[str, ...] = ()
     send_at: str = "08:00"
 
@@ -186,7 +185,7 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
         if not reviewers:
             raise ChannelNameError(
                 "요약 검토자를 한 명 이상 골라 주세요. 검토자가 없으면 요약이 "
-                "반영되지 않고, 봇이 읽지 못한 첨부도 아무에게도 가지 않습니다.",
+                "반영되지 않습니다.",
                 REVIEWER_BLOCK,
             )
         send_at = (
@@ -396,9 +395,8 @@ def create_modal(
                     "placeholder": {"type": "plain_text", "text": "나중에 초대해도 됩니다"},
                 },
             },
-            # 검토자는 **필수**다. 선택으로 두면 안 정한 채널이 쌓이고, 그 채널은
-            # 요약이 반영되지 않고 읽지 못한 첨부도 아무에게도 가지 않는다 —
-            # 둘 다 오류 없이 조용하다. 기본값은 만든 사람 자신이다.
+            # 검토자는 **필수**다. 선택으로 두면 요약 후보가 아무에게도 가지 않고
+            # 반영되지 않는다. 기본값은 만든 사람 자신이다.
             {
                 "type": "input",
                 "block_id": REVIEWER_BLOCK,
@@ -415,8 +413,8 @@ def create_modal(
                 },
                 "hint": {
                     "type": "plain_text",
-                    "text": "봇이 만든 요약 후보와 읽지 못한 첨부를 매일 이 사람에게 "
-                            "DM 으로 보냅니다. 확인한 것만 반영됩니다.",
+                    "text": "봇이 만든 요약 후보를 매일 이 사람에게 DM 으로 보냅니다. "
+                            "확인한 것만 반영됩니다.",
                 },
             },
             {
@@ -569,8 +567,8 @@ def edit_modal(
                 },
                 "hint": {
                     "type": "plain_text",
-                    "text": "검토자가 없으면 요약을 반영하지 않고, 읽지 못한 첨부도 "
-                            "아무에게도 가지 않습니다. 비우고 저장하면 전부 해제됩니다.",
+                    "text": "검토자가 없으면 요약을 반영하지 않습니다. 첨부 변환 상세는 "
+                            "관리 콘솔에서 확인합니다. 비우고 저장하면 전부 해제됩니다.",
                 },
             },
             {
@@ -585,7 +583,7 @@ def edit_modal(
                 },
                 "hint": {
                     "type": "plain_text",
-                    "text": "그날 요약 후보와 확인이 필요한 첨부를 이 시각에 DM 으로 보냅니다.",
+                    "text": "그날 요약 후보를 이 시각에 DM 으로 보냅니다.",
                 },
             },
             *manager_blocks,

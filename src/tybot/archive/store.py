@@ -110,12 +110,17 @@ class SearchHit:
 
         다른 워크스페이스 자료는 **끝에 밝힌다.** 앞자리는 조직이 가져갔지만
         「이건 우리 자료가 아니다」 를 지우면 안 된다(원칙 4).
+
+        보관·삭제된 채널을 근거로 켠 경우에는 `(보관 채널)` 이 붙는다(B-51).
+        **조용히 섞지 않는다** — 사람이 출처를 눌러도 채널이 없을 수 있다.
         """
+        from ..channel_lifecycle import mark_for
         from ..channels import source_label
 
         date = self.line.ts.split()[0] if self.line.ts else ""
         source = self.line.source_path or self.doc.path
         tail = f" ({self.doc.workspace})" if with_workspace else ""
+        tail += mark_for(self.doc.workspace, self.doc.channel_id, self.doc.channel)
         return f"{source_label(self.doc.channel)}{tail}, 📄{source.name}({date})"
 
 
@@ -408,11 +413,23 @@ class ArchiveStore:
         return [(p, got) for p in self._files() if isinstance(got := self._load(p), str)]
 
     def visible_docs(self, ctx: RequestContext) -> list[ArchiveDoc]:
-        """3겹/권한: 답변 생성 **이전에** 검색 범위를 축소한다."""
+        """3겹/권한: 답변 생성 **이전에** 검색 범위를 축소한다.
+
+        보관·삭제된 채널의 원문도 여기서 뺀다(B-51). 없앤 채널의 이야기가 오늘
+        답에 섞이면 사람은 출처를 눌러도 확인할 수 없다 — 「틀린 자료」 보다
+        나쁘다. 원문은 그대로 두고 **근거로 쓰는 것만** 막는다.
+
+        설정을 **문서마다 읽지 않는다.** 한 요청에서 값이 바뀌면 같은 답 안에서
+        어떤 문서는 들어오고 어떤 문서는 빠진다.
+        """
+        from ..channel_lifecycle import include_retired, keep
+
+        allow_retired = include_retired()
         return [
             d
             for d in self.docs()
-            if can_access(
+            if keep(d, allow_retired=allow_retired)
+            and can_access(
                 ctx,
                 visibility=d.visibility,
                 acl=d.acl if d.acl else None,

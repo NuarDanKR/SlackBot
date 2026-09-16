@@ -1,4 +1,4 @@
-"""검토자에게 하루치를 밀어 준다 — 사람이 찾아오게 하지 않는다.
+"""검토자에게 요약 후보를 밀어 준다 — 사람이 찾아오게 하지 않는다.
 
 설계: [`docs/design/summary-review.md`](../../docs/design/summary-review.md) 3단계
 
@@ -13,8 +13,8 @@
 
 1. 변환은 사람 승인을 기다리지 않는다. 추출 텍스트가 아카이브에 들어갔다는 것이
    곧 수집 단계 PII 검사를 통과했다는 뜻이다.
-2. 자동 변환 결과와 실패, 읽지 못해 원본 확인이 필요한 항목을 검토자와 채널 담당자에게
-   정해진 시각에 하루치로 밀어 준다. 변환본은 짧은 본문 미리보기도 함께 보인다.
+2. 변환 상세는 검토자 DM으로 보내지 않는다. 성공한 변환본은 요약 후보의 근거에
+   포함되고, 실패·미지원 파일은 관리 콘솔의 아카이브 진단에서 운영자가 확인한다.
 
 밀어 준 것을 놓쳤거나 실패가 누적되면 관리 콘솔의 아카이브 진단에서 다시 본다.
 
@@ -34,11 +34,11 @@
 
 **보낼 것이 없으면 보내지 않는다.** 매일 "없습니다" 가 오면 사람이 그 DM 을 끈다.
 
-## 종류를 나눠 둔 이유
+## 첨부 하루치 코드를 남겨 둔 이유
 
-`kind` 로 첨부(`attachment`)와 요약 후보(`summary`)를 가른다. 둘은 같은 실행기와
-발송 시각을 쓰며, 각 종류의 발송 이력을 같은 테이블에 남긴다. 요약 후보는 Hermes
-계약으로 만들고 원문 대조를 통과한 것만 보낸다.
+기존 첨부 발송 이력과 콘솔 진단 호환을 위해 첨부 하루치 생성 함수는 남아 있다.
+운영 실행기에서는 호출하지 않는다. 검토자에게 발송하는 것은 Hermes 계약으로 만들고
+원문 대조를 통과한 요약 후보뿐이다.
 """
 from __future__ import annotations
 
@@ -513,7 +513,7 @@ def _channels(conn) -> list[tuple[str, str, str, time]]:
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="검토자에게 첨부와 요약 후보 검토를 보낸다")
+    ap = argparse.ArgumentParser(description="검토자에게 요약 후보 검토를 보낸다")
     ap.add_argument("--dry-run", action="store_true", help="보내지 않고 건수만 센다")
     args = ap.parse_args(argv)
 
@@ -542,17 +542,6 @@ def main(argv: list[str] | None = None) -> int:
     root = archive_dir()
     store = ArchiveStore(root)
 
-    def extracted_for(workspace: str, channel_id: str) -> set[str]:
-        from .answer import EXTRACTED_ATTACHMENT_RE as pattern
-
-        return {
-            m.group("name")
-            for doc in store.docs()
-            if doc.channel_id == channel_id
-            for line in doc.raw_lines
-            if (m := pattern.match((line.text or "").strip()))
-        }
-
     import psycopg
 
     with psycopg.connect(
@@ -572,17 +561,6 @@ def main(argv: list[str] | None = None) -> int:
         owners = ChannelOwnerStore(
             heartbeat.state_dir() / "channel-owners.json"
         ).responsibles()
-        result = run(
-            conn,
-            clients,
-            archive_dir=root,
-            channels=channels,
-            extracted_for=extracted_for,
-            # 검토자를 안 정한 채널은 개설자에게 간다. 안 그러면 그 채널 첨부는
-            # 아무도 확인하지 않고, 아무 일도 안 일어난다.
-            owners=owners,
-        )
-
         summary_result = None
         if not args.dry_run:
             from . import summary_review
@@ -617,17 +595,19 @@ def main(argv: list[str] | None = None) -> int:
                 complete=complete_summary,
             )
 
-    logger.info(
-        "검토 하루치 sent=%d skipped=%d failed=%d 받는사람없음=%d",
-        result.sent, result.skipped, result.failed, result.no_recipient,
-    )
     if summary_result is not None:
+        # Canvas 수치를 **따로** 남긴다. 폴백을 성공과 합치면 Canvas 가 계속
+        # 실패하는데도 「잘 보내지고 있다」 로 보인다(B-50).
         logger.info(
-            "요약 검토 generated=%d sent=%d skipped=%d failed=%d",
+            "요약 검토 generated=%d sent=%d skipped=%d failed=%d "
+            "canvas=%d fallback=%d ambiguous=%d",
             summary_result.generated,
             summary_result.sent,
             summary_result.skipped,
             summary_result.failed,
+            summary_result.canvas_created,
+            summary_result.canvas_fallback,
+            summary_result.canvas_ambiguous,
         )
     return 0
 

@@ -48,6 +48,7 @@ from . import (
     specialist_source,
     specialist_store,
     specialist_zip,
+    summary_review_store,
     timer_manager,
     workspace_store,
 )
@@ -337,7 +338,9 @@ def capabilities(user: User) -> dict:
     return {
         "specialists": user.may_manage_bot and specialist_store.is_ready(),
         "approvedSummaries": False,
-        "summaryReview": False,
+        # 회차 스키마가 올라간 설치에서만 화면을 연다. 없는데 켜면 빈 표가 보이고
+        # 사람은 「검토가 하나도 없다」 로 읽는다(B-50).
+        "summaryReview": summary_review_store.is_ready(),
     }
 
 
@@ -414,7 +417,9 @@ def collection_dashboard(user: User) -> dict:
         "brokenDocuments": sum(int(row.get("brokenDocs") or 0) for row in workspaces),
         "uninvitedChannels": sum(int(row.get("uninvitedChannels") or 0) for row in workspaces),
         "workspaces": workspaces,
-        "summaryReview": {"available": False, "pending": 0},
+        "summaryReview": summary_review_store.health(
+            None if user.all_workspaces else list(user.workspaces)
+        ),
     }
 
 
@@ -1089,6 +1094,26 @@ def models(user: User) -> dict:
         })
     out.sort(key=lambda row: (row["provider"], row["inputPer1M"]))
     return {"models": out}
+
+
+@app.get("/api/summary-review/rounds")
+def summary_review_rounds(user: User) -> dict:
+    """요약 검토 회차 현황(B-50).
+
+    **본문·정정사항을 내려보내지 않는다.** 상태·수치·Canvas 링크만이다 —
+    정정은 검토자가 쓴 판단이고, 관리자 화면이 근거의 사본이 되면 안 된다.
+    """
+    try:
+        rows = summary_review_store.rounds(
+            None if user.all_workspaces else list(user.workspaces)
+        )
+    except summary_review_store.SummaryReviewStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "rounds": rows,
+        # 사람이 손대야 하는 회차. 자동 재생성은 하지 않는다(설계 §5).
+        "ambiguous": [r for r in rows if r["state"] == "ambiguous"],
+    }
 
 
 @app.get("/api/specialists")
@@ -2429,7 +2454,7 @@ def _auth_error(_request, exc: AuthError) -> JSONResponse:
 # 설계: docs/design/console-channel-admin.md
 #
 # 옛날에 만든 채널은 담당자가 없어 `/채널 수정` 이 안 된다. 담당자가 없으면 검토자도
-# 못 정하고, 그러면 첨부 검수 DM 도 안 간다. Slack 에서 채널마다 명령을 치게 하면
+# 못 정하고, 그러면 요약 검토 DM도 안 간다. Slack 에서 채널마다 명령을 치게 하면
 # 수십 개를 하나씩 돌아야 해서 아무도 안 한다.
 @app.get("/api/channels")
 def channel_admin_rows(user: User) -> dict:

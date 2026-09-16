@@ -73,7 +73,8 @@ def test_citation_shows_the_organisation_and_keeps_the_workspace_behind_it():
     from tybot.archive.store import SearchHit
 
     doc = SimpleNamespace(
-        workspace="tyit", channel="#팀-전산_ABB155-공지", path=Path("2026-09-01.md")
+        workspace="tyit", channel="#팀-전산_ABB155-공지", channel_id="C155",
+        path=Path("2026-09-01.md"),
     )
     line = SimpleNamespace(
         ts="2026-09-01 10:00", source_path=None, lineno=1,

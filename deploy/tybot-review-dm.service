@@ -1,5 +1,5 @@
 [Unit]
-Description=TYBot 검토자 하루치 DM (첨부 및 요약 후보)
+Description=TYBot 요약 후보 검토 DM
 Documentation=file:///opt/tybot/docs/design/summary-review.md
 After=network-online.target
 Wants=network-online.target

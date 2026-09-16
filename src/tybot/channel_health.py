@@ -92,6 +92,12 @@ class HealthFacts:
     last_digest: str | None = None
     # 검토자를 정한 날. 정한 직후에는 아직 안 가는 것이 정상이다.
     reviewer_since: str | None = None
+    # 마지막 요약 검토 **회차**의 상태(B-50). `None` 이면 못 읽었다.
+    #
+    # 「검토 DM 이 나갔다」 만 보면 Canvas 가 계속 실패해 후보 DM 으로 폴백하는
+    # 상태를 못 잡는다 — 사람은 링크가 없는 것을 보고도 그냥 그런가 보다 한다.
+    review_canvas: str | None = None
+    review_canvas_error: str = ""
     # **이 화면을 보는 사람**이 이 채널을 고칠 수 있는가.
     #
     # 「누군가는 고칠 수 있다」 를 보이면 안 된다 — 실제로 그렇게 만들었다가,
@@ -205,8 +211,7 @@ def check_reviewer(f: HealthFacts) -> Check:
     if not f.reviewers:
         return Check(
             BAD, "검토자",
-            "없습니다 — 이 채널은 요약을 반영하지 않고, "
-            "읽지 못한 첨부도 아무에게도 가지 않습니다.",
+            "없습니다 — 이 채널은 요약 후보를 보내거나 반영하지 않습니다.",
             "`/채널 수정` 에서 검토자와 보낼 시각을 정하세요.",
         )
     who = " ".join(f"<@{u}>" for u in f.reviewers)
@@ -241,30 +246,49 @@ def check_digest(f: HealthFacts) -> Check:
     )
 
 
+def check_review_canvas(f: HealthFacts) -> Check:
+    """요약 검토 Canvas 가 만들어지고 있는가(B-50).
+
+    Canvas 실패는 **답변을 막지 않는다** — 후보 DM 으로 폴백한다. 그래서 조용히
+    계속 실패할 수 있고, 그 상태에서는 검토자가 전체 맥락을 못 읽는다.
+
+    `ambiguous` 는 따로 말한다. 그 회차는 **사람이 확인해야** 다음으로 간다 —
+    Slack 이 이미 Canvas 를 만들었을 수 있어 자동 재생성을 하지 않는다.
+    """
+    if not f.reviewers:
+        return Check(OK, "검토 Canvas", "검토자를 정하면 이 항목이 켜집니다.")
+    if f.review_canvas is None:
+        return Check(UNKNOWN, "검토 Canvas", "확인하지 못했습니다(회차 상태를 읽지 못함).")
+    if f.review_canvas == "":
+        return Check(OK, "검토 Canvas", "아직 회차가 없습니다.")
+    if f.review_canvas == "ambiguous":
+        return Check(
+            BAD, "검토 Canvas",
+            "지난 회차가 **만들어졌는지 확실하지 않아** 멈춰 있습니다.",
+            "콘솔 `요약 검토 현황` 에서 그 회차를 확인하고 정리해 주세요. "
+            "중복 Canvas 를 막기 위해 자동으로 다시 만들지 않습니다.",
+        )
+    if f.review_canvas == "failed":
+        detail = "Canvas 를 만들지 못해 후보 DM 으로 보냈습니다."
+        return Check(
+            WARN, "검토 Canvas",
+            f"{detail} 코드: `{f.review_canvas_error or '알 수 없음'}`",
+            "`canvases:write` 권한과 워크스페이스의 Canvas 사용 여부를 확인하세요.",
+        )
+    return Check(OK, "검토 Canvas", f"마지막 회차 상태: {f.review_canvas}")
+
+
 def check_attachments(f: HealthFacts) -> Check:
     """자동 변환에 실패했거나 지원하지 않아 운영 확인이 필요한 첨부."""
     if f.waiting_attachments is None:
         return Check(UNKNOWN, "첨부", "확인하지 못했습니다.")
     if not f.waiting_attachments:
         return Check(OK, "첨부", "자동 변환에 실패한 파일이 없습니다.")
-    if f.reviewers:
-        return Check(
-            WARN, "첨부",
-            f"자동 변환하지 못한 첨부 {f.waiting_attachments}건이 있습니다.",
-            f"매일 {f.send_at or '08:00'} 검토자·채널 담당자 DM 으로 갑니다. "
-            "상세 사유는 관리 콘솔의 아카이브 진단에서 확인하세요.",
-        )
-    # 권한이 없는 사람에게 `/채널 수정` 을 시키면 거절만 당한다. 막다른 안내는
-    # 「이 봇은 안 된다」 로 읽힌다.
-    fix = (
-        "`/채널 수정` 에서 검토자를 지정하세요. 실패 상세는 관리 콘솔에서 확인할 수 있습니다."
-        if f.viewer_can_edit
-        else "개설자 또는 TYBot 채널 관리자에게 검토자 지정을 요청하세요."
-    )
     return Check(
-        BAD, "첨부",
-        f"{f.waiting_attachments}건이 확인을 기다리는데 **받을 사람이 없습니다.**",
-        fix,
+        WARN, "첨부",
+        f"자동 변환하지 못한 첨부 {f.waiting_attachments}건이 있습니다.",
+        "파일 변환 상세는 검토자에게 DM으로 보내지 않습니다. "
+        "관리 콘솔의 아카이브 진단에서 확인하세요.",
     )
 
 
@@ -303,6 +327,7 @@ CHECKS = (
     check_collection,
     check_reviewer,
     check_digest,
+    check_review_canvas,
     check_attachments,
     check_manager,
 )

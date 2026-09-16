@@ -36,6 +36,16 @@ def test_a_number_not_in_evidence_is_rejected():
     assert sr.parse_proposals(raw, _source(quote)) == []
 
 
+def test_a_numeric_new_issue_is_still_reviewed_as_a_number():
+    quote = "신규 계약금액은 1,200억원입니다"
+    raw = json.dumps({"candidates": [{"kind": "new_issue", "current_text": "",
+        "proposed_text": quote, "evidence_quote": quote}]})
+
+    got = sr.parse_proposals(raw, _source(quote))
+
+    assert got[0].kind == "number_or_schedule"
+
+
 def test_model_cannot_invent_the_current_approved_text():
     quote = "새 일정은 2026-09-15입니다"
     raw = json.dumps({"candidates": [{"kind": "number_or_schedule",
@@ -72,9 +82,32 @@ def test_review_blocks_have_nonempty_candidate_ids():
     assert all(x["value"] for x in actions["elements"])
 
 
+def test_numeric_candidates_are_first_and_show_values_to_verify():
+    rows = [
+        {"id": "issue", "kind": "new_issue", "current_text": "",
+         "proposed_text": "신규 쟁점이 있습니다", "evidence_author": "김현장",
+         "evidence_at": "2026-09-15", "evidence_quote": "신규 쟁점이 있습니다"},
+        {"id": "number", "kind": "number_or_schedule", "current_text": "",
+         "proposed_text": "공정률은 62.5%, 금액은 1,200억원입니다",
+         "evidence_author": "홍길동", "evidence_at": "2026-09-16",
+         "evidence_quote": "공정률은 62.5%, 금액은 1,200억원입니다"},
+    ]
+
+    blocks = sr.candidate_blocks("#현장", rows)
+    sections = [
+        block["text"]["text"] for block in blocks if block["type"] == "section"
+    ]
+
+    assert "숫자·금액·비율·날짜 확인 1건" in sections[0]
+    assert "*확인할 값* `62.5%` · `1,200억원`" in sections[1]
+    assert "신규 쟁점" in sections[2]
+
+
 def test_reject_modal_requires_correction():
-    field = sr.reject_modal("123")["blocks"][0]["element"]
-    assert field["min_length"] == sr.MIN_CORRECTION
+    blocks = {b["block_id"]: b for b in sr.reject_modal("123")["blocks"]}
+    assert blocks["correction"]["element"]["min_length"] == sr.MIN_CORRECTION
+    # 「틀린 부분」 분류도 필수다 — 분류가 없으면 같은 실수를 세어 볼 수 없다.
+    assert blocks["wrong_part"]["element"]["type"] == "static_select"
 
 
 def test_defer_is_until_tomorrow():

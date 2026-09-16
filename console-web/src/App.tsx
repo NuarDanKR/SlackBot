@@ -4,6 +4,7 @@ import { ApiError, login as apiLogin, logout as apiLogout } from './api/client'
 import { useResource } from './api/hooks'
 import { AuditEvents } from './pages/AuditEvents'
 import { ArchiveDiagnostics, CommandDiagnostics, FeedbackPage } from './pages/Diagnostics'
+import { SummaryReviews } from './pages/SummaryReviews'
 import { AnswerRecords } from './pages/AnswerRecords'
 import { BatchTimers } from './pages/BatchTimers'
 import { Channels } from './pages/Channels'
@@ -154,7 +155,8 @@ export default function App() {
       {path === '/collect/archive' && <ArchiveDiagnostics user={user} onToast={toast} />}
       {path === '/collect/documents' && <Collected user={user} query={location.query} onToast={toast} />}
       {path === '/collect/channels' && <Channels onToast={toast} />}
-      {(path === '/collect/summaries' || path === '/collect/reviews') && <><div className="page-head"><div><div className="crumb">수집</div><h1 className="page-title">화면을 준비하고 있습니다</h1><p className="page-note">기능이 활성화되었지만 이 버전의 콘솔에는 화면이 연결되지 않았습니다. 관리자에게 콘솔 배포 상태를 알려 주세요.</p></div></div></>}
+      {path === '/collect/reviews' && <SummaryReviews />}
+      {path === '/collect/summaries' && <><div className="page-head"><div><div className="crumb">수집</div><h1 className="page-title">화면을 준비하고 있습니다</h1><p className="page-note">기능이 활성화되었지만 이 버전의 콘솔에는 화면이 연결되지 않았습니다. 관리자에게 콘솔 배포 상태를 알려 주세요.</p></div></div></>}
       {path === '/answer' && <AnswerDashboard user={user} query={location.query} navigate={navigate} />}
       {path === '/answer/specialists' && <SpecialistAnalytics query={location.query} navigate={navigate} />}
       {path === '/answer/records' && <AnswerRecords user={user} query={location.query} navigate={navigate} />}
