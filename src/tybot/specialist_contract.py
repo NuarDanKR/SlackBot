@@ -9,6 +9,8 @@ from typing import Protocol
 
 log = logging.getLogger("tybot.specialist_contract")
 
+MAX_OUTPUT_CHARS = 3_000
+
 # 실패 이유를 **한 덩어리(`adapter-error`)로 뭉개지 않는다.**
 #
 # 2026-09-08 실측: 콘솔의 「최근 호출」 에 `마스터 폴백 / adapter-error` 만 떴고,
@@ -121,7 +123,7 @@ def _validated_text(value: object) -> str:
     lowered = text.lower()
     if "출처:" in text or "slack.com/archives/" in lowered or "file://" in lowered:
         raise ContractViolation("출처는 마스터 봇만 부착할 수 있습니다.")
-    if len(text) > 20_000:
+    if len(text) > MAX_OUTPUT_CHARS:
         raise ContractViolation("전문 봇 응답 길이가 계약 범위를 초과했습니다.")
     return text
 
@@ -145,7 +147,12 @@ def execute(
     except TimeoutError:
         future.cancel()
         return SpecialistCallResult(fallback(), "fallback", "timeout")
-    except ContractViolation:
+    except ContractViolation as exc:
+        # 응답 본문은 남기지 않는다. 다만 아래 사유는 모두 우리가 만든 고정
+        # 검증 문구라서 업무 내용이나 모델 출력이 로그로 새지 않는다. 예전에는
+        # 모든 위반을 `invalid-output` 하나로 접어 운영에서 빈 응답/출처 포함/
+        # 길이 초과를 구별할 방법이 없었다.
+        log.warning("전문 봇 응답 계약 위반: %s", exc)
         return SpecialistCallResult(fallback(), "contract_violation", "invalid-output")
     except Exception as exc:  # noqa: BLE001 - an adapter failure must not take down the master bot
         # **반드시 남긴다.** 이 줄이 없어서 콘솔의 `adapter-error` 가 원인을 하나도

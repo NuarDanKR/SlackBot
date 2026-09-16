@@ -359,7 +359,7 @@ def test_self_kinds_answer_without_touching_the_archive(kind):
 
 @pytest.mark.parametrize("fails", [False, True])
 def test_long_answer_automatically_creates_canvas_or_readable_fallback(monkeypatch, fails):
-    text = "## 주간 현황\n" + "**진행 중**\n" * 22
+    text = "## 주간 현황\n" + "**진행 중**\n" * 25
     ans = Answer(text, [], "m", 0.0, 1, "answered")
     bot = _bot([Intent("summary", question="정리해줘")], [ans])
     created = Mock(return_value=CanvasResult("FC", "https://example.slack.com/FC"))

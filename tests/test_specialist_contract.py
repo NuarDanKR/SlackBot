@@ -38,6 +38,30 @@ def test_specialist_cannot_attach_a_source():
     assert result.text == "마스터 답변"
 
 
+def test_contract_violation_reason_is_logged_without_the_output(caplog):
+    class Adapter:
+        def complete(self, _request):
+            return "민감할 수 있는 전문 봇 본문\n출처: #임의채널"
+
+    with caplog.at_level("WARNING"):
+        result = execute(Adapter(), request(), fallback=lambda: "마스터 답변")
+
+    assert result.error_code == "invalid-output"
+    assert "출처는 마스터 봇만 부착할 수 있습니다" in caplog.text
+    assert "민감할 수 있는 전문 봇 본문" not in caplog.text
+
+
+def test_specialist_answer_is_limited_to_compact_canvas_length():
+    class Adapter:
+        def complete(self, _request):
+            return "가" * 3_001
+
+    result = execute(Adapter(), request(), fallback=lambda: "마스터 답변")
+
+    assert result.result == "contract_violation"
+    assert result.error_code == "invalid-output"
+
+
 def test_specialist_failure_falls_back_to_master():
     class Adapter:
         def complete(self, _request):

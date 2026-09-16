@@ -3,6 +3,8 @@ from unittest.mock import Mock
 from tybot.canvas_answer import (
     DISCLAIMER,
     TITLE,
+    answer_line_count,
+    automatic,
     create,
     grant_channel,
     grant_user,
@@ -14,10 +16,21 @@ from tybot.canvas_answer import (
 def test_long_answers_use_canvas_unless_message_requested():
     from tybot.canvas_answer import automatic
 
-    assert automatic("x" * 1200, "정리해줘")
-    assert automatic("\n".join(["line"] * 20), "정리해줘")
+    assert not automatic("x" * 5000, "정리해줘")
+    assert not automatic("\n".join(["line"] * 25), "정리해줘")
+    assert automatic("\n".join(["line"] * 26), "정리해줘")
     assert not automatic("short", "정리해줘")
-    assert not automatic("x" * 1200, "메시지로 답변해줘")
+    assert not automatic("\n".join(["line"] * 26), "메시지로 답변해줘")
+
+
+def test_canvas_threshold_excludes_each_answers_source_block():
+    first = "\n".join(["본문"] * 13) + "\n\n출처:\n" + "\n".join(["• 문서"] * 20)
+    second = "\n".join(["본문"] * 12) + "\n\n출처:\n• 문서"
+    reply = f"{first}\n\n───\n\n{second}"
+
+    assert answer_line_count(reply) == 25
+    assert not automatic(reply, "정리해줘")
+    assert automatic(f"본문 한 줄\n───\n{reply}", "정리해줘")
 
 
 def test_message_normalizes_headings_and_bold_but_preserves_code():

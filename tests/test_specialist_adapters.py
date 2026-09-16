@@ -132,6 +132,7 @@ def test_the_prompt_goes_in_as_a_system_message():
 
     assert messages[0].role == "system"
     assert "출처를 쓰지 않습니다" in messages[0].content
+    assert "3,000자 이내" in messages[0].content
 
 
 def test_the_prompt_forbids_writing_sources():

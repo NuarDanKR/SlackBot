@@ -13,8 +13,7 @@ log = logging.getLogger("tybot.canvas_answer")
 # 예전 고정 제목. **새로 만들지 않는다** — 제목이 전부 같으면 Slack 목록에서
 # 어느 문서인지 구별할 수 없었다. 수집 제외 판정에는 계속 쓴다(옛 문서가 남아 있다).
 TITLE = "TYBot 정식 답변"
-AUTO_CANVAS_CHARS = 1200
-AUTO_CANVAS_LINES = 20
+AUTO_CANVAS_LINES = 25
 
 # 본문 **첫 블록**. 제목 자리가 아니라 여기에 둔다 — Slack 은 Canvas 제목을 따로
 # 보여 주므로 본문 H1 은 같은 제목을 두 번 보여 줄 뿐이었다.
@@ -35,8 +34,26 @@ TITLE_SUFFIX = " · TYBot"
 def automatic(body: str, request: str) -> bool:
     if re.search(r"(메시지로|메시지에|캔버스\s*(말고|쓰지|사용하지))", request):
         return False
-    return (len(body.strip()) >= AUTO_CANVAS_CHARS
-            or len([line for line in body.splitlines() if line.strip()]) >= AUTO_CANVAS_LINES)
+    return answer_line_count(body) > AUTO_CANVAS_LINES
+
+
+def answer_line_count(body: str) -> int:
+    """출처 블록을 제외한 실제 답변 줄 수."""
+    count = 0
+    in_sources = False
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        # 복합 질문의 다음 답변이 시작된다. 각 하위 답변의 출처를 따로 제외한다.
+        if line == "───":
+            in_sources = False
+            continue
+        if line == "출처:":
+            in_sources = True
+            continue
+        if not line or in_sources:
+            continue
+        count += 1
+    return count
 
 
 def message(body: str) -> str:
