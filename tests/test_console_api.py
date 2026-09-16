@@ -26,6 +26,7 @@ pytest.importorskip("httpx", reason="fastapi TestClient 가 httpx 를 쓴다")
 from fastapi.testclient import TestClient
 
 from tybot.console import app as console_app
+from tybot.console import auth
 from tybot.console.auth import AuthConfigurationError, Authenticator, account, hash_password
 
 KST = timezone(timedelta(hours=9))
@@ -954,6 +955,140 @@ def test_env_save_removes_legacy_workspace_overlay_values(client, env):
     assert "ROOT_WORKSPACES=" not in saved
     assert "CROSS_WS_READ=" not in saved
     assert "WORKSPACE_LABEL_" not in saved
+
+
+# --- 문제 패킷 내려받기 ---------------------------------------------------
+
+
+def _packet(monkeypatch, body="# 패킷\n\n- 문제 후보: 0건\n"):
+    """보고서 생성은 따로 시험한다(test_answer_issue_export.py). 여기서 고정하는 것은
+    **누가 무엇까지 받는가** 다."""
+    seen = {}
+
+    def fake_build(root, **kw):
+        seen.update(kw)
+        seen["root"] = root
+        return body
+
+    monkeypatch.setattr(console_app.answer_issues, "build_report", fake_build)
+    return seen
+
+
+def test_the_issue_packet_download_is_admin_only(client, monkeypatch):
+    """화면에서 한 건씩 보는 것과 달리 이건 질문·답변이 **통째로** 나간다."""
+    _packet(monkeypatch)
+    assert client.get("/api/answer-issues/export", headers=owner(client)).status_code == 200
+    assert client.get("/api/answer-issues/export", headers=member(client)).status_code == 403
+    assert client.get("/api/answer-issues/export", headers=guest(client)).status_code == 403
+
+
+def test_the_packet_comes_back_as_a_download(client, monkeypatch):
+    _packet(monkeypatch, body="# 패킷 본문\n")
+
+    response = client.get("/api/answer-issues/export", headers=owner(client))
+
+    assert response.status_code == 200
+    assert "attachment;" in response.headers["content-disposition"]
+    assert "answer-issues-" in response.headers["content-disposition"]
+    assert response.headers["content-type"].startswith("text/markdown")
+    # 브라우저 캐시에 사내 원문이 남으면 안 된다.
+    assert "no-store" in response.headers["cache-control"]
+    assert response.text == "# 패킷 본문\n"
+
+
+def test_the_filename_names_the_scope(client, monkeypatch):
+    """여러 장을 받아 두었을 때 파일명만으로 어느 것이 무엇인지 알아야 한다."""
+    _packet(monkeypatch)
+    response = client.get(
+        "/api/answer-issues/export?workspace=tyit", headers=owner(client)
+    )
+    assert "-tyit.md" in response.headers["content-disposition"]
+
+
+def test_the_requested_window_reaches_the_report(client, monkeypatch):
+    seen = _packet(monkeypatch)
+    client.get("/api/answer-issues/export?days=30&limit=50", headers=owner(client))
+    assert seen["days"] == 30
+    assert seen["limit"] == 50
+
+
+def test_an_absurd_window_is_refused_before_it_reads_anything(client, monkeypatch):
+    """상한이 없으면 한 번의 클릭이 전체 이력을 통째로 반출한다."""
+    _packet(monkeypatch)
+    assert client.get("/api/answer-issues/export?days=0", headers=owner(client)).status_code == 422
+    assert client.get("/api/answer-issues/export?days=400", headers=owner(client)).status_code == 422
+
+
+def test_an_unscoped_admin_gets_every_workspace(client, monkeypatch):
+    seen = _packet(monkeypatch)
+    assert client.get("/api/answer-issues/export", headers=owner(client)).status_code == 200
+    assert seen["allowed"] is None
+
+
+def test_a_scoped_admin_only_gets_their_own_workspaces(client, monkeypatch):
+    """범위는 보고서를 **만들기 전에** 건다 — 만든 뒤 걸러내면 분포 표와 합계에
+    남의 워크스페이스가 그대로 남는다.
+
+    지금은 관리자면 곧 전체 범위라(`auth.account`) 이 상태가 로그인으로는 안 나온다.
+    그래도 고정해 둔다 — 역할 모델이 바뀌어 범위가 좁은 관리자가 생기는 날,
+    이 시험이 없으면 반출만 조용히 넓은 채로 남는다.
+    """
+    seen = _packet(monkeypatch)
+    scoped = auth.ConsoleUser(
+        email="dan@taeyoung.com", name="dan", role="admin",
+        workspaces=frozenset({"tyit"}), all_workspaces=False,
+    )
+    console_app.app.dependency_overrides[console_app.current_user] = lambda: scoped
+    try:
+        response = client.get("/api/answer-issues/export")
+    finally:
+        console_app.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert seen["allowed"] == {"tyit"}
+
+
+def test_a_workspace_outside_the_scope_is_refused(client, monkeypatch):
+    """되돌릴 수 없는 반출이다. 못 보는 워크스페이스를 지정하면 거절한다."""
+    _packet(monkeypatch)
+    scoped = auth.ConsoleUser(
+        email="dan@taeyoung.com", name="dan", role="admin",
+        workspaces=frozenset({"tyit"}), all_workspaces=False,
+    )
+    console_app.app.dependency_overrides[console_app.current_user] = lambda: scoped
+    try:
+        response = client.get("/api/answer-issues/export?workspace=mgmt")
+    finally:
+        console_app.app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+
+
+def test_the_export_is_written_to_the_audit_log(client, monkeypatch):
+    """되돌릴 수 없는 반출이다. 누가 언제 무엇을 받았는지 남지 않으면 답할 수 없다."""
+    _packet(monkeypatch)
+    events = []
+    monkeypatch.setattr(console_app, "_audit_event", lambda **kw: events.append(kw))
+
+    client.get("/api/answer-issues/export?days=14", headers=owner(client))
+
+    assert len(events) == 1
+    assert events[0]["action"] == "export-issue-packet"
+    assert events[0]["actor"] == "dan@taeyoung.com"
+    assert events[0]["metadata"]["days"] == 14
+
+
+def test_a_failure_says_so_instead_of_downloading_the_error(client, monkeypatch):
+    """오류 본문을 파일로 저장하면 사람은 열어 보고 나서야 안다."""
+    def boom(root, **kw):
+        raise OSError("기록을 읽지 못했습니다")
+
+    monkeypatch.setattr(console_app.answer_issues, "build_report", boom)
+
+    response = client.get("/api/answer-issues/export", headers=owner(client))
+
+    assert response.status_code == 503
+    assert "content-disposition" not in response.headers
 
 
 # --- 워크스페이스 관리 ----------------------------------------------------

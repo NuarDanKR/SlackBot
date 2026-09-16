@@ -27,7 +27,7 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import deploy_request, heartbeat
+from .. import answer_issues, deploy_request, heartbeat
 from ..archive.store import ArchiveStore
 from ..feedback import FeedbackLog
 from ..managed_env import request_restart
@@ -500,6 +500,77 @@ def operations_dashboard(user: User) -> dict:
         "deployment": deployment_state,
         "specialistErrors": specialist_errors,
     }
+
+
+@app.get("/api/answer-issues/export")
+def export_answer_issues(
+    user: User,
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
+    workspace: Annotated[str, Query(max_length=40)] = "",
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+) -> Response:
+    """문제 후보와 피드백을 Markdown 한 장으로 묶어 **브라우저로 내려보낸다.**
+
+    ## 왜 이 버튼이 필요한가
+    같은 보고서를 서버에서 만드는 CLI 가 이미 있다. 그런데 그 파일을 쓰려면 서버에
+    들어가 FTP 로 꺼내 와야 했다 — 그 몇 걸음 때문에 **실제로는 아무도 안 꺼냈다.**
+    문제를 모아 두고 아무도 읽지 않는 상태가 제일 나쁘다.
+
+    ## 담기는 것
+    **사내 질문·답변 원문과 피드백 원문이 들어간다.** 그래서
+    - 관리자만 누를 수 있다. 화면에서 한 건씩 보는 것과 달리 이건 **통째로** 나간다
+    - 범위가 좁혀진 관리자는 자기 워크스페이스 기록만 받는다. 범위는 보고서를
+      만들기 전에(행을 고르는 자리에서) 건다 — 만든 뒤 목록만 걸러내면 분포 표와
+      합계에 남의 워크스페이스가 그대로 남는다
+    - 누가 언제 무엇을 받았는지 감사 기록에 남는다. 되돌릴 수 없는 반출이다
+    """
+    _require_admin(user)
+    scope = workspace.strip().lower()
+    if scope and not user.may_see(scope):
+        raise HTTPException(status_code=403, detail="이 워크스페이스를 볼 권한이 없습니다.")
+    allowed = None if user.all_workspaces else set(user.workspaces)
+
+    generated_at = datetime.now(answer_issues.KST)
+    try:
+        report = answer_issues.build_report(
+            reader.qa_log_dir(),
+            days=days,
+            workspace=scope,
+            limit=limit,
+            now=generated_at,
+            allowed=allowed,
+        )
+    except (OSError, ValueError) as e:
+        logger.exception("답변 문제 패킷 생성 실패")
+        raise HTTPException(
+            status_code=503, detail=f"문제 패킷을 만들지 못했습니다: {e}"
+        ) from e
+
+    name = answer_issues.report_filename(generated_at=generated_at, workspace=scope)
+    _audit_event(
+        actor=user.email,
+        category="answer",
+        action="export-issue-packet",
+        target_type="qa-log",
+        target_id=name,
+        workspace=scope,
+        outcome="succeeded",
+        metadata={"days": days, "limit": limit, "bytes": len(report.encode("utf-8"))},
+    )
+    logger.warning(
+        "답변 문제 패킷 반출 actor=%s days=%s workspace=%s bytes=%d",
+        user.email, days, scope or "전체", len(report.encode("utf-8")),
+    )
+    return Response(
+        content=report.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            # 파일명에 ASCII 만 쓴다 — 한글이 들어가면 브라우저마다 깨진다.
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "Cache-Control": "no-store, private",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/api/dashboards/console")

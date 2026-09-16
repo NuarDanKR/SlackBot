@@ -66,6 +66,102 @@ interface OperationsData {
   specialistErrors: number
 }
 
+/**
+ * 문제 패킷을 내 PC 로 받는다.
+ *
+ * 같은 보고서를 서버에서 만드는 CLI 가 이미 있다. 그런데 그 파일을 쓰려면 서버에
+ * 들어가 FTP 로 꺼내 와야 했고, 그 몇 걸음 때문에 **실제로는 아무도 안 꺼냈다.**
+ * 문제를 모아 두고 아무도 읽지 않는 상태가 제일 나쁘다.
+ *
+ * `fetch` + Blob 을 쓰는 이유: `<a href>` 로 열면 세션 쿠키는 따라가지만 **실패를
+ * 알 수 없다.** 403·503 이 나도 브라우저는 그 오류 본문을 파일로 저장해 버리고,
+ * 사람은 받은 파일을 열어 보고 나서야 안다.
+ */
+function IssuePacketDownload() {
+  const [days, setDays] = useState('7')
+  const [workspace, setWorkspace] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState('')
+
+  async function download() {
+    if (busy) return
+    setBusy(true); setError(null); setDone('')
+    try {
+      const params = new URLSearchParams({ days, ...(workspace.trim() && { workspace: workspace.trim() }) })
+      const response = await fetch(`/api/answer-issues/export?${params}`, { credentials: 'same-origin' })
+      if (!response.ok) {
+        // 오류 본문은 JSON 이다. 그걸 파일로 저장하면 사람은 열어 보고 나서야 안다.
+        const detail = await response.json().catch(() => null)
+        throw new Error(detail?.detail ?? `요청이 실패했습니다 (${response.status})`)
+      }
+      // 서버가 지은 이름을 그대로 쓴다 — 기간·범위가 이름에 들어 있어서,
+      // 여러 장을 받아 두었을 때 파일명만으로 어느 것이 무엇인지 안다.
+      const disposition = response.headers.get('Content-Disposition') ?? ''
+      const name = /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'answer-issues.md'
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = name
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setDone(name)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Section
+      title="문제 패킷 내려받기"
+      lead="최근 답변의 오류·근거 없음·지연·전문 봇 실패와 사용자 피드백 원문을 Markdown 한 장으로 묶어 받습니다. 받은 파일을 저장소의 qa-issues/ 폴더에 넣고 Claude 나 Codex 에게 넘기면 그대로 분류·수정에 들어갑니다."
+    >
+      <div className="card card-pad">
+        <div className="form-grid">
+          <div className="field">
+            <label className="field-label" htmlFor="packet-days">조회 일수</label>
+            <input id="packet-days" className="input mono" type="number" min="1" max="90"
+              value={days} onChange={(event) => setDays(event.target.value)} />
+            <span className="field-help">오늘부터 거슬러 셉니다. 기본 7일.</span>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="packet-workspace">워크스페이스</label>
+            <input id="packet-workspace" className="input" placeholder="비워 두면 전체"
+              value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
+            <span className="field-help">예: tyit</span>
+          </div>
+        </div>
+
+        <div className="form-row">
+          <button className="btn btn-primary" type="button" disabled={busy} onClick={() => { void download() }}>
+            {busy ? '만드는 중…' : '문제 패킷 내려받기'}
+          </button>
+        </div>
+
+        {done && <p className="note">{done} 를 내려받았습니다. 저장소의 qa-issues/ 폴더로 옮기세요.</p>}
+        {error && (
+          <div className="notice bad" style={{ marginTop: 14 }}>
+            <div className="notice-kind">내려받기 실패</div>
+            <div><div className="notice-title">문제 패킷을 만들지 못했습니다</div>
+              <div className="notice-detail">{error}</div></div>
+          </div>
+        )}
+
+        <p className="note">
+          이 파일에는 <strong>사내 질문·답변과 피드백 원문</strong>이 들어 있습니다.
+          저장소에 커밋하거나 공개 경로에 두지 마세요 — qa-issues/ 는 .gitignore 에 있습니다.
+          누가 언제 받았는지는 감사 기록에 남습니다.
+        </p>
+      </div>
+    </Section>
+  )
+}
+
 export function OperationsDashboard({ user, navigate }: { user: ConsoleUser; navigate: Navigate }) {
   const res = useResource<OperationsData>('/api/dashboards/operations')
   if (res.loading) return <Loading what="운영 대시보드를" />
@@ -81,6 +177,7 @@ export function OperationsDashboard({ user, navigate }: { user: ConsoleUser; nav
       {user.role === 'admin' && <ActionRow title="워크스페이스" detail="등록, 사용 중지와 Slack 토큰을 관리합니다." onClick={() => navigate('/manage/workspaces')} />}
       {user.role === 'admin' && <ActionRow title="환경 설정" detail="공통 동작과 LLM API 키를 관리합니다." onClick={() => navigate('/manage/environment')} />}
     </div></Section>
+    {user.role === 'admin' && <IssuePacketDownload />}
   </>
 }
 
