@@ -27,6 +27,24 @@ def test_operational_entrypoint_only_sends_summary_reviews():
     assert "result = run(" not in source
 
 
+def test_force_target_selects_one_channel_and_bypasses_only_its_schedule():
+    channels = [
+        ("tyit", "C1", "전산팀장보고", time(16, 0)),
+        ("tyit", "C2", "공지", time(17, 0)),
+        ("mgmt", "C1", "경영보고", time(15, 0)),
+    ]
+
+    assert dr._force_target(channels, workspace="tyit", channel_id="C1") == [
+        ("tyit", "C1", "전산팀장보고", time.min)
+    ]
+
+
+def test_force_target_refuses_to_widen_when_channel_is_unknown():
+    channels = [("tyit", "C1", "전산팀장보고", time(16, 0))]
+
+    assert dr._force_target(channels, workspace="tyit", channel_id="C9") == []
+
+
 def _stage(tmp_path, *, name, file_id, status=PENDING, staged_at="2026-09-08T09:00:00+09:00",
            ws="tyit", ch="C1", extracted=False, error="", permalink=""):
     """`stage_files` 가 만드는 것과 같은 모양."""

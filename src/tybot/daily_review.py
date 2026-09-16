@@ -510,12 +510,40 @@ def _channels(conn) -> list[tuple[str, str, str, time]]:
         ]
 
 
+def _force_target(
+    channels: list[tuple[str, str, str, time]],
+    *,
+    workspace: str,
+    channel_id: str,
+) -> list[tuple[str, str, str, time]]:
+    """즉시 시험할 채널 하나만 남기고 예약 시각을 자정으로 바꾼다."""
+    return [
+        (ws, channel, name, time.min)
+        for ws, channel, name, _send_at in channels
+        if ws == workspace and channel == channel_id
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
     ap = argparse.ArgumentParser(description="검토자에게 요약 후보 검토를 보낸다")
     ap.add_argument("--dry-run", action="store_true", help="보내지 않고 건수만 센다")
+    ap.add_argument(
+        "--force-now",
+        action="store_true",
+        help="지정한 채널의 예약 시각만 우회한다(오늘 발송 이력은 우회하지 않음)",
+    )
+    ap.add_argument("--workspace", help="--force-now 대상 워크스페이스 키")
+    ap.add_argument("--channel", help="--force-now 대상 Slack 채널 ID")
     args = ap.parse_args(argv)
+
+    if args.force_now and (not args.workspace or not args.channel):
+        ap.error("--force-now에는 --workspace와 --channel이 모두 필요합니다.")
+    if not args.force_now and (args.workspace or args.channel):
+        ap.error("--workspace와 --channel은 --force-now와 함께 사용하세요.")
+    if args.force_now and args.dry_run:
+        ap.error("--force-now와 --dry-run은 함께 사용할 수 없습니다.")
 
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
 
@@ -552,6 +580,24 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("%s", problem)
             return 2
         channels = _channels(conn)
+        if args.force_now:
+            channels = _force_target(
+                channels,
+                workspace=args.workspace,
+                channel_id=args.channel,
+            )
+            if not channels:
+                logger.error(
+                    "활성 검토 설정을 찾지 못했습니다 ws=%s ch=%s",
+                    args.workspace,
+                    args.channel,
+                )
+                return 2
+            logger.warning(
+                "예약 시각을 우회해 요약 검토를 즉시 실행합니다 ws=%s ch=%s",
+                args.workspace,
+                args.channel,
+            )
         if args.dry_run:
             clients = {}
         else:
