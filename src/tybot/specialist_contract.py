@@ -2,12 +2,144 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 log = logging.getLogger("tybot.specialist_contract")
+
+
+# --- 시간 예산 (2026-09-16 장애) ----------------------------------------------
+#
+# 장애: 같은 비교 질문이 94.7초 `timeout` 과 88.8초 `invalid-output:empty` 로
+# 실패했다. 근거 20건을 확보한 **뒤** Hermes 실행 단계에서 죽었다.
+#
+# 원인은 **상한이 계층마다 따로 놀았다**는 것이다.
+#
+# | 어디 | 상한 | 누가 보나 |
+# |---|---|---|
+# | `execute()` | 90초 | 바깥 스레드 |
+# | 도구 루프 | 8라운드 | 어댑터 |
+# | `ToolBudget` | 45초 | **도구 실행 직전에만** |
+# | Provider | 없음 | 아무도 |
+#
+# 하나의 deadline 을 공유하지 않으니 느린 LLM 호출 하나가 도구 예산을 넘겨도
+# 계속 돌고, 여러 라운드의 합이 90초를 넘었다. **90초를 늘리는 수정은 금지다** —
+# 그건 장애를 숨긴다.
+#
+# 여기서는 **monotonic 기준 하나**를 만들어 task·adapter·Gateway·Provider·도구
+# 루프가 같은 값을 본다. 벽시계(`datetime.now()`)를 쓰지 않는다 — NTP 보정 한 번에
+# 남은 시간이 음수가 된다.
+MAX_LIVE_CALLS = 8
+
+# 취소할 수 없는 스레드를 요청마다 무제한 만들지 않는다. Python 은 실행 중인
+# 스레드를 죽이지 못하므로, 상한이 없으면 timeout 이 쌓일수록 살아 있는
+# Provider 호출과 비용이 함께 는다.
+_workers = threading.BoundedSemaphore(MAX_LIVE_CALLS)
+
+
+class StageTimeout(RuntimeError):
+    """단계 시간이 끝났다. **계약 위반이 아니다** — 우리가 멈춘 것이다."""
+
+    def __init__(self, stage: str, message: str = "") -> None:
+        super().__init__(message or f"{stage} 단계 시간이 끝났습니다.")
+        self.stage = stage
+
+
+@dataclass(frozen=True)
+class SpecialistDeadlines:
+    """단계별 예산. **한곳에서 검증한다** — 상수로 흩어 두면 합이 안 맞는다.
+
+    기본값 근거(설계 §4): 사용자 대기 상한 75초를 primary 탐색·recovery 최종화·
+    전달 예약으로 나눈다. 늘려서 장애를 숨기지 않는다.
+    """
+
+    total: float = 75.0
+    # primary 가 끝나야 하는 시점. 이 뒤로는 **새 검색을 시작하지 않는다.**
+    primary: float = 55.0
+    # Provider 1회 상한. 남은 시간과 비교해 **작은 쪽**을 쓴다.
+    per_call: float = 25.0
+    # 무도구 최종화 1회에 남겨 두는 시간.
+    recovery: float = 15.0
+    # QA 기록과 Slack 전달. 여기까지 먹으면 답이 늦게 도착한다.
+    reserve: float = 5.0
+
+    def __post_init__(self) -> None:
+        if min(self.total, self.primary, self.per_call, self.recovery, self.reserve) <= 0:
+            raise ValueError("시간 예산은 모두 0보다 커야 합니다.")
+        if self.primary + self.recovery + self.reserve > self.total:
+            # 합이 넘으면 recovery 가 시작도 못 하고 끝난다 — 있으나 마나 한 단계가
+            # 되고, 그건 「복구가 안 된다」 로 보인다.
+            raise ValueError(
+                f"primary+recovery+reserve({self.primary + self.recovery + self.reserve})"
+                f" 가 total({self.total}) 을 넘습니다."
+            )
+
+
+DEADLINES = SpecialistDeadlines()
+
+
+@dataclass
+class Deadline:
+    """이 요청 하나의 시계. **재시도마다 새로 주지 않는다.**"""
+
+    settings: SpecialistDeadlines = DEADLINES
+    started: float = 0.0
+    # 시간이 끝난 뒤 늦게 도착한 결과를 게시하지 않기 위한 표식.
+    # 스레드를 죽일 수 없으니 **어댑터가 보고 스스로 멈춘다.**
+    aborted: bool = False
+    timeout_stage: str = ""
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.started:
+            self.started = self.clock()
+
+    @property
+    def elapsed(self) -> float:
+        return max(0.0, self.clock() - self.started)
+
+    def remaining(self, *, reserve: bool = True) -> float:
+        """남은 시간. **음수가 되지 않는다.**
+
+        `reserve` 면 전달 예약을 뺀 값이다 — 그 시간을 쓰면 답이 늦게 도착한다.
+        """
+        budget = self.settings.total - (self.settings.reserve if reserve else 0.0)
+        return max(0.0, budget - self.elapsed)
+
+    def remaining_primary(self) -> float:
+        """primary 가 쓸 수 있는 남은 시간. 경계를 넘으면 0 이다."""
+        return max(0.0, self.settings.primary - self.elapsed)
+
+    def call_timeout(self, *, stage: str = "primary") -> float:
+        """Provider 한 번에 줄 시간. `min(남은 시간, per_call)`."""
+        left = self.remaining_primary() if stage == "primary" else self.remaining()
+        return max(0.0, min(left, self.settings.per_call))
+
+    def require_time(self, stage: str, *, need: float = 0.0) -> None:
+        """이 단계를 시작할 시간이 남았는가. 아니면 `StageTimeout`.
+
+        **시작하기 전에 본다.** 시작하고 나서 보면 이미 쓴 시간은 돌아오지 않는다.
+        """
+        if self.aborted:
+            raise StageTimeout(self.timeout_stage or stage, "이미 종료된 요청입니다.")
+        left = self.remaining_primary() if stage == "primary" else self.remaining()
+        if left <= need:
+            self.abort(stage)
+            raise StageTimeout(stage)
+
+    def abort(self, stage: str) -> None:
+        """더 진행하지 않는다. 늦게 온 결과도 쓰지 않는다."""
+        if not self.aborted:
+            self.aborted = True
+            self.timeout_stage = stage
+
+    def may_recover(self) -> bool:
+        """무도구 최종화를 한 번 더 할 시간이 남았는가."""
+        return self.remaining() >= min(self.settings.recovery, self.settings.per_call)
 
 # 본문 상한. **프롬프트에 적는 값과 같은 값이다**(`specialist_adapters`).
 #
@@ -28,6 +160,7 @@ MAX_OUTPUT_CHARS = 3_000
 # 계약 위반 사유. **한 덩어리로 뭉개지 않는다** — 빈 응답·출처 포함·폭주는
 # 사람이 할 일이 서로 다르다.
 VIOLATION_EMPTY = "invalid-output:empty"
+VIOLATION_MAX_TOKENS = "invalid-output:max-tokens"
 VIOLATION_SOURCES = "invalid-output:sources"
 VIOLATION_TOO_LONG = "invalid-output:too-long"
 
@@ -44,6 +177,7 @@ _ERROR_CODES: dict[str, str] = {
     "UnknownModel": "unknown-model",
     "ModelNotAllowed": "model-not-allowed",
     "CostLimitExceeded": "cost-limit",
+    "ProviderTimeout": "provider-timeout",
 }
 
 
@@ -106,6 +240,9 @@ class SpecialistRequest:
     # 그 길이 「업무 답변은 전문 봇만」 규칙의 가장 큰 구멍이었다.
     visual: tuple = ()
     editing_text: str = ""
+    # 이 요청 하나의 시계. **어댑터·Gateway·도구 루프가 같은 값을 본다**(장애 §2.1).
+    # 없으면 `execute()` 가 기본 예산으로 하나 만든다.
+    deadline: Deadline | None = None
     # **표시 힌트**. 「Markdown 표로 답하라」 같은 형식 안내뿐이다(설계 §3.3).
     #
     # Canvas 를 만들라는 **동작 요청은 여기 오지 않는다.** 전문 봇에 그걸 보내면
@@ -152,10 +289,19 @@ class OutputViolation(ContractViolation):
         self.code = code
 
 
-def _validated_text(value: object) -> str:
+def _validated_text(value: object, *, stop_reason: str = "") -> str:
     if not isinstance(value, str) or not value.strip():
+        # **왜 비었는지**를 코드로 가른다(장애 §2.3). `max_tokens` 에서 끊긴 것과
+        # thinking 블록만 돌아온 것은 사람이 할 일이 다르다 — 앞은 토큰을
+        # 늘리거나 짧게 쓰게 하고, 뒤는 Provider·모델을 본다.
+        if stop_reason == "max_tokens":
+            raise OutputViolation(
+                VIOLATION_MAX_TOKENS,
+                "전문 봇이 토큰 상한에서 끊겨 본문을 남기지 못했습니다.",
+            )
         raise OutputViolation(
-            VIOLATION_EMPTY, "전문 봇이 비어 있거나 잘못된 응답을 반환했습니다."
+            VIOLATION_EMPTY,
+            f"전문 봇이 비어 있는 응답을 반환했습니다(stop_reason={stop_reason or '-'}).",
         )
     text = value.strip()
     lowered = text.lower()
@@ -184,14 +330,50 @@ def execute(
     """Run one specialist and fall back without granting storage or ACL capabilities."""
     if confidence < minimum_confidence:
         return SpecialistCallResult(fallback(), "fallback", "low-confidence")
+    deadline = request.deadline or Deadline()
+    # 살아 있는 호출 수를 막는다. 취소할 수 없는 스레드를 요청마다 무제한 만들면
+    # timeout 이 쌓일수록 Provider 호출과 비용이 함께 는다(장애 §2.2).
+    if not _workers.acquire(blocking=False):
+        log.warning("전문 봇 동시 호출 상한(%d)에 걸렸습니다", MAX_LIVE_CALLS)
+        return SpecialistCallResult(fallback(), "fallback", "specialist-busy")
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tybot-specialist")
     future = pool.submit(adapter.complete, request)
+    # 바깥 대기는 **남은 시간**이다. 고정 90초를 쓰면 안쪽 예산과 따로 논다.
+    wait = deadline.remaining() if request.deadline else timeout_seconds
     try:
-        text = _validated_text(future.result(timeout=timeout_seconds))
+        # **바닥값을 두지 않는다.** 남은 시간이 0 이면 지금 시작하면 안 된다는
+        # 뜻이고, `future.result(timeout=0)` 은 그 자리에서 timeout 이다.
+        raw = future.result(timeout=wait)
+        text = _validated_text(raw, stop_reason=getattr(adapter, "last_stop_reason", ""))
+        if deadline.aborted:
+            # 시간이 끝난 뒤 도착했다. **게시하지 않는다** — 사용자는 이미 실패를
+            # 받았고, 여기서 또 보내면 답이 두 번 간다.
+            log.warning("시간이 끝난 뒤 도착한 전문 봇 결과를 버립니다")
+            return SpecialistCallResult(
+                fallback(), "fallback", f"specialist-timeout:{deadline.timeout_stage}"
+            )
         return SpecialistCallResult(text, "success", output_chars=len(text))
-    except TimeoutError:
+    except StageTimeout as exc:
+        # 어댑터가 **스스로 멈췄다.** Provider 호출도 이미 끝났다는 뜻이라,
+        # 이 뒤에 살아 남는 작업이 없다.
+        return SpecialistCallResult(
+            fallback(), "fallback", f"specialist-timeout:{exc.stage}"
+        )
+    except TimeoutError as exc:
+        # `ProviderTimeout` 은 표준 `TimeoutError` 의 하위 타입이다. 바깥
+        # `future.result()` 대기 만료와 먼저 구별하지 않으면 SDK timeout까지
+        # `specialist-timeout:primary` 로 잘못 기록된다.
+        if error_code_for(exc) == "provider-timeout":
+            return SpecialistCallResult(fallback(), "fallback", "provider-timeout")
+        # 바깥에서 시간이 끝났다. 스레드는 못 죽이지만 **표식을 세워** 어댑터가
+        # 다음 확인 지점에서 멈추게 한다. `future.cancel()` 만으로는 이미 실행
+        # 중인 스레드가 안 멈춘다(장애 §2.2).
+        stage = str(getattr(adapter, "phase", "") or "primary")
+        deadline.abort(stage)
         future.cancel()
-        return SpecialistCallResult(fallback(), "fallback", "timeout")
+        return SpecialistCallResult(
+            fallback(), "fallback", f"specialist-timeout:{stage}"
+        )
     except ContractViolation as exc:
         # 응답 본문은 남기지 않는다. 다만 아래 사유는 모두 우리가 만든 고정
         # 검증 문구라서 업무 내용이나 모델 출력이 로그로 새지 않는다. 예전에는
@@ -213,3 +395,21 @@ def execute(
         return SpecialistCallResult(fallback(), "fallback", error_code_for(exc))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+        # **자리를 반드시 돌려준다.** 안 돌려주면 상한이 한 번씩 줄어들어
+        # 결국 모든 질문이 `specialist-busy` 가 된다.
+        _release_when_done(future)
+
+
+def _release_when_done(future) -> None:
+    """작업이 끝나면 동시 호출 자리를 돌려준다.
+
+    `add_done_callback` 은 **이미 끝난 작업이면 즉시** 부른다. 그래서 정상 종료와
+    timeout 뒤 늦은 종료 양쪽에서 한 번씩만 풀린다.
+    """
+    def _done(_fut) -> None:
+        try:
+            _workers.release()
+        except ValueError:  # pragma: no cover - 두 번 풀리면 여기서 멈춘다
+            log.warning("전문 봇 동시 호출 자리를 두 번 반납했습니다")
+
+    future.add_done_callback(_done)

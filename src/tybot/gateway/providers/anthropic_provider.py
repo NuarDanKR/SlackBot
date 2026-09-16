@@ -4,7 +4,15 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 
-from ..base import LLMResponse, Message, ModelSpec, ToolCall, ToolSpec
+from ..base import (
+    LLMResponse,
+    Message,
+    ModelSpec,
+    ProviderTimeout,
+    ToolCall,
+    ToolSpec,
+)
+from ._timeout import is_timeout as _is_timeout
 
 
 def _resolve_key() -> str | None:
@@ -50,6 +58,7 @@ class AnthropicProvider:
         max_tokens: int = 1024,
         temperature: float = 0.0,
         tools: Sequence[ToolSpec] = (),
+        timeout_seconds: float | None = None,
     ) -> LLMResponse:
         client = self._get_client()
         system = "\n\n".join(m.content for m in messages if m.role == "system")
@@ -100,7 +109,21 @@ class AnthropicProvider:
                 }
                 for t in tools
             ]
-        resp = client.messages.create(**request)
+        # **SDK 에 실제 timeout 을 건다.** 바깥 스레드 타이머만으로는 이미 나간
+        # HTTP 요청이 안 끊긴다 — 사용자에게 실패를 보낸 뒤에도 호출은 계속되고
+        # 그 비용은 기록에 안 남는다(2026-09-16 장애 §2.2).
+        if timeout_seconds is not None:
+            if timeout_seconds <= 0:
+                raise ProviderTimeout("남은 시간이 없어 호출하지 않았습니다.")
+            request["timeout"] = timeout_seconds
+        try:
+            resp = client.messages.create(**request)
+        except Exception as exc:
+            # SDK 마다 timeout 예외 이름이 다르다. **하나로 정규화**해야 호출부가
+            # 「느렸다」 와 「거절당했다」 를 구별한다.
+            if _is_timeout(exc):
+                raise ProviderTimeout(str(exc) or "Provider 호출이 시간 안에 끝나지 않았습니다.") from exc
+            raise
         # `text` 블록만 모은다. thinking 블록은 `.text` 가 없고, tool_use 는 아래에서
         # 따로 꺼낸다 — 여기서 섞으면 도구 인자가 답변 본문에 붙는다.
         text = "".join(

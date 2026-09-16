@@ -141,6 +141,24 @@ def _with_display_hint(body: str, request) -> str:
     )
 
 
+RECOVERY_INSTRUCTION = (
+    "더 찾지 말고 **이미 읽은 자료만으로** 질문에 직접 답하세요. "
+    "새 검색·새 문서 읽기는 하지 않습니다. 3,000자 이내로 마무리하고, "
+    "확인하지 못한 범위가 있으면 마지막 한 줄에 적으세요."
+)
+
+
+def _call_timeout(deadline, stage: str) -> dict:
+    """Provider 한 번에 줄 시간. 시계가 없으면 **빈 dict**.
+
+    `timeout_seconds=None` 을 넘기지 않는 이유는 계약을 좁게 두기 위해서다 —
+    상한을 쓰는 호출에서만 인자가 늘어난다.
+    """
+    if deadline is None:
+        return {}
+    return {"timeout_seconds": deadline.call_timeout(stage=stage)}
+
+
 class AdapterError(Exception):
     """어댑터를 만들 수 없다. 호출부는 마스터 답변으로 넘어간다."""
 
@@ -262,7 +280,12 @@ class PromptSpecialist:
         # 계약(`SpecialistAdapter`)은 문장만 돌려준다. 어느 모델이 얼마에 답했는지는
         # 감사기록과 사용량에 남아야 하므로 여기에 둔다 — 호출부가 뒤에 읽는다.
         self.last_model = ""
+        self.last_provider = ""
         self.last_cost_usd = 0.0
+        self.last_stop_reason = ""
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.phase = "primary"
 
     def complete(self, request) -> str:
         from .gateway.base import Message, Sensitivity
@@ -305,9 +328,14 @@ class PromptSpecialist:
             #
             # 실제로 쓴 만큼만 과금되므로 상한을 올리는 것 자체의 비용은 없다.
             max_tokens=8192,
+            **_call_timeout(getattr(request, "deadline", None), "primary"),
         )
         self.last_model = response.model
+        self.last_provider = response.provider
         self.last_cost_usd = response.cost_usd
+        self.last_stop_reason = response.stop_reason
+        self.input_tokens += response.input_tokens
+        self.output_tokens += response.output_tokens
         return response.text
 
 
@@ -355,7 +383,14 @@ def build(
 # 권한은 도구 안에서 `RequestContext` 로 한 번만 판정된다.
 
 # 루프 상한. **없으면 모델이 검색을 무한히 돈다** — 비용도 지연도 상한이 없어진다.
-MAX_TOOL_ROUNDS = 8
+# 도구 라운드 상한. **8 에서 4 로 줄였다**(2026-09-16 장애 §4).
+#
+# 라운드마다 LLM 호출이 하나씩 붙고 각 호출은 최대 8,192 토큰이다. 8 라운드면
+# 바깥 90 초를 넘기는 것이 정상 동작이었다 — 상한이 상한이 아니었다.
+#
+# 단순히 뒤 4 개를 버리는 것이 아니다. primary 시간이 끝나기 **전에** 최종화
+# 단계로 옮겨 간다(`_finalize`).
+MAX_TOOL_ROUNDS = 4
 # 루프 전체 예산. 사고가 켜져 있는 모델은 한 회차가 크다.
 TOOL_MAX_TOKENS = 8192
 
@@ -376,9 +411,14 @@ def _edit_answer(adapter, request) -> str:
         model=adapter._model or None,
         sensitivity=Sensitivity.CONFIDENTIAL,
         max_tokens=TOOL_MAX_TOKENS,
+        **_call_timeout(getattr(request, "deadline", None), "primary"),
     )
     adapter.last_model = response.model
+    adapter.last_provider = response.provider
     adapter.last_cost_usd += response.cost_usd
+    adapter.last_stop_reason = response.stop_reason
+    adapter.input_tokens += response.input_tokens
+    adapter.output_tokens += response.output_tokens
     return response.text
 
 
@@ -410,8 +450,21 @@ class ToolSpecialist:
         self._live = live
         self._max_rounds = max_rounds
         self.last_model = ""
+        self.last_provider = ""
         self.last_cost_usd = 0.0
         self.rounds = 0
+        # 빈 출력의 **원인**을 남기기 위한 값들(장애 §2.3). 예전에는
+        # `invalid-output:empty` 한 줄뿐이라 `max_tokens` 인지 thinking-only 인지
+        # Provider 이상인지 구별할 수 없었다.
+        self.last_stop_reason = ""
+        self.input_tokens = 0
+        self.output_tokens = 0
+        # 실패한 회차의 대화. **복구가 쓰는 유일한 입력이다**(장애 §5.4).
+        #
+        # 여기 있는 것은 이미 권한을 통과해 읽은 근거뿐이다. 복구가 새로 검색하면
+        # 그 순간 권한 범위가 넓어지므로, 새 도구를 주지 않고 이 대화만 다시 쓴다.
+        self._transcript: list = []
+        self.phase = "primary"
 
     @property
     def touched(self):
@@ -427,6 +480,7 @@ class ToolSpecialist:
         from .gateway.base import Message, Sensitivity
         from .specialist_tools import specs
 
+        self.phase = "primary"
         if getattr(request, "editing_text", ""):
             return _edit_answer(self, request)
         tools = specs(live=self._live)
@@ -444,8 +498,23 @@ class ToolSpecialist:
             Message("system", _governed_prompt(self.prompt)),
             Message("user", first),
         ]
+        self._transcript = messages
+        # 이 요청 하나의 시계. 없으면 상한 없이 도는 옛 동작이다(테스트·구형 호출부).
+        deadline = getattr(request, "deadline", None)
 
         for _ in range(self._max_rounds):
+            if deadline is not None:
+                # 전체 시간이 끝났으면 여기서 멈춘다 — 최종화도 못 한다.
+                deadline.require_time("total")
+                # primary 경계만 넘은 것은 **끝이 아니라 전환**이다. 새 검색을
+                # 시작하지 않고 최종화 단계로 넘어간다(장애 §5.3). 여기서
+                # 예외를 올리면 이미 읽은 근거로 마무리할 기회까지 사라진다.
+                if deadline.remaining_primary() <= 0:
+                    log.info(
+                        "primary 시간이 끝나 최종화로 넘어갑니다 key=%s rounds=%d",
+                        self.key, self.rounds,
+                    )
+                    break
             self.rounds += 1
             response = self._router.complete(
                 messages,
@@ -453,35 +522,102 @@ class ToolSpecialist:
                 sensitivity=Sensitivity.CONFIDENTIAL,
                 max_tokens=TOOL_MAX_TOKENS,
                 tools=tools,
+                # **상한이 없으면 인자를 넘기지 않는다.** `system`·`tools` 와 같은
+                # 이유다 — 안 쓰는 것을 보내면 그것을 모르는 구현이 거부한다.
+                **_call_timeout(deadline, "primary"),
             )
             self.last_model = response.model
+            self.last_provider = response.provider
             self.last_cost_usd += response.cost_usd
+            self.last_stop_reason = response.stop_reason
+            self.input_tokens += response.input_tokens
+            self.output_tokens += response.output_tokens
 
             if not response.wants_tools:
-                return response.text
+                # 텍스트가 비어 있고 도구도 안 불렀다 — 최종화로 넘겨 한 번 더
+                # 기회를 준다. 여기서 빈 문자열을 그대로 돌려주면 근거를 다 읽고도
+                # 답이 없는 상태가 된다(장애 §2.3).
+                if response.text.strip():
+                    return response.text
+                log.warning(
+                    "전문가 응답에 text 블록이 없습니다 key=%s stop_reason=%s",
+                    self.key, response.stop_reason or "-",
+                )
+                break
 
             # 모델이 만든 블록을 **그대로** 되돌려 넣는다. 텍스트만 넣으면
             # tool_use 와 tool_result 의 짝이 깨져 다음 호출이 400 이다.
             messages.append(Message("assistant", _assistant_blocks(response)))
-            messages.append(Message("user", [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": call.id,
+            results = []
+            for call in response.tool_calls:
+                # 한 응답에 도구가 여러 개다. **묶음 중간에도** 시간을 다시 본다 —
+                # 앞 도구가 오래 걸리면 뒤 도구는 시작하면 안 된다.
+                if deadline is not None and deadline.remaining_primary() <= 0:
+                    results.append({
+                        "type": "tool_result", "tool_use_id": call.id,
+                        "content": "(시간이 끝나 이 도구는 실행하지 않았습니다.)",
+                    })
+                    continue
+                results.append({
+                    "type": "tool_result", "tool_use_id": call.id,
                     "content": self._toolbox.run(call.name, call.input),
-                }
-                for call in response.tool_calls
-            ]))
+                })
+            messages.append(Message("user", results))
 
-        # 상한에 걸렸다. **도구 없이 한 번 더 물어 지금까지 읽은 것으로 답하게 한다.**
-        # 도구를 계속 주면 또 부르고, 상한이 상한이 아니게 된다.
-        #
-        # 그래도 비면 빈 문자열을 돌려준다 — 계약 검사가 그것을 위반으로 보고
-        # 마스터가 답한다. 모자란 채로 억지 문장을 만드는 것보다 낫다.
+        return self._finalize(messages, deadline)
+
+    def recover(self, request) -> str:
+        """이미 읽은 근거로 **도구 없이 한 번** 마무리한다(장애 §5.4).
+
+        새 검색을 하지 않는다. 입력은 실패한 회차의 대화뿐이고, 그 안에는 이미
+        권한을 통과한 근거만 들어 있다 — 복구가 권한을 넓히는 길이 되면 안 된다.
+
+        **한 번만** 부른다. 여기서도 비면 마스터가 대신 답하지 않는다.
+        """
+        from .gateway.base import Message, Sensitivity
+
+        if not self._transcript:
+            raise AdapterError("recovery-no-transcript: 복구할 대화가 없습니다")
+        deadline = getattr(request, "deadline", None)
+        if deadline is not None:
+            deadline.require_time("recovery")
+        self.phase = "recovery"
+        messages = [*self._transcript, Message("user", RECOVERY_INSTRUCTION)]
+        final = self._router.complete(
+            messages,
+            model=self._model or None,
+            sensitivity=Sensitivity.CONFIDENTIAL,
+            max_tokens=TOOL_MAX_TOKENS,
+            # **도구를 주지 않는다.** 주면 또 부르고, 복구가 아니라 두 번째
+            # 탐색이 된다.
+            **_call_timeout(deadline, "recovery"),
+        )
+        self.last_model = final.model
+        self.last_provider = final.provider
+        self.last_cost_usd += final.cost_usd
+        self.last_stop_reason = final.stop_reason
+        self.input_tokens += final.input_tokens
+        self.output_tokens += final.output_tokens
+        return final.text
+
+    def _finalize(self, messages: list, deadline) -> str:
+        """도구 없이 한 번 더 물어 **지금까지 읽은 것으로** 답하게 한다.
+
+        도구를 계속 주면 또 부르고, 상한이 상한이 아니게 된다.
+
+        그래도 비면 빈 문자열을 돌려준다 — 계약 검사가 그것을 위반으로 보고
+        마스터가 아니라 **Hermes 복구**가 한 번 더 시도한다(장애 §5.4).
+        """
+        from .gateway.base import Message, Sensitivity
+
         budget = self.budget
         log.warning(
-            "전문가 도구 루프 상한 key=%s rounds=%d %s",
+            "전문가 도구 루프 종료 key=%s rounds=%d %s",
             self.key, self.rounds, budget.summary() if budget else "-",
         )
+        if deadline is not None:
+            # 최종화는 primary 경계를 넘겨도 된다 — 전체 deadline 안이면 된다.
+            deadline.require_time("finalize")
         messages.append(Message(
             "user",
             "더 찾지 말고 지금까지 읽은 것으로 답하세요. 모자라면 모자라다고 쓰세요.",
@@ -491,9 +627,14 @@ class ToolSpecialist:
             model=self._model or None,
             sensitivity=Sensitivity.CONFIDENTIAL,
             max_tokens=TOOL_MAX_TOKENS,
+            **_call_timeout(deadline, "finalize"),
         )
         self.last_model = final.model
+        self.last_provider = final.provider
         self.last_cost_usd += final.cost_usd
+        self.last_stop_reason = final.stop_reason
+        self.input_tokens += final.input_tokens
+        self.output_tokens += final.output_tokens
         return final.text
 
 

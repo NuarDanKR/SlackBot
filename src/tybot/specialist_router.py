@@ -748,6 +748,88 @@ def display_hint_for(task) -> str:
     return DISPLAY_HINTS.get(layout, "")
 
 
+# 복구할 수 있는 실패. **빈 출력과 토큰 상한뿐이다**(장애 §5.4).
+#
+# 출처 포함·길이 초과는 **명시적 계약 위반**이라 다시 물어도 같은 답이 온다.
+# 권한·인증·모델 미등록은 사람이 고칠 일이지 재시도할 일이 아니다.
+RECOVERABLE = ("invalid-output:empty", "invalid-output:max-tokens")
+
+
+def _may_recover(result, request, adapter, *, evidence, visual) -> bool:
+    """무도구 복구를 시작해도 되는가. **막는 쪽이 기본값이다.**"""
+    if result.error_code not in RECOVERABLE:
+        return False
+    if not hasattr(adapter, "recover"):
+        # 프롬프트형에는 되살릴 대화가 없다. 같은 입력으로 다시 부르는 것은
+        # 복구가 아니라 그냥 재시도다.
+        return False
+    deadline = getattr(request, "deadline", None)
+    if deadline is None or deadline.aborted or not deadline.may_recover():
+        # 시간이 없거나 이미 끝난 요청이다. 원래 호출이 아직 살아 있을 수도 있어
+        # 여기서 또 부르면 같은 질문에 두 호출이 동시에 돈다.
+        return False
+    # **근거 0건이면 복구하지 않는다.** 읽은 것이 없는데 마무리하라고 하면
+    # 모델이 자료 없이 문장을 만든다.
+    touched = getattr(adapter, "touched", None)
+    return bool(
+        evidence
+        or visual
+        or (touched and (touched.documents or touched.live_permalinks))
+    )
+
+
+def _recover_once(adapter, request, chosen, confidence):
+    """무도구 최종화 1회. 실패하면 `None` — 마스터가 대신 답하지 않는다."""
+    from .specialist_contract import execute
+
+    try:
+        return execute(
+            _RecoveryAdapter(adapter),
+            request,
+            fallback=lambda: "",
+            confidence=confidence,
+            minimum_confidence=chosen.min_confidence,
+        )
+    except Exception as exc:  # noqa: BLE001 - 복구 실패가 원래 실패를 가리면 안 된다
+        log.warning("전문 봇 복구 실패 key=%s: %s", chosen.key, type(exc).__name__)
+        return None
+
+
+class _RecoveryAdapter:
+    """`execute()` 가 복구 호출도 **같은 계약 검사**를 지나게 하는 얇은 껍데기.
+
+    복구 답변이라고 출처를 붙이거나 길이 상한을 건너뛰면, 그 경로만 검사가
+    헐거워진다 — 사고는 늘 그런 자리에서 난다.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def complete(self, request) -> str:
+        return self._inner.recover(request)
+
+
+def _runtime_meta(adapter, *, recovered: bool, deadline=None) -> str:
+    """호출 기록에 남길 비민감 진단값. 본문은 하나도 담지 않는다."""
+    parts = [
+        f"phase={getattr(adapter, 'phase', 'primary')}",
+        f"model={getattr(adapter, 'last_model', '') or '-'}",
+        f"provider={getattr(adapter, 'last_provider', '') or '-'}",
+        f"stop_reason={getattr(adapter, 'last_stop_reason', '') or '-'}",
+        f"rounds={getattr(adapter, 'rounds', 0)}",
+        f"in_tok={getattr(adapter, 'input_tokens', 0)}",
+        f"out_tok={getattr(adapter, 'output_tokens', 0)}",
+    ]
+    if deadline is not None and deadline.timeout_stage:
+        parts.append(f"timeout_stage={deadline.timeout_stage}")
+    if recovered:
+        parts.append("recovered=1")
+    return " ".join(parts)
+
+
 def _run_one(
     chosen: Specialist,
     *,
@@ -776,6 +858,7 @@ def _run_one(
     from .specialist_contract import (
         AuthorizedEvidence,
         ContractViolation,
+        Deadline,
         SpecialistRequest,
         execute,
     )
@@ -783,8 +866,10 @@ def _run_one(
     started = time.monotonic()
     result = None
     adapter = None
+    request = None
     error_code = ""
     format_retry_count = 0
+    recovered = False
     try:
         toolbox = None
         if chosen.execution_mode == "tools" and toolbox_factory is not None:
@@ -811,6 +896,9 @@ def _run_one(
             visual=tuple(visual or ()),
             editing_text=editing_text,
             display_hint=display_hint,
+            # **하나의 시계.** 어댑터·Gateway·Provider·도구 루프가 같은 값을 본다
+            # (2026-09-16 장애). 재시도마다 새로 주지 않는다.
+            deadline=Deadline(),
         )
         result = execute(
             adapter,
@@ -818,9 +906,17 @@ def _run_one(
             fallback=lambda: "",
             confidence=confidence,
             minimum_confidence=chosen.min_confidence,
-            timeout_seconds=90,
         )
         error_code = result.error_code
+        if _may_recover(result, request, adapter, evidence=evidence, visual=visual):
+            # 근거는 이미 읽었는데 본문이 비었다. **같은 Hermes 가 이미 읽은 것으로**
+            # 한 번 마무리한다 — 마스터가 대신 답하지 않는다(장애 §5.4).
+            log.info("전문 봇 무도구 복구 1회 key=%s code=%s", chosen.key, error_code)
+            retried = _recover_once(adapter, request, chosen, confidence)
+            if retried is not None and retried.result == "success":
+                result, error_code, recovered = retried, retried.error_code, True
+            else:
+                error_code = f"{error_code}+recovery-failed"
         if result.result == "success" and is_execution_refusal(result.text):
             # 전문 봇이 "Canvas는 못 만든다" 는 **실행 거절**로 답했다. 근거는
             # 이미 찾았는데 산출물 요청 때문에 답이 통째로 버려진다 — 그래서 한
@@ -840,11 +936,13 @@ def _run_one(
                     visual=tuple(visual or ()),
                     editing_text=editing_text,
                     display_hint=REFUSAL_CORRECTION,
+                    # 실행 거부 보정도 최초 요청과 **같은 시계**를 쓴다. 새 시계를
+                    # 만들면 첫 호출 뒤 다시 최대 90초를 쓰는 이전 장애가 재발한다.
+                    deadline=request.deadline,
                 ),
                 fallback=lambda: "",
                 confidence=confidence,
                 minimum_confidence=chosen.min_confidence,
-                timeout_seconds=90,
             )
             # ToolSpecialist는 라운드 비용을 누적하지만 PromptSpecialist는 호출마다
             # 마지막 비용으로 교체한다. 보정 호출도 실제 비용이므로 첫 호출을 잃지
@@ -892,7 +990,13 @@ def _run_one(
         # still not an evidence-backed answer and must not be reported as success.
         ok = False
         error_code = EVIDENCE_INSUFFICIENT
-    trace = f"capability-match:{chosen.execution_mode}"
+    # 200자 제한이 있는 구형 호출 기록에서도 원인 진단값이 먼저 살아남게 한다.
+    # 도구 예산 상세는 뒤에 붙여 잘리더라도 result/error_code와 핵심 시계는 남는다.
+    trace = _runtime_meta(
+        adapter, recovered=recovered,
+        deadline=getattr(request, "deadline", None),
+    )
+    trace = f"{trace} capability-match:{chosen.execution_mode}"
     if budget is not None:
         trace = f"{trace} {budget.summary()}"
     # **답변 길이를 남긴다.** 도구 입력(`chars=`)만 있으면 느린 호출이 자료를 많이

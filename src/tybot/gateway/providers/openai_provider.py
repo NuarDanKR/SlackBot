@@ -4,7 +4,8 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 
-from ..base import LLMResponse, Message, ModelSpec
+from ..base import LLMResponse, Message, ModelSpec, ProviderTimeout
+from ._timeout import is_timeout as _is_timeout
 
 
 def _content(content: str | list[dict]):
@@ -67,15 +68,28 @@ class OpenAIProvider:
         *,
         max_tokens: int = 1024,
         temperature: float = 0.0,
+        timeout_seconds: float | None = None,
     ) -> LLMResponse:
         client = self._get_client()
         payload = [{"role": m.role, "content": _content(m.content)} for m in messages]
-        resp = client.chat.completions.create(
-            model=spec.model,
-            messages=payload,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        request: dict = {
+            "model": spec.model,
+            "messages": payload,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        # Anthropic 쪽과 **같은 규칙**이다. 한쪽만 걸어 두면 폴백이 그쪽으로 갔을 때
+        # 상한이 사라지는데, 그 차이는 장애가 나야 보인다.
+        if timeout_seconds is not None:
+            if timeout_seconds <= 0:
+                raise ProviderTimeout("남은 시간이 없어 호출하지 않았습니다.")
+            request["timeout"] = timeout_seconds
+        try:
+            resp = client.chat.completions.create(**request)
+        except Exception as exc:
+            if _is_timeout(exc):
+                raise ProviderTimeout(str(exc) or "Provider 호출이 시간 안에 끝나지 않았습니다.") from exc
+            raise
         text = resp.choices[0].message.content or ""
         in_tok = resp.usage.prompt_tokens
         out_tok = resp.usage.completion_tokens

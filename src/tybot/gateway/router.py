@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 
 from .base import (
@@ -10,6 +11,7 @@ from .base import (
     Message,
     ModelSpec,
     Provider,
+    ProviderTimeout,
     Sensitivity,
     ToolSpec,
     error_reason,
@@ -192,6 +194,9 @@ class Router:
         max_tokens: int = 1024,
         temperature: float = 0.0,
         tools: Sequence[ToolSpec] = (),
+        # 남은 시간. **폴백 후보도 같은 시계를 쓴다** — 첫 모델이 다 써 버렸으면
+        # 두 번째를 시작하지 않는다(2026-09-16 장애 §5.2).
+        timeout_seconds: float | None = None,
     ) -> LLMResponse:
         spec = self.resolve(model, sensitivity)
         # 러프 사전 견적(입력 토큰 근사 = 콘텐츠 크기/4). 문서·이미지 블록도 누락하지 않는다.
@@ -207,13 +212,30 @@ class Router:
         # 설정으로 받는다(`fallback_models`). 비어 있으면 폴백하지 않는다 —
         # 조용히 다른 벤더로 보내는 것이 더 나쁘다.
         last_error: Exception | None = None
+        started = time.monotonic()
         for candidate in self._candidates(spec, sensitivity):
+            left = _left(timeout_seconds, started)
+            if left is not None and left <= 0:
+                # 남은 시간이 없다. **새 모델을 시작하지 않는다** — 시작하면
+                # 사용자는 이미 실패를 받았는데 비용만 더 든다.
+                #
+                # `break` 로 빠지면 `for…else` 를 건너뛰어 `resp` 가 없는 채로
+                # 아래로 내려간다 — 테스트가 `UnboundLocalError` 로 잡았다.
+                # **끝났다는 것을 예외로 말한다.**
+                logger.warning(
+                    "llm_call 폴백 중단 model=%s — 남은 시간 없음", candidate.model
+                )
+                raise last_error or ProviderTimeout(
+                    "남은 시간이 없어 다음 모델을 시작하지 않았습니다."
+                )
             provider = self._providers[candidate.provider]
             try:
                 # **도구가 없으면 인자를 넘기지 않는다.** `system` · `temperature`
                 # 와 같은 이유다 — 안 쓰는 것을 보내면 그것을 모르는 구현이
                 # 거부한다. 도구를 실제로 쓰는 호출에서만 계약이 넓어진다.
                 extra = {"tools": tools} if tools else {}
+                if left is not None:
+                    extra["timeout_seconds"] = left
                 resp = provider.complete(
                     candidate, messages, max_tokens=max_tokens,
                     temperature=temperature, **extra,
@@ -269,3 +291,14 @@ def _content_size(content: str | list[dict]) -> int:
             elif isinstance(value, dict):
                 total += _content_size([value])
     return total
+
+
+def _left(timeout_seconds: float | None, started: float) -> float | None:
+    """폴백 후보에게 남은 시간. 상한이 없으면 `None`.
+
+    후보마다 새로 상한을 주지 않는다 — 그러면 후보 수만큼 시간이 늘어나고,
+    바깥에서 본 「한 번의 호출」 이 실제로는 몇 배가 된다.
+    """
+    if timeout_seconds is None:
+        return None
+    return timeout_seconds - (time.monotonic() - started)

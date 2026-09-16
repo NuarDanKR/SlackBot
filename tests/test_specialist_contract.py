@@ -122,7 +122,9 @@ def test_specialist_timeout_falls_back_to_master():
 
     result = execute(Adapter(), request(), fallback=lambda: "마스터 답변", timeout_seconds=0.001)
     assert result.result == "fallback"
-    assert result.error_code == "timeout"
+    # **어느 단계에서 끝났는지** 남긴다. `timeout` 한 덩어리면 primary 지연과
+    # recovery 지연을 콘솔에서 구별할 수 없다(장애 §5.6).
+    assert result.error_code == "specialist-timeout:primary"
 
 
 def test_low_confidence_does_not_call_specialist():

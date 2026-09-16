@@ -498,9 +498,11 @@ def test_execution_refusal_retry_keeps_count_and_total_cost(monkeypatch):
 
         def __init__(self):
             self.calls = 0
+            self.deadlines = []
 
         def complete(self, request):
             self.calls += 1
+            self.deadlines.append(request.deadline)
             self.last_cost_usd = 0.01 * self.calls
             if self.calls == 1:
                 return "Canvas를 생성할 수 없습니다."
@@ -521,6 +523,29 @@ def test_execution_refusal_retry_keeps_count_and_total_cost(monkeypatch):
     assert outcome.ok
     assert outcome.answer.format_retry_count == 1
     assert outcome.answer.cost_usd == pytest.approx(0.03)
+    assert adapter.deadlines[0] is adapter.deadlines[1]
+
+
+def test_adapter_build_failure_is_recorded_without_masking_the_error(monkeypatch):
+    """진단값 초기화가 늦으면 AdapterError가 UnboundLocalError로 덮인다."""
+    from tybot import specialist_adapters
+
+    def refuse(*args, **kwargs):
+        raise specialist_adapters.AdapterError("adapter-build: 준비되지 않음")
+
+    monkeypatch.setattr(specialist_adapters, "build", refuse)
+    monkeypatch.setattr(specialist_router, "available", lambda ws: [_row()])
+    monkeypatch.setattr(
+        specialist_router, "capabilities_of", lambda s: ("internal_document_qa",)
+    )
+
+    outcome = specialist_router.serve(
+        _task(), workspace="pilot", evidence=["원문"], router=None,
+        authorization_id="pilot:member", record_call_row=False,
+    )
+
+    assert outcome.status == specialist_router.UNAVAILABLE
+    assert outcome.error_code == "adapter-build"
 
 
 # =============================================================================

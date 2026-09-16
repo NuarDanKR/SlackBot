@@ -7,6 +7,14 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 
+class ProviderTimeout(TimeoutError):
+    """Provider 호출이 시간 안에 끝나지 않았다.
+
+    **거절과 구별한다.** 400·401 은 고칠 것이 있고 timeout 은 다시 시도하거나
+    예산을 늘릴 일이다 — 한 코드로 뭉치면 둘 다 "Provider 오류" 로만 보인다.
+    """
+
+
 class Sensitivity(str, Enum):  # noqa: UP042 - StrEnum 은 3.11+ 이지만 기존 직렬화 호환 유지
     """데이터 민감도. 민감도별로 허용 프로바이더를 제한한다."""
 
@@ -109,6 +117,9 @@ class Provider(Protocol):
         max_tokens: int = 1024,
         temperature: float = 0.0,
         tools: Sequence[ToolSpec] = (),
+        # **SDK 에 실제로 건다.** 없으면 느린 호출 하나가 바깥 예산을 통째로
+        # 먹고, 우리는 취소할 수 없는 스레드만 남긴다(2026-09-16 장애 §2.1).
+        timeout_seconds: float | None = None,
     ) -> LLMResponse: ...
 
 

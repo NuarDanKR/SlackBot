@@ -407,6 +407,9 @@ class WorkspaceBot:
         self._ingested = 0
         self._user_cache: dict[str, str] = {}
         self._chan_cache: dict[str, str] = {}
+        # 사용자 ID → 봇인가. **조회 결과만** 캐시한다 — 실패는 캐시하지 않아야
+        # 일시 장애 뒤에 다시 물어볼 수 있다(장애 §6).
+        self._bot_users: dict[str, bool] = {}
         self.channel_owners = ChannelOwnerStore(
             heartbeat.state_dir() / "channel-owners.json"
         )
@@ -1082,19 +1085,89 @@ class WorkspaceBot:
 
         @self.app.event("message")
         def on_message(event, client, say):
-            if event.get("bot_id"):
-                return  # 1겹: 봇 출력은 아카이브 대상 아님
-            # 첨부만 올린 메시지는 subtype=file_share 로 온다 - 이건 수집한다.
-            if event.get("subtype") not in (None, "file_share"):
-                return  # 입퇴장·핀 등 시스템 메시지 제외
-            ctype = event.get("channel_type")
-            if ctype == "im":
-                if self._handle_correction(event, say):
-                    return
-                self._handle(event, client, say, in_channel=False)
-                return
-            if ctype in ("channel", "group") and self.realtime:
-                self._ingest_live(client, event)
+            # 판정은 **메서드 하나**에 둔다. 클로저 안에 두면 테스트가 이 갈래를
+            # 지나갈 수 없고, 배선을 통째로 빼도 아무 테스트가 안 걸린다
+            # (되돌리기 실험에서 실제로 그랬다).
+            self.route_message(event, client, say)
+
+    def route_message(self, event: dict, client, say) -> str:
+        """메시지 하나를 어디로 보낼지. 무엇을 했는지 한 낱말로 돌려준다.
+
+        **사람이 보낸 것인가**를 먼저 본다(2026-09-16 장애 §6).
+
+        예전에는 `bot_id` 와 `subtype` 만 봤다. Slack 이 만든 Canvas 접근 요청
+        메시지는 둘 다 비어 있어 일반 질문처럼 `_handle()` 까지 갔고, 읽기 전용
+        대화에 답을 보내다 `restricted_action_read_only_channel` 로 죽었다.
+        그 본문(`requested access to <Canvas URL>`)은 QA 기록에 질문으로도 남았다.
+        """
+        if not self._is_human_request(event, client):
+            return "ignored"
+        ctype = event.get("channel_type")
+        if ctype == "im":
+            if self._handle_correction(event, say):
+                return "correction"
+            self._handle(event, client, say, in_channel=False)
+            return "answered"
+        if ctype in ("channel", "group") and self.realtime:
+            self._ingest_live(client, event)
+            return "ingested"
+        return "skipped"
+
+    # Slack 이 만든 이벤트의 표식. **`subtype` 만으로는 안 걸린다** — Canvas 접근
+    # 요청처럼 사람 메시지와 같은 모양으로 오는 것이 있다.
+    SYSTEM_SUBTYPES = frozenset({
+        "bot_message", "channel_join", "channel_leave", "channel_topic",
+        "channel_purpose", "channel_name", "channel_archive", "channel_unarchive",
+        "message_changed", "message_deleted", "thread_broadcast", "tombstone",
+        "reminder_add", "slackbot_response", "bot_add", "bot_remove",
+        "app_conversation_join", "file_comment", "pinned_item", "unpinned_item",
+        "huddle_thread", "channel_canvas_updated", "canvas_access_requested",
+    })
+    SLACKBOT_USER = "USLACKBOT"
+
+    def _is_human_request(self, event: dict, client) -> bool:
+        """사람이 보낸 메시지인가. **모르면 아니라고 한다.**
+
+        막는 쪽이 기본값이다(원칙 3). 시스템 메시지를 사람 질문으로 올리면 읽기
+        전용 대화에 답을 보내고, 그 본문이 QA 기록에 질문으로 남는다 — 되돌릴 수
+        없다. 반대로 사람 메시지를 한 번 놓치면 사람이 다시 묻는다.
+
+        **문자열 하나를 하드코딩하지 않는다.** `requested access to …` 만 막으면
+        다음 시스템 메시지에 또 걸린다.
+        """
+        if event.get("bot_id") or event.get("app_id"):
+            return False
+        if event.get("hidden") or event.get("subtype") in self.SYSTEM_SUBTYPES:
+            return False
+        # 첨부만 올린 메시지는 `file_share` 로 온다 — 이건 사람이 올린 것이다.
+        if event.get("subtype") not in (None, "file_share"):
+            return False
+        user_id = str(event.get("user") or "")
+        if not user_id or user_id == self.SLACKBOT_USER:
+            # 보낸 사람이 없는 메시지는 사람이 쓴 것이 아니다.
+            return False
+        return not self._is_bot_user(client, user_id)
+
+    def _is_bot_user(self, client, user_id: str) -> bool:
+        """이 사용자가 봇·앱인가. **조회 실패는 답변 경로를 닫는다.**
+
+        `users.info` 가 잠깐 흔들리면 사람 질문도 한 번 놓칠 수 있다. 반대로
+        시스템 메시지를 사람으로 잘못 보면 읽기 전용 대화에 답하려다 오류가 나고
+        QA 질문 기록까지 오염된다. 실패는 캐시하지 않아 다음 이벤트에서 재확인한다.
+        """
+        cached = self._bot_users.get(user_id)
+        if cached is not None:
+            return cached
+        try:
+            info = (client.users_info(user=user_id) or {}).get("user") or {}
+        except Exception as e:
+            log.debug("[%s] 사용자 조회 실패 user=%s: %s", self.workspace, user_id, e)
+            # 시스템 이벤트를 사람 질문으로 승격해 읽기 전용 대화에 답하는 쪽이
+            # 더 위험하다. 조회 실패는 캐시하지 않으므로 다음 이벤트에서 재확인한다.
+            return True
+        is_bot = bool(info.get("is_bot")) or str(info.get("id") or "") == self.SLACKBOT_USER
+        self._bot_users[user_id] = is_bot
+        return is_bot
 
     def _schedule_text(self, text: str, *, channel_id: str, user_id: str) -> str:
         """`/일정` 본문. 제목·장소는 여기서만 다루고 로그에는 남기지 않는다."""
