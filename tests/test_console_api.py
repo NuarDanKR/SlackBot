@@ -194,6 +194,29 @@ def guest(client):
     return _login(client, "guest@taeyoung.com", GUEST_PW)
 
 
+def test_summary_review_rounds_include_workspace_scoped_schedule(client, monkeypatch):
+    seen = []
+    monkeypatch.setattr(console_app.summary_review_store, "rounds", lambda ws: [])
+
+    def fake_schedule(workspaces):
+        seen.append(workspaces)
+        return {
+            "channels": 1,
+            "due": 0,
+            "waiting": 1,
+            "nextSendAt": "16:00",
+            "timezone": "Asia/Seoul",
+        }
+
+    monkeypatch.setattr(console_app.summary_review_store, "schedule", fake_schedule)
+
+    response = client.get("/api/summary-review/rounds", headers=member(client))
+
+    assert response.status_code == 200
+    assert response.json()["schedule"]["nextSendAt"] == "16:00"
+    assert seen == [["fin"]]
+
+
 # --- 인증 -----------------------------------------------------------------
 
 def test_without_login_is_rejected(client):

@@ -1104,13 +1104,14 @@ def summary_review_rounds(user: User) -> dict:
     정정은 검토자가 쓴 판단이고, 관리자 화면이 근거의 사본이 되면 안 된다.
     """
     try:
-        rows = summary_review_store.rounds(
-            None if user.all_workspaces else list(user.workspaces)
-        )
+        workspaces = None if user.all_workspaces else list(user.workspaces)
+        rows = summary_review_store.rounds(workspaces)
+        schedule = summary_review_store.schedule(workspaces)
     except summary_review_store.SummaryReviewStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "rounds": rows,
+        "schedule": schedule,
         # 사람이 손대야 하는 회차. 자동 재생성은 하지 않는다(설계 §5).
         "ambiguous": [r for r in rows if r["state"] == "ambiguous"],
     }

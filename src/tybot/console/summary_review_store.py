@@ -20,9 +20,11 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 
 # 한 화면에 실을 회차 수. 더 필요하면 기간으로 좁힌다.
 MAX_ROWS = 100
+KST = timezone(timedelta(hours=9))
 
 
 class SummaryReviewStoreError(RuntimeError):
@@ -90,6 +92,57 @@ def rounds(workspaces: list[str] | None = None, *, limit: int = MAX_ROWS) -> lis
     return [_row(row) for row in rows]
 
 
+def schedule(
+    workspaces: list[str] | None = None, *, now: datetime | None = None
+) -> dict:
+    """활성 검토 채널의 오늘 발송 대기 상태를 반환한다.
+
+    회차가 0건일 때 설정이 없는지, 아직 예약 시각 전인지, 예약 시각이
+    지났는데도 생성되지 않았는지를 콘솔이 구분하는 데 쓰인다.
+    """
+    where = ""
+    params: list = []
+    if workspaces is not None:
+        if not workspaces:
+            return _schedule_status([], now=now)
+        where = "AND workspace = ANY(%s)"
+        params.append(list(workspaces))
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT workspace, channel_id, min(send_at) AS send_at
+              FROM channel_reviewer
+             WHERE enabled
+              {where}
+             GROUP BY workspace, channel_id
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    return _schedule_status(rows, now=now)
+
+
+def _schedule_status(rows: list[dict], *, now: datetime | None = None) -> dict:
+    current = now or datetime.now(KST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=KST)
+    local = current.astimezone(KST)
+    current_minutes = local.hour * 60 + local.minute
+    send_times = [row.get("send_at") for row in rows if row.get("send_at") is not None]
+    due = sum(1 for value in send_times if value.hour * 60 + value.minute <= current_minutes)
+    future = [
+        value for value in send_times if value.hour * 60 + value.minute > current_minutes
+    ]
+    next_send = min(future).strftime("%H:%M") if future else ""
+    return {
+        "channels": len(rows),
+        "due": due,
+        "waiting": len(rows) - due,
+        "nextSendAt": next_send,
+        "timezone": "Asia/Seoul",
+    }
+
+
 def _row(row: dict) -> dict:
     return {
         "id": str(row.get("id") or ""),
@@ -130,4 +183,5 @@ __all__ = [
     "health",
     "is_ready",
     "rounds",
+    "schedule",
 ]

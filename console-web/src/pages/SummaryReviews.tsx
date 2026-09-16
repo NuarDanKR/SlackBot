@@ -23,6 +23,14 @@ type Round = {
   createdAt: string
 }
 
+type Schedule = {
+  channels: number
+  due: number
+  waiting: number
+  nextSendAt: string
+  timezone: string
+}
+
 const STATE_LABEL: Record<string, string> = {
   creating: '생성 중',
   ready: '검토 대기',
@@ -43,13 +51,20 @@ const STATE_TONE: Record<string, 'ok' | 'watch' | 'bad' | 'plain'> = {
 }
 
 export function SummaryReviews() {
-  const res = useResource<{ rounds: Round[]; ambiguous: Round[] }>('/api/summary-review/rounds')
+  const res = useResource<{ rounds: Round[]; ambiguous: Round[]; schedule: Schedule }>('/api/summary-review/rounds')
   if (res.loading) return <Loading what="요약 검토 회차를" />
   if (res.error || !res.data) {
     return <Failed what="요약 검토 회차를" detail={res.error?.message ?? '응답이 없습니다.'} onRetry={res.reload} />
   }
   const rounds = res.data.rounds
   const stuck = res.data.ambiguous
+  const schedule = res.data.schedule ?? {
+    channels: 0,
+    due: 0,
+    waiting: 0,
+    nextSendAt: '',
+    timezone: 'Asia/Seoul',
+  }
   const open = rounds.filter((r) => r.state === 'ready' || r.state === 'partial').length
   const failed = rounds.filter((r) => r.state === 'failed').length
 
@@ -81,7 +96,7 @@ export function SummaryReviews() {
       </Section>
       <Section title="회차 목록" note={`${rounds.length}건`}>
         {rounds.length === 0 ? (
-          <Empty title="아직 회차가 없습니다." note="검토자를 정한 채널에서 설정 시각이 지나면 생깁니다." />
+          <EmptyState schedule={schedule} />
         ) : (
           <div className="table-wrap">
             <table className="table">
@@ -145,5 +160,31 @@ export function SummaryReviews() {
         </ul>
       </Section>
     </>
+  )
+}
+
+function EmptyState({ schedule }: { schedule: Schedule }) {
+  if (schedule.channels === 0) {
+    return (
+      <Empty
+        title="검토자가 설정된 채널이 없습니다."
+        note="채널 관리 또는 /채널 수정에서 요약 검토자와 발송 시각을 설정하세요."
+      />
+    )
+  }
+  if (schedule.due === 0) {
+    const next = schedule.nextSendAt ? ` 다음 예약 시각은 ${schedule.nextSendAt} KST입니다.` : ''
+    return (
+      <Empty
+        title="아직 설정 시각 전입니다."
+        note={`검토 채널 ${schedule.channels}개가 대기 중입니다.${next} 실행기는 5분 주기로 확인합니다.`}
+      />
+    )
+  }
+  return (
+    <Empty
+      title="설정 시각이 지났지만 생성된 회차가 없습니다."
+      note={`대상 채널 ${schedule.due}개입니다. 아직 실행기가 돌지 않았거나 새 원문에서 유효한 요약 후보를 만들지 못했습니다. tybot-review-dm 서비스 로그를 확인하세요.`}
+    />
   )
 }
