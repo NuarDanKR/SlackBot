@@ -141,7 +141,7 @@ class FakeClient:
         return {"channels": self.channels, "response_metadata": {}}
 
 
-def test_reconcile_marks_archived_and_deleted_public_channels():
+def test_reconcile_marks_archived_but_does_not_guess_deletion_from_absence():
     client = FakeClient([
         {"id": "C1", "name": "a", "is_archived": True},
         {"id": "C2", "name": "b", "is_archived": False},
@@ -149,9 +149,9 @@ def test_reconcile_marks_archived_and_deleted_public_channels():
 
     got = cl.reconcile(client, "tyit", known=[("C1", "#a"), ("C2", "#b"), ("C3", "#c")])
 
-    assert (got["archived"], got["deleted"]) == (1, 1)
+    assert (got["archived"], got["deleted"]) == (1, 0)
     assert cl.keep(_doc(channel_id="C1", channel="#a")) is False
-    assert cl.keep(_doc(channel_id="C3", channel="#c")) is False
+    assert cl.keep(_doc(channel_id="C3", channel="#c")) is True
     assert cl.keep(_doc(channel_id="C2", channel="#b")) is True
 
 
@@ -173,6 +173,13 @@ def test_reconcile_restores_a_channel_that_came_back():
         "tyit", known=[("C1", "#a")],
     )
     assert got["restored"] == 1
+    assert cl.keep(_doc(channel_id="C1", channel="#a")) is True
+
+
+def test_an_observed_channel_event_restores_a_false_retired_record():
+    cl.mark("tyit", "C1", channel="#a", reason=cl.DELETED)
+
+    assert cl.observe_active("tyit", "C1") is True
     assert cl.keep(_doc(channel_id="C1", channel="#a")) is True
 
 

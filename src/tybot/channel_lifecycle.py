@@ -290,10 +290,10 @@ def reconcile(client, workspace: str, *, known: list[tuple[str, str]]) -> dict:
         info = live.get(channel_id)
         was = current.find(workspace, channel_id, channel)
         if info is None:
-            # 목록에 아예 없다. 공개 채널이면 지워진 것이다.
-            if (was is None and not _looks_private(channel_id)
-                    and mark(workspace, channel_id, channel=channel, reason=DELETED)):
-                result["deleted"] += 1
+            # 목록 누락만으로 삭제라고 단정하지 않는다. 앱 가시성·권한·Slack API의
+            # 목록 범위 차이로도 빠질 수 있다. 삭제는 channel_deleted 이벤트가
+            # 확정하고, 실제 채널에서 새 이벤트를 받으면 아래 `observe_active`가
+            # 잘못 남은 과거 판정을 지운다.
             continue
         if info.get("is_archived"):
             if was is None and mark(workspace, channel_id, channel=channel, reason=ARCHIVED):
@@ -305,13 +305,11 @@ def reconcile(client, workspace: str, *, known: list[tuple[str, str]]) -> dict:
     return result
 
 
-def _looks_private(channel_id: str) -> bool:
-    """비공개 채널 ID 인가. Slack 은 비공개에 `G`/`C` 를 섞어 쓴다.
-
-    확신할 수 없으므로 **만들어 낸 ID 는 비공개로 본다** — 삭제로 적지 않는다.
-    """
-    got = str(channel_id or "")
-    return not got or got.startswith(("G", "legacy-"))
+def observe_active(workspace: str, channel_id: str) -> bool:
+    """실제 채널 이벤트를 받았으므로 잘못 남은 보관·삭제 판정을 지운다."""
+    if not workspace or not channel_id:
+        return False
+    return restore(workspace, channel_id)
 
 
 def _live_channels(client) -> dict[str, dict]:
@@ -346,6 +344,7 @@ __all__ = [
     "keep",
     "mark",
     "mark_for",
+    "observe_active",
     "reconcile",
     "registry",
     "restore",

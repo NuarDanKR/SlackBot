@@ -2438,6 +2438,16 @@ class WorkspaceBot:
             text = "최근 업무 내용을 정리해줘"
         user_id = event.get("user", "")
         channel_id = event.get("channel", "")
+        if in_channel and channel_id:
+            # 이 이벤트를 받았다는 사실 자체가 채널이 살아 있고 봇이 접근 가능하다는
+            # 증거다. 목록 대조의 일시 누락으로 남은 제외 판정을 답변 전에 복구한다.
+            with contextlib.suppress(Exception):
+                if channel_lifecycle.observe_active(self.workspace, channel_id):
+                    log.info(
+                        "[%s] 활성 채널 이벤트로 근거 제외 판정 복구 ch=%s",
+                        self.workspace,
+                        channel_id,
+                    )
         # 스레드 안에서 부른 경우에는 설정과 무관하게 그 스레드에 답한다(대화 맥락 유지).
         in_existing_thread = bool(event.get("thread_ts"))
         thread_ts = (
@@ -2463,9 +2473,9 @@ class WorkspaceBot:
             """모든 응답 경로가 여기로 모인다 — 경로마다 로그가 달라지지 않게."""
             from ..canvas_answer import automatic, message
 
-            use_canvas = artifact.wants_canvas or (
-                ans is not None and ans.reason in ("answered", "advice")
-                and automatic(reply, raw_text)
+            answer_supports_canvas = ans is not None and ans.reason in ("answered", "advice")
+            use_canvas = answer_supports_canvas and (
+                artifact.wants_canvas or automatic(reply, raw_text)
             )
             if artifact.unsupported_operation:
                 # **실행한 척하지 않는다.** 판정은 됐지만 지금 못 하는 동작이라

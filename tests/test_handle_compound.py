@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tybot import channel_lifecycle
 from tybot.answer import Answer
 from tybot.canvas_answer import CanvasResult
 from tybot.intent import Intent
@@ -273,6 +274,30 @@ def test_explicit_canvas_request_posts_canvas_link(monkeypatch):
     client.canvases_access_set.assert_called_once_with(
         canvas_id="F-CANVAS", access_level="read", channel_ids=["C1"]
     )
+
+
+def test_no_access_answer_is_not_wrapped_in_an_empty_canvas(monkeypatch):
+    ans = Answer("열람 가능한 문서가 없습니다.", [], None, 0.0, 0, "no_access")
+    bot = _bot([Intent("summary", question="정산 추정 정리")], [ans])
+    created = Mock()
+    monkeypatch.setattr("tybot.slack.pilot.create_answer_canvas", created)
+
+    (reply,) = _handle(bot, "정산 추정을 캔버스로 정리해줘")
+
+    created.assert_not_called()
+    assert "열람 가능한 문서가 없습니다" in reply
+
+
+def test_an_incoming_channel_request_restores_false_retired_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    channel_lifecycle._cache.clear()
+    channel_lifecycle.mark("mgmt", "C1", channel="#팀-전산_ABB110-회의")
+    ans = Answer("확인했습니다.", [], "m", 0.0, 1, "answered")
+    bot = _bot([Intent("search", question="확인")], [ans])
+
+    _handle(bot, "확인해줘")
+
+    assert channel_lifecycle.is_retired("mgmt", "C1", "") is False
 
 
 @pytest.mark.parametrize(
