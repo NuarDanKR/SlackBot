@@ -2369,6 +2369,66 @@ def test_channel_collection_jobs_are_admin_only(client, monkeypatch):
     )
 
 
+def test_channel_review_job_starts_for_a_known_channel_with_reviewers(
+    client, monkeypatch
+):
+    from tybot.console.channel_admin import ChannelRow
+
+    _channel_rows(
+        monkeypatch,
+        rows=[
+            ChannelRow(
+                workspace="tyit",
+                workspace_label="전산팀",
+                channel_id="C1",
+                channel="#주간보고",
+                reviewers=["U1"],
+            )
+        ],
+    )
+    seen = {}
+
+    def _start(workspace, channel_id, *, actor):
+        seen.update(workspace=workspace, channel_id=channel_id, actor=actor)
+        return {"id": "a" * 32, "status": "queued"}
+
+    monkeypatch.setattr(console_app.review_jobs, "start", _start)
+    response = client.post(
+        "/api/channels/review-jobs",
+        json={"channel": "tyit:C1"},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 202
+    assert seen["workspace"] == "tyit"
+    assert seen["channel_id"] == "C1"
+
+
+def test_channel_review_job_refuses_a_channel_without_reviewers(client, monkeypatch):
+    _channel_rows(monkeypatch)
+    monkeypatch.setattr(
+        console_app.review_jobs,
+        "start",
+        lambda *args, **kwargs: pytest.fail("must not start without a reviewer"),
+    )
+
+    response = client.post(
+        "/api/channels/review-jobs",
+        json={"channel": "tyit:C1"},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 422
+    assert "검토자" in response.json()["detail"]
+
+
+def test_channel_review_jobs_are_admin_only(client):
+    assert (
+        client.get("/api/channels/review-jobs/latest", headers=member(client)).status_code
+        == 403
+    )
+
+
 def test_channel_api_is_registered_before_the_static_frontend(tmp_path, monkeypatch):
     (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
     monkeypatch.setenv("CONSOLE_DIST", str(tmp_path))

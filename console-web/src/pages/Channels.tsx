@@ -82,6 +82,19 @@ interface CollectionJob {
   logTail: string[]
 }
 
+interface ReviewJob {
+  id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  workspace: string
+  channelId: string
+  createdAt: string
+  startedAt: string | null
+  finishedAt: string | null
+  exitCode: number | null
+  errorCode: string | null
+  logTail: string[]
+}
+
 type IssueFilter = 'all' | 'missing-owner' | 'missing-reviewer' | 'active-missing-owner'
 type ChannelSort = 'priority' | 'channel' | 'answers' | 'last-answer' | 'last-ingested' | 'documents' | 'lines'
 type SortDirection = 'asc' | 'desc'
@@ -97,6 +110,7 @@ function personLabel(id: string, people: Map<string, Candidate>): string {
 export function Channels({ onToast }: { onToast: (message: string) => void }) {
   const resource = useResource<ChannelsPayload>('/api/channels')
   const jobResource = useResource<{ job: CollectionJob | null }>('/api/channels/collection-jobs/latest')
+  const reviewJobResource = useResource<{ job: ReviewJob | null }>('/api/channels/review-jobs/latest')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [owner, setOwner] = useState('')
   const [ownerMenuOpen, setOwnerMenuOpen] = useState(false)
@@ -109,15 +123,24 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [busy, setBusy] = useState(false)
   const [collectionBusy, setCollectionBusy] = useState(false)
+  const [reviewBusy, setReviewBusy] = useState(false)
   const [result, setResult] = useState<AssignResult | null>(null)
   const job = jobResource.data?.job ?? null
   const jobActive = job?.status === 'queued' || job?.status === 'running'
+  const reviewJob = reviewJobResource.data?.job ?? null
+  const reviewJobActive = reviewJob?.status === 'queued' || reviewJob?.status === 'running'
 
   useEffect(() => {
     if (!jobActive) return
     const timer = window.setInterval(jobResource.reload, 3000)
     return () => window.clearInterval(timer)
   }, [jobActive, job?.id, jobResource.reload])
+
+  useEffect(() => {
+    if (!reviewJobActive) return
+    const timer = window.setInterval(reviewJobResource.reload, 3000)
+    return () => window.clearInterval(timer)
+  }, [reviewJobActive, reviewJob?.id, reviewJobResource.reload])
 
   const people = useMemo(() => {
     const map = new Map<string, Candidate>()
@@ -195,6 +218,11 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
   }, [ownerSearch, resource.data])
 
   const selectedOwner = resource.data?.candidates.find((candidate) => candidate.slackUser === owner)
+  const selectedReviewRow = useMemo(() => {
+    if (selected.size !== 1) return null
+    const selectedKey = [...selected][0]
+    return (resource.data?.rows ?? []).find((row) => key(row) === selectedKey) ?? null
+  }, [resource.data, selected])
 
   if (resource.loading) return <Loading what="채널 목록" />
   if (resource.error)
@@ -266,12 +294,35 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     }
   }
 
+  async function startReview() {
+    if (!selectedReviewRow || selectedReviewRow.reviewers.length === 0 || reviewJobActive) return
+    if (
+      !window.confirm(
+        `${selectedReviewRow.channel}의 예약 시각을 무시하고 오늘 요약 검토를 지금 실행할까요?`,
+      )
+    )
+      return
+    setReviewBusy(true)
+    try {
+      await api.securePost<{ job: ReviewJob }>('/api/channels/review-jobs', {
+        channel: key(selectedReviewRow),
+      })
+      onToast('요약 검토 DM 작업을 시작했습니다.')
+      reviewJobResource.reload()
+    } catch (e) {
+      const error = e as ApiError
+      onToast(error.message || '요약 검토 DM 작업을 시작하지 못했습니다.')
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
   return (
     <>
       <PageHead
         crumb="수집 · 채널"
         title="채널 관리"
-        note="채널 담당자를 정하고, 선택한 채널의 파일 동기화와 봇 초대 이전 데이터 소급 수집을 실행합니다."
+        note="채널 담당자를 정하고, 수집 작업과 요약 검토 DM을 채널별로 실행합니다."
       />
 
       <Section title="현황">
@@ -438,6 +489,53 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
           </div>
         )}
         {jobResource.error && <p className="note warn">작업 상태를 읽지 못했습니다: {jobResource.error.message}</p>}
+      </Section>
+
+      <Section
+        title="요약 검토 DM"
+        lead="채널 하나를 선택해 예약 시각을 기다리지 않고 검토 Canvas와 DM 생성을 실행합니다. 오늘 이미 발송한 DM은 중복 전송하지 않습니다."
+      >
+        <div className="toolbar">
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={
+              reviewBusy ||
+              reviewJobActive ||
+              !selectedReviewRow ||
+              selectedReviewRow.reviewers.length === 0
+            }
+            onClick={startReview}
+          >
+            {reviewBusy || reviewJobActive ? '검토 DM 실행 중' : '선택 채널 검토 DM 지금 발송'}
+          </button>
+          {selectedReviewRow && selectedReviewRow.reviewers.length === 0 && (
+            <span className="note warn">선택한 채널에는 활성 검토자가 없습니다.</span>
+          )}
+          {selected.size !== 1 && (
+            <span className="note">채널을 하나만 선택하세요.</span>
+          )}
+        </div>
+        {reviewJob && (
+          <div className={`notice ${reviewJob.status === 'failed' ? 'bad' : ''}`}>
+            <div className="notice-kind">요약 검토 DM</div>
+            <div>
+              <div className="notice-title">
+                {reviewJob.status === 'queued' && '실행 대기'}
+                {reviewJob.status === 'running' && '요약 및 Canvas 생성 중'}
+                {reviewJob.status === 'completed' && '실행 완료'}
+                {reviewJob.status === 'failed' && `실패 · ${reviewJob.errorCode ?? '원인 미확인'}`}
+              </div>
+              <div className="notice-detail mono">{reviewJob.workspace} · {reviewJob.channelId}</div>
+              {reviewJob.logTail.length > 0 && (
+                <pre className="channel-job-log">{reviewJob.logTail.join('\n')}</pre>
+              )}
+            </div>
+          </div>
+        )}
+        {reviewJobResource.error && (
+          <p className="note warn">작업 상태를 읽지 못했습니다: {reviewJobResource.error.message}</p>
+        )}
       </Section>
 
       <Section

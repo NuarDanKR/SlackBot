@@ -42,6 +42,7 @@ from . import (
     health,
     llm_secret_store,
     reader,
+    review_jobs,
     service_logs,
     specialist_git,
     specialist_runtime_store,
@@ -222,6 +223,12 @@ class ChannelCollectionJobBody(BaseModel):
 
     mode: Literal["files", "history"]
     channels: list[str] = Field(min_length=1, max_length=500)
+
+
+class ChannelReviewJobBody(BaseModel):
+    """콘솔에서 즉시 실행하는 채널 하나의 요약 검토 DM."""
+
+    channel: str = Field(min_length=3, max_length=80)
 
 
 class SpecialistDecisionBody(BaseModel):
@@ -2569,6 +2576,49 @@ def start_channel_collection_job(
         target_id=str(job["id"]),
         outcome="requested",
         metadata={"target_count": len(set(targets))},
+    )
+    return {"job": job}
+
+
+@app.get("/api/channels/review-jobs/latest")
+def latest_channel_review_job(user: User) -> dict:
+    _require_admin(user)
+    return {"job": review_jobs.latest()}
+
+
+@app.post("/api/channels/review-jobs", status_code=202)
+def start_channel_review_job(
+    body: ChannelReviewJobBody, request: Request, user: User
+) -> dict:
+    """선택한 채널 하나의 예약 시각을 우회해 요약 검토를 실행한다."""
+    _require_admin(user)
+    _check_write_request(request)
+
+    workspace, separator, channel_id = body.channel.partition(":")
+    rows, _totals = channel_admin.snapshot()
+    target = next(
+        (
+            row
+            for row in rows
+            if row.workspace == workspace and row.channel_id == channel_id
+        ),
+        None,
+    )
+    if not separator or target is None:
+        raise HTTPException(status_code=422, detail="관리 대상이 아닌 채널입니다.")
+    if not target.reviewers:
+        raise HTTPException(status_code=422, detail="활성 요약 검토자가 없는 채널입니다.")
+    try:
+        job = review_jobs.start(workspace, channel_id, actor=user.email)
+    except review_jobs.ReviewJobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email,
+        category="review",
+        action="send-now",
+        target_type="channel",
+        target_id=body.channel,
+        outcome="requested",
     )
     return {"job": job}
 
