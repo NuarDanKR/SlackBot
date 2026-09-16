@@ -9,7 +9,27 @@ from typing import Protocol
 
 log = logging.getLogger("tybot.specialist_contract")
 
+# 본문 상한. **프롬프트에 적는 값과 같은 값이다**(`specialist_adapters`).
+#
+# 갈리면 「부탁은 3,000, 검사는 20,000」 이 되어 전문 봇이 상한을 지킬 이유가
+# 없어진다. 지키는지 보는 쪽과 지키라고 말하는 쪽이 같은 숫자를 봐야 한다.
+#
+# **여기를 임의로 올리지 않는다**(B-52). 3,000 자를 넘어야 하는 답은 Hermes 를
+# 늘리는 것이 아니라 보고서 전문 봇(`clio`)이 맡는다. 상한을 올리면 그 분리가
+# 조용히 없어지고, 모든 질문이 Hermes 의 장문으로 흘러간다.
+#
+# 2026-09-16 사고: 상한을 20,000 → 3,000 으로 내린 직후 "현장 간 비교 분석해
+# 자세히 설명해줘" 가 실패했다. 원인은 상한 자체가 아니라 **최초 요청에서 상한을
+# 약하게 말한 것**이었다 — 사용자의 "자세히" 가 배경 정책 한 줄을 이겼다.
+# 고친 자리는 프롬프트다(`MASTER_OUTPUT_POLICY`).
+TARGET_OUTPUT_CHARS = 3_000
 MAX_OUTPUT_CHARS = 3_000
+
+# 계약 위반 사유. **한 덩어리로 뭉개지 않는다** — 빈 응답·출처 포함·폭주는
+# 사람이 할 일이 서로 다르다.
+VIOLATION_EMPTY = "invalid-output:empty"
+VIOLATION_SOURCES = "invalid-output:sources"
+VIOLATION_TOO_LONG = "invalid-output:too-long"
 
 # 실패 이유를 **한 덩어리(`adapter-error`)로 뭉개지 않는다.**
 #
@@ -114,17 +134,41 @@ class SpecialistCallResult:
     text: str
     result: str
     error_code: str = ""
+    # 성공한 답의 길이. **버리지 않고 재는 값이다** — 목표를 얼마나 넘는지 보여야
+    # 천장을 조일지 프롬프트를 고칠지 판단할 수 있다. 0 이면 재지 못했다.
+    output_chars: int = 0
+
+    @property
+    def over_target(self) -> bool:
+        """본문 상한을 넘었는가. 통과한 답은 언제나 `False` 다."""
+        return self.output_chars > TARGET_OUTPUT_CHARS
+
+
+class OutputViolation(ContractViolation):
+    """어느 규칙이 깨졌는지 들고 다닌다. 본문은 담지 않는다."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _validated_text(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ContractViolation("전문 봇이 비어 있거나 잘못된 응답을 반환했습니다.")
+        raise OutputViolation(
+            VIOLATION_EMPTY, "전문 봇이 비어 있거나 잘못된 응답을 반환했습니다."
+        )
     text = value.strip()
     lowered = text.lower()
     if "출처:" in text or "slack.com/archives/" in lowered or "file://" in lowered:
-        raise ContractViolation("출처는 마스터 봇만 부착할 수 있습니다.")
+        raise OutputViolation(VIOLATION_SOURCES, "출처는 마스터 봇만 부착할 수 있습니다.")
     if len(text) > MAX_OUTPUT_CHARS:
-        raise ContractViolation("전문 봇 응답 길이가 계약 범위를 초과했습니다.")
+        # 길이 숫자는 업무 내용이 아니다. **적어 둬야** 프롬프트를 고칠지
+        # 상한을 볼지 판단할 수 있다. 예전에는 「초과」 만 남아서 3,050 자인지
+        # 9,000 자인지 알 수 없었다.
+        raise OutputViolation(
+            VIOLATION_TOO_LONG,
+            f"전문 봇 응답이 본문 상한을 넘었습니다({len(text)} > {MAX_OUTPUT_CHARS}).",
+        )
     return text
 
 
@@ -143,7 +187,8 @@ def execute(
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tybot-specialist")
     future = pool.submit(adapter.complete, request)
     try:
-        return SpecialistCallResult(_validated_text(future.result(timeout=timeout_seconds)), "success")
+        text = _validated_text(future.result(timeout=timeout_seconds))
+        return SpecialistCallResult(text, "success", output_chars=len(text))
     except TimeoutError:
         future.cancel()
         return SpecialistCallResult(fallback(), "fallback", "timeout")
@@ -153,7 +198,10 @@ def execute(
         # 모든 위반을 `invalid-output` 하나로 접어 운영에서 빈 응답/출처 포함/
         # 길이 초과를 구별할 방법이 없었다.
         log.warning("전문 봇 응답 계약 위반: %s", exc)
-        return SpecialistCallResult(fallback(), "contract_violation", "invalid-output")
+        return SpecialistCallResult(
+            fallback(), "contract_violation",
+            getattr(exc, "code", "") or "invalid-output",
+        )
     except Exception as exc:  # noqa: BLE001 - an adapter failure must not take down the master bot
         # **반드시 남긴다.** 이 줄이 없어서 콘솔의 `adapter-error` 가 원인을 하나도
         # 말하지 못했다. 예외 메시지에 근거 본문은 들어가지 않는다(모델 이름·

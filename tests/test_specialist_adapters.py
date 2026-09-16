@@ -132,7 +132,28 @@ def test_the_prompt_goes_in_as_a_system_message():
 
     assert messages[0].role == "system"
     assert "출처를 쓰지 않습니다" in messages[0].content
-    assert "3,000자 이내" in messages[0].content
+    # 분량 상한은 **최초 요청에** 들어간다. 나중에 재요청으로 줄이는 것이 아니다.
+    assert "3,000자를 넘지 않습니다" in messages[0].content
+
+
+def test_the_length_limit_outranks_a_user_asking_for_detail():
+    """2026-09-16 사고 — "자세히 상세히" 가 배경 정책 한 줄을 이겼다.
+
+    숫자만 적으면 모델은 사용자의 말을 따른다. **어느 쪽이 먼저인지** 를 적어야
+    한다. 이 문장이 빠지면 같은 질문이 다시 상한을 넘고, 답은 버려진다.
+    """
+    policy = sa.MASTER_OUTPUT_POLICY
+
+    assert "자세히" in policy and "상한이 먼저입니다" in policy
+    # 줄이는 방법도 함께 말한다. 숫자만으로는 모델이 무엇을 버릴지 모른다.
+    assert "다루지 못한 범위" in policy
+
+
+def test_the_prompt_and_the_contract_check_use_the_same_number():
+    """부탁하는 숫자와 검사하는 숫자가 갈리면 상한을 지킬 이유가 없어진다."""
+    from tybot.specialist_contract import MAX_OUTPUT_CHARS
+
+    assert f"{MAX_OUTPUT_CHARS:,}자" in sa.MASTER_OUTPUT_POLICY
 
 
 def test_the_prompt_forbids_writing_sources():

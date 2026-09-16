@@ -895,6 +895,11 @@ def _run_one(
     trace = f"capability-match:{chosen.execution_mode}"
     if budget is not None:
         trace = f"{trace} {budget.summary()}"
+    # **답변 길이를 남긴다.** 도구 입력(`chars=`)만 있으면 느린 호출이 자료를 많이
+    # 읽어서인지 길게 써서인지 구별할 수 없다 — 2026-09-16 사고에서 그 차이를
+    # 콘솔 숫자로 되짚을 수 없었다.
+    if result is not None and getattr(result, "output_chars", 0):
+        trace = f"{trace} output_chars={result.output_chars}"
     try:
         if not record_call_row:
             raise _SkipRecord

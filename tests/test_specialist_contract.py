@@ -3,6 +3,8 @@ import time
 import pytest
 
 from tybot.specialist_contract import (
+    MAX_OUTPUT_CHARS,
+    TARGET_OUTPUT_CHARS,
     AuthorizedEvidence,
     ContractViolation,
     SpecialistRequest,
@@ -46,20 +48,60 @@ def test_contract_violation_reason_is_logged_without_the_output(caplog):
     with caplog.at_level("WARNING"):
         result = execute(Adapter(), request(), fallback=lambda: "마스터 답변")
 
-    assert result.error_code == "invalid-output"
+    # **어느 규칙이 깨졌는지** 코드로 남는다. 한 덩어리로 뭉개면 운영에서
+    # 빈 응답·출처 포함·폭주를 구별할 수 없다.
+    assert result.error_code == "invalid-output:sources"
     assert "출처는 마스터 봇만 부착할 수 있습니다" in caplog.text
     assert "민감할 수 있는 전문 봇 본문" not in caplog.text
 
 
-def test_specialist_answer_is_limited_to_compact_canvas_length():
+def test_an_answer_over_the_limit_is_refused_not_quietly_shipped():
+    """상한은 3,000 자 하나다(B-52).
+
+    3,000 자를 넘어야 하는 답은 Hermes 를 늘려서 만들지 않는다 — 보고서 전문
+    봇(`clio`)이 맡을 자리다. 상한을 올리면 그 분리가 조용히 없어진다.
+    """
     class Adapter:
         def complete(self, _request):
-            return "가" * 3_001
+            return "가" * (MAX_OUTPUT_CHARS + 1)
 
     result = execute(Adapter(), request(), fallback=lambda: "마스터 답변")
 
     assert result.result == "contract_violation"
-    assert result.error_code == "invalid-output"
+    assert result.error_code == "invalid-output:too-long"
+
+
+def test_an_answer_at_the_limit_passes_and_is_measured():
+    class Adapter:
+        def complete(self, _request):
+            return "가" * MAX_OUTPUT_CHARS
+
+    result = execute(Adapter(), request(), fallback=lambda: "마스터 답변")
+
+    assert result.result == "success"
+    # 길이를 **재 둔다** — 상한에 얼마나 붙어 있는지 봐야 프롬프트를 고칠지
+    # 판단할 수 있다. 예전에는 「초과」 만 남아 3,050 인지 9,000 인지 몰랐다.
+    assert result.output_chars == MAX_OUTPUT_CHARS
+    assert result.over_target is False
+
+
+def test_an_empty_answer_says_so_by_code():
+    class Adapter:
+        def complete(self, _request):
+            return "   "
+
+    result = execute(Adapter(), request(), fallback=lambda: "마스터 답변")
+
+    assert result.error_code == "invalid-output:empty"
+
+
+def test_the_prompt_target_and_the_ceiling_are_the_same_number():
+    """부탁하는 숫자와 검사하는 숫자가 갈리면 상한을 지킬 이유가 없어진다.
+
+    「부탁은 3,000, 검사는 20,000」 이면 전문 봇은 마음껏 길게 쓰고, 우리는
+    그것을 통과시킨다 — 상한이 있다는 말만 남는다.
+    """
+    assert TARGET_OUTPUT_CHARS == MAX_OUTPUT_CHARS == 3_000
 
 
 def test_specialist_failure_falls_back_to_master():
