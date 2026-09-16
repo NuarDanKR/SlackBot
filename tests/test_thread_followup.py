@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -37,6 +38,34 @@ GJ = "#현장-광주도시철도(180901)-정산"
 GJ_ID = "C0GJ"
 FUND = "#팀-자금(ABB540)-주간보고"
 FUND_ID = "C0FUND"
+
+
+def test_specialist_refs_prefer_the_lines_hermes_actually_read(tmp_path):
+    """도구 검색이 최초 seed 밖 문서를 열면 그 좌표도 근거 보기에 남는다."""
+    from tybot.answer import _specialist_evidence_refs
+
+    def hit(name: str, text: str, lineno: int):
+        path = tmp_path / "workspaces" / "tyit" / "channels" / name / "raw.md"
+        doc = SimpleNamespace(
+            workspace="tyit", channel_id="C1", channel="#전산", path=path
+        )
+        line = SimpleNamespace(
+            ts="2026-09-16 10:00", speaker="홍길동", text=text,
+            lineno=lineno, source_path=path,
+        )
+        return SimpleNamespace(doc=doc, line=line, score=1)
+
+    seed = hit("seed", "최초 검색", 1)
+    opened = hit("opened", "Hermes가 추가로 읽은 줄", 2)
+    special = SimpleNamespace(
+        evidence_hits=(opened,), live_messages=(("tyit", "C1", "123.45"),)
+    )
+
+    refs = _specialist_evidence_refs(special, [seed], tmp_path)
+
+    assert refs[0].document_path.endswith("opened/raw.md")
+    assert any(ref.document_path.endswith("seed/raw.md") for ref in refs if not ref.is_live)
+    assert refs[-1].is_live and refs[-1].message_ts == "123.45"
 
 
 # --- 픽스처 ------------------------------------------------------------------

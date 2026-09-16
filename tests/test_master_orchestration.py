@@ -224,6 +224,43 @@ def test_tools_success_without_any_touched_evidence_is_not_an_answer(monkeypatch
     assert outcome.answer is None
 
 
+def test_tools_success_carries_the_exact_lines_it_showed_the_model(monkeypatch):
+    """근거 모달은 마스터 최초 검색이 아니라 Hermes가 실제로 읽은 줄을 연다."""
+    from tybot import specialist_adapters
+
+    evidence_hit = SimpleNamespace(doc="doc", line="line")
+
+    class Adapter:
+        touched = SimpleNamespace(
+            documents=("doc",),
+            evidence_hits=(evidence_hit,),
+            live_permalinks=("https://slack.test/p1",),
+            live_messages=(("pilot", "C1", "1.2"),),
+        )
+        last_model = "m"
+        last_cost_usd = 0.0
+
+        def complete(self, request):
+            return "근거에 따른 답"
+
+    monkeypatch.setattr(
+        specialist_router, "available", lambda workspace: [_row(execution_mode="tools")]
+    )
+    monkeypatch.setattr(
+        specialist_adapters, "build", lambda *args, **kwargs: Adapter()
+    )
+
+    outcome = specialist_router.serve(
+        _task(), workspace="pilot", evidence=[], router=None,
+        authorization_id="pilot:member", toolbox_factory=object,
+        record_call_row=False,
+    )
+
+    assert outcome.ok
+    assert outcome.answer.evidence_hits == (evidence_hit,)
+    assert outcome.answer.live_messages == (("pilot", "C1", "1.2"),)
+
+
 def test_specialist_call_keeps_decision_and_task_coordinates(monkeypatch):
     from tybot import specialist_adapters
     from tybot.console import specialist_store

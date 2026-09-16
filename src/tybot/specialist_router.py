@@ -423,8 +423,12 @@ class SpecialistAnswer:
     cost_usd: float
     # 전문가가 실제로 연 아카이브 문서. 비면 마스터 검색 결과로 출처를 만든다.
     documents: tuple = ()
+    # 전문가가 모델에게 실제로 전달한 원문 줄. `근거 보기`와 후속 질문은
+    # 최초 마스터 검색 결과가 아니라 이 좌표를 이어 가야 한다.
+    evidence_hits: tuple = ()
     # 아직 아카이브에 없는 실시간 대화의 Slack 링크(2026-09-11 원칙 개정).
     live_links: tuple[str, ...] = ()
+    live_messages: tuple[tuple[str, str, str], ...] = ()
     # 실행 지시를 거절해 형식 보정을 다시 요청한 횟수. 현재 상한은 1이다.
     format_retry_count: int = 0
 
@@ -748,11 +752,20 @@ def display_hint_for(task) -> str:
     return DISPLAY_HINTS.get(layout, "")
 
 
-# 복구할 수 있는 실패. **빈 출력과 토큰 상한뿐이다**(장애 §5.4).
+# 복구할 수 있는 실패. **빈 출력·토큰 상한, 그리고 단계 timeout**(인계 §3.3).
+#
+# `specialist-timeout:discovery` 가 들어온 이유: 탐색에서 시간이 끝난 것은
+# 「자료를 못 찾았다」 가 아니라 「그만 찾으라」 다. 이미 읽은 것이 있으면 그것으로
+# 마무리할 수 있어야 한다 — 예전에는 이 경우가 통째로 실패였다.
 #
 # 출처 포함·길이 초과는 **명시적 계약 위반**이라 다시 물어도 같은 답이 온다.
 # 권한·인증·모델 미등록은 사람이 고칠 일이지 재시도할 일이 아니다.
-RECOVERABLE = ("invalid-output:empty", "invalid-output:max-tokens")
+RECOVERABLE = (
+    "invalid-output:empty",
+    "invalid-output:max-tokens",
+    "specialist-timeout:discovery",
+    "specialist-timeout:finalize",
+)
 
 
 def _may_recover(result, request, adapter, *, evidence, visual) -> bool:
@@ -764,9 +777,9 @@ def _may_recover(result, request, adapter, *, evidence, visual) -> bool:
         # 복구가 아니라 그냥 재시도다.
         return False
     deadline = getattr(request, "deadline", None)
-    if deadline is None or deadline.aborted or not deadline.may_recover():
-        # 시간이 없거나 이미 끝난 요청이다. 원래 호출이 아직 살아 있을 수도 있어
-        # 여기서 또 부르면 같은 질문에 두 호출이 동시에 돈다.
+    if deadline is None or not deadline.may_recover():
+        # **`aborted` 하나로 막지 않는다**(인계 §3.3). discovery 초과는 전환이지
+        # 종료가 아니다. `may_recover()` 가 전체 종료와 남은 시간을 함께 본다.
         return False
     # **근거 0건이면 복구하지 않는다.** 읽은 것이 없는데 마무리하라고 하면
     # 모델이 자료 없이 문장을 만든다.
@@ -815,19 +828,44 @@ class _RecoveryAdapter:
 def _runtime_meta(adapter, *, recovered: bool, deadline=None) -> str:
     """호출 기록에 남길 비민감 진단값. 본문은 하나도 담지 않는다."""
     parts = [
-        f"phase={getattr(adapter, 'phase', 'primary')}",
+        f"phase={getattr(adapter, 'phase', '-')}",
         f"model={getattr(adapter, 'last_model', '') or '-'}",
         f"provider={getattr(adapter, 'last_provider', '') or '-'}",
         f"stop_reason={getattr(adapter, 'last_stop_reason', '') or '-'}",
         f"rounds={getattr(adapter, 'rounds', 0)}",
+        # **범위가 줄었는지 보는 값들**(인계 §5). seed 로 답했는지, 검색을 몇 번
+        # 새로 시작했는지, 실제로 연 문서가 몇 건인지 — 셋이 같이 있어야
+        # "시간만 늘리고 검색은 그대로" 를 판별할 수 있다.
+        f"seed={getattr(adapter, 'seed_count', 0)}",
+        f"search_rounds={getattr(adapter, 'search_rounds', 0)}",
+        f"search_calls={getattr(adapter, 'search_calls', 0)}",
+        f"opened={_opened_count(adapter)}",
         f"in_tok={getattr(adapter, 'input_tokens', 0)}",
         f"out_tok={getattr(adapter, 'output_tokens', 0)}",
     ]
-    if deadline is not None and deadline.timeout_stage:
-        parts.append(f"timeout_stage={deadline.timeout_stage}")
+    by_name = getattr(adapter, "tool_calls_by_name", None) or {}
+    if by_name:
+        parts.append(
+            "by_tool=" + ",".join(f"{k}={v}" for k, v in sorted(by_name.items()))
+        )
+    if deadline is not None:
+        if deadline.timeout_stage:
+            parts.append(f"timeout_stage={deadline.timeout_stage}")
+        parts.append(f"deadline_total_ms={int(deadline.settings.total * 1000)}")
+        parts.append(f"specialist_elapsed_ms={int(deadline.elapsed * 1000)}")
     if recovered:
         parts.append("recovered=1")
     return " ".join(parts)
+
+
+def _opened_count(adapter) -> int:
+    """**실제로 본문을 연** 문서 수. 검색 결과에 나왔다고 세지 않는다(인계 §4.2)."""
+    touched = getattr(adapter, "touched", None)
+    if touched is None:
+        return 0
+    return len(getattr(touched, "documents", ()) or ()) + len(
+        getattr(touched, "live_permalinks", ()) or ()
+    )
 
 
 def _run_one(
@@ -977,7 +1015,9 @@ def _run_one(
         error_code = "search-budget-exhausted"
     touched = getattr(adapter, "touched", None)
     touched_documents = tuple(getattr(touched, "documents", ()) or ())
+    touched_hits = tuple(getattr(touched, "evidence_hits", ()) or ())
     touched_live = tuple(getattr(touched, "live_permalinks", ()) or ())
+    touched_live_messages = tuple(getattr(touched, "live_messages", ()) or ())
     if (
         ok
         and chosen.execution_mode == "tools"
@@ -1040,7 +1080,9 @@ def _run_one(
             model=getattr(adapter, "last_model", "") or chosen.model,
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
             documents=touched_documents,
+            evidence_hits=touched_hits,
             live_links=touched_live,
+            live_messages=touched_live_messages,
             format_retry_count=format_retry_count,
         ),
         "",

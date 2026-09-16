@@ -77,7 +77,7 @@ from ..collection_status import report as collection_report
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
 from ..db import connect as db_connect
-from ..evidence_refs import attachment_refs_to_json, refs_to_json
+from ..evidence_refs import attachment_refs_to_json, refs_from_json, refs_to_json
 from ..failures import failure_message
 from ..feedback import (
     SLASH_HELP,
@@ -655,20 +655,45 @@ class WorkspaceBot:
 
         @self.app.action(evidence_view.ACTION_SHOW)
         def on_show_evidence(ack, body, client, respond):
-            """답변이 실제로 읽은 원문 줄을 보여준다.
+            """답변이 **그때 읽은** 원문 좌표를 지금 권한으로 다시 연다.
 
-            저장해 둔 것을 꺼내는 게 아니라 **같은 검색어로 지금 다시 찾는다.**
-            그래서 권한도 지금 다시 판정된다 - 답변 뒤에 채널에서 나간 사람에게는
-            근거가 보이지 않는다. 저장 방식이었다면 그대로 보였을 것이다.
+            다시 검색하지 않는다(인계 §6.2). 검색하면 답변이 읽은 것이 아니라
+            지금 그 낱말로 나오는 것을 보여 주게 된다.
+
+            권한은 **지금** 판정한다 — 답변 뒤에 채널에서 나간 사람에게는 그 줄이
+            보이지 않는다. 저장한 본문을 꺼내는 방식이었다면 그대로 보였을 것이다.
+
+            모달로 연다. 닫으면 원래 스레드가 그대로 남는다 — ephemeral 은 별도
+            메시지가 쌓이고 돌아갈 곳이 없었다(인계 §6.3).
             """
             ack()
-            query = ((body.get("actions") or [{}])[0]).get("value") or ""
+            record_id = ((body.get("actions") or [{}])[0]).get("value") or ""
             user_id = (body.get("user") or {}).get("id", "")
             channel_id = str((body.get("channel") or {}).get("id") or "")
+            text = self._evidence_text(
+                client, user_id, record_id, channel_id=channel_id
+            )
+            trigger = str(body.get("trigger_id") or "")
+            if trigger:
+                try:
+                    client.views_open(
+                        trigger_id=trigger, view=evidence_view.modal(text)
+                    )
+                    return
+                except Exception as exc:
+                    log.warning("[%s] 근거 모달 열기 실패: %s", self.workspace, exc)
+            # 모달을 못 열었을 때만 ephemeral. **닫을 수 있게** 버튼을 준다.
             respond(
-                self._evidence_text(client, user_id, query, channel_id=channel_id),
+                blocks=evidence_view.fallback_blocks(text),
+                text=text[:2900],
                 response_type="ephemeral",
             )
+
+        @self.app.action(evidence_view.ACTION_DISMISS)
+        def on_dismiss_evidence(ack, respond):
+            """ephemeral 폴백을 지운다. 남겨 두면 스레드에 쌓인다."""
+            ack()
+            respond(delete_original=True, text="")
 
         @self.app.event("app_home_opened")
         def on_home_opened(event, client):
@@ -1300,46 +1325,63 @@ class WorkspaceBot:
             })
         respond(text="일정 알림 설정", blocks=blocks, replace_original=True)
 
-    def _evidence_lines(
-        self, client, user_id: str, query: str, *, channel_id: str = ""
-    ):
-        """지금 이 사람 권한으로 다시 찾은 근거 줄."""
-        ctx = self._request_context(
-            client,
-            user_id,
-            channel_id=channel_id,
-            in_channel=bool(channel_id and not channel_id.startswith("D")),
-        )
-        return [
-            evidence_view.EvidenceLine(
-                channel=h.doc.channel,
-                ts=h.line.ts,
-                speaker=h.line.speaker,
-                text=h.line.text,
-                workspace=h.doc.workspace,
-            )
-            for h in self.store.search(query, ctx, limit=40)
-        ]
-
     def _evidence_text(
-        self, client, user_id: str, query: str, *, channel_id: str = ""
+        self, client, user_id: str, record_id: str, *, channel_id: str = ""
     ) -> str:
-        """`근거 보기` 본문. 원문은 손대지 않고 그대로 보여준다."""
-        if not (query or "").strip():
+        """`근거 보기` 본문. 원문은 손대지 않고 그대로 보여준다.
+
+        **다시 검색하지 않는다**(인계 §6.2). 답변 당시 저장한 `EvidenceRef` 좌표를
+        지금 권한으로 다시 연다 — 권한이 사라진 줄은 그냥 안 나온다.
+        """
+        key = (record_id or "").strip()
+        if not key:
+            return evidence_view.NO_EVIDENCE
+        row = self.qa_log.by_record_id(self.workspace, key)
+        if row is None:
+            return evidence_view.NO_RECORD
+        record_channel = str(row.get("channel_id") or "")
+        channel_type = str(row.get("channel_type") or "")
+        is_dm = channel_type in {"im", "mpim"} or record_channel.startswith("D")
+        if is_dm:
+            # DM 근거는 원 질문자만 연다. DM의 record ID가 전달돼도 타인은 못 본다.
+            if str(row.get("user") or "") != user_id:
+                return evidence_view.NO_RECORD
+        elif not channel_id or channel_id != record_channel:
+            # 채널 답변은 질문자 소유가 아니라 채널 구성원의 자료다. 다만 버튼을
+            # 다른 채널로 가져가 범위를 넓히는 것은 막고, 아래에서 클릭 사용자의
+            # 현재 채널 ACL을 다시 판정한다.
+            return evidence_view.NO_RECORD
+        refs = refs_from_json(row.get("evidence_refs") or [])
+        if not refs:
             return evidence_view.NO_EVIDENCE
         try:
-            lines = self._evidence_lines(
-                client, user_id, query, channel_id=channel_id
+            ctx = self._request_context(
+                client, user_id,
+                channel_id=channel_id,
+                in_channel=bool(channel_id) and not channel_id.startswith("D"),
             )
+            hits, dropped = self.store.resolve_refs(refs, ctx)
         except Exception as e:
             log.warning("[%s] 근거 조회 실패: %s", self.workspace, e)
             return "근거를 다시 찾지 못했습니다. 잠시 뒤 다시 시도해 주세요."
-        # 검색어와 건수만 남긴다. 원문 줄은 로그에 넣지 않는다.
+        lines = [
+            evidence_view.EvidenceLine(
+                channel=hit.doc.channel,
+                ts=hit.line.ts,
+                speaker=hit.line.speaker,
+                text=hit.line.text,
+                workspace=hit.doc.workspace,
+            )
+            for hit in hits
+        ]
+        # 건수와 사유 코드만 남긴다. 원문 줄과 질문은 로그에 넣지 않는다.
         log.info(
-            "[%s] 근거 보기 user=%s q=%r lines=%d",
-            self.workspace, user_id, query[:40], len(lines),
+            "[%s] 근거 보기 user=%s refs=%d lines=%d dropped=%s",
+            self.workspace, user_id, len(refs), len(lines), ",".join(dropped) or "-",
         )
-        return evidence_view.report(lines, query=query, own_workspace=self.workspace)
+        return evidence_view.stored_report(
+            lines, dropped=dropped, own_workspace=self.workspace
+        )
 
     def _scope_report(self, client, user_id: str) -> str:
         """`/권한` 본문. 범위와 건수만 보여주고 채널 이름은 보여주지 않는다.
@@ -2606,9 +2648,15 @@ class WorkspaceBot:
                     log.exception("[%s] Canvas 답변 생성 실패: %s", self.workspace, exc)
                     canvas = None
                     kw = fallback_kw
-            elif ans is not None and ans.terms:
+            elif ans is not None:
+                # **성공 + 다시 열 좌표**가 있을 때만 버튼이 붙는다(인계 §6.1).
+                # 검색어가 있다는 이유로 붙이면 timeout 답변에도 버튼이 생기고,
+                # 눌러 보면 아무것도 안 나온다.
                 kw["blocks"] = evidence_view.blocks(
-                    message(reply), ans.terms, workspace=self.workspace
+                    message(reply),
+                    record_id=qa_record_id,
+                    has_evidence=bool(ans.evidence_refs),
+                    answered=ans.reason in ("answered", "advice"),
                 )
             response = say(**kw)
             if canvas is not None and channel_id.startswith("D"):

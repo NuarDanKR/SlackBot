@@ -124,7 +124,9 @@ def test_specialist_timeout_falls_back_to_master():
     assert result.result == "fallback"
     # **어느 단계에서 끝났는지** 남긴다. `timeout` 한 덩어리면 primary 지연과
     # recovery 지연을 콘솔에서 구별할 수 없다(장애 §5.6).
-    assert result.error_code == "specialist-timeout:primary"
+    # 단계 이름은 `discovery`·`finalize`·`recovery`·`total` 뿐이다.
+    # `primary` 는 탐색과 최종 합성을 함께 뜻해 어디서 끝났는지 알 수 없었다.
+    assert result.error_code == "specialist-timeout:discovery"
 
 
 def test_low_confidence_does_not_call_specialist():

@@ -7,15 +7,11 @@
 안 보인다. 원문 줄을 그대로 보여주면 질문이 바뀐다 — "봇을 믿을 수 있나" 에서
 "이 답이 맞나" 로. 뒤쪽은 사람이 검증할 수 있는 질문이다.
 
-## 저장하지 않는다. 다시 찾는다.
-근거 줄을 감사기록에 복사해 두는 방법도 있지만 그러면 **원문이 아카이브 밖에 한 벌 더
-생긴다** — ACL 이 다른 두 번째 사본이고, 시간이 지나면 아카이브와 어긋난다.
-
-대신 누를 때 **같은 검색어로 다시 찾는다.** 그때 권한도 다시 판정되므로, 답변을 받은 뒤
-채널에서 나간 사람에게는 근거가 보이지 않는다. 저장 방식이었다면 그대로 보였을 것이다.
-
-대가: 그사이 아카이브가 자라면 줄이 조금 달라질 수 있다. 그래서 "지금 다시 찾은
-결과" 라고 밝힌다 — 그럴듯하게 같은 척하지 않는다.
+## 원문은 복제하지 않고 좌표만 저장한다.
+근거 줄을 감사기록에 복사하면 ACL이 다른 원문 사본이 하나 더 생긴다. 대신 답변 당시
+읽은 `EvidenceRef` 좌표만 저장하고, 버튼을 누를 때 현재 권한으로 원문을 다시 연다.
+검색을 다시 하지 않으므로 답변과 다른 문서가 나타나지 않고, 권한이 사라진 줄은 보이지
+않는다.
 """
 from __future__ import annotations
 
@@ -41,13 +37,19 @@ class EvidenceLine:
     workspace: str = ""
 
 
-def button(terms: list[str], *, workspace: str = "") -> dict | None:
-    """근거 보기 버튼. 검색어가 없으면(기간 요약 등) 만들지 않는다.
+def button(record_id: str) -> dict | None:
+    """근거 보기 버튼. **답변 기록 ID 하나만** 싣는다(인계 §6.2).
 
-    버튼이 있는데 눌러도 아무것도 안 나오는 것보다, 없는 편이 낫다.
+    예전에는 검색어를 실어 클릭 시 다시 검색했다. 두 가지가 잘못됐다.
+
+    1. 보여 주는 것이 **답변이 읽은 원문이 아니라** 지금 그 낱말로 나오는 것이었다.
+    2. 질문에서 뽑은 낱말이 버튼 값으로 Slack 에 남았다.
+
+    실패 답변에는 붙이지 않는다 — 버튼이 있는데 눌러도 아무것도 안 나오면
+    없는 것만 못하다. 그 판정은 `blocks()` 가 한다.
     """
-    query = " ".join(t for t in (terms or []) if t).strip()
-    if not query:
+    key = (record_id or "").strip()
+    if not key:
         return None
     return {
         "type": "actions",
@@ -55,20 +57,37 @@ def button(terms: list[str], *, workspace: str = "") -> dict | None:
             "type": "button",
             "action_id": ACTION_SHOW,
             "text": {"type": "plain_text", "text": "근거 보기"},
-            "value": query[:MAX_VALUE],
+            "value": key[:MAX_VALUE],
         }],
     }
 
 
-def blocks(body: str, terms: list[str], *, workspace: str = "") -> list[dict]:
-    """답변 본문 + 근거 보기 버튼."""
+def blocks(
+    body: str,
+    *,
+    record_id: str = "",
+    has_evidence: bool = False,
+    answered: bool = False,
+) -> list[dict]:
+    """답변 본문 + 근거 보기 버튼.
+
+    버튼은 **셋이 모두 참일 때만** 붙는다(인계 §6.1).
+
+    - 답변이 성공했다(`answered`)
+    - 다시 열 좌표가 있다(`has_evidence`)
+    - 그 좌표를 찾을 기록 ID 가 있다(`record_id`)
+
+    `timeout`·`specialist_unavailable`·근거 없음 답변에 버튼이 붙으면, 사람은
+    눌러 보고 빈 화면을 받는다. 검색어가 있다는 이유만으로 만들지 않는다.
+    """
     out: list[dict] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": part}}
         for part in _split_sections(body)
     ]
-    btn = button(terms, workspace=workspace)
-    if btn:
-        out.append(btn)
+    if answered and has_evidence:
+        btn = button(record_id)
+        if btn:
+            out.append(btn)
     return out
 
 
@@ -98,9 +117,92 @@ def _stamp(ts: str) -> str:
     return v or "-"
 
 
+ACTION_DISMISS = "tybot_dismiss_evidence"
+
+NO_RECORD = (
+    "이 답변의 기록을 찾지 못했습니다.\n"
+    "다른 채널 또는 다른 사용자의 DM 답변일 수 있습니다."
+)
+
+# 좌표를 다시 열지 못한 사유. **업무 내용을 담지 않는 고정 낱말**이라 그대로 보인다.
+DROP_LABELS = {
+    "acl": "권한이 바뀌어 볼 수 없습니다",
+    "missing": "문서를 찾지 못했습니다",
+    "changed": "원문이 바뀌어 같은 줄을 찾지 못했습니다",
+    "live_not_archived": "실시간으로 읽은 대화라 아카이브에 없습니다",
+}
+
+
+def modal(text: str) -> dict:
+    """근거 모달. 닫으면 **원래 스레드가 그대로** 남는다(인계 §6.3).
+
+    ephemeral 은 별도 메시지가 쌓이고 「이전」 으로 돌아갈 곳이 없었다.
+    """
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "답변 근거"},
+        # 닫기는 Slack 기본 버튼을 쓴다. 우리가 만들면 동작이 두 가지가 된다.
+        "close": {"type": "plain_text", "text": "닫기"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": part}}
+            for part in _split_sections(text, limit=2900, max_sections=40)
+        ],
+    }
+
+
+def fallback_blocks(text: str) -> list[dict]:
+    """모달을 못 열었을 때의 ephemeral. **지울 수 있게** 버튼을 준다."""
+    return [
+        *(
+            {"type": "section", "text": {"type": "mrkdwn", "text": part}}
+            for part in _split_sections(text)
+        ),
+        {"type": "actions", "elements": [{
+            "type": "button",
+            "action_id": ACTION_DISMISS,
+            "text": {"type": "plain_text", "text": "닫기"},
+            "value": "dismiss",
+        }]},
+    ]
+
+
+def stored_report(
+    lines: list[EvidenceLine], *, dropped: list[str], own_workspace: str = ""
+) -> str:
+    """답변 당시 좌표를 지금 권한으로 다시 연 결과.
+
+    **다시 검색한 것이 아니다.** 그 말을 머리글에 적는다 — 사람이 "왜 검색
+    결과와 다르지" 를 묻지 않게.
+    """
+    from .channel_lifecycle import mark_for
+    from .channels import source_label
+
+    if not lines and not dropped:
+        return NO_EVIDENCE
+    head = f"*답변이 읽은 원문* — {len(lines)}줄"
+    out = [head, ""]
+    last = ""
+    for line in lines:
+        label = source_label(line.channel)
+        if line.workspace and line.workspace != own_workspace:
+            label = f"{label} ({line.workspace})"
+        label += mark_for(line.workspace, None, line.channel)
+        if label != last:
+            out.append(f"*{label}*")
+            last = label
+        out.append(f"    `{_stamp(line.ts)}` {line.speaker}: {line.text}")
+    if dropped:
+        reasons = ", ".join(
+            DROP_LABELS.get(code, code) for code in dict.fromkeys(dropped)
+        )
+        out += ["", f"_일부 근거는 지금 열 수 없습니다: {reasons}_"]
+    out += ["", "_지금 권한으로 다시 연 것입니다. 새로 검색하지 않았습니다._"]
+    return "\n".join(out)
+
+
 NO_EVIDENCE = (
-    "지금 다시 찾아보니 이 검색어로 나오는 원문이 없습니다.\n"
-    "답변 이후 채널 권한이 바뀌었거나, 아카이브가 정리됐을 수 있습니다."
+    "답변 당시 근거 좌표를 현재 권한으로 열 수 없습니다.\n"
+    "답변 이후 채널 권한이 바뀌었거나, 원문이 정리됐을 수 있습니다."
 )
 
 

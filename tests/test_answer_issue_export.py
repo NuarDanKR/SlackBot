@@ -138,6 +138,19 @@ def test_a_missing_log_directory_is_an_empty_report_not_a_crash(tmp_path):
     assert "문제 후보: 0건" in report
 
 
+def test_specialist_unavailable_is_counted_as_a_specialist_failure():
+    row = _qa(
+        reason="specialist_unavailable",
+        hits=20,
+        task_traces=[{"result": "specialist_unavailable"}],
+    )
+
+    codes = answer_issues.issue_codes(row, [])
+
+    assert "error" in codes
+    assert "specialist_failure" in codes
+
+
 # --- CLI 와 콘솔이 같은 보고서를 만든다 ---------------------------------------
 def test_the_cli_reexports_the_same_functions():
     """두 벌로 두면 한쪽만 고쳐지고, 「받은 파일과 서버가 만든 파일이 다르다」 가 된다."""

@@ -37,6 +37,8 @@ import logging
 import re
 from pathlib import Path
 
+from .specialist_contract import DISCOVERY, FINALIZE, RECOVERY, TOTAL
+
 log = logging.getLogger("tybot.specialist_adapters")
 
 # 프롬프트 계약이 사는 두 자리.
@@ -146,6 +148,57 @@ RECOVERY_INSTRUCTION = (
     "새 검색·새 문서 읽기는 하지 않습니다. 3,000자 이내로 마무리하고, "
     "확인하지 못한 범위가 있으면 마지막 한 줄에 적으세요."
 )
+
+
+# 새 검색을 시작하는 도구. 라운드 상한이 지나면 이것만 뺀다 — 이미 찾은 것을
+# **읽는** 것은 계속 허용해야 답을 쓸 수 있다.
+REQUEST_SEARCH = "request_search"
+SEARCH_TOOLS = frozenset({"search", "fetch_recent_slack", REQUEST_SEARCH})
+
+# seed 가 있을 때 **먼저 하는 일**을 말한다(인계 §4.1).
+#
+# Hermes 원본 프롬프트를 고치지 않는다 — 우리 governed prompt 와 도구 제공 조건에서
+# 해결한다. 받은 계약은 받은 자리에 둔다.
+SEED_FIRST_INSTRUCTION = (
+    "위 근거는 이미 권한을 확인해 고른 것입니다. **먼저 이것으로 답할 수 있는지 "
+    "판단하세요.** 충분하면 검색하지 말고 바로 답합니다.\n"
+    "모자랄 때만 검색하고, 그때도 질문에 나온 현장명·문서명·기간을 검색어에 "
+    "유지하세요. 범위를 넓히면 다른 현장 자료가 답에 섞입니다."
+)
+
+# 중복 판정에 쓸 표식. 같은 파일이 다른 경로로 들어오면 앞머리가 같다.
+_SOURCE_MARK = re.compile(r"\[(?:첨부[^\]]*|캔버스[^\]]*):([^\]]+)\]")
+
+
+def _deduplicated(chunks) -> list[str]:
+    """같은 근거를 한 번만 남긴다. 순서는 처음 나온 차례.
+
+    Slack 파일 표식이 있으면 그것으로, 없으면 정규화한 본문으로 본다.
+    **자르거나 고치지 않는다** — 같은 것을 두 번 싣지 않을 뿐이다.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in chunks:
+        text = (raw or "").strip()
+        if not text:
+            continue
+        # 파일명만 키로 쓰지 않는다. 같은 이름의 월별 보고서·재업로드는 흔하고,
+        # 이름만 같다고 합치면 한 달의 근거가 조용히 사라진다. 수집 경로 표식만
+        # 통일한 뒤 **본문까지 같은 경우**에만 중복으로 본다.
+        canonical = _SOURCE_MARK.sub(
+            lambda match: f"[원문:{match.group(1).strip()}]", text
+        )
+        key = re.sub(r"\s+", " ", canonical)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def _read_only(tools) -> tuple:
+    """검색 도구를 뺀 목록. 읽기와 최종화만 남는다."""
+    return tuple(t for t in tools if getattr(t, "name", "") not in SEARCH_TOOLS)
 
 
 def _call_timeout(deadline, stage: str) -> dict:
@@ -285,7 +338,7 @@ class PromptSpecialist:
         self.last_stop_reason = ""
         self.input_tokens = 0
         self.output_tokens = 0
-        self.phase = "primary"
+        self.phase = DISCOVERY
 
     def complete(self, request) -> str:
         from .gateway.base import Message, Sensitivity
@@ -327,8 +380,8 @@ class PromptSpecialist:
             # 전문가만 조용히 안 쓰인다.
             #
             # 실제로 쓴 만큼만 과금되므로 상한을 올리는 것 자체의 비용은 없다.
-            max_tokens=8192,
-            **_call_timeout(getattr(request, "deadline", None), "primary"),
+            max_tokens=4096,
+            **_call_timeout(getattr(request, "deadline", None), DISCOVERY),
         )
         self.last_model = response.model
         self.last_provider = response.provider
@@ -391,8 +444,36 @@ def build(
 # 단순히 뒤 4 개를 버리는 것이 아니다. primary 시간이 끝나기 **전에** 최종화
 # 단계로 옮겨 간다(`_finalize`).
 MAX_TOOL_ROUNDS = 4
+
+# **새 검색을 시작할 수 있는 라운드**. 나머지는 문서 열람과 최종 합성에 쓴다.
+#
+# 시간을 180초로 늘려도 같은 광범위 검색을 반복하면 p90 과 비용만 는다(인계 §4.3).
+# 시간이 아니라 **범위**를 좁히는 것이 이 숫자의 일이다.
+MAX_SEARCH_ROUNDS = 2
+# 한 라운드에 모델이 search tool_use를 여러 개 낼 수 있다. 라운드만 세면 첫
+# 응답에서 여섯 번을 실행하고도 `1회`로 기록된다. 실제 외부 조회 호출도 묶는다.
+MAX_SEARCH_CALLS = 2
 # 루프 전체 예산. 사고가 켜져 있는 모델은 한 회차가 크다.
-TOOL_MAX_TOKENS = 8192
+# 도구를 고르는 호출과 답을 쓰는 호출은 **필요한 토큰이 다르다**(인계 §4.3).
+#
+# 전부 8,192 를 주면 도구 선택 호출도 그만큼 길게 쓸 수 있고, 그 시간이 최종
+# 합성에서 빠진다. 도구 선택은 이름과 인자만 내면 된다.
+# 한 호출의 출력 상한. **8,192 에서 4,096 으로 내렸다**(인계 §4.3).
+#
+# 인계는 도구 선택 호출과 최종 답변 호출을 **분리**하라고 했다. 분리하지 않았고,
+# 이유를 여기 적는다 — 테스트가 그 위험을 드러냈다.
+#
+# seed-first 를 넣은 뒤로 **첫 라운드가 곧 최종 답변일 수 있다.** 도구를 줬다고
+# 해서 그 호출이 답을 안 쓰는 것이 아니다. 도구 쪽만 낮추면 seed 로 바로 답하는
+# 경로가 토큰 상한에서 끊기고, 그건 방금 고친 `invalid-output:max-tokens` 와
+# 같은 모양이다. thinking 토큰이 같은 예산을 쓰는 것(Opus 5 는 끌 수도 없다)이
+# 그 위험을 더 키운다.
+#
+# 그래서 **모든 전문 봇 호출이 같은 4,096** 을 쓴다. 본문 상한 3,000자를 한국어로
+# 담고 thinking 에 여유를 남기는 크기다. 인계가 막으려던 것(8,192 를 모든 곳에
+# 그대로 주는 것)은 지켰다.
+TOOL_MAX_TOKENS = 4096
+ANSWER_MAX_TOKENS = TOOL_MAX_TOKENS
 
 
 def _edit_answer(adapter, request) -> str:
@@ -411,7 +492,7 @@ def _edit_answer(adapter, request) -> str:
         model=adapter._model or None,
         sensitivity=Sensitivity.CONFIDENTIAL,
         max_tokens=TOOL_MAX_TOKENS,
-        **_call_timeout(getattr(request, "deadline", None), "primary"),
+        **_call_timeout(getattr(request, "deadline", None), DISCOVERY),
     )
     adapter.last_model = response.model
     adapter.last_provider = response.provider
@@ -464,7 +545,15 @@ class ToolSpecialist:
         # 여기 있는 것은 이미 권한을 통과해 읽은 근거뿐이다. 복구가 새로 검색하면
         # 그 순간 권한 범위가 넓어지므로, 새 도구를 주지 않고 이 대화만 다시 쓴다.
         self._transcript: list = []
-        self.phase = "primary"
+        self.phase = DISCOVERY
+        # 새 검색을 **시작한** 라운드 수. 읽기만 한 라운드는 세지 않는다.
+        self.search_rounds = 0
+        self.search_calls = 0
+        self.tool_calls_by_name: dict[str, int] = {}
+        self.opened_evidence = 0
+        # 중복 제거 뒤 실제로 실은 seed 건수. 콘솔이 「무엇을 받고 시작했나」 를
+        # 보려면 이 숫자가 필요하다(인계 §5).
+        self.seed_count = 0
 
     @property
     def touched(self):
@@ -477,19 +566,45 @@ class ToolSpecialist:
         return getattr(self._toolbox, "budget", None)
 
     def complete(self, request) -> str:
-        from .gateway.base import Message, Sensitivity
+        from .gateway.base import Message, Sensitivity, ToolSpec
         from .specialist_tools import specs
 
-        self.phase = "primary"
+        self.phase = DISCOVERY
         if getattr(request, "editing_text", ""):
             return _edit_answer(self, request)
         tools = specs(live=self._live)
+        search_spec = next((tool for tool in tools if tool.name == "search"), None)
+        seed_gate_tools = _read_only(tools)
+        if search_spec is not None:
+            seed_gate_tools = (
+                *seed_gate_tools,
+                ToolSpec(
+                    name=REQUEST_SEARCH,
+                    description=(
+                        "이미 받은 근거만으로 답할 수 없을 때만 호출합니다. "
+                        "부족한 현장명·문서명·기간을 유지한 검색어를 지정하세요."
+                    ),
+                    input_schema=search_spec.input_schema,
+                ),
+            )
         # 마스터가 이미 고른 근거가 있으면 함께 준다. 없어도 된다 —
         # 도구로 스스로 찾는 것이 이 어댑터의 전제다.
-        seed = "\n\n".join(item.text for item in request.evidence)[:MAX_EVIDENCE_CHARS]
+        #
+        # **중복을 먼저 지운다**(인계 §4.2). 같은 파일의 원본과 변환본이 다른
+        # 수집 경로로 들어와 두 근거가 되면, 모델은 자료가 두 배로 있다고 읽고
+        # 출처도 두 줄이 된다.
+        chunks = _deduplicated(item.text for item in request.evidence)
+        self.seed_count = len(chunks)
+        seed = "\n\n".join(chunks)[:MAX_EVIDENCE_CHARS]
         opening = _with_display_hint(f"질문: {request.question}", request)
         if seed:
-            opening = f"이미 찾아 둔 근거:\n{seed}\n\n{opening}"
+            # **seed 부터 본다**(인계 §4.1). "무엇을 찾든 여기서 시작하라" 는
+            # 도구 설명이 앞서면 모델은 이미 받은 근거를 두고 전체 검색부터 한다 —
+            # 그 반복이 탐색 시간을 다 쓰고 최종 합성이 굶었다.
+            opening = (
+                f"이미 찾아 둔 근거({self.seed_count}건):\n{seed}\n\n"
+                f"{SEED_FIRST_INSTRUCTION}\n\n{opening}"
+            )
         first: str | list = opening
         if getattr(request, "visual", ()):
             first = [{"type": "text", "text": opening}, *request.visual]
@@ -505,26 +620,39 @@ class ToolSpecialist:
         for _ in range(self._max_rounds):
             if deadline is not None:
                 # 전체 시간이 끝났으면 여기서 멈춘다 — 최종화도 못 한다.
-                deadline.require_time("total")
-                # primary 경계만 넘은 것은 **끝이 아니라 전환**이다. 새 검색을
-                # 시작하지 않고 최종화 단계로 넘어간다(장애 §5.3). 여기서
-                # 예외를 올리면 이미 읽은 근거로 마무리할 기회까지 사라진다.
-                if deadline.remaining_primary() <= 0:
+                deadline.require_time(TOTAL)
+                # discovery 경계를 넘은 것은 **끝이 아니라 전환**이다. 새 검색을
+                # 시작하지 않고 최종 합성으로 넘어간다(인계 §3.3). 여기서 예외를
+                # 올리면 이미 읽은 근거로 마무리할 기회까지 사라진다.
+                if deadline.remaining(DISCOVERY) <= 0:
                     log.info(
-                        "primary 시간이 끝나 최종화로 넘어갑니다 key=%s rounds=%d",
+                        "탐색 시간이 끝나 최종 합성으로 넘어갑니다 key=%s rounds=%d",
                         self.key, self.rounds,
                     )
                     break
             self.rounds += 1
+            # **검색 도구를 계속 주지 않는다.** 정해진 라운드가 지나면 읽기와
+            # 최종화만 남긴다 — 시간이 아니라 범위를 좁히는 자리다(인계 §4.3).
+            if seed and self.rounds == 1:
+                # 첫 회차는 seed 평가다. 광범위 search를 직접 주지 않고, 부족할
+                # 때만 request_search로 의사를 명시하게 한다.
+                round_tools = seed_gate_tools
+            else:
+                round_tools = (
+                    tools
+                    if self.search_rounds < MAX_SEARCH_ROUNDS
+                    and self.search_calls < MAX_SEARCH_CALLS
+                    else _read_only(tools)
+                )
             response = self._router.complete(
                 messages,
                 model=self._model or None,
                 sensitivity=Sensitivity.CONFIDENTIAL,
                 max_tokens=TOOL_MAX_TOKENS,
-                tools=tools,
+                tools=round_tools,
                 # **상한이 없으면 인자를 넘기지 않는다.** `system`·`tools` 와 같은
                 # 이유다 — 안 쓰는 것을 보내면 그것을 모르는 구현이 거부한다.
-                **_call_timeout(deadline, "primary"),
+                **_call_timeout(deadline, DISCOVERY),
             )
             self.last_model = response.model
             self.last_provider = response.provider
@@ -549,19 +677,60 @@ class ToolSpecialist:
             # tool_use 와 tool_result 의 짝이 깨져 다음 호출이 400 이다.
             messages.append(Message("assistant", _assistant_blocks(response)))
             results = []
+            searched = False
+            offered_tools = {tool.name for tool in round_tools}
             for call in response.tool_calls:
                 # 한 응답에 도구가 여러 개다. **묶음 중간에도** 시간을 다시 본다 —
                 # 앞 도구가 오래 걸리면 뒤 도구는 시작하면 안 된다.
-                if deadline is not None and deadline.remaining_primary() <= 0:
+                if deadline is not None and deadline.remaining(DISCOVERY) <= 0:
                     results.append({
                         "type": "tool_result", "tool_use_id": call.id,
                         "content": "(시간이 끝나 이 도구는 실행하지 않았습니다.)",
                     })
                     continue
+                if call.name not in offered_tools:
+                    # 모델이 이번 회차에 주지 않은 도구 이름을 만들어 내더라도
+                    # 실행하지 않는다. 특히 seed 평가 회차의 직접 `search` 호출을
+                    # 허용하면 request_search 게이트는 안내 문구에 불과해진다.
+                    results.append({
+                        "type": "tool_result", "tool_use_id": call.id,
+                        "content": (
+                            "(이번 단계에서 사용할 수 없는 도구입니다. "
+                            "제공된 도구만 사용하세요.)"
+                        ),
+                    })
+                    continue
+                if (
+                    call.name in SEARCH_TOOLS
+                    and (
+                        self.search_rounds >= MAX_SEARCH_ROUNDS
+                        or self.search_calls >= MAX_SEARCH_CALLS
+                    )
+                ):
+                    # 도구를 안 줬는데도 부른 경우다. **실행하지 않는다** — 주지
+                    # 않는 것과 거절하는 것을 함께 둬야 상한이 실제로 상한이다.
+                    results.append({
+                        "type": "tool_result", "tool_use_id": call.id,
+                        "content": (
+                            "(검색 라운드를 다 썼습니다. 이미 읽은 것으로 답하세요.)"
+                        ),
+                    })
+                    continue
+                self.tool_calls_by_name[call.name] = (
+                    self.tool_calls_by_name.get(call.name, 0) + 1
+                )
+                searched = searched or call.name in SEARCH_TOOLS
+                if call.name in SEARCH_TOOLS:
+                    self.search_calls += 1
+                tool_name = "search" if call.name == REQUEST_SEARCH else call.name
                 results.append({
                     "type": "tool_result", "tool_use_id": call.id,
-                    "content": self._toolbox.run(call.name, call.input),
+                    "content": self._toolbox.run(tool_name, call.input),
                 })
+            if searched:
+                # **검색을 실제로 한 라운드만** 센다. 읽기만 한 라운드까지 세면
+                # 문서를 여는 도중에 검색 예산이 끝난다.
+                self.search_rounds += 1
             messages.append(Message("user", results))
 
         return self._finalize(messages, deadline)
@@ -579,18 +748,19 @@ class ToolSpecialist:
         if not self._transcript:
             raise AdapterError("recovery-no-transcript: 복구할 대화가 없습니다")
         deadline = getattr(request, "deadline", None)
+        self.phase = RECOVERY
         if deadline is not None:
-            deadline.require_time("recovery")
-        self.phase = "recovery"
+            deadline.enter(RECOVERY)
+            deadline.require_time(RECOVERY)
         messages = [*self._transcript, Message("user", RECOVERY_INSTRUCTION)]
         final = self._router.complete(
             messages,
             model=self._model or None,
             sensitivity=Sensitivity.CONFIDENTIAL,
-            max_tokens=TOOL_MAX_TOKENS,
+            max_tokens=ANSWER_MAX_TOKENS,
             # **도구를 주지 않는다.** 주면 또 부르고, 복구가 아니라 두 번째
             # 탐색이 된다.
-            **_call_timeout(deadline, "recovery"),
+            **_call_timeout(deadline, RECOVERY),
         )
         self.last_model = final.model
         self.last_provider = final.provider
@@ -615,9 +785,13 @@ class ToolSpecialist:
             "전문가 도구 루프 종료 key=%s rounds=%d %s",
             self.key, self.rounds, budget.summary() if budget else "-",
         )
+        # **단계를 먼저 옮긴다.** 이 줄이 없으면 최종화 중 timeout 이
+        # `discovery` 로 기록되고, 콘솔에서 탐색이 느린 것처럼 보인다(인계 §3.3).
+        self.phase = FINALIZE
         if deadline is not None:
-            # 최종화는 primary 경계를 넘겨도 된다 — 전체 deadline 안이면 된다.
-            deadline.require_time("finalize")
+            deadline.enter(FINALIZE)
+            # 최종화는 discovery 경계를 넘겨도 된다 — 자기 몫의 시간이 따로 있다.
+            deadline.require_time(FINALIZE)
         messages.append(Message(
             "user",
             "더 찾지 말고 지금까지 읽은 것으로 답하세요. 모자라면 모자라다고 쓰세요.",
@@ -626,8 +800,8 @@ class ToolSpecialist:
             messages,
             model=self._model or None,
             sensitivity=Sensitivity.CONFIDENTIAL,
-            max_tokens=TOOL_MAX_TOKENS,
-            **_call_timeout(deadline, "finalize"),
+            max_tokens=ANSWER_MAX_TOKENS,
+            **_call_timeout(deadline, FINALIZE),
         )
         self.last_model = final.model
         self.last_provider = final.provider

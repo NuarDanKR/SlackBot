@@ -140,6 +140,8 @@ def test_the_assistant_turn_is_replayed_whole():
 
 def test_the_loop_is_bounded():
     """상한이 없으면 모델이 검색을 무한히 돈다 — 비용도 지연도 상한이 없어진다."""
+    from tybot.specialist_adapters import MAX_SEARCH_ROUNDS
+
     router = FakeRouter(_wants("search", {"query": "x"}))
     box = FakeBox()
     specialist = _specialist(router, box, max_rounds=3)
@@ -147,7 +149,11 @@ def test_the_loop_is_bounded():
     specialist.complete(Request())
 
     assert specialist.rounds == 3
-    assert len(box.ran) == 3
+    # **새 검색은 2라운드까지다**(2026-09-16 인계 §4.3). 라운드 자체는 돌지만
+    # 검색 도구를 더 주지 않고, 그래도 부르면 실행하지 않는다 — 시간이 아니라
+    # 범위를 좁히는 자리다.
+    assert len(box.ran) == MAX_SEARCH_ROUNDS
+    assert specialist.search_rounds == MAX_SEARCH_ROUNDS
 
 
 def test_hitting_the_limit_asks_without_tools():

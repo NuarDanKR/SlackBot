@@ -174,6 +174,9 @@ def test_touched_records_the_documents_used():
     box.run("search", {"query": "기성금"})
 
     assert [d.channel for d in box.touched.documents] == ["#팀-전산_ABB110-주간회의"]
+    assert [h.line.text for h in box.touched.evidence_hits] == [
+        "3공구 기성금 3.2억 지급"
+    ]
 
 
 def test_touched_does_not_duplicate():
@@ -187,6 +190,28 @@ def test_touched_does_not_duplicate():
     box.run("read_channel", {"channel": "팀-전산"})
 
     assert [d.channel for d in box.touched.documents] == ["#팀-전산_ABB110-주간회의"]
+
+
+def test_touched_does_not_record_lines_beyond_the_tool_output_limit():
+    """잘려 모델에게 전달되지 않은 뒤쪽 줄은 답변 근거가 아니다."""
+    doc = FakeDoc(
+        channel="#팀-전산_ABB110-주간회의", channel_id="C1",
+        raw_lines=[
+            FakeLine("1", "홍", "공통 " + "가" * 20_000),
+            FakeLine("2", "김", "공통 " + "나" * 20_000),
+        ],
+    )
+    box = _box(FakeStore([doc]))
+
+    box.run("search", {"query": "공통"})
+
+    assert [hit.line.ts for hit in box.touched.evidence_hits] == ["1", "2"]
+
+    # 세 번째 줄은 30,000자 뒤라 모델에게 전달되지 않는다.
+    doc.raw_lines.append(FakeLine("3", "박", "공통 " + "다" * 20_000))
+    box = _box(FakeStore([doc]))
+    box.run("search", {"query": "공통"})
+    assert [hit.line.ts for hit in box.touched.evidence_hits] == ["1", "2"]
 
 
 # --- 실시간 조회 --------------------------------------------------------------
@@ -231,6 +256,7 @@ def test_live_lines_are_marked():
     assert tools.LIVE_MARK in got
     assert box.touched.used_live
     assert box.touched.live_permalinks == ["https://ty.slack.com/archives/C1/p1"]
+    assert box.touched.live_messages == [("tyit", "C1", "1")]
 
 
 def test_bot_messages_are_never_fetched():

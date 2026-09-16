@@ -147,12 +147,34 @@ class Touched:
     """도구가 실제로 돌려준 것. 출처는 이것으로 만든다."""
 
     documents: list = field(default_factory=list)
+    # 모델에게 실제로 전달한 아카이브 줄. 문서만 기억하면 `근거 보기`가
+    # 답변 당시 줄이 아니라 마스터의 최초 검색 결과를 다시 열게 된다.
+    evidence_hits: list = field(default_factory=list)
     live_permalinks: list[str] = field(default_factory=list)
+    # `(workspace, channel_id, message_ts)`. URL은 출처 표시용이고 좌표는
+    # 클릭 시 현재 ACL로 다시 열기 위한 값이다.
+    live_messages: list[tuple[str, str, str]] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
 
     def record_doc(self, doc) -> None:
         if doc is not None and doc not in self.documents:
             self.documents.append(doc)
+
+    def record_line(self, doc, line) -> None:
+        """모델에게 돌려준 원문 줄을 문서와 함께 기억한다."""
+        if doc is None or line is None:
+            return
+        from .archive.store import SearchHit
+
+        self.record_doc(doc)
+        hit = SearchHit(doc=doc, line=line, score=0)
+        if hit not in self.evidence_hits:
+            self.evidence_hits.append(hit)
+
+    def record_live(self, workspace: str, channel_id: str, message_ts: str) -> None:
+        key = (workspace.strip(), channel_id.strip(), message_ts.strip())
+        if all(key) and key not in self.live_messages:
+            self.live_messages.append(key)
 
     @property
     def used_live(self) -> bool:
@@ -344,12 +366,17 @@ class ToolBox:
                 "위 건수를 보고 의미를 유지하는 동의어·문서명으로 다시 찾거나, "
                 "관련 채널과 문서를 열어 보세요. 같은 검색은 반복하지 마세요."
             )
-        lines = []
-        for hit in hits:
-            self.touched.record_doc(hit.doc)
-            lines.append(
-                f"[{hit.line.ts}] ({hit.doc.channel}) {hit.line.speaker}: {hit.line.text}"
-            )
+        lines = [
+            f"[{hit.line.ts}] ({hit.doc.channel}) {hit.line.speaker}: {hit.line.text}"
+            for hit in hits
+        ]
+        used = 0
+        for hit, rendered in zip(hits, lines, strict=False):
+            start = used + (1 if used else 0)
+            if start >= MAX_TOOL_CHARS:
+                break
+            self.touched.record_line(hit.doc, hit.line)
+            used = start + len(rendered)
         return _clip("\n".join(lines))
 
     # -- 읽기 ------------------------------------------------------------
@@ -370,12 +397,19 @@ class ToolBox:
         if doc is None:
             return "(그 이름의 채널을 찾지 못했거나 열람 권한이 없습니다)"
         limit = max(1, min(int(args.get("limit") or 80), 400))
-        self.touched.record_doc(doc)
         rows = doc.raw_lines[-limit:]
-        body = "\n".join(
+        rendered = [
             f"[{line.ts}] {line.speaker}: {line.text}" for line in rows
-        )
-        return _clip(f"# {doc.channel} (최근 {len(rows)}줄)\n{body}")
+        ]
+        head = f"# {doc.channel} (최근 {len(rows)}줄)\n"
+        used = len(head)
+        for line, text in zip(rows, rendered, strict=False):
+            start = used + (1 if used > len(head) else 0)
+            if start >= MAX_TOOL_CHARS:
+                break
+            self.touched.record_line(doc, line)
+            used = start + len(text)
+        return _clip(head + "\n".join(rendered))
 
     def _read_document(self, args: dict) -> str:
         """문서·첨부 본문. 첨부 변환본은 `[첨부추출:이름]` 줄로 원문에 들어 있다."""
@@ -383,14 +417,21 @@ class ToolBox:
         if not wanted:
             return "(문서 이름이 비었습니다)"
         rows: list[str] = []
+        used = 0
         for doc in self.store.visible_docs(self.ctx):
-            hit = [
-                line.text for line in doc.raw_lines
-                if wanted in (line.text or "")
-            ]
-            if hit:
-                self.touched.record_doc(doc)
-                rows.append(f"# {doc.channel}\n" + "\n".join(hit))
+            matched = [line for line in doc.raw_lines if wanted in (line.text or "")]
+            if matched:
+                section = f"# {doc.channel}\n" + "\n".join(
+                    line.text for line in matched
+                )
+                section_start = used + (2 if rows else 0)
+                line_start = section_start + len(f"# {doc.channel}\n")
+                for line in matched:
+                    if line_start < MAX_TOOL_CHARS:
+                        self.touched.record_line(doc, line)
+                    line_start += len(line.text) + 1
+                rows.append(section)
+                used = section_start + len(section)
         if not rows:
             return "(그 문서를 찾지 못했거나 열람 권한이 없습니다)"
         return _clip("\n\n".join(rows))
@@ -413,18 +454,29 @@ class ToolBox:
         limit = max(1, min(int(args.get("limit") or 20), MAX_LIVE_MESSAGES))
         messages = self.live_fetch(doc.channel_id or doc.channel, limit) or []
         rows: list[str] = []
+        head = f"# {doc.channel} — 아카이브에 아직 없는 최근 대화·Canvas "
         for message in messages:
             # **봇 발언을 싣지 않는다.** 실으면 우리 답이 다음 답의 근거가 되고,
             # 한 번 잘못 말한 숫자가 그대로 굳는다(원칙 1).
             if message.get("is_bot"):
                 continue
-            link = str(message.get("permalink") or "")
-            if link:
-                self.touched.live_permalinks.append(link)
-            rows.append(
+            rendered = (
                 f"{LIVE_MARK} [{message.get('ts', '')}] "
                 f"{message.get('speaker', '?')}: {message.get('text', '')}"
             )
+            # 최종 머리글에는 건수가 들어가지만 자릿수 차이는 작다. 보수적으로
+            # 머리글과 현재까지의 줄이 상한 안일 때만 좌표를 남긴다.
+            projected = len(head) + 12 + sum(len(row) + 1 for row in rows) + len(rendered)
+            if projected <= MAX_TOOL_CHARS:
+                link = str(message.get("permalink") or "")
+                if link:
+                    self.touched.live_permalinks.append(link)
+                self.touched.record_live(
+                    self.ctx.workspace,
+                    str(getattr(doc, "channel_id", "") or ""),
+                    str(message.get("ts") or ""),
+                )
+            rows.append(rendered)
         if not rows:
             return f"({doc.channel} 에 아직 아카이브에 없는 새 대화가 없습니다)"
         return _clip(

@@ -282,7 +282,7 @@ def test_the_specialist_budget_covers_thinking():
     source = inspect.getsource(specialist_adapters.PromptSpecialist.complete)
 
     assert "max_tokens=1024" not in source
-    assert "max_tokens=8192" in source
+    assert "max_tokens=4096" in source
 
 
 # --- 도구 (2026-09-11) --------------------------------------------------------

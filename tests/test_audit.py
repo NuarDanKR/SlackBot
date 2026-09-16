@@ -98,3 +98,20 @@ def test_write_failure_does_not_raise(tmp_path):
 def test_long_text_is_clipped():
     rec = _rec(question="가" * 9000)
     assert len(rec.question) < 4200 and "총 9000자" in rec.question
+
+
+def test_record_id_lookup_is_not_limited_to_the_latest_three_files(tmp_path):
+    """Slack의 근거 버튼은 QA 파일 세 개보다 오래 남는다."""
+    old = _rec(record_id="old-record")
+    (tmp_path / "qa-2026-09-01.jsonl").write_text(
+        json.dumps(old.__dict__, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    for day in range(2, 6):
+        row = _rec(record_id=f"new-{day}")
+        (tmp_path / f"qa-2026-09-0{day}.jsonl").write_text(
+            json.dumps(row.__dict__, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+    found = QALog(tmp_path).by_record_id("pilot", "old-record")
+
+    assert found is not None and found["record_id"] == "old-record"

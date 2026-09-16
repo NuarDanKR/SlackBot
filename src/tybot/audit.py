@@ -360,6 +360,41 @@ class QALog:
             logger.warning("피드백 대상 QA 기록 조회 실패: %s", e)
         return None
 
+    def by_record_id(self, workspace: str, record_id: str, *, user: str = "") -> dict | None:
+        """이 ID 의 QA 기록. 없으면 `None`.
+
+        `근거 보기` 가 **답변 당시 좌표**를 다시 열 때 쓴다(인계 §6.2). 예전에는
+        버튼에 검색어를 실어 클릭 시 다시 검색했다 — 그러면 답변이 읽은 것이
+        아니라 **지금 그 낱말로 나오는 것**을 보여 주게 된다.
+
+        `user` 를 주면 본인 기록만 돌려준다. DM처럼 소유권이 필요한 호출부에서
+        사용한다. 채널 답변은 같은 채널 구성원이 볼 수 있으므로 호출부가 채널 ID와
+        현재 ACL을 검증한 뒤 `user` 없이 조회한다.
+        """
+        key = (record_id or "").strip()
+        if not key or not workspace:
+            return None
+        try:
+            # Slack 메시지의 버튼은 QA 일자보다 오래 남는다. 최근 3개 파일만 보면
+            # 정상 버튼이 며칠 뒤부터 영구적으로 깨진다. ID 조회는 사용자 동작일
+            # 때만 실행되므로 전체 파일을 최신순으로 찾는다.
+            for path in sorted(self.root.glob("qa-*.jsonl"), reverse=True):
+                for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("record_id") != key or row.get("workspace") != workspace:
+                        continue
+                    if user and row.get("user") != user:
+                        # 남의 답변 근거를 열어 주지 않는다. 버튼 값이 새어도
+                        # 다른 사람의 기록으로는 아무것도 안 나온다.
+                        return None
+                    return row
+        except OSError as e:
+            logger.warning("QA 기록 조회 실패: %s", e)
+        return None
+
     def last_answer_for_user(self, workspace: str, channel_id: str, user: str) -> dict | None:
         """이 채널에서 **본인이** 마지막으로 받은 답변 기록.
 

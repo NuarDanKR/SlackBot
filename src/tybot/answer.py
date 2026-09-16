@@ -14,7 +14,7 @@ from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
 from .attachment_review import find_sendable, status_line
 from .channels import source_label
-from .evidence_refs import refs_from_hits
+from .evidence_refs import MAX_REFS, live_ref, refs_from_hits
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -452,6 +452,26 @@ def _specialist_citations(special, hits: list[SearchHit], ctx) -> list[str]:
     for link in (getattr(special, "live_links", ()) or ())[:3]:
         out.append(f"🔴실시간 <{link}|Slack 원문>")
     return out
+
+
+def _specialist_evidence_refs(special, hits: list[SearchHit], root) -> list:
+    """전문 봇이 실제로 본 좌표와 seed 좌표를 한 목록으로 만든다.
+
+    도구형 전문가는 마스터의 최초 검색 밖에서 문서를 열 수 있다. 출처는 그
+    문서로 바꾸면서 `근거 보기`만 최초 검색 좌표를 저장하면 서로 다른 자료를
+    가리킨다. 실제 도구 결과를 먼저 두고, seed는 뒤에서 보완한다.
+    """
+    touched = list(getattr(special, "evidence_hits", ()) or ())
+    refs = refs_from_hits([*touched, *(hits or ())], root, limit=MAX_REFS)
+    for workspace, channel_id, message_ts in (
+        getattr(special, "live_messages", ()) or ()
+    ):
+        ref = live_ref(workspace, channel_id, message_ts)
+        if ref is not None and ref not in refs:
+            refs.append(ref)
+        if len(refs) >= MAX_REFS:
+            break
+    return refs
 
 
 def _extracted_names(hits: list[SearchHit]) -> set[str]:
@@ -1168,7 +1188,9 @@ class AnswerEngine:
                     guardrail_result=_guardrail_result(self._store.root, selected_hits),
                     required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
-                    evidence_refs=refs_from_hits(selected_hits, self._store.root),
+                    evidence_refs=_specialist_evidence_refs(
+                        special, selected_hits, self._store.root
+                    ),
                     attachment_refs=_attachment_refs(self._store.root, selected_hits),
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
@@ -1268,7 +1290,9 @@ class AnswerEngine:
                     guardrail_result=_guardrail_result(self._store.root, hits),
                     required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
-                    evidence_refs=refs_from_hits(hits, self._store.root),
+                    evidence_refs=_specialist_evidence_refs(
+                        special, hits, self._store.root
+                    ),
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
                 )
@@ -1591,6 +1615,9 @@ class AnswerEngine:
                         getattr(task, "required_capability", "") or ""
                     ),
                     attempted_specialists=list(outcome.attempted),
+                    evidence_refs=_specialist_evidence_refs(
+                        special, [], self._store.root
+                    ),
                 )
             # 전문 봇도 못 찾았다. **「찾지 못했다」 와 「없다」 를 구분해서** 남긴다.
             logger.info(
@@ -1682,7 +1709,9 @@ class AnswerEngine:
                     partial_attachments=partial,
                     required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
-                    evidence_refs=refs_from_hits(hits, self._store.root),
+                    evidence_refs=_specialist_evidence_refs(
+                        special, hits, self._store.root
+                    ),
                     attachment_refs=_attachment_refs(self._store.root, hits),
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",

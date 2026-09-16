@@ -131,7 +131,9 @@ def issue_codes(row: dict, feedback: list[dict]) -> list[str]:
     codes: list[str] = []
     reason = str(row.get("reason") or "")
     error = str(row.get("error") or "").strip()
-    if error or reason in {"error", "unavailable", "invalid-output", "timeout"}:
+    if error or reason in {
+        "error", "unavailable", "invalid-output", "timeout", "specialist_unavailable",
+    }:
         codes.append("error")
     if int(row.get("hits") or 0) == 0 or reason in {"no_hits", "no_access"}:
         codes.append("no_evidence")
@@ -140,7 +142,10 @@ def issue_codes(row: dict, feedback: list[dict]) -> list[str]:
     traces = row.get("task_traces") or []
     if any(
         str(trace.get("status") or trace.get("result") or "").lower()
-        in {"error", "failed", "fallback", "timeout", "unavailable", "invalid-output"}
+        in {
+            "error", "failed", "fallback", "timeout", "unavailable",
+            "invalid-output", "specialist_unavailable",
+        }
         for trace in traces
         if isinstance(trace, dict)
     ):

@@ -49,34 +49,82 @@ class StageTimeout(RuntimeError):
         self.stage = stage
 
 
+# 단계 이름. **`primary` 를 쓰지 않는다** — 그 이름이 탐색과 최종 합성을 함께
+# 뜻해서, 콘솔에 `specialist-timeout:primary` 가 떠도 어디서 끝났는지 몰랐다.
+DISCOVERY = "discovery"
+FINALIZE = "finalize"
+RECOVERY = "recovery"
+TOTAL = "total"
+STAGES = (DISCOVERY, FINALIZE, RECOVERY, TOTAL)
+
+
 @dataclass(frozen=True)
 class SpecialistDeadlines:
     """단계별 예산. **한곳에서 검증한다** — 상수로 흩어 두면 합이 안 맞는다.
 
-    기본값 근거(설계 §4): 사용자 대기 상한 75초를 primary 탐색·recovery 최종화·
-    전달 예약으로 나눈다. 늘려서 장애를 숨기지 않는다.
+    ## 왜 180초인가
+
+    2026-09-16 운영: 같은 비교 질문이 13:03 에 **77.3초로 성공**했고 14:23·14:31 에
+    74.5~76.2초로 `timeout` 이 났다. 75초 예산은 그 질문이 원래 쓰던 시간보다
+    **짧았다** — 고친 것이 아니라 회귀였다.
+
+    그래서 상한을 늘리되 **단계가 서로를 침범하지 못하게** 나눈다. 늘리기만 하면
+    같은 광범위 검색이 더 오래 돌 뿐이고, p90 과 비용만 는다(§4 가 그쪽을 막는다).
+
+    ```text
+    discovery 100 + finalize 45 + recovery 20 + delivery_reserve 15 = total 180
+    ```
+
+    합이 정확히 맞아야 한다. 남으면 아무도 안 쓰는 시간이고, 모자라면 뒤 단계가
+    시작도 못 한다.
     """
 
-    total: float = 75.0
-    # primary 가 끝나야 하는 시점. 이 뒤로는 **새 검색을 시작하지 않는다.**
-    primary: float = 55.0
-    # Provider 1회 상한. 남은 시간과 비교해 **작은 쪽**을 쓴다.
-    per_call: float = 25.0
-    # 무도구 최종화 1회에 남겨 두는 시간.
-    recovery: float = 15.0
-    # QA 기록과 Slack 전달. 여기까지 먹으면 답이 늦게 도착한다.
-    reserve: float = 5.0
+    total: float = 180.0
+    # 추가 검색·문서 열람을 **새로 시작할 수 있는** 구간.
+    discovery: float = 100.0
+    # 이미 읽은 근거로 답을 만드는 무도구 호출 1회. **discovery 가 빌려 쓸 수 없다.**
+    finalize: float = 45.0
+    # 허용된 실패에서 다시 한 번. 여기까지가 전문 봇의 시간이다.
+    recovery: float = 20.0
+    # QA 기록·Canvas/Slack 전송. 전문 봇이 쓰면 답이 늦게 도착한다.
+    delivery_reserve: float = 15.0
+    # Provider 1회 상한. 단계 잔여와 비교해 **작은 쪽**을 쓴다.
+    per_call: float = 45.0
 
     def __post_init__(self) -> None:
-        if min(self.total, self.primary, self.per_call, self.recovery, self.reserve) <= 0:
+        values = (self.total, self.discovery, self.finalize, self.recovery,
+                  self.delivery_reserve, self.per_call)
+        if min(values) <= 0:
             raise ValueError("시간 예산은 모두 0보다 커야 합니다.")
-        if self.primary + self.recovery + self.reserve > self.total:
-            # 합이 넘으면 recovery 가 시작도 못 하고 끝난다 — 있으나 마나 한 단계가
-            # 되고, 그건 「복구가 안 된다」 로 보인다.
+        staged = self.discovery + self.finalize + self.recovery + self.delivery_reserve
+        if staged != self.total:
+            # 「대략 맞다」 로 두면 어느 단계가 모자란지 사고가 나야 안다.
             raise ValueError(
-                f"primary+recovery+reserve({self.primary + self.recovery + self.reserve})"
-                f" 가 total({self.total}) 을 넘습니다."
+                f"단계 합({staged})이 total({self.total})과 다릅니다: "
+                f"discovery {self.discovery} + finalize {self.finalize} + "
+                f"recovery {self.recovery} + reserve {self.delivery_reserve}"
             )
+
+    # --- 절대 경계 ------------------------------------------------------------
+    #
+    # 시작 시각에 더해서 쓴다. 단계가 바뀔 때 45초를 **새로 더하지 않는다** —
+    # 그러면 단계 수만큼 시간이 늘어난다.
+    @property
+    def discovery_ends(self) -> float:
+        return self.discovery
+
+    @property
+    def finalize_ends(self) -> float:
+        return self.discovery + self.finalize
+
+    @property
+    def recovery_ends(self) -> float:
+        return self.discovery + self.finalize + self.recovery
+
+    @property
+    def hard_ends(self) -> float:
+        """전문 봇이 쓸 수 있는 마지막 순간. 전달 예약은 그 뒤다."""
+        return self.recovery_ends
 
 
 DEADLINES = SpecialistDeadlines()
@@ -84,7 +132,11 @@ DEADLINES = SpecialistDeadlines()
 
 @dataclass
 class Deadline:
-    """이 요청 하나의 시계. **재시도마다 새로 주지 않는다.**"""
+    """이 요청 하나의 시계. **재시도마다 새로 주지 않는다.**
+
+    `time.monotonic()` 기준 시작 시각을 **한 번만** 만들고, adapter·Gateway·
+    Provider·도구가 같은 절대 경계를 본다.
+    """
 
     settings: SpecialistDeadlines = DEADLINES
     started: float = 0.0
@@ -92,6 +144,9 @@ class Deadline:
     # 스레드를 죽일 수 없으니 **어댑터가 보고 스스로 멈춘다.**
     aborted: bool = False
     timeout_stage: str = ""
+    # 지금 어느 단계인가. 복구 가능 여부를 **단계로** 판단한다 — `aborted` 하나만
+    # 보면 discovery 에서 시간이 끝난 요청이 최종 합성 기회까지 잃는다.
+    stage: str = DISCOVERY
     clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -102,44 +157,67 @@ class Deadline:
     def elapsed(self) -> float:
         return max(0.0, self.clock() - self.started)
 
-    def remaining(self, *, reserve: bool = True) -> float:
-        """남은 시간. **음수가 되지 않는다.**
+    def _ends_at(self, stage: str) -> float:
+        return {
+            DISCOVERY: self.settings.discovery_ends,
+            FINALIZE: self.settings.finalize_ends,
+            RECOVERY: self.settings.recovery_ends,
+            TOTAL: self.settings.hard_ends,
+        }.get(stage, self.settings.hard_ends)
 
-        `reserve` 면 전달 예약을 뺀 값이다 — 그 시간을 쓰면 답이 늦게 도착한다.
-        """
-        budget = self.settings.total - (self.settings.reserve if reserve else 0.0)
-        return max(0.0, budget - self.elapsed)
+    def remaining(self, stage: str = TOTAL) -> float:
+        """이 단계가 쓸 수 있는 남은 시간. **음수가 되지 않는다.**"""
+        return max(0.0, self._ends_at(stage) - self.elapsed)
 
-    def remaining_primary(self) -> float:
-        """primary 가 쓸 수 있는 남은 시간. 경계를 넘으면 0 이다."""
-        return max(0.0, self.settings.primary - self.elapsed)
+    def call_timeout(self, *, stage: str = DISCOVERY) -> float:
+        """Provider 한 번에 줄 시간. `min(단계 잔여, per_call)`."""
+        return max(0.0, min(self.remaining(stage), self.settings.per_call))
 
-    def call_timeout(self, *, stage: str = "primary") -> float:
-        """Provider 한 번에 줄 시간. `min(남은 시간, per_call)`."""
-        left = self.remaining_primary() if stage == "primary" else self.remaining()
-        return max(0.0, min(left, self.settings.per_call))
+    def enter(self, stage: str) -> None:
+        """단계를 옮긴다. 시간을 더하지 않는다 — 경계는 절대값이다."""
+        self.stage = stage
 
     def require_time(self, stage: str, *, need: float = 0.0) -> None:
         """이 단계를 시작할 시간이 남았는가. 아니면 `StageTimeout`.
 
         **시작하기 전에 본다.** 시작하고 나서 보면 이미 쓴 시간은 돌아오지 않는다.
         """
-        if self.aborted:
-            raise StageTimeout(self.timeout_stage or stage, "이미 종료된 요청입니다.")
-        left = self.remaining_primary() if stage == "primary" else self.remaining()
-        if left <= need:
+        if self.expired:
+            # **표식을 먼저 세운다.** 예전에는 여기서 바로 raise 해서, 전체 시간이
+            # 끝난 요청이 `aborted=False` 로 남았다 — 늦게 온 결과를 버리는 검사가
+            # 그 표식을 보는데 서 있지 않았다(테스트가 잡았다).
+            self.abort(TOTAL)
+            raise StageTimeout(self.timeout_stage or TOTAL, "이미 종료된 요청입니다.")
+        if self.remaining(stage) <= need:
             self.abort(stage)
             raise StageTimeout(stage)
 
+    @property
+    def expired(self) -> bool:
+        """요청이 끝났는가. **단계 timeout 과 다르다.**
+
+        discovery 에서 시간이 끝난 것은 「탐색은 그만」 이지 「요청 종료」 가 아니다.
+        이미 `abort(TOTAL)` 된 경우도 끝난 것으로 본다 — 안 그러면 바깥에서 닫은
+        요청이 안쪽에서 계속 돈다.
+        """
+        return self.aborted or self.remaining(TOTAL) <= 0
+
     def abort(self, stage: str) -> None:
-        """더 진행하지 않는다. 늦게 온 결과도 쓰지 않는다."""
-        if not self.aborted:
-            self.aborted = True
+        """이 단계에서 끝났다고 표시한다. 늦게 온 결과는 쓰지 않는다."""
+        if not self.timeout_stage:
             self.timeout_stage = stage
+        # 전체가 끝난 경우에만 요청 자체를 닫는다. discovery 초과는 **전환**이다.
+        if stage == TOTAL or self.expired:
+            self.aborted = True
+
+    def may_finalize(self) -> bool:
+        """최종 합성을 시작할 시간이 남았는가."""
+        return not self.aborted and self.remaining(FINALIZE) > 0
 
     def may_recover(self) -> bool:
-        """무도구 최종화를 한 번 더 할 시간이 남았는가."""
-        return self.remaining() >= min(self.settings.recovery, self.settings.per_call)
+        """복구 합성을 한 번 더 할 시간이 남았는가."""
+        return not self.aborted and self.remaining(RECOVERY) > 0
+
 
 # 본문 상한. **프롬프트에 적는 값과 같은 값이다**(`specialist_adapters`).
 #
@@ -339,7 +417,9 @@ def execute(
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tybot-specialist")
     future = pool.submit(adapter.complete, request)
     # 바깥 대기는 **남은 시간**이다. 고정 90초를 쓰면 안쪽 예산과 따로 논다.
-    wait = deadline.remaining() if request.deadline else timeout_seconds
+    # 바깥 대기는 **전문 봇에게 허용된 마지막 순간**까지다. 전달 예약은 그 뒤라
+    # 여기서 쓰지 않는다.
+    wait = deadline.remaining(TOTAL) if request.deadline else timeout_seconds
     try:
         # **바닥값을 두지 않는다.** 남은 시간이 0 이면 지금 시작하면 안 된다는
         # 뜻이고, `future.result(timeout=0)` 은 그 자리에서 timeout 이다.
@@ -368,7 +448,9 @@ def execute(
         # 바깥에서 시간이 끝났다. 스레드는 못 죽이지만 **표식을 세워** 어댑터가
         # 다음 확인 지점에서 멈추게 한다. `future.cancel()` 만으로는 이미 실행
         # 중인 스레드가 안 멈춘다(장애 §2.2).
-        stage = str(getattr(adapter, "phase", "") or "primary")
+        # 어느 단계에서 끝났는지 어댑터가 안다. 없으면 전체로 본다 —
+        # `primary` 라는 모호한 이름은 더 만들지 않는다.
+        stage = str(getattr(adapter, "phase", "") or deadline.stage or TOTAL)
         deadline.abort(stage)
         future.cancel()
         return SpecialistCallResult(
