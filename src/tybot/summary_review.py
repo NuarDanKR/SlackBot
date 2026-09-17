@@ -212,6 +212,40 @@ class Store:
             return ""
         return str(row.get("watermark") if isinstance(row, dict) else row[0])
 
+    def rewind(self, workspace: str, channel_id: str, watermark: str) -> None:
+        """커서를 지정한 지점으로 되돌린다. 빈 값이면 **아카이브 처음부터**.
+
+        소급 검토(B-58)만 쓴다. 커서는 원래 한 방향으로만 간다 — 뒤로 돌리는 것은
+        「이미 본 것으로 친 구간을 다시 본다」 는 뜻이고, 운영자가 명시적으로
+        요청했을 때만 해야 한다. 후보는 `ON CONFLICT DO NOTHING` 으로 막히므로
+        같은 구간을 다시 읽어도 같은 후보가 두 번 생기지는 않는다.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO summary_review_cursor(workspace,channel_id,watermark,source_digest)
+                VALUES (%s,%s,%s,'') ON CONFLICT(workspace,channel_id) DO UPDATE SET
+                watermark=excluded.watermark, source_digest='',
+                failed_digest='', retry_after=NULL, checked_at=now()""",
+                (workspace, channel_id, watermark),
+            )
+        self.conn.commit()
+
+    def mark_delivered(self, candidate_ids: list) -> None:
+        """이 후보들을 검토자에게 실제로 보여 줬다고 남긴다.
+
+        폐기는 이 기록만 보고 판단한다 — 보여 준 적 없는 후보를 폐기하면 소급으로
+        쌓은 검토 대기분이 다음 회차에 통째로 사라진다.
+        """
+        if not candidate_ids:
+            return
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """UPDATE summary_review_candidate SET delivered_at=now()
+                WHERE id = ANY(%s) AND delivered_at IS NULL""",
+                (list(candidate_ids),),
+            )
+        self.conn.commit()
+
     def start_at(self, workspace: str, channel_id: str) -> str:
         """최초 회차는 검토자를 지정한 뒤의 원문부터 본다."""
         with self.conn.cursor() as cur:
@@ -318,15 +352,22 @@ class Store:
 
         보류한 후보는 약속한 날 한 번 더 보여 주고, 그날도 결정하지 않았을 때
         다음 검토일에 폐기한다. 폐기 후보는 `approved_summary_item`에 들어가지 않는다.
+
+        **보여 준 적 없는 후보는 폐기하지 않는다**(B-58). 한 회차 DM 은 후보를 최대
+        10건만 싣는다. 하루에 11건이 생기거나 소급 검토로 수백 건이 쌓이면 나머지는
+        사람 앞에 나온 적이 없는데, 예전 규칙은 `run_date` 만 보고 그것들을 버렸다.
+        「확인하지 않았다」 는 보여 준 뒤에만 할 수 있는 말이다.
         """
         with self.conn.cursor() as cur:
             cur.execute(
                 """UPDATE summary_review_candidate SET state='expired', decided_at=now(),
                 decided_by='system:expired', correction='', defer_until=NULL
                 WHERE workspace=%s AND channel_id=%s AND run_date<%s
+                AND delivered_at IS NOT NULL
+                AND (delivered_at AT TIME ZONE 'Asia/Seoul')::date < %s
                 AND (state='pending' OR (state='deferred' AND defer_until<%s))
                 RETURNING id""",
-                (workspace, channel_id, on, on),
+                (workspace, channel_id, on, on, on),
             )
             expired = list(cur.fetchall())
             if not expired:
@@ -1097,9 +1138,13 @@ def default_defer_date(today: date) -> date:
     return today + timedelta(days=1)
 
 
-def channel_source(archive, workspace: str, channel_id: str, watermark: str,
-                   start_at: str = "") -> list[SourceLine]:
-    """한 채널의 새 원문만 가져온다. 승인 요약과 봇 출력은 읽지 않는다."""
+def _source_rows(archive, workspace: str, channel_id: str, watermark: str,
+                 start_at: str = "") -> list[SourceLine]:
+    """커서 이후의 원문 **전부**. 한 회차 분량으로 자르지 않는다.
+
+    소급 대상이 얼마나 되는지 세려면 자르기 전 목록이 필요하다 — 잘린 목록으로
+    세면 몇 달치가 늘 「한 회차」 로 보인다.
+    """
     from .channel_lifecycle import include_retired, keep
 
     allow_retired = include_retired()
@@ -1126,15 +1171,116 @@ def channel_source(archive, workspace: str, channel_id: str, watermark: str,
                 message_ts=str(getattr(line, "message_ts", "") or ""),
             ))
     rows.sort(key=lambda item: (item.at, item.locator))
+    return rows
+
+
+def _line_size(item: SourceLine) -> int:
+    return len(item.at) + len(item.author) + len(item.text) + 8
+
+
+def channel_source(archive, workspace: str, channel_id: str, watermark: str,
+                   start_at: str = "") -> list[SourceLine]:
+    """한 채널의 새 원문 **한 회차분**. 승인 요약과 봇 출력은 읽지 않는다."""
     selected: list[SourceLine] = []
     used = 0
-    for item in rows:
-        size = len(item.at) + len(item.author) + len(item.text) + 8
+    for item in _source_rows(archive, workspace, channel_id, watermark, start_at):
+        size = _line_size(item)
         if selected and used + size > MAX_NEW_SOURCE_CHARS:
             break
         selected.append(item)
         used += size
     return selected
+
+
+# --- 소급 검토 (B-58) ---------------------------------------------------------
+# 수집은 됐는데 검토 후보가 한 번도 만들어지지 않은 구간이 있다. 최초 회차가
+# 「검토자 지정 시각 이후」와 「최근 하루」로 두 번 좁혀지고, 그 뒤로는 커서가
+# 앞으로만 가기 때문이다. 과거 전체 수집으로 넣은 몇 달치는 그 셋에 모두 걸린다.
+#
+# 소급은 커서를 뒤로 돌려 같은 생성 경로를 다시 태우는 것이다. **새 경로를 만들지
+# 않는다** — 후보 계약·원문 대조·승인 절차가 갈라지면 어느 쪽이 맞는지 알 수 없다.
+
+# 아카이브 처음을 뜻하는 커서 값. 빈 문자열은 「커서 없음」이라 최초 회차 규칙
+# (최근 하루)이 다시 걸리므로 쓸 수 없다.
+EPOCH_WATERMARK = "0000-00-00 00:00|"
+
+# 한 번의 소급이 도는 최대 회차. 회차마다 LLM 을 한 번 부른다 — 무제한이면
+# 채널 하나가 일일 비용 한도를 다 쓴다.
+DEFAULT_BACKFILL_ROUNDS = 10
+MAX_BACKFILL_ROUNDS = 50
+
+
+def backfill_watermark(since: str = "") -> str:
+    """소급 시작점을 커서 값으로 옮긴다. 시작일은 **포함**한다."""
+    since = (since or "").strip()
+    if not since:
+        return EPOCH_WATERMARK
+    return f"{since[:10]} 00:00|"
+
+
+@dataclass(frozen=True)
+class BackfillEstimate:
+    """LLM 을 부르지 않고 센 소급 대상. 비용을 보고 누르라고 있는 값이다."""
+
+    lines: int = 0
+    characters: int = 0
+    rounds: int = 0
+    first_at: str = ""
+    last_at: str = ""
+
+
+def backfill_estimate(archive, *, workspace: str, channel_id: str,
+                      since: str = "") -> BackfillEstimate:
+    rows = _source_rows(archive, workspace, channel_id, backfill_watermark(since))
+    if not rows:
+        return BackfillEstimate()
+    characters = sum(_line_size(item) for item in rows)
+    rounds = max(1, -(-characters // MAX_NEW_SOURCE_CHARS))
+    return BackfillEstimate(
+        lines=len(rows), characters=characters, rounds=rounds,
+        first_at=rows[0].at, last_at=rows[-1].at,
+    )
+
+
+@dataclass
+class BackfillResult:
+    rounds: int = 0
+    candidates: int = 0
+    # 원문을 끝까지 읽었는가. 거짓이면 회차 상한에 걸린 것이고, 다시 누르면
+    # **멈춘 지점부터** 이어 간다(커서가 그대로 남는다).
+    exhausted: bool = False
+
+
+def backfill_channel(store: Store, archive, *, workspace: str, channel_id: str,
+                     channel_name: str, complete, now: datetime,
+                     since: str = "", max_rounds: int = DEFAULT_BACKFILL_ROUNDS,
+                     resume: bool = False) -> BackfillResult:
+    """수집된 과거 원문으로 검토 후보를 만든다.
+
+    `resume` 이면 커서를 그대로 두고 멈춘 지점부터 이어 간다. 아니면 `since` 로
+    되돌린다 — 되돌리는 것은 「이미 본 것으로 친 구간을 다시 본다」 는 뜻이라
+    운영자가 명시적으로 요청했을 때만 한다.
+
+    후보는 `(워크스페이스, 채널, 원문 지문, 종류, 제안 문장)` 으로 유일하므로 같은
+    구간을 다시 읽어도 같은 후보가 두 번 생기지 않는다.
+    """
+    rounds = max(1, min(int(max_rounds or 0) or DEFAULT_BACKFILL_ROUNDS,
+                        MAX_BACKFILL_ROUNDS))
+    if not resume:
+        store.rewind(workspace, channel_id, backfill_watermark(since))
+    result = BackfillResult()
+    for _ in range(rounds):
+        before = store.cursor(workspace, channel_id)
+        result.candidates += generate_channel(
+            store, archive, workspace=workspace, channel_id=channel_id,
+            channel_name=channel_name, complete=complete, now=now, force=True,
+        )
+        result.rounds += 1
+        if store.cursor(workspace, channel_id) == before:
+            # 커서가 안 움직였다 = 읽을 원문이 없다. 회차를 더 돌아도 같다.
+            result.exhausted = True
+            break
+    return result
 
 
 def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
@@ -1544,6 +1690,10 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
                 else:
                     _mark_sent(conn, workspace=workspace, channel_id=channel_id,
                                recipient=recipient, on=on, count=len(artifact_rows))
+                # 폐기 판정의 기준이다(B-58). 이 줄이 빠지면 보여 준 후보가
+                # 「한 번도 안 보여 준 것」 으로 남아 영원히 폐기되지 않는다.
+                with contextlib.suppress(Exception):
+                    db.mark_delivered([row["id"] for row in artifact_rows if row.get("id")])
                 result.sent += 1
                 outcome.sent += 1
                 outcome.code = OUTCOME_SENT

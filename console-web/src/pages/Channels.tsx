@@ -91,6 +91,11 @@ interface ReviewChannelResult {
   sent: number
   skipped: number
   failed: number
+  /** 소급 분량 추정 회차에만 채워집니다. */
+  lines?: number
+  rounds?: number
+  firstAt?: string
+  lastAt?: string
 }
 
 interface ReviewResult {
@@ -99,6 +104,8 @@ interface ReviewResult {
   failed: number
   generated: number
   canvasFallback: number
+  /** 분량만 센 회차. LLM을 부르지 않았고 DM도 보내지 않았습니다. */
+  estimate?: boolean
   channels: ReviewChannelResult[]
 }
 
@@ -110,7 +117,10 @@ interface ReviewJob {
   targets?: { workspace: string; channelId: string }[]
   resend?: boolean
   /** 실제로 무슨 일이 있었는가. 종료 코드는 「보낼 것이 없었다」를 모른다. */
-  outcome?: 'sent' | 'partial' | 'nothing-sent' | 'unknown' | null
+  outcome?: 'sent' | 'partial' | 'nothing-sent' | 'estimate' | 'unknown' | null
+  backfill?: boolean
+  since?: string
+  estimate?: boolean
   result?: ReviewResult | null
   createdAt: string
   startedAt: string | null
@@ -150,6 +160,8 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
   const [collectionBusy, setCollectionBusy] = useState(false)
   const [reviewBusy, setReviewBusy] = useState(false)
   const [reviewResend, setReviewResend] = useState(false)
+  const [backfillSince, setBackfillSince] = useState('')
+  const [backfillRounds, setBackfillRounds] = useState(10)
   const [result, setResult] = useState<AssignResult | null>(null)
   const job = jobResource.data?.job ?? null
   const jobActive = job?.status === 'queued' || job?.status === 'running'
@@ -344,6 +356,46 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     } catch (e) {
       const error = e as ApiError
       onToast(error.message || '요약 검토 DM 작업을 시작하지 못했습니다.')
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
+  /** 소급 검토 — 이미 수집된 과거 원문으로 검토 후보를 만듭니다.
+   *
+   * 최초 회차는 「검토자 지정 이후」와 「최근 하루」로 두 번 좁혀지고, 그 뒤로는
+   * 커서가 앞으로만 갑니다. 과거 전체 수집으로 넣은 몇 달치는 그 셋에 모두 걸려
+   * 한 번도 검토 후보가 되지 못합니다. 소급은 커서를 되돌려 같은 생성 경로를
+   * 다시 태웁니다.
+   */
+  async function startBackfill(estimate: boolean) {
+    if (reviewTargets.length === 0 || reviewJobActive) return
+    const what =
+      reviewTargets.length === 1 ? reviewTargets[0].channel : `채널 ${reviewTargets.length}개`
+    const from = backfillSince ? `${backfillSince}부터` : '아카이브 처음부터'
+    if (
+      !estimate &&
+      !window.confirm(
+        `${what}의 수집된 원문을 ${from} 다시 읽어 검토 후보를 만듭니다.
+` +
+          `회차마다 LLM을 한 번 부르며 채널당 최대 ${backfillRounds}회차입니다. 실행할까요?`,
+      )
+    )
+      return
+    setReviewBusy(true)
+    try {
+      await api.securePost<{ job: ReviewJob }>('/api/channels/review-jobs', {
+        channels: reviewTargets.map(key),
+        backfill: true,
+        since: backfillSince,
+        rounds: backfillRounds,
+        estimate,
+      })
+      onToast(estimate ? '소급 대상 분량을 세고 있습니다.' : '소급 검토를 시작했습니다.')
+      reviewJobResource.reload()
+    } catch (e) {
+      const error = e as ApiError
+      onToast(error.message || '소급 검토를 시작하지 못했습니다.')
     } finally {
       setReviewBusy(false)
     }
@@ -566,14 +618,17 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                 {reviewJob.status === 'queued' && '실행 대기'}
                 {reviewJob.status === 'running' && '요약 및 Canvas 생성 중'}
                 {reviewJob.status === 'failed' && `실패 · ${reviewJob.errorCode ?? '원인 미확인'}`}
-                {reviewJob.status === 'completed' &&
+                {reviewJob.status === 'completed' && reviewJob.outcome === 'estimate' &&
+                  '소급 대상 분량을 셌습니다 — 아직 아무것도 만들지 않았습니다'}
+                {reviewJob.status === 'completed' && reviewJob.outcome !== 'estimate' &&
                   (reviewJob.outcome === 'sent'
                     ? `발송 완료 · DM ${reviewJob.result?.sent ?? 0}건`
                     : reviewJob.outcome === 'partial'
                       ? `일부 발송 · DM ${reviewJob.result?.sent ?? 0}건 · 실패 ${reviewJob.result?.failed ?? 0}건`
                       : 'DM이 한 건도 가지 않았습니다')}
               </div>
-              {reviewJob.status === 'completed' && reviewJob.outcome === 'nothing-sent' && (
+              {reviewJob.status === 'completed' &&
+                reviewJob.outcome === 'nothing-sent' && (
                 <p className="note warn">
                   실행 자체는 끝났지만 아무도 받지 못했습니다. 채널별 사유를 보고 조치하세요.
                 </p>
@@ -590,6 +645,9 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                     <li key={`${row.workspace}:${row.channelId}`}>
                       <span className="mono">{row.channelName || row.channelId}</span> —{' '}
                       {row.sent > 0 ? `DM ${row.sent}건 발송` : row.reason}
+                      {row.code === 'estimate' && row.lines ? (
+                        <span className="mono"> ({row.firstAt} ~ {row.lastAt})</span>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
@@ -603,6 +661,53 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
         {reviewJobResource.error && (
           <p className="note warn">작업 상태를 읽지 못했습니다: {reviewJobResource.error.message}</p>
         )}
+      </Section>
+
+      <Section
+        title="소급 검토"
+        lead="이미 수집된 과거 원문으로 검토 후보를 만듭니다. 최초 회차는 검토자를 지정한 이후의 최근 하루만 보고, 그 뒤로는 앞으로만 갑니다 — 과거 전체 수집으로 넣은 자료는 그래서 한 번도 검토 대상이 되지 못합니다."
+      >
+        <div className="toolbar">
+          <label className="field">
+            시작일
+            <input
+              type="date"
+              value={backfillSince}
+              onChange={(event) => setBackfillSince(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            회차 상한
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={backfillRounds}
+              onChange={(event) => setBackfillRounds(Number(event.target.value) || 1)}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn"
+            disabled={reviewBusy || reviewJobActive || reviewTargets.length === 0}
+            onClick={() => startBackfill(true)}
+          >
+            대상 분량 먼저 세기
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={reviewBusy || reviewJobActive || reviewTargets.length === 0}
+            onClick={() => startBackfill(false)}
+          >
+            선택 채널 {reviewTargets.length}개 소급 검토 실행
+          </button>
+        </div>
+        <p className="note">
+          시작일을 비우면 아카이브 처음부터 읽습니다. 회차마다 LLM을 한 번 부르므로 먼저
+          분량을 세어 보고 실행하세요. 회차 상한에 걸려 끝나지 않으면 다시 실행할 때 멈춘
+          지점부터 이어 갑니다. 만들어진 후보는 검토 DM으로 한 회차에 10건씩 나갑니다.
+        </p>
       </Section>
 
       <Section

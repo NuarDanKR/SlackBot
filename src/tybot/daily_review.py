@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -56,6 +57,8 @@ from .attachment_review import (
 )
 
 logger = logging.getLogger("tybot.daily_review")
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 KST = timezone(timedelta(hours=9))
 
@@ -579,6 +582,81 @@ def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]]) -> 
         logger.error("실행 결과를 남기지 못했습니다: %s", exc)
 
 
+def _report_estimate(archive, channels, *, since: str, result_path: str | None) -> None:
+    """소급 대상 분량을 세어 로그와 결과 파일에 남긴다. LLM 은 부르지 않는다."""
+    import json
+    from pathlib import Path
+
+    from . import summary_review
+
+    rows = []
+    for workspace, channel_id, channel_name, _send_at in channels:
+        found = summary_review.backfill_estimate(
+            archive, workspace=workspace, channel_id=channel_id, since=since,
+        )
+        logger.info(
+            "소급 대상 ws=%s ch=%s 줄=%d 회차=%d 기간=%s~%s",
+            workspace, channel_id, found.lines, found.rounds,
+            found.first_at or "-", found.last_at or "-",
+        )
+        rows.append({
+            "workspace": workspace,
+            "channelId": channel_id,
+            "channelName": channel_name,
+            "code": "estimate",
+            "reason": (
+                f"소급 대상 {found.lines}줄 · 예상 {found.rounds}회차"
+                if found.lines else "소급할 원문이 없습니다"
+            ),
+            "lines": found.lines,
+            "rounds": found.rounds,
+            "firstAt": found.first_at,
+            "lastAt": found.last_at,
+            "sent": 0,
+            "skipped": 0,
+            "failed": 0,
+        })
+    if not result_path:
+        return
+    payload = {"sent": 0, "skipped": 0, "failed": 0, "generated": 0,
+               "canvasFallback": 0, "estimate": True, "channels": rows}
+    try:
+        Path(result_path).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.error("소급 추정 결과를 남기지 못했습니다: %s", exc)
+
+
+def _run_backfill(summary_review, conn, archive, channels, *, complete, now,
+                  since: str, rounds: int, resume: bool) -> None:
+    """수집된 과거 원문으로 검토 후보를 소급 생성한다.
+
+    한 채널이 실패해도 나머지 채널은 돈다 — 소급은 여러 달치를 한 번에 도는 일이라
+    중간에 멈추면 어디까지 됐는지 아무도 모른다. 커서는 회차마다 저장되므로 다시
+    실행하면 멈춘 지점부터 이어 간다.
+    """
+    store = summary_review.Store(conn)
+    for workspace, channel_id, channel_name, _send_at in channels:
+        try:
+            done = summary_review.backfill_channel(
+                store, archive, workspace=workspace, channel_id=channel_id,
+                channel_name=channel_name, complete=complete, now=now,
+                since=since, max_rounds=rounds, resume=resume,
+            )
+        except Exception as exc:  # noqa: BLE001 - 한 채널 실패가 나머지를 막지 않는다
+            logger.warning(
+                "소급 검토 실패 ws=%s ch=%s code=%s",
+                workspace, channel_id, type(exc).__name__,
+            )
+            continue
+        logger.warning(
+            "소급 검토 ws=%s ch=%s 회차=%d 후보=%d 남은원문=%s",
+            workspace, channel_id, done.rounds, done.candidates,
+            "없음" if done.exhausted else "있음(다시 실행하면 이어 갑니다)",
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -602,6 +680,32 @@ def main(argv: list[str] | None = None) -> int:
         help="오늘 이미 보낸 검토자에게도 다시 보낸다(--force-now 전용)",
     )
     ap.add_argument("--result-json", help="채널별 실행 결과를 이 경로에 JSON 으로 남긴다")
+    ap.add_argument(
+        "--backfill",
+        action="store_true",
+        help="이미 수집된 과거 원문으로 검토 후보를 소급 생성한다(--force-now 전용)",
+    )
+    ap.add_argument(
+        "--since",
+        default="",
+        help="소급 시작일 `YYYY-MM-DD`. 비우면 아카이브 처음부터",
+    )
+    ap.add_argument(
+        "--rounds",
+        type=int,
+        default=0,
+        help="채널당 소급 회차 상한. 회차마다 LLM 을 한 번 부른다",
+    )
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="커서를 되돌리지 않고 지난 소급이 멈춘 지점부터 이어 간다",
+    )
+    ap.add_argument(
+        "--estimate",
+        action="store_true",
+        help="LLM 을 부르지 않고 소급 대상 분량만 센다",
+    )
     args = ap.parse_args(argv)
 
     targets: list[tuple[str, str]] = []
@@ -625,6 +729,16 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--resend는 --force-now와 함께만 사용합니다.")
     if args.force_now and args.dry_run:
         ap.error("--force-now와 --dry-run은 함께 사용할 수 없습니다.")
+    if args.backfill and not args.force_now:
+        ap.error("--backfill은 --force-now와 함께만 사용합니다.")
+    for flag, value in (("--since", args.since), ("--rounds", args.rounds),
+                        ("--resume", args.resume), ("--estimate", args.estimate)):
+        if value and not args.backfill:
+            ap.error(f"{flag}는 --backfill과 함께만 사용합니다.")
+    if args.since and not _DATE_RE.fullmatch(args.since):
+        ap.error("--since는 `YYYY-MM-DD` 형식입니다.")
+    if args.since and args.resume:
+        ap.error("--resume은 시작점을 되돌리지 않으므로 --since와 함께 쓸 수 없습니다.")
 
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
 
@@ -679,6 +793,11 @@ def main(argv: list[str] | None = None) -> int:
                 len(channels),
                 " (재발송)" if args.resend else "",
             )
+        if args.estimate:
+            # LLM 을 부르지 않는다. 얼마나 되는지 보고 누르라고 있는 경로다.
+            _report_estimate(store, channels, since=args.since,
+                             result_path=args.result_json)
+            return 0
         if args.dry_run:
             clients = {}
         else:
@@ -712,6 +831,13 @@ def main(argv: list[str] | None = None) -> int:
                         max_tokens=4096,
                     )
                 return response.text
+
+            if args.backfill:
+                _run_backfill(
+                    summary_review, conn, store, channels,
+                    complete=complete_summary, now=datetime.now(KST),
+                    since=args.since, rounds=args.rounds, resume=args.resume,
+                )
 
             summary_result = summary_review.run(
                 conn,

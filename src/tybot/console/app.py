@@ -235,6 +235,12 @@ class ChannelReviewJobBody(BaseModel):
     channel: str = Field(default="", max_length=80)
     # 오늘 이미 보낸 검토자에게 다시 보낸다. 운영자가 명시적으로 켠 회차만이다.
     resend: bool = False
+    # 이미 수집된 과거 원문으로 검토 후보를 소급 생성한다(B-58).
+    backfill: bool = False
+    since: str = Field(default="", max_length=10)
+    rounds: int = Field(default=0, ge=0, le=50)
+    resume: bool = False
+    estimate: bool = False
 
     def targets(self) -> list[str]:
         picked = [value for value in [*self.channels, self.channel] if value.strip()]
@@ -2751,17 +2757,32 @@ def start_channel_review_job(
             )
         targets.append((workspace, channel_id))
     try:
-        job = review_jobs.start(targets, actor=user.email, resend=body.resend)
+        job = review_jobs.start(
+            targets,
+            actor=user.email,
+            resend=body.resend,
+            backfill=body.backfill,
+            since=body.since,
+            rounds=body.rounds,
+            resume=body.resume,
+            estimate=body.estimate,
+        )
     except review_jobs.ReviewJobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     _audit_event(
         actor=user.email,
         category="review",
-        action="send-now",
+        action="backfill" if body.backfill else "send-now",
         target_type="channel",
         target_id=",".join(f"{ws}:{ch}" for ws, ch in targets),
         outcome="requested",
-        metadata={"target_count": len(targets), "resend": body.resend},
+        metadata={
+            "target_count": len(targets),
+            "resend": body.resend,
+            "backfill": body.backfill,
+            "since": body.since,
+            "estimate": body.estimate,
+        },
     )
     return {"job": job}
 

@@ -576,3 +576,33 @@ def test_deploy_doc_enables_the_timer():
 
     doc = pathlib.Path("docs/deploy/rocky8.md").read_text(encoding="utf-8")
     assert "systemctl enable --now tybot-review-dm.timer" in doc
+
+
+# --- 소급 검토 CLI (B-58) -----------------------------------------------------
+def test_backfill_settings_require_a_backfill(capsys):
+    """소급 설정만 넣고 소급을 안 켜면 조용히 평소 회차가 돈다 — 그걸 막는다."""
+    for argv in (
+        ["--force-now", "--target", "tyit:C1", "--since", "2026-06-01"],
+        ["--force-now", "--target", "tyit:C1", "--rounds", "5"],
+        ["--force-now", "--target", "tyit:C1", "--estimate"],
+    ):
+        with pytest.raises(SystemExit):
+            dr.main(argv)
+
+
+def test_backfill_needs_an_explicit_target(capsys):
+    with pytest.raises(SystemExit):
+        dr.main(["--backfill"])
+
+
+def test_a_malformed_start_day_is_refused(capsys):
+    with pytest.raises(SystemExit):
+        dr.main(["--force-now", "--backfill", "--target", "tyit:C1",
+                 "--since", "2026-6-1"])
+
+
+def test_resume_and_a_start_day_are_mutually_exclusive(capsys):
+    """이어 가기는 커서를 되돌리지 않는다. 시작일을 함께 주면 둘 중 뭘 원했는지 모른다."""
+    with pytest.raises(SystemExit):
+        dr.main(["--force-now", "--backfill", "--target", "tyit:C1",
+                 "--since", "2026-06-01", "--resume"])

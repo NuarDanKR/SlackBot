@@ -81,6 +81,14 @@ ALTER TABLE summary_review_candidate
 ALTER TABLE summary_review_candidate
     ADD COLUMN IF NOT EXISTS evidence_hash text NOT NULL DEFAULT '';
 
+-- 검토자에게 실제로 보여 준 시각 (B-58). **폐기 판정의 기준이다.**
+-- 한 회차 DM 은 후보를 최대 10건만 싣는다. 소급 검토로 200건이 쌓이면 나머지
+-- 190건은 사람 앞에 나온 적이 없는데, 예전 폐기 규칙은 「지난 회차 후보」라는
+-- 이유만으로 그것들을 승인 없이 버렸다. 보여 준 적 없는 것을 「확인 안 했다」 로
+-- 치면 소급은 시작하자마자 사라진다.
+ALTER TABLE summary_review_candidate
+    ADD COLUMN IF NOT EXISTS delivered_at timestamptz;
+
 -- 승인 요약이 가리키는 원문이 사라졌거나 좌표가 어긋난 상태 (B-56).
 -- 승인 이력을 지우지 않는다 — 검색 길잡이와 기존 승인 요약에서만 빠진다.
 ALTER TABLE approved_summary_item

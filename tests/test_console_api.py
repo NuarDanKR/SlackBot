@@ -2561,8 +2561,8 @@ def test_channel_review_job_starts_for_a_known_channel_with_reviewers(
     )
     seen = {}
 
-    def _start(targets, *, actor, resend=False):
-        seen.update(targets=list(targets), actor=actor, resend=resend)
+    def _start(targets, *, actor, resend=False, **rest):
+        seen.update(targets=list(targets), actor=actor, resend=resend, **rest)
         return {"id": "a" * 32, "status": "queued"}
 
     monkeypatch.setattr(console_app.review_jobs, "start", _start)
@@ -2602,8 +2602,8 @@ def test_channel_review_job_accepts_several_channels_at_once(client, monkeypatch
     )
     seen = {}
 
-    def _start(targets, *, actor, resend=False):
-        seen.update(targets=list(targets), resend=resend)
+    def _start(targets, *, actor, resend=False, **rest):
+        seen.update(targets=list(targets), resend=resend, **rest)
         return {"id": "a" * 32, "status": "queued"}
 
     monkeypatch.setattr(console_app.review_jobs, "start", _start)

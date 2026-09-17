@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 from unittest.mock import ANY, Mock
 
 import pytest
@@ -433,6 +434,41 @@ def test_unanswered_candidates_expire_without_becoming_approved():
     assert "state='expired'" in sql
     assert "run_date<%s" in sql
     assert "approved_summary_item" not in sql
+
+
+def test_a_candidate_never_shown_to_anyone_is_not_expired():
+    """한 회차 DM 은 10건만 싣는다. 소급으로 쌓인 나머지는 보여 준 적이 없다 —
+    「확인하지 않았다」 는 보여 준 뒤에만 할 수 있는 말이다(B-58)."""
+    conn = FakeConn([[], []])
+
+    sr.Store(conn).expire_unconfirmed("ws", "C1", date(2026, 9, 17))
+
+    sql = conn.cur.calls[0][0]
+    assert "delivered_at IS NOT NULL" in sql
+
+
+def test_delivered_candidates_are_stamped_so_expiry_has_a_basis():
+    conn = FakeConn([[]])
+
+    sr.Store(conn).mark_delivered(["11111111-1111-1111-1111-111111111111"])
+
+    sql = conn.cur.calls[0][0]
+    assert "delivered_at=now()" in sql
+    assert "delivered_at IS NULL" in sql
+
+
+def test_mark_delivered_touches_nothing_when_there_is_nothing_to_stamp():
+    conn = FakeConn([])
+
+    sr.Store(conn).mark_delivered([])
+
+    assert conn.cur.calls == []
+
+
+def test_the_schema_carries_the_delivered_stamp():
+    sql = Path("deploy/sql/summary_review_schema.sql").read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS delivered_at" in sql
 
 
 def test_expired_candidate_is_shown_as_discarded_not_approved():

@@ -160,3 +160,78 @@ def test_the_result_file_is_not_mistaken_for_another_job(tmp_path, monkeypatch):
 
     assert len(review_jobs.list_jobs()) == 1
     assert review_jobs.latest()["outcome"] == "sent"
+
+
+# --- 소급 검토 (B-58) ---------------------------------------------------------
+def test_backfill_command_carries_the_start_day_and_round_cap(tmp_path):
+    command = review_jobs._command(
+        {"targets": [{"workspace": "tyit", "channelId": "C1"}],
+         "backfill": True, "since": "2026-06-01", "rounds": 5},
+        tmp_path / "out.result",
+    )
+
+    assert "--backfill" in command
+    assert command[command.index("--since") + 1] == "2026-06-01"
+    assert command[command.index("--rounds") + 1] == "5"
+
+
+def test_backfill_estimate_does_not_run_the_generator(tmp_path):
+    command = review_jobs._command(
+        {"targets": [{"workspace": "tyit", "channelId": "C1"}],
+         "backfill": True, "estimate": True},
+        tmp_path / "out.result",
+    )
+
+    assert "--estimate" in command
+
+
+def test_backfill_settings_are_refused_without_a_backfill(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        review_jobs.subprocess,
+        "Popen",
+        lambda *a, **k: pytest.fail("must not start with stray backfill settings"),
+    )
+
+    with pytest.raises(review_jobs.ReviewJobError, match="소급"):
+        review_jobs.start([("tyit", "C1")], actor="a@b.c", since="2026-06-01")
+
+
+def test_a_command_like_start_day_is_refused(tmp_path, monkeypatch):
+    """시작일은 그대로 명령줄에 들어간다 — 형식을 먼저 막는다."""
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        review_jobs.subprocess,
+        "Popen",
+        lambda *a, **k: pytest.fail("must not start a process"),
+    )
+
+    with pytest.raises(review_jobs.ReviewJobError, match="형식"):
+        review_jobs.start(
+            [("tyit", "C1")], actor="a@b.c", backfill=True, since="--rounds=999",
+        )
+
+
+def test_an_unbounded_round_cap_is_refused(tmp_path, monkeypatch):
+    """회차마다 LLM 을 한 번 부른다. 상한이 없으면 채널 하나가 비용 한도를 다 쓴다."""
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        review_jobs.subprocess, "Popen", lambda *a, **k: pytest.fail("no process")
+    )
+
+    with pytest.raises(review_jobs.ReviewJobError, match="회차"):
+        review_jobs.start(
+            [("tyit", "C1")], actor="a@b.c", backfill=True,
+            rounds=review_jobs.MAX_ROUNDS + 1,
+        )
+
+
+def test_an_estimate_round_is_not_reported_as_nothing_sent(tmp_path, monkeypatch):
+    """분량만 센 회차를 「아무도 못 받았다」로 경고하면 매번 빨간 화면이 뜬다."""
+    saved = _run(
+        tmp_path, monkeypatch,
+        result={"sent": 0, "skipped": 0, "failed": 0, "generated": 0,
+                "canvasFallback": 0, "estimate": True, "channels": []},
+    )
+
+    assert saved["outcome"] == "estimate"

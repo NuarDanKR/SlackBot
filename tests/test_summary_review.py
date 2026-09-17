@@ -256,6 +256,7 @@ class _OutcomeStore:
         self._reviewers = reviewers
         self._already = already
         self.delivered = []
+        self.stamped = []
 
     def __call__(self, conn):
         return self
@@ -281,6 +282,9 @@ class _OutcomeStore:
     def record_delivery(self, artifact_id, recipient, **kwargs):
         if kwargs.get("state", "sent") == "sent":
             self.delivered.append(recipient)
+
+    def mark_delivered(self, candidate_ids):
+        self.stamped += list(candidate_ids)
 
 
 class _OutcomeClient:
@@ -320,11 +324,11 @@ def _outcome_run(
         resend=resend,
         force_generate=force_generate,
     )
-    return result, client
+    return result, client, store
 
 
 def test_run_says_no_candidates_instead_of_silently_finishing(monkeypatch):
-    result, client = _outcome_run(monkeypatch, rows=[], reviewers=["U1"], already=set())
+    result, client, _store = _outcome_run(monkeypatch, rows=[], reviewers=["U1"], already=set())
 
     assert result.sent == 0
     assert client.posted == []
@@ -332,7 +336,7 @@ def test_run_says_no_candidates_instead_of_silently_finishing(monkeypatch):
 
 
 def test_run_says_no_reviewer_when_nobody_is_registered(monkeypatch):
-    result, _client = _outcome_run(
+    result, _client, _store = _outcome_run(
         monkeypatch, rows=[{"id": 1}], reviewers=[], already=set()
     )
 
@@ -340,7 +344,7 @@ def test_run_says_no_reviewer_when_nobody_is_registered(monkeypatch):
 
 
 def test_run_says_already_sent_rather_than_reporting_success(monkeypatch):
-    result, client = _outcome_run(
+    result, client, _store = _outcome_run(
         monkeypatch, rows=[{"id": 1}], reviewers=["U1"], already={"U1"}
     )
 
@@ -351,7 +355,7 @@ def test_run_says_already_sent_rather_than_reporting_success(monkeypatch):
 
 def test_resend_pushes_to_a_reviewer_who_already_got_today(monkeypatch):
     """운영자가 직접 「다시 보내기」를 켠 회차에만 오늘 이력을 넘어선다."""
-    result, client = _outcome_run(
+    result, client, _store = _outcome_run(
         monkeypatch, rows=[{"id": 1}], reviewers=["U1"], already={"U1"}, resend=True
     )
 
@@ -373,7 +377,7 @@ def test_manual_run_checks_new_source_even_after_an_earlier_run_today(monkeypatc
         ) or 0,
     )
 
-    result, _client = _outcome_run(
+    result, _client, _store = _outcome_run(
         monkeypatch,
         rows=[],
         reviewers=["U1"],
@@ -395,3 +399,137 @@ def test_scheduled_run_keeps_the_once_per_day_generation_lock(monkeypatch):
     )
 
     _outcome_run(monkeypatch, rows=[], reviewers=["U1"], already=set())
+
+
+# --- 소급 검토 (B-58) ---------------------------------------------------------
+# 수집은 됐는데 검토 후보가 한 번도 안 만들어진 구간이 있었다. 최초 회차가
+# 「검토자 지정 이후」와 「최근 하루」로 두 번 좁혀지고 커서는 앞으로만 간다.
+def _line(ts, text, lineno):
+    return SimpleNamespace(ts=ts, speaker="홍길동", text=text, lineno=lineno,
+                           source_path=Path("archive.md"), message_ts="")
+
+
+def _archive(lines):
+    return SimpleNamespace(docs=lambda: [SimpleNamespace(
+        workspace="ws", channel_id="C1", raw_lines=list(lines),
+        path=Path("fallback.md"),
+    )])
+
+
+def test_a_channel_collected_before_the_reviewer_was_named_is_not_reviewable_without_backfill():
+    """이게 「수집은 됐는데 검토 DM이 안 온다」의 원인이다."""
+    archive = _archive([_line("2026-06-01 09:00", "6월 원문", 1)])
+
+    # 최초 회차 규칙: 검토자 지정 시각 이후만 본다.
+    assert sr.channel_source(archive, "ws", "C1", "", start_at="2026-09-01 00:00") == []
+    # 소급은 같은 원문을 본다.
+    got = sr.channel_source(archive, "ws", "C1", sr.backfill_watermark())
+    assert [line.text for line in got] == ["6월 원문"]
+
+
+def test_backfill_since_includes_the_named_day():
+    archive = _archive([
+        _line("2026-05-31 23:59", "전날", 1),
+        _line("2026-06-01 00:00", "그날 0시", 2),
+        _line("2026-06-02 09:00", "다음날", 3),
+    ])
+
+    got = sr.channel_source(archive, "ws", "C1", sr.backfill_watermark("2026-06-01"))
+
+    assert [line.text for line in got] == ["그날 0시", "다음날"]
+
+
+def test_backfill_estimate_counts_everything_not_one_round(monkeypatch):
+    """자른 목록으로 세면 몇 달치가 늘 「한 회차」로 보인다."""
+    monkeypatch.setattr(sr, "MAX_NEW_SOURCE_CHARS", 100)
+    lines = [_line(f"2026-06-{day:02d} 09:00", "가" * 60, day) for day in range(1, 11)]
+
+    found = sr.backfill_estimate(_archive(lines), workspace="ws", channel_id="C1")
+
+    assert found.lines == 10
+    assert found.rounds > 1
+    assert found.first_at == "2026-06-01 09:00"
+    assert found.last_at == "2026-06-10 09:00"
+
+
+class _BackfillStore:
+    """커서가 회차마다 전진하는지 보려고 실제 커서 값을 흉내 낸다."""
+
+    def __init__(self):
+        self.watermark = "2026-09-17 00:00|z"
+        self.rewound_to = None
+        self.rounds = 0
+
+    def cursor(self, workspace, channel_id):
+        return self.watermark
+
+    def rewind(self, workspace, channel_id, watermark):
+        self.rewound_to = watermark
+        self.watermark = watermark
+
+    def start_at(self, workspace, channel_id):
+        return "2026-09-01 00:00"
+
+    def approved(self, workspace, channel_id):
+        return []
+
+    def may_attempt(self, *args, **kwargs):
+        return True
+
+    def save_run(self, **kwargs):
+        self.watermark = kwargs["watermark"]
+        self.rounds += 1
+        return len(kwargs["proposals"])
+
+
+def _backfill(monkeypatch, *, lines, rounds=10, resume=False, since=""):
+    monkeypatch.setattr(sr, "MAX_NEW_SOURCE_CHARS", 90)
+    store = _BackfillStore()
+    done = sr.backfill_channel(
+        store, _archive(lines), workspace="ws", channel_id="C1", channel_name="#채널",
+        complete=lambda *_: json.dumps({"candidates": []}),
+        now=datetime(2026, 9, 17, tzinfo=sr.KST),
+        since=since, max_rounds=rounds, resume=resume,
+    )
+    return store, done
+
+
+def test_backfill_walks_the_whole_history_in_rounds(monkeypatch):
+    lines = [_line(f"2026-06-{day:02d} 09:00", "가" * 50, day) for day in range(1, 8)]
+
+    store, done = _backfill(monkeypatch, lines=lines)
+
+    assert store.rewound_to == sr.EPOCH_WATERMARK
+    assert done.rounds > 1
+    assert done.exhausted
+    # 마지막 줄까지 읽었다 — 커서가 그 줄을 가리킨다.
+    assert store.watermark.startswith("2026-06-07 09:00")
+
+
+def test_backfill_stops_at_the_round_cap_and_says_it_is_not_done(monkeypatch):
+    """회차마다 LLM 을 한 번 부른다. 무제한이면 채널 하나가 비용 한도를 다 쓴다."""
+    lines = [_line(f"2026-06-{day:02d} 09:00", "가" * 50, day) for day in range(1, 20)]
+
+    _store, done = _backfill(monkeypatch, lines=lines, rounds=2)
+
+    assert done.rounds == 2
+    assert not done.exhausted
+
+
+def test_backfill_resume_does_not_rewind_the_cursor(monkeypatch):
+    """되돌리기는 「이미 본 구간을 다시 본다」다. 이어 가기는 그걸 하지 않는다."""
+    lines = [_line("2026-06-01 09:00", "6월 원문", 1)]
+
+    store, _done = _backfill(monkeypatch, lines=lines, resume=True)
+
+    assert store.rewound_to is None
+
+
+def test_a_delivered_candidate_is_stamped_through_the_real_send_path(monkeypatch):
+    """폐기는 이 기록만 보고 판단한다. 배선이 빠지면 보여 준 후보가 영원히 안 죽는다."""
+    result, _client, store = _outcome_run(
+        monkeypatch, rows=[{"id": "cand-1"}], reviewers=["U1"], already=set()
+    )
+
+    assert result.sent == 1
+    assert store.stamped == ["cand-1"]

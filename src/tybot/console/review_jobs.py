@@ -22,6 +22,10 @@ _CHANNEL_RE = re.compile(r"^[A-Z][A-Z0-9]+$")
 # 한 번에 도는 채널 수. Canvas 생성과 LLM 호출이 채널마다 붙으므로 무제한이면
 # 작업 하나가 몇 시간을 잡는다.
 MAX_TARGETS = 20
+# 소급 회차 상한. 회차마다 LLM 을 한 번 부른다 — 무제한이면 채널 하나가 일일
+# 비용 한도를 다 쓴다. 실행기 쪽 상한과 같은 값이어야 한다.
+MAX_ROUNDS = 50
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class ReviewJobError(RuntimeError):
@@ -112,10 +116,21 @@ def _targets(raw) -> list[tuple[str, str]]:
     return list(dict.fromkeys(out))
 
 
-def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False) -> dict:
+def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False,
+          backfill: bool = False, since: str = "", rounds: int = 0,
+          resume: bool = False, estimate: bool = False) -> dict:
     pairs = _targets([{"workspace": ws, "channelId": ch} for ws, ch in targets])
     if len(pairs) > MAX_TARGETS:
         raise ReviewJobError(f"한 번에 최대 {MAX_TARGETS}개 채널까지 실행합니다.")
+    since = (since or "").strip()
+    if since and not _DATE_RE.fullmatch(since):
+        raise ReviewJobError("소급 시작일은 `YYYY-MM-DD` 형식입니다.")
+    if (since or rounds or resume or estimate) and not backfill:
+        raise ReviewJobError("소급 설정은 소급 실행에서만 씁니다.")
+    if since and resume:
+        raise ReviewJobError("이어 가기는 시작점을 되돌리지 않으므로 시작일과 함께 쓸 수 없습니다.")
+    if rounds and not 1 <= int(rounds) <= MAX_ROUNDS:
+        raise ReviewJobError(f"소급 회차는 1에서 {MAX_ROUNDS} 사이입니다.")
     with _START_LOCK:
         active = next((row for row in list_jobs() if row.get("status") in ACTIVE), None)
         if active:
@@ -130,6 +145,11 @@ def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False) -
             "workspace": pairs[0][0],
             "channelId": pairs[0][1],
             "resend": bool(resend),
+            "backfill": bool(backfill),
+            "since": since,
+            "rounds": int(rounds or 0),
+            "resume": bool(resume),
+            "estimate": bool(estimate),
             "createdAt": datetime.now(UTC).isoformat(),
             "startedAt": None,
             "finishedAt": None,
@@ -171,6 +191,22 @@ def _command(job: dict, result_path: Path) -> list[str]:
         command += ["--target", f"{workspace}:{channel_id}"]
     if job.get("resend"):
         command.append("--resend")
+    if job.get("backfill"):
+        command.append("--backfill")
+        since = str(job.get("since") or "")
+        if since:
+            if not _DATE_RE.fullmatch(since):
+                raise ReviewJobError("저장된 소급 시작일 형식이 올바르지 않습니다.")
+            command += ["--since", since]
+        rounds = int(job.get("rounds") or 0)
+        if rounds:
+            if not 1 <= rounds <= MAX_ROUNDS:
+                raise ReviewJobError("저장된 소급 회차가 허용 범위를 벗어났습니다.")
+            command += ["--rounds", str(rounds)]
+        if job.get("resume"):
+            command.append("--resume")
+        if job.get("estimate"):
+            command.append("--estimate")
     command += ["--result-json", str(result_path)]
     return command
 
@@ -182,6 +218,9 @@ def _outcome(result: dict | None) -> str:
     """
     if not result:
         return "unknown"
+    if result.get("estimate"):
+        # 분량만 센 회차다. 「안 보냈다」 로 경고하면 매번 빨간 화면이 뜬다.
+        return "estimate"
     if int(result.get("sent") or 0) <= 0:
         return "nothing-sent"
     if int(result.get("failed") or 0) > 0:
