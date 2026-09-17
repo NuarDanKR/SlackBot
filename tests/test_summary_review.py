@@ -148,6 +148,53 @@ def test_first_generation_only_looks_back_one_day():
     ) == 0
 
 
+def test_manual_generation_bypasses_the_failed_digest_backoff():
+    class FakeStore:
+        conn = SimpleNamespace(rollback=lambda: None)
+
+        def cursor(self, *_):
+            return ""
+
+        def start_at(self, *_):
+            return "2026-09-15 00:00"
+
+        def may_attempt(self, *_):
+            return False
+
+        def approved(self, *_):
+            return []
+
+        def save_run(self, **kwargs):
+            return len(kwargs["proposals"])
+
+    line = SimpleNamespace(
+        ts="2026-09-16 09:00",
+        speaker="홍길동",
+        text="공정률은 62.5%입니다",
+        lineno=1,
+        source_path=Path("2026-09-16.md"),
+        message_ts="1757980800.000001",
+    )
+    archive = SimpleNamespace(docs=lambda: [SimpleNamespace(
+        workspace="ws", channel_id="C1", raw_lines=[line], path=Path("fallback.md")
+    )])
+    proposal = json.dumps({"candidates": [{
+        "kind": "number_or_schedule",
+        "current_text": "",
+        "proposed_text": line.text,
+        "evidence_quote": line.text,
+    }]})
+
+    got = sr.generate_channel(
+        FakeStore(), archive, workspace="ws", channel_id="C1", channel_name="#채널",
+        complete=lambda *_: proposal,
+        now=sr.datetime(2026, 9, 17, tzinfo=sr.KST),
+        force=True,
+    )
+
+    assert got == 1
+
+
 def test_channel_source_is_scoped_and_never_reads_bot_lines():
     human = SimpleNamespace(ts="2026-09-15 09:00", speaker="홍길동", text="사람 원문",
                             lineno=10, source_path=Path("2026-09-15.md"))
@@ -248,7 +295,9 @@ class _OutcomeClient:
         return {"ts": "1.0"}
 
 
-def _outcome_run(monkeypatch, *, rows, reviewers, already, resend=False):
+def _outcome_run(
+    monkeypatch, *, rows, reviewers, already, resend=False, force_generate=False
+):
     from types import SimpleNamespace
 
     from tybot import summary_review as sr
@@ -269,6 +318,7 @@ def _outcome_run(monkeypatch, *, rows, reviewers, already, resend=False):
         complete=lambda *a, **k: "",
         now=datetime(2026, 9, 17, 18, 0, tzinfo=sr.KST),
         resend=resend,
+        force_generate=force_generate,
     )
     return result, client
 
@@ -308,3 +358,40 @@ def test_resend_pushes_to_a_reviewer_who_already_got_today(monkeypatch):
     assert result.sent == 1
     assert client.posted == ["DU1"]
     assert [row.code for row in result.outcomes] == ["sent"]
+
+
+def test_manual_run_checks_new_source_even_after_an_earlier_run_today(monkeypatch):
+    """수동 버튼 뒤 새 대화가 생겼다면 `generated_on` 때문에 놓치면 안 된다."""
+    from tybot import summary_review as sr
+
+    called = []
+    monkeypatch.setattr(
+        sr,
+        "generate_channel",
+        lambda *args, **kwargs: called.append(
+            (kwargs["channel_id"], kwargs["force"])
+        ) or 0,
+    )
+
+    result, _client = _outcome_run(
+        monkeypatch,
+        rows=[],
+        reviewers=["U1"],
+        already=set(),
+        force_generate=True,
+    )
+
+    assert called == [("C1", True)]
+    assert [row.code for row in result.outcomes] == ["no-candidates"]
+
+
+def test_scheduled_run_keeps_the_once_per_day_generation_lock(monkeypatch):
+    from tybot import summary_review as sr
+
+    monkeypatch.setattr(
+        sr,
+        "generate_channel",
+        lambda *args, **kwargs: pytest.fail("scheduled run regenerated today's source"),
+    )
+
+    _outcome_run(monkeypatch, rows=[], reviewers=["U1"], already=set())

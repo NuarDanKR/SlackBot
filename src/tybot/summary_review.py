@@ -1138,7 +1138,8 @@ def channel_source(archive, workspace: str, channel_id: str, watermark: str,
 
 
 def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
-                     channel_name: str, complete, now: datetime) -> int:
+                     channel_name: str, complete, now: datetime,
+                     force: bool = False) -> int:
     watermark = store.cursor(workspace, channel_id)
     configured_at = store.start_at(workspace, channel_id)
     if not watermark:
@@ -1151,7 +1152,10 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
     if not source:
         return 0
     digest = source_digest(source)
-    if not store.may_attempt(workspace, channel_id, digest, now):
+    # 예약 실행은 같은 실패 입력을 한 시간 뒤에 재시도한다. 콘솔에서 사람이 직접
+    # 누른 즉시 실행은 그 백오프도 우회한다 — 장애를 고친 직후 확인하려고 누른
+    # 버튼이 이전 실패 시각 때문에 아무 일도 하지 않으면 원인을 다시 숨긴다.
+    if not force and not store.may_attempt(workspace, channel_id, digest, now):
         return 0
     try:
         approved = store.approved(workspace, channel_id)
@@ -1403,7 +1407,8 @@ def _canvas_failure(exc: Exception) -> tuple[str, str]:
 
 
 def run(conn, clients: dict, *, archive, channels, complete, owners=None,
-        now: datetime | None = None, resend: bool = False) -> RunResult:
+        now: datetime | None = None, resend: bool = False,
+        force_generate: bool = False) -> RunResult:
     """설정 시각이 지난 채널의 후보를 만들고 **검토자에게** 민다.
 
     `owners` 는 더 이상 수신자를 만들지 않는다. 호출부 호환으로만 남긴다 —
@@ -1413,6 +1418,10 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
     `resend` 는 **운영자가 콘솔에서 직접 누른 회차에만** 쓴다. 오늘 이미 보낸
     검토자에게 같은 회차를 다시 민다 — 타이머가 이걸 켜면 하루 종일 같은 DM 이
     간다. 후보 자체가 없으면 재발송도 보낼 것이 없다.
+
+    `force_generate` 는 수동 실행에서만 오늘의 생성 잠금을 우회한다. 원문 워터마크는
+    그대로 쓰므로 이미 처리한 대화를 다시 요약하지 않고, 마지막 처리 뒤 새로 수집된
+    원문만 후보 생성기에 보낸다.
     """
     del owners
     from .daily_review import due
@@ -1432,10 +1441,11 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
             result.expired += db.expire_unconfirmed(
                 workspace, channel_id, on
             )
-            if not db.generated_on(workspace, channel_id, on):
+            if force_generate or not db.generated_on(workspace, channel_id, on):
                 result.generated += generate_channel(
                     db, archive, workspace=workspace, channel_id=channel_id,
                     channel_name=channel_name, complete=complete, now=now,
+                    force=force_generate,
                 )
             rows = db.pending(workspace, channel_id, on)
         except Exception as exc:  # noqa: BLE001 - 한 채널 실패로 다음 채널을 막지 않는다

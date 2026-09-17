@@ -721,6 +721,9 @@ def main(argv: list[str] | None = None) -> int:
                 owners=owners,
                 complete=complete_summary,
                 resend=args.resend,
+                # 콘솔의 즉시 실행은 오늘 이미 생성기를 돌렸더라도 워터마크 이후
+                # 새 원문을 다시 확인한다. 예약 실행은 하루 한 번 잠금을 유지한다.
+                force_generate=args.force_now,
             )
 
     if args.result_json:
@@ -741,6 +744,16 @@ def main(argv: list[str] | None = None) -> int:
             summary_result.canvas_ambiguous,
             summary_result.expired,
         )
+        for outcome in summary_result.outcomes:
+            logger.info(
+                "요약 검토 채널 ws=%s ch=%s result=%s sent=%d skipped=%d failed=%d",
+                outcome.workspace,
+                outcome.channel_id,
+                outcome.code,
+                outcome.sent,
+                outcome.skipped,
+                outcome.failed,
+            )
     return 0
 
 

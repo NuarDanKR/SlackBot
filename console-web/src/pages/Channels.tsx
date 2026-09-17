@@ -525,7 +525,7 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
 
       <Section
         title="요약 검토 DM"
-        lead="선택한 채널의 예약 시각을 기다리지 않고 검토 Canvas와 DM 생성을 실행합니다. 실행이 끝나면 채널마다 실제로 보냈는지를 함께 보여 줍니다."
+        lead="선택한 채널의 예약 시각과 당일 생성 잠금을 우회해, 마지막 처리 이후 새 원문으로 검토 Canvas와 DM 생성을 실행합니다. 새 원문이나 검토 후보가 없으면 DM은 보내지 않고 사유를 표시합니다."
       >
         <div className="toolbar">
           <button
