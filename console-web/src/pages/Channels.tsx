@@ -88,6 +88,8 @@ interface ReviewChannelResult {
   channelName: string
   code: string
   reason: string
+  /** 사유를 뒷받침하는 수치. 로그를 열지 않아도 판단할 수 있게 합니다. */
+  detail?: string
   sent: number
   skipped: number
   failed: number
@@ -577,7 +579,7 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
 
       <Section
         title="요약 검토 DM"
-        lead="선택한 채널의 예약 시각과 당일 생성 잠금을 우회해, 마지막 처리 이후 새 원문으로 검토 Canvas와 DM 생성을 실행합니다. 새 원문이나 검토 후보가 없으면 DM은 보내지 않고 사유를 표시합니다."
+        lead="선택한 채널의 예약 시각과 당일 생성 잠금을 우회해 검토 Canvas와 DM 생성을 실행합니다. 「지금 발송」은 마지막 처리 이후 새 원문만 보고, 이미 수집된 과거 원문은 「소급 검토」로 읽습니다. 보낼 것이 없으면 DM 대신 사유를 표시합니다."
       >
         <div className="toolbar">
           <button
@@ -606,6 +608,50 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
           )}
           {selected.size === 0 && <span className="note">채널을 하나 이상 선택하세요.</span>}
         </div>
+        <div className="toolbar">
+          <label className="field">
+            소급 시작일
+            <input
+              type="date"
+              value={backfillSince}
+              onChange={(event) => setBackfillSince(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            소급 회차 상한
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={backfillRounds}
+              onChange={(event) => setBackfillRounds(Number(event.target.value) || 1)}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn"
+            disabled={reviewBusy || reviewJobActive || reviewTargets.length === 0}
+            onClick={() => startBackfill(true)}
+          >
+            소급 대상 분량 먼저 세기
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={reviewBusy || reviewJobActive || reviewTargets.length === 0}
+            onClick={() => startBackfill(false)}
+          >
+            선택 채널 {reviewTargets.length}개 소급 검토 실행
+          </button>
+        </div>
+        <p className="note">
+          「지금 발송」은 <strong>마지막 처리 이후 새 원문</strong>만 봅니다. 봇이 들어오기
+          전에 오간 대화나 과거 전체 수집으로 넣은 자료는 거기에 들어가지 않습니다 —
+          그건 <strong>소급 검토</strong>가 읽습니다. 시작일을 비우면 아카이브 처음부터입니다.
+          회차마다 LLM을 한 번 부르므로 먼저 분량을 세어 보고 실행하세요. 회차 상한에 걸려
+          끝나지 않으면 다시 실행할 때 멈춘 지점부터 이어 갑니다. 만들어진 후보는 검토
+          DM으로 한 회차에 10건씩 나갑니다.
+        </p>
         {reviewJob && (
           <div
             className={`notice ${
@@ -648,6 +694,7 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                       {row.code === 'estimate' && row.lines ? (
                         <span className="mono"> ({row.firstAt} ~ {row.lastAt})</span>
                       ) : null}
+                      {row.detail ? <span className="mono"> · {row.detail}</span> : null}
                     </li>
                   ))}
                 </ul>
@@ -661,53 +708,6 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
         {reviewJobResource.error && (
           <p className="note warn">작업 상태를 읽지 못했습니다: {reviewJobResource.error.message}</p>
         )}
-      </Section>
-
-      <Section
-        title="소급 검토"
-        lead="이미 수집된 과거 원문으로 검토 후보를 만듭니다. 최초 회차는 검토자를 지정한 이후의 최근 하루만 보고, 그 뒤로는 앞으로만 갑니다 — 과거 전체 수집으로 넣은 자료는 그래서 한 번도 검토 대상이 되지 못합니다."
-      >
-        <div className="toolbar">
-          <label className="field">
-            시작일
-            <input
-              type="date"
-              value={backfillSince}
-              onChange={(event) => setBackfillSince(event.target.value)}
-            />
-          </label>
-          <label className="field">
-            회차 상한
-            <input
-              type="number"
-              min={1}
-              max={50}
-              value={backfillRounds}
-              onChange={(event) => setBackfillRounds(Number(event.target.value) || 1)}
-            />
-          </label>
-          <button
-            type="button"
-            className="btn"
-            disabled={reviewBusy || reviewJobActive || reviewTargets.length === 0}
-            onClick={() => startBackfill(true)}
-          >
-            대상 분량 먼저 세기
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={reviewBusy || reviewJobActive || reviewTargets.length === 0}
-            onClick={() => startBackfill(false)}
-          >
-            선택 채널 {reviewTargets.length}개 소급 검토 실행
-          </button>
-        </div>
-        <p className="note">
-          시작일을 비우면 아카이브 처음부터 읽습니다. 회차마다 LLM을 한 번 부르므로 먼저
-          분량을 세어 보고 실행하세요. 회차 상한에 걸려 끝나지 않으면 다시 실행할 때 멈춘
-          지점부터 이어 갑니다. 만들어진 후보는 검토 DM으로 한 회차에 10건씩 나갑니다.
-        </p>
       </Section>
 
       <Section

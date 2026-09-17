@@ -386,7 +386,8 @@ def test_manual_run_checks_new_source_even_after_an_earlier_run_today(monkeypatc
     )
 
     assert called == [("C1", True)]
-    assert [row.code for row in result.outcomes] == ["no-candidates"]
+    # 읽을 원문이 없었다는 뜻이다. 「후보가 없다」 로 뭉치면 소급이 답인지 모른다.
+    assert [row.code for row in result.outcomes] == ["no-new-source"]
 
 
 def test_scheduled_run_keeps_the_once_per_day_generation_lock(monkeypatch):
@@ -533,3 +534,100 @@ def test_a_delivered_candidate_is_stamped_through_the_real_send_path(monkeypatch
 
     assert result.sent == 1
     assert store.stamped == ["cand-1"]
+
+
+# --- 「새 후보가 없다」를 셋으로 가른다 (2026-09-17) ---------------------------
+def test_no_new_source_says_backfill_is_the_answer():
+    stats = sr.GenerateStats(lines=0)
+
+    assert sr._empty_reason(stats) == sr.OUTCOME_NO_SOURCE
+    assert "소급" in sr.OUTCOME_LABELS[sr.OUTCOME_NO_SOURCE]
+
+
+def test_source_read_but_nothing_passed_verification_is_a_different_reason():
+    """소급해도 결과가 같다 — 원문은 읽었는데 대조에서 다 떨어진 것이다."""
+    stats = sr.GenerateStats(lines=120, proposed=4, accepted=0)
+
+    assert sr._empty_reason(stats) == sr.OUTCOME_NO_ACCEPTED
+    assert sr._empty_detail(stats) == "원문 120줄 · 요약기 제안 4건 · 대조 통과 0건"
+
+
+def test_a_skipped_generation_keeps_the_plain_reason():
+    assert sr._empty_reason(None) == sr.OUTCOME_NO_CANDIDATES
+    assert sr._empty_detail(None) == ""
+
+
+def test_the_real_run_reports_why_nothing_was_generated(monkeypatch):
+    """배선 확인 — 통계가 run() 까지 오지 않으면 화면은 다시 한 문장만 보인다."""
+    def _generate(*args, **kwargs):
+        stats = kwargs["stats"]
+        stats.lines, stats.proposed, stats.accepted = 90, 3, 0
+        return 0
+
+    monkeypatch.setattr(sr, "generate_channel", _generate)
+    result, _client, _store = _outcome_run(
+        monkeypatch, rows=[], reviewers=["U1"], already=set(), force_generate=True,
+    )
+
+    assert [row.code for row in result.outcomes] == ["no-accepted-candidate"]
+    assert result.outcomes[0].as_dict()["detail"] == "원문 90줄 · 요약기 제안 3건 · 대조 통과 0건"
+
+
+def test_parse_proposals_reports_how_many_it_threw_away():
+    stats = sr.GenerateStats()
+    raw = json.dumps({"candidates": [
+        {"kind": "new_issue", "current_text": "", "proposed_text": "원문에 없는 문장",
+         "evidence_quote": "원문에 없는 문장"},
+        {"kind": "number_or_schedule", "current_text": "",
+         "proposed_text": "공사기간은 2026-09-01부터 2026-12-31까지입니다",
+         "evidence_quote": "공사기간은 2026-09-01부터 2026-12-31까지입니다"},
+    ]})
+
+    got = sr.parse_proposals(raw, _source(), stats=stats)
+
+    assert stats.proposed == 2
+    assert stats.accepted == len(got) == 1
+
+
+def test_generate_channel_fills_the_stats_it_was_given():
+    """배선 확인 — `parse_proposals` 까지 통계가 가지 않으면 화면은 다시 침묵한다."""
+    class FakeStore:
+        conn = SimpleNamespace(rollback=lambda: None)
+
+        def cursor(self, *_):
+            return ""
+
+        def start_at(self, *_):
+            return "2026-09-15 00:00"
+
+        def may_attempt(self, *_):
+            return True
+
+        def approved(self, *_):
+            return []
+
+        def save_run(self, **kwargs):
+            return len(kwargs["proposals"])
+
+    line = SimpleNamespace(ts="2026-09-16 09:00", speaker="홍길동",
+                           text="공정률은 62.5%입니다", lineno=1,
+                           source_path=Path("2026-09-16.md"), message_ts="")
+    archive = SimpleNamespace(docs=lambda: [SimpleNamespace(
+        workspace="ws", channel_id="C1", raw_lines=[line], path=Path("f.md"))])
+    raw = json.dumps({"candidates": [
+        {"kind": "number_or_schedule", "current_text": "",
+         "proposed_text": line.text, "evidence_quote": line.text},
+        {"kind": "new_issue", "current_text": "",
+         "proposed_text": "원문에 없는 문장", "evidence_quote": "원문에 없는 문장"},
+    ]})
+    stats = sr.GenerateStats()
+
+    sr.generate_channel(
+        FakeStore(), archive, workspace="ws", channel_id="C1", channel_name="#채널",
+        complete=lambda *_: raw, now=datetime(2026, 9, 17, tzinfo=sr.KST),
+        force=True, stats=stats,
+    )
+
+    assert stats.lines == 1
+    assert stats.proposed == 2
+    assert stats.accepted == 1

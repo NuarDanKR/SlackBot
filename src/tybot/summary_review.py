@@ -122,8 +122,23 @@ def _numbers(value: str) -> set[str]:
     return set(_number_values(value))
 
 
+@dataclass
+class GenerateStats:
+    """이번 회차가 **무엇을 보고 무엇을 버렸는가.**
+
+    「오늘 검토할 새 후보가 없습니다」 한 문장으로는 두 가지가 구별되지 않는다.
+    읽을 원문이 아예 없었으면 소급 검토가 답이고, 원문은 읽었는데 요약기가 낸
+    후보가 원문 대조에서 전부 떨어졌으면 소급해도 결과는 같다 — 조치가 다르다.
+    """
+
+    lines: int = 0
+    proposed: int = 0
+    accepted: int = 0
+
+
 def parse_proposals(raw: str, source: list[SourceLine],
-                    approved: list[str] | None = None) -> list[Proposal]:
+                    approved: list[str] | None = None,
+                    stats: GenerateStats | None = None) -> list[Proposal]:
     """모델 JSON을 읽고 모든 근거·수치를 원문과 다시 대조한다."""
     body = (raw or "").strip()
     if body.startswith("```json") and body.endswith("```"):
@@ -135,6 +150,8 @@ def parse_proposals(raw: str, source: list[SourceLine],
     rows = payload.get("candidates") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise SummaryReviewError("Hermes 후보 목록이 없습니다.")
+    if stats is not None:
+        stats.proposed = len(rows)
     source_norm = [(_normalized(line.text), line) for line in source]
     accepted: list[Proposal] = []
     approved_norm = {_normalized(item) for item in (approved or [])}
@@ -177,6 +194,8 @@ def parse_proposals(raw: str, source: list[SourceLine],
             evidence_message_ts=matched.message_ts,
             evidence_hash=_evidence_hash(matched),
         ))
+    if stats is not None:
+        stats.accepted = len(accepted)
     return accepted
 
 
@@ -1285,7 +1304,8 @@ def backfill_channel(store: Store, archive, *, workspace: str, channel_id: str,
 
 def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
                      channel_name: str, complete, now: datetime,
-                     force: bool = False) -> int:
+                     force: bool = False,
+                     stats: GenerateStats | None = None) -> int:
     watermark = store.cursor(workspace, channel_id)
     configured_at = store.start_at(workspace, channel_id)
     if not watermark:
@@ -1297,6 +1317,8 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
     )
     if not source:
         return 0
+    if stats is not None:
+        stats.lines = len(source)
     digest = source_digest(source)
     # 예약 실행은 같은 실패 입력을 한 시간 뒤에 재시도한다. 콘솔에서 사람이 직접
     # 누른 즉시 실행은 그 백오프도 우회한다 — 장애를 고친 직후 확인하려고 누른
@@ -1310,7 +1332,7 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
             prompt_input(approved=approved, source=source),
             workspace,
         )
-        proposals = parse_proposals(raw, source, approved)
+        proposals = parse_proposals(raw, source, approved, stats=stats)
     except Exception:
         with contextlib.suppress(Exception):
             store.conn.rollback()
@@ -1355,6 +1377,11 @@ def _mark_sent(conn, *, workspace: str, channel_id: str, recipient: str,
 OUTCOME_SENT = "sent"
 OUTCOME_GENERATE_FAILED = "generate-failed"
 OUTCOME_NO_CANDIDATES = "no-candidates"
+# 「새 후보가 없다」 를 셋으로 가른다. 조치가 서로 다르기 때문이다 — 원문이 없으면
+# 소급 검토, 원문은 읽었는데 다 떨어졌으면 소급해도 같은 결과, 이미 다 결정했으면
+# 할 일이 없다.
+OUTCOME_NO_SOURCE = "no-new-source"
+OUTCOME_NO_ACCEPTED = "no-accepted-candidate"
 OUTCOME_NO_CLIENT = "no-client"
 OUTCOME_NO_REVIEWER = "no-reviewer"
 OUTCOME_ALREADY_SENT = "already-sent"
@@ -1364,11 +1391,32 @@ OUTCOME_LABELS = {
     OUTCOME_SENT: "검토 DM 발송",
     OUTCOME_GENERATE_FAILED: "요약 후보를 만들지 못했습니다",
     OUTCOME_NO_CANDIDATES: "오늘 검토할 새 후보가 없습니다",
+    OUTCOME_NO_SOURCE: "마지막 처리 이후 새로 읽을 원문이 없습니다 — 과거 자료는 소급 검토로 읽습니다",
+    OUTCOME_NO_ACCEPTED: "원문은 읽었지만 원문 대조를 통과한 후보가 없습니다",
     OUTCOME_NO_CLIENT: "이 워크스페이스의 Slack 토큰이 없습니다",
     OUTCOME_NO_REVIEWER: "활성 검토자가 없습니다",
     OUTCOME_ALREADY_SENT: "오늘 이미 보낸 검토자뿐입니다",
     OUTCOME_DM_FAILED: "DM 발송이 실패했습니다",
 }
+
+
+def _empty_reason(stats: GenerateStats | None) -> str:
+    """후보가 0건인 이유. **셋을 한 문장으로 뭉치지 않는다.**"""
+    if stats is None:
+        # 오늘 이미 생성했고 그 후보는 모두 결정됐다. 새로 만들 것이 없다.
+        return OUTCOME_NO_CANDIDATES
+    if not stats.lines:
+        return OUTCOME_NO_SOURCE
+    if not stats.accepted:
+        return OUTCOME_NO_ACCEPTED
+    # 만들긴 했는데 대기 목록이 비었다 = 같은 후보가 이미 있었다(중복 차단).
+    return OUTCOME_NO_CANDIDATES
+
+
+def _empty_detail(stats: GenerateStats | None) -> str:
+    if stats is None or not stats.lines:
+        return ""
+    return f"원문 {stats.lines}줄 · 요약기 제안 {stats.proposed}건 · 대조 통과 {stats.accepted}건"
 
 
 @dataclass
@@ -1382,6 +1430,8 @@ class ChannelOutcome:
     sent: int = 0
     skipped: int = 0
     failed: int = 0
+    # 사유를 뒷받침하는 수치. 운영자가 로그를 열지 않아도 판단할 수 있어야 한다.
+    detail: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -1390,6 +1440,7 @@ class ChannelOutcome:
             "channelName": self.channel_name,
             "code": self.code,
             "reason": OUTCOME_LABELS.get(self.code, self.code),
+            "detail": self.detail,
             "sent": self.sent,
             "skipped": self.skipped,
             "failed": self.failed,
@@ -1587,11 +1638,13 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
             result.expired += db.expire_unconfirmed(
                 workspace, channel_id, on
             )
+            stats = None
             if force_generate or not db.generated_on(workspace, channel_id, on):
+                stats = GenerateStats()
                 result.generated += generate_channel(
                     db, archive, workspace=workspace, channel_id=channel_id,
                     channel_name=channel_name, complete=complete, now=now,
-                    force=force_generate,
+                    force=force_generate, stats=stats,
                 )
             rows = db.pending(workspace, channel_id, on)
         except Exception as exc:  # noqa: BLE001 - 한 채널 실패로 다음 채널을 막지 않는다
@@ -1608,7 +1661,8 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         if not rows:
             result.skipped += 1
             outcome.skipped += 1
-            outcome.code = OUTCOME_NO_CANDIDATES
+            outcome.code = _empty_reason(stats)
+            outcome.detail = _empty_detail(stats)
             continue
         client = clients.get(workspace)
         if client is None:
