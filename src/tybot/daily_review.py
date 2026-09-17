@@ -646,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
         # 실패하는데도 「잘 보내지고 있다」 로 보인다(B-50).
         logger.info(
             "요약 검토 generated=%d sent=%d skipped=%d failed=%d "
-            "canvas=%d fallback=%d ambiguous=%d",
+            "canvas=%d fallback=%d ambiguous=%d expired=%d",
             summary_result.generated,
             summary_result.sent,
             summary_result.skipped,
@@ -654,6 +654,7 @@ def main(argv: list[str] | None = None) -> int:
             summary_result.canvas_created,
             summary_result.canvas_fallback,
             summary_result.canvas_ambiguous,
+            summary_result.expired,
         )
     return 0
 

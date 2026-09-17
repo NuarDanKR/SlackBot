@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS summary_review_candidate (
     CONSTRAINT summary_review_candidate_kind
         CHECK (kind IN ('number_or_schedule', 'new_issue', 'closed_issue')),
     CONSTRAINT summary_review_candidate_state
-        CHECK (state IN ('pending', 'approved', 'rejected', 'deferred', 'superseded')),
+        CHECK (state IN ('pending', 'approved', 'rejected', 'deferred', 'expired', 'superseded')),
     CONSTRAINT summary_review_candidate_unique
         UNIQUE (workspace, channel_id, source_digest, kind, proposed_text)
 );
@@ -61,6 +61,14 @@ CREATE TABLE IF NOT EXISTS approved_summary_item (
 CREATE INDEX IF NOT EXISTS approved_summary_channel
     ON approved_summary_item (workspace, channel_id, approved_at DESC)
     WHERE superseded_at IS NULL;
+
+-- 기존 설치의 CHECK 제약도 갱신한다. `CREATE TABLE IF NOT EXISTS`만 바꾸면 이미
+-- 만들어진 서버는 `expired`를 계속 거부한다.
+ALTER TABLE summary_review_candidate
+    DROP CONSTRAINT IF EXISTS summary_review_candidate_state;
+ALTER TABLE summary_review_candidate
+    ADD CONSTRAINT summary_review_candidate_state
+    CHECK (state IN ('pending', 'approved', 'rejected', 'deferred', 'expired', 'superseded'));
 
 DO $$
 BEGIN

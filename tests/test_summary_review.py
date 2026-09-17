@@ -98,7 +98,7 @@ def test_numeric_candidates_are_first_and_show_values_to_verify():
         block["text"]["text"] for block in blocks if block["type"] == "section"
     ]
 
-    assert "숫자·금액·비율·날짜 확인 1건" in sections[0]
+    assert "숫자·금액·비율·날짜 포함 1건" in sections[0]
     assert "*확인할 값* `62.5%` · `1,200억원`" in sections[1]
     assert "신규 쟁점" in sections[2]
 
@@ -119,6 +119,13 @@ def test_prompt_budget_does_not_cut_new_originals():
     body = sr.prompt_input(approved=["가" * (sr.MAX_APPROVED_CHARS + 100)], source=source)
     assert "중요 원문" in body
     assert len(body) <= sr.MAX_SOURCE_CHARS
+
+
+def test_contract_asks_for_non_numeric_daily_context_too():
+    prompt = sr.contract_prompt()
+    assert "진행 상황" in prompt
+    assert "후속 조치" in prompt
+    assert "숫자가 없는" in prompt
 
 
 def test_first_generation_only_looks_back_one_day():
@@ -159,3 +166,4 @@ def test_schema_keeps_approved_summaries_out_of_raw_archive():
     assert "raw_line" not in sql
     assert "sent.recipient=%s" in Path("src/tybot/summary_review.py").read_text(encoding="utf-8")
     assert "enable --now tybot-review-dm.timer" in Path("deploy/update.sh").read_text(encoding="utf-8")
+    assert "'expired'" in sql

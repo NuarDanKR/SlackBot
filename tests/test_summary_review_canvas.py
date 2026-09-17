@@ -116,8 +116,17 @@ def test_canvas_marks_the_projection_as_not_yet_approved():
         channel_label="#전산팀장보고", review_date=date(2026, 9, 16),
         rows=[_row()], approved=["기존 문장"],
     )
-    assert "검토 전 예상 요약본" in body
+    assert "오늘 수집 내용 요약 (검토 전)" in body
     assert "아직 승인된" in body
+
+
+def test_canvas_has_a_channel_source_link():
+    body = sr.canvas_markdown(
+        channel_label="#ch", channel_id="C123", review_date=date(2026, 9, 16),
+        rows=[_row()], approved=[],
+    )
+    assert "https://slack.com/archives/C123" in body
+    assert "출처 링크" in body
 
 
 def test_canvas_numbers_come_from_the_candidate_not_from_a_model():
@@ -370,6 +379,8 @@ def test_approve_all_skips_what_someone_else_already_decided():
         (["pending", "pending"], "ready"),
         (["approved", "pending"], "partial"),
         (["approved", "rejected"], "completed"),
+        (["expired", "expired"], "expired"),
+        (["approved", "expired"], "completed"),
         # 보류는 결정이 아니다. 하나라도 있으면 완료가 아니다(§7).
         (["approved", "deferred"], "partial"),
     ],
@@ -378,11 +389,41 @@ def test_round_state_is_computed_from_its_candidates(states, expected):
     total = len(states)
     decided = sum(s in ("approved", "rejected") for s in states)
     deferred = sum(s == "deferred" for s in states)
-    conn = FakeConn([{"total": total, "decided": decided, "deferred": deferred}])
+    expired = sum(s == "expired" for s in states)
+    conn = FakeConn([{
+        "total": total, "decided": decided, "deferred": deferred,
+        "expired": expired,
+    }])
 
     assert sr.Store(conn).refresh_artifact_state(
         "11111111-1111-1111-1111-111111111111"
     ) == expected
+
+
+def test_unanswered_candidates_expire_without_becoming_approved():
+    conn = FakeConn([
+        [{"id": "C1"}],  # UPDATE ... RETURNING
+        [],                # 연결된 열린 Artifact 없음
+    ])
+
+    count = sr.Store(conn).expire_unconfirmed("ws", "C1", date(2026, 9, 17))
+
+    assert count == 1
+    sql = conn.cur.calls[0][0]
+    assert "state='expired'" in sql
+    assert "run_date<%s" in sql
+    assert "approved_summary_item" not in sql
+
+
+def test_expired_candidate_is_shown_as_discarded_not_approved():
+    rows = [_row(state="expired", decided_by="system:expired")]
+    blocks = sr.canvas_review_blocks(
+        channel_label="#ch", review_date=date(2026, 9, 16),
+        permalink="https://slack/canvas", artifact_id="A1", rows=rows,
+    )
+    rendered = json.dumps(sr._with_decisions(blocks, rows), ensure_ascii=False)
+    assert "미응답 폐기" in rendered
+    assert "맞음" not in rendered
 
 
 def test_recipients_are_reviewers_only():

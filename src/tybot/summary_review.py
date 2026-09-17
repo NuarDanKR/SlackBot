@@ -1,6 +1,7 @@
-"""Hermes 요약 후보 생성, 검토 DM, 승인 상태 전이.
+"""Hermes 일일 요약 후보 생성, 검토 Canvas·DM, 승인 상태 전이.
 
-후보와 승인본은 파생 DB에만 둔다. 원문 아카이브와 답변 검색에는 넣지 않는다.
+후보와 승인본은 파생 DB에만 둔다. 승인본은 검색 길잡이로 사용할 수 있지만 사실
+답변에는 연결된 원문을 현재 권한으로 다시 열어 사용해야 한다.
 """
 from __future__ import annotations
 
@@ -29,8 +30,10 @@ REJECT_CALLBACK = "tybot_summary_review_reject_modal"
 #
 # 렌더러 버전은 `content_hash` 에 들어간다. 렌더 규칙이 바뀌면 같은 후보라도 다른
 # 문서가 되므로, 버전을 안 섞으면 「같은 회차인데 내용이 다른」 Canvas 가 생긴다.
-RENDERER_VERSION = 1
-ARTIFACT_STATES = ("creating", "ready", "partial", "completed", "failed", "ambiguous")
+RENDERER_VERSION = 2
+ARTIFACT_STATES = (
+    "creating", "ready", "partial", "completed", "expired", "failed", "ambiguous",
+)
 # 반려 모달의 「틀린 부분」. **필수 선택**이다 — 무엇이 틀렸는지 분류가 없으면
 # 나중에 같은 실수를 세어 볼 수가 없다.
 WRONG_PARTS = (
@@ -284,6 +287,40 @@ class Store:
             )
             return list(cur.fetchall())
 
+    def expire_unconfirmed(self, workspace: str, channel_id: str, on: date) -> int:
+        """지난 회차에서 확인하지 않은 후보를 승인 없이 폐기한다.
+
+        보류한 후보는 약속한 날 한 번 더 보여 주고, 그날도 결정하지 않았을 때
+        다음 검토일에 폐기한다. 폐기 후보는 `approved_summary_item`에 들어가지 않는다.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """UPDATE summary_review_candidate SET state='expired', decided_at=now(),
+                decided_by='system:expired', correction='', defer_until=NULL
+                WHERE workspace=%s AND channel_id=%s AND run_date<%s
+                AND (state='pending' OR (state='deferred' AND defer_until<%s))
+                RETURNING id""",
+                (workspace, channel_id, on, on),
+            )
+            expired = list(cur.fetchall())
+            if not expired:
+                self.conn.commit()
+                return 0
+            cur.execute(
+                """SELECT DISTINCT a.id FROM summary_review_artifact a
+                JOIN summary_review_artifact_candidate m ON m.artifact_id=a.id
+                JOIN summary_review_candidate c ON c.id=m.candidate_id
+                WHERE a.workspace=%s AND a.channel_id=%s AND c.state='expired'
+                AND a.state NOT IN ('failed','ambiguous','completed','expired')""",
+                (workspace, channel_id),
+            )
+            artifacts = list(cur.fetchall())
+        self.conn.commit()
+        for row in artifacts:
+            key = row.get("id") if isinstance(row, dict) else row[0]
+            self.refresh_artifact_state(str(key))
+        return len(expired)
+
     # --- Canvas 회차 (B-50) ---------------------------------------------------
     def reviewer_recipients(self, workspace: str, channel_id: str) -> list[str]:
         """이 회차를 받을 사람. **검토자만.**
@@ -477,7 +514,8 @@ class Store:
             cur.execute(
                 """SELECT count(*) AS total,
                 count(*) FILTER (WHERE c.state IN ('approved','rejected')) AS decided,
-                count(*) FILTER (WHERE c.state='deferred') AS deferred
+                count(*) FILTER (WHERE c.state='deferred') AS deferred,
+                count(*) FILTER (WHERE c.state='expired') AS expired
                 FROM summary_review_artifact_candidate m
                 JOIN summary_review_candidate c ON c.id=m.candidate_id
                 WHERE m.artifact_id=%s""",
@@ -488,15 +526,19 @@ class Store:
             total = int((get("total") if get else row[0]) or 0)
             decided = int((get("decided") if get else row[1]) or 0)
             deferred = int((get("deferred") if get else row[2]) or 0)
-            if not total or not decided:
-                state = "ready"
-            elif decided == total and not deferred:
+            expired = int((get("expired") if get else row[3]) or 0)
+            if total and expired == total:
+                state = "expired"
+            elif total and decided + expired == total and not deferred:
                 state = "completed"
+            elif not total or (not decided and not expired):
+                state = "ready"
             else:
                 state = "partial"
             cur.execute(
                 """UPDATE summary_review_artifact SET state=%s,
-                decided_at=CASE WHEN %s='completed' THEN now() ELSE decided_at END
+                decided_at=CASE WHEN %s IN ('completed','expired') THEN now()
+                ELSE decided_at END
                 WHERE id=%s AND state NOT IN ('failed','ambiguous')""",
                 (state, state, key),
             )
@@ -611,8 +653,8 @@ def candidate_blocks(channel_name: str, rows: list[dict]) -> list[dict]:
         str(row.get("kind") or "") == "number_or_schedule" for row in rows
     )
     heading = (
-        f"*{channel_name} - 요약 검토 {len(rows)}건*\n"
-        f"숫자·금액·비율·날짜 확인 {numeric_count}건 · 나머지 쟁점 "
+        f"*{channel_name} - 오늘 수집 내용 요약 검토 {len(rows)}건*\n"
+        f"숫자·금액·비율·날짜 포함 {numeric_count}건 · 일반 핵심 내용 "
         f"{len(rows) - numeric_count}건\n"
         "특히 숫자는 후보와 근거 원문이 한 자리까지 같은지 확인해 주세요."
     )
@@ -639,7 +681,9 @@ def candidate_blocks(channel_name: str, rows: list[dict]) -> list[dict]:
                 {"type": "button", "action_id": ACTION_DEFER, "text": {"type": "plain_text", "text": "나중에"}, "value": cid},
             ]},
         ])
-    out.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "승인 요약은 파생 문서이며 원문이나 답변 검색 근거를 변경하지 않습니다."}]})
+    out.append({"type": "context", "elements": [{"type": "mrkdwn", "text":
+        "응답하지 않은 항목은 다음 검토일에 폐기됩니다. 승인 요약은 검색 길잡이이며 "
+        "답변 출처는 연결된 원문입니다."}]})
     return out
 
 
@@ -747,7 +791,8 @@ def _cell(value) -> str:
 
 
 def canvas_markdown(
-    *, channel_label: str, review_date: date, rows: list[dict], approved: list[str]
+    *, channel_label: str, review_date: date, rows: list[dict], approved: list[str],
+    channel_id: str = "",
 ) -> str:
     """검토용 Canvas 본문. Disclaimer 는 `canvas_answer.markdown()` 이 붙인다.
 
@@ -757,16 +802,21 @@ def canvas_markdown(
     ordered = ordered_rows(rows)
     numeric = sum(str(row.get("kind") or "") == "number_or_schedule" for row in ordered)
     parts = [
-        f"## {channel_label} · {review_date} 요약 검토",
-        f"후보 {len(ordered)}건 — 숫자·일정 {numeric}건 · 나머지 쟁점 {len(ordered) - numeric}건",
+        f"## {channel_label} · {review_date} 일일 요약 검토",
+        f"요약 항목 {len(ordered)}건 — 숫자·일정 포함 {numeric}건 · 일반 핵심 내용 {len(ordered) - numeric}건",
         "",
-        "## 검토 전 예상 요약본",
+        "## 오늘 수집 내용 요약 (검토 전)",
         "",
-        "> 아래는 **이번 후보를 모두 반영했다고 가정한** 모습입니다. 아직 승인된"
-        " 문서가 아니며, DM 에서 결정한 후보만 실제로 반영됩니다.",
+        "> 오늘 수집된 사람의 채팅과 변환 완료 첨부에서 뽑은 핵심 내용입니다. 아직"
+        " 승인된 문서가 아니며, DM에서 승인한 항목만 파생 요약에 반영됩니다.",
         "",
     ]
-    parts += [f"- {line}" for line in projected_summary(approved, ordered)] or ["- (없음)"]
+    parts += [f"- {_cell(row.get('proposed_text'))}" for row in ordered] or ["- (없음)"]
+
+    projected = projected_summary(approved, ordered)
+    if approved:
+        parts += ["", "## 승인 반영 후 누적 요약 (예상)", ""]
+        parts += [f"- {line}" for line in projected]
 
     table = _numbers_table(ordered)
     if table:
@@ -782,7 +832,10 @@ def canvas_markdown(
             if row in rest
         ]
 
-    parts += ["", "## 후보별 근거 원문", ""]
+    parts += ["", "## 항목별 근거 원문", ""]
+    source_url = f"https://slack.com/archives/{channel_id}" if channel_id else ""
+    if source_url:
+        parts += [f"[Slack 채널 원문 열기]({source_url})", ""]
     for index, row in enumerate(ordered, start=1):
         parts.append(f"### {index}. {KIND_LABELS.get(str(row.get('kind')), '요약')}")
         if row.get("current_text"):
@@ -791,6 +844,8 @@ def canvas_markdown(
         parts.append(
             f"- 근거: {_cell(row.get('evidence_author'))} · {_cell(row.get('evidence_at'))}"
         )
+        if source_url:
+            parts.append(f"- 출처 링크: [채널에서 원문 확인]({source_url})")
         # **검증을 통과한 인용만** 싣는다. 첨부에서 뽑은 문장이라도 XML·OCR 덤프를
         # 그대로 옮기지 않는다 — 그건 근거가 아니라 원본의 사본이다.
         parts.append(f"> {_cell(row.get('evidence_quote'))}")
@@ -801,7 +856,8 @@ def canvas_markdown(
         "",
         "- 이 문서는 읽기용입니다. 결정은 TYBot DM 의 버튼에서 합니다.",
         "- 후보 하나가 부분적으로만 맞아도 **틀리다** 로 처리하고 올바른 전체 문장을 적어 주세요.",
-        "- 승인 요약은 파생 문서이며 원문이나 답변 검색 근거를 바꾸지 않습니다.",
+        "- 응답하지 않은 항목은 다음 검토일에 폐기되며 승인 요약에 반영되지 않습니다.",
+        "- 승인 요약은 검색 길잡이로만 사용하며 실제 답변은 연결된 원문을 다시 확인합니다.",
     ]
     return "\n".join(parts)
 
@@ -818,8 +874,9 @@ def canvas_review_blocks(
     ordered = ordered_rows(rows)
     numeric = sum(str(row.get("kind") or "") == "number_or_schedule" for row in ordered)
     head = (
-        f"*{channel_label} · {review_date} 요약 검토 {len(ordered)}건*\n"
-        f"숫자 확인 {numeric}건 · 일반 쟁점 {len(ordered) - numeric}건"
+        f"*{channel_label} · {review_date} 오늘 수집 내용 요약 {len(ordered)}건*\n"
+        f"숫자 포함 {numeric}건 · 일반 핵심 내용 {len(ordered) - numeric}건\n"
+        "Canvas에서 요약과 출처를 읽고 항목별로 확인해 주세요."
     )
     out: list[dict] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": head}},
@@ -847,7 +904,7 @@ def canvas_review_blocks(
             ]},
         ])
     out.append({"type": "context", "elements": [{"type": "mrkdwn",
-        "text": "승인 요약은 파생 문서이며 원문이나 답변 검색 근거를 변경하지 않습니다."}]})
+        "text": "미응답 항목은 다음 검토일에 폐기됩니다. 틀리면 정정사항을 입력해 주세요."}]})
     return out
 
 
@@ -863,6 +920,7 @@ DECISION_LABELS = {
     "approved": "맞음",
     "rejected": "수정 필요",
     "deferred": "내일 다시 확인",
+    "expired": "미응답 폐기",
 }
 
 
@@ -1104,6 +1162,7 @@ class RunResult:
     canvas_created: int = 0
     canvas_fallback: int = 0
     canvas_ambiguous: int = 0
+    expired: int = 0
 
 
 def _canvas_round(
@@ -1123,7 +1182,7 @@ def _canvas_round(
         body_hash = content_hash(approved, rows)
         body = canvas_markdown(
             channel_label=channel_label, review_date=review_date,
-            rows=rows, approved=approved,
+            rows=rows, approved=approved, channel_id=channel_id,
         )
     except AmbiguousProjection as exc:
         # 예상본을 확정할 수 없다. **그려서 보여 주지 않는다** — 바뀌지 않을 문장이
@@ -1265,6 +1324,9 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         if not due(send_at, now):
             continue
         try:
+            result.expired += db.expire_unconfirmed(
+                workspace, channel_id, on
+            )
             if not db.generated_on(workspace, channel_id, on):
                 result.generated += generate_channel(
                     db, archive, workspace=workspace, channel_id=channel_id,

@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS summary_review_artifact (
     ready_at         timestamptz,
     decided_at       timestamptz,
     CONSTRAINT summary_review_artifact_state
-        CHECK (state IN ('creating', 'ready', 'partial', 'completed', 'failed', 'ambiguous')),
+        CHECK (state IN ('creating', 'ready', 'partial', 'completed', 'expired', 'failed', 'ambiguous')),
     -- 같은 회차를 두 번 만들지 않는다. 재실행의 멱등성이 이 제약 하나에 걸려 있다.
     CONSTRAINT summary_review_artifact_round
         UNIQUE (workspace, channel_id, review_date, source_digest)
@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS summary_review_delivery (
 
 CREATE INDEX IF NOT EXISTS summary_review_delivery_recipient
     ON summary_review_delivery (recipient, state);
+
+ALTER TABLE summary_review_artifact
+    DROP CONSTRAINT IF EXISTS summary_review_artifact_state;
+ALTER TABLE summary_review_artifact
+    ADD CONSTRAINT summary_review_artifact_state
+    CHECK (state IN ('creating', 'ready', 'partial', 'completed', 'expired', 'failed', 'ambiguous'));
 
 DO $$
 BEGIN
