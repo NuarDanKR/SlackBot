@@ -76,6 +76,7 @@ KIND_MAP = {
     "out_of_scope": SYSTEM,
     "ingest": WRITE,
     "ingest_all": WRITE,
+    "feedback": WRITE,
 }
 
 # 작업 종류 → 기본 능력. LLM 이 다른 능력을 제안할 수 있지만, 제안이 없거나

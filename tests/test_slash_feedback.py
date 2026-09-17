@@ -100,6 +100,22 @@ def test_reply_states_the_report_is_not_used_as_evidence(tmp_path):
     assert "아카이브에 저장되지 않으며" in reply
 
 
+def test_natural_language_feedback_uses_the_same_log(tmp_path):
+    bot = _bot(tmp_path)
+    rec = _answered(bot, question="ESG 최신 자료 알려줘")
+
+    reply = bot._record_natural_feedback(
+        user_id="U1",
+        channel_id="C1",
+        text="과거 자료보다 최신 자료를 먼저 가져오는 게 좋겠어요",
+    )
+
+    (event,) = _events(tmp_path)
+    assert event["qa_record_id"] == rec.record_id
+    assert event["text"].startswith("과거 자료보다")
+    assert "피드백으로 판단" in reply
+
+
 def test_last_answer_lookup_ignores_other_channels(tmp_path):
     bot = _bot(tmp_path)
     _answered(bot, channel_id="C-OTHER")

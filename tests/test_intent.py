@@ -99,6 +99,7 @@ def test_no_router_uses_rules():
         ("사용법 알려줘", "help"),
         ("이번주 진행 상황", "summary"),
         ("김해외동 기성금 얼마야?", "search"),
+        ("과거 자료를 가져오는데 최신 자료를 가져오는 게 좋겠어", "feedback"),
     ],
 )
 def test_rule_fallback_covers_common_phrasing(text, kind):

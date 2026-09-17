@@ -1468,6 +1468,15 @@ class WorkspaceBot:
         linked = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if record_id and asked else ""
         return feedback_thanks("correction", linked=linked)
 
+    def _record_natural_feedback(
+        self, *, user_id: str, channel_id: str, text: str
+    ) -> str:
+        """일반 문장으로 준 TYBot 개선 의견도 `/피드백`과 같은 원장에 남긴다."""
+        recorded = self._record_slash_feedback(
+            user_id=user_id, channel_id=channel_id, text=text
+        )
+        return "요청 내용을 TYBot 답변 품질 피드백으로 판단했습니다.\n" + recorded
+
     def _handle_correction(self, event: dict, say) -> bool:
         text = correction_text(_clean(event.get("text", "")))
         if text is None:
@@ -2699,7 +2708,11 @@ class WorkspaceBot:
                 decision_id=decision_id,
                 required_capability=(ans.required_capability if ans else ""),
                 # 업무 답변의 **최종 주체**. 비어 있으면 전문 봇이 답하지 못한 것이다.
-                final_responder=(ans.specialist if ans and ans.specialist else "none"),
+                final_responder=(
+                    "master-interim"
+                    if ans and ans.master_interim
+                    else (ans.specialist if ans and ans.specialist else "none")
+                ),
                 attempted_specialists=(
                     list(ans.attempted_specialists) if ans else []
                 ),
@@ -2749,6 +2762,19 @@ class WorkspaceBot:
         dropped = len(tasks) - MAX_TASKS if len(tasks) > MAX_TASKS else 0
         tasks = tasks[:MAX_TASKS]
         first = tasks[0]
+
+        # 자연어 피드백도 `/피드백`과 같은 append-only 원장으로 보낸다. 사용자가
+        # 명령어를 기억하지 못했다는 이유로 아카이브 검색 질문으로 처리하지 않는다.
+        if first.kind == "feedback":
+            finish(
+                self._record_natural_feedback(
+                    user_id=user_id, channel_id=channel_id, text=text
+                ),
+                intent=first,
+                ans=None,
+                ctx=None,
+            )
+            return
 
         # 쓰기 동작은 **단독으로만** 실행한다. 무엇을 실행하는지 모호하면 실행하지 않는다.
         if first.kind in WRITE_KINDS:
@@ -2822,7 +2848,9 @@ class WorkspaceBot:
                     "task_kind": master_task.kind,
                     "required_capability": master_task.required_capability,
                     "routing_confidence": master_task.routing_confidence,
-                    "final_responder": ans.specialist or "none",
+                    "final_responder": (
+                        "master-interim" if ans.master_interim else ans.specialist or "none"
+                    ),
                     "attempted_specialists": list(ans.attempted_specialists),
                     "result": ans.reason,
                     "error_code": ans.specialist_error_code,

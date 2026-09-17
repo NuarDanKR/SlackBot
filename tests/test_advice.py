@@ -10,6 +10,7 @@ from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity
 from tybot.gateway.cost import CostGuard
 from tybot.gateway.router import Router
 from tybot.intent import Intent, classify_by_rule
+from tybot.specialist_router import SpecialistAnswer
 
 DOC = """---
 workspace: pilot
@@ -102,6 +103,26 @@ def test_respond_routes_advice(engine):
     ans = eng.respond("채널 하나로 묶는 게 나을까?", _ctx(), Intent("advice", terms=["채널"]))
     assert ans.reason == "advice"
     assert fake.calls  # 판단 요청은 답을 만든다(예전엔 도움말로 새거나 거절됐다)
+
+
+def test_hermes_facts_receive_a_labelled_interim_master_comment(engine):
+    eng, fake = engine
+    eng._specialist = lambda *args, **kwargs: SpecialistAnswer(
+        "Hermes가 원문 사실을 요약했습니다.", "hermes", "claude-sonnet-5", 0.002
+    )
+
+    ans = eng.advise(
+        "두 구성안 중 어느 방향이 나을까?",
+        _ctx(),
+        terms=["워크스페이스", "구성"],
+    )
+
+    assert "Hermes가 원문 사실을 요약" in ans.text
+    assert "TYBot 임시 판단·조언" in ans.text
+    assert "판단 전문봇 도입 전" in ans.text
+    assert ans.master_interim is True
+    assert ans.specialist == "hermes"
+    assert "1안" in fake.calls[-1][1].content
 
 
 @pytest.mark.parametrize(

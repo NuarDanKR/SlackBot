@@ -80,6 +80,19 @@ ADVICE_PROMPT = """너는 태영건설 사내 Slack 아카이브 봇 'TYBot'이�
 • 판단의 전제나 확인이 필요한 사항이 있으면 한 줄로 덧붙인다.
 한국어, 간결하게. 출처 줄은 시스템이 붙이므로 쓰지 않는다."""
 
+INTERIM_ADVICE_PROMPT = """너는 TYBot 마스터다. 판단 전문 봇이 도입되기 전까지
+사용자의 판단·조언 요청에 **임시 코멘트만** 작성한다.
+
+규칙:
+1. 사내 사실은 <원문>에 있는 것만 사용한다. 숫자·날짜·조직·현장 상태를 추측하지 않는다.
+2. 원문 사실과 일반적인 판단을 분리한다. 일반 원칙은 반드시 판단 또는 제안으로 표현한다.
+3. 사용자가 요청한 판단, 위험, 다음 확인사항에 직접 답한다.
+4. 법률·세무·안전·외부 최신정보를 확정적으로 판단하지 않는다. 전문 검토 필요성을 밝힌다.
+5. Hermes 답변을 다시 요약하지 않는다. 3~7개의 간결한 bullet로 코멘트만 쓴다.
+6. Slack mrkdwn 형식으로 쓰고 출처 줄은 만들지 않는다.
+
+출력은 코멘트 본문만 작성한다."""
+
 MODEL_FLAG_RE = re.compile(r"--model=([A-Za-z0-9._\-]+)")
 # 아카이브 범위 자체를 묻는 표현. 분류기가 out_of_scope 로 잘못 보내도 여기서 되돌린다.
 ARCHIVE_SCOPE_RE = re.compile(
@@ -179,6 +192,9 @@ class Answer:
     required_capability: str = ""
     format_retry_count: int = 0
     guardrail_result: str = ""
+    # 판단 전문 봇 도입 전 마스터가 같은 원문 범위로 조언만 덧붙였는가.
+    # 감사 기록의 최종 응답 주체를 `master-interim` 으로 남기는 표식이다.
+    master_interim: bool = False
 
     @property
     def doc_count(self) -> int:
@@ -1273,15 +1289,54 @@ class AnswerEngine:
             if special is not None:
                 citations = _specialist_citations(special, hits, ctx)
                 citations += _attachment_source_links(hits)
+                text = special.text
+                model_name = special.model
+                cost_usd = special.cost_usd
+                master_interim = False
+                # Hermes는 사내 근거를 읽는 전문 봇이다. 별도 판단 전문 봇이
+                # 등록되기 전까지만, 마스터가 **같은 권한 필터 원문**으로 조언을
+                # 덧붙인다. 외부 사실이나 Hermes 답변을 근거로 삼지 않는다.
+                if special.specialist == "hermes":
+                    evidence = (
+                        f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n"
+                        if hits else "<원문>\n(관련 원문 없음)\n</원문>\n\n"
+                    )
+                    try:
+                        comment = self._router.complete(
+                            [
+                                Message("system", INTERIM_ADVICE_PROMPT),
+                                Message("user", f"{evidence}질문: {q}"),
+                            ],
+                            model=model,
+                            sensitivity=self._sensitivity,
+                            max_tokens=1000,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - Hermes 요약은 보존한다
+                        logger.warning("마스터 임시 판단 생성 실패: %s", exc)
+                    else:
+                        body = (comment.text or "").strip()
+                        if body:
+                            label = (
+                                "아래 코멘트는 판단 전문봇 도입 전 TYBot 마스터가 "
+                                "작성한 임시 판단입니다."
+                            )
+                            text = (
+                                f"{special.text.rstrip()}\n\n"
+                                f"*TYBot 임시 판단·조언*\n_{label}_\n\n{body}"
+                            )
+                            model_name = comment.model
+                            cost_usd += comment.cost_usd
+                            master_interim = True
                 logger.info(
-                    "advice ok(전문가) ws=%s specialist=%s hits=%d",
+                    "advice ok(전문가%s) ws=%s specialist=%s hits=%d",
+                    "+master-interim" if master_interim else "",
                     ctx.workspace, special.specialist, len(hits),
                 )
                 return Answer(
-                    special.text,
+                    text,
                     citations,
-                    special.model,
-                    special.cost_usd,
+                    model_name,
+                    cost_usd,
                     len(hits),
                     "advice",
                     terms=list(terms or []),
@@ -1295,6 +1350,7 @@ class AnswerEngine:
                     ),
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
+                    master_interim=master_interim,
                 )
             return self._unavailable(outcome, hits=len(hits), terms=terms, task=task)
 

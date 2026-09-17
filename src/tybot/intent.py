@@ -24,7 +24,7 @@ CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
 
 KINDS = (
     "status", "help", "summary", "search", "advice", "smalltalk", "out_of_scope",
-    "ingest", "ingest_all", "memory",
+    "ingest", "ingest_all", "memory", "feedback",
 )
 
 CLASSIFIER_PROMPT = """너는 사내 Slack 아카이브 봇의 **라우터**다. 질문에 답하지 말고 분류만 한다.
@@ -42,6 +42,9 @@ kind 를 하나 고른다:
   주의: 봇의 연결·가동 상태(status)와 다르다. '기억·이전 답변·대화 맥락'을 묻는 것만 memory 다.
 - help: **봇 자신의** 사용법·명령어·기능을 묻는 질문 (예: "뭘 할 수 있어?", "명령어 알려줘")
   주의: 업무 방식에 대한 조언 요청은 help 가 아니라 advice 다
+- feedback: TYBot의 이전 답변·검색 방식·근거 선택이 틀렸거나 개선되어야 한다는 의견
+  (예: "과거 자료 말고 최신 자료를 가져오는 게 좋겠어", "방금 답변은 다른 현장 내용이야")
+  주의: 업무 자체의 개선 방향을 묻는 질문은 advice 다. TYBot 동작에 대한 의견만 feedback 이다.
 - summary: 특정 키워드가 아니라 **범위 전체의 내용·진행 상황**을 알고 싶은 질문
   (예: "요약해줘", "이번주 어땠어", "무슨 일 있었어", "프로젝트 어디까지 갔어",
    "다른 워크스페이스 내용 알려줘", "어떤 자료 있어?")
@@ -128,6 +131,10 @@ ADVICE_RE = re.compile(
     r"(추천|권장|의견|조언|어느\s*(쪽|방향|게)|어떤\s*(쪽|방향|방법)|"
     r"좋을까|나을까|낫나|낫니|낫을까|장단점|비교해|괜찮을까|문제\s*(될|있을|생길)|"
     r"어떻게\s*(하는\s*게|해야|가는\s*게)|바람직)"
+)
+FEEDBACK_RE = re.compile(
+    r"((답변|검색|근거|자료).{0,35}(틀|잘못|엉뚱|누락|못\s*찾|개선|최신|과거)|"
+    r"(과거\s*(자료|것|내용).{0,30}(가져오|말하)|최신\s*(자료|것|내용).{0,30}(가져오|찾)))"
 )
 SUMMARY_RE = re.compile(
     # `종합` 은 여러 문서를 묶어 달라는 요청이다. 없으면 그런 질문이 search 로 새고,
@@ -337,7 +344,7 @@ ARCHIVE_KINDS = ("summary", "search", "advice")
 # 봇 자신에 대한 답변. 사실은 코드가 만들고 문장은 LLM 이 쓴다(compose.py).
 SELF_KINDS = ("status", "help", "memory", "smalltalk", "out_of_scope")
 # 쓰기 동작. 절대 다른 의도와 섞지 않는다 - 무엇을 실행하는지 모호하면 실행하지 않는다.
-WRITE_KINDS = ("ingest", "ingest_all")
+WRITE_KINDS = ("ingest", "ingest_all", "feedback")
 
 
 def parse_period(text: str, *, default: int = DEFAULT_DAYS) -> int:
@@ -389,6 +396,8 @@ def classify_by_rule(text: str) -> Intent:
         return Intent("help", source="regex", asks_about_our_sources=True)
     if STATUS_RE.search(text):
         return Intent("status", source="regex")
+    if FEEDBACK_RE.search(text):
+        return Intent("feedback", source="regex")
     if INGEST_ALL_RE.search(text):
         return Intent("ingest_all", source="regex")
     if INGEST_RE.search(text):

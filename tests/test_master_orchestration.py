@@ -331,7 +331,12 @@ def test_a_successful_business_answer_always_names_its_specialist(tmp_path, kind
 
     assert answer.specialist == "hermes"
     assert answer.attempted_specialists == ["hermes"]
-    assert provider.calls == [], "마스터가 업무 답변을 만들었다"
+    if kind == "advice":
+        assert len(provider.calls) == 1
+        assert answer.master_interim is True
+        assert "TYBot 임시 판단·조언" in answer.text
+    else:
+        assert provider.calls == [], "마스터가 업무 답변을 만들었다"
 
 
 # =============================================================================
