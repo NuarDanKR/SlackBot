@@ -119,7 +119,7 @@ def _targets(raw) -> list[tuple[str, str]]:
 def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False,
           backfill: bool = False, since: str = "", rounds: int = 0,
           resume: bool = False, estimate: bool = False,
-          deliver_only: bool = False) -> dict:
+          deliver_only: bool = False, generate_only: bool = False) -> dict:
     pairs = _targets([{"workspace": ws, "channelId": ch} for ws, ch in targets])
     if len(pairs) > MAX_TARGETS:
         raise ReviewJobError(f"한 번에 최대 {MAX_TARGETS}개 채널까지 실행합니다.")
@@ -132,6 +132,10 @@ def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False,
         raise ReviewJobError("이어 가기는 시작점을 되돌리지 않으므로 시작일과 함께 쓸 수 없습니다.")
     if deliver_only and backfill:
         raise ReviewJobError("다시 보내기는 후보를 만들지 않으므로 소급 검토와 함께 쓸 수 없습니다.")
+    if generate_only and deliver_only:
+        raise ReviewJobError("후보만 만들기와 다시 보내기는 정반대 동작입니다.")
+    if generate_only and resend:
+        raise ReviewJobError("후보만 만들기는 아무것도 보내지 않으므로 재발송을 쓰지 않습니다.")
     if rounds and not 1 <= int(rounds) <= MAX_ROUNDS:
         raise ReviewJobError(f"소급 회차는 1에서 {MAX_ROUNDS} 사이입니다.")
     with _START_LOCK:
@@ -150,6 +154,7 @@ def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False,
             "resend": bool(resend),
             "backfill": bool(backfill),
             "deliverOnly": bool(deliver_only),
+            "generateOnly": bool(generate_only),
             "since": since,
             "rounds": int(rounds or 0),
             "resume": bool(resume),
@@ -197,6 +202,8 @@ def _command(job: dict, result_path: Path) -> list[str]:
         command.append("--resend")
     if job.get("deliverOnly"):
         command.append("--deliver-only")
+    if job.get("generateOnly"):
+        command.append("--generate-only")
     if job.get("backfill"):
         command.append("--backfill")
         since = str(job.get("since") or "")
@@ -227,6 +234,9 @@ def _outcome(result: dict | None) -> str:
     if result.get("estimate"):
         # 분량만 센 회차다. 「안 보냈다」 로 경고하면 매번 빨간 화면이 뜬다.
         return "estimate"
+    if result.get("generateOnly"):
+        # 후보만 만든 회차다. 보낸 것이 없지만 실패도 아니다.
+        return "generated"
     if int(result.get("sent") or 0) <= 0:
         return "nothing-sent"
     if int(result.get("failed") or 0) > 0:

@@ -2691,3 +2691,57 @@ def test_channel_api_is_registered_before_the_static_frontend(tmp_path, monkeypa
         if getattr(route, "name", None) == "console"
     )
     assert channel_index < frontend_index
+
+
+def test_generate_only_runs_for_a_channel_without_reviewers(client, monkeypatch):
+    """검토자 지정은 채널마다 업무 협의라 몇 주가 걸린다. 그동안 후보 생성까지
+    멈춰 있을 이유가 없다 — 생성은 사람에게 아무것도 보내지 않는다(B-62)."""
+    from tybot.console.channel_admin import ChannelRow
+
+    _channel_rows(
+        monkeypatch,
+        rows=[
+            ChannelRow(
+                workspace="tyit",
+                workspace_label="전산팀",
+                channel_id="C1",
+                channel="#주간보고",
+                reviewers=[],
+            )
+        ],
+    )
+    seen = {}
+
+    def _start(targets, *, actor, **rest):
+        seen.update(targets=list(targets), **rest)
+        return {"id": "a" * 32, "status": "queued"}
+
+    monkeypatch.setattr(console_app.review_jobs, "start", _start)
+    response = client.post(
+        "/api/channels/review-jobs",
+        json={"channels": ["tyit:C1"], "generateOnly": True},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 202
+    assert seen["targets"] == [("tyit", "C1")]
+    assert seen["generate_only"] is True
+
+
+def test_sending_still_requires_a_reviewer(client, monkeypatch):
+    """후보 생성만 열어 준 것이다. 보내는 회차의 권한 경계는 그대로다."""
+    _channel_rows(monkeypatch)
+    monkeypatch.setattr(
+        console_app.review_jobs,
+        "start",
+        lambda *args, **kwargs: pytest.fail("must not send without a reviewer"),
+    )
+
+    response = client.post(
+        "/api/channels/review-jobs",
+        json={"channels": ["tyit:C1"], "generateOnly": False},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 422
+    assert "검토자" in response.json()["detail"]

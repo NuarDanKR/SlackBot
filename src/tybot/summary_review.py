@@ -1550,6 +1550,9 @@ OUTCOME_NO_CANDIDATES = "no-candidates"
 # 할 일이 없다.
 OUTCOME_NO_SOURCE = "no-new-source"
 OUTCOME_NOTHING_PENDING = "nothing-pending"
+# 검토자 지정을 기다리지 않고 후보만 미리 만든 회차(B-62). 보낸 것이 없지만
+# 실패도 아니다 — 이걸 「아무도 못 받았다」 로 경고하면 매번 빨간 화면이 뜬다.
+OUTCOME_GENERATED_ONLY = "generated-only"
 OUTCOME_NO_ACCEPTED = "no-accepted-candidate"
 OUTCOME_NO_CLIENT = "no-client"
 OUTCOME_NO_REVIEWER = "no-reviewer"
@@ -1563,6 +1566,7 @@ OUTCOME_LABELS = {
     OUTCOME_NO_SOURCE: "마지막 처리 이후 새로 읽을 원문이 없습니다 — 과거 자료는 소급 검토로 읽습니다",
     OUTCOME_NO_ACCEPTED: "원문은 읽었지만 원문 대조를 통과한 후보가 없습니다",
     OUTCOME_NOTHING_PENDING: "다시 보낼 대기 후보가 없습니다",
+    OUTCOME_GENERATED_ONLY: "후보만 만들어 두었습니다 — 검토자가 지정되면 DM 이 나갑니다",
     OUTCOME_NO_CLIENT: "이 워크스페이스의 Slack 토큰이 없습니다",
     OUTCOME_NO_REVIEWER: "활성 검토자가 없습니다",
     OUTCOME_ALREADY_SENT: "오늘 이미 보낸 검토자뿐입니다",
@@ -1826,7 +1830,8 @@ def _canvas_failure(exc: Exception) -> tuple[str, str]:
 
 def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         now: datetime | None = None, resend: bool = False,
-        force_generate: bool = False, deliver_only: bool = False) -> RunResult:
+        force_generate: bool = False, deliver_only: bool = False,
+        generate_only: bool = False) -> RunResult:
     """설정 시각이 지난 채널의 후보를 만들고 **검토자에게** 민다.
 
     `owners` 는 더 이상 수신자를 만들지 않는다. 호출부 호환으로만 남긴다 —
@@ -1844,6 +1849,11 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
     `deliver_only` 는 **LLM 을 한 번도 부르지 않는다.** 이미 만들어 둔 후보를 다시
     민다 — 요약은 됐는데 DM 만 실패한 회차를 복구하는 경로다. 이게 없으면 사람은
     보내려고 생성 버튼을 다시 누르고, 같은 원문에 돈이 또 나간다(B-59).
+
+    `generate_only` 는 **아무에게도 보내지 않고 후보만 만든다**(B-62). 검토자 지정은
+    업무 협의라 몇 주가 걸리는데, 그동안 생성까지 멈춰 있을 이유가 없다. 후보는
+    보여 준 적이 없으므로 폐기되지 않고(B-58), 같은 구간을 다시 읽어도 모델을 부르지
+    않으므로(B-59) 나중에 검토자가 지정되면 그대로 나간다.
     """
     del owners
     from .daily_review import due
@@ -1889,6 +1899,12 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
             result.skipped += 1
             outcome.skipped += 1
             outcome.code = _empty_reason(stats, deliver_only=deliver_only)
+            outcome.detail = _empty_detail(stats)
+            continue
+        if generate_only:
+            # 검토자 지정을 기다리는 중이다. 만들어 두고 여기서 멈춘다.
+            outcome.pending = len(rows)
+            outcome.code = OUTCOME_GENERATED_ONLY
             outcome.detail = _empty_detail(stats)
             continue
         outcome.pending = len(rows)

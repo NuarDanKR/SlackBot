@@ -243,6 +243,8 @@ class ChannelReviewJobBody(BaseModel):
     estimate: bool = False
     # LLM 을 부르지 않고 이미 만들어 둔 후보만 다시 보낸다(B-59).
     deliverOnly: bool = False
+    # 아무에게도 보내지 않고 후보만 만든다(B-62). 검토자 없는 채널도 대상이다.
+    generateOnly: bool = False
 
     def targets(self) -> list[str]:
         picked = [value for value in [*self.channels, self.channel] if value.strip()]
@@ -2752,7 +2754,10 @@ def start_channel_review_job(
             raise HTTPException(
                 status_code=422, detail=f"관리 대상이 아닌 채널입니다: {value}"
             )
-        if not target.reviewers:
+        # 후보만 만드는 회차는 검토자가 없어도 돈다 — 그게 이 모드의 목적이다.
+        # 검토자 지정은 채널마다 업무 협의라 몇 주가 걸리고, 그동안 생성까지
+        # 멈춰 있을 이유가 없다(B-62).
+        if not target.reviewers and not body.generateOnly:
             raise HTTPException(
                 status_code=422,
                 detail=f"활성 요약 검토자가 없는 채널입니다: {target.channel or value}",
@@ -2769,6 +2774,7 @@ def start_channel_review_job(
             resume=body.resume,
             estimate=body.estimate,
             deliver_only=body.deliverOnly,
+            generate_only=body.generateOnly,
         )
     except review_jobs.ReviewJobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2776,7 +2782,8 @@ def start_channel_review_job(
         actor=user.email,
         category="review",
         action=(
-            "backfill" if body.backfill
+            "generate-only" if body.generateOnly
+            else "backfill" if body.backfill
             else "redeliver" if body.deliverOnly
             else "send-now"
         ),
@@ -2789,6 +2796,7 @@ def start_channel_review_job(
             "backfill": body.backfill,
             "since": body.since,
             "estimate": body.estimate,
+            "generate_only": body.generateOnly,
         },
     )
     return {"job": job}

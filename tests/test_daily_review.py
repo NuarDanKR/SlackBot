@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import json
 from datetime import date, datetime, time, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -617,3 +618,47 @@ def test_deliver_only_and_backfill_are_mutually_exclusive(capsys):
     """다시 보내기는 후보를 만들지 않는다. 함께 주면 뭘 원했는지 모른다."""
     with pytest.raises(SystemExit):
         dr.main(["--force-now", "--target", "tyit:C1", "--deliver-only", "--backfill"])
+
+
+# --- 검토자 지정을 기다리지 않는다 (B-62) -------------------------------------
+def test_generate_only_lists_every_channel_in_the_archive():
+    """평소 목록은 `channel_reviewer` 가 안다 — 보낼 사람이 있는 채널만 돈다.
+
+    검토자 지정은 채널마다 업무 협의라 몇 주가 걸린다. 그동안 후보 생성까지 멈춰
+    있을 이유는 없다 — 생성은 사람에게 아무것도 보내지 않는다.
+    """
+    docs = [
+        SimpleNamespace(workspace="tyit", channel_id="C1", channel="#공지",
+                        raw_lines=[object()]),
+        SimpleNamespace(workspace="tyit", channel_id="C2", channel="#보고",
+                        raw_lines=[object()]),
+        # 원문이 없는 채널은 부를 것이 없다.
+        SimpleNamespace(workspace="tyit", channel_id="C3", channel="#빈방",
+                        raw_lines=[]),
+        # channel_id 가 없으면 어느 채널인지 모른다(B-61).
+        SimpleNamespace(workspace="tyit", channel_id=None, channel="#미상",
+                        raw_lines=[object()]),
+    ]
+
+    got = dr._archive_channels(SimpleNamespace(docs=lambda: docs))
+
+    assert [(ws, ch) for ws, ch, _n, _t in got] == [("tyit", "C1"), ("tyit", "C2")]
+    assert all(send_at == time.min for _ws, _ch, _n, send_at in got)
+
+
+def test_generate_only_and_deliver_only_cannot_be_asked_for_at_once(capsys):
+    with pytest.raises(SystemExit):
+        dr.main(["--generate-only", "--deliver-only", "--force-now",
+                 "--target", "tyit:C1"])
+
+
+def test_generate_only_refuses_resend_because_it_sends_nothing(capsys):
+    with pytest.raises(SystemExit):
+        dr.main(["--generate-only", "--resend"])
+
+
+def test_a_generate_only_backfill_must_name_its_channels(capsys):
+    """회차마다 LLM 을 한 번 부른다. 채널 수십 개를 암묵적으로 도는 것은 일일 비용
+    한도를 한 번에 쓰는 일이다."""
+    with pytest.raises(SystemExit):
+        dr.main(["--generate-only", "--backfill"])

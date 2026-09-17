@@ -314,7 +314,7 @@ class _OutcomeClient:
 
 def _outcome_run(
     monkeypatch, *, rows, reviewers, already, resend=False, force_generate=False,
-    deliver_only=False, generated=True,
+    deliver_only=False, generated=True, generate_only=False,
 ):
     from types import SimpleNamespace
 
@@ -339,6 +339,7 @@ def _outcome_run(
         resend=resend,
         force_generate=force_generate,
         deliver_only=deliver_only,
+        generate_only=generate_only,
     )
     return result, client, store
 
@@ -823,3 +824,33 @@ def test_a_missing_form_column_is_written_as_quote():
 
     assert "ADD COLUMN IF NOT EXISTS form text NOT NULL DEFAULT 'quote'" in sql
     assert "CHECK (form IN ('quote', 'abstract'))" in sql
+
+
+def test_generate_only_makes_candidates_and_sends_nothing(monkeypatch):
+    """검토자가 없어도 후보는 만든다. 보내는 것만 멈춘다(B-62)."""
+    monkeypatch.setattr(sr, "generate_channel", lambda *a, **k: 2)
+    result, client, store = _outcome_run(
+        monkeypatch, rows=[{"id": "c1"}, {"id": "c2"}], reviewers=[], already=set(),
+        generate_only=True, generated=False,
+    )
+
+    assert client.posted == []
+    assert store.stamped == []          # 보여 준 적 없으니 폐기 대상이 아니다
+    assert result.sent == 0
+    assert result.skipped == 0          # 건너뛴 것이 아니라 여기까지가 이 회차다
+    outcome = result.outcomes[0]
+    assert outcome.code == "generated-only"
+    assert outcome.pending == 2
+
+
+def test_generate_only_stops_before_asking_who_the_reviewers_are(monkeypatch):
+    """검토자 조회까지 가면 「검토자 없음」 으로 기록되고, 그건 사실이 아니다 —
+    이 회차는 애초에 보내는 회차가 아니다."""
+    monkeypatch.setattr(sr, "generate_channel", lambda *a, **k: 1)
+    result, _client, store = _outcome_run(
+        monkeypatch, rows=[{"id": "c1"}], reviewers=["U1"], already=set(),
+        generate_only=True, generated=False,
+    )
+
+    assert result.outcomes[0].code == "generated-only"
+    assert store.delivered == []

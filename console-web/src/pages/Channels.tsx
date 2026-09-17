@@ -111,6 +111,8 @@ interface ReviewResult {
   canvasFallback: number
   /** 분량만 센 회차. LLM을 부르지 않았고 DM도 보내지 않았습니다. */
   estimate?: boolean
+  /** 후보만 만든 회차. 검토자가 없는 채널도 돌았고 DM은 보내지 않았습니다. */
+  generateOnly?: boolean
   channels: ReviewChannelResult[]
 }
 
@@ -122,7 +124,7 @@ interface ReviewJob {
   targets?: { workspace: string; channelId: string }[]
   resend?: boolean
   /** 실제로 무슨 일이 있었는가. 종료 코드는 「보낼 것이 없었다」를 모른다. */
-  outcome?: 'sent' | 'partial' | 'nothing-sent' | 'estimate' | 'unknown' | null
+  outcome?: 'sent' | 'partial' | 'nothing-sent' | 'estimate' | 'generated' | 'unknown' | null
   backfill?: boolean
   since?: string
   estimate?: boolean
@@ -266,6 +268,12 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     const rows = resource.data?.rows ?? []
     return rows.filter((row) => selected.has(key(row)) && row.reviewers.length > 0)
   }, [resource.data, selected])
+  /** 후보만 만드는 회차의 대상. **검토자 유무를 묻지 않습니다** — 그게 이 모드의
+   *  목적입니다. 검토자 지정은 채널마다 업무 협의라 몇 주가 걸립니다. */
+  const generateTargets = useMemo(() => {
+    const rows = resource.data?.rows ?? []
+    return rows.filter((row) => selected.has(key(row)))
+  }, [resource.data, selected])
   const reviewBlocked = useMemo(() => {
     const rows = resource.data?.rows ?? []
     return rows.filter((row) => selected.has(key(row)) && row.reviewers.length === 0)
@@ -385,6 +393,54 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     } catch (e) {
       const error = e as ApiError
       onToast(error.message || '다시 보내기를 시작하지 못했습니다.')
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
+  /** 검토자 없이 후보만 만듭니다 — 아무에게도 보내지 않습니다.
+   *
+   * 검토자 지정은 채널마다 업무 협의라 몇 주가 걸립니다. 그동안 요약 생성까지
+   * 멈춰 있을 이유가 없습니다. 만든 후보는 보여 준 적이 없어 폐기되지 않고,
+   * 검토자가 지정되면 타이머가 그대로 보냅니다.
+   */
+  async function startGenerateOnly(withBackfill: boolean) {
+    if (generateTargets.length === 0 || reviewJobActive) return
+    const what =
+      generateTargets.length === 1
+        ? generateTargets[0].channel
+        : `채널 ${generateTargets.length}개`
+    const from = backfillSince ? `${backfillSince}부터` : '아카이브 처음부터'
+    const scope = withBackfill
+      ? `수집된 과거 원문을 ${from} 읽어` 
+      : '마지막 처리 이후 새 원문으로'
+    const cost = withBackfill
+      ? `
+회차마다 LLM을 한 번 부르며 채널당 최대 ${backfillRounds}회차입니다.`
+      : ''
+    if (
+      !window.confirm(
+        `${what}의 ${scope} 검토 후보만 만듭니다.
+` +
+          `DM은 보내지 않습니다 — 검토자가 지정되면 그때 나갑니다.${cost}
+실행할까요?`,
+      )
+    )
+      return
+    setReviewBusy(true)
+    try {
+      await api.securePost<{ job: ReviewJob }>('/api/channels/review-jobs', {
+        channels: generateTargets.map(key),
+        generateOnly: true,
+        backfill: withBackfill,
+        since: withBackfill ? backfillSince : '',
+        rounds: withBackfill ? backfillRounds : 0,
+      })
+      onToast('검토 후보를 만들고 있습니다 — DM은 보내지 않습니다.')
+      reviewJobResource.reload()
+    } catch (e) {
+      const error = e as ApiError
+      onToast(error.message || '후보 생성을 시작하지 못했습니다.')
     } finally {
       setReviewBusy(false)
     }
@@ -685,6 +741,33 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
             선택 채널 {reviewTargets.length}개 소급 검토 실행
           </button>
         </div>
+        <div className="toolbar">
+          <button
+            type="button"
+            className="btn"
+            disabled={reviewBusy || reviewJobActive || generateTargets.length === 0}
+            onClick={() => startGenerateOnly(false)}
+            title="검토자가 없는 채널도 돕니다. DM은 보내지 않습니다."
+          >
+            검토자 없이 후보만 만들기 ({generateTargets.length}개)
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={reviewBusy || reviewJobActive || generateTargets.length === 0}
+            onClick={() => startGenerateOnly(true)}
+            title="과거 원문까지 읽어 후보만 만듭니다. DM은 보내지 않습니다."
+          >
+            검토자 없이 소급해서 후보만 만들기 ({generateTargets.length}개)
+          </button>
+        </div>
+        <p className="note">
+          검토자 지정은 채널마다 업무 협의라 오래 걸립니다. 그동안 요약 생성까지 멈춰
+          있을 이유가 없어서, <strong>후보만 미리 만들어 두는</strong> 경로를 따로 둡니다.
+          만든 후보는 보여 준 적이 없어 폐기되지 않고, 같은 원문을 다시 읽어도 LLM을
+          부르지 않으므로 비용은 한 번만 듭니다. 검토자가 지정되면 타이머가 그대로
+          보냅니다.
+        </p>
         <p className="note">
           「지금 발송」은 <strong>마지막 처리 이후 새 원문</strong>만 봅니다. 봇이 들어오기
           전에 오간 대화나 과거 전체 수집으로 넣은 자료는 거기에 들어가지 않습니다 —
@@ -696,7 +779,9 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
         {reviewJob && (
           <div
             className={`notice ${
-              reviewJob.status === 'failed' || reviewJob.outcome === 'nothing-sent' ? 'bad' : ''
+              reviewJob.status === 'failed' || reviewJob.outcome === 'nothing-sent'
+                ? 'bad'
+                : ''
             }`}
           >
             <div className="notice-kind">요약 검토 DM</div>
@@ -707,13 +792,22 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                 {reviewJob.status === 'failed' && `실패 · ${reviewJob.errorCode ?? '원인 미확인'}`}
                 {reviewJob.status === 'completed' && reviewJob.outcome === 'estimate' &&
                   '소급 대상 분량을 셌습니다 — 아직 아무것도 만들지 않았습니다'}
-                {reviewJob.status === 'completed' && reviewJob.outcome !== 'estimate' &&
+                {reviewJob.status === 'completed' && reviewJob.outcome === 'generated' &&
+                  `후보 ${reviewJob.result?.generated ?? 0}건을 만들었습니다 — DM은 보내지 않았습니다`}
+                {reviewJob.status === 'completed' &&
+                  reviewJob.outcome !== 'estimate' &&
+                  reviewJob.outcome !== 'generated' &&
                   (reviewJob.outcome === 'sent'
                     ? `발송 완료 · DM ${reviewJob.result?.sent ?? 0}건`
                     : reviewJob.outcome === 'partial'
                       ? `일부 발송 · DM ${reviewJob.result?.sent ?? 0}건 · 실패 ${reviewJob.result?.failed ?? 0}건`
                       : 'DM이 한 건도 가지 않았습니다')}
               </div>
+              {reviewJob.status === 'completed' && reviewJob.outcome === 'generated' && (
+                <p className="note">
+                  검토자가 지정되면 타이머가 5분 안에 이 후보를 DM으로 보냅니다.
+                </p>
+              )}
               {reviewJob.status === 'completed' &&
                 reviewJob.outcome === 'nothing-sent' && (
                 <p className="note warn">

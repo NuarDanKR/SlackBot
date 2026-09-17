@@ -285,3 +285,38 @@ def test_redeliver_and_backfill_cannot_be_asked_for_at_once(tmp_path, monkeypatc
         review_jobs.start(
             [("tyit", "C1")], actor="a@b.c", deliver_only=True, backfill=True,
         )
+
+
+def test_generate_only_reaches_the_runner(tmp_path):
+    command = review_jobs._command(
+        {"targets": [{"workspace": "tyit", "channelId": "C1"}], "generateOnly": True},
+        tmp_path / "out.result",
+    )
+
+    assert "--generate-only" in command
+    assert "--resend" not in command
+
+
+def test_generate_only_and_resend_cannot_be_asked_for_at_once(tmp_path, monkeypatch):
+    """후보만 만드는 회차는 아무것도 보내지 않는다. 재발송은 말이 되지 않는다."""
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        review_jobs.subprocess, "Popen", lambda *a, **k: pytest.fail("no process")
+    )
+
+    with pytest.raises(review_jobs.ReviewJobError, match="재발송"):
+        review_jobs.start(
+            [("tyit", "C1")], actor="a@b.c", generate_only=True, resend=True,
+        )
+
+
+def test_a_generate_only_round_is_not_reported_as_nothing_sent(tmp_path, monkeypatch):
+    """보낸 것이 없지만 실패도 아니다. 빨간 화면으로 보이면 사람이 원인을 찾는다."""
+    saved = _run(
+        tmp_path, monkeypatch,
+        result={"sent": 0, "skipped": 0, "failed": 0, "generated": 12,
+                "canvasFallback": 0, "generateOnly": True, "channels": []},
+    )
+
+    assert saved["status"] == "completed"
+    assert saved["outcome"] == "generated"

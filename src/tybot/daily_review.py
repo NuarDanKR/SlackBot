@@ -513,6 +513,28 @@ def _channels(conn) -> list[tuple[str, str, str, time]]:
         ]
 
 
+def _archive_channels(archive) -> list[tuple[str, str, str, time]]:
+    """아카이브에 원문이 있는 **모든** 채널. 검토자 유무를 묻지 않는다(B-62).
+
+    평소 채널 목록은 `channel_reviewer` 가 안다 — 보낼 사람이 있는 채널만 도는 것이
+    맞기 때문이다. 그런데 검토자 지정은 채널마다 업무 협의가 필요해 몇 주가 걸리고,
+    그동안 **후보 생성까지 멈춰 있을 이유는 없다.** 생성은 사람에게 아무것도 보내지
+    않는다.
+
+    발송 시각은 자정으로 둔다. 이 목록은 보내지 않는 회차에만 쓰인다.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    for doc in archive.docs():
+        channel_id = str(doc.channel_id or "")
+        if not channel_id or not doc.raw_lines:
+            continue
+        seen.setdefault((doc.workspace, channel_id), doc.channel or "")
+    return [
+        (workspace, channel_id, name, time.min)
+        for (workspace, channel_id), name in sorted(seen.items())
+    ]
+
+
 def _force_target(
     channels: list[tuple[str, str, str, time]],
     targets: list[tuple[str, str]],
@@ -543,7 +565,8 @@ def parse_target(value: str) -> tuple[str, str]:
 NO_REVIEW_CONFIG = "no-review-config"
 
 
-def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]]) -> None:
+def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]],
+                  generate_only: bool = False) -> None:
     """채널별 결과를 JSON 으로 남긴다. **종료 코드는 이걸 대신하지 못한다.**
 
     보낼 것이 없어도, 검토자가 없어도, 이미 보냈어도 실행은 0 으로 끝난다. 그래서
@@ -559,7 +582,12 @@ def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]]) -> 
             "channelId": channel_id,
             "channelName": "",
             "code": NO_REVIEW_CONFIG,
-            "reason": "활성 검토 설정이 없는 채널입니다",
+            # 모드마다 없는 것이 다르다. 「검토 설정이 없다」 를 후보만 만드는
+            # 회차에 보이면 검토자를 지정하러 가는데, 없는 것은 원문이다.
+            "reason": (
+                "아카이브에 원문이 없는 채널입니다"
+                if generate_only else "활성 검토 설정이 없는 채널입니다"
+            ),
             "sent": 0,
             "skipped": 0,
             "failed": 1,
@@ -572,6 +600,7 @@ def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]]) -> 
         "failed": sum(row["failed"] for row in outcomes),
         "generated": result.generated if result else 0,
         "canvasFallback": result.canvas_fallback if result else 0,
+        "generateOnly": bool(generate_only),
         "channels": outcomes,
     }
     try:
@@ -686,6 +715,11 @@ def main(argv: list[str] | None = None) -> int:
         help="LLM 을 부르지 않고 이미 만들어 둔 후보만 다시 보낸다(--force-now 전용)",
     )
     ap.add_argument(
+        "--generate-only",
+        action="store_true",
+        help="아무에게도 보내지 않고 후보만 만든다. 검토자가 없는 채널도 돈다",
+    )
+    ap.add_argument(
         "--backfill",
         action="store_true",
         help="이미 수집된 과거 원문으로 검토 후보를 소급 생성한다(--force-now 전용)",
@@ -726,20 +760,32 @@ def main(argv: list[str] | None = None) -> int:
     # 같은 채널을 두 번 적어도 한 번만 돈다 — 두 번 돌면 재발송이 두 번 간다.
     targets = list(dict.fromkeys(targets))
 
+    # 대상을 직접 고르는 회차인가. 둘 다 사람이 직접 실행하는 경로다.
+    manual = args.force_now or args.generate_only
     if args.force_now and not targets:
         ap.error("--force-now에는 --target 또는 --workspace/--channel이 필요합니다.")
-    if not args.force_now and (targets or args.workspace):
-        ap.error("--target/--workspace/--channel은 --force-now와 함께 사용하세요.")
+    if not manual and (targets or args.workspace):
+        ap.error("--target/--workspace/--channel은 --force-now 또는 --generate-only와 함께 사용하세요.")
     if args.resend and not args.force_now:
         ap.error("--resend는 --force-now와 함께만 사용합니다.")
     if args.force_now and args.dry_run:
         ap.error("--force-now와 --dry-run은 함께 사용할 수 없습니다.")
-    if args.backfill and not args.force_now:
-        ap.error("--backfill은 --force-now와 함께만 사용합니다.")
+    if args.backfill and not manual:
+        ap.error("--backfill은 --force-now 또는 --generate-only와 함께만 사용합니다.")
+    if args.backfill and args.generate_only and not targets:
+        # 소급은 회차마다 LLM 을 한 번 부른다. 채널 수십 개를 암묵적으로 도는 것은
+        # 일일 비용 한도를 한 번에 쓰는 일이라 **명시적으로 고르게 한다.**
+        ap.error("--generate-only로 소급할 때는 --target으로 채널을 고르세요.")
     if args.deliver_only and not args.force_now:
         ap.error("--deliver-only는 --force-now와 함께만 사용합니다.")
     if args.deliver_only and args.backfill:
         ap.error("--deliver-only는 후보를 만들지 않으므로 --backfill과 함께 쓸 수 없습니다.")
+    if args.generate_only and args.deliver_only:
+        ap.error("--generate-only와 --deliver-only는 정반대 동작입니다.")
+    if args.generate_only and args.dry_run:
+        ap.error("--generate-only와 --dry-run은 함께 사용할 수 없습니다.")
+    if args.generate_only and args.resend:
+        ap.error("--generate-only는 아무것도 보내지 않으므로 --resend를 쓰지 않습니다.")
     for flag, value in (("--since", args.since), ("--rounds", args.rounds),
                         ("--resume", args.resume), ("--estimate", args.estimate)):
         if value and not args.backfill:
@@ -783,24 +829,34 @@ def main(argv: list[str] | None = None) -> int:
         if problem:
             logger.error("%s", problem)
             return 2
-        channels = _channels(conn)
+        # 검토자가 없는 채널도 후보는 만들 수 있다(B-62). 보내지 않는 회차에서만
+        # 목록을 넓힌다 — 평소 회차가 이 목록을 쓰면 보낼 사람 없는 채널을 매번 돈다.
+        channels = _archive_channels(store) if args.generate_only else _channels(conn)
         unconfigured: list[tuple[str, str]] = []
-        if args.force_now:
+        if targets:
             channels = _force_target(channels, targets)
             found = {(ws, channel) for ws, channel, _name, _at in channels}
             unconfigured = [item for item in targets if item not in found]
             for workspace, channel_id in unconfigured:
                 logger.error(
-                    "활성 검토 설정을 찾지 못했습니다 ws=%s ch=%s", workspace, channel_id,
+                    "%s ws=%s ch=%s",
+                    "아카이브에 원문이 없습니다" if args.generate_only
+                    else "활성 검토 설정을 찾지 못했습니다",
+                    workspace, channel_id,
                 )
             if not channels:
                 if args.result_json:
-                    _write_result(args.result_json, None, unconfigured=unconfigured)
+                    _write_result(args.result_json, None, unconfigured=unconfigured,
+                                  generate_only=args.generate_only)
                 return 2
             logger.warning(
                 "예약 시각을 우회해 요약 검토를 즉시 실행합니다 대상=%d개%s",
                 len(channels),
                 " (재발송)" if args.resend else "",
+            )
+        if args.generate_only:
+            logger.warning(
+                "후보만 만들고 아무에게도 보내지 않습니다 대상=%d개", len(channels),
             )
         if args.estimate:
             # LLM 을 부르지 않는다. 얼마나 되는지 보고 누르라고 있는 경로다.
@@ -857,13 +913,15 @@ def main(argv: list[str] | None = None) -> int:
                 complete=complete_summary,
                 resend=args.resend,
                 deliver_only=args.deliver_only,
+                generate_only=args.generate_only,
                 # 콘솔의 즉시 실행은 오늘 이미 생성기를 돌렸더라도 워터마크 이후
                 # 새 원문을 다시 확인한다. 예약 실행은 하루 한 번 잠금을 유지한다.
                 force_generate=args.force_now,
             )
 
     if args.result_json:
-        _write_result(args.result_json, summary_result, unconfigured=unconfigured)
+        _write_result(args.result_json, summary_result, unconfigured=unconfigured,
+                      generate_only=args.generate_only)
 
     if summary_result is not None:
         # Canvas 수치를 **따로** 남긴다. 폴백을 성공과 합치면 Canvas 가 계속
