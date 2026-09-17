@@ -708,6 +708,54 @@ def serve(
     )
 
 
+def preview_rules(
+    specialist: Specialist,
+    *,
+    question: str,
+    workspace: str,
+    evidence: list[str],
+    router,
+    authorization_id: str,
+    toolbox_factory=None,
+    variant: str,
+) -> SpecialistOutcome:
+    """규칙 QA에서 이미 고른 전문가를 한 번 실행한다.
+
+    라우팅을 다시 하면 두 실행이 서로 다른 전문가로 갈 수 있어 규칙 비교가
+    아니게 된다. 실제 계약 검사는 `_run_one`과 동일하게 통과하며 호출 비용도
+    `specialist_call`에 `rule_test_*` 작업으로 남는다.
+    """
+    if variant not in {"current", "draft"}:
+        raise ValueError("rule-test variant must be current or draft")
+    answer, code = _run_one(
+        specialist,
+        question=question,
+        workspace=workspace,
+        evidence=evidence,
+        router=router,
+        authorization_id=authorization_id,
+        toolbox_factory=toolbox_factory,
+        live=False,
+        confidence=1.0,
+        record_call_row=True,
+        task_kind=f"rule_test_{variant}",
+        required_capability="rule_test",
+    )
+    if answer is None:
+        return SpecialistOutcome(
+            UNAVAILABLE,
+            error_code=code or "specialist-failed",
+            attempted=(specialist.key,),
+            selected=specialist.key,
+        )
+    return SpecialistOutcome(
+        SUCCESS,
+        answer=answer,
+        attempted=(specialist.key,),
+        selected=specialist.key,
+    )
+
+
 # layout → 형식 안내. **동작 요청이 아니다.** 전문 봇은 사실만 쓰고, Canvas 생성과
 # 공유는 호출자가 한다(설계 §3.3).
 DISPLAY_HINTS = {

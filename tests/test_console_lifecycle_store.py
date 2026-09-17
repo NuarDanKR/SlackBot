@@ -1,4 +1,5 @@
 import json
+import uuid
 
 import pytest
 
@@ -28,6 +29,19 @@ def test_specialist_request_normalizes_workspace_scope():
         "adapter": "hermes", "state": "draft", "workspaces": ["TYIT", "tyit", "mgmt"],
     })
     assert value["workspaces"] == ["mgmt", "tyit"]
+
+
+def test_specialist_request_accepts_only_a_uuid_rule_test_id():
+    proposal = {
+        "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+        "adapter": "hermes", "state": "draft", "workspaces": ["tyit"],
+    }
+    with pytest.raises(specialist_store.SpecialistStoreError, match="시험 ID"):
+        specialist_store._validate_proposal({**proposal, "ruleTestId": "not-an-id"})
+
+    test_id = str(uuid.uuid4())
+    value = specialist_store._validate_proposal({**proposal, "ruleTestId": test_id})
+    assert value["ruleTestId"] == test_id
 
 
 def test_specialist_request_rejects_unverified_contract_version():

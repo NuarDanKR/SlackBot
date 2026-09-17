@@ -1705,6 +1705,44 @@ def test_specialist_registry_is_developer_only(client, monkeypatch):
     assert response.json()["specialists"] == []
 
 
+def test_developer_can_compare_rules_only_in_their_workspace(client, monkeypatch):
+    row = {
+        "key": "hermes", "name": "Hermes", "domain": "내부 문서",
+        "adapter": "hermes", "state": "enabled", "workspaces": ["fin"],
+    }
+    result = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "specialist": "hermes", "workspace": "fin",
+        "requester": "sh.kim@taeyoung.com", "question": "기성 현황은?",
+        "currentRulesHash": "a" * 64, "draftRulesHash": "b" * 64,
+        "current": {"status": "success", "answer": "현재", "costUsd": 0.01},
+        "draft": {"status": "success", "answer": "변경", "costUsd": 0.01},
+    }
+    events = []
+    monkeypatch.setattr(console_app.specialist_store, "get_specialist", lambda _key: row)
+    monkeypatch.setattr(console_app.rule_test, "run", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(console_app.specialist_store, "save_rule_test", lambda value: value)
+    monkeypatch.setattr(console_app, "_audit_event", lambda **event: events.append(event))
+
+    response = client.post(
+        "/api/specialists/hermes/rule-test",
+        headers=_write_headers(member(client)),
+        json={"workspace": "fin", "question": "기성 현황은?", "draftRules": "새 규칙"},
+    )
+    forbidden = client.post(
+        "/api/specialists/hermes/rule-test",
+        headers=_write_headers(member(client)),
+        json={"workspace": "mgmt", "question": "기성 현황은?", "draftRules": "새 규칙"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ruleTest"]["draft"]["answer"] == "변경"
+    assert forbidden.status_code == 403
+    assert events[0]["metadata"]["reason"] == "rule_test"
+    assert "question" not in events[0]["metadata"]
+    assert "answer" not in events[0]["metadata"]
+
+
 def test_specialist_call_links_to_the_exact_qa_record(client, monkeypatch):
     monkeypatch.setattr(
         console_app.specialist_store,
@@ -2523,8 +2561,8 @@ def test_channel_review_job_starts_for_a_known_channel_with_reviewers(
     )
     seen = {}
 
-    def _start(workspace, channel_id, *, actor):
-        seen.update(workspace=workspace, channel_id=channel_id, actor=actor)
+    def _start(targets, *, actor, resend=False):
+        seen.update(targets=list(targets), actor=actor, resend=resend)
         return {"id": "a" * 32, "status": "queued"}
 
     monkeypatch.setattr(console_app.review_jobs, "start", _start)
@@ -2535,8 +2573,82 @@ def test_channel_review_job_starts_for_a_known_channel_with_reviewers(
     )
 
     assert response.status_code == 202
-    assert seen["workspace"] == "tyit"
-    assert seen["channel_id"] == "C1"
+    assert seen["targets"] == [("tyit", "C1")]
+    assert seen["resend"] is False
+
+
+def test_channel_review_job_accepts_several_channels_at_once(client, monkeypatch):
+    """채널마다 작업을 따로 띄우면 「한 번에 하나」 잠금에 걸려 두 번째가 거절된다."""
+    from tybot.console.channel_admin import ChannelRow
+
+    _channel_rows(
+        monkeypatch,
+        rows=[
+            ChannelRow(
+                workspace="tyit",
+                workspace_label="전산팀",
+                channel_id="C1",
+                channel="#주간보고",
+                reviewers=["U1"],
+            ),
+            ChannelRow(
+                workspace="mgmt",
+                workspace_label="경영",
+                channel_id="C2",
+                channel="#경영보고",
+                reviewers=["U2"],
+            ),
+        ],
+    )
+    seen = {}
+
+    def _start(targets, *, actor, resend=False):
+        seen.update(targets=list(targets), resend=resend)
+        return {"id": "a" * 32, "status": "queued"}
+
+    monkeypatch.setattr(console_app.review_jobs, "start", _start)
+    response = client.post(
+        "/api/channels/review-jobs",
+        json={"channels": ["tyit:C1", "mgmt:C2"], "resend": True},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 202
+    assert seen["targets"] == [("tyit", "C1"), ("mgmt", "C2")]
+    assert seen["resend"] is True
+
+
+def test_channel_review_job_refuses_the_whole_batch_when_one_channel_is_unknown(
+    client, monkeypatch
+):
+    """모르는 채널을 조용히 빼면 운영자는 그 채널에도 보낸 줄 안다."""
+    from tybot.console.channel_admin import ChannelRow
+
+    _channel_rows(
+        monkeypatch,
+        rows=[
+            ChannelRow(
+                workspace="tyit",
+                workspace_label="전산팀",
+                channel_id="C1",
+                channel="#주간보고",
+                reviewers=["U1"],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        console_app.review_jobs,
+        "start",
+        lambda *args, **kwargs: pytest.fail("unknown channel must not start a job"),
+    )
+
+    response = client.post(
+        "/api/channels/review-jobs",
+        json={"channels": ["tyit:C1", "tyit:C9"]},
+        headers=_write_headers(owner(client)),
+    )
+
+    assert response.status_code == 422
 
 
 def test_channel_review_job_refuses_a_channel_without_reviewers(client, monkeypatch):

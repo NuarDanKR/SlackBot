@@ -230,3 +230,82 @@ def test_image_is_ocr_converted_without_waiting_for_a_command(
     )
     assert metadata["status"] == "converted"
     assert metadata["extracted"] is True
+
+
+# --- Slack 메시지 좌표 보존 (B-56) ---------------------------------------------
+def test_the_slack_message_ts_is_kept_out_of_the_original_text(tmp_path):
+    """좌표는 **시각 칸 안에** 적는다. 본문에 붙이면 그 글자가 원문이 된다(원칙 1)."""
+    writer.ingest(
+        tmp_path,
+        workspace="pilot",
+        channel="#팀-전산_ABB110-회의",
+        channel_id="C1",
+        messages=[writer.IncomingMessage(
+            ts=datetime(2026, 9, 16, 1, 0, tzinfo=UTC),
+            speaker="홍길동",
+            text="공정률은 62.5%입니다",
+            source_ts="1758012345.123456",
+        )],
+    )
+
+    line = ArchiveStore(tmp_path).source_docs()[0].raw_lines[0]
+
+    assert line.message_ts == "1758012345.123456"
+    assert line.text == "공정률은 62.5%입니다"
+    assert line.ts == "2026-09-16 10:00"
+
+
+def test_lines_collected_before_the_coordinate_existed_still_parse(tmp_path):
+    """옛 줄에는 좌표가 없다. 그 줄이 안 읽히면 과거 근거가 통째로 사라진다."""
+    path = tmp_path / "channels" / "pilot" / "회의.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_legacy_doc(), encoding="utf-8")
+
+    line = ArchiveStore(tmp_path).source_docs()[0].raw_lines[0]
+
+    assert line.message_ts == ""
+    assert line.text == "첫날 회의"
+
+
+def test_a_message_archived_before_the_coordinate_is_not_written_twice(tmp_path):
+    """좌표만 다른 같은 줄이 다시 쌓이면 사람이 같은 말을 두 번 한 것처럼 보인다."""
+    kw = {
+        "workspace": "pilot",
+        "channel": "#팀-전산_ABB110-회의",
+        "channel_id": "C1",
+    }
+    when = datetime(2026, 9, 16, 1, 0, tzinfo=UTC)
+    writer.ingest(tmp_path, messages=[
+        writer.IncomingMessage(ts=when, speaker="홍길동", text="공정률은 62.5%입니다"),
+    ], **kw)
+
+    again = writer.ingest(tmp_path, messages=[
+        writer.IncomingMessage(
+            ts=when, speaker="홍길동", text="공정률은 62.5%입니다",
+            source_ts="1758012345.123456",
+        ),
+    ], **kw)
+
+    assert again.written == 0
+    assert len(ArchiveStore(tmp_path).source_docs()[0].raw_lines) == 1
+
+
+def test_a_made_up_coordinate_is_not_written(tmp_path):
+    """permalink 로 나갈 값이다. 모양이 아니면 채널 링크로 내려가는 편이 낫다."""
+    writer.ingest(
+        tmp_path,
+        workspace="pilot",
+        channel="#팀-전산_ABB110-회의",
+        channel_id="C1",
+        messages=[writer.IncomingMessage(
+            ts=datetime(2026, 9, 16, 1, 0, tzinfo=UTC),
+            speaker="홍길동",
+            text="공정률은 62.5%입니다",
+            source_ts="어제 그 메시지",
+        )],
+    )
+
+    line = ArchiveStore(tmp_path).source_docs()[0].raw_lines[0]
+
+    assert line.message_ts == ""
+    assert line.ts == "2026-09-16 10:00"

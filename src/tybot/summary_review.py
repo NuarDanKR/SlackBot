@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -72,6 +72,9 @@ class SourceLine:
     author: str
     text: str
     locator: str
+    # Slack 메시지 ts. 있으면 후보의 출처 링크가 **그 메시지 한 건**을 연다.
+    # 좌표를 남기기 전에 수집한 줄은 비어 있고, 그때는 채널 링크로 내려간다(B-56).
+    message_ts: str = ""
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,8 @@ class Proposal:
     evidence_at: str
     evidence_author: str
     evidence_locator: str
+    evidence_message_ts: str = ""
+    evidence_hash: str = ""
 
 
 def _as_uuid(value) -> uuid.UUID | None:
@@ -167,6 +172,10 @@ def parse_proposals(raw: str, source: list[SourceLine],
             evidence_at=matched.at,
             evidence_author=matched.author,
             evidence_locator=matched.locator,
+            # 좌표도 **원문에서** 온다. 모델이 준 값은 쓰지 않는다 — 출처 링크가
+            # 모델 출력이면 사람이 확인하러 간 자리에 그 문장이 없을 수 있다.
+            evidence_message_ts=matched.message_ts,
+            evidence_hash=_evidence_hash(matched),
         ))
     return accepted
 
@@ -174,6 +183,13 @@ def parse_proposals(raw: str, source: list[SourceLine],
 def source_digest(lines: list[SourceLine]) -> str:
     body = "\n".join(f"{x.locator}|{x.at}|{x.author}|{x.text}" for x in lines)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _evidence_hash(line: SourceLine) -> str:
+    """승인 당시 원문 한 줄의 지문. 부분 인용이 아니라 전체 원문을 묶는다."""
+    from .evidence_refs import content_hash
+
+    return content_hash(line.at, line.author, line.text)
 
 
 def prompt_input(*, approved: list[str], source: list[SourceLine]) -> str:
@@ -211,10 +227,18 @@ class Store:
         return str(row.get("start_at") if isinstance(row, dict) else row[0] or "")
 
     def approved(self, workspace: str, channel_id: str) -> list[str]:
+        """살아 있는 승인 요약. **근거가 어긋난 항목은 빼고** 돌려준다(B-56).
+
+        근거 원문이 사라졌거나 좌표가 바뀐 항목(`stale_at`)은 더 이상 사람이
+        확인한 문장이 아니다. 그대로 두면 다음 회차가 그 문장을 「기존 승인」으로
+        읽고 그 위에 후보를 얹는다 — 확인할 수 없는 것 위에 쌓는 셈이다.
+        길잡이와 기존 승인 목록에서 제외하며, 같은 사실이 새 원문으로 수집된 경우에만
+        정상 후보 생성 경로에서 다시 검토한다.
+        """
         with self.conn.cursor() as cur:
             cur.execute(
                 """SELECT body FROM approved_summary_item WHERE workspace=%s AND channel_id=%s
-                AND superseded_at IS NULL ORDER BY approved_at""",
+                AND superseded_at IS NULL AND stale_at IS NULL ORDER BY approved_at""",
                 (workspace, channel_id),
             )
             rows = cur.fetchall()
@@ -261,12 +285,14 @@ class Store:
                 cur.execute(
                     """INSERT INTO summary_review_candidate
                     (id,workspace,channel_id,channel_name,run_date,source_digest,kind,current_text,
-                     proposed_text,evidence_quote,evidence_at,evidence_author,evidence_locator)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                    proposed_text,evidence_quote,evidence_at,evidence_author,evidence_locator,
+                     evidence_message_ts,evidence_hash)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
                     (uuid.uuid4(), workspace, channel_id, channel_name, on, digest,
                      proposal.kind, proposal.current_text, proposal.proposed_text,
                      proposal.evidence_quote, proposal.evidence_at, proposal.evidence_author,
-                     proposal.evidence_locator),
+                     proposal.evidence_locator, proposal.evidence_message_ts,
+                     proposal.evidence_hash),
                 )
             cur.execute(
                 """INSERT INTO summary_review_cursor(workspace,channel_id,watermark,source_digest)
@@ -790,6 +816,19 @@ def _cell(value) -> str:
     return text.replace("|", r"\|")
 
 
+def message_link(channel_id: str, message_ts: str) -> str:
+    """근거 메시지 한 건을 여는 링크. 좌표가 없으면 빈 문자열.
+
+    좌표가 없을 때 채널 링크를 **여기서** 대신 돌려주지 않는다. 호출부가 두 링크를
+    다른 문구로 보여야 한다 — 「이 메시지」 라고 적힌 링크가 채널 맨 위를 열면
+    사람은 근거를 못 찾고도 찾았다고 생각한다.
+    """
+    ts = str(message_ts or "").strip()
+    if not channel_id or not ts:
+        return ""
+    return f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
+
+
 def canvas_markdown(
     *, channel_label: str, review_date: date, rows: list[dict], approved: list[str],
     channel_id: str = "",
@@ -844,7 +883,12 @@ def canvas_markdown(
         parts.append(
             f"- 근거: {_cell(row.get('evidence_author'))} · {_cell(row.get('evidence_at'))}"
         )
-        if source_url:
+        # 후보마다 **그 근거 메시지**를 연다. 채널 링크만 주면 사람은 그날 대화를
+        # 처음부터 뒤져야 하고, 실제로는 확인하지 않은 채 승인하게 된다(B-56).
+        direct = message_link(channel_id, str(row.get("evidence_message_ts") or ""))
+        if direct:
+            parts.append(f"- 출처 링크: [이 근거 메시지 열기]({direct})")
+        elif source_url:
             parts.append(f"- 출처 링크: [채널에서 원문 확인]({source_url})")
         # **검증을 통과한 인용만** 싣는다. 첨부에서 뽑은 문장이라도 XML·OCR 덤프를
         # 그대로 옮기지 않는다 — 그건 근거가 아니라 원본의 사본이다.
@@ -1077,7 +1121,10 @@ def channel_source(archive, workspace: str, channel_id: str, watermark: str,
                 continue
             if "tybot" in line.speaker.casefold():
                 continue
-            rows.append(SourceLine(line.ts, line.speaker, line.text, locator))
+            rows.append(SourceLine(
+                line.ts, line.speaker, line.text, locator,
+                message_ts=str(getattr(line, "message_ts", "") or ""),
+            ))
     rows.sort(key=lambda item: (item.at, item.locator))
     selected: list[SourceLine] = []
     used = 0
@@ -1151,6 +1198,54 @@ def _mark_sent(conn, *, workspace: str, channel_id: str, recipient: str,
     conn.commit()
 
 
+# --- 왜 안 갔는가 -------------------------------------------------------------
+# 종료 코드 0 하나로는 「보냈다」 와 「보낼 것이 없었다」 가 구별되지 않았다. 콘솔은
+# 그래서 아무도 DM 을 못 받은 회차에도 「실행 완료」 만 보였다(2026-09-17). 채널마다
+# 무슨 일이 있었는지 코드로 남긴다 — 운영자가 로그를 읽지 않아도 알아야 한다.
+OUTCOME_SENT = "sent"
+OUTCOME_GENERATE_FAILED = "generate-failed"
+OUTCOME_NO_CANDIDATES = "no-candidates"
+OUTCOME_NO_CLIENT = "no-client"
+OUTCOME_NO_REVIEWER = "no-reviewer"
+OUTCOME_ALREADY_SENT = "already-sent"
+OUTCOME_DM_FAILED = "dm-failed"
+
+OUTCOME_LABELS = {
+    OUTCOME_SENT: "검토 DM 발송",
+    OUTCOME_GENERATE_FAILED: "요약 후보를 만들지 못했습니다",
+    OUTCOME_NO_CANDIDATES: "오늘 검토할 새 후보가 없습니다",
+    OUTCOME_NO_CLIENT: "이 워크스페이스의 Slack 토큰이 없습니다",
+    OUTCOME_NO_REVIEWER: "활성 검토자가 없습니다",
+    OUTCOME_ALREADY_SENT: "오늘 이미 보낸 검토자뿐입니다",
+    OUTCOME_DM_FAILED: "DM 발송이 실패했습니다",
+}
+
+
+@dataclass
+class ChannelOutcome:
+    """한 채널 한 회차의 실제 결과. `code` 는 사람이 조치할 사유다."""
+
+    workspace: str
+    channel_id: str
+    channel_name: str = ""
+    code: str = OUTCOME_NO_CANDIDATES
+    sent: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+    def as_dict(self) -> dict:
+        return {
+            "workspace": self.workspace,
+            "channelId": self.channel_id,
+            "channelName": self.channel_name,
+            "code": self.code,
+            "reason": OUTCOME_LABELS.get(self.code, self.code),
+            "sent": self.sent,
+            "skipped": self.skipped,
+            "failed": self.failed,
+        }
+
+
 @dataclass
 class RunResult:
     generated: int = 0
@@ -1163,6 +1258,8 @@ class RunResult:
     canvas_fallback: int = 0
     canvas_ambiguous: int = 0
     expired: int = 0
+    # 발송 시각이 지난 채널만 들어간다. 아직 시각 전인 채널은 결과가 아니다.
+    outcomes: list[ChannelOutcome] = field(default_factory=list)
 
 
 def _canvas_round(
@@ -1306,12 +1403,16 @@ def _canvas_failure(exc: Exception) -> tuple[str, str]:
 
 
 def run(conn, clients: dict, *, archive, channels, complete, owners=None,
-        now: datetime | None = None) -> RunResult:
+        now: datetime | None = None, resend: bool = False) -> RunResult:
     """설정 시각이 지난 채널의 후보를 만들고 **검토자에게** 민다.
 
     `owners` 는 더 이상 수신자를 만들지 않는다. 호출부 호환으로만 남긴다 —
     담당자를 자동으로 넣으면 그 사람이 승인 권한을 갖는데, 아무도 그 권한을
     준 적이 없다(설계 §6). 담당자도 보려면 검토자로 등록한다.
+
+    `resend` 는 **운영자가 콘솔에서 직접 누른 회차에만** 쓴다. 오늘 이미 보낸
+    검토자에게 같은 회차를 다시 민다 — 타이머가 이걸 켜면 하루 종일 같은 DM 이
+    간다. 후보 자체가 없으면 재발송도 보낼 것이 없다.
     """
     del owners
     from .daily_review import due
@@ -1323,6 +1424,10 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
     for workspace, channel_id, channel_name, send_at in channels:
         if not due(send_at, now):
             continue
+        outcome = ChannelOutcome(
+            workspace=workspace, channel_id=channel_id, channel_name=channel_name,
+        )
+        result.outcomes.append(outcome)
         try:
             result.expired += db.expire_unconfirmed(
                 workspace, channel_id, on
@@ -1341,13 +1446,19 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
                 workspace, channel_id, type(exc).__name__,
             )
             result.failed += 1
+            outcome.failed += 1
+            outcome.code = OUTCOME_GENERATE_FAILED
             continue
         if not rows:
             result.skipped += 1
+            outcome.skipped += 1
+            outcome.code = OUTCOME_NO_CANDIDATES
             continue
         client = clients.get(workspace)
         if client is None:
             result.failed += 1
+            outcome.failed += 1
+            outcome.code = OUTCOME_NO_CLIENT
             continue
         label = channel_name or channel_id
         # **검토자만** 받는다. 담당자를 자동으로 넣지 않는다(설계 §6) — 담당이라는
@@ -1355,6 +1466,8 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         targets = db.reviewer_recipients(workspace, channel_id)
         if not targets:
             result.skipped += 1
+            outcome.skipped += 1
+            outcome.code = OUTCOME_NO_REVIEWER
             continue
         # Canvas 를 **먼저 한 번** 만들고 모든 수신자가 같은 것을 본다.
         round_info = None
@@ -1373,7 +1486,7 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         artifact_rows = db.artifact_rows(round_info["artifact_id"]) if round_info else rows
 
         for recipient in targets:
-            already_sent = (
+            already_sent = not resend and (
                 db.delivery_sent(round_info["artifact_id"], recipient)
                 if round_info else
                 _already_sent(conn, workspace=workspace, channel_id=channel_id,
@@ -1381,6 +1494,9 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
             )
             if already_sent:
                 result.skipped += 1
+                outcome.skipped += 1
+                if outcome.code != OUTCOME_SENT:
+                    outcome.code = OUTCOME_ALREADY_SENT
                 continue
             try:
                 opened = client.conversations_open(users=recipient)
@@ -1419,6 +1535,8 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
                     _mark_sent(conn, workspace=workspace, channel_id=channel_id,
                                recipient=recipient, on=on, count=len(artifact_rows))
                 result.sent += 1
+                outcome.sent += 1
+                outcome.code = OUTCOME_SENT
             except Exception as exc:  # noqa: BLE001 - Slack 오류 종류가 여러 가지다
                 with contextlib.suppress(Exception):
                     conn.rollback()
@@ -1433,6 +1551,9 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
                             error_code=type(exc).__name__,
                         )
                 result.failed += 1
+                outcome.failed += 1
+                if outcome.code != OUTCOME_SENT:
+                    outcome.code = OUTCOME_DM_FAILED
     return result
 
 

@@ -15,8 +15,11 @@ from ..channels import parse as parse_channel
 from ..lock import archive_write_lock
 from .store import (
     RAW_HEADING_RE,
+    RAW_LINE_RE,
+    SLACK_TS_RE,
     SYNTHETIC_ID_PREFIX,
     SchemaError,
+    split_stamp,
     validate,
 )
 
@@ -47,6 +50,9 @@ class IncomingMessage:
     text: str
     is_bot: bool = False
     dedupe_key: str | None = None
+    # Slack 메시지 ts. 그 메시지 하나를 여는 permalink 를 만들 수 있는 유일한 값이다.
+    # 첨부 목록·캔버스처럼 메시지가 아닌 줄에는 없고, 없으면 채널 링크로 내려간다.
+    source_ts: str = ""
 
 
 def screen(text: str) -> str | None:
@@ -147,9 +153,29 @@ def _new_doc(
 
 
 def format_line(msg: IncomingMessage) -> str:
+    """원문 한 줄. Slack 메시지 ts 는 **시각 칸 안에** 적는다.
+
+    본문 뒤에 붙이면 우리가 덧붙인 글자가 원문 텍스트의 일부가 되고, 그 뒤로
+    검색·요약·인용이 전부 그 글자를 원문으로 읽는다(원칙 1 — 원문 보존).
+    """
     ts = msg.ts.astimezone(KST).strftime("%Y-%m-%d %H:%M")
+    stamp = f"{ts}|{msg.source_ts}" if SLACK_TS_RE.match(msg.source_ts or "") else ts
     text = msg.text.replace("\n", " ").strip()
-    return f"> [{ts}] {msg.speaker}: {text}"
+    return f"> [{stamp}] {msg.speaker}: {text}"
+
+
+def dedupe_line(line: str) -> str:
+    """중복 판정용 키. **Slack ts 표기는 떼고 본다.**
+
+    좌표를 남기기 시작한 날, 이미 아카이브에 있는 줄에는 좌표가 없다. 표기까지
+    비교하면 같은 메시지가 좌표만 다른 두 줄로 다시 쌓이고, 그 중복은 오류로
+    보이지 않는다 — 사람이 같은 말을 두 번 한 것처럼 읽힌다.
+    """
+    m = RAW_LINE_RE.match((line or "").strip())
+    if not m:
+        return (line or "").strip()
+    stamp, _ = split_stamp(m.group("ts"))
+    return f"> [{stamp}] {m.group('speaker').strip()}: {m.group('text').strip()}"
 
 
 @dataclass
@@ -207,7 +233,7 @@ def _ingest_locked(
         path: path.read_text(encoding="utf-8") for path in sorted(raw_dir.glob("*.md"))
     }
     all_existing = "\n".join(existing_texts.values())
-    seen = set(all_existing.splitlines())
+    seen = {dedupe_line(ln) for ln in all_existing.splitlines()}
     existing_dedupe_keys = {
         m.dedupe_key
         for m in messages
@@ -228,9 +254,10 @@ def _ingest_locked(
             refused.append((message.speaker, reason))
             continue
         line = format_line(message)
-        if line in seen:
+        key = dedupe_line(line)
+        if key in seen:
             continue
-        seen.add(line)
+        seen.add(key)
         grouped.setdefault(message.ts.astimezone(KST).date(), []).append(line)
 
     fallback_day = messages[0].ts.astimezone(KST).date() if messages else datetime.now(KST).date()

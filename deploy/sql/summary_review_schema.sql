@@ -70,6 +70,29 @@ ALTER TABLE summary_review_candidate
     ADD CONSTRAINT summary_review_candidate_state
     CHECK (state IN ('pending', 'approved', 'rejected', 'deferred', 'expired', 'superseded'));
 
+-- 근거 메시지 좌표 (B-56). Canvas의 후보별 출처 링크가 채널이 아니라 그 메시지를
+-- 연다. 좌표를 남기기 전에 수집한 후보는 빈 문자열이고, 그때는 채널 링크로 내려간다.
+ALTER TABLE summary_review_candidate
+    ADD COLUMN IF NOT EXISTS evidence_message_ts text NOT NULL DEFAULT '';
+
+-- 승인 당시 원문 한 줄의 지문. 인용문 포함 여부만 보면 원문 뒤에 정정 문장이
+-- 붙어도 같은 근거로 오인한다. 새 후보는 시각·작성자·전체 본문의 지문을 남기고,
+-- 지문이 없는 과거 후보는 검색 길잡이로 승격하지 않는다.
+ALTER TABLE summary_review_candidate
+    ADD COLUMN IF NOT EXISTS evidence_hash text NOT NULL DEFAULT '';
+
+-- 승인 요약이 가리키는 원문이 사라졌거나 좌표가 어긋난 상태 (B-56).
+-- 승인 이력을 지우지 않는다 — 검색 길잡이와 기존 승인 요약에서만 빠진다.
+ALTER TABLE approved_summary_item
+    ADD COLUMN IF NOT EXISTS stale_at timestamptz;
+ALTER TABLE approved_summary_item
+    ADD COLUMN IF NOT EXISTS stale_reason text NOT NULL DEFAULT '';
+
+-- 검색 길잡이가 매 질문마다 훑는 범위. 살아 있는 항목만 든다.
+CREATE INDEX IF NOT EXISTS approved_summary_guide
+    ON approved_summary_item (workspace, approved_at DESC)
+    WHERE superseded_at IS NULL AND stale_at IS NULL;
+
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN

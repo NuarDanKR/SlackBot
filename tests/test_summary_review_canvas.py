@@ -120,6 +120,26 @@ def test_canvas_marks_the_projection_as_not_yet_approved():
     assert "아직 승인된" in body
 
 
+def test_each_candidate_links_to_its_own_slack_message():
+    """채널 링크만 주면 사람은 그날 대화를 처음부터 뒤져야 한다(B-56)."""
+    body = sr.canvas_markdown(
+        channel_label="#ch", channel_id="C123", review_date=date(2026, 9, 16),
+        rows=[_row(evidence_message_ts="1758012345.123456")], approved=[],
+    )
+    assert "https://slack.com/archives/C123/p1758012345123456" in body
+    assert "이 근거 메시지 열기" in body
+
+
+def test_a_candidate_without_a_coordinate_falls_back_to_the_channel():
+    """좌표 없는 옛 근거에 「이 메시지」 라고 적으면 못 찾고도 찾은 줄 안다."""
+    body = sr.canvas_markdown(
+        channel_label="#ch", channel_id="C123", review_date=date(2026, 9, 16),
+        rows=[_row()], approved=[],
+    )
+    assert "이 근거 메시지 열기" not in body
+    assert "채널에서 원문 확인" in body
+
+
 def test_canvas_has_a_channel_source_link():
     body = sr.canvas_markdown(
         channel_label="#ch", channel_id="C123", review_date=date(2026, 9, 16),

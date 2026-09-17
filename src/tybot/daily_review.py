@@ -512,16 +512,71 @@ def _channels(conn) -> list[tuple[str, str, str, time]]:
 
 def _force_target(
     channels: list[tuple[str, str, str, time]],
-    *,
-    workspace: str,
-    channel_id: str,
+    targets: list[tuple[str, str]],
 ) -> list[tuple[str, str, str, time]]:
-    """즉시 시험할 채널 하나만 남기고 예약 시각을 자정으로 바꾼다."""
+    """즉시 실행할 채널만 남기고 예약 시각을 자정으로 바꾼다.
+
+    대상은 여러 개일 수 있다. 콘솔에서 채널을 여러 개 고르면 한 번의 실행으로
+    돌아야 한다 — 채널마다 작업을 따로 띄우면 「한 번에 하나」 잠금에 걸린다.
+    """
+    wanted = set(targets)
     return [
         (ws, channel, name, time.min)
         for ws, channel, name, _send_at in channels
-        if ws == workspace and channel == channel_id
+        if (ws, channel) in wanted
     ]
+
+
+def parse_target(value: str) -> tuple[str, str]:
+    """`워크스페이스:채널ID` 를 쪼갠다. 형식이 아니면 `ValueError`."""
+    workspace, separator, channel_id = value.partition(":")
+    if not separator or not workspace.strip() or not channel_id.strip():
+        raise ValueError(f"대상 형식이 올바르지 않습니다: {value}")
+    return workspace.strip(), channel_id.strip()
+
+
+# 검토 설정 자체가 없는 채널. `summary_review` 는 이 채널을 보지도 못하므로
+# 여기서 결과에 넣는다 — 목록에서 사라지면 「보냈다」 로 오해된다.
+NO_REVIEW_CONFIG = "no-review-config"
+
+
+def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]]) -> None:
+    """채널별 결과를 JSON 으로 남긴다. **종료 코드는 이걸 대신하지 못한다.**
+
+    보낼 것이 없어도, 검토자가 없어도, 이미 보냈어도 실행은 0 으로 끝난다. 그래서
+    콘솔이 「실행 완료」 만 보이고 아무도 DM 을 못 받는 일이 생겼다(2026-09-17).
+    """
+    import json
+    from pathlib import Path
+
+    outcomes = [row.as_dict() for row in (result.outcomes if result else [])]
+    outcomes += [
+        {
+            "workspace": workspace,
+            "channelId": channel_id,
+            "channelName": "",
+            "code": NO_REVIEW_CONFIG,
+            "reason": "활성 검토 설정이 없는 채널입니다",
+            "sent": 0,
+            "skipped": 0,
+            "failed": 1,
+        }
+        for workspace, channel_id in unconfigured
+    ]
+    payload = {
+        "sent": sum(row["sent"] for row in outcomes),
+        "skipped": sum(row["skipped"] for row in outcomes),
+        "failed": sum(row["failed"] for row in outcomes),
+        "generated": result.generated if result else 0,
+        "canvasFallback": result.canvas_fallback if result else 0,
+        "channels": outcomes,
+    }
+    try:
+        Path(path).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.error("실행 결과를 남기지 못했습니다: %s", exc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -535,13 +590,39 @@ def main(argv: list[str] | None = None) -> int:
         help="지정한 채널의 예약 시각만 우회한다(오늘 발송 이력은 우회하지 않음)",
     )
     ap.add_argument("--workspace", help="--force-now 대상 워크스페이스 키")
-    ap.add_argument("--channel", help="--force-now 대상 Slack 채널 ID")
+    ap.add_argument("--channel", action="append", help="--force-now 대상 Slack 채널 ID(반복 가능)")
+    ap.add_argument(
+        "--target",
+        action="append",
+        help="--force-now 대상을 `워크스페이스:채널ID` 로 지정한다(반복 가능)",
+    )
+    ap.add_argument(
+        "--resend",
+        action="store_true",
+        help="오늘 이미 보낸 검토자에게도 다시 보낸다(--force-now 전용)",
+    )
+    ap.add_argument("--result-json", help="채널별 실행 결과를 이 경로에 JSON 으로 남긴다")
     args = ap.parse_args(argv)
 
-    if args.force_now and (not args.workspace or not args.channel):
-        ap.error("--force-now에는 --workspace와 --channel이 모두 필요합니다.")
-    if not args.force_now and (args.workspace or args.channel):
-        ap.error("--workspace와 --channel은 --force-now와 함께 사용하세요.")
+    targets: list[tuple[str, str]] = []
+    for value in args.target or []:
+        try:
+            targets.append(parse_target(value))
+        except ValueError as exc:
+            ap.error(str(exc))
+    for channel in args.channel or []:
+        if not args.workspace:
+            ap.error("--channel 에는 --workspace 가 필요합니다. 또는 --target 을 쓰세요.")
+        targets.append((args.workspace, channel))
+    # 같은 채널을 두 번 적어도 한 번만 돈다 — 두 번 돌면 재발송이 두 번 간다.
+    targets = list(dict.fromkeys(targets))
+
+    if args.force_now and not targets:
+        ap.error("--force-now에는 --target 또는 --workspace/--channel이 필요합니다.")
+    if not args.force_now and (targets or args.workspace):
+        ap.error("--target/--workspace/--channel은 --force-now와 함께 사용하세요.")
+    if args.resend and not args.force_now:
+        ap.error("--resend는 --force-now와 함께만 사용합니다.")
     if args.force_now and args.dry_run:
         ap.error("--force-now와 --dry-run은 함께 사용할 수 없습니다.")
 
@@ -580,23 +661,23 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("%s", problem)
             return 2
         channels = _channels(conn)
+        unconfigured: list[tuple[str, str]] = []
         if args.force_now:
-            channels = _force_target(
-                channels,
-                workspace=args.workspace,
-                channel_id=args.channel,
-            )
-            if not channels:
+            channels = _force_target(channels, targets)
+            found = {(ws, channel) for ws, channel, _name, _at in channels}
+            unconfigured = [item for item in targets if item not in found]
+            for workspace, channel_id in unconfigured:
                 logger.error(
-                    "활성 검토 설정을 찾지 못했습니다 ws=%s ch=%s",
-                    args.workspace,
-                    args.channel,
+                    "활성 검토 설정을 찾지 못했습니다 ws=%s ch=%s", workspace, channel_id,
                 )
+            if not channels:
+                if args.result_json:
+                    _write_result(args.result_json, None, unconfigured=unconfigured)
                 return 2
             logger.warning(
-                "예약 시각을 우회해 요약 검토를 즉시 실행합니다 ws=%s ch=%s",
-                args.workspace,
-                args.channel,
+                "예약 시각을 우회해 요약 검토를 즉시 실행합니다 대상=%d개%s",
+                len(channels),
+                " (재발송)" if args.resend else "",
             )
         if args.dry_run:
             clients = {}
@@ -639,7 +720,11 @@ def main(argv: list[str] | None = None) -> int:
                 channels=channels,
                 owners=owners,
                 complete=complete_summary,
+                resend=args.resend,
             )
+
+    if args.result_json:
+        _write_result(args.result_json, summary_result, unconfigured=unconfigured)
 
     if summary_result is not None:
         # Canvas 수치를 **따로** 남긴다. 폴백을 성공과 합치면 Canvas 가 계속

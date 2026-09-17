@@ -1598,6 +1598,20 @@
 .pane-split > * + * {
   border-left: 1px solid var(--line);
 }
+.rule-test-result {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.rule-test-result > .hint {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.rule-test-result .browser-pane {
+  max-height: 520px;
+}
 @media (max-width: 1120px) {
   .pane-split {
     grid-template-columns: minmax(0, 1fr);
@@ -3091,4 +3105,15 @@ table.grid tbody:first-of-type .channel-workspace-row th {
   font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 요약 검토 DM 결과 — 채널마다 「보냈다/왜 안 갔다」 를 한 줄로 보인다. */
+.review-outcomes {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
 }

@@ -1,11 +1,13 @@
 import json
-from datetime import date
+from datetime import date, datetime
+from datetime import time as dt_time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tybot import summary_review as sr
+from tybot.evidence_refs import content_hash
 
 
 def _source(text="공사기간은 2026-09-01부터 2026-12-31까지입니다"):
@@ -167,3 +169,142 @@ def test_schema_keeps_approved_summaries_out_of_raw_archive():
     assert "sent.recipient=%s" in Path("src/tybot/summary_review.py").read_text(encoding="utf-8")
     assert "enable --now tybot-review-dm.timer" in Path("deploy/update.sh").read_text(encoding="utf-8")
     assert "'expired'" in sql
+    assert "evidence_hash" in sql
+
+
+def test_the_evidence_coordinate_comes_from_the_archive_not_the_model():
+    """출처 링크가 모델 출력이면 사람이 확인하러 간 자리에 그 문장이 없다(B-56)."""
+    quote = "공정률은 62.5%입니다"
+    source = [sr.SourceLine(
+        "2026-09-15 09:00", "홍길동", quote, "2026-09-15.md:10",
+        message_ts="1758012345.123456",
+    )]
+    raw = json.dumps({"candidates": [{"kind": "number_or_schedule", "current_text": "",
+        "proposed_text": quote, "evidence_quote": quote,
+        "evidence_message_ts": "9999999999.000000"}]})
+
+    got = sr.parse_proposals(raw, source)
+
+    assert got[0].evidence_message_ts == "1758012345.123456"
+    assert got[0].evidence_hash == content_hash(
+        "2026-09-15 09:00", "홍길동", quote
+    )
+
+
+def test_message_link_needs_both_channel_and_coordinate():
+    assert sr.message_link("C1", "1758012345.123456") == (
+        "https://slack.com/archives/C1/p1758012345123456"
+    )
+    assert sr.message_link("C1", "") == ""
+    assert sr.message_link("", "1758012345.123456") == ""
+
+
+# --- 무엇이 실제로 일어났는가 (2026-09-17) -------------------------------------
+# 콘솔은 「실행 완료」만 보이고 아무도 DM을 못 받았다. 종료 코드 0이 「보낼 것이
+# 없었다」와 「보냈다」를 같은 글자로 만들었기 때문이다. run() 이 채널마다 사유를
+# 남기는지 실제 호출 경로로 확인한다.
+class _OutcomeStore:
+    def __init__(self, *, rows, reviewers, already):
+        self._rows = rows
+        self._reviewers = reviewers
+        self._already = already
+        self.delivered = []
+
+    def __call__(self, conn):
+        return self
+
+    def expire_unconfirmed(self, workspace, channel_id, on):
+        return 0
+
+    def generated_on(self, workspace, channel_id, on):
+        return True
+
+    def pending(self, workspace, channel_id, on):
+        return list(self._rows)
+
+    def reviewer_recipients(self, workspace, channel_id):
+        return list(self._reviewers)
+
+    def artifact_rows(self, artifact_id):
+        return list(self._rows)
+
+    def delivery_sent(self, artifact_id, recipient):
+        return recipient in self._already
+
+    def record_delivery(self, artifact_id, recipient, **kwargs):
+        if kwargs.get("state", "sent") == "sent":
+            self.delivered.append(recipient)
+
+
+class _OutcomeClient:
+    def __init__(self):
+        self.posted = []
+
+    def conversations_open(self, users):
+        return {"channel": {"id": f"D{users}"}}
+
+    def chat_postMessage(self, **kwargs):
+        self.posted.append(kwargs["channel"])
+        return {"ts": "1.0"}
+
+
+def _outcome_run(monkeypatch, *, rows, reviewers, already, resend=False):
+    from types import SimpleNamespace
+
+    from tybot import summary_review as sr
+
+    store = _OutcomeStore(rows=rows, reviewers=reviewers, already=already)
+    monkeypatch.setattr(sr, "Store", store)
+    monkeypatch.setattr(
+        sr, "_canvas_round",
+        lambda *a, **k: {"artifact_id": "A1", "permalink": "https://x"},
+    )
+    monkeypatch.setattr(sr, "canvas_review_blocks", lambda **k: [])
+    client = _OutcomeClient()
+    result = sr.run(
+        SimpleNamespace(rollback=lambda: None),
+        {"tyit": client},
+        archive=None,
+        channels=[("tyit", "C1", "주간보고", dt_time.min)],
+        complete=lambda *a, **k: "",
+        now=datetime(2026, 9, 17, 18, 0, tzinfo=sr.KST),
+        resend=resend,
+    )
+    return result, client
+
+
+def test_run_says_no_candidates_instead_of_silently_finishing(monkeypatch):
+    result, client = _outcome_run(monkeypatch, rows=[], reviewers=["U1"], already=set())
+
+    assert result.sent == 0
+    assert client.posted == []
+    assert [row.code for row in result.outcomes] == ["no-candidates"]
+
+
+def test_run_says_no_reviewer_when_nobody_is_registered(monkeypatch):
+    result, _client = _outcome_run(
+        monkeypatch, rows=[{"id": 1}], reviewers=[], already=set()
+    )
+
+    assert [row.code for row in result.outcomes] == ["no-reviewer"]
+
+
+def test_run_says_already_sent_rather_than_reporting_success(monkeypatch):
+    result, client = _outcome_run(
+        monkeypatch, rows=[{"id": 1}], reviewers=["U1"], already={"U1"}
+    )
+
+    assert result.sent == 0
+    assert client.posted == []
+    assert [row.code for row in result.outcomes] == ["already-sent"]
+
+
+def test_resend_pushes_to_a_reviewer_who_already_got_today(monkeypatch):
+    """운영자가 직접 「다시 보내기」를 켠 회차에만 오늘 이력을 넘어선다."""
+    result, client = _outcome_run(
+        monkeypatch, rows=[{"id": 1}], reviewers=["U1"], already={"U1"}, resend=True
+    )
+
+    assert result.sent == 1
+    assert client.posted == ["DU1"]
+    assert [row.code for row in result.outcomes] == ["sent"]

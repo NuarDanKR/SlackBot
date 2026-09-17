@@ -82,11 +82,36 @@ interface CollectionJob {
   logTail: string[]
 }
 
+interface ReviewChannelResult {
+  workspace: string
+  channelId: string
+  channelName: string
+  code: string
+  reason: string
+  sent: number
+  skipped: number
+  failed: number
+}
+
+interface ReviewResult {
+  sent: number
+  skipped: number
+  failed: number
+  generated: number
+  canvasFallback: number
+  channels: ReviewChannelResult[]
+}
+
 interface ReviewJob {
   id: string
   status: 'queued' | 'running' | 'completed' | 'failed'
   workspace: string
   channelId: string
+  targets?: { workspace: string; channelId: string }[]
+  resend?: boolean
+  /** 실제로 무슨 일이 있었는가. 종료 코드는 「보낼 것이 없었다」를 모른다. */
+  outcome?: 'sent' | 'partial' | 'nothing-sent' | 'unknown' | null
+  result?: ReviewResult | null
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -124,6 +149,7 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
   const [busy, setBusy] = useState(false)
   const [collectionBusy, setCollectionBusy] = useState(false)
   const [reviewBusy, setReviewBusy] = useState(false)
+  const [reviewResend, setReviewResend] = useState(false)
   const [result, setResult] = useState<AssignResult | null>(null)
   const job = jobResource.data?.job ?? null
   const jobActive = job?.status === 'queued' || job?.status === 'running'
@@ -218,10 +244,14 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
   }, [ownerSearch, resource.data])
 
   const selectedOwner = resource.data?.candidates.find((candidate) => candidate.slackUser === owner)
-  const selectedReviewRow = useMemo(() => {
-    if (selected.size !== 1) return null
-    const selectedKey = [...selected][0]
-    return (resource.data?.rows ?? []).find((row) => key(row) === selectedKey) ?? null
+  /** 선택한 채널 중 검토자가 있는 채널만 실행 대상입니다. */
+  const reviewTargets = useMemo(() => {
+    const rows = resource.data?.rows ?? []
+    return rows.filter((row) => selected.has(key(row)) && row.reviewers.length > 0)
+  }, [resource.data, selected])
+  const reviewBlocked = useMemo(() => {
+    const rows = resource.data?.rows ?? []
+    return rows.filter((row) => selected.has(key(row)) && row.reviewers.length === 0)
   }, [resource.data, selected])
 
   if (resource.loading) return <Loading what="채널 목록" />
@@ -295,19 +325,21 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
   }
 
   async function startReview() {
-    if (!selectedReviewRow || selectedReviewRow.reviewers.length === 0 || reviewJobActive) return
-    if (
-      !window.confirm(
-        `${selectedReviewRow.channel}의 예약 시각을 무시하고 오늘 요약 검토를 지금 실행할까요?`,
-      )
-    )
+    if (reviewTargets.length === 0 || reviewJobActive) return
+    const what =
+      reviewTargets.length === 1
+        ? reviewTargets[0].channel
+        : `채널 ${reviewTargets.length}개`
+    const again = reviewResend ? '\n오늘 이미 보낸 검토자에게도 다시 보냅니다.' : ''
+    if (!window.confirm(`${what}의 예약 시각을 무시하고 오늘 요약 검토를 지금 실행할까요?${again}`))
       return
     setReviewBusy(true)
     try {
       await api.securePost<{ job: ReviewJob }>('/api/channels/review-jobs', {
-        channel: key(selectedReviewRow),
+        channels: reviewTargets.map(key),
+        resend: reviewResend,
       })
-      onToast('요약 검토 DM 작업을 시작했습니다.')
+      onToast(`요약 검토 DM 작업을 시작했습니다 — 대상 ${reviewTargets.length}개 채널.`)
       reviewJobResource.reload()
     } catch (e) {
       const error = e as ApiError
@@ -493,40 +525,75 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
 
       <Section
         title="요약 검토 DM"
-        lead="채널 하나를 선택해 예약 시각을 기다리지 않고 검토 Canvas와 DM 생성을 실행합니다. 오늘 이미 발송한 DM은 중복 전송하지 않습니다."
+        lead="선택한 채널의 예약 시각을 기다리지 않고 검토 Canvas와 DM 생성을 실행합니다. 실행이 끝나면 채널마다 실제로 보냈는지를 함께 보여 줍니다."
       >
         <div className="toolbar">
           <button
             type="button"
             className="btn btn-primary"
-            disabled={
-              reviewBusy ||
-              reviewJobActive ||
-              !selectedReviewRow ||
-              selectedReviewRow.reviewers.length === 0
-            }
+            disabled={reviewBusy || reviewJobActive || reviewTargets.length === 0}
             onClick={startReview}
           >
-            {reviewBusy || reviewJobActive ? '검토 DM 실행 중' : '선택 채널 검토 DM 지금 발송'}
+            {reviewBusy || reviewJobActive
+              ? '검토 DM 실행 중'
+              : `선택 채널 ${reviewTargets.length}개 검토 DM 지금 발송`}
           </button>
-          {selectedReviewRow && selectedReviewRow.reviewers.length === 0 && (
-            <span className="note warn">선택한 채널에는 활성 검토자가 없습니다.</span>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={reviewResend}
+              onChange={(event) => setReviewResend(event.target.checked)}
+            />
+            오늘 이미 보낸 검토자에게도 다시 보내기
+          </label>
+          {reviewBlocked.length > 0 && (
+            <span className="note warn">
+              활성 검토자가 없어 제외한 채널 {reviewBlocked.length}개:{' '}
+              {reviewBlocked.map((row) => row.channel).join(', ')}
+            </span>
           )}
-          {selected.size !== 1 && (
-            <span className="note">채널을 하나만 선택하세요.</span>
-          )}
+          {selected.size === 0 && <span className="note">채널을 하나 이상 선택하세요.</span>}
         </div>
         {reviewJob && (
-          <div className={`notice ${reviewJob.status === 'failed' ? 'bad' : ''}`}>
+          <div
+            className={`notice ${
+              reviewJob.status === 'failed' || reviewJob.outcome === 'nothing-sent' ? 'bad' : ''
+            }`}
+          >
             <div className="notice-kind">요약 검토 DM</div>
             <div>
               <div className="notice-title">
                 {reviewJob.status === 'queued' && '실행 대기'}
                 {reviewJob.status === 'running' && '요약 및 Canvas 생성 중'}
-                {reviewJob.status === 'completed' && '실행 완료'}
                 {reviewJob.status === 'failed' && `실패 · ${reviewJob.errorCode ?? '원인 미확인'}`}
+                {reviewJob.status === 'completed' &&
+                  (reviewJob.outcome === 'sent'
+                    ? `발송 완료 · DM ${reviewJob.result?.sent ?? 0}건`
+                    : reviewJob.outcome === 'partial'
+                      ? `일부 발송 · DM ${reviewJob.result?.sent ?? 0}건 · 실패 ${reviewJob.result?.failed ?? 0}건`
+                      : 'DM이 한 건도 가지 않았습니다')}
               </div>
-              <div className="notice-detail mono">{reviewJob.workspace} · {reviewJob.channelId}</div>
+              {reviewJob.status === 'completed' && reviewJob.outcome === 'nothing-sent' && (
+                <p className="note warn">
+                  실행 자체는 끝났지만 아무도 받지 못했습니다. 채널별 사유를 보고 조치하세요.
+                </p>
+              )}
+              <div className="notice-detail mono">
+                {(reviewJob.targets ?? [{ workspace: reviewJob.workspace, channelId: reviewJob.channelId }])
+                  .map((target) => `${target.workspace}:${target.channelId}`)
+                  .join(', ')}
+                {reviewJob.resend ? ' · 재발송' : ''}
+              </div>
+              {reviewJob.result && reviewJob.result.channels.length > 0 && (
+                <ul className="review-outcomes">
+                  {reviewJob.result.channels.map((row) => (
+                    <li key={`${row.workspace}:${row.channelId}`}>
+                      <span className="mono">{row.channelName || row.channelId}</span> —{' '}
+                      {row.sent > 0 ? `DM ${row.sent}건 발송` : row.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
               {reviewJob.logTail.length > 0 && (
                 <pre className="channel-job-log">{reviewJob.logTail.join('\n')}</pre>
               )}

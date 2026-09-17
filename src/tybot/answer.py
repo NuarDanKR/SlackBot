@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import document_evidence, documents
+from . import document_evidence, documents, summary_guide
 from .access import RequestContext
 from .archive.store import ArchiveStore, SearchHit
 from .attachment_review import find_sendable, status_line
@@ -1542,6 +1542,39 @@ class AnswerEngine:
         )
         return ans
 
+    def _with_approved_guide(self, query: str, hits, ctx) -> list[SearchHit]:
+        """승인 요약이 가리키는 원문 좌표를 **검색 후보에만** 더한다(B-56).
+
+        사람이 쓰는 말과 문서에 적힌 말이 다르면 검색은 옆에 둔 문서를 못 찾는다.
+        검토자가 승인한 요약은 그 둘을 이어 주는 유일한 사람 확인 자료다.
+
+        그래도 **승인 문장 자체는 근거로 나가지 않는다.** 여기서 더해지는 것은 그
+        문장이 가리킨 원문 줄이고, 그 줄은 요청자의 현재 권한으로 다시 연 것이다.
+        검색 결과를 밀어내지 않도록 뒤에 붙인다 — 원문 검색이 먼저다.
+        """
+        try:
+            extra = summary_guide.expand(self._store, ctx, query)
+        except Exception:
+            # 길잡이 실패가 답변을 막으면 안 된다. 없으면 예전과 같은 검색 결과다.
+            logger.warning("승인 요약 길잡이를 쓰지 못했습니다", exc_info=True)
+            return list(hits)
+        if not extra:
+            return list(hits)
+        merged = list(hits)
+        seen = {(str(h.doc.path), h.line.lineno) for h in merged}
+        for hit in extra:
+            key = (str(hit.doc.path), hit.line.lineno)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(hit)
+        if len(merged) > len(hits):
+            logger.info(
+                "승인 요약 길잡이로 원문 %d줄을 더했다 ws=%s",
+                len(merged) - len(hits), ctx.workspace,
+            )
+        return merged[: self._max_hits + summary_guide.MAX_EXTRA_HITS]
+
     def answer(
         self,
         question: str,
@@ -1569,6 +1602,7 @@ class AnswerEngine:
             # 2겹: 색인이 아니라 원문 라인을 연다.
             query = " ".join(terms) if terms else q
             hits = self._store.search(query, ctx, limit=self._max_hits)
+            hits = self._with_approved_guide(query, hits, ctx)
 
         if not hits and scoped:
             return Answer(

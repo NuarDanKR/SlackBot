@@ -43,6 +43,7 @@ from . import (
     llm_secret_store,
     reader,
     review_jobs,
+    rule_test,
     service_logs,
     specialist_git,
     specialist_runtime_store,
@@ -202,6 +203,7 @@ class SpecialistProposalBody(BaseModel):
     sourceName: str = Field(default="", max_length=150)
     bundleSha256: str = Field(default="", max_length=64)
     uploadReceipt: str = Field(default="", max_length=200)
+    ruleTestId: str = Field(default="", max_length=36)
 
 
 class SpecialistImportBody(BaseModel):
@@ -226,13 +228,27 @@ class ChannelCollectionJobBody(BaseModel):
 
 
 class ChannelReviewJobBody(BaseModel):
-    """콘솔에서 즉시 실행하는 채널 하나의 요약 검토 DM."""
+    """콘솔에서 즉시 실행하는 요약 검토 DM. 채널은 여러 개 고를 수 있다."""
 
-    channel: str = Field(min_length=3, max_length=80)
+    channels: list[str] = Field(default_factory=list, max_length=20)
+    # 옛 화면 호환. 새 화면은 `channels` 를 보낸다.
+    channel: str = Field(default="", max_length=80)
+    # 오늘 이미 보낸 검토자에게 다시 보낸다. 운영자가 명시적으로 켠 회차만이다.
+    resend: bool = False
+
+    def targets(self) -> list[str]:
+        picked = [value for value in [*self.channels, self.channel] if value.strip()]
+        return list(dict.fromkeys(picked))
 
 
 class SpecialistDecisionBody(BaseModel):
     note: str = Field(default="", max_length=500)
+
+
+class SpecialistRuleTestBody(BaseModel):
+    workspace: str = Field(min_length=1, max_length=40)
+    question: str = Field(min_length=1, max_length=2000)
+    draftRules: str = Field(default="", max_length=8000)
 
 
 def _audit_event(**kwargs) -> None:
@@ -1114,6 +1130,7 @@ def _specialist_request_response(row: dict) -> dict:
         "approver": row.get("approver"),
         "decidedAt": row.get("decided_at"),
         "note": row.get("note") or "",
+        "ruleTest": row.get("rule_test"),
     }
 
 
@@ -1228,6 +1245,55 @@ def specialist(key: str, user: User) -> dict:
     detail = _specialist_response(row)
     detail["rules"] = row.get("rules") or ""
     return detail
+
+
+@app.post("/api/specialists/{key}/rule-test")
+def test_specialist_rules(
+    key: str,
+    body: SpecialistRuleTestBody,
+    request: Request,
+    user: User,
+) -> dict:
+    """Run deployed and draft rules with the actor's Slack ACL, without archiving."""
+    _require_developer(user)
+    _check_write_request(request)
+    workspace = body.workspace.strip().lower()
+    if not user.may_see(workspace):
+        raise HTTPException(status_code=403, detail="담당 워크스페이스만 시험할 수 있습니다.")
+    try:
+        row = specialist_store.get_specialist(key)
+        if row is None:
+            raise HTTPException(status_code=404, detail="전문 봇을 찾을 수 없습니다.")
+        if not _visible_specialists(user, [row]):
+            raise HTTPException(status_code=403, detail="이 전문 봇을 시험할 권한이 없습니다.")
+        result = rule_test.run(
+            row,
+            draft_rules=body.draftRules,
+            question=body.question,
+            workspace=workspace,
+            actor=user.email,
+        )
+        saved = specialist_store.save_rule_test(result)
+    except HTTPException:
+        raise
+    except (rule_test.RuleTestError, specialist_store.SpecialistStoreError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email,
+        category="specialist",
+        action="rule-test",
+        target_type="specialist",
+        target_id=key,
+        workspace=workspace,
+        outcome="completed",
+        metadata={
+            "reason": "rule_test",
+            "testId": saved.get("id"),
+            "currentStatus": (saved.get("current") or {}).get("status"),
+            "draftStatus": (saved.get("draft") or {}).get("status"),
+        },
+    )
+    return {"ruleTest": saved}
 
 
 @app.post("/api/specialists/import-preview")
@@ -2661,26 +2727,31 @@ def latest_channel_review_job(user: User) -> dict:
 def start_channel_review_job(
     body: ChannelReviewJobBody, request: Request, user: User
 ) -> dict:
-    """선택한 채널 하나의 예약 시각을 우회해 요약 검토를 실행한다."""
+    """선택한 채널들의 예약 시각을 우회해 요약 검토를 실행한다."""
     _require_admin(user)
     _check_write_request(request)
 
-    workspace, separator, channel_id = body.channel.partition(":")
+    picked = body.targets()
+    if not picked:
+        raise HTTPException(status_code=422, detail="실행할 채널을 선택하세요.")
     rows, _totals = channel_admin.snapshot()
-    target = next(
-        (
-            row
-            for row in rows
-            if row.workspace == workspace and row.channel_id == channel_id
-        ),
-        None,
-    )
-    if not separator or target is None:
-        raise HTTPException(status_code=422, detail="관리 대상이 아닌 채널입니다.")
-    if not target.reviewers:
-        raise HTTPException(status_code=422, detail="활성 요약 검토자가 없는 채널입니다.")
+    index = {(row.workspace, row.channel_id): row for row in rows}
+    targets: list[tuple[str, str]] = []
+    for value in picked:
+        workspace, separator, channel_id = value.partition(":")
+        target = index.get((workspace, channel_id))
+        if not separator or target is None:
+            raise HTTPException(
+                status_code=422, detail=f"관리 대상이 아닌 채널입니다: {value}"
+            )
+        if not target.reviewers:
+            raise HTTPException(
+                status_code=422,
+                detail=f"활성 요약 검토자가 없는 채널입니다: {target.channel or value}",
+            )
+        targets.append((workspace, channel_id))
     try:
-        job = review_jobs.start(workspace, channel_id, actor=user.email)
+        job = review_jobs.start(targets, actor=user.email, resend=body.resend)
     except review_jobs.ReviewJobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     _audit_event(
@@ -2688,8 +2759,9 @@ def start_channel_review_job(
         category="review",
         action="send-now",
         target_type="channel",
-        target_id=body.channel,
+        target_id=",".join(f"{ws}:{ch}" for ws, ch in targets),
         outcome="requested",
+        metadata={"target_count": len(targets), "resend": body.resend},
     )
     return {"job": job}
 

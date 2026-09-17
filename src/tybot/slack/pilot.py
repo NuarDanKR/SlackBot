@@ -2852,8 +2852,13 @@ class WorkspaceBot:
         self._pending_attachments = []
         out = []
         body = (event.get("text") or "").strip()
+        # 메시지 하나를 여는 좌표. 첨부에서 뽑은 줄에도 같은 값을 남긴다 —
+        # 링크를 누르면 그 파일이 붙은 메시지가 열린다(B-56).
+        source_ts = str(event.get("ts") or "")
         if body:
-            out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=body))
+            out.append(writer.IncomingMessage(
+                ts=ts, speaker=speaker, text=body, source_ts=source_ts,
+            ))
         if event.get("files"):
             channel_id = event.get("channel", "unknown")
             storage = attachment_storage(self.archive_dir, self.workspace, channel_id)
@@ -2870,7 +2875,9 @@ class WorkspaceBot:
             self._pending_attachments = staged
             for item in staged:
                 for ln in item.lines:
-                    out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=ln))
+                    out.append(writer.IncomingMessage(
+                        ts=ts, speaker=speaker, text=ln, source_ts=source_ts,
+                    ))
                 for w in item.warnings:
                     log.warning("첨부 처리 경고 ch=%s: %s", channel_id, w)
         return out

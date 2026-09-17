@@ -368,6 +368,30 @@ export interface SpecialistRequest {
   approver: string | null
   decidedAt: string | null
   note: string
+  ruleTest: SpecialistRuleTest | null
+}
+
+export interface SpecialistRuleTestSide {
+  status: string
+  answer: string
+  model: string
+  costUsd: number
+  errorCode: string
+  sources: string[]
+}
+
+export interface SpecialistRuleTest {
+  id: string
+  specialist: string
+  workspace: string
+  requester: string
+  question: string
+  currentRulesHash: string
+  draftRulesHash: string
+  current: SpecialistRuleTestSide
+  draft: SpecialistRuleTestSide
+  createdAt: string
+  expiresAt: string
 }
 
 export type CheckId = 'pytest' | 'ruff' | 'schema' | 'secrets'

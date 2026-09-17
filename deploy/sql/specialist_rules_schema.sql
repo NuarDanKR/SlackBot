@@ -36,6 +36,32 @@ COMMENT ON COLUMN specialist_bot.rules IS
     '콘솔에서 편집하는 답변 규칙. 비면 저장소의 프롬프트 파일을 쓴다.';
 
 -- ---------------------------------------------------------------------------
+-- 1.1 규칙 변경 전후 시험 결과 (B-17)
+-- ---------------------------------------------------------------------------
+-- 답변 원문 아카이브가 아니다. 승인자가 변경 효과를 확인하는 30일짜리 파생 기록이다.
+-- 질문·답변이 들어 있으므로 같은 워크스페이스 개발자와 관리자에게만 API로 보인다.
+CREATE TABLE IF NOT EXISTS specialist_rule_test (
+    id                  uuid PRIMARY KEY,
+    specialist          text NOT NULL REFERENCES specialist_bot(key) ON DELETE CASCADE,
+    workspace           text NOT NULL REFERENCES workspace(key) ON DELETE CASCADE,
+    requester           text NOT NULL,
+    question            text NOT NULL CHECK (length(question) BETWEEN 1 AND 2000),
+    current_rules_hash  text NOT NULL CHECK (current_rules_hash ~ '^[0-9a-f]{64}$'),
+    draft_rules_hash    text NOT NULL CHECK (draft_rules_hash ~ '^[0-9a-f]{64}$'),
+    current_result      jsonb NOT NULL,
+    draft_result        jsonb NOT NULL,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    expires_at          timestamptz NOT NULL,
+    CHECK (expires_at > created_at)
+);
+
+CREATE INDEX IF NOT EXISTS specialist_rule_test_recent
+    ON specialist_rule_test (specialist, created_at DESC);
+
+COMMENT ON TABLE specialist_rule_test IS
+    '규칙 변경 전후 시험 결과. raw/와 답변 검색 색인에는 들어가지 않는 30일 파생 기록.';
+
+-- ---------------------------------------------------------------------------
 -- 2. 전문가 전용 API 키
 -- ---------------------------------------------------------------------------
 -- `llm_secret` 은 프로바이더 단위(우리 키)다. 팀이 **자기 키**로 답하고 싶으면
@@ -72,6 +98,7 @@ DECLARE
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE specialist_secret TO tyslackai';
+        EXECUTE 'GRANT SELECT, INSERT, DELETE ON TABLE specialist_rule_test TO tyslackai';
         -- bigserial 시퀀스도 함께. 없으면 INSERT 만 권한 오류로 죽는다.
         --
         -- `ALL SEQUENCES IN SCHEMA public` 은 쓰지 않는다 — 다른 파일이 만든 남의

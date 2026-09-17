@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { Markdown } from '../components/Markdown'
 import { Chip, Failed, Loading, Metric, MiniBars, PageHead, Section, fmt } from '../components/primitives'
-import type { ConsoleUser, GatewayModel, Specialist, SpecialistCall, SpecialistRequest } from '../types'
+import type { ConsoleUser, GatewayModel, Specialist, SpecialistCall, SpecialistRequest, SpecialistRuleTest } from '../types'
 import { withQuery } from '../navigation'
 
 const RESULT_LABEL: Record<SpecialistCall['result'], string> = { success: '성공', fallback: '폴백', error: '오류', contract_violation: '계약 위반', evidence_insufficient: '근거 부족' }
@@ -13,6 +14,24 @@ function stateChip(state: Specialist['state'], health: Specialist['health']) {
   if (state === 'enabled') return <Chip tone="ok">사용 중</Chip>
   if (state === 'draft') return <Chip tone="watch">초안</Chip>
   return <Chip tone="plain">사용 중지</Chip>
+}
+
+function RuleTestComparison({ value }: { value: SpecialistRuleTest }) {
+  const panes = [
+    { key: 'current', label: '현재 규칙', value: value.current },
+    { key: 'draft', label: '편집 중 규칙', value: value.draft },
+  ] as const
+  return <div className="rule-test-result">
+    <div className="hint">{value.workspace} · {fmt.dayClock(value.createdAt)} · 질문: {value.question}</div>
+    <div className="pane-split">
+      {panes.map((pane) => <div className="browser-pane" key={pane.key}>
+        <div className="pane-label"><strong>{pane.label}</strong><span className="mono">{fmt.usd(pane.value.costUsd)}</span></div>
+        {pane.value.status === 'success' ? <Markdown source={pane.value.answer} /> : <div className="notice bad"><div><div className="notice-title">답변 실패</div><div className="notice-detail mono">{pane.value.errorCode || pane.value.status}</div></div></div>}
+        <div className="hint">모델 {pane.value.model || '-'} · 근거 {pane.value.sources.length}건</div>
+        {pane.value.sources.length > 0 && <ul className="compact-list">{pane.value.sources.map((source) => <li key={source}>{source}</li>)}</ul>}
+      </div>)}
+    </div>
+  </div>
 }
 
 export function SpecialistAnalytics({ query, navigate }: { query: URLSearchParams; navigate: (path: string) => void }) {
@@ -78,7 +97,7 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
     minConfidence: 0.6, rules: '', repositoryUrl: '', releaseRef: '',
     sourceCommit: '', artifactHashes: {} as Record<string, string>,
     sourceType: 'manual' as 'manual' | 'git' | 'zip', sourceName: '',
-    bundleSha256: '', uploadReceipt: '',
+    bundleSha256: '', uploadReceipt: '', ruleTestId: '',
   })
   const [repositoryUrl, setRepositoryUrl] = useState('')
   const [release, setRelease] = useState('latest')
@@ -89,6 +108,9 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [decisionPending, setDecisionPending] = useState<{ id: string; decision: 'approve' | 'reject'; specialist: string; requester: string } | null>(null)
+  const [testQuestion, setTestQuestion] = useState('')
+  const [testWorkspace, setTestWorkspace] = useState('')
+  const [ruleTest, setRuleTest] = useState<SpecialistRuleTest | null>(null)
   useEffect(() => { if (resource.data) setData(resource.data) }, [resource.data])
   const filtered = useMemo(() => {
     const state = query.get('state')
@@ -103,6 +125,19 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
       const result = await api.securePost<{ requests: SpecialistRequest[] }>('/api/specialists/requests', { ...draft, workspaces: picked })
       setData((current) => current ? { ...current, requests: result.requests } : current)
       onToast('전문 봇 변경 요청을 등록했습니다.')
+    } catch (caught) { setError(caught instanceof ApiError ? caught.message : String(caught)) }
+    finally { setBusy(false) }
+  }
+  async function runRuleTest() {
+    if (!draft.key || !testWorkspace || !testQuestion.trim()) return
+    setBusy(true); setError(null); setRuleTest(null)
+    try {
+      const result = await api.securePost<{ ruleTest: SpecialistRuleTest }>(`/api/specialists/${draft.key}/rule-test`, {
+        workspace: testWorkspace, question: testQuestion, draftRules: draft.rules,
+      })
+      setRuleTest(result.ruleTest)
+      setDraft((current) => ({ ...current, ruleTestId: result.ruleTest.id }))
+      onToast('현재 규칙과 편집 중 규칙의 답변을 비교했습니다.')
     } catch (caught) { setError(caught instanceof ApiError ? caught.message : String(caught)) }
     finally { setBusy(false) }
   }
@@ -128,7 +163,7 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
         sourceType: result.sourceType,
         sourceName: result.sourceName,
         bundleSha256: result.bundleSha256,
-        uploadReceipt: '',
+        uploadReceipt: '', ruleTestId: '',
       }))
       onToast(`${result.key} ${result.releaseRef} 계약을 검증했습니다.`)
     } catch (caught) { setError(caught instanceof ApiError ? caught.message : String(caught)) }
@@ -157,7 +192,7 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
         sourceType: 'zip',
         sourceName: result.sourceName,
         bundleSha256: result.bundleSha256,
-        uploadReceipt: result.uploadReceipt ?? '',
+        uploadReceipt: result.uploadReceipt ?? '', ruleTestId: '',
       }))
       onToast(`${result.key} 계약 ZIP을 검증했습니다.`)
     } catch (caught) { setError(caught instanceof ApiError ? caught.message : String(caught)) }
@@ -169,7 +204,12 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
       ...current,
       repositoryUrl: '', releaseRef: '', sourceCommit: '', artifactHashes: {},
       sourceType: 'manual', sourceName: '', bundleSha256: '', uploadReceipt: '',
+      ruleTestId: '',
     }))
+  }
+  function changeRules(rules: string) {
+    setDraft((current) => ({ ...current, rules, ruleTestId: '' }))
+    setRuleTest(null)
   }
   async function decide(id: string, decision: 'approve' | 'reject') {
     setBusy(true); setError(null)
@@ -197,10 +237,12 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
       sourceType: row.sourceType,
       sourceName: row.sourceName,
       bundleSha256: row.bundleSha256,
-      uploadReceipt: '',
+      uploadReceipt: '', ruleTestId: '',
     })
     setImported(null)
     setPicked(row.workspaces)
+    setTestWorkspace(row.workspaces[0] ?? '')
+    setRuleTest(null)
     // 규칙 본문은 목록에 없다(8000자가 표마다 실리면 화면이 무거워진다).
     // 편집을 누른 뒤 상세에서 받아 채운다.
     void api.get<Specialist>(`/api/specialists/${row.key}`)
@@ -228,7 +270,10 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
       </div>
     </Section>
     <Section title="등록된 전문 봇" note={`${filtered.length}개`}><div className="table-wrap"><table className="table"><thead><tr><th>전문 봇</th><th>분야</th><th>어댑터</th><th>모델</th><th>버전</th><th>적용 범위</th><th>상태</th><th>요청</th></tr></thead><tbody>{filtered.map((row) => <tr key={row.key}><td>{row.name}<div className="ws-key">{row.key}</div></td><td>{row.domain}</td><td className="mono">{row.adapter}{!row.adapterAvailable && <div className="hint">런타임 미배포</div>}</td><td className="mono">{row.model || '기본'}{row.hasRules && <div className="hint">규칙 v{row.rulesVersion}</div>}</td><td>{row.version || '-'}<div className="hint">계약 {row.contractVersion}</div>{row.sourceType === 'git' && <div className="hint mono">{row.releaseRef} · {row.sourceCommit.slice(0, 12)}</div>}{row.sourceType === 'zip' && <div className="hint mono">ZIP · {row.sourceName} · {row.bundleSha256.slice(0, 12)}</div>}</td><td>{row.workspaces.join(', ') || '미지정'}</td><td>{stateChip(row.state, row.health)}{row.errorCode && <div className="hint mono">{row.errorCode}</div>}</td><td><button className="btn btn-sm" type="button" onClick={() => edit(row)}>변경 요청</button></td></tr>)}</tbody></table></div></Section>
-    <Section title="승인 대기 및 이력" note={`${data?.requests.length ?? 0}건`}><div className="table-wrap"><table className="table"><thead><tr><th>요청</th><th>전문 봇</th><th>요청자</th><th>상태</th><th>처리</th></tr></thead><tbody>{(data?.requests ?? []).map((row) => <tr key={row.id}><td>#{row.id}<div className="hint">{fmt.dayClock(row.requestedAt)}</div></td><td className="mono">{row.specialist}</td><td>{row.requester}</td><td>{REQUEST_STATE_LABEL[row.state]}</td><td>{user.role === 'admin' && row.state === 'awaiting_approval' ? <div className="form-row"><button className="btn btn-sm btn-primary" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'approve', specialist: row.specialist, requester: row.requester })}>승인</button><button className="btn btn-sm" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'reject', specialist: row.specialist, requester: row.requester })}>반려</button></div> : '-'}</td></tr>)}</tbody></table></div></Section>
+    <Section title="승인 대기 및 이력" note={`${data?.requests.length ?? 0}건`}><div className="table-wrap"><table className="table"><thead><tr><th>요청</th><th>전문 봇</th><th>요청자</th><th>상태</th><th>처리</th></tr></thead><tbody>{(data?.requests ?? []).map((row) => <Fragment key={row.id}>
+      <tr><td>#{row.id}<div className="hint">{fmt.dayClock(row.requestedAt)}</div></td><td className="mono">{row.specialist}{row.ruleTest && <div className="hint">규칙 시험 완료</div>}</td><td>{row.requester}</td><td>{REQUEST_STATE_LABEL[row.state]}</td><td>{user.role === 'admin' && row.state === 'awaiting_approval' ? <div className="form-row"><button className="btn btn-sm btn-primary" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'approve', specialist: row.specialist, requester: row.requester })}>승인</button><button className="btn btn-sm" disabled={busy} onClick={() => setDecisionPending({ id: row.id, decision: 'reject', specialist: row.specialist, requester: row.requester })}>반려</button></div> : '-'}</td></tr>
+      {row.ruleTest && <tr><td colSpan={5}><RuleTestComparison value={row.ruleTest} /></td></tr>}
+    </Fragment>)}</tbody></table></div></Section>
     <Section title="등록·변경 요청" lead="개발자와 관리자가 등록 정보와 변경 사항을 제출할 수 있습니다. 다른 관리자가 승인한 뒤에만 적용되며, 활성화는 런타임 어댑터가 배포된 뒤에만 가능합니다."><div className="card card-pad"><div className="form-grid specialist-form">
       <div className="field"><label className="field-label" htmlFor="specialist-draft-key">키</label><input id="specialist-draft-key" className="input" readOnly={draft.sourceType !== 'manual'} placeholder="예: hermes" value={draft.key} onChange={(e) => setDraft({ ...draft, key: e.target.value })} /></div>
       <div className="field"><label className="field-label" htmlFor="specialist-draft-name">표시 이름</label><input id="specialist-draft-name" className="input" readOnly={draft.sourceType !== 'manual'} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
@@ -273,10 +318,15 @@ export function SpecialistManagement({ user, query, onToast }: { user: ConsoleUs
         <div className="field-help">고르지 않으면 이 전문가는 어디에서도 호출되지 않습니다.</div>
       </div>
       <div className="field field-wide"><label className="field-label" htmlFor="specialist-draft-rules">답변 규칙</label>
-        <textarea id="specialist-draft-rules" className="input" readOnly={draft.sourceType !== 'manual'} rows={8} maxLength={8000} placeholder="비워 두면 저장소의 기본 규칙을 씁니다." value={draft.rules} onChange={(e) => setDraft({ ...draft, rules: e.target.value })} />
+        <textarea id="specialist-draft-rules" className="input" readOnly={draft.sourceType !== 'manual'} rows={8} maxLength={8000} placeholder="비워 두면 저장소의 기본 규칙을 씁니다." value={draft.rules} onChange={(e) => changeRules(e.target.value)} />
         <div className="field-help">{draft.sourceType === 'git' ? `${draft.repositoryUrl} · ${draft.releaseRef} · ${draft.sourceCommit.slice(0, 12)}` : draft.sourceType === 'zip' ? `${draft.sourceName} · SHA-256 ${draft.bundleSha256.slice(0, 12)}` : '이 전문가가 답할 때의 지시문입니다. 승인 뒤 다음 답변부터 적용됩니다.'}</div>
       </div>
-    </div><div className="form-row">{draft.sourceType !== 'manual' && <button className="btn" type="button" onClick={detachRelease}>가져오기 연결 해제</button>}<button className="btn btn-primary" disabled={busy || !draft.key || !draft.name || !draft.domain} onClick={requestChange}>승인 요청</button></div></div></Section>
+      <div className="field"><label className="field-label" htmlFor="specialist-test-workspace">시험 워크스페이스</label><select id="specialist-test-workspace" className="input" value={testWorkspace} onChange={(e) => { setTestWorkspace(e.target.value); setRuleTest(null); setDraft((current) => ({ ...current, ruleTestId: '' })) }}><option value="">선택</option>{picked.map((key) => <option value={key} key={key}>{key}</option>)}</select></div>
+      <div className="field field-wide"><label className="field-label" htmlFor="specialist-test-question">시험 질문</label><textarea id="specialist-test-question" className="input" rows={3} maxLength={2000} value={testQuestion} onChange={(e) => { setTestQuestion(e.target.value); setRuleTest(null); setDraft((current) => ({ ...current, ruleTestId: '' })) }} placeholder="현재 규칙과 편집 중 규칙에 같은 질문을 보냅니다." /></div>
+    </div>
+    <div className="form-row"><button className="btn" type="button" disabled={busy || !draft.key || !testWorkspace || !testQuestion.trim()} onClick={runRuleTest}>전후 답변 비교</button>{draft.sourceType !== 'manual' && <button className="btn" type="button" onClick={detachRelease}>가져오기 연결 해제</button>}<button className="btn btn-primary" disabled={busy || !draft.key || !draft.name || !draft.domain} onClick={requestChange}>승인 요청</button></div>
+    {ruleTest && <RuleTestComparison value={ruleTest} />}
+    </div></Section>
     <ConfirmDialog open={decisionPending !== null} title={`전문 봇 변경 요청을 ${decisionPending?.decision === 'approve' ? '승인' : '반려'}할까요?`}
       detail={`${decisionPending?.specialist ?? ''} · 요청자 ${decisionPending?.requester ?? ''}. 처리 결과와 승인자는 감사 기록에 남습니다.`}
       confirmLabel={decisionPending?.decision === 'approve' ? '변경 승인' : '요청 반려'} danger={decisionPending?.decision === 'reject'} busy={busy}

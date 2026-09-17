@@ -5,10 +5,12 @@ prompts, or arbitrary endpoints; those remain reviewed application code.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import uuid
 
 from .workspace_store import WorkspaceStoreError
 
@@ -111,7 +113,11 @@ def list_requests() -> list[dict]:
     try:
         with _connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT * FROM specialist_change_request ORDER BY requested_at DESC LIMIT 200")
-            return [dict(row) for row in cur.fetchall()]
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                test_id = str((row.get("proposal") or {}).get("ruleTestId") or "")
+                row["rule_test"] = _get_rule_test(cur, test_id) if test_id else None
+            return rows
     except SpecialistStoreError:
         raise
     except Exception as exc:
@@ -167,6 +173,12 @@ def _validate_proposal(proposal: dict) -> dict:
     source_type = str(proposal.get("sourceType") or "").strip().lower()
     source_name = str(proposal.get("sourceName") or "").strip()
     bundle_sha256 = str(proposal.get("bundleSha256") or "").strip().lower()
+    rule_test_id = str(proposal.get("ruleTestId") or "").strip().lower()
+    if rule_test_id:
+        try:
+            uuid.UUID(rule_test_id)
+        except ValueError as exc:
+            raise SpecialistStoreError("규칙 시험 ID 형식이 잘못됐습니다.") from exc
     raw_hashes = proposal.get("artifactHashes") or {}
     if not isinstance(raw_hashes, dict):
         raise SpecialistStoreError("릴리스 artifact 해시 형식이 잘못됐습니다.")
@@ -234,7 +246,99 @@ def _validate_proposal(proposal: dict) -> dict:
         "sourceType": source_type,
         "sourceName": source_name,
         "bundleSha256": bundle_sha256,
+        "ruleTestId": rule_test_id,
     }
+
+
+def _test_result(value: dict) -> dict:
+    return {
+        "status": str(value.get("status") or ""),
+        "answer": str(value.get("answer") or "")[:20_000],
+        "model": str(value.get("model") or "")[:80],
+        "costUsd": max(0.0, float(value.get("costUsd") or 0.0)),
+        "errorCode": str(value.get("errorCode") or "")[:100],
+        "sources": [str(item)[:500] for item in (value.get("sources") or [])[:20]],
+    }
+
+
+def save_rule_test(result: dict) -> dict:
+    """Persist a 30-day comparison outside the archive and search index."""
+    try:
+        test_id = uuid.UUID(str(result["id"]))
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM specialist_rule_test WHERE expires_at <= now()")
+            cur.execute(
+                """INSERT INTO specialist_rule_test
+                (id,specialist,workspace,requester,question,current_rules_hash,
+                 draft_rules_hash,current_result,draft_result,created_at,expires_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    test_id, result["specialist"], result["workspace"],
+                    str(result["requester"]).lower(), result["question"],
+                    result["currentRulesHash"], result["draftRulesHash"],
+                    json.dumps(_test_result(result["current"]), ensure_ascii=False),
+                    json.dumps(_test_result(result["draft"]), ensure_ascii=False),
+                    result["createdAt"], result["expiresAt"],
+                ),
+            )
+            return _get_rule_test(cur, str(test_id)) or {}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SpecialistStoreError("규칙 시험 결과 형식이 잘못됐습니다.") from exc
+    except SpecialistStoreError:
+        raise
+    except Exception as exc:
+        raise SpecialistStoreError(f"규칙 시험 결과 저장 실패: {exc}") from exc
+
+
+def _get_rule_test(cur, test_id: str) -> dict | None:
+    try:
+        key = uuid.UUID(test_id)
+    except (ValueError, TypeError):
+        return None
+    cur.execute(
+        """SELECT id,specialist,workspace,requester,question,current_rules_hash,
+        draft_rules_hash,current_result,draft_result,created_at,expires_at
+        FROM specialist_rule_test WHERE id=%s AND expires_at>now()""",
+        (key,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "id": str(row["id"]), "specialist": row["specialist"],
+        "workspace": row["workspace"], "requester": row["requester"],
+        "question": row["question"], "currentRulesHash": row["current_rules_hash"],
+        "draftRulesHash": row["draft_rules_hash"], "current": row["current_result"],
+        "draft": row["draft_result"], "createdAt": row["created_at"],
+        "expiresAt": row["expires_at"],
+    }
+
+
+def _validate_attached_rule_test(cur, proposal: dict, *, actor: str) -> dict | None:
+    """Reject an expired, foreign, or stale comparison attached to a change."""
+    test_id = str(proposal.get("ruleTestId") or "")
+    if not test_id:
+        return None
+    tested = _get_rule_test(cur, test_id)
+    if tested is None:
+        raise SpecialistStoreError("규칙 시험 결과가 없거나 30일 보존기간이 지났습니다.")
+    cur.execute("SELECT rules FROM specialist_bot WHERE key = %s", (proposal["key"],))
+    current = cur.fetchone()
+    if current is None:
+        raise SpecialistStoreError("규칙 시험 대상 전문 봇이 더 이상 존재하지 않습니다.")
+    current_hash = hashlib.sha256(
+        str(current.get("rules") or "").encode("utf-8")
+    ).hexdigest()
+    draft_hash = hashlib.sha256(str(proposal.get("rules") or "").encode("utf-8")).hexdigest()
+    if (
+        tested["requester"].lower() != actor.lower()
+        or tested["specialist"] != proposal["key"]
+        or tested["workspace"] not in proposal["workspaces"]
+        or tested["currentRulesHash"] != current_hash
+        or tested["draftRulesHash"] != draft_hash
+    ):
+        raise SpecialistStoreError("현재 변경 요청과 규칙 시험 결과가 일치하지 않습니다.")
+    return tested
 
 
 def create_request(*, actor: str, proposal: dict) -> int:
@@ -262,6 +366,12 @@ def create_request(*, actor: str, proposal: dict) -> int:
                 unknown = sorted(set(clean["workspaces"]) - known)
                 if unknown:
                     raise SpecialistStoreError(f"등록되지 않은 워크스페이스입니다: {', '.join(unknown)}")
+            tested = _validate_attached_rule_test(cur, clean, actor=actor)
+            if tested is not None:
+                checks.append({
+                    "id": "rule-test", "state": "pass",
+                    "detail": f"규칙 전후 비교 · {tested['workspace']}",
+                })
             cur.execute(
                 """
                 INSERT INTO specialist_change_request (specialist, proposal, checks, requester)
@@ -308,6 +418,7 @@ def decide_request(
             state = "approved" if decision == "approve" else "rejected"
             if decision == "approve":
                 p = dict(row["proposal"])
+                _validate_attached_rule_test(cur, p, actor=str(row["requester"]))
                 adapter = str(p["adapter"])
                 requested_state = str(p["state"])
                 if requested_state == "enabled" and adapter not in _deployed():

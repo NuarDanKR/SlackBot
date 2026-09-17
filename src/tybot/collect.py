@@ -64,8 +64,13 @@ def _messages_from(
 
     out = []
     body = (event.get("text") or "").strip()
+    # 첨부에서 뽑은 줄에도 **그 파일을 올린 메시지**의 좌표를 남긴다. 링크를 누르면
+    # 원본 파일이 붙은 메시지가 열리므로, 사람이 근거를 확인하러 갈 자리가 맞다.
+    source_ts = str(event.get("ts") or "")
     if body:
-        out.append(writer.IncomingMessage(ts=ts, speaker=speaker, text=body))
+        out.append(writer.IncomingMessage(
+            ts=ts, speaker=speaker, text=body, source_ts=source_ts,
+        ))
     if event.get("files"):
         # 실시간 수집과 **같은 구조**를 쓴다. 한쪽만 추적 좌표를 남기면 그 경로로
         # 들어온 첨부만 조용히 추적이 끊긴다(설계 §5).
@@ -82,7 +87,9 @@ def _messages_from(
             staged_out.extend(staged)
         for item in staged:
             out.extend(
-                writer.IncomingMessage(ts=ts, speaker=speaker, text=ln)
+                writer.IncomingMessage(
+                    ts=ts, speaker=speaker, text=ln, source_ts=source_ts,
+                )
                 for ln in item.lines
             )
             for w in item.warnings:

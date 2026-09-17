@@ -27,22 +27,50 @@ def test_operational_entrypoint_only_sends_summary_reviews():
     assert "result = run(" not in source
 
 
-def test_force_target_selects_one_channel_and_bypasses_only_its_schedule():
+def test_force_target_selects_the_named_channels_and_bypasses_only_their_schedule():
     channels = [
         ("tyit", "C1", "전산팀장보고", time(16, 0)),
         ("tyit", "C2", "공지", time(17, 0)),
         ("mgmt", "C1", "경영보고", time(15, 0)),
     ]
 
-    assert dr._force_target(channels, workspace="tyit", channel_id="C1") == [
+    assert dr._force_target(channels, [("tyit", "C1")]) == [
         ("tyit", "C1", "전산팀장보고", time.min)
+    ]
+    assert dr._force_target(channels, [("tyit", "C2"), ("mgmt", "C1")]) == [
+        ("tyit", "C2", "공지", time.min),
+        ("mgmt", "C1", "경영보고", time.min),
     ]
 
 
 def test_force_target_refuses_to_widen_when_channel_is_unknown():
     channels = [("tyit", "C1", "전산팀장보고", time(16, 0))]
 
-    assert dr._force_target(channels, workspace="tyit", channel_id="C9") == []
+    assert dr._force_target(channels, [("tyit", "C9")]) == []
+
+
+def test_a_run_result_says_which_channel_got_nothing_and_why(tmp_path):
+    """종료 코드는 「보낼 것이 없었다」 를 말하지 못한다. 결과 파일이 말한다."""
+    from tybot.summary_review import ChannelOutcome, RunResult
+
+    path = tmp_path / "out.json"
+    dr._write_result(
+        str(path),
+        RunResult(
+            sent=1,
+            outcomes=[
+                ChannelOutcome("tyit", "C1", "주간보고", code="sent", sent=1),
+                ChannelOutcome("tyit", "C2", "공지", code="no-reviewer", skipped=1),
+            ],
+        ),
+        unconfigured=[("mgmt", "C9")],
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert payload["sent"] == 1
+    codes = {row["channelId"]: row["code"] for row in payload["channels"]}
+    assert codes == {"C1": "sent", "C2": "no-reviewer", "C9": "no-review-config"}
+    assert any(row["reason"] for row in payload["channels"] if row["code"] != "sent")
 
 
 def _stage(tmp_path, *, name, file_id, status=PENDING, staged_at="2026-09-08T09:00:00+09:00",

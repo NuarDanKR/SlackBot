@@ -29,7 +29,26 @@ FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 RAW_HEADING_RE = re.compile(r"^##\s*원문", re.MULTILINE)
 SUMMARY_HEADING_RE = re.compile(r"^##\s*요약", re.MULTILINE)
 # > [2026-08-12 09:15] 홍길동: 내용
+# > [2026-08-12 09:15|1758012345.123456] 홍길동: 내용  ← Slack 메시지 좌표를 함께 적은 줄
 RAW_LINE_RE = re.compile(r"^>\s*\[(?P<ts>[^\]]+)\]\s*(?P<speaker>[^:]+):\s*(?P<text>.*)$")
+
+# Slack 메시지 ts(`1758012345.123456`). 이 모양이 아니면 좌표로 쓰지 않는다 —
+# 사람이 손으로 적은 값이 permalink 로 나가면 열리지 않는 링크가 출처가 된다.
+SLACK_TS_RE = re.compile(r"\A\d{1,12}\.\d{1,8}\Z")
+
+
+def split_stamp(value: str) -> tuple[str, str]:
+    """`2026-09-16 14:23|1758012345.123456` → (표시 시각, Slack 메시지 ts).
+
+    좌표는 **시각 칸 안에** 적는다. 본문 뒤에 붙이면 그 문자열이 원문 텍스트의
+    일부가 되고, 검색·요약·인용이 전부 우리가 덧붙인 글자를 원문으로 읽는다
+    (원칙 1 — 원문 보존).
+
+    좌표가 없는 옛 줄은 그대로 통과한다. 수집 시점 이전 원문에는 없다.
+    """
+    head, _, tail = (value or "").partition("|")
+    ts = tail.strip()
+    return head.strip(), ts if SLACK_TS_RE.match(ts) else ""
 
 # 만들어 낸 channel_id 의 접두사. `writer._stable_channel_id()` 가 Slack ID 를 모를 때
 # 붙인다. **여기서 다시 적는 이유는 순환 import 때문이다** — `writer` 가 이 모듈을
@@ -70,6 +89,9 @@ class RawLine:
     text: str
     lineno: int
     source_path: Path | None = None
+    # Slack 메시지 ts. 있으면 이 줄 하나를 가리키는 permalink 를 만들 수 있다.
+    # 수집 경로가 남기지 못한 옛 줄은 빈 문자열이고, 그때는 채널 링크로 내려간다.
+    message_ts: str = ""
 
 
 @dataclass
@@ -221,13 +243,15 @@ def load_doc(path: Path) -> ArchiveDoc:
     for i, ln in enumerate(body.splitlines(), start=offset + 1):
         m = RAW_LINE_RE.match(ln.strip())
         if m:
+            stamp, message_ts = split_stamp(m.group("ts"))
             lines.append(
                 RawLine(
-                    ts=m.group("ts").strip(),
+                    ts=stamp,
                     speaker=m.group("speaker").strip(),
                     text=m.group("text").strip(),
                     lineno=i,
                     source_path=path,
+                    message_ts=message_ts,
                 )
             )
     return ArchiveDoc(
@@ -374,13 +398,19 @@ class ArchiveStore:
             share_with.intersection_update(doc.share_with)
 
         lines: list[RawLine] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: dict[tuple[str, str, str], int] = {}
         for doc in parts:
             for line in doc.raw_lines:
                 key = (line.ts, line.speaker, line.text)
-                if key not in seen:
-                    seen.add(key)
+                at = seen.get(key)
+                if at is None:
+                    seen[key] = len(lines)
                     lines.append(line)
+                elif line.message_ts and not lines[at].message_ts:
+                    # 같은 줄이 좌표 있는 것과 없는 것으로 두 번 들어올 수 있다
+                    # (좌표를 남기기 전에 수집한 파일). **좌표 있는 쪽을 남긴다** —
+                    # 없는 쪽을 남기면 출처가 조용히 채널 링크로 내려앉는다.
+                    lines[at] = line
         lines.sort(key=lambda line: (line.ts, str(line.source_path), line.lineno))
         return ArchiveDoc(
             path=newest.path,

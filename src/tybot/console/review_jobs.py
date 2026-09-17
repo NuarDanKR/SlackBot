@@ -19,6 +19,9 @@ ACTIVE = {"queued", "running"}
 _START_LOCK = threading.Lock()
 _WORKSPACE_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 _CHANNEL_RE = re.compile(r"^[A-Z][A-Z0-9]+$")
+# 한 번에 도는 채널 수. Canvas 생성과 LLM 호출이 채널마다 붙으므로 무제한이면
+# 작업 하나가 몇 시간을 잡는다.
+MAX_TARGETS = 20
 
 
 class ReviewJobError(RuntimeError):
@@ -91,9 +94,28 @@ def latest() -> dict | None:
     return job
 
 
-def start(workspace: str, channel_id: str, *, actor: str) -> dict:
-    if not _WORKSPACE_RE.fullmatch(workspace) or not _CHANNEL_RE.fullmatch(channel_id):
-        raise ReviewJobError("워크스페이스 또는 채널 ID 형식이 올바르지 않습니다.")
+def _targets(raw) -> list[tuple[str, str]]:
+    """저장된 대상 목록을 검증해 돌려준다. 옛 단일 채널 작업도 읽는다."""
+    out: list[tuple[str, str]] = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            workspace = str(item.get("workspace") or "")
+            channel_id = str(item.get("channelId") or "")
+        else:
+            workspace, _, channel_id = str(item).partition(":")
+        if not _WORKSPACE_RE.fullmatch(workspace) or not _CHANNEL_RE.fullmatch(channel_id):
+            raise ReviewJobError("워크스페이스 또는 채널 ID 형식이 올바르지 않습니다.")
+        out.append((workspace, channel_id))
+    if not out:
+        raise ReviewJobError("실행할 채널이 없습니다.")
+    # 같은 채널을 두 번 넣으면 재발송이 두 번 간다.
+    return list(dict.fromkeys(out))
+
+
+def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False) -> dict:
+    pairs = _targets([{"workspace": ws, "channelId": ch} for ws, ch in targets])
+    if len(pairs) > MAX_TARGETS:
+        raise ReviewJobError(f"한 번에 최대 {MAX_TARGETS}개 채널까지 실행합니다.")
     with _START_LOCK:
         active = next((row for row in list_jobs() if row.get("status") in ACTIVE), None)
         if active:
@@ -103,14 +125,19 @@ def start(workspace: str, channel_id: str, *, actor: str) -> dict:
             "id": job_id,
             "status": "queued",
             "actor": actor,
-            "workspace": workspace,
-            "channelId": channel_id,
+            "targets": [{"workspace": ws, "channelId": ch} for ws, ch in pairs],
+            # 옛 화면과 옛 작업 파일 호환. 대상 수는 `targets` 가 알고 있다.
+            "workspace": pairs[0][0],
+            "channelId": pairs[0][1],
+            "resend": bool(resend),
             "createdAt": datetime.now(UTC).isoformat(),
             "startedAt": None,
             "finishedAt": None,
             "pid": None,
             "exitCode": None,
             "errorCode": None,
+            "outcome": None,
+            "result": None,
         }
         _write(job)
         try:
@@ -135,22 +162,31 @@ def start(workspace: str, channel_id: str, *, actor: str) -> dict:
         return current
 
 
-def _command(job: dict) -> list[str]:
-    workspace = str(job.get("workspace") or "")
-    channel_id = str(job.get("channelId") or "")
-    if not _WORKSPACE_RE.fullmatch(workspace) or not _CHANNEL_RE.fullmatch(channel_id):
-        raise ReviewJobError("저장된 요약 검토 대상 형식이 올바르지 않습니다.")
-    return [
-        sys.executable,
-        "-u",
-        "-m",
-        "tybot.daily_review",
-        "--force-now",
-        "--workspace",
-        workspace,
-        "--channel",
-        channel_id,
-    ]
+def _command(job: dict, result_path: Path) -> list[str]:
+    raw = job.get("targets")
+    if not raw:
+        raw = [{"workspace": job.get("workspace"), "channelId": job.get("channelId")}]
+    command = [sys.executable, "-u", "-m", "tybot.daily_review", "--force-now"]
+    for workspace, channel_id in _targets(raw):
+        command += ["--target", f"{workspace}:{channel_id}"]
+    if job.get("resend"):
+        command.append("--resend")
+    command += ["--result-json", str(result_path)]
+    return command
+
+
+def _outcome(result: dict | None) -> str:
+    """무엇이 실제로 일어났는가. **종료 코드로는 알 수 없다.**
+
+    「보낼 것이 없었다」 를 성공과 같은 글자로 보이면 운영자는 DM 이 간 줄 안다.
+    """
+    if not result:
+        return "unknown"
+    if int(result.get("sent") or 0) <= 0:
+        return "nothing-sent"
+    if int(result.get("failed") or 0) > 0:
+        return "partial"
+    return "sent"
 
 
 def run_worker(job_id: str) -> int:
@@ -162,10 +198,11 @@ def run_worker(job_id: str) -> int:
     job["startedAt"] = datetime.now(UTC).isoformat()
     _write(job)
     log_path = jobs_dir() / f"{job_id}.log"
+    result_path = jobs_dir() / f"{job_id}.result"
     try:
         with log_path.open("a", encoding="utf-8") as output:
             result = subprocess.run(
-                _command(job),
+                _command(job, result_path),
                 cwd=str(Path(__file__).resolve().parents[3]),
                 stdin=subprocess.DEVNULL,
                 stdout=output,
@@ -173,8 +210,19 @@ def run_worker(job_id: str) -> int:
                 check=False,
             )
         job["exitCode"] = result.returncode
-        job["status"] = "completed" if result.returncode == 0 else "failed"
-        job["errorCode"] = None if result.returncode == 0 else "review-runner-failed"
+        job["result"] = _read(result_path)
+        job["outcome"] = _outcome(job["result"])
+        # 결과 파일이 없으면 **성공으로 치지 않는다.** 실행기는 보낼 것이 없어도
+        # 0 으로 끝나므로, 종료 코드만으로는 「안 보냈다」 와 구별할 수 없다.
+        if result.returncode != 0:
+            job["status"] = "failed"
+            job["errorCode"] = "review-runner-failed"
+        elif job["result"] is None:
+            job["status"] = "failed"
+            job["errorCode"] = "result-missing"
+        else:
+            job["status"] = "completed"
+            job["errorCode"] = None
     except Exception:
         logger.exception("콘솔 요약 검토 작업 실패 job=%s", job_id)
         job["status"] = "failed"
