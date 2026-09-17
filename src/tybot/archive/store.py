@@ -345,8 +345,16 @@ class ArchiveStore:
         # 갈리면 출처가 두 줄 나오고, 더 나쁘게는 **권한 메타가 따로 계산된다** —
         # `visibility`·`acl`·`share_with` 를 그룹마다 정하므로 같은 채널이 한쪽으로는
         # 보이고 다른 쪽으로는 안 보일 수 있다(2026-09-07 실제 발생).
+        #
+        # **빈 표시명은 별칭이 되지 않는다**(B-61). `channel: #이름` 을 따옴표 없이
+        # 적으면 프론트매터 파서가 `#` 를 주석으로 읽어 표시명이 빈 문자열이 된다.
+        # 그 상태로 별칭을 만들면 표시명이 빈 문서 전부가 같은 키를 공유하고,
+        # 진짜 ID 가 하나뿐일 때 **서로 관계없는 문서가 그 채널의 근거가 된다.**
+        # 2026-09-17 QC 에서 다른 채널의 내용이 요약에 들어간 경로가 이것이다.
         real_id_sets: dict[tuple[str, str], set[str]] = {}
         for doc in loaded:
+            if not doc.channel:
+                continue
             if doc.channel_id and not is_synthetic_channel_id(doc.channel_id):
                 real_id_sets.setdefault((doc.workspace, doc.channel), set()).add(doc.channel_id)
         # A display name is only a safe migration alias when it identifies exactly one
@@ -359,12 +367,17 @@ class ArchiveStore:
             own = doc.channel_id
             if own and is_synthetic_channel_id(own):
                 own = None
-            identity = (
-                own
-                or real_ids.get((doc.workspace, doc.channel))
-                or doc.channel_id
-                or doc.channel
-            )
+            alias = real_ids.get((doc.workspace, doc.channel)) if doc.channel else None
+            identity = own or alias or doc.channel_id or doc.channel
+            if not identity:
+                # 진짜 ID 도 표시명도 없다. **어느 채널에도 붙이지 않는다** —
+                # 가까운 채널로 밀어 넣으면 그 채널 검토자가 본 적 없는 자료를
+                # 승인하게 된다. 자기 파일 경로를 신원으로 삼아 혼자 남는다.
+                identity = f"unidentified:{doc.path}"
+                logger.warning(
+                    "채널을 식별할 수 없는 원문 문서라 어느 채널에도 붙이지 않는다: %s",
+                    doc.path,
+                )
             grouped.setdefault((doc.workspace, identity), []).append(doc)
         return [self._merge(parts) for parts in grouped.values()]
 

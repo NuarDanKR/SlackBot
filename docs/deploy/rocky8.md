@@ -630,7 +630,9 @@ enable 은 한 번만 하고 잊기 쉬운데, 안 켜진 타이머는 **오류 
 않는다.** 한 줄로 전부 대조한다.
 
 ```bash
-for u in tybot-collect tybot-schedule-dm tybot-index tybot-review-dm          tybot-schedule-reconcile tybot-schedule-sync tybot-tidy tybot-update; do
+for u in tybot-collect tybot-schedule-dm tybot-index tybot-review-dm \
+         tybot-schedule-reconcile tybot-schedule-sync tybot-tidy tybot-update \
+         tybot-convert-retry tybot-convert-nightly; do
   printf '%-30s %s
 ' "$u.timer" "$(systemctl is-enabled $u.timer 2>&1)"
 done
@@ -866,6 +868,32 @@ journalctl -u tybot-collect -n 40
 - 재수집은 멱등이다 — 이미 있는 원문 라인은 다시 쓰지 않는다.
 
 ## 8. 운영 명령
+
+### 실패 첨부 야간 재시도
+
+변환기 timeout·crash처럼 일시 실패로 기록된 첨부는 매일 **03:20** 이후
+(`RandomizedDelaySec=600`) 일괄 재등록하고 바로 최대 50건을 처리한다. 나머지는
+5분 주기의 `tybot-convert-retry.timer`가 이어서 처리한다. 지원하지 않는 형식,
+암호화·손상 파일, PII 차단, 원본이 없는 파일은 자동 재시도하지 않는다.
+
+```bash
+sudo systemctl enable --now tybot-convert-retry.timer tybot-convert-nightly.timer
+systemctl list-timers tybot-convert-retry.timer tybot-convert-nightly.timer
+sudo systemctl start tybot-convert-nightly.service
+sudo journalctl -u tybot-convert-nightly -n 60 --no-pager
+```
+
+실제 등록 전 대상만 확인할 수도 있다.
+
+```bash
+cd /opt/tybot
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env \
+  /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/drain_conversion_queue.py --nightly
+```
+
+과거 변환기 판정까지 강제로 다시 시험하는 `--backfill --apply`와 달리 야간 배치는
+메타데이터와 현재 오류 정책이 모두 재시도 가능하다고 판정한 파일만 다룬다.
 
 ### 기존 PII 차단 첨부 재판정
 

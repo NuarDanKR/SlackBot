@@ -66,6 +66,20 @@ class AmbiguousProjection(SummaryReviewError):
     """
 
 
+# 후보의 형식 (B-60).
+#
+# 추출(`quote`)만 허용하던 동안은 같은 사실이 여러 날 나오면 그 수만큼 후보가 됐다.
+# 30일치를 소급하면 검토자 앞에 수십 건이 쌓이고, 한 회차 DM 은 10건만 싣는다.
+# 생성(`abstract`)을 허용하면 그것이 몇 건으로 묶인다.
+#
+# **푸는 것은 「제안 == 인용」 한 줄뿐이다.** 인용이 원문에 있는지, 숫자가 인용이나
+# 기존 승인에 있는지는 form 과 무관하게 그대로 본다. 문장은 모델이 써도 되지만
+# 사실은 원문에서만 온다 — 그리고 검토자가 인용과 나란히 보고 승인한다.
+FORM_QUOTE = "quote"
+FORM_ABSTRACT = "abstract"
+FORMS = (FORM_QUOTE, FORM_ABSTRACT)
+
+
 @dataclass(frozen=True)
 class SourceLine:
     at: str
@@ -88,6 +102,10 @@ class Proposal:
     evidence_locator: str
     evidence_message_ts: str = ""
     evidence_hash: str = ""
+    # `quote` 는 원문을 그대로 오려 낸 것, `abstract` 는 모델이 쓴 문장(B-60).
+    # 기본이 `quote` 인 이유는 **모르면 더 엄격한 쪽**이기 때문이다 — 모델이 form 을
+    # 빼먹었을 때 생성문으로 통과시키면 검증이 한 겹 사라진다.
+    form: str = FORM_QUOTE
 
 
 def _as_uuid(value) -> uuid.UUID | None:
@@ -134,6 +152,8 @@ class GenerateStats:
     lines: int = 0
     proposed: int = 0
     accepted: int = 0
+    # 이미 요약한 구간이라 LLM 을 부르지 않고 지나갔다.
+    reused: bool = False
 
 
 def parse_proposals(raw: str, source: list[SourceLine],
@@ -159,9 +179,15 @@ def parse_proposals(raw: str, source: list[SourceLine],
         if not isinstance(item, dict):
             continue
         kind = str(item.get("kind") or "")
+        # **모르면 더 엄격한 쪽.** form 을 빼먹었거나 모르는 값이면 `quote` 로 본다 —
+        # 생성문으로 통과시키면 「제안 == 인용」 검사가 조용히 사라진다.
+        form = str(item.get("form") or "").strip().lower()
+        if form not in FORMS:
+            form = FORM_QUOTE
         proposed = str(item.get("proposed_text") or "").strip()
         quote = str(item.get("evidence_quote") or "").strip()
         quote_norm = _normalized(quote)
+        # 인용은 form 과 무관하게 필수다. 생성문이라도 근거 없이는 받지 않는다.
         if kind not in KINDS or not proposed or len(quote_norm) < 5:
             continue
         matched = next((line for text, line in source_norm if quote_norm in text), None)
@@ -170,8 +196,10 @@ def parse_proposals(raw: str, source: list[SourceLine],
         current = str(item.get("current_text") or "").strip()
         if current and _normalized(current) not in approved_norm:
             continue
-        # 승인 후보는 요약기의 창작물이 아니라 원문에서 뽑은 검토 단위다.
-        if _normalized(proposed) != quote_norm:
+        # `quote` 후보는 요약기의 창작물이 아니라 원문에서 뽑은 검토 단위다.
+        # `abstract` 는 여기 하나만 면제된다 — 문장을 모델이 쓰기 때문이다.
+        # 나머지 검사(인용 존재·숫자 상속·기존 승인 대조)는 그대로 지난다.
+        if form == FORM_QUOTE and _normalized(proposed) != quote_norm:
             continue
         # 새로 만든 숫자는 원문 인용이나 기존 승인 문장에 실제로 있어야 한다.
         if not _numbers(proposed) <= (_numbers(quote) | _numbers(current)):
@@ -193,6 +221,7 @@ def parse_proposals(raw: str, source: list[SourceLine],
             # 모델 출력이면 사람이 확인하러 간 자리에 그 문장이 없을 수 있다.
             evidence_message_ts=matched.message_ts,
             evidence_hash=_evidence_hash(matched),
+            form=form,
         ))
     if stats is not None:
         stats.accepted = len(accepted)
@@ -246,6 +275,94 @@ class Store:
                 watermark=excluded.watermark, source_digest='',
                 failed_digest='', retry_after=NULL, checked_at=now()""",
                 (workspace, channel_id, watermark),
+            )
+        self.conn.commit()
+
+    def form_stats(self, *, since: date, workspace: str = "",
+                   channel_id: str = "") -> list[dict]:
+        """`form`·`state` 별 후보 건수 (B-60 실측).
+
+        생성 요약을 허용한 값어치는 **후보 수가 줄고 승인률이 유지되는가**로만
+        판단할 수 있다. 그 수치를 볼 수단이 없으면 「실측 대기」 가 영원히 풀리지
+        않는다.
+        """
+        where = ["run_date >= %s"]
+        args: list = [since]
+        if workspace:
+            where.append("workspace = %s")
+            args.append(workspace)
+        if channel_id:
+            where.append("channel_id = %s")
+            args.append(channel_id)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT workspace, channel_id, max(channel_name) AS channel_name,
+                       form, state, count(*) AS n
+                  FROM summary_review_candidate
+                 WHERE {" AND ".join(where)}
+                 GROUP BY workspace, channel_id, form, state
+                 ORDER BY workspace, channel_id, form, state""",
+                tuple(args),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def review_latency(self, *, since: date, workspace: str = "",
+                       channel_id: str = "") -> list[dict]:
+        """보여 준 뒤 사람이 결정하기까지 걸린 시간 (B-60 실측).
+
+        **자동 폐기는 빼고 센다.** 사람이 결정하지 않아 시스템이 버린 것을 섞으면
+        「검토에 얼마나 걸리는가」 가 아니라 「얼마나 방치되는가」 를 재게 된다.
+        """
+        where = [
+            "run_date >= %s",
+            "delivered_at IS NOT NULL",
+            "decided_at IS NOT NULL",
+            "coalesce(decided_by, '') <> 'system:expired'",
+        ]
+        args: list = [since]
+        if workspace:
+            where.append("workspace = %s")
+            args.append(workspace)
+        if channel_id:
+            where.append("channel_id = %s")
+            args.append(channel_id)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT workspace, channel_id, form, count(*) AS decided,
+                       avg(extract(epoch FROM (decided_at - delivered_at))) AS avg_seconds,
+                       max(extract(epoch FROM (decided_at - delivered_at))) AS max_seconds
+                  FROM summary_review_candidate
+                 WHERE {" AND ".join(where)}
+                 GROUP BY workspace, channel_id, form
+                 ORDER BY workspace, channel_id, form""",
+                tuple(args),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def source_run_seen(self, workspace: str, channel_id: str, digest: str) -> bool:
+        """이 원문 구간으로 **이미 요약을 돌렸는가.**
+
+        커서만으로는 모른다. 소급은 커서를 되돌리므로 다시 실행하면 같은 구간이
+        또 LLM 으로 간다 — 후보는 중복 차단에 막히지만 돈은 두 번 나간다.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT 1 FROM summary_review_source_run
+                WHERE workspace=%s AND channel_id=%s AND source_digest=%s""",
+                (workspace, channel_id, digest),
+            )
+            return cur.fetchone() is not None
+
+    def advance(self, workspace: str, channel_id: str, watermark: str,
+                digest: str) -> None:
+        """LLM 을 부르지 않고 커서만 옮긴다. 이미 돌린 구간을 지나갈 때 쓴다."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO summary_review_cursor(workspace,channel_id,watermark,source_digest)
+                VALUES (%s,%s,%s,%s) ON CONFLICT(workspace,channel_id) DO UPDATE SET
+                watermark=excluded.watermark, source_digest=excluded.source_digest,
+                checked_at=now()""",
+                (workspace, channel_id, watermark, digest),
             )
         self.conn.commit()
 
@@ -339,13 +456,13 @@ class Store:
                     """INSERT INTO summary_review_candidate
                     (id,workspace,channel_id,channel_name,run_date,source_digest,kind,current_text,
                     proposed_text,evidence_quote,evidence_at,evidence_author,evidence_locator,
-                     evidence_message_ts,evidence_hash)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                     evidence_message_ts,evidence_hash,form)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
                     (uuid.uuid4(), workspace, channel_id, channel_name, on, digest,
                      proposal.kind, proposal.current_text, proposal.proposed_text,
                      proposal.evidence_quote, proposal.evidence_at, proposal.evidence_author,
                      proposal.evidence_locator, proposal.evidence_message_ts,
-                     proposal.evidence_hash),
+                     proposal.evidence_hash, proposal.form),
                 )
             cur.execute(
                 """INSERT INTO summary_review_cursor(workspace,channel_id,watermark,source_digest)
@@ -353,6 +470,17 @@ class Store:
                 watermark=excluded.watermark, source_digest=excluded.source_digest,
                 failed_digest='', retry_after=NULL, checked_at=now()""",
                 (workspace, channel_id, watermark, digest),
+            )
+            # 후보가 0건이어도 남긴다. 행이 없으면 「안 돌렸다」 와 구별되지 않아
+            # 잡담뿐인 구간을 누를 때마다 다시 요약한다.
+            cur.execute(
+                """INSERT INTO summary_review_source_run
+                (workspace,channel_id,source_digest,watermark,candidates)
+                VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT (workspace,channel_id,source_digest) DO UPDATE SET
+                watermark=excluded.watermark, candidates=excluded.candidates,
+                ran_at=now()""",
+                (workspace, channel_id, digest, watermark, len(proposals)),
             )
         self.conn.commit()
         return len(proposals)
@@ -753,7 +881,12 @@ def candidate_blocks(channel_name: str, rows: list[dict]) -> list[dict]:
     for row in ordered:
         get = row.get
         cid = str(get("id"))
-        body = f"*{labels.get(str(get('kind')), '요약')}*\n*후보* {get('proposed_text')}\n*근거* {get('evidence_author')} · {get('evidence_at')}\n>{get('evidence_quote')}"
+        body = (
+            f"*{labels.get(str(get('kind')), '요약')}{form_note(row)}*\n"
+            f"*후보* {get('proposed_text')}\n"
+            f"*근거* {get('evidence_author')} · {get('evidence_at')}\n"
+            f">{get('evidence_quote')}"
+        )
         values = _number_values(str(get("proposed_text") or ""))
         if values:
             body = f"*확인할 값* `{'` · `'.join(values)}`\n" + body
@@ -863,11 +996,27 @@ def _numbers_table(rows: list[dict]) -> list[str]:
         if not values:
             continue
         out.append(
-            f"| {index} | {KIND_LABELS.get(str(row.get('kind')), '요약')} "
+            f"| {index} | {KIND_LABELS.get(str(row.get('kind')), '요약')}"
+            f"{form_note(row)} "
             f"| {', '.join(values)} | {_cell(row.get('proposed_text'))} "
             f"| {_cell(row.get('evidence_author'))} · {_cell(row.get('evidence_at'))} |"
         )
     return out if len(out) > 2 else []
+
+
+def form_of(row) -> str:
+    """이 후보의 형식. 모르면 `quote` — 더 엄격한 쪽으로 읽는다."""
+    value = str(row.get("form") or FORM_QUOTE)
+    return value if value in FORMS else FORM_QUOTE
+
+
+def form_note(row) -> str:
+    """검토자에게 붙이는 한마디. **생성 문장은 그렇다고 말한다.**
+
+    원문 그대로인 후보와 모델이 쓴 문장은 확인하는 방법이 다르다. 표시가 없으면
+    검토자는 둘을 같게 읽고, 생성 문장을 「원문에 그렇게 적혀 있다」 로 믿는다.
+    """
+    return " · 정리 문장" if form_of(row) == FORM_ABSTRACT else ""
 
 
 def _cell(value) -> str:
@@ -936,7 +1085,15 @@ def canvas_markdown(
     if source_url:
         parts += [f"[Slack 채널 원문 열기]({source_url})", ""]
     for index, row in enumerate(ordered, start=1):
-        parts.append(f"### {index}. {KIND_LABELS.get(str(row.get('kind')), '요약')}")
+        parts.append(
+            f"### {index}. {KIND_LABELS.get(str(row.get('kind')), '요약')}{form_note(row)}"
+        )
+        if form_of(row) == FORM_ABSTRACT:
+            # 인용은 바로 아래에 그대로 붙는다. 두 줄을 나란히 읽고 판단한다.
+            parts.append(
+                "- 이 문장은 **원문 그대로가 아니라** 아래 인용을 정리한 것입니다."
+                " 숫자·날짜가 인용과 같은지 먼저 확인하세요."
+            )
         if row.get("current_text"):
             parts.append(f"- 현재: {_cell(row.get('current_text'))}")
         parts.append(f"- 후보: {_cell(row.get('proposed_text'))}")
@@ -1320,6 +1477,18 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
     if stats is not None:
         stats.lines = len(source)
     digest = source_digest(source)
+    watermark_after = f"{source[-1].at}|{source[-1].locator}"
+    if store.source_run_seen(workspace, channel_id, digest):
+        # 같은 원문을 두 번 요약하지 않는다. 후보는 이미 DB 에 있고 중복 차단에
+        # 막히지만 **돈은 다시 나간다**(B-59). 커서만 옮겨 다음 구간으로 간다.
+        log.info(
+            "이미 요약한 구간이라 건너뛴다 ws=%s ch=%s 줄=%d",
+            workspace, channel_id, len(source),
+        )
+        if stats is not None:
+            stats.reused = True
+        store.advance(workspace, channel_id, watermark_after, digest)
+        return 0
     # 예약 실행은 같은 실패 입력을 한 시간 뒤에 재시도한다. 콘솔에서 사람이 직접
     # 누른 즉시 실행은 그 백오프도 우회한다 — 장애를 고친 직후 확인하려고 누른
     # 버튼이 이전 실패 시각 때문에 아무 일도 하지 않으면 원인을 다시 숨긴다.
@@ -1339,10 +1508,9 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
         with contextlib.suppress(Exception):
             store.mark_failed(workspace, channel_id, digest, now)
         raise
-    watermark = f"{source[-1].at}|{source[-1].locator}"
     return store.save_run(
         workspace=workspace, channel_id=channel_id, channel_name=channel_name,
-        watermark=watermark, digest=digest, proposals=proposals,
+        watermark=watermark_after, digest=digest, proposals=proposals,
         on=now.astimezone(KST).date(),
     )
 
@@ -1381,6 +1549,7 @@ OUTCOME_NO_CANDIDATES = "no-candidates"
 # 소급 검토, 원문은 읽었는데 다 떨어졌으면 소급해도 같은 결과, 이미 다 결정했으면
 # 할 일이 없다.
 OUTCOME_NO_SOURCE = "no-new-source"
+OUTCOME_NOTHING_PENDING = "nothing-pending"
 OUTCOME_NO_ACCEPTED = "no-accepted-candidate"
 OUTCOME_NO_CLIENT = "no-client"
 OUTCOME_NO_REVIEWER = "no-reviewer"
@@ -1393,6 +1562,7 @@ OUTCOME_LABELS = {
     OUTCOME_NO_CANDIDATES: "오늘 검토할 새 후보가 없습니다",
     OUTCOME_NO_SOURCE: "마지막 처리 이후 새로 읽을 원문이 없습니다 — 과거 자료는 소급 검토로 읽습니다",
     OUTCOME_NO_ACCEPTED: "원문은 읽었지만 원문 대조를 통과한 후보가 없습니다",
+    OUTCOME_NOTHING_PENDING: "다시 보낼 대기 후보가 없습니다",
     OUTCOME_NO_CLIENT: "이 워크스페이스의 Slack 토큰이 없습니다",
     OUTCOME_NO_REVIEWER: "활성 검토자가 없습니다",
     OUTCOME_ALREADY_SENT: "오늘 이미 보낸 검토자뿐입니다",
@@ -1400,8 +1570,55 @@ OUTCOME_LABELS = {
 }
 
 
-def _empty_reason(stats: GenerateStats | None) -> str:
+# 결정으로 치는 상태. 보류(`deferred`)는 결정이 아니고, 자동 폐기(`expired`)는
+# 사람이 한 일이 아니다. 둘을 분모에 넣으면 승인률이 사람의 판단과 무관해진다.
+DECIDED_STATES = ("approved", "rejected")
+
+
+@dataclass
+class FormSummary:
+    """한 `form` 의 실측치. 승인률은 **사람이 결정한 것만** 분모로 쓴다."""
+
+    form: str = FORM_QUOTE
+    total: int = 0
+    approved: int = 0
+    rejected: int = 0
+    pending: int = 0
+    deferred: int = 0
+    expired: int = 0
+
+    @property
+    def decided(self) -> int:
+        return self.approved + self.rejected
+
+    @property
+    def approval_rate(self) -> float | None:
+        """승인 / 결정. **결정이 없으면 `None`** — 0% 와 다르다."""
+        return self.approved / self.decided if self.decided else None
+
+
+def summarize_forms(rows: list[dict]) -> dict[str, FormSummary]:
+    """`Store.form_stats()` 행을 form 별로 접는다."""
+    out: dict[str, FormSummary] = {}
+    for row in rows:
+        form = str(row.get("form") or FORM_QUOTE)
+        if form not in FORMS:
+            form = FORM_QUOTE
+        found = out.setdefault(form, FormSummary(form=form))
+        count = int(row.get("n") or 0)
+        found.total += count
+        state = str(row.get("state") or "")
+        if state in {"approved", "rejected", "pending", "deferred", "expired"}:
+            setattr(found, state, getattr(found, state) + count)
+    return out
+
+
+def _empty_reason(stats: GenerateStats | None, *, deliver_only: bool = False) -> str:
     """후보가 0건인 이유. **셋을 한 문장으로 뭉치지 않는다.**"""
+    if deliver_only:
+        # 생성을 아예 안 돌린 회차다. 「새 후보가 없다」 로 말하면 사람은 생성
+        # 버튼을 다시 누르고, 같은 원문에 돈이 또 나간다.
+        return OUTCOME_NOTHING_PENDING
     if stats is None:
         # 오늘 이미 생성했고 그 후보는 모두 결정됐다. 새로 만들 것이 없다.
         return OUTCOME_NO_CANDIDATES
@@ -1430,6 +1647,9 @@ class ChannelOutcome:
     sent: int = 0
     skipped: int = 0
     failed: int = 0
+    # 이 회차가 들고 있던 검토 대기 후보. 0 이 아닌데 `sent` 가 0 이면 **이미 만든
+    # 것이 아직 아무에게도 안 갔다** — LLM 을 다시 부르지 않고 보내기만 하면 된다.
+    pending: int = 0
     # 사유를 뒷받침하는 수치. 운영자가 로그를 열지 않아도 판단할 수 있어야 한다.
     detail: str = ""
 
@@ -1444,6 +1664,7 @@ class ChannelOutcome:
             "sent": self.sent,
             "skipped": self.skipped,
             "failed": self.failed,
+            "pending": self.pending,
         }
 
 
@@ -1605,7 +1826,7 @@ def _canvas_failure(exc: Exception) -> tuple[str, str]:
 
 def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         now: datetime | None = None, resend: bool = False,
-        force_generate: bool = False) -> RunResult:
+        force_generate: bool = False, deliver_only: bool = False) -> RunResult:
     """설정 시각이 지난 채널의 후보를 만들고 **검토자에게** 민다.
 
     `owners` 는 더 이상 수신자를 만들지 않는다. 호출부 호환으로만 남긴다 —
@@ -1619,6 +1840,10 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
     `force_generate` 는 수동 실행에서만 오늘의 생성 잠금을 우회한다. 원문 워터마크는
     그대로 쓰므로 이미 처리한 대화를 다시 요약하지 않고, 마지막 처리 뒤 새로 수집된
     원문만 후보 생성기에 보낸다.
+
+    `deliver_only` 는 **LLM 을 한 번도 부르지 않는다.** 이미 만들어 둔 후보를 다시
+    민다 — 요약은 됐는데 DM 만 실패한 회차를 복구하는 경로다. 이게 없으면 사람은
+    보내려고 생성 버튼을 다시 누르고, 같은 원문에 돈이 또 나간다(B-59).
     """
     del owners
     from .daily_review import due
@@ -1639,7 +1864,9 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
                 workspace, channel_id, on
             )
             stats = None
-            if force_generate or not db.generated_on(workspace, channel_id, on):
+            if not deliver_only and (
+                force_generate or not db.generated_on(workspace, channel_id, on)
+            ):
                 stats = GenerateStats()
                 result.generated += generate_channel(
                     db, archive, workspace=workspace, channel_id=channel_id,
@@ -1661,9 +1888,10 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         if not rows:
             result.skipped += 1
             outcome.skipped += 1
-            outcome.code = _empty_reason(stats)
+            outcome.code = _empty_reason(stats, deliver_only=deliver_only)
             outcome.detail = _empty_detail(stats)
             continue
+        outcome.pending = len(rows)
         client = clients.get(workspace)
         if client is None:
             result.failed += 1

@@ -590,3 +590,40 @@ def test_the_new_schema_grants_access_in_the_file_itself():
         assert name in sql
     # Canvas 본문을 DB 에 복제하지 않는다(§4.1).
     assert "body" not in sql and "markdown" not in sql
+
+
+# --- 생성 문장은 그렇다고 말한다 (B-60 1단계) ---------------------------------
+def test_an_abstract_candidate_is_marked_in_the_canvas():
+    """원문 그대로인 후보와 모델이 쓴 문장은 확인하는 방법이 다르다.
+
+    표시가 없으면 검토자는 둘을 같게 읽고, 생성 문장을 「원문에 그렇게 적혀 있다」로
+    믿는다. 그 순간 사람 승인이 검증이 아니라 형식이 된다.
+    """
+    rows = [_row(form="abstract", proposed_text="공정률 62.5% 로 진행 중입니다")]
+
+    body = sr.canvas_markdown(
+        channel_label="#채널", review_date=date(2026, 9, 17), rows=rows, approved=[],
+    )
+
+    assert "정리 문장" in body
+    assert "원문 그대로가 아니라" in body
+    # 인용은 여전히 바로 아래에 그대로 붙는다 — 나란히 읽고 판단한다.
+    assert rows[0]["evidence_quote"] in body
+
+
+def test_a_quote_candidate_is_not_marked():
+    rows = [_row(form="quote")]
+
+    body = sr.canvas_markdown(
+        channel_label="#채널", review_date=date(2026, 9, 17), rows=rows, approved=[],
+    )
+
+    assert "정리 문장" not in body
+
+
+def test_a_candidate_without_a_form_is_read_as_a_quote():
+    rows = [_row()]
+    rows[0].pop("form", None)
+
+    assert sr.form_of(rows[0]) == sr.FORM_QUOTE
+    assert sr.form_note(rows[0]) == ""

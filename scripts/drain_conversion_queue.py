@@ -385,6 +385,81 @@ def backfill(archive_dir: str, *, apply: bool) -> int:
     return EXIT_OK
 
 
+def nightly_backfill(archive_dir: str, *, apply: bool) -> int:
+    """재시도 가능한 실패만 야간 큐에 다시 올린다.
+
+    사람의 ``--backfill`` 은 변환기를 고친 뒤 과거 판정을 다시 시험하는 강제
+    작업이다. 야간 배치는 무인 작업이므로 범위가 더 좁다. 수집 당시 변환기가
+    ``retryable=true`` 로 남겼고 현재 오류 코드 정책도 허용하는 파일만 다룬다.
+    """
+    from tybot.attachment_review import scan
+
+    failed = [item for item in scan(archive_dir) if item.conversion_failed]
+    retryable = [
+        item for item in failed
+        if queue.is_retryable(item.error_code, item.retryable)
+    ]
+    excluded = [item for item in failed if item not in retryable]
+    unknown_channel = [
+        item for item in retryable
+        if not item.channel_id or item.channel_id == "unknown"
+    ]
+    located = [item for item in retryable if item not in unknown_channel]
+    original_missing = [
+        item for item in located
+        if item.object_path is None or not item.object_path.is_file()
+    ]
+    candidates = [item for item in located if item not in original_missing]
+
+    print(
+        f"야간 실패 첨부 {len(failed)}건 · 재시도 대상 {len(candidates)}건 · "
+        f"영구 제외 {len(excluded)}건 · 원본 없음 {len(original_missing)}건 · "
+        f"채널 미확인 {len(unknown_channel)}건"
+    )
+    if not candidates:
+        return EXIT_OK
+    if not apply:
+        for item in candidates[:20]:
+            print(
+                f"  {item.workspace}/{item.channel_id}/{item.file_id} "
+                f"{item.name} ({item.error_code or item.status})"
+            )
+        if len(candidates) > 20:
+            print(f"  … 외 {len(candidates) - 20}건")
+        print("\n실제로 재시도하려면 `--nightly --apply` 를 사용하세요.")
+        return EXIT_OK
+
+    added = 0
+    for item in candidates:
+        digest = item.sha256 or ""
+        if not digest:
+            try:
+                digest = hashlib.sha256(item.object_path.read_bytes()).hexdigest()
+            except OSError:
+                print(
+                    f"  건너뜀(원본 소실): "
+                    f"{item.workspace}/{item.channel_id}/{item.file_id}"
+                )
+                continue
+        try:
+            job_id = queue.enqueue(
+                workspace=item.workspace,
+                channel_id=item.channel_id,
+                file_id=item.file_id,
+                original_sha256=digest,
+                error_code=item.error_code or "reprocess_requested",
+                retryable=True,
+                force=False,
+            )
+        except queue.QueueUnavailable as exc:
+            print(f"큐를 쓸 수 없습니다: {exc}", file=sys.stderr)
+            return EXIT_INPUT
+        if job_id:
+            added += 1
+    print(f"야간 재시도 큐 등록 {added}건. 이어서 즉시 변환합니다.")
+    return EXIT_OK
+
+
 def show_status() -> int:
     reclaimed = queue.reclaim_expired()
     counts = queue.summary()
@@ -410,6 +485,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status", action="store_true", help="큐 상태만 보여준다")
     ap.add_argument("--backfill", action="store_true",
                     help="이미 쌓인 실패 첨부를 큐에 올린다(사람이 요청한 재처리)")
+    ap.add_argument(
+        "--nightly",
+        action="store_true",
+        help="재시도 가능한 실패 첨부를 큐에 올리고 즉시 처리한다(야간 배치)",
+    )
     ap.add_argument("--limit", type=int, default=20, help="한 번에 처리할 작업 수")
     ap.add_argument("--archive", default="")
     args = ap.parse_args(argv)
@@ -426,10 +506,16 @@ def main(argv: list[str] | None = None) -> int:
     archive = args.archive or os.getenv("ARCHIVE_DIR", "./archive")
 
     try:
+        if args.backfill and args.nightly:
+            ap.error("--backfill 과 --nightly 는 함께 사용할 수 없습니다")
         if args.status:
             return show_status()
         if args.backfill:
             return backfill(archive, apply=args.apply)
+        if args.nightly:
+            result = nightly_backfill(archive, apply=args.apply)
+            if result != EXIT_OK or not args.apply:
+                return result
 
         queue.reclaim_expired()
         if not args.apply:

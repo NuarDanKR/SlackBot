@@ -235,3 +235,53 @@ def test_an_estimate_round_is_not_reported_as_nothing_sent(tmp_path, monkeypatch
     )
 
     assert saved["outcome"] == "estimate"
+
+
+def test_a_backfill_can_also_resend_to_reviewers_who_already_got_today(tmp_path):
+    """소급으로 만든 후보도 같은 DM 으로 나간다. 재발송이 「지금 발송」에만 걸리면
+    체크는 켜져 있는데 「오늘 이미 보낸 검토자뿐입니다」가 그대로 뜬다."""
+    command = review_jobs._command(
+        {"targets": [{"workspace": "tyit", "channelId": "C1"}],
+         "backfill": True, "resend": True},
+        tmp_path / "out.result",
+    )
+
+    assert "--backfill" in command
+    assert "--resend" in command
+
+
+def test_resend_and_backfill_start_together(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        review_jobs.subprocess, "Popen", lambda *a, **k: SimpleNamespace(pid=321)
+    )
+
+    job = review_jobs.start(
+        [("tyit", "C1")], actor="a@b.c", resend=True, backfill=True, since="2026-08-17",
+    )
+
+    assert job["resend"] is True
+    assert job["backfill"] is True
+
+
+def test_redeliver_never_asks_the_generator_to_run(tmp_path):
+    """요약은 됐는데 DM 만 실패한 회차를 LLM 없이 복구한다."""
+    command = review_jobs._command(
+        {"targets": [{"workspace": "tyit", "channelId": "C1"}], "deliverOnly": True},
+        tmp_path / "out.result",
+    )
+
+    assert "--deliver-only" in command
+    assert "--backfill" not in command
+
+
+def test_redeliver_and_backfill_cannot_be_asked_for_at_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        review_jobs.subprocess, "Popen", lambda *a, **k: pytest.fail("no process")
+    )
+
+    with pytest.raises(review_jobs.ReviewJobError, match="소급"):
+        review_jobs.start(
+            [("tyit", "C1")], actor="a@b.c", deliver_only=True, backfill=True,
+        )

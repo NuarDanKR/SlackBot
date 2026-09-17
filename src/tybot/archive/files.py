@@ -73,6 +73,9 @@ class SlackFile:
     url_private_download: str | None
     mimetype: str = ""
     permalink: str = ""
+    # Slack 이 말하는 **파일이 올라온 시각**(epoch 초). 0 이면 모른다.
+    # 수집 시각으로 대신하지 않는다 — 몇 년 전 문서가 「오늘 올라온 것」 이 된다.
+    created: int = 0
 
     @classmethod
     def from_event(cls, f: dict) -> SlackFile:
@@ -90,6 +93,7 @@ class SlackFile:
             url_private_download=f.get("url_private_download") or f.get("url_private"),
             mimetype=str(f.get("mimetype") or ""),
             permalink=str(f.get("permalink") or f.get("permalink_public") or ""),
+            created=_epoch(f.get("created") or f.get("timestamp")),
         )
 
     @property
@@ -127,6 +131,14 @@ class AttachmentOrigin:
     thread_ts: str = ""
 
 
+def _epoch(value) -> int:
+    """Slack 이 준 epoch 초. 읽지 못하면 **0 — 모른다는 뜻**이다."""
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class StagedAttachmentResult:
     """첨부 하나의 처리 결과. **어느 줄이 어느 파일에서 왔는지** 담는다.
@@ -145,6 +157,32 @@ class StagedAttachmentResult:
     metadata_path: Path
     warnings: list[str]
     extracted: bool = False
+    # 파일이 올라온 시각(epoch 초). 0 이면 모른다 — 호출부가 수집 시각으로
+    # 채우지 않고 **모른다는 사실을 그대로** 다뤄야 한다.
+    created: int = 0
+
+
+# 파일 줄을 원문에 적을 때 쓰는 시각과 화자.
+#
+# 예전에는 **수집 시각**을 그대로 썼다. `writer.ingest()` 가 그 값으로 저장 경로
+# (`raw/<날짜>.md`)를 정하므로, 몇 년 전 문서가 「오늘 올라온 원문」 이 되어 그날
+# 요약에 들어갔다(2026-09-17 실측). 기간 요약은 시각으로 묶으므로 이게 틀리면
+# 기간 자체가 무의미해진다.
+#
+# 시각을 모르면 **모른다고 적는다.** 아는 척한 시각보다 낫다.
+FILE_SPEAKER = "채널 파일"
+FILE_SPEAKER_UNKNOWN = "채널 파일(올린 시각 미상)"
+
+
+def staged_line_time(item: StagedAttachmentResult, *, fallback: datetime):
+    """`(그 줄에 적을 시각, 화자)`.
+
+    Slack 이 파일 생성 시각을 준 경우에만 그 값을 쓴다. 못 주면 `fallback` 을 쓰되
+    화자에 그 사실을 적어 사람이 오늘 올라온 것으로 읽지 않게 한다.
+    """
+    if item.created:
+        return datetime.fromtimestamp(item.created, tz=UTC), FILE_SPEAKER
+    return fallback, FILE_SPEAKER_UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -527,6 +565,7 @@ def stage_attachments(
             metadata_path=staged / "metadata.json",
             warnings=list(own_warnings),
             extracted=extracted is not None,
+            created=f.created,
         ))
     return results
 

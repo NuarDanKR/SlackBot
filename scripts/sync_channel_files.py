@@ -20,7 +20,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 from tybot import search_index
 from tybot.archive import writer
 from tybot.archive.channel_files import ChannelFileScan, collect, scan
-from tybot.archive.files import attachment_storage
+from tybot.archive.files import attachment_storage, staged_line_time
 from tybot.archive.store import ArchiveStore
 from tybot.attachment_trace import confirm_archived
 from tybot.channels import should_collect
@@ -55,11 +55,13 @@ def _publish(archive: str, cfg, channel: dict, staged: list) -> tuple[int, bool]
     if not staged:
         return 0, True
     now = datetime.now(UTC)
-    messages = [
-        writer.IncomingMessage(ts=now, speaker="채널 파일", text=line)
-        for item in staged
-        for line in item.lines
-    ]
+    messages = []
+    for item in staged:
+        when, speaker = staged_line_time(item, fallback=now)
+        messages += [
+            writer.IncomingMessage(ts=when, speaker=speaker, text=line)
+            for line in item.lines
+        ]
     name = "#" + str(channel["name"])
     result = writer.ingest(
         archive,

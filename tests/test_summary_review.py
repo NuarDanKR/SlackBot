@@ -135,6 +135,12 @@ def test_first_generation_only_looks_back_one_day():
         conn = SimpleNamespace(rollback=lambda: None)
         def cursor(self, *_): return ""
         def start_at(self, *_): return "2020-01-01 00:00"
+        def source_run_seen(self, *_):
+            return False
+
+        def advance(self, *_):
+            pass
+
         def may_attempt(self, *_): return True
         def approved(self, *_): return []
         def save_run(self, **_): raise AssertionError("오래된 원문은 후보가 되면 안 된다")
@@ -157,6 +163,12 @@ def test_manual_generation_bypasses_the_failed_digest_backoff():
 
         def start_at(self, *_):
             return "2026-09-15 00:00"
+
+        def source_run_seen(self, *_):
+            return False
+
+        def advance(self, *_):
+            pass
 
         def may_attempt(self, *_):
             return False
@@ -251,10 +263,11 @@ def test_message_link_needs_both_channel_and_coordinate():
 # 없었다」와 「보냈다」를 같은 글자로 만들었기 때문이다. run() 이 채널마다 사유를
 # 남기는지 실제 호출 경로로 확인한다.
 class _OutcomeStore:
-    def __init__(self, *, rows, reviewers, already):
+    def __init__(self, *, rows, reviewers, already, generated=True):
         self._rows = rows
         self._reviewers = reviewers
         self._already = already
+        self._generated = generated
         self.delivered = []
         self.stamped = []
 
@@ -265,7 +278,7 @@ class _OutcomeStore:
         return 0
 
     def generated_on(self, workspace, channel_id, on):
-        return True
+        return self._generated
 
     def pending(self, workspace, channel_id, on):
         return list(self._rows)
@@ -300,13 +313,15 @@ class _OutcomeClient:
 
 
 def _outcome_run(
-    monkeypatch, *, rows, reviewers, already, resend=False, force_generate=False
+    monkeypatch, *, rows, reviewers, already, resend=False, force_generate=False,
+    deliver_only=False, generated=True,
 ):
     from types import SimpleNamespace
 
     from tybot import summary_review as sr
 
-    store = _OutcomeStore(rows=rows, reviewers=reviewers, already=already)
+    store = _OutcomeStore(rows=rows, reviewers=reviewers, already=already,
+                          generated=generated)
     monkeypatch.setattr(sr, "Store", store)
     monkeypatch.setattr(
         sr, "_canvas_round",
@@ -323,6 +338,7 @@ def _outcome_run(
         now=datetime(2026, 9, 17, 18, 0, tzinfo=sr.KST),
         resend=resend,
         force_generate=force_generate,
+        deliver_only=deliver_only,
     )
     return result, client, store
 
@@ -456,10 +472,11 @@ def test_backfill_estimate_counts_everything_not_one_round(monkeypatch):
 class _BackfillStore:
     """커서가 회차마다 전진하는지 보려고 실제 커서 값을 흉내 낸다."""
 
-    def __init__(self):
+    def __init__(self, seen=False):
         self.watermark = "2026-09-17 00:00|z"
         self.rewound_to = None
         self.rounds = 0
+        self.seen = seen
 
     def cursor(self, workspace, channel_id):
         return self.watermark
@@ -473,6 +490,12 @@ class _BackfillStore:
 
     def approved(self, workspace, channel_id):
         return []
+
+    def source_run_seen(self, *_):
+        return self.seen
+
+    def advance(self, workspace, channel_id, watermark, digest):
+        self.watermark = watermark
 
     def may_attempt(self, *args, **kwargs):
         return True
@@ -600,6 +623,12 @@ def test_generate_channel_fills_the_stats_it_was_given():
         def start_at(self, *_):
             return "2026-09-15 00:00"
 
+        def source_run_seen(self, *_):
+            return False
+
+        def advance(self, *_):
+            pass
+
         def may_attempt(self, *_):
             return True
 
@@ -631,3 +660,166 @@ def test_generate_channel_fills_the_stats_it_was_given():
     assert stats.lines == 1
     assert stats.proposed == 2
     assert stats.accepted == 1
+
+
+# --- 같은 원문을 두 번 요약하지 않는다 (B-59) ---------------------------------
+def test_an_already_summarized_segment_costs_nothing_the_second_time(monkeypatch):
+    """소급은 커서를 되돌린다. 막지 않으면 같은 구간에 돈이 두 번 나간다."""
+    calls = []
+    store = _BackfillStore(seen=True)
+    store.watermark = sr.EPOCH_WATERMARK
+    stats = sr.GenerateStats()
+    line = _line("2026-06-01 09:00", "6월 원문", 1)
+
+    got = sr.generate_channel(
+        store, _archive([line]), workspace="ws", channel_id="C1", channel_name="#채널",
+        complete=lambda *a: calls.append(a) or "{}",
+        now=datetime(2026, 9, 17, tzinfo=sr.KST), force=True, stats=stats,
+    )
+
+    assert calls == []          # LLM 을 부르지 않았다
+    assert got == 0
+    assert stats.reused
+    # 커서는 전진한다 — 안 그러면 소급이 그 구간에서 영원히 맴돈다.
+    assert store.watermark.startswith("2026-06-01 09:00")
+
+
+def test_a_second_backfill_walks_the_history_without_calling_the_model(monkeypatch):
+    monkeypatch.setattr(sr, "MAX_NEW_SOURCE_CHARS", 90)
+    lines = [_line(f"2026-06-{day:02d} 09:00", "가" * 50, day) for day in range(1, 8)]
+    store = _BackfillStore(seen=True)
+    calls = []
+
+    done = sr.backfill_channel(
+        store, _archive(lines), workspace="ws", channel_id="C1", channel_name="#채널",
+        complete=lambda *a: calls.append(a) or "{}",
+        now=datetime(2026, 9, 17, tzinfo=sr.KST), max_rounds=10,
+    )
+
+    assert calls == []
+    assert done.exhausted
+    assert store.watermark.startswith("2026-06-07 09:00")
+
+
+# --- 만든 후보만 다시 보낸다 (B-59) -------------------------------------------
+def test_deliver_only_never_calls_the_model(monkeypatch):
+    """요약은 됐는데 DM 만 실패한 회차를 복구한다. 생성 버튼을 다시 누르게 하면
+    같은 원문에 돈이 또 나간다."""
+    calls = []
+    monkeypatch.setattr(sr, "generate_channel",
+                        lambda *a, **k: calls.append(1) or 0)
+
+    # 생성 잠금이 안 걸린 상태다 — 막는 것은 `deliver_only` 하나뿐이어야 한다.
+    result, client, _store = _outcome_run(
+        monkeypatch, rows=[{"id": "c1"}], reviewers=["U1"], already=set(),
+        deliver_only=True, generated=False,
+    )
+
+    assert calls == []
+    assert result.sent == 1
+    assert client.posted == ["DU1"]
+
+
+def test_deliver_only_with_nothing_pending_says_so():
+    assert sr._empty_reason(None, deliver_only=True) == sr.OUTCOME_NOTHING_PENDING
+
+
+def test_the_result_says_how_many_candidates_are_waiting(monkeypatch):
+    """이미 만든 것이 아직 아무에게도 안 갔다 — 그건 LLM 없이 복구할 수 있다."""
+    result, _client, _store = _outcome_run(
+        monkeypatch, rows=[{"id": "c1"}, {"id": "c2"}], reviewers=["U1"],
+        already={"U1"},
+    )
+
+    outcome = result.outcomes[0]
+    assert outcome.code == "already-sent"
+    assert outcome.pending == 2
+    assert outcome.as_dict()["pending"] == 2
+
+
+# --- 생성 요약(abstract) 후보 (B-60 1단계) ------------------------------------
+# 푸는 것은 「제안 == 인용」 한 줄뿐이다. 나머지 검증은 form 과 무관하게 그대로 돈다.
+_ABSTRACT_SOURCE = [
+    sr.SourceLine("2026-09-15 09:00", "홍길동",
+                  "공사기간은 2026-09-01부터 2026-12-31까지입니다", "a.md:10"),
+    sr.SourceLine("2026-09-15 10:00", "홍길동",
+                  "공정률은 62.5%로 집계되었습니다", "a.md:11"),
+]
+
+
+def _candidate(**over):
+    base = {
+        "kind": "new_issue",
+        "form": "abstract",
+        "current_text": "",
+        "proposed_text": "공사기간과 공정률을 한 문장으로 정리했습니다",
+        "evidence_quote": "공정률은 62.5%로 집계되었습니다",
+    }
+    base.update(over)
+    return json.dumps({"candidates": [base]})
+
+
+def test_an_abstract_candidate_need_not_repeat_the_quote():
+    """같은 사실이 여러 날 나오면 추출만으로는 그 수만큼 후보가 된다."""
+    got = sr.parse_proposals(_candidate(), _ABSTRACT_SOURCE)
+
+    assert len(got) == 1
+    assert got[0].form == sr.FORM_ABSTRACT
+    assert got[0].proposed_text != got[0].evidence_quote
+
+
+def test_an_abstract_candidate_cannot_invent_a_number():
+    """문장은 모델이 써도 되지만 **사실은 원문에서만 온다.**"""
+    got = sr.parse_proposals(
+        _candidate(proposed_text="공정률은 75%로 집계되었습니다"), _ABSTRACT_SOURCE,
+    )
+
+    assert got == []
+
+
+def test_an_abstract_candidate_may_reuse_a_number_from_its_quote():
+    got = sr.parse_proposals(
+        _candidate(proposed_text="공정률 62.5% 로 일정에 맞춰 진행 중입니다"),
+        _ABSTRACT_SOURCE,
+    )
+
+    assert len(got) == 1
+
+
+def test_an_abstract_candidate_without_a_quote_is_dropped():
+    """근거 없는 생성 문장은 환각과 구별되지 않는다."""
+    assert sr.parse_proposals(_candidate(evidence_quote=""), _ABSTRACT_SOURCE) == []
+
+
+def test_an_abstract_candidate_whose_quote_is_not_in_the_source_is_dropped():
+    got = sr.parse_proposals(
+        _candidate(evidence_quote="원문에 없는 문장입니다"), _ABSTRACT_SOURCE,
+    )
+
+    assert got == []
+
+
+def test_an_unknown_form_falls_back_to_the_stricter_one():
+    """모르면 더 엄격한 쪽. 생성문으로 통과시키면 검증이 한 겹 조용히 사라진다."""
+    for form in ("", "freeform", "ABSTRACTIVE", None):
+        got = sr.parse_proposals(_candidate(form=form), _ABSTRACT_SOURCE)
+        assert got == [], form
+
+
+def test_a_quote_candidate_is_judged_exactly_as_before():
+    got = sr.parse_proposals(
+        _candidate(form="quote", proposed_text="공정률은 62.5%로 집계되었습니다"),
+        _ABSTRACT_SOURCE,
+    )
+
+    assert len(got) == 1
+    assert got[0].form == sr.FORM_QUOTE
+
+
+def test_a_missing_form_column_is_written_as_quote():
+    """옛 후보가 소급으로 생성문이 되면, 사람이 「원문 그대로」로 믿고 승인한 것이
+    다른 종류가 된다."""
+    sql = Path("deploy/sql/summary_review_schema.sql").read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS form text NOT NULL DEFAULT 'quote'" in sql
+    assert "CHECK (form IN ('quote', 'abstract'))" in sql

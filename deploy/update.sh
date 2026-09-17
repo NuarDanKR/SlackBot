@@ -98,6 +98,11 @@ systemctl restart tybot
 # 채널 설정에서 매일 발송한다고 명시하므로 배포가 실행기를 함께 활성화한다.
 systemctl enable --now tybot-review-dm.timer
 
+# 실시간 재처리 큐와 야간 실패 스캔은 한 쌍이다. 전자만 켜면 이미 failed 로
+# 닫힌 파일은 다시 큐에 들어오지 않고, 후자만 켜면 한 번에 처리하지 못한 나머지가
+# 다음 날까지 기다린다.
+systemctl enable --now tybot-convert-retry.timer tybot-convert-nightly.timer
+
 # 콘솔은 별도 프로세스이므로 따로 재시작한다.
 if [[ "$WITH_CONSOLE" == "1" ]] && systemctl is-enabled --quiet tybot-console 2>/dev/null; then
   systemctl restart tybot-console || log '콘솔 재시작 실패 — journalctl -u tybot-console 확인'

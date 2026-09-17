@@ -1,0 +1,10 @@
+[Unit]
+Description=TYBot 실패 첨부 매일 새벽 일괄 재시도
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

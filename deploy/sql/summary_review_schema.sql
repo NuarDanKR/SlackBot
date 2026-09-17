@@ -14,6 +14,22 @@ CREATE TABLE IF NOT EXISTS summary_review_cursor (
     PRIMARY KEY (workspace, channel_id)
 );
 
+-- 이 원문 구간으로 요약을 **이미 돌렸는가** (B-59). 커서만으로는 모른다 — 소급은
+-- 커서를 되돌리므로 다시 실행하면 같은 구간이 또 LLM 으로 간다. 후보는
+-- `ON CONFLICT DO NOTHING` 이 막지만 **돈은 두 번 나간다.**
+--
+-- 후보가 0건이었던 구간도 남긴다. 행이 없으면 「안 돌렸다」 와 구별되지 않아
+-- 잡담뿐인 구간을 누를 때마다 다시 요약한다.
+CREATE TABLE IF NOT EXISTS summary_review_source_run (
+    workspace     text NOT NULL,
+    channel_id    text NOT NULL,
+    source_digest text NOT NULL,
+    watermark     text NOT NULL DEFAULT '',
+    candidates    integer NOT NULL DEFAULT 0,
+    ran_at        timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace, channel_id, source_digest)
+);
+
 CREATE TABLE IF NOT EXISTS summary_review_candidate (
     id              uuid PRIMARY KEY,
     workspace       text NOT NULL,
@@ -89,6 +105,17 @@ ALTER TABLE summary_review_candidate
 ALTER TABLE summary_review_candidate
     ADD COLUMN IF NOT EXISTS delivered_at timestamptz;
 
+-- 후보의 형식 (B-60). `quote` 는 원문을 그대로 오려 낸 것, `abstract` 는 모델이
+-- 쓴 문장이다. 기존 행은 전부 `quote` 로 남는다 — 과거 후보가 소급으로 생성문으로
+-- 바뀌면, 사람이 「원문 그대로」 라고 믿고 승인한 것이 다른 종류가 된다.
+ALTER TABLE summary_review_candidate
+    ADD COLUMN IF NOT EXISTS form text NOT NULL DEFAULT 'quote';
+ALTER TABLE summary_review_candidate
+    DROP CONSTRAINT IF EXISTS summary_review_candidate_form;
+ALTER TABLE summary_review_candidate
+    ADD CONSTRAINT summary_review_candidate_form
+    CHECK (form IN ('quote', 'abstract'));
+
 -- 승인 요약이 가리키는 원문이 사라졌거나 좌표가 어긋난 상태 (B-56).
 -- 승인 이력을 지우지 않는다 — 검색 길잡이와 기존 승인 요약에서만 빠진다.
 ALTER TABLE approved_summary_item
@@ -105,7 +132,8 @@ DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE '
-                'summary_review_cursor, summary_review_candidate, approved_summary_item '
+                'summary_review_cursor, summary_review_candidate, approved_summary_item, '
+                'summary_review_source_run '
                 'TO tyslackai';
     END IF;
 END

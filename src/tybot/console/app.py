@@ -241,6 +241,8 @@ class ChannelReviewJobBody(BaseModel):
     rounds: int = Field(default=0, ge=0, le=50)
     resume: bool = False
     estimate: bool = False
+    # LLM 을 부르지 않고 이미 만들어 둔 후보만 다시 보낸다(B-59).
+    deliverOnly: bool = False
 
     def targets(self) -> list[str]:
         picked = [value for value in [*self.channels, self.channel] if value.strip()]
@@ -2766,13 +2768,18 @@ def start_channel_review_job(
             rounds=body.rounds,
             resume=body.resume,
             estimate=body.estimate,
+            deliver_only=body.deliverOnly,
         )
     except review_jobs.ReviewJobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     _audit_event(
         actor=user.email,
         category="review",
-        action="backfill" if body.backfill else "send-now",
+        action=(
+            "backfill" if body.backfill
+            else "redeliver" if body.deliverOnly
+            else "send-now"
+        ),
         target_type="channel",
         target_id=",".join(f"{ws}:{ch}" for ws, ch in targets),
         outcome="requested",

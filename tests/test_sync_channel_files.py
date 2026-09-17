@@ -27,7 +27,9 @@ def test_member_channels_only_returns_joined_rule_matching_channels():
 
 def test_publish_writes_source_and_reindexes_the_changed_document(tmp_path, monkeypatch):
     archive = tmp_path / "archive"
-    staged = [SimpleNamespace(file_id="F1", lines=["[첨부:자동변환] 보고서.txt"])]
+    # 2026-06-01 09:00 KST 에 올라온 파일. 수집은 오늘 해도 원문 시각은 그날이다.
+    staged = [SimpleNamespace(file_id="F1", lines=["[첨부:자동변환] 보고서.txt"],
+                              created=1780272000)]
     cfg = SimpleNamespace(key="pilot")
     channel = {"id": "C1", "name": "팀-전산_ABB110-자료"}
     indexed = []
@@ -48,6 +50,31 @@ def test_publish_writes_source_and_reindexes_the_changed_document(tmp_path, monk
     assert len(indexed) == 1
     assert indexed[0].channel_id == "C1"
     assert indexed[0].raw_lines[0].speaker == "채널 파일"
+    # **수집 시각이 아니라 파일이 올라온 시각**이다. 이게 오늘로 찍히면 몇 년 전
+    # 문서가 그날 요약에 들어간다(2026-09-17 실측).
+    assert indexed[0].raw_lines[0].ts.startswith("2026-06-01")
+
+
+def test_publish_says_so_when_the_upload_time_is_unknown(tmp_path, monkeypatch):
+    """모르는 시각을 수집 시각으로 채우면 사람은 오늘 올라온 것으로 읽는다."""
+    archive = tmp_path / "archive"
+    staged = [SimpleNamespace(file_id="F1", lines=["[첨부:자동변환] 보고서.txt"],
+                              created=0)]
+    cfg = SimpleNamespace(key="pilot")
+    channel = {"id": "C1", "name": "팀-전산_ABB110-자료"}
+    indexed = []
+    monkeypatch.setattr(
+        sync, "confirm_archived", lambda store, items, **kwargs: {"F1": "archived"},
+    )
+    monkeypatch.setattr(
+        sync.search_index,
+        "reindex",
+        lambda docs, root: indexed.extend(docs) or {"docs": len(docs), "lines": 1},
+    )
+
+    sync._publish(str(archive), cfg, channel, staged)
+
+    assert indexed[0].raw_lines[0].speaker == "채널 파일(올린 시각 미상)"
 
 
 def test_apply_publishes_each_file_before_starting_the_next(tmp_path, monkeypatch):

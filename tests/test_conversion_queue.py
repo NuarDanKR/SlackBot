@@ -532,8 +532,81 @@ def test_backfill_does_not_queue_an_attachment_with_an_unknown_channel(
     assert "채널 미확인 1건" in capsys.readouterr().out
 
 
+def test_nightly_backfill_queues_only_retryable_failures(
+    tmp_path, monkeypatch, capsys
+):
+    """무인 배치는 변환기 crash 같은 일시 실패만 다시 연다."""
+    import drain_conversion_queue as drain
+
+    _staged_review(
+        tmp_path,
+        "F1",
+        status="download_or_extract_failed",
+        error_code="converter_crashed",
+        retryable=True,
+    )
+    _staged_review(
+        tmp_path,
+        "F2",
+        status="unsupported",
+        error_code="unsupported",
+        retryable=False,
+    )
+    added = []
+    monkeypatch.setattr(queue, "enqueue", lambda **kw: added.append(kw) or 1)
+
+    code = drain.nightly_backfill(str(tmp_path / "archive"), apply=True)
+
+    assert code == 0
+    assert [item["file_id"] for item in added] == ["F1"]
+    assert added[0]["force"] is False
+    assert "영구 제외 1건" in capsys.readouterr().out
+
+
+def test_nightly_backfill_is_a_dry_run_without_apply(tmp_path, monkeypatch, capsys):
+    import drain_conversion_queue as drain
+
+    _staged_review(
+        tmp_path,
+        "F1",
+        status="download_or_extract_failed",
+        error_code="converter_timeout",
+        retryable=True,
+    )
+    monkeypatch.setattr(
+        queue,
+        "enqueue",
+        lambda **_kw: pytest.fail("dry run must not enqueue"),
+    )
+
+    assert drain.nightly_backfill(str(tmp_path / "archive"), apply=False) == 0
+    assert "--nightly --apply" in capsys.readouterr().out
+
+
+def test_nightly_unit_requeues_and_can_publish_to_the_archive():
+    root = Path(__file__).resolve().parent.parent
+    service = (root / "deploy" / "tybot-convert-nightly.service").read_text(
+        encoding="utf-8"
+    )
+    timer = (root / "deploy" / "tybot-convert-nightly.timer").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--nightly --apply" in service
+    assert "ReadWritePaths=/var/lib/tybot/staging /var/lib/tybot/archive" in service
+    assert "OnCalendar=*-*-* 03:20:00" in timer
+    assert "Persistent=true" in timer
+
+
 def _staged_review(
-    tmp_path, file_id, *, status, error_code="", channel_id="C1", original=True
+    tmp_path,
+    file_id,
+    *,
+    status,
+    error_code="",
+    channel_id="C1",
+    original=True,
+    retryable=False,
 ) -> None:
     """`attachment_review.scan()` 이 읽는 모양으로 하나 만든다."""
     d = (
@@ -547,7 +620,7 @@ def _staged_review(
     (d / "metadata.json").write_text(
         json.dumps({
             "name": f"{file_id}.pdf", "filetype": "pdf", "status": status,
-            "error_code": error_code, "retryable": False, "sha256": "abc123",
+            "error_code": error_code, "retryable": retryable, "sha256": "abc123",
             "object_path": str(object_path),
         }, ensure_ascii=False),
         encoding="utf-8",

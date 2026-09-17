@@ -1,0 +1,25 @@
+[Unit]
+Description=TYBot 실패 첨부 야간 일괄 재시도
+Documentation=file:///opt/tybot/docs/deploy/rocky8.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python scripts/drain_conversion_queue.py --nightly --apply --limit 50
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-convert-nightly
+TimeoutStartSec=7200
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tybot/staging /var/lib/tybot/archive
+ReadOnlyPaths=/var/lib/tybot/objects

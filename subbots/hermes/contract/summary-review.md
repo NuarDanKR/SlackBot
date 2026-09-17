@@ -2,11 +2,20 @@
 
 출력은 JSON 객체 하나만 사용합니다. 설명이나 Markdown 코드 블록을 붙이지 마세요.
 
-{"candidates":[{"kind":"number_or_schedule|new_issue|closed_issue","current_text":"기존 요약의 관련 문장 또는 빈 문자열","proposed_text":"검토자가 승인할 새 요약 문장","evidence_quote":"새 원문에서 글자 그대로 복사한 한 문장","evidence_at":"원문 시각","evidence_author":"원문 작성자"}]}
+{"candidates":[{"kind":"number_or_schedule|new_issue|closed_issue","form":"quote|abstract","current_text":"기존 요약의 관련 문장 또는 빈 문자열","proposed_text":"검토자가 승인할 새 요약 문장","evidence_quote":"새 원문에서 글자 그대로 복사한 한 문장","evidence_at":"원문 시각","evidence_author":"원문 작성자"}]}
 
 규칙:
 - 숫자, 금액, 비율, 날짜와 기관명은 원문 그대로 옮기고 환산하거나 추론하지 않습니다.
-- proposed_text와 evidence_quote는 제공된 새 원문의 같은 문장을 글자 그대로 복사합니다.
+  이것은 form과 무관하게 지킵니다. 원문에 없는 숫자를 쓴 후보는 버려집니다.
+- form은 후보마다 반드시 적습니다.
+  - quote: proposed_text와 evidence_quote가 제공된 새 원문의 같은 문장을 글자 그대로
+    복사한 것입니다. 원문 한 문장이 그대로 검토 단위가 될 때 씁니다.
+  - abstract: 여러 줄에 걸친 하나의 사안을 한 문장으로 정리한 것입니다. 문장은 직접
+    쓰되 그 안의 숫자·금액·비율·날짜·기관명은 evidence_quote에 있는 것만 씁니다.
+- form이 무엇이든 evidence_quote는 반드시 새 원문에서 글자 그대로 복사합니다.
+  인용이 없거나 원문에서 찾을 수 없는 후보는 버려집니다.
+- 같은 사안이 여러 날에 걸쳐 반복되면 quote 여러 건 대신 abstract 한 건으로 묶습니다.
+  검토자가 같은 내용을 여러 번 보게 하지 않습니다.
 - 근거가 불확실하면 후보로 만들지 않습니다.
 - 다른 사업장이나 다른 채널 내용을 섞지 않습니다.
 - 그날의 핵심 내용을 훑을 수 있도록 의사결정, 진행 상황, 위험·쟁점, 후속 조치,

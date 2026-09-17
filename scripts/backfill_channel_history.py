@@ -30,7 +30,7 @@ from tybot.archive.channel_files import (
 from tybot.archive.channel_files import (
     collect as collect_channel_files,
 )
-from tybot.archive.files import attachment_storage
+from tybot.archive.files import attachment_storage, staged_line_time
 from tybot.archive.store import ArchiveStore
 from tybot.attachment_trace import confirm_archived
 from tybot.channels import should_collect
@@ -299,11 +299,14 @@ def _sync_files(
         )
         if not staged:
             continue
-        messages = [
-            writer.IncomingMessage(ts=datetime.now(UTC), speaker="채널 파일", text=line)
-            for item in staged
-            for line in item.lines
-        ]
+        now = datetime.now(UTC)
+        messages = []
+        for item in staged:
+            when, speaker = staged_line_time(item, fallback=now)
+            messages += [
+                writer.IncomingMessage(ts=when, speaker=speaker, text=line)
+                for line in item.lines
+            ]
         ingest = writer.ingest(
             archive,
             workspace=cfg.key,

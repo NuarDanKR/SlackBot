@@ -107,7 +107,41 @@ def main(argv: list[str] | None = None) -> int:
         print("\n🔴 설정된 워크스페이스가 0개다. 워크스페이스마다 Slack 앱을 따로 만들고 "
               "봇/앱 토큰 두 개를 각각 등록해야 한다(docs/multi-workspace.md).")
 
-    # --- 2. v1 삭제 판정 -------------------------------------------------
+    # --- 2. 채널을 식별할 수 없는 원문 (B-61) -----------------------------
+    # `ArchiveStore.docs()` 는 표시명을 마이그레이션 별칭으로 쓴다. 표시명을 못 읽는
+    # 문서는 이제 **어느 채널에도 붙지 않는다** — 다른 채널의 근거가 되는 것보다
+    # 낫지만, 그 내용이 답변에서 빠진다는 뜻이기도 하다. 조용히 두지 않는다.
+    from tybot.archive.store import is_synthetic_channel_id
+
+    named_real = {
+        (d.workspace, d.channel)
+        for d in docs
+        if d.channel and d.channel_id and not is_synthetic_channel_id(d.channel_id)
+    }
+    unreadable = [d for d in docs if not d.channel and not d.channel_id]
+    orphan = [
+        d for d in docs
+        if d.channel and not d.channel_id and (d.workspace, d.channel) not in named_real
+    ]
+    print("\n=== 채널을 식별할 수 없는 원문 ===")
+    if not unreadable and not orphan:
+        print("없다. 모든 원문 문서가 채널에 귀속된다.")
+    for doc in unreadable:
+        lines = len(doc.raw_lines)
+        print(f"🔴 {doc.path} — 표시명과 channel_id 가 둘 다 없다 (원문 {lines}줄)")
+    if unreadable:
+        print("    프론트매터의 `channel:` 값에 따옴표가 없으면 `#` 뒤가 주석으로 잘린다.")
+        print('    `channel: "#팀-전산_abb155-공지"` 처럼 고치거나 v2 로 이전하라.')
+    for doc in orphan:
+        lines = len(doc.raw_lines)
+        print(f"🟡 {doc.path} — `{doc.channel}` 이름의 v2 문서가 없다 (원문 {lines}줄)")
+    if orphan:
+        print("    채널명이 바뀐 뒤 옛 이름만 남았을 수 있다. 지금 채널명을 확인하라.")
+    if unreadable or orphan:
+        print("    **이 문서의 원문은 답변 근거에서 빠져 있다.** 고치기 전에 그 채널")
+        print("    검토자에게 빠진 근거가 있다는 것을 알려라.")
+
+    # --- 3. v1 삭제 판정 -------------------------------------------------
     legacy_dir = root / "channels"
     print("\n=== v1 `channels/` 삭제 가능 여부 ===")
     if not legacy_dir.is_dir():

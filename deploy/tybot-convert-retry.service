@@ -19,11 +19,11 @@ SyslogIdentifier=tybot-convert-retry
 # 임대가 만료될 때까지 그 작업이 멈춘다.
 TimeoutStartSec=1800
 
-# 재처리는 **staging 안에서만** 쓴다. 원문 아카이브는 읽기 전용이다 —
-# 재변환이 과거 `## 원문` 을 고치는 길을 만들지 않는다(원칙 1).
+# 검증된 추출 결과는 기존 원문 줄을 고치지 않고 새 첨부 추출 줄로 추가한 뒤
+# 검색 색인을 갱신한다. 따라서 staging 과 archive 에 쓰기 권한이 모두 필요하다.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/tybot/staging
-ReadOnlyPaths=/var/lib/tybot/archive /var/lib/tybot/objects
+ReadWritePaths=/var/lib/tybot/staging /var/lib/tybot/archive
+ReadOnlyPaths=/var/lib/tybot/objects

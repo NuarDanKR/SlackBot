@@ -606,3 +606,14 @@ def test_resume_and_a_start_day_are_mutually_exclusive(capsys):
     with pytest.raises(SystemExit):
         dr.main(["--force-now", "--backfill", "--target", "tyit:C1",
                  "--since", "2026-06-01", "--resume"])
+
+
+def test_deliver_only_needs_an_explicit_run(capsys):
+    with pytest.raises(SystemExit):
+        dr.main(["--deliver-only"])
+
+
+def test_deliver_only_and_backfill_are_mutually_exclusive(capsys):
+    """다시 보내기는 후보를 만들지 않는다. 함께 주면 뭘 원했는지 모른다."""
+    with pytest.raises(SystemExit):
+        dr.main(["--force-now", "--target", "tyit:C1", "--deliver-only", "--backfill"])

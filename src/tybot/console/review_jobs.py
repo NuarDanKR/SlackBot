@@ -118,7 +118,8 @@ def _targets(raw) -> list[tuple[str, str]]:
 
 def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False,
           backfill: bool = False, since: str = "", rounds: int = 0,
-          resume: bool = False, estimate: bool = False) -> dict:
+          resume: bool = False, estimate: bool = False,
+          deliver_only: bool = False) -> dict:
     pairs = _targets([{"workspace": ws, "channelId": ch} for ws, ch in targets])
     if len(pairs) > MAX_TARGETS:
         raise ReviewJobError(f"한 번에 최대 {MAX_TARGETS}개 채널까지 실행합니다.")
@@ -129,6 +130,8 @@ def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False,
         raise ReviewJobError("소급 설정은 소급 실행에서만 씁니다.")
     if since and resume:
         raise ReviewJobError("이어 가기는 시작점을 되돌리지 않으므로 시작일과 함께 쓸 수 없습니다.")
+    if deliver_only and backfill:
+        raise ReviewJobError("다시 보내기는 후보를 만들지 않으므로 소급 검토와 함께 쓸 수 없습니다.")
     if rounds and not 1 <= int(rounds) <= MAX_ROUNDS:
         raise ReviewJobError(f"소급 회차는 1에서 {MAX_ROUNDS} 사이입니다.")
     with _START_LOCK:
@@ -146,6 +149,7 @@ def start(targets: list[tuple[str, str]], *, actor: str, resend: bool = False,
             "channelId": pairs[0][1],
             "resend": bool(resend),
             "backfill": bool(backfill),
+            "deliverOnly": bool(deliver_only),
             "since": since,
             "rounds": int(rounds or 0),
             "resume": bool(resume),
@@ -191,6 +195,8 @@ def _command(job: dict, result_path: Path) -> list[str]:
         command += ["--target", f"{workspace}:{channel_id}"]
     if job.get("resend"):
         command.append("--resend")
+    if job.get("deliverOnly"):
+        command.append("--deliver-only")
     if job.get("backfill"):
         command.append("--backfill")
         since = str(job.get("since") or "")

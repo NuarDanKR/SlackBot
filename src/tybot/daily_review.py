@@ -681,6 +681,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--result-json", help="채널별 실행 결과를 이 경로에 JSON 으로 남긴다")
     ap.add_argument(
+        "--deliver-only",
+        action="store_true",
+        help="LLM 을 부르지 않고 이미 만들어 둔 후보만 다시 보낸다(--force-now 전용)",
+    )
+    ap.add_argument(
         "--backfill",
         action="store_true",
         help="이미 수집된 과거 원문으로 검토 후보를 소급 생성한다(--force-now 전용)",
@@ -731,6 +736,10 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--force-now와 --dry-run은 함께 사용할 수 없습니다.")
     if args.backfill and not args.force_now:
         ap.error("--backfill은 --force-now와 함께만 사용합니다.")
+    if args.deliver_only and not args.force_now:
+        ap.error("--deliver-only는 --force-now와 함께만 사용합니다.")
+    if args.deliver_only and args.backfill:
+        ap.error("--deliver-only는 후보를 만들지 않으므로 --backfill과 함께 쓸 수 없습니다.")
     for flag, value in (("--since", args.since), ("--rounds", args.rounds),
                         ("--resume", args.resume), ("--estimate", args.estimate)):
         if value and not args.backfill:
@@ -847,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
                 owners=owners,
                 complete=complete_summary,
                 resend=args.resend,
+                deliver_only=args.deliver_only,
                 # 콘솔의 즉시 실행은 오늘 이미 생성기를 돌렸더라도 워터마크 이후
                 # 새 원문을 다시 확인한다. 예약 실행은 하루 한 번 잠금을 유지한다.
                 force_generate=args.force_now,

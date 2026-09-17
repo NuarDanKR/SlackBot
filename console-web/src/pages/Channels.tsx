@@ -90,6 +90,9 @@ interface ReviewChannelResult {
   reason: string
   /** 사유를 뒷받침하는 수치. 로그를 열지 않아도 판단할 수 있게 합니다. */
   detail?: string
+  /** 이 회차가 들고 있던 검토 대기 후보. `sent`가 0인데 이 값이 있으면 이미 만든
+   *  것이 아직 아무에게도 가지 않았다는 뜻입니다 — 다시 보내기로 복구합니다. */
+  pending?: number
   sent: number
   skipped: number
   failed: number
@@ -363,6 +366,30 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     }
   }
 
+  /** 이미 만들어 둔 후보만 다시 보냅니다 — LLM을 부르지 않습니다.
+   *
+   * 요약은 성공했는데 DM만 실패한 회차를 복구하는 경로입니다. 이게 없으면 사람은
+   * 보내려고 생성 버튼을 다시 누르고, 같은 원문에 돈이 또 나갑니다.
+   */
+  async function redeliver() {
+    if (reviewTargets.length === 0 || reviewJobActive) return
+    setReviewBusy(true)
+    try {
+      await api.securePost<{ job: ReviewJob }>('/api/channels/review-jobs', {
+        channels: reviewTargets.map(key),
+        resend: reviewResend,
+        deliverOnly: true,
+      })
+      onToast('만들어 둔 후보를 다시 보내고 있습니다 — LLM은 부르지 않습니다.')
+      reviewJobResource.reload()
+    } catch (e) {
+      const error = e as ApiError
+      onToast(error.message || '다시 보내기를 시작하지 못했습니다.')
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
   /** 소급 검토 — 이미 수집된 과거 원문으로 검토 후보를 만듭니다.
    *
    * 최초 회차는 「검토자 지정 이후」와 「최근 하루」로 두 번 좁혀지고, 그 뒤로는
@@ -375,12 +402,13 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     const what =
       reviewTargets.length === 1 ? reviewTargets[0].channel : `채널 ${reviewTargets.length}개`
     const from = backfillSince ? `${backfillSince}부터` : '아카이브 처음부터'
+    const again = reviewResend ? '\n오늘 이미 보낸 검토자에게도 다시 보냅니다.' : ''
     if (
       !estimate &&
       !window.confirm(
-        `${what}의 수집된 원문을 ${from} 다시 읽어 검토 후보를 만듭니다.
-` +
-          `회차마다 LLM을 한 번 부르며 채널당 최대 ${backfillRounds}회차입니다. 실행할까요?`,
+        `${what}의 수집된 원문을 ${from} 다시 읽어 검토 후보를 만듭니다.\n` +
+          `회차마다 LLM을 한 번 부르며 채널당 최대 ${backfillRounds}회차입니다.${again}\n` +
+          '실행할까요?',
       )
     )
       return
@@ -388,6 +416,10 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
     try {
       await api.securePost<{ job: ReviewJob }>('/api/channels/review-jobs', {
         channels: reviewTargets.map(key),
+        // 소급으로 만든 후보도 결국 같은 DM 으로 나간다. 재발송 설정이 위쪽
+        // 버튼에만 걸리면 체크는 켜져 있는데 「오늘 이미 보낸 검토자뿐입니다」가
+        // 그대로 뜬다 — 화면이 거짓말을 한다.
+        resend: reviewResend,
         backfill: true,
         since: backfillSince,
         rounds: backfillRounds,
@@ -592,13 +624,22 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
               ? '검토 DM 실행 중'
               : `선택 채널 ${reviewTargets.length}개 검토 DM 지금 발송`}
           </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={reviewBusy || reviewJobActive || reviewTargets.length === 0}
+            onClick={redeliver}
+            title="이미 만들어 둔 후보만 다시 보냅니다. LLM을 부르지 않으므로 비용이 들지 않습니다."
+          >
+            만든 후보 다시 보내기 (LLM 호출 없음)
+          </button>
           <label className="checkbox">
             <input
               type="checkbox"
               checked={reviewResend}
               onChange={(event) => setReviewResend(event.target.checked)}
             />
-            오늘 이미 보낸 검토자에게도 다시 보내기
+            오늘 이미 보낸 검토자에게도 다시 보내기 (아래 소급 검토에도 적용)
           </label>
           {reviewBlocked.length > 0 && (
             <span className="note warn">
@@ -695,6 +736,12 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                         <span className="mono"> ({row.firstAt} ~ {row.lastAt})</span>
                       ) : null}
                       {row.detail ? <span className="mono"> · {row.detail}</span> : null}
+                      {row.sent === 0 && (row.pending ?? 0) > 0 ? (
+                        <span className="warn">
+                          {' '}· 만들어 둔 후보 {row.pending}건이 대기 중입니다 — 「만든 후보
+                          다시 보내기」로 보냅니다(LLM 호출 없음)
+                        </span>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
