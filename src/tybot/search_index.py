@@ -300,7 +300,11 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     store = ArchiveStore(args.archive or archive_dir())
     try:
-        result = reindex(store.docs(), store.root)
+        # DM 도 색인한다(B-57). 권한은 조회 쪽이 쥔다 — `candidates()` 는 이미
+        # `visible_docs()` 를 통과한 채널 목록만 받고, DM 의 `channel` 값은
+        # 사람마다 다르다(`writer.dm_channel`). 색인에서 빼면 개인 작업공간만
+        # 매번 파일 스캔으로 떨어져, 정작 본인 자료를 찾는 길이 제일 느려진다.
+        result = reindex(store.docs(dm_scope="*"), store.root)
     except IndexError_ as exc:
         log.error("%s", exc)
         return 1

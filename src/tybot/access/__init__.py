@@ -45,6 +45,10 @@ class RequestContext:
     # 채널만 허용한다. ID가 우선이고, v1 문서는 ID가 없어 표시 이름으로 폴백한다.
     channel_id: str = ""
     channel: str = ""
+    # 요청자 Slack 사용자 ID. **봇과의 DM 원문을 여는 유일한 열쇠다**(B-57).
+    # 비어 있으면 DM 문서는 열리지 않는다 — 콘솔·배치처럼 사람이 특정되지 않는
+    # 경로가 개인 기록을 읽는 일을 기본값으로 막는다.
+    user_id: str = ""
 
     def may_reach(self, owner_workspace: str) -> bool:
         """워크스페이스 경계 판정. 답변 생성 이전 1차 필터."""
@@ -62,14 +66,29 @@ def can_access(
     share_with: frozenset[str] | None = None,
     channel_id: str | None = None,
     channel: str | None = None,
+    dm_user: str | None = None,
 ) -> bool:
     """막는 쪽이 기본값. 판정 순서를 바꾸지 말 것.
 
-    0. 채널에서 온 질문이면 현재 워크스페이스의 현재 채널만 허용한다.
-    1. 워크스페이스 경계 — exec/root 가 아니면 화이트리스트에 없을 때 여기서 끝.
-    2. 다른 워크스페이스 자료: root 는 전량, 동등 워크스페이스는 `share_with` 명시분만.
-    3. 자기 워크스페이스 자료: root 는 전량, 그 외는 **채널 멤버십**(또는 명시적 public).
+    0. **봇과의 DM 원문은 본인이 DM 에서 물을 때만.** exec·root 도 예외가 아니다.
+    1. 채널에서 온 질문이면 현재 워크스페이스의 현재 채널만 허용한다.
+    2. 워크스페이스 경계 — exec/root 가 아니면 화이트리스트에 없을 때 여기서 끝.
+    3. 다른 워크스페이스 자료: root 는 전량, 동등 워크스페이스는 `share_with` 명시분만.
+    4. 자기 워크스페이스 자료: root 는 전량, 그 외는 **채널 멤버십**(또는 명시적 public).
     """
+    if dm_user:
+        # **맨 앞이어야 한다.** 뒤에 두면 `role == "exec"` 와 `is_root` 의 조기
+        # 반환에 걸려 남의 개인 공간이 통합조회로 열린다. 통합조회 권한은 조직의
+        # 기록을 보는 권한이지 개인 작업공간을 보는 권한이 아니다(B-57 설계 §2).
+        #
+        # 채널 질문에서도 막는다. 답을 그 채널 사람들이 함께 보기 때문이다 —
+        # 본인이 물었더라도 개인 자료가 공개 화면으로 나간다.
+        if ctx.channel_id or ctx.channel:
+            return False
+        if owner_workspace != ctx.workspace:
+            return False
+        return bool(ctx.user_id) and ctx.user_id == dm_user
+
     if ctx.channel_id or ctx.channel:
         if owner_workspace != ctx.workspace:
             return False

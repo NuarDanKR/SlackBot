@@ -98,6 +98,7 @@ from ..gateway import cost
 from ..identity import backfill as identity_backfill
 from ..identity import ensure as ensure_identity
 from ..intent import (
+    ACTION_RE,
     INGEST_ALL_RE,
     INGEST_RE,
     MAX_TASKS,
@@ -442,7 +443,12 @@ class WorkspaceBot:
         """권한 컨텍스트 — 답변 생성 **이전에** 검색 범위를 좁힌다."""
         if user_id in self.exec_users:
             log.info("exec 통합조회 user=%s", user_id)
-            return RequestContext(workspace=self.workspace, role="exec")
+            # `user_id` 는 통합조회에서도 채운다. 이건 권한을 넓히는 값이 아니라
+            # **자기 DM 작업공간을 여는 열쇠**다(B-57). exec 라고 남의 DM 이
+            # 열리지는 않는다 — `can_access` 의 DM 관문이 본인 여부만 본다.
+            return RequestContext(
+                workspace=self.workspace, role="exec", user_id=user_id
+            )
         channels: set[str] = set()
         try:
             res = client.users_conversations(
@@ -456,6 +462,7 @@ class WorkspaceBot:
             channels=frozenset(channels),
             readable_workspaces=self.cfg.readable,
             is_root=self.cfg.is_root,
+            user_id=user_id,
         )
 
     def _request_context(
@@ -485,6 +492,7 @@ class WorkspaceBot:
             is_root=bool(getattr(base, "is_root", False)),
             channel_id=channel_id,
             channel=channel,
+            user_id=str(getattr(base, "user_id", "") or ""),
         )
 
     def _specialist_roster(self) -> list:
@@ -521,12 +529,16 @@ class WorkspaceBot:
             except Exception as exc:
                 log.warning("[%s] 스레드 문맥 조회 실패: %s", self.workspace, exc)
                 return []
-        # Slack DM의 일반 메시지는 매번 새 root라 thread_ts가 없다. 모든 DM에 과거
-        # 대화를 섞으면 새 주제가 오염되므로, 지칭어가 있는 후속 질문만 최근 본인
-        # 문답 좌표를 연결한다.
-        text = _clean(event.get("text", ""))
-        if (not channel_id.startswith("D")
-                or not re.search(r"(?:방금|아까|이전|앞서|위(?:의)?|그)\s*(?:답변|내용|질문)|다시\s*(?:정리|확인|작성|말)", text)):
+        # Slack DM 의 일반 메시지는 매번 새 root 라 thread_ts 가 없다.
+        #
+        # 예전에는 여기서 지칭어 정규식(`방금|아까|이전…`)에 걸릴 때만 이전 문답을
+        # 실었다. 그 자리가 CLAUDE.md 가 금지한 자리다 — **규칙이 LLM 판정을
+        # 가로챈다**(B-47). 한국어 활용형은 반드시 새고, 새면 사람은 "어제 한
+        # 얘기를 기억 못 한다" 고 느낀다. DM 은 개인 작업공간이라 이어서 묻는 것이
+        # 기본이므로, **항상 싣고 이어진 질문인지는 분해기(LLM)가 판단한다**(B-57).
+        #
+        # 여기서 싣는 것은 질문과 좌표뿐이다. 봇 답변 전문이 아니다(원칙 1).
+        if not channel_id.startswith("D"):
             return []
         dm_reader = getattr(self.qa_log, "context_for_dm", None)
         if not callable(dm_reader):
@@ -1131,6 +1143,9 @@ class WorkspaceBot:
         if ctype == "im":
             if self._handle_correction(event, say):
                 return "correction"
+            # **수집이 먼저다.** 질문에 붙여 올린 파일을 이번 답변의 근거로 쓰려면
+            # 답하기 전에 변환돼 있어야 한다(B-57 설계 §4).
+            event["_tybot_dm_attachments"] = self._ingest_dm(client, event)
             self._handle(event, client, say, in_channel=False)
             return "answered"
         if ctype in ("channel", "group") and self.realtime:
@@ -1505,8 +1520,56 @@ class WorkspaceBot:
             action="submitted",
             text=text,
         )
-        say(text="정정 의견을 기록했습니다. 답변 품질 검토에 반영하겠습니다.", thread_ts=thread_ts)
+        # **접수하고 끝내지 않는다**(2026-09-18 문제 패킷 QA e8463a7b).
+        #
+        # 예전에는 기록하고 "반영하겠습니다" 로 닫았다. 틀렸다고 알려준 사람은
+        # 그 자리에서 아무것도 얻지 못했고, 다음부터 알려 주지 않게 된다 —
+        # 그러면 이 경로가 비어 간다.
+        #
+        # 정정 문장을 **근거로 쓰지는 않는다**(원칙 7). 사람이 쓴 지시를 질문으로
+        # 다시 실행할 뿐이고, 답의 근거는 여전히 아카이브 원문이다.
+        note = self._previous_failure_note(row)
+        if ACTION_RE.search(text):
+            say(
+                text="정정 의견을 기록했습니다. 말씀하신 방향으로 다시 찾아보겠습니다."
+                + (f"\n{note}" if note else ""),
+                thread_ts=thread_ts,
+            )
+            retry = dict(event)
+            retry["text"] = text
+            retry.pop("_tybot_qa_record_id", None)
+            self._handle(retry, self.app.client, say, in_channel=not channel_id.startswith("D"))
+            return True
+        say(
+            text="정정 의견을 기록했습니다. 답변 품질 검토에 반영하겠습니다."
+            + (f"\n{note}" if note else ""),
+            thread_ts=thread_ts,
+        )
         return True
+
+    @staticmethod
+    def _previous_failure_note(row) -> str:
+        """직전 답변이 **왜** 실패했는지와 지금 할 수 있는 일. 모르면 빈 문자열.
+
+        "반영하겠습니다" 만 돌려주면 사람은 무엇이 달라지는지 알 수 없다. 사유를
+        아는 경우에는 그 사유와 다음 한 걸음을 같이 준다.
+        """
+        reason = str((row or {}).get("reason") or "")
+        return {
+            "no_hits": (
+                "직전 답변은 열람 범위에서 근거를 찾지 못한 상태였습니다. "
+                "자료가 있는 채널 이름을 함께 적어 주시거나, 그 파일을 저와의 DM 에 "
+                "올려 주시면 그것을 근거로 답하겠습니다."
+            ),
+            "no_access": (
+                "직전 질문은 열람 권한 범위에 자료가 없었습니다. "
+                "해당 채널에 저를 초대(`/invite`)해 주세요."
+            ),
+            "error": "직전 답변은 처리 오류로 끝났습니다. 다시 물어보시면 재시도합니다.",
+            "specialist_unavailable": (
+                "직전 답변은 전문 봇을 쓰지 못해 끝났습니다. 다시 물어보시면 재시도합니다."
+            ),
+        }.get(reason, "")
 
     def _modal_metadata(self, view: dict) -> dict:
         try:
@@ -2839,7 +2902,10 @@ class WorkspaceBot:
                     log.exception("[%s] 후속 질문 해석 실패: %s", self.workspace, exc)
                     followup = None
             with specialist_router.bind_qa_record(qa_record_id):
-                ans = self.engine.respond(q, ctx, task, followup=followup, task=master_task)
+                ans = self.engine.respond(
+                    q, ctx, task, followup=followup, task=master_task,
+                    seed_hits=self._uploaded_now(ctx, event),
+                )
             last = ans
             sections.append(ans.to_slack(preserve_markdown=True))
             task_traces.append(
@@ -2948,6 +3014,86 @@ class WorkspaceBot:
                 for line in item.lines
             )
         return out, warnings, staged
+
+    def _uploaded_now(self, ctx, event) -> list:
+        """**이 메시지로 방금 올라온** 원문 줄. 좌표(`message_ts`)로 고른다.
+
+        수집을 먼저 했으므로 그 줄은 이미 아카이브에 있다. 그래도 검색에 맡기지
+        않는다 — 사람이 방금 올린 파일은 「찾아야 하는 자료」가 아니라 「이 질문의
+        입력」이고, 검색어가 파일 내용과 어긋나면 바로 옆에 둔 파일을 못 찾는다
+        (2026-09-18 문제 패킷 `4d98bb66`).
+
+        **권한은 여기서도 `visible_docs` 가 쥔다.** 방금 올린 사람이라고 따로
+        열어 주지 않는다 — 열쇠는 그 문서의 `dm_user` 하나뿐이다.
+        """
+        message_ts = str(event.get("ts") or "")
+        if not message_ts or not event.get("_tybot_dm_attachments"):
+            return []
+        from ..archive.store import SearchHit
+
+        rows: list = []
+        try:
+            for doc in self.store.visible_docs(ctx):
+                if not doc.dm_user:
+                    continue
+                rows.extend(
+                    SearchHit(doc=doc, line=line, score=1)
+                    for line in doc.raw_lines
+                    if line.message_ts == message_ts
+                )
+        except Exception as exc:
+            log.warning("[%s] 방금 올린 원문을 찾지 못했습니다: %s", self.workspace, exc)
+            return []
+        if rows:
+            log.info("[%s] 이번 질문의 첨부 원문 %d줄을 근거로 싣는다", self.workspace, len(rows))
+        return rows
+
+    def _ingest_dm(self, client, event) -> list:
+        """봇과의 DM 원문을 **그 사람의 작업공간**에 쌓는다(B-57).
+
+        답변보다 **먼저** 부른다. 질문에 붙여 올린 파일이 이번 답변의 근거가
+        되려면 그때 이미 변환돼 있어야 한다. 예전에는 DM 에서 수집 자체를 하지
+        않아서, 사람이 파일을 붙여 물어도 봇은 그 파일을 열어 볼 방법이 없었다
+        (2026-09-18 문제 패킷 `98fa5853`·`4d98bb66`).
+
+        **봇 발언은 들어오지 않는다.** 이 메서드는 `_is_human_request` 를 통과한
+        사람 메시지 이벤트로만 불리고, `writer.ingest` 가 `is_bot` 을 한 번 더
+        거른다(원칙 1).
+
+        돌려주는 것은 이번 메시지에서 격리·변환된 첨부 목록이다. 실패해도 답변은
+        계속한다 — 수집이 막혔다고 질문에 답하지 못하면 사람은 봇이 죽은 줄 안다.
+        """
+        user_id = str(event.get("user") or "")
+        if not user_id:
+            return []
+        staged: list = []
+        try:
+            msgs = self._messages_from(client, event)
+            staged = list(getattr(self, "_pending_attachments", None) or [])
+            if not msgs:
+                return staged
+            channel = writer.dm_channel(user_id)
+            r = writer.ingest(
+                self.archive_dir,
+                workspace=self.workspace,
+                channel=channel,
+                channel_id=str(event.get("channel") or ""),
+                messages=msgs,
+                # 채널 멤버십으로는 열리지 않는다. 여는 열쇠는 `dm_user` 하나다.
+                acl=[],
+                dm_user=user_id,
+            )
+        except Exception as e:
+            log.exception("[%s] DM 수집 실패 user=%s: %s", self.workspace, user_id, e)
+            return staged
+        if r.written:
+            self._ingested += r.written
+            self._last_ingest_at = datetime.now(UTC)
+        if r.refused:
+            # 개인 자료라 채널 경고로 흘리지 않는다. 사유만 남긴다(원칙 5).
+            log.warning("DM 제외 대상으로 미저장 user=%s 사유=%s", user_id, r.refused[0][1])
+        self._confirm_attachments(str(event.get("channel") or ""), staged)
+        return staged
 
     def _ingest_live(self, client, event) -> None:
         """실시간 원문 append. 실패해도 봇은 계속 살아 있어야 한다."""

@@ -53,7 +53,7 @@ class FakeEngine:
         self.plan_contexts.append(conversation_context)
         return list(self._tasks)
 
-    def respond(self, question, ctx, intent, *, followup=None, task=None):
+    def respond(self, question, ctx, intent, *, followup=None, task=None, seed_hits=()):
         self.asked.append(question)
         return self._answers.pop(0)
 
@@ -362,15 +362,39 @@ def test_explicit_dm_followup_uses_recent_own_dm_context():
     assert "이전 질문: 현황을 정리해줘" in bot.engine.plan_contexts[0]
 
 
-def test_new_dm_topic_does_not_mix_previous_dm_context():
+def test_dm_always_shows_recent_turns_to_the_planner():
+    """DM 은 개인 작업공간이라 **이어서 묻는 것이 기본**이다(B-57).
+
+    예전에는 지칭어 정규식에 걸릴 때만 이전 문답을 실었다. 한국어 활용형은 반드시
+    새고, 새면 사람은 "어제 한 얘기를 기억 못 한다" 고 느낀다. 이어진 질문인지는
+    분해기(LLM)가 판단한다 — 규칙이 그 판정을 가로채지 않는다.
+    """
     ans = Answer("새 답변", [], "m", 0.0, 1, "answered")
     bot = _bot([Intent("search", question="새 계약 금액")], [ans])
-    bot.qa_log.dm_context = [{"question": "무관한 이전 질문"}]
+    bot.qa_log.dm_context = [{"question": "이전 질문 주제"}]
     bot._handle(
         {"text": "새 계약 금액 알려줘", "user": "U1", "channel": "D1", "ts": "1.0"},
         Mock(), lambda **kw: None, in_channel=False,
     )
-    assert bot.engine.plan_contexts == [""]
+    (context,) = bot.engine.plan_contexts
+    assert "이전 질문 주제" in context
+
+
+def test_dm_context_carries_coordinates_not_the_previous_bot_answer():
+    """싣는 것은 질문과 좌표다. 봇 답변 전문을 실으면 요약 재귀다(원칙 1)."""
+    ans = Answer("새 답변", [], "m", 0.0, 1, "answered")
+    bot = _bot([Intent("search", question="새 계약 금액")], [ans])
+    bot.qa_log.dm_context = [{
+        "question": "이전 질문 주제",
+        "evidence_refs": [object()],
+        "answer": "봇이 지난번에 한 말",
+    }]
+    bot._handle(
+        {"text": "새 계약 금액 알려줘", "user": "U1", "channel": "D1", "ts": "1.0"},
+        Mock(), lambda **kw: None, in_channel=False,
+    )
+    (context,) = bot.engine.plan_contexts
+    assert "봇이 지난번에 한 말" not in context
 
 
 @pytest.mark.parametrize("kind", ["status", "help", "smalltalk", "out_of_scope"])

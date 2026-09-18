@@ -9,6 +9,7 @@ from tybot.answer import AnswerEngine, parse_model_flag
 from tybot.archive.store import ArchiveStore
 from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity
 from tybot.gateway.router import Router
+from tybot.intent import Intent
 
 DOC = """---
 workspace: pilot
@@ -139,3 +140,60 @@ def test_unknown_model_is_rejected(engine):
     eng, _ = engine
     ans = eng.answer("--model=gpt-9 기성금 얼마야", _ctx())
     assert ans.reason == "error" and "모델" in ans.text
+
+
+# --- 좁힌 범위에서 되돌아 나오는 문 (2026-09-18 패킷 QA ec366cd4·43142c76) -----
+class _Followup:
+    """`ThreadFollowupResolver` 가 돌려주는 모양만 흉내 낸다."""
+
+    def __init__(self, *, topic_terms=(), hits=(), dropped=()):
+        self.evidence_hits = list(hits)
+        self.attachments = []
+        self.parent_record_ids = ["prev"]
+        self.topic_terms = list(topic_terms)
+        self.resolution = "prior_topic"
+        self.dropped_codes = list(dropped)
+        self.needs_clarification = False
+        self.choices = []
+        self.refs_requested = 3
+        self.editing_text = ""
+        self.applied = True
+        self.empty = not self.evidence_hits
+
+    def log_line(self) -> str:
+        return f"followup_resolution={self.resolution} refs_resolved={len(self.evidence_hits)}"
+
+
+def test_a_widened_follow_up_is_not_a_dead_end(engine):
+    """사용자가 「넓혀서 찾아줘」 라고 했는데 봇이 좁힌 자리에 서 있었다.
+
+    이전 근거에서 못 찾으면 **현재 권한으로 다시 검색한다.** 넓혔다는 사실은
+    답에 적는다 — 조용히 넓히면 좁게 물은 사람이 그 사실을 알 수 없다.
+    """
+    eng, _ = engine
+    intent = Intent("search", terms=["기성금"], question="기성금 쪽으로 넓혀서 찾아줘")
+
+    ans = eng._respond_scoped(
+        "기성금 쪽으로 넓혀서 찾아줘",
+        _ctx(),
+        intent,
+        _Followup(topic_terms=["기성금"], dropped=["topic_no_match"]),
+    )
+
+    assert ans.reason == "answered"
+    assert "3억 2천만원" in ans.text or ans.citations
+    assert "넓혀" in ans.text or "다시 찾" in ans.text
+    assert ans.context_resolution == "widened_after_scope_miss"
+
+
+def test_a_purely_deictic_follow_up_still_refuses_to_widen(engine):
+    """「방금 그거 다시」 는 넓힐 주제가 없다. 넓히면 엉뚱한 답이 그 자리에 온다."""
+    eng, _ = engine
+    intent = Intent("search", terms=[], question="방금 그거 다시 보여줘")
+
+    ans = eng._respond_scoped(
+        "방금 그거 다시 보여줘", _ctx(), intent, _Followup(dropped=["hash_mismatch"])
+    )
+
+    assert ans.reason == "no_hits"
+    assert "다시 확인하지 못했습니다" in ans.text

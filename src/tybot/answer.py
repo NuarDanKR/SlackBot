@@ -648,6 +648,14 @@ def _attachment_refs(root: Path, hits: list[SearchHit]):
     return out
 
 
+# 후속 질문의 좌표를 **권한 때문에** 못 연 경우의 사유 코드
+# (`ArchiveStore.resolve_refs`). 이때는 넓히지 않는다 — 넓혀도 같은 권한으로
+# 찾으므로 결과가 같고, 「다시 찾아봤다」 는 말만 늘어 사람이 권한 문제를
+# 검색 문제로 읽는다. 주제가 안 맞아 못 찾은 것과는 사람이 할 일이 다르다.
+PERMISSION_MISS_CODES = frozenset({
+    "permission_changed", "channel_scope", "workspace_scope", "path_rejected",
+})
+
 MISSING_ATTACHMENT_STATUS = "관련 파일의 현재 변환 상태를 확인하지 못했습니다."
 
 
@@ -1441,6 +1449,7 @@ class AnswerEngine:
         *,
         followup=None,
         task=None,
+        seed_hits=(),
     ) -> Answer:
         """아카이브로 답할 수 있는 의도를 처리한다.
 
@@ -1458,7 +1467,23 @@ class AnswerEngine:
         if followup is not None and getattr(followup, "applied", False):
             return self._respond_scoped(q, ctx, intent, followup, model=model, task=task)
 
+        # 사람이 **이번 질문에 붙여 올린 원문**(B-57). 「찾아야 하는 자료」가 아니라
+        # 「이 질문의 입력」이라, 검색이 낱말을 못 맞혀도 빠지면 안 된다.
+        seed = list(seed_hits or ())
+
         if intent.kind == "summary":
+            if seed:
+                # "이 파일 요약해줘" — 기간 요약으로 넓히면 방금 올린 파일이
+                # 채널 최근 줄에 묻힌다. 올린 것을 요약하라는 뜻으로 읽는다.
+                return self.summarize(
+                    ctx,
+                    days=intent.days or DEFAULT_DAYS,
+                    model=model,
+                    question=q,
+                    terms=list(intent.terms) if intent.document_query else None,
+                    evidence_hits=seed,
+                    task=task,
+                )
             return self.summarize(
                 ctx,
                 days=intent.days or DEFAULT_DAYS,
@@ -1498,6 +1523,23 @@ class AnswerEngine:
                     document_query=list(intent.document_query),
                     all_time=intent.wants_all_time,
                 )
+            # **거절하기 전에 한 번 찾아본다.** 분류기가 「우리 범위 밖」 이라고
+            # 본 질문이 실제로는 채널에 쌓여 있는 일인 경우가 있다 — 사내 도구·
+            # 계약·일정 이야기가 그렇다(2026-09-18 문제 패킷 QA 570e9393).
+            # 알면서 거절하는 것이 모르고 못 찾는 것보다 나쁘다.
+            #
+            # 근거가 하나도 없으면 그때 거절한다. 일반 지식 질문은 여기서 0건이
+            # 나오므로 결과가 달라지지 않는다.
+            probe = self._store.search(
+                " ".join(intent.terms) if intent.terms else q,
+                ctx,
+                limit=self._max_hits,
+            )
+            if probe:
+                logger.info("out_of_scope 재분류 -> 근거 %d줄로 답한다 q=%r", len(probe), q)
+                return self.answer(
+                    question, ctx, terms=intent.terms, task=task, extra_hits=probe
+                )
             return Answer(
                 "사내 아카이브에 쌓인 원문만 근거로 답하는 봇입니다. "
                 "일반 지식이나 외부 정보는 다루지 않습니다.",
@@ -1507,7 +1549,9 @@ class AnswerEngine:
             return Answer(
                 "봇 상태·사용법은 `상태` / `도움말` 로 확인하세요.", [], None, 0.0, 0, intent.kind
             )
-        return self.answer(question, ctx, terms=intent.terms, task=task)
+        return self.answer(
+            question, ctx, terms=intent.terms, task=task, extra_hits=seed
+        )
 
     def _respond_scoped(
         self,
@@ -1551,7 +1595,42 @@ class AnswerEngine:
             if followup.attachments and asked_status:
                 # 원문은 못 살렸지만 파일 상태는 확인됐다. 물은 것의 절반은 답이다.
                 ans = Answer(status, [], None, 0.0, 0, "answered")
+            elif (
+                widen_terms := [
+                    t for t in (list(intent.terms) or list(followup.topic_terms)) if t
+                ]
+            ) and not (set(followup.dropped_codes) & PERMISSION_MISS_CODES):
+                # **되돌아 나오는 문**(2026-09-18 문제 패킷 QA ec366cd4·43142c76).
+                #
+                # 좁히기는 "방금 그 문서 다시" 를 위한 장치였는데, 사람이 대화로
+                # 방향을 다시 줄 때도("~쪽으로 넓혀서 찾아줘", "최신 것으로")
+                # 같은 문이 닫혀 「이전 근거를 확인하지 못했습니다」 로 끝났다.
+                # 요청의 정반대다.
+                #
+                # 자기 주제어를 들고 온 질문은 좁힐 대상이 아니라 **새 질문**이다.
+                # 그래서 현재 권한으로 다시 찾는다. 다만 **넓혔다고 말한다** —
+                # 조용히 넓히면 좁게 물은 사람이 그 사실을 알 수 없다(설계 §10).
+                logger.info(
+                    "followup 범위 복원 실패 -> 현재 권한으로 재검색 terms=%r dropped=%s",
+                    widen_terms, "|".join(followup.dropped_codes) or "-",
+                )
+                ans = self.answer(q, ctx, terms=widen_terms, task=task)
+                ans.text = (
+                    "직전 답변의 근거에서는 찾지 못해 **열람 권한 범위 전체에서 다시 찾았습니다.**"
+                    f"\n\n{ans.text}"
+                )
+                ans.context_resolution = "widened_after_scope_miss"
+                if status:
+                    ans.text = f"{ans.text}\n\n{status}"
+                ans.context_parent_ids = list(followup.parent_record_ids)
+                logger.info(
+                    "followup ws=%s ch=%s %s",
+                    ctx.workspace, ctx.channel_id or "-", followup.log_line(),
+                )
+                return ans
             else:
+                # 지칭만 있고 주제가 없는 질문("방금 그거 다시")은 넓힐 대상이
+                # 없다. 넓히면 엉뚱한 답이 그 자리에 온다.
                 ans = Answer(
                     "이전 답변이 근거로 쓴 원문을 현재 권한으로 다시 확인하지 못했습니다. "
                     "추측으로 답하지 않습니다."
@@ -1598,6 +1677,20 @@ class AnswerEngine:
         )
         return ans
 
+    @staticmethod
+    def _with_seed(seed, hits) -> list[SearchHit]:
+        """이번 질문에 붙여 올린 원문을 근거 맨 앞에 둔다. 중복은 합친다."""
+        rows = list(seed or ())
+        if not rows:
+            return list(hits)
+        seen = {(str(h.doc.path), h.line.lineno) for h in rows}
+        for hit in hits:
+            key = (str(hit.doc.path), hit.line.lineno)
+            if key not in seen:
+                seen.add(key)
+                rows.append(hit)
+        return rows
+
     def _with_approved_guide(self, query: str, hits, ctx) -> list[SearchHit]:
         """승인 요약이 가리키는 원문 좌표를 **검색 후보에만** 더한다(B-56).
 
@@ -1639,6 +1732,7 @@ class AnswerEngine:
         terms: list[str] | None = None,
         evidence_hits: list[SearchHit] | None = None,
         task=None,
+        extra_hits=(),
     ) -> Answer:
         """구체 사실 질문 — 원문 검색 후 그 라인만 근거로 답한다.
 
@@ -1659,6 +1753,11 @@ class AnswerEngine:
             query = " ".join(terms) if terms else q
             hits = self._store.search(query, ctx, limit=self._max_hits)
             hits = self._with_approved_guide(query, hits, ctx)
+            # 방금 올린 첨부는 **검색 앞에** 둔다. 검색어가 파일 내용과 어긋나도
+            # 빠지면 안 되는 근거다 — 사람은 그 파일을 보고 물었다(B-57 §4).
+            # 검색을 끄지는 않는다. 「이 목록이 슬랙 어디 있나」 같은 질문은
+            # 첨부만으로 답할 수 없다.
+            hits = self._with_seed(extra_hits, hits)
 
         if not hits and scoped:
             return Answer(

@@ -101,6 +101,26 @@ def channel_dir(
     return base / f"{stable_id}__{_slugify(channel)}"
 
 
+def dm_channel(user_id: str) -> str:
+    """DM 문서의 `channel` 값. **사람마다 다르다.**
+
+    모든 DM 이 같은 이름을 쓰면 검색 색인(`raw_line.channel`)에서 한 사람의 질의가
+    다른 사람 DM 줄을 후보로 끌어올린다. 최종 판정은 `visible_docs()` 가 다시
+    하므로 새지는 않지만, **판정 하나에만 기대는 구조를 만들지 않는다**(B-57 §3).
+    """
+    return f"DM:{_slugify(user_id)}"
+
+
+def dm_dir(root: Path | str, workspace: str, user_id: str) -> Path:
+    """DM 원문 디렉터리. 채널과 **다른 가지**에 둔다.
+
+    경로를 나누는 이유는 「기본 제외」를 경로로 보장하기 위해서다. 채널을 훑는
+    기존 소비자(콘솔 목록·채널 헬스·조직 매핑·요약 검토)는 한 줄도 고치지 않아도
+    개인 기록을 보지 않는다.
+    """
+    return Path(root) / "workspaces" / _slugify(workspace) / "dm" / _slugify(user_id)
+
+
 def doc_path(
     root: Path | str,
     workspace: str,
@@ -108,9 +128,15 @@ def doc_path(
     *,
     channel_id: str | None = None,
     day: date | None = None,
+    dm_user: str | None = None,
 ) -> Path:
     day = day or datetime.now(KST).date()
-    return channel_dir(root, workspace, channel, channel_id) / "raw" / f"{day.isoformat()}.md"
+    base = (
+        dm_dir(root, workspace, dm_user)
+        if dm_user
+        else channel_dir(root, workspace, channel, channel_id)
+    )
+    return base / "raw" / f"{day.isoformat()}.md"
 
 
 def _new_doc(
@@ -122,6 +148,7 @@ def _new_doc(
     acl: list[str],
     share_with: list[str],
     imported_from: str | None,
+    dm_user: str | None = None,
 ) -> str:
     acl_s = "[" + ", ".join(acl) + "]"
     share_s = "[" + ", ".join(share_with) + "]"
@@ -133,12 +160,17 @@ def _new_doc(
             org_lines += f"org_code: {spec.org_code}\n"
         org_lines += f"org_name: {spec.org_name}\n"
     import_line = f'imported_from: "{imported_from}"\n' if imported_from else ""
+    # DM 은 조직이 없다. 조직 줄을 억지로 채우면 개인 기록이 조직 트리에 붙는다.
+    if dm_user:
+        org_lines = ""
+    dm_line = f"dm_user: {dm_user}\n" if dm_user else ""
     return (
         "---\n"
         "schema_version: 2\n"
         f"workspace: {workspace}\n"
         f'channel: "{channel}"\n'
         f"channel_id: {channel_id}\n"
+        f"{dm_line}"
         f"source_date: {source_date.isoformat()}\n"
         f"visibility: {visibility}\n"
         f"acl: {acl_s}\n"
@@ -198,8 +230,14 @@ def ingest(
     acl: list[str] | None = None,
     share_with: list[str] | None = None,
     imported_from: str | None = None,
+    dm_user: str | None = None,
 ) -> IngestResult:
-    """원문을 KST 날짜별 파일에 추가한다. 검증 실패 시 어떤 파일도 쓰지 않는다."""
+    """원문을 KST 날짜별 파일에 추가한다. 검증 실패 시 어떤 파일도 쓰지 않는다.
+
+    `dm_user` 를 주면 **그 사람의 DM 작업공간**에 쌓는다(B-57). 경로·권한이
+    채널과 다르고, 그 외 검사(PII·중복·형식)는 전부 같은 것을 지난다 — 새 입구를
+    만들면서 검사를 새로 짜면 그 입구만 헐거워진다.
+    """
     with archive_write_lock(root):
         return _ingest_locked(
             root,
@@ -211,6 +249,7 @@ def ingest(
             acl=acl,
             share_with=share_with,
             imported_from=imported_from,
+            dm_user=dm_user,
         )
 
 
@@ -225,9 +264,14 @@ def _ingest_locked(
     acl: list[str] | None,
     share_with: list[str] | None,
     imported_from: str | None,
+    dm_user: str | None = None,
 ) -> IngestResult:
     stable_id = _stable_channel_id(channel, channel_id)
-    directory = channel_dir(root, workspace, channel, stable_id)
+    directory = (
+        dm_dir(root, workspace, dm_user)
+        if dm_user
+        else channel_dir(root, workspace, channel, stable_id)
+    )
     raw_dir = directory / "raw"
     existing_texts: dict[Path, str] = {
         path: path.read_text(encoding="utf-8") for path in sorted(raw_dir.glob("*.md"))
@@ -261,14 +305,18 @@ def _ingest_locked(
         grouped.setdefault(message.ts.astimezone(KST).date(), []).append(line)
 
     fallback_day = messages[0].ts.astimezone(KST).date() if messages else datetime.now(KST).date()
-    fallback_path = doc_path(root, workspace, channel, channel_id=stable_id, day=fallback_day)
+    fallback_path = doc_path(
+        root, workspace, channel, channel_id=stable_id, day=fallback_day, dm_user=dm_user
+    )
     if not grouped:
         return IngestResult(fallback_path, 0, skipped_bot, refused)
 
     stamp = datetime.now(KST).strftime("%Y-%m-%dT%H:%M+09:00")
     pending: dict[Path, str] = {}
     for day, lines in sorted(grouped.items()):
-        path = doc_path(root, workspace, channel, channel_id=stable_id, day=day)
+        path = doc_path(
+            root, workspace, channel, channel_id=stable_id, day=day, dm_user=dm_user
+        )
         text = existing_texts.get(path) or _new_doc(
             workspace,
             channel,
@@ -278,6 +326,7 @@ def _ingest_locked(
             acl or [],
             share_with or [],
             imported_from,
+            dm_user,
         )
         body = text.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
         body = re.sub(

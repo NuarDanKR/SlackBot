@@ -106,6 +106,27 @@ SOURCE_CAPABILITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 「그런 자료도 읽을 수 있느냐」 를 묻는 **능력 표현**. 자료 낱말과 **함께** 있어야 한다.
+#
+# 예전에는 자료 낱말 뒤 40자 안에 `읽|보|답|조회…` 가 오기만 하면 능력 질문으로
+# 봤다. 그 그물에 평범한 업무 요청이 통째로 걸렸다 — `보고서` 의 「보」, `보여줘`
+# 의 「보」 까지 잡아서 **"주간 업무보고 파일 보여줘" 가 도움말로 나갔다**
+# (2026-09-18 문제 패킷 QA 98fa5853). 능력을 묻는 말은 요청하는 말과 다르다.
+#
+# 이 규칙은 **LLM 분해가 실패했을 때의 폴백**에서만 쓰인다. 그래서 애매하면
+# 검색으로 보낸다 — 검색이 빗나가면 「찾지 못했습니다」 로 끝나지만, 도움말이
+# 나가면 사람은 자기 질문이 무시당했다고 읽는다(CLAUDE.md 원칙: 규칙은 LLM 을
+# 덮어쓰지 않는다).
+CAPABILITY_ASK_RE = re.compile(
+    r"(가능|할\s*수\s*있|될\s*수\s*있|수\s*있(나|니|냐|는지|어|어요)|"
+    r"되나|되니|되냐|되는지|되어?요\?|"
+    r"지원\s*(하|되|안)|인식|"
+    # 「읽고 답해주냐」 처럼 어간과 의문 어미 사이에 보조 동사가 끼는 형태.
+    # 어미를 세지 않고 **어간 + 짧은 꼬리 + 의문 어미** 로만 본다.
+    r"(읽|답|참고|조회|인식|보)[가-힣]{0,4}(냐|나요|나\?|니\?))",
+    re.IGNORECASE,
+)
+
 CANVAS_CAPABILITY_RE = re.compile(
     r"(?:캔버스|canvas).*(?:읽|내용|답)",
     re.IGNORECASE,
@@ -651,7 +672,7 @@ def is_source_capability(text: str) -> bool:
     body = (text or "").strip()
     if not body:
         return False
-    if SOURCE_CAPABILITY_RE.search(body):
+    if SOURCE_CAPABILITY_RE.search(body) and CAPABILITY_ASK_RE.search(body):
         return True
     # 동사가 생략된 짧은 되물음. 자료 낱말이 있고 질문 모양이면 같은 부류다.
     if len(body) <= 40 and body.rstrip().endswith("?"):

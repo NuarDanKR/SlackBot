@@ -106,6 +106,9 @@ class ArchiveDoc:
     last_ingested: str | None
     channel_id: str | None = None
     schema_version: int = 1
+    # 값이 있으면 **봇과의 DM 원문**이다. 그 사람 한 명의 작업공간이므로
+    # 채널 멤버십이 아니라 본인 여부로 열린다(설계 dm-workspace.md §2).
+    dm_user: str | None = None
     # 채널명에서 뽑은 조직 정보(선택). 조직 트리 연결·개편 추적에 쓴다.
     org_code: str | None = None
     org_kind: str | None = None
@@ -142,6 +145,10 @@ class SearchHit:
         date = self.line.ts.split()[0] if self.line.ts else ""
         source = self.line.source_path or self.doc.path
         tail = f" ({self.doc.workspace})" if with_workspace else ""
+        if getattr(self.doc, "dm_user", None):
+            # DM 은 조직이 없다. 채널명을 그대로 보이면 `DM:U0BR…` 라는 내부 키가
+            # 사람에게 나간다 — 출처는 사람이 읽고 확인하러 갈 수 있어야 한다(원칙 2).
+            return f"[DM]나와의 대화{tail}, 📄{source.name}({date})"
         tail += mark_for(self.doc.workspace, self.doc.channel_id, self.doc.channel)
         return f"{source_label(self.doc.channel)}{tail}, 📄{source.name}({date})"
 
@@ -264,6 +271,7 @@ def load_doc(path: Path) -> ArchiveDoc:
         last_ingested=str(fm.get("last_ingested")) if fm.get("last_ingested") else None,
         channel_id=str(fm["channel_id"]) if fm.get("channel_id") else None,
         schema_version=int(str(fm.get("schema_version") or "1")),
+        dm_user=str(fm["dm_user"]) if fm.get("dm_user") else None,
         raw_lines=lines,
         org_code=str(fm["org_code"]) if fm.get("org_code") else None,
         org_kind=str(fm["org_kind"]) if fm.get("org_kind") else None,
@@ -288,11 +296,34 @@ class ArchiveStore:
         self._cache: dict[Path, tuple[tuple[int, int], ArchiveDoc | str]] = {}
         self._lock = threading.Lock()
 
-    def _files(self) -> list[Path]:
+    def _files(self, *, dm_scope: str = "") -> list[Path]:
+        """원문 파일 목록. **DM 은 기본으로 빼고 센다.**
+
+        `dm_scope` 는 셋 중 하나다.
+
+        | 값 | 읽는 DM |
+        |---|---|
+        | `""` (기본) | 없음 |
+        | 사용자 ID | **그 사람 것만** |
+        | `"*"` | 전부 (색인 재빌드 전용) |
+
+        남의 DM 을 「읽고 나서 거르는」 구조를 만들지 않는다. 거르는 코드가 한 번
+        어긋나면 그건 오류가 아니라 **개인 기록 노출**로 나타나고, 실제로 그렇게
+        샜다 — `_merge()` 가 `dm_user` 를 떨어뜨려 통합조회 권한에 열렸다
+        (2026-09-18 구현 중 발견). 그래서 애초에 파일을 열지 않는다.
+
+        채널을 훑는 기존 소비자(콘솔 목록·채널 헬스·조직 매핑·요약 검토)는 기본값
+        덕분에 한 줄도 고치지 않아도 개인 기록을 보지 않는다(설계 dm-workspace.md §3).
+        """
         v2 = self.root / "workspaces"
         legacy = self.root / "channels"
         # v2를 먼저 읽어 v1과 같은 라인이 있으면 새 경로를 출처로 남긴다.
         files = sorted(v2.glob("*/channels/*/raw/*.md")) if v2.is_dir() else []
+        if dm_scope and v2.is_dir():
+            from .writer import _slugify
+
+            who = "*" if dm_scope == "*" else _slugify(dm_scope)
+            files.extend(sorted(v2.glob(f"*/dm/{who}/raw/*.md")))
         if legacy.is_dir():
             legacy_files = sorted(legacy.glob("*/*.md"))
             files.extend(legacy_files)
@@ -334,8 +365,8 @@ class ArchiveStore:
                 self._cache = {p: v for p, v in self._cache.items() if p.exists()}
         return result
 
-    def docs(self) -> list[ArchiveDoc]:
-        loaded = self.source_docs()
+    def docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
+        loaded = self.source_docs(dm_scope=dm_scope)
 
         # 같은 이름의 문서에 **진짜 Slack ID** 가 있으면 그 ID 로 묶는다.
         # 마이그레이션 전후 원문이 답변에 두 벌로 들어가지 않게 하는 장치다.
@@ -381,10 +412,13 @@ class ArchiveStore:
             grouped.setdefault((doc.workspace, identity), []).append(doc)
         return [self._merge(parts) for parts in grouped.values()]
 
-    def source_docs(self) -> list[ArchiveDoc]:
-        """실제 원문 파일별 문서. 콘솔 파일 목록과 점검에 사용한다."""
+    def source_docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
+        """실제 원문 파일별 문서. 콘솔 파일 목록과 점검에 사용한다.
+
+        DM 은 기본으로 빠진다(`_files`). 켜는 곳은 답변 권한 필터와 색인뿐이다.
+        """
         loaded: list[ArchiveDoc] = []
-        for p in self._files():
+        for p in self._files(dm_scope=dm_scope):
             got = self._load(p)
             # 조용한 0건이 가장 위험 — 형식 위반은 건너뛰되 broken() 으로 감지 가능하게 남긴다.
             if isinstance(got, ArchiveDoc):
@@ -445,6 +479,10 @@ class ArchiveStore:
                 next((d.channel_id for d in parts if d.channel_id), None),
             ),
             schema_version=max(d.schema_version for d in parts),
+            # **떨어뜨리면 개인 기록이 조직 자료가 된다.** 이 값이 없으면
+            # `can_access` 의 DM 관문을 아예 지나가지 않고, 통합조회 권한에
+            # 그대로 열린다(2026-09-18 실제로 그랬다).
+            dm_user=next((d.dm_user for d in parts if d.dm_user), None),
             org_code=newest.org_code,
             org_kind=newest.org_kind,
             org_name=newest.org_name,
@@ -468,9 +506,12 @@ class ArchiveStore:
         from ..channel_lifecycle import include_retired, keep
 
         allow_retired = include_retired()
+        # 요청자가 특정되지 않으면 DM 은 아예 읽지 않는다. 특정돼도 **그 사람
+        # 것만** 읽는다. 판정을 `can_access` 하나에만 기대지 않는다 — 개인 기록은
+        # 막는 문이 둘이어야 하고, 하나는 파일을 열지 않는 문이어야 한다.
         return [
             d
-            for d in self.docs()
+            for d in self.docs(dm_scope=str(getattr(ctx, "user_id", "") or ""))
             if keep(d, allow_retired=allow_retired)
             and can_access(
                 ctx,
@@ -480,6 +521,7 @@ class ArchiveStore:
                 share_with=d.share_with if d.share_with else None,
                 channel_id=d.channel_id,
                 channel=d.channel,
+                dm_user=d.dm_user,
             )
         ]
 

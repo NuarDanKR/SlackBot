@@ -383,3 +383,31 @@ def test_the_scope_answer_does_not_overclaim_canvas():
 
     assert "Canvas 안에" in SOURCE_SCOPE_ANSWER
     assert "따라가지 않습니다" in SOURCE_SCOPE_ANSWER
+
+
+# --- 규칙 폴백이 업무 질문을 도움말로 삼키지 않는다 (2026-09-18 패킷) ----------
+def test_a_file_request_is_not_a_capability_question():
+    """LLM 분해가 흔들린 순간, 평범한 업무 요청이 도움말 덤프로 나갔다.
+
+    자료 낱말 뒤 40자 안에 `읽|보|답…` 이 오기만 하면 능력 질문으로 보던 그물에
+    `보고서` 의 「보」, `보여줘` 의 「보」 까지 걸렸다(QA 98fa5853).
+    """
+    for text in (
+        "주간 업무보고 파일 보여줘",
+        "첨부된 파일 내에 적혀있는 목록을 전부 찾아 알려주세요",
+        "그 문서에서 금액만 뽑아줘",
+        "계약 문서 어디 있는지 조회해줘",
+    ):
+        assert not intent.is_source_capability(text), text
+        assert intent.classify_by_rule(text).kind != "help", text
+
+
+def test_a_real_capability_question_is_still_caught():
+    """능력을 묻는 말은 따로 있다. 검색으로 보내면 0건이 나오고 답을 못 받는다."""
+    for text in (
+        "캔버스 내용도 읽을 수 있어?",
+        "첨부 파일도 읽나요?",
+        "엑셀 표도 인식 가능한가요?",
+        "그럼 채널에 있는 폴더는?",
+    ):
+        assert intent.is_source_capability(text), text
