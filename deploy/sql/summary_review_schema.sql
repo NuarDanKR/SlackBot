@@ -97,6 +97,11 @@ ALTER TABLE summary_review_candidate
 ALTER TABLE summary_review_candidate
     ADD COLUMN IF NOT EXISTS evidence_hash text NOT NULL DEFAULT '';
 
+-- 후보 근거가 실제 어느 Slack 채널에서 왔는지. B-61 이전 후보는 빈 문자열이라
+-- 발송 전에 폐기하고 소급 재생성한다. 이름이나 파일명으로 채널을 추정하지 않는다.
+ALTER TABLE summary_review_candidate
+    ADD COLUMN IF NOT EXISTS evidence_channel_id text NOT NULL DEFAULT '';
+
 -- 검토자에게 실제로 보여 준 시각 (B-58). **폐기 판정의 기준이다.**
 -- 한 회차 DM 은 후보를 최대 10건만 싣는다. 소급 검토로 200건이 쌓이면 나머지
 -- 190건은 사람 앞에 나온 적이 없는데, 예전 폐기 규칙은 「지난 회차 후보」라는

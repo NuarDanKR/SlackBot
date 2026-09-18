@@ -72,12 +72,8 @@ def test_a_shared_display_name_does_not_merge_two_real_channels(tmp_path):
     assert [line.text for line in report] == ["이름만 같은 다른 채널의 줄"]
 
 
-def test_a_legacy_doc_without_a_channel_id_joins_only_its_own_name(tmp_path):
-    """v1 문서는 `channel_id` 가 없어 표시명으로 편입된다(마이그레이션 별칭).
-
-    그 별칭이 **자기 이름과 같은 채널** 밖으로 번지면 안 된다. 지금 운영 아카이브에
-    v1 문서가 남아 있으므로 이 경계가 실제로 걸린다.
-    """
+def test_summary_review_never_uses_a_legacy_doc_without_a_channel_id(tmp_path):
+    """답변 호환용 이름 별칭은 요약 승인 후보의 채널 증명이 될 수 없다."""
     _v2(tmp_path, "C_NOTICE", channel="#팀-전산_abb155-공지", line="공지 채널의 줄")
     _v2(tmp_path, "C_REPORT", channel="#팀-전산_abb155-전산팀장보고",
         line="전산팀장보고의 줄")
@@ -90,9 +86,7 @@ def test_a_legacy_doc_without_a_channel_id_joins_only_its_own_name(tmp_path):
     notice = sr.channel_source(store, "tyit", "C_NOTICE", "")
 
     assert [line.text for line in report] == ["전산팀장보고의 줄"]
-    assert {line.text for line in notice} == {
-        "공지 채널의 줄", "v1 문서에 남아 있던 공지 줄",
-    }
+    assert [line.text for line in notice] == ["공지 채널의 줄"]
 
 
 def test_a_legacy_doc_whose_name_matches_nothing_joins_no_real_channel(tmp_path):

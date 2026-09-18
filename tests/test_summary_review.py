@@ -31,6 +31,26 @@ def test_source_identity_comes_from_archive_not_model():
     assert got[0].evidence_author == "홍길동"
 
 
+def test_evidence_channel_comes_from_archive_not_model():
+    quote = "공정률은 62.5%입니다"
+    source = [sr.SourceLine(
+        "2026-09-15 09:00", "홍길동", quote,
+        "workspaces/ws/channels/C1/raw/2026-09-15.md:10",
+        channel_id="C1",
+    )]
+    raw = json.dumps({"candidates": [{
+        "kind": "number_or_schedule",
+        "current_text": "",
+        "proposed_text": quote,
+        "evidence_quote": quote,
+        "evidence_channel_id": "C_OTHER",
+    }]})
+
+    got = sr.parse_proposals(raw, source)
+
+    assert got[0].evidence_channel_id == "C1"
+
+
 def test_a_number_not_in_evidence_is_rejected():
     quote = "공사기간은 2026-09-01부터입니다"
     raw = json.dumps({"candidates": [{"kind": "number_or_schedule", "current_text": "",
@@ -229,6 +249,7 @@ def test_schema_keeps_approved_summaries_out_of_raw_archive():
     assert "enable --now tybot-review-dm.timer" in Path("deploy/update.sh").read_text(encoding="utf-8")
     assert "'expired'" in sql
     assert "evidence_hash" in sql
+    assert "evidence_channel_id" in sql
 
 
 def test_the_evidence_coordinate_comes_from_the_archive_not_the_model():

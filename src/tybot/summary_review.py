@@ -23,6 +23,10 @@ ACTION_DEFER = "tybot_summary_review_defer"
 ACTION_APPROVE_ALL = "tybot_summary_review_approve_all"
 REJECT_CALLBACK = "tybot_summary_review_reject_modal"
 
+# 원문 선택·좌표 계약의 버전. 채널 이름 병합 대신 실제 channel_id만 읽고 후보에도
+# 그 ID를 남기는 버전이다. 소급 시 과거 source_run과 같은 것으로 오인하지 않는다.
+SOURCE_PIPELINE_VERSION = 2
+
 # --- Canvas 회차 (B-50) --------------------------------------------------------
 #
 # 검토자는 긴 요약과 근거를 **Canvas 에서 읽고**, 결정은 **DM 버튼**에서 한다.
@@ -89,6 +93,8 @@ class SourceLine:
     # Slack 메시지 ts. 있으면 후보의 출처 링크가 **그 메시지 한 건**을 연다.
     # 좌표를 남기기 전에 수집한 줄은 비어 있고, 그때는 채널 링크로 내려간다(B-56).
     message_ts: str = ""
+    # 이 줄이 실제로 속한 Slack 채널. 후보가 발송 채널과 같은지 마지막에 대조한다.
+    channel_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,7 @@ class Proposal:
     evidence_locator: str
     evidence_message_ts: str = ""
     evidence_hash: str = ""
+    evidence_channel_id: str = ""
     # `quote` 는 원문을 그대로 오려 낸 것, `abstract` 는 모델이 쓴 문장(B-60).
     # 기본이 `quote` 인 이유는 **모르면 더 엄격한 쪽**이기 때문이다 — 모델이 form 을
     # 빼먹었을 때 생성문으로 통과시키면 검증이 한 겹 사라진다.
@@ -221,6 +228,7 @@ def parse_proposals(raw: str, source: list[SourceLine],
             # 모델 출력이면 사람이 확인하러 간 자리에 그 문장이 없을 수 있다.
             evidence_message_ts=matched.message_ts,
             evidence_hash=_evidence_hash(matched),
+            evidence_channel_id=matched.channel_id,
             form=form,
         ))
     if stats is not None:
@@ -229,7 +237,11 @@ def parse_proposals(raw: str, source: list[SourceLine],
 
 
 def source_digest(lines: list[SourceLine]) -> str:
-    body = "\n".join(f"{x.locator}|{x.at}|{x.author}|{x.text}" for x in lines)
+    body = "\n".join(
+        f"v{SOURCE_PIPELINE_VERSION}|{x.channel_id}|{x.locator}|"
+        f"{x.at}|{x.author}|{x.text}"
+        for x in lines
+    )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -456,13 +468,13 @@ class Store:
                     """INSERT INTO summary_review_candidate
                     (id,workspace,channel_id,channel_name,run_date,source_digest,kind,current_text,
                     proposed_text,evidence_quote,evidence_at,evidence_author,evidence_locator,
-                     evidence_message_ts,evidence_hash,form)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                     evidence_message_ts,evidence_hash,evidence_channel_id,form)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
                     (uuid.uuid4(), workspace, channel_id, channel_name, on, digest,
                      proposal.kind, proposal.current_text, proposal.proposed_text,
                      proposal.evidence_quote, proposal.evidence_at, proposal.evidence_author,
                      proposal.evidence_locator, proposal.evidence_message_ts,
-                     proposal.evidence_hash, proposal.form),
+                     proposal.evidence_hash, proposal.evidence_channel_id, proposal.form),
                 )
             cur.execute(
                 """INSERT INTO summary_review_cursor(workspace,channel_id,watermark,source_digest)
@@ -533,6 +545,29 @@ class Store:
         for row in artifacts:
             key = row.get("id") if isinstance(row, dict) else row[0]
             self.refresh_artifact_state(str(key))
+        return len(expired)
+
+    def expire_unscoped(self, workspace: str, channel_id: str) -> int:
+        """근거 채널을 증명하지 못하는 과거 대기 후보를 승인 전에 폐기한다.
+
+        B-61 수정 전 후보는 파일명과 줄 번호만 남겨 다른 채널 혼입 여부를 나중에
+        검사할 수 없다. 모르는 것을 통과시키지 않고 소급 재생성 대상으로 돌린다.
+        이미 승인·반려된 이력은 건드리지 않는다.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """UPDATE summary_review_candidate
+                SET state='expired', decided_at=now(),
+                    decided_by='system:channel-scope-upgrade',
+                    correction='', defer_until=NULL
+                WHERE workspace=%s AND channel_id=%s
+                AND state IN ('pending','deferred')
+                AND coalesce(evidence_channel_id, '') <> channel_id
+                RETURNING id""",
+                (workspace, channel_id),
+            )
+            expired = list(cur.fetchall())
+        self.conn.commit()
         return len(expired)
 
     # --- Canvas 회차 (B-50) ---------------------------------------------------
@@ -1325,7 +1360,12 @@ def _source_rows(archive, workspace: str, channel_id: str, watermark: str,
 
     allow_retired = include_retired()
     rows: list[SourceLine] = []
-    for doc in archive.docs():
+    # 요약 승인은 사람 검토를 거쳐 검색 길잡이가 된다. 이름 기반 v1 병합은 답변
+    # 호환에는 쓸 수 있어도 승인 후보에는 너무 느슨하다. 실제 파일별 문서를 읽고
+    # channel_id가 정확히 같은 것만 받는다.
+    source_docs = getattr(archive, "source_docs", None)
+    docs = source_docs() if callable(source_docs) else archive.docs()
+    for doc in docs:
         if doc.workspace != workspace or str(doc.channel_id or "") != channel_id:
             continue
         # 보관·삭제된 채널의 원문은 **요약 후보를 만들지 않는다**(B-51).
@@ -1334,7 +1374,11 @@ def _source_rows(archive, workspace: str, channel_id: str, watermark: str,
             continue
         for line in doc.raw_lines:
             source = line.source_path or doc.path
-            locator = f"{source.name}:{line.lineno}"
+            try:
+                source_name = source.relative_to(archive.root).as_posix()
+            except (AttributeError, ValueError):
+                source_name = source.as_posix()
+            locator = f"{source_name}:{line.lineno}"
             key = f"{line.ts}|{locator}"
             if watermark and key <= watermark:
                 continue
@@ -1345,6 +1389,7 @@ def _source_rows(archive, workspace: str, channel_id: str, watermark: str,
             rows.append(SourceLine(
                 line.ts, line.speaker, line.text, locator,
                 message_ts=str(getattr(line, "message_ts", "") or ""),
+                channel_id=str(doc.channel_id or ""),
             ))
     rows.sort(key=lambda item: (item.at, item.locator))
     return rows
@@ -1870,6 +1915,11 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         )
         result.outcomes.append(outcome)
         try:
+            # 수정 전 생성된 후보는 근거 채널 좌표가 없다. 오늘 날짜로 다시 보내
+            # 승인시키지 않고 폐기한 뒤, 운영자가 해당 구간을 소급 재생성한다.
+            expire_unscoped = getattr(db, "expire_unscoped", None)
+            if callable(expire_unscoped):
+                result.expired += expire_unscoped(workspace, channel_id)
             result.expired += db.expire_unconfirmed(
                 workspace, channel_id, on
             )
