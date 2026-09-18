@@ -28,7 +28,7 @@ _최종 갱신: 2026-09-17_
 |---|---|
 | `deploy/sql/oracle_tyslack_setup.sql` | Oracle 뷰·계정 (A: DBA / B: TYSLACK / C: 확인) |
 | `scripts/oracle_export.py` | **내부망 실행.** 뷰 → JSONL + manifest(sha256) |
-| `src/tybot/orgsync.py` | **봇 서버.** `python -m tybot.orgsync`. Oracle 을 import 하지 않는다 |
+| `src/tybot/orgsync.py` | **봇 서버.** `sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.orgsync`. Oracle 을 import 하지 않는다 |
 | `scripts/oracle_probe.py` | 원본 구조 조사. SELECT 만. 민감 컬럼은 값을 안 본다 |
 | `scripts/check_search_index.py` | `--compare` 로 pg_bigm vs pg_trgm 재측정 |
 | `docs/deploy/oracle-checklist.md` | Oracle 담당자용. 진행 상황 표 포함 |
@@ -1047,7 +1047,8 @@ B-01 결과를 사람이 보는 곳으로 보낸다. 마스터봇의 실질적 �
 - 보내는 쪽 `scripts/oracle_export.py` — 내부망 실행. JSONL + manifest(sha256) 생성.
   `sqlplus` 대신 `python-oracledb` 를 쓴다: 12.1 에 `JSON_OBJECT` 가 없어
   문자열 연결로 JSON 을 만들면 조직명의 큰따옴표 하나에 그 줄이 조용히 깨진다
-- 받는 쪽 `src/tybot/orgsync.py` — `python -m tybot.orgsync`. **Oracle 을 import 하지 않는다**
+- 받는 쪽 `src/tybot/orgsync.py` — `sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.orgsync`.
+  **Oracle 을 import 하지 않는다**
   (봇 서버에 Oracle 자격증명이 없는 것이 방식 B 의 전부다)
 - 테스트 `tests/test_orgsync.py` 21건 — 대부분 "막혀야 하는 경우"
 

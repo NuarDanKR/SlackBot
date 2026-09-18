@@ -120,6 +120,28 @@ exec·root 도 예외가 아니고, 본인이라도 채널에서 물으면 나�
 - 파괴적이거나 비용이 드는 동작은 콘솔에서 **범위를 명시**하게 만든다
   (예: 소급은 채널을 고르게 하고, 실행 전에 분량을 먼저 센다)
 
+## 서버 명령은 가상환경 기준으로 적는다
+
+서버에는 `python` 이 PATH 에 없다(`command not found`). 전역 파이썬을 쓰면 의존성이
+없어 실패하거나, 더 나쁘게는 **다른 버전으로 돌아 진단이 어긋난다.** 운영 명령은
+항상 venv 의 인터프리터를 절대 경로로 적고, 서비스 계정으로 실행한다.
+
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.search_index          # 모듈
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_env.py  # 스크립트
+```
+
+| 무엇 | 값 |
+|---|---|
+| 봇·콘솔·잡 | `/opt/tybot/.venv/bin/python` · 사용자 `tybot` · 작업 디렉터리 `/opt/tybot` |
+| 변환 워커 | `/opt/tybot-convert/.venv/bin/python` · 사용자 `tybot-convert` (격리된 별도 환경) |
+| 설정 파일 | `TYBOT_ENV_FILE=/etc/tybot/tybot.env` — env 를 읽는 스크립트는 `env` 로 함께 넘긴다 |
+| 스키마 적용 | `sudo /opt/tybot/deploy/apply-schema.sh` (안에서 venv 를 부른다) |
+
+`pip` 도 같다 — `/opt/tybot/.venv/bin/pip`. 개발 PC(Windows)에서는 그냥 `python` 이고,
+**이 구분을 문서·안내에 섞지 않는다.** 서버 절차에 개발 PC 명령을 적으면 실행한
+사람은 `command not found` 만 보고 원인을 모른다.
+
 ## 개발 워크플로
 - **Claude Code + Codex** 병행. 커밋 메시지/PR은 사람이 검토 후.
 - 언어: Python (봇/파이프라인), LLM 게이트웨이는 프로바이더 추상화(LiteLLM 등 검토).

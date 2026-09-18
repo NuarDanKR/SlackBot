@@ -144,15 +144,16 @@ conn = oracledb.connect(user="TYSLACK_BOT", password=..., dsn="host:1521/SERVICE
 **보내는 쪽**: [`scripts/oracle_export.py`](../../scripts/oracle_export.py) — 내부망에서 실행.
 뷰 2개를 읽어 `org.jsonl`·`emp.jsonl`·`manifest.json`(sha256) 을 만든다.
 
-**받는 쪽**: [`src/tybot/orgsync.py`](../../src/tybot/orgsync.py) — `python -m tybot.orgsync`.
+**받는 쪽**: [`src/tybot/orgsync.py`](../../src/tybot/orgsync.py) —
+`sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.orgsync`.
 이 파일은 Oracle 을 import 하지 않는다. 봇 서버에 Oracle 자격증명이 없는 것이 방식 B 의
 전부이므로, 여기서 Oracle 을 부르면 그 이점이 사라진다.
 
 ```bash
 # 내부망 배치서버 (야간 1회)
 python3 scripts/oracle_export.py --out /var/tmp/tyslack
-# 봇 서버
-python -m tybot.orgsync
+# 봇 서버 (전역 python 은 PATH 에 없다 — venv 절대 경로로)
+sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.orgsync
 ```
 
 전송 절차(임시 이름 업로드 후 rename, 체크섬, 행 수 방어)는
