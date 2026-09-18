@@ -49,6 +49,12 @@ def _raw_key(workspace: str, line) -> tuple:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # argparse 기본값을 만들기 전에 운영 환경 파일을 읽어야 한다. 그렇지 않으면
+    # TYBOT_ENV_FILE을 지정해도 ARCHIVE_DIR 대신 실행 위치의 ./archive를 진단한다.
+    from tybot.envfile import load_env_file
+
+    load_env_file()
+
     ap = argparse.ArgumentParser(description="수집 진단 · v1 삭제 가능 여부")
     ap.add_argument("--archive", default=os.getenv("ARCHIVE_DIR", "./archive"))
     args = ap.parse_args(argv)

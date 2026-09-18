@@ -118,6 +118,7 @@ def build_rows(
     """
     labels = labels or {}
     by_channel: dict[tuple[str, str], ChannelRow] = {}
+    workspace_labels: dict[str, str] = {}
 
     for doc in docs:
         workspace = str(doc.get("workspace") or "")
@@ -125,6 +126,13 @@ def build_rows(
         channel = str(doc.get("channel") or "")
         if not workspace or not channel:
             continue
+        label = str(labels.get(workspace) or doc.get("workspaceLabel") or workspace)
+        current_label = workspace_labels.get(workspace, "")
+        # Archive rows know the configured label, while heartbeat-only rows use the
+        # workspace key as a fallback.  If both exist, one workspace must still have
+        # one label or the frontend sorts it into two separate groups.
+        if not current_label or (current_label == workspace and label != workspace):
+            workspace_labels[workspace] = label
         # v1 문서에는 채널 ID 가 없다. 이름을 키로 쓰되 **담당자 지정은 막는다** —
         # ID 없이 쓰면 다른 채널에 붙을 수 있다.
         key = (workspace, channel_id or f"name:{channel}")
@@ -132,7 +140,7 @@ def build_rows(
         if row is None:
             row = ChannelRow(
                 workspace=workspace,
-                workspace_label=str(doc.get("workspaceLabel") or labels.get(workspace, workspace)),
+                workspace_label=label,
                 channel_id=channel_id,
                 channel=channel,
             )
@@ -143,6 +151,9 @@ def build_rows(
         last = str(doc.get("lastIngestedAt") or "")
         if last > row.last_ingested:
             row.last_ingested = last
+
+    for row in by_channel.values():
+        row.workspace_label = workspace_labels.get(row.workspace, row.workspace_label)
 
     for key, row in by_channel.items():
         found = owners.get(key) or {}
@@ -308,6 +319,7 @@ def snapshot(days: int = 365) -> tuple[list[ChannelRow], dict]:
         owners=owner_store().all(),
         reviewers=reviewer_map(),
         answers=answer_counts(days),
+        labels=reader.workspace_labels(),
     )
     return rows, summary(rows)
 

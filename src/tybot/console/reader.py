@@ -134,6 +134,11 @@ def _workspace_labels() -> dict[str, str]:
     return labels
 
 
+def workspace_labels() -> dict[str, str]:
+    """콘솔의 여러 데이터 소스가 공유할 워크스페이스 표시 이름."""
+    return _workspace_labels()
+
+
 def _readable_map(known: set[str]) -> dict[str, list[str]]:
     registry = _registry_access()
     if registry is not None:

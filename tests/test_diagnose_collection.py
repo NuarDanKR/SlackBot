@@ -94,3 +94,26 @@ def test_a_clean_archive_says_so(tmp_path, capsys):
     out = _run(tmp_path, capsys)
 
     assert "없다. 모든 원문 문서가 채널에 귀속된다." in out
+
+
+def test_archive_default_is_loaded_from_tybot_env_file(tmp_path, capsys, monkeypatch):
+    """운영 명령은 TYBOT_ENV_FILE만 넘긴다. ARCHIVE_DIR 기본값을 환경 파일보다
+    먼저 계산하면 실행 디렉터리의 ``./archive``를 열어 권한 오류가 난다."""
+    archive = tmp_path / "service-archive"
+    _doc(archive, "workspaces/tyit/channels/C1/raw/2026-09-17.md",
+         channel="#팀-전산_abb155-공지", channel_id="C1", version=2,
+         line="환경 파일에서 찾은 원문")
+    env_file = tmp_path / "tybot.env"
+    env_file.write_text(f"ARCHIVE_DIR={archive}\n", encoding="utf-8")
+
+    monkeypatch.delenv("ARCHIVE_DIR", raising=False)
+    monkeypatch.setenv("TYBOT_ENV_FILE", str(env_file))
+    monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(diagnose_collection, "_load_workspaces", lambda: ([], "test"))
+
+    result = diagnose_collection.main([])
+    out = capsys.readouterr().out
+
+    assert result == 0
+    assert "tyit" in out
+    assert "환경 파일에서 찾은 원문" not in out

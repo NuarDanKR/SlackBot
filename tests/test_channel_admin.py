@@ -83,6 +83,38 @@ def test_heartbeat_channels_are_available_before_the_first_archive_document(
     ]
 
 
+def test_heartbeat_fallback_label_does_not_split_one_workspace_into_two_groups():
+    """아카이브 행은 설정 라벨을, heartbeat 행은 키를 라벨로 쓴다. 두 값을 그대로
+    내보내면 프론트엔드 정렬에서 같은 workspace가 서로 떨어져 두 그룹이 된다."""
+    rows = _rows([
+        _doc(channel="#수집됨", channel_id="C_ARCHIVE", workspaceLabel="전산팀"),
+        _doc(
+            channel="#아직-원문-없음",
+            channel_id="C_HEARTBEAT",
+            workspaceLabel=WS,
+            documents=0,
+            lines=0,
+            attachmentLines=0,
+            lastIngestedAt="",
+        ),
+    ])
+
+    assert {row.workspace for row in rows} == {WS}
+    assert {row.workspace_label for row in rows} == {"전산팀"}
+
+
+def test_configured_label_applies_to_heartbeat_only_workspace():
+    rows = ca.build_rows(
+        [_doc(channel="#첫-수집-전", channel_id="C_NEW", workspaceLabel=WS)],
+        owners={},
+        reviewers={},
+        answers={},
+        labels={WS: "전산팀"},
+    )
+
+    assert rows[0].workspace_label == "전산팀"
+
+
 def test_channels_are_joined_by_id_not_name():
     """이름은 바뀐다. 이름으로 이으면 담당자가 조용히 다른 채널에 붙는다."""
     docs = [_doc(channel="#옛이름", channel_id="C1"), _doc(channel="#새이름", channel_id="C1")]
