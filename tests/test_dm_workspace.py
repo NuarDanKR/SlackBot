@@ -173,8 +173,12 @@ def test_bot_output_is_not_archived_in_dm(tmp_path):
 
 
 def test_pii_screening_still_applies_in_dm(tmp_path):
-    """개인이 자기 파일을 올리는 자리라 오히려 걸릴 확률이 높다(원칙 5)."""
-    result = _dm(tmp_path, text="주민등록번호 880101-1234567 입니다")
+    """개인이 자기 파일을 올리는 자리라 오히려 걸릴 확률이 높다(원칙 5).
+
+    값은 **형식만 맞춘 가짜**다(뒷자리가 `1000000`). 검사에 걸리는 것은 모양이지
+    내용이 아니므로, 실제 번호처럼 보이는 값을 저장소에 남길 이유가 없다.
+    """
+    result = _dm(tmp_path, text="주민등록번호 900101-1000000 입니다")
 
     assert result.written == 0
     assert result.refused
