@@ -328,3 +328,65 @@ def test_the_pf_role_can_only_append_to_the_audit_table():
     for statement in statements:
         assert "UPDATE" not in statement, f"감사 표에 UPDATE 권한이 있습니다: {statement}"
         assert "DELETE" not in statement, f"감사 표에 DELETE 권한이 있습니다: {statement}"
+
+
+# --- 배포가 콘솔을 잠그지 않는다 ------------------------------------------------
+#
+# 2026-09-22 사고. 콘솔 unit 을 루프백으로 바꾼 커밋이 배포되면서 **문을 닫는 쪽만**
+# 적용됐다. nginx 배치는 수동 단계라 따라오지 않았고, 배포 버튼 한 번에 콘솔에 아무도
+# 접속할 수 없게 됐다. 화면에는 「API 서버가 응답하지 않습니다」 만 남았다.
+#
+# 「실패한 배포가 현재 서비스를 중지해서는 안 된다」(오너 계획 §9).
+
+def test_the_installer_keeps_the_console_reachable_until_nginx_is_ready():
+    """nginx 가 없으면 예전 바인딩을 유지한다. 유지하되 **조용히** 하지는 않는다."""
+    script = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+
+    assert "console_bind_guard" in script, "콘솔 바인딩 안전장치가 없습니다."
+    # 판단 근거 넷 — 하나라도 빠지면 nginx 가 요청을 못 받는데 문을 닫게 된다.
+    for needle in (
+        "command -v nginx",
+        "systemctl is-active --quiet nginx",
+        "/etc/nginx/conf.d/tybot-console.conf",
+        "nginx -t",
+    ):
+        assert needle in script, f"nginx 준비 확인이 빠졌습니다: {needle}"
+
+
+def test_the_fallback_binding_is_announced_not_silent():
+    """조용히 평문으로 되돌리면 임시 상태가 영구 상태가 된다 — B-35 가 그랬다."""
+    script = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+    guard = script[script.index("console_bind_guard() {"):]
+    guard = guard[: guard.index("\n}\n")]
+
+    assert "평문" in guard
+    assert "B-35" in guard
+    # 경고는 표준오류로. 성공 로그에 섞이면 배포 출력에서 묻힌다.
+    assert ">&2" in guard
+
+
+def test_the_guard_removes_itself_once_nginx_takes_over():
+    """목표 상태는 루프백이다. 안전장치가 남아 있으면 그게 새로운 영구 상태가 된다."""
+    script = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+    guard = script[script.index("console_bind_guard() {"):]
+    guard = guard[: guard.index("\n}\n")]
+
+    assert 'rm -f "$dropin"' in guard
+    assert "systemctl daemon-reload" in guard
+
+
+def test_the_console_error_message_gives_no_broken_command():
+    """틀린 명령은 안내가 아니라 한 단계 더 헤매게 만드는 것이다.
+
+    서버에는 `uvicorn` 이 PATH 에 없다 — venv 절대경로라야 한다
+    (CLAUDE.md 「서버 명령은 가상환경 기준으로 적는다」).
+    """
+    client = (
+        Path(__file__).resolve().parents[1] / "console-web" / "src" / "api" / "client.ts"
+    ).read_text(encoding="utf-8")
+    start = client.index("const SERVER_DOWN")
+    message = client[start : client.index(".join(", start)]
+
+    assert "uvicorn tybot.console.app" not in message, (
+        "화면이 서버에서 실패하는 명령을 안내합니다."
+    )

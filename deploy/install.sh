@@ -181,6 +181,71 @@ echo "== 4/6 가상환경 =="
 # 따로 부르면 pip 이 앞서 깐 것을 고려하지 못해, 겉으로는 성공하고
 # 실제로는 버전이 어긋난 상태가 남는다(typing-inspection 이 그랬다).
 REQ_FILES=(-r "$APP_DIR/requirements.txt")
+# ---------------------------------------------------------------------------
+# 콘솔 바인딩 안전장치 (B-35)
+# ---------------------------------------------------------------------------
+#
+# ## 왜 있나
+# `tybot-console.service` 는 루프백에만 바인딩한다. 밖으로 나가는 문은 nginx 다.
+# 그런데 nginx 설정 배치는 **수동 단계**이고, 배포는 자동이다.
+#
+# 2026-09-22 에 그래서 사고가 났다. 배포 버튼 한 번에 unit 이 갱신·재시작되면서
+# **문을 닫는 쪽만 적용되고 새 문을 여는 쪽은 적용되지 않았다.** 콘솔에 아무도
+# 접속할 수 없게 됐고, 화면에는 「API 서버가 응답하지 않습니다」 만 남았다.
+# 복구하려면 SSH 가 필요한데, 콘솔을 쓰는 사람이 항상 SSH 를 쓸 수 있는 것은 아니다.
+#
+# 「실패한 배포가 현재 서비스를 중지해서는 안 된다」(오너 계획 §9).
+#
+# ## 무엇을 하나
+# nginx 가 콘솔을 실제로 받고 있는지 본다.
+#   - 받고 있으면  → drop-in 을 지운다. unit 그대로 루프백. 이게 목표 상태다
+#   - 아니면      → drop-in 으로 예전 바인딩을 유지하고 **크게 알린다**
+#
+# 조용히 평문으로 되돌리지 않는다. 조용하면 임시 상태가 영구 상태가 된다 —
+# B-35 가 3주 걸린 이유가 그것이다.
+console_bind_guard() {
+  local dropin_dir=/etc/systemd/system/tybot-console.service.d
+  local dropin="$dropin_dir/bind-until-tls.conf"
+
+  # nginx 가 있고, 활성이고, 콘솔 설정이 배치돼 있고, 문법이 맞는가.
+  # 넷 중 하나라도 아니면 프록시가 요청을 못 받는다.
+  if command -v nginx >/dev/null 2>&1 \
+     && systemctl is-active --quiet nginx 2>/dev/null \
+     && [[ -f /etc/nginx/conf.d/tybot-console.conf ]] \
+     && nginx -t >/dev/null 2>&1; then
+    if [[ -f "$dropin" ]]; then
+      rm -f "$dropin"
+      rmdir "$dropin_dir" 2>/dev/null || true
+      systemctl daemon-reload
+      echo "  → nginx 가 콘솔을 받고 있습니다. 루프백 바인딩으로 전환했습니다 (B-35 완료)"
+    fi
+    return 0
+  fi
+
+  install -d -m 0755 "$dropin_dir"
+  cat > "$dropin" <<'DROPIN'
+# 자동 생성 — deploy/install.sh 의 console_bind_guard
+#
+# nginx 리버스 프록시가 아직 콘솔을 받지 않아 **예전 바인딩을 유지**합니다.
+# 이 파일이 없어야 정상(루프백)입니다.
+#
+# 이 상태는 평문 HTTP 입니다. 로그인 비밀번호와 세션 쿠키가 사내망을 그대로
+# 지나갑니다(BACKLOG B-35). 아래를 끝내면 다음 배포에서 자동으로 사라집니다.
+#
+#   sudo cp /opt/tybot/deploy/nginx/tybot-console.conf /etc/nginx/conf.d/
+#   sudo nginx -t && sudo systemctl enable --now nginx
+#   sudo bash /opt/tybot/deploy/install.sh     (또는 다음 배포)
+[Service]
+ExecStart=
+ExecStart=/opt/tybot/.venv/bin/uvicorn tybot.console.app:app \
+    --host 0.0.0.0 --port 8787 --app-dir /opt/tybot/src
+DROPIN
+  systemctl daemon-reload
+  echo "  ⚠ nginx 가 콘솔을 받지 않아 평문 바인딩(0.0.0.0:8787)을 유지합니다." >&2
+  echo "    B-35 가 끝나지 않은 상태입니다 — 비밀번호와 세션 쿠키가 평문으로 흐릅니다." >&2
+  echo "    끝내는 방법: $dropin" >&2
+}
+
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   REQ_FILES+=(-r "$APP_DIR/deploy/requirements-console.txt")
 fi
@@ -318,6 +383,7 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   visudo -cf "$APP_DIR/deploy/tybot-console-logs.sudoers" >/dev/null
   visudo -cf "$APP_DIR/deploy/tybot-console-timers.sudoers" >/dev/null
   install -m 0644 "$APP_DIR/deploy/tybot-console.service" /etc/systemd/system/tybot-console.service
+  console_bind_guard
   install -d -m 0755 /usr/local/libexec
   install -m 0755 "$APP_DIR/deploy/tybot-console-logs" /usr/local/libexec/tybot-console-logs
   install -m 0755 "$APP_DIR/deploy/tybot-console-timers" /usr/local/libexec/tybot-console-timers

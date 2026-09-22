@@ -12,9 +12,27 @@
  * 어떤 스크립트든 그 값을 읽을 수 있지만, HttpOnly 쿠키는 스크립트가 읽지 못합니다.
  */
 
+/**
+ * 서버에 닿지 못했을 때의 안내.
+ *
+ * ## 왜 명령을 안 적나
+ * 전에는 `uvicorn ...` 한 줄을 적어 두었다. 그건 **개발 PC 기준**인데, 이 화면은
+ * 운영 서버에서도 뜬다. 2026-09-22 에 운영 콘솔이 안 열렸을 때 사람이 그 줄을 그대로
+ * 서버에 붙여 넣었고 `bash: uvicorn: command not found` 만 봤다 — 서버에는 `uvicorn`
+ * 이 PATH 에 없고 venv 절대경로라야 한다(CLAUDE.md 「서버 명령은 가상환경 기준으로」).
+ *
+ * 틀린 명령은 안내가 아니라 **한 단계 더 헤매게 만드는 것**이다. 그래서 화면은
+ * 명령을 주지 않고, 어디를 봐야 하는지만 말한다. 두 환경에서 원인이 다르므로
+ * 둘을 갈라 적는다.
+ */
 const SERVER_DOWN = [
-  'API 서버가 응답하지 않습니다. 저장소 루트에서 아래 명령으로 서버를 먼저 띄워 주세요.',
-  'uvicorn tybot.console.app:app --host 127.0.0.1 --port 8787 --app-dir src',
+  'API 서버에 닿지 못했습니다.',
+  '',
+  '· 개발 PC: 저장소 루트에서 `npm run dev:all` 로 화면과 API 를 함께 띄웁니다.',
+  '· 운영 서버: 서비스가 떠 있는지와 앞단 프록시를 확인합니다.',
+  '    sudo systemctl status tybot-console --no-pager',
+  '    sudo nginx -t && sudo systemctl status nginx --no-pager',
+  '  콘솔은 루프백에만 바인딩하므로 nginx 가 없으면 브라우저에서 닿지 않습니다(B-35).',
 ].join('\n')
 
 export class ApiError extends Error {
