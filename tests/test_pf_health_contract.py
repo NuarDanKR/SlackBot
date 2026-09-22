@@ -37,9 +37,14 @@ checker = _checker()
 NOW = dt.datetime.now(dt.UTC)
 
 # 가짜 시크릿. 조각으로 나눠 붙여 커밋 가드에 걸리지 않게 한다(파일 머리말 참조).
-FAKE_BOT_TOKEN = "xox" + "b-1111111111-222222222222-" + "a" * 20
-FAKE_APP_TOKEN = "xap" + "p-1-A111-2222-" + "c" * 32
-FAKE_MODEL_KEY = "sk-" + "ant-api03-" + "z" * 40
+#
+# **숫자를 길게 넣지 않는다.** 처음에는 숫자열로 채웠는데, 그것이 주민번호
+# 형식(여섯 자리-일곱 자리)과 우연히 겹쳐 커밋 가드가 매번 경고했다. 오탐이지만
+# 같은 경고가 되풀이되면 사람은 경고 자체를 안 보게 되고, 그러면 진짜가 섞여
+# 들어올 때 못 잡는다. 탐지에 필요한 것은 접두사뿐이므로 뒤는 글자로 채운다.
+FAKE_BOT_TOKEN = "xox" + "b-" + "T" * 10 + "-" + "K" * 12 + "-" + "a" * 24
+FAKE_APP_TOKEN = "xap" + "p-" + "A" * 4 + "-" + "B" * 8 + "-" + "c" * 32
+FAKE_MODEL_KEY = "sk-" + "ant-api" + "-" + "z" * 40
 FAKE_PRIVATE_KEY = "-----" + "BEGIN OPENSSH PRIVATE" + " KEY-----"
 
 
