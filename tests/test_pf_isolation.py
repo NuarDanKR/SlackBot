@@ -16,11 +16,10 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 PF_ROOT = Path(__file__).resolve().parents[1] / "src" / "tybot_pf"
 
@@ -261,17 +260,71 @@ def test_the_pf_schema_is_applied_by_the_deploy_script():
     assert "pf_console_schema.sql" in script
 
 
-@pytest.mark.skipif(os.name == "nt", reason="파일 권한 표기는 Linux 배포에서만 의미가 있다")
-def test_the_pf_schema_does_not_grant_tybot_tables_to_the_pf_role():
-    """PF role 에 TYBot 표 권한이 한 줄이라도 있으면 DB 쪽 방어가 사라진다."""
+def _executed_statements(sql: str) -> list[str]:
+    """`DO $$ ... EXECUTE '...' '...'; ... $$` 안에서 **실제로 실행되는 문장**.
+
+    왜 줄 단위로 안 보나: 한 GRANT 가 여러 줄에 걸쳐 있다. 파이썬처럼 인접한 문자열
+    리터럴이 이어 붙는 형태라, 줄 하나만 보면 `console_user` 는 뒷줄에 있고 컬럼
+    목록은 앞줄에 있다. 2026-09-22 운영 배포에서 이 시험이 그렇게 틀렸다 —
+    **SQL 이 아니라 시험이 틀렸는데 배포가 막혔다.**
+
+    고정하려는 것은 「어떤 권한이 나가는가」 이지 그 문장을 몇 줄로 적었는가가 아니다.
+    """
+    body = "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+    out: list[str] = []
+    for match in re.finditer(r"EXECUTE\s+((?:'[^']*'\s*)+);", body):
+        joined = "".join(re.findall(r"'([^']*)'", match.group(1)))
+        out.append(" ".join(joined.split()))
+    return out
+
+
+def test_the_pf_role_gets_no_privilege_on_a_tybot_table():
+    """PF role 에 TYBot 표 권한이 한 줄이라도 있으면 DB 쪽 방어가 사라진다.
+
+    코드가 `tybot.*` 를 안 부르는 것(위 시험들)과 별개다. 코드는 고쳐 쓸 수 있지만
+    DB 권한은 그 자리에서 거절한다 — 둘 중 하나가 틀렸을 때 나머지가 막는다.
+    """
     sql = (DEPLOY / "sql" / "pf_console_schema.sql").read_text(encoding="utf-8")
-    grants = [line for line in sql.splitlines() if "tybot_pf_console" in line]
-    assert grants, "PF role 권한 구문이 없습니다."
-    forbidden = ("workspace", "usage_call", "archive_doc", "specialist_", "raw_line")
-    for line in grants:
-        # `console_user` 는 **열 단위로만** 준다. 표 전체를 주면 역할·워크스페이스
-        # 배정까지 읽힌다.
-        if "console_user " in line or "console_user\t" in line:
-            assert "(email, name, password_hash, active)" in line
+    statements = [s for s in _executed_statements(sql) if "tybot_pf_console" in s]
+    assert statements, "PF role 권한 구문을 찾지 못했습니다(형식이 바뀌었나 봅니다)."
+
+    forbidden = ("usage_call", "archive_doc", "specialist_", "raw_line", "workspace")
+    for statement in statements:
         for name in forbidden:
-            assert name not in line, f"PF role 에 TYBot 표 권한이 있습니다: {line.strip()}"
+            assert name not in statement, (
+                f"PF role 에 TYBot 표 권한이 있습니다: {statement}"
+            )
+
+
+def test_the_pf_role_reads_console_user_by_column_not_by_table():
+    """표 전체를 주면 TYBot 쪽 역할·워크스페이스 배정까지 읽힌다.
+
+    PF 가 알 필요가 없고, 알면 조직 구조가 드러난다(원칙 3).
+    """
+    sql = (DEPLOY / "sql" / "pf_console_schema.sql").read_text(encoding="utf-8")
+    statements = [
+        s
+        for s in _executed_statements(sql)
+        if "tybot_pf_console" in s and re.search(r"\bconsole_user\b", s)
+    ]
+    assert statements, "console_user 권한 구문을 찾지 못했습니다."
+    for statement in statements:
+        assert "(email, name, password_hash, active)" in statement, (
+            f"console_user 를 표 단위로 주고 있습니다: {statement}"
+        )
+
+
+def test_the_pf_role_can_only_append_to_the_audit_table():
+    """감사는 지울 수 없어야 한다. UPDATE·DELETE 권한이 있으면 그 전제가 무너진다."""
+    sql = (DEPLOY / "sql" / "pf_console_schema.sql").read_text(encoding="utf-8")
+    statements = [
+        s
+        for s in _executed_statements(sql)
+        if "tybot_pf_console" in s and "pf_audit_event" in s and "SEQUENCE" not in s
+    ]
+    assert statements, "pf_audit_event 권한 구문을 찾지 못했습니다."
+    for statement in statements:
+        assert "UPDATE" not in statement, f"감사 표에 UPDATE 권한이 있습니다: {statement}"
+        assert "DELETE" not in statement, f"감사 표에 DELETE 권한이 있습니다: {statement}"
