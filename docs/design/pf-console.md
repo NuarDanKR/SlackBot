@@ -206,12 +206,12 @@ sudo chown root:tybot-pf /etc/tybot-pf/console.env && sudo chmod 640 /etc/tybot-
 sudo cp /opt/tybot/deploy/pf-hermes-console.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now pf-hermes-console
 
-# 5. TLS (B-35)
-sudo cp /opt/tybot/deploy/nginx/tybot-console.conf /etc/nginx/conf.d/
-sudo nginx -t && sudo systemctl reload nginx
-sudo cp /opt/tybot/deploy/tybot-console.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl restart tybot-console
-sudo firewall-cmd --permanent --remove-port=8787/tcp && sudo firewall-cmd --reload
+# 5. TLS (B-35) — 스크립트가 nginx 설치·인증서·SELinux·설정·기동·바인딩 전환까지 한다
+sudo /opt/tybot/deploy/setup-nginx-tls.sh --dry-run    # 무엇을 할지 먼저 본다
+sudo /opt/tybot/deploy/setup-nginx-tls.sh
+#
+# 방화벽은 스크립트가 건드리지 않는다 — 지금 좁혀 둔 출발지 범위가 사람이 정한
+# 것이기 때문이다. 스크립트 마지막에 명령을 출력하므로 범위를 보고 직접 적용한다.
 
 # 6. **그다음에** Secure 쿠키
 #   /etc/tybot/tybot.env   : CONSOLE_COOKIE_SECURE=1
