@@ -613,6 +613,13 @@ TYBot이 호출하는 계약형/HTTP 전문가를 전제로 하므로 프금팀 
 - [x] PF 계정의 TYBot env/archive/API/DB 접근 거부와 시크릿 비노출 **자동 검사**
       — [`tests/test_pf_isolation.py`](tests/test_pf_isolation.py),
       [`tests/test_pf_console_api.py`](tests/test_pf_console_api.py)
+- [x] `/pf/` 를 nginx 없이 평문으로 연다 (오너 결정 2026-09-22). `install.sh` 안전장치가
+      두 콘솔 모두 `0.0.0.0` 으로 유지하고, nginx 를 붙이면 다음 배포에서 저절로
+      루프백으로 돌아간다. **방화벽에서 8787·8788 출발지를 좁혀 둔 상태여야 한다**
+- [x] 이관 수동 runbook — [`docs/deploy/pf-hermes-migration-runbook.md`](docs/deploy/pf-hermes-migration-runbook.md)
+- [x] 전용 계정·경로·권한 구성과 **격리 확인** — [`deploy/setup-pf-hermes-host.sh`](deploy/setup-pf-hermes-host.sh)
+- [x] 상태 파일 계약 검사 — [`scripts/check_pf_health.py`](scripts/check_pf_health.py).
+      화면은 새는 것을 막고 이 도구는 깨진 것을 말한다
 - [ ] 서버 배포와 smoke — 설계 [`pf-console.md`](docs/design/pf-console.md) §8·§9
 - [ ] allowlist 운영 action과 릴리스 제출·분리 승인·활성화·롤백 자동화
       (고정 helper·lock·timeout·감사가 먼저다. 오늘 열지 않았다)

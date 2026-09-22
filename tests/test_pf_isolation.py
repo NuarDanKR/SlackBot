@@ -338,7 +338,14 @@ def test_the_pf_role_can_only_append_to_the_audit_table():
 #
 # 「실패한 배포가 현재 서비스를 중지해서는 안 된다」(오너 계획 §9).
 
-def test_the_installer_keeps_the_console_reachable_until_nginx_is_ready():
+def _guard_body() -> str:
+    """안전장치 함수의 본문. 함수 이름이 아니라 **하는 일**을 고정한다."""
+    script = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+    start = script.index("console_bind_guard_for() {")
+    return script[start : script.index("\n}\n", start)]
+
+
+def test_the_installer_keeps_both_consoles_reachable_until_nginx_is_ready():
     """nginx 가 없으면 예전 바인딩을 유지한다. 유지하되 **조용히** 하지는 않는다."""
     script = (DEPLOY / "install.sh").read_text(encoding="utf-8")
 
@@ -353,26 +360,45 @@ def test_the_installer_keeps_the_console_reachable_until_nginx_is_ready():
         assert needle in script, f"nginx 준비 확인이 빠졌습니다: {needle}"
 
 
+def test_the_guard_covers_the_pf_console_too():
+    """PF 콘솔만 루프백에 남으면 `/pf/` 가 브라우저에서 안 닿는다.
+
+    TYBot 콘솔만 챙기면 「콘솔은 되는데 /pf/ 만 안 된다」 가 되고, 원인이 바인딩이라는
+    것은 화면 어디에도 안 나온다.
+    """
+    script = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+    start = script.index("console_bind_guard() {")
+    body = script[start : script.index("\n}\n", start)]
+
+    assert "tybot-console" in body and "8787" in body
+    assert "pf-hermes-console" in body and "8788" in body
+
+
+def test_the_guard_skips_units_that_are_not_installed():
+    """PF 콘솔은 나중에 붙는다. 없는 unit 에 drop-in 을 만들면 그 파일만 남는다."""
+    assert '[[ -f "/etc/systemd/system/$unit.service" ]] || return 0' in _guard_body()
+
+
 def test_the_fallback_binding_is_announced_not_silent():
     """조용히 평문으로 되돌리면 임시 상태가 영구 상태가 된다 — B-35 가 그랬다."""
-    script = (DEPLOY / "install.sh").read_text(encoding="utf-8")
-    guard = script[script.index("console_bind_guard() {"):]
-    guard = guard[: guard.index("\n}\n")]
+    body = _guard_body()
 
-    assert "평문" in guard
-    assert "B-35" in guard
+    assert "평문" in body
+    assert "B-35" in body
+    # 방화벽으로 좁히라는 말을 같이 한다. 평문 + 전면 개방은 다른 이야기다.
+    assert "방화벽" in body
     # 경고는 표준오류로. 성공 로그에 섞이면 배포 출력에서 묻힌다.
-    assert ">&2" in guard
+    assert ">&2" in body
 
 
 def test_the_guard_removes_itself_once_nginx_takes_over():
     """목표 상태는 루프백이다. 안전장치가 남아 있으면 그게 새로운 영구 상태가 된다."""
-    script = (DEPLOY / "install.sh").read_text(encoding="utf-8")
-    guard = script[script.index("console_bind_guard() {"):]
-    guard = guard[: guard.index("\n}\n")]
+    body = _guard_body()
 
-    assert 'rm -f "$dropin"' in guard
-    assert "systemctl daemon-reload" in guard
+    assert 'rm -f "$dropin"' in body
+    assert "systemctl daemon-reload" in body
+    # 바인딩이 바뀌었으면 재시작해야 실제로 반영된다.
+    assert 'systemctl restart "$unit"' in body
 
 
 def test_the_console_error_message_gives_no_broken_command():

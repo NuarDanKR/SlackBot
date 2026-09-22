@@ -226,8 +226,17 @@ PF_DATABASE_URL=postgresql://tybot_pf_console:<암호>@127.0.0.1:55432/tyslackai
 PF_CONSOLE_SECRET=<openssl rand -base64 32>
 PF_CONSOLE_DIST=/opt/tybot/console-web/dist-pf
 PF_STATE_ROOT=/var/lib/tybot-subbots
-PF_CONSOLE_COOKIE_SECURE=1
+
+# **TLS 를 붙인 뒤에 1 로 바꾼다.** 지금처럼 nginx 없이 평문으로 여는 동안 1 이면
+# 브라우저가 쿠키를 보내지 않아 로그인이 되지 않고, 화면에는 「비밀번호가 틀렸다」
+# 처럼 보인다. 그 상태로 비밀번호를 세 번 바꾸게 된다.
+PF_CONSOLE_COOKIE_SECURE=0
 ```
+
+> **nginx 없이 여는 동안**(2026-09-22 결정) 두 콘솔 모두 `0.0.0.0` 으로 열린다.
+> `install.sh` 의 안전장치가 drop-in 으로 그렇게 유지하고, nginx 를 붙이면 다음
+> 배포에서 저절로 루프백으로 돌아간다. **방화벽에서 8787·8788 출발지를 필요한
+> 대역으로 좁혀 두어야 한다** — 평문이므로 세션 쿠키를 주워 담을 수 있다.
 
 ### 권한 부여
 

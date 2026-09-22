@@ -203,47 +203,64 @@ REQ_FILES=(-r "$APP_DIR/requirements.txt")
 #
 # 조용히 평문으로 되돌리지 않는다. 조용하면 임시 상태가 영구 상태가 된다 —
 # B-35 가 3주 걸린 이유가 그것이다.
-console_bind_guard() {
-  local dropin_dir=/etc/systemd/system/tybot-console.service.d
-  local dropin="$dropin_dir/bind-until-tls.conf"
-
+nginx_is_serving_the_console() {
   # nginx 가 있고, 활성이고, 콘솔 설정이 배치돼 있고, 문법이 맞는가.
   # 넷 중 하나라도 아니면 프록시가 요청을 못 받는다.
-  if command -v nginx >/dev/null 2>&1 \
-     && systemctl is-active --quiet nginx 2>/dev/null \
-     && [[ -f /etc/nginx/conf.d/tybot-console.conf ]] \
-     && nginx -t >/dev/null 2>&1; then
+  command -v nginx >/dev/null 2>&1 \
+    && systemctl is-active --quiet nginx 2>/dev/null \
+    && [[ -f /etc/nginx/conf.d/tybot-console.conf ]] \
+    && nginx -t >/dev/null 2>&1
+}
+
+# 한 서비스의 바인딩 안전장치.
+#   $1 unit 이름   $2 uvicorn 앱 경로   $3 포트   $4 사람이 부르는 이름
+console_bind_guard_for() {
+  local unit="$1" app="$2" port="$3" label="$4"
+  local dropin_dir="/etc/systemd/system/$unit.service.d"
+  local dropin="$dropin_dir/bind-until-tls.conf"
+
+  # 설치되지 않은 unit 은 건드리지 않는다. PF 콘솔은 나중에 붙는다.
+  [[ -f "/etc/systemd/system/$unit.service" ]] || return 0
+
+  if nginx_is_serving_the_console; then
     if [[ -f "$dropin" ]]; then
       rm -f "$dropin"
       rmdir "$dropin_dir" 2>/dev/null || true
       systemctl daemon-reload
-      echo "  → nginx 가 콘솔을 받고 있습니다. 루프백 바인딩으로 전환했습니다 (B-35 완료)"
+      systemctl is-active --quiet "$unit" && systemctl restart "$unit" || true
+      echo "  → nginx 가 $label 을 받고 있습니다. 루프백 바인딩으로 전환했습니다 (B-35)"
     fi
     return 0
   fi
 
   install -d -m 0755 "$dropin_dir"
-  cat > "$dropin" <<'DROPIN'
+  cat > "$dropin" <<DROPIN
 # 자동 생성 — deploy/install.sh 의 console_bind_guard
 #
-# nginx 리버스 프록시가 아직 콘솔을 받지 않아 **예전 바인딩을 유지**합니다.
+# nginx 리버스 프록시가 아직 $label 을 받지 않아 **예전 바인딩을 유지**합니다.
 # 이 파일이 없어야 정상(루프백)입니다.
 #
 # 이 상태는 평문 HTTP 입니다. 로그인 비밀번호와 세션 쿠키가 사내망을 그대로
-# 지나갑니다(BACKLOG B-35). 아래를 끝내면 다음 배포에서 자동으로 사라집니다.
+# 지나갑니다(BACKLOG B-35). 방화벽에서 출발지를 좁혀 두세요.
 #
-#   sudo cp /opt/tybot/deploy/nginx/tybot-console.conf /etc/nginx/conf.d/
-#   sudo nginx -t && sudo systemctl enable --now nginx
-#   sudo bash /opt/tybot/deploy/install.sh     (또는 다음 배포)
+# 아래를 끝내면 다음 배포에서 이 파일이 자동으로 사라집니다.
+#   sudo /opt/tybot/deploy/setup-nginx-tls.sh
 [Service]
 ExecStart=
-ExecStart=/opt/tybot/.venv/bin/uvicorn tybot.console.app:app \
-    --host 0.0.0.0 --port 8787 --app-dir /opt/tybot/src
+ExecStart=/opt/tybot/.venv/bin/uvicorn $app \\
+    --host 0.0.0.0 --port $port --app-dir /opt/tybot/src
 DROPIN
   systemctl daemon-reload
-  echo "  ⚠ nginx 가 콘솔을 받지 않아 평문 바인딩(0.0.0.0:8787)을 유지합니다." >&2
+  systemctl is-active --quiet "$unit" && systemctl restart "$unit" || true
+  echo "  ⚠ nginx 가 $label 을 받지 않아 평문 바인딩(0.0.0.0:$port)을 유지합니다." >&2
   echo "    B-35 가 끝나지 않은 상태입니다 — 비밀번호와 세션 쿠키가 평문으로 흐릅니다." >&2
-  echo "    끝내는 방법: $dropin" >&2
+  echo "    방화벽에서 $port 출발지를 필요한 대역으로 좁히세요. 끝내는 방법: $dropin" >&2
+}
+
+console_bind_guard() {
+  console_bind_guard_for tybot-console tybot.console.app:app 8787 "TYBot 콘솔"
+  # PF 콘솔은 설치돼 있을 때만. 없으면 조용히 넘어간다.
+  console_bind_guard_for pf-hermes-console tybot_pf.app:app 8788 "PF 콘솔"
 }
 
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
