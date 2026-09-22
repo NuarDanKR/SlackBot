@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "api": "node scripts/run-api.mjs",
-    "dev:all": "npm-run-all --parallel api dev"
+    "dev:all": "npm-run-all --parallel api dev",
+    "build:pf": "tsc -b && vite build -c vite.pf.config.ts",
+    "dev:pf": "vite -c vite.pf.config.ts",
+    "build:all": "npm run build && vite build -c vite.pf.config.ts"
   },
   "dependencies": {
     "react": "^19.1.1",

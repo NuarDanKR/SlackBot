@@ -1,0 +1,77 @@
+[Unit]
+# PF 운영 콘솔 — 프금팀 Hermes 상태를 보는 읽기 전용 화면 (`/pf/`)
+#
+# 설계: /opt/tybot/docs/design/pf-console.md
+#       /opt/tybot/docs/design/pf-hermes-owner-plan.md §8
+#
+# ## 왜 별도 unit 인가
+# TYBot 콘솔에 route 만 더하는 것은 격리가 아니다(§8.1). 같은 프로세스면 같은 env 를
+# 읽고 같은 DB 연결을 쓰며, TYBot `developer` 가 PF 를 보게 된다. 프로세스를 나눠야
+# env·DB role·쿠키를 나눌 수 있다.
+Description=PF 운영 콘솔 (프금팀 Hermes 상태 조회)
+Documentation=file:///opt/tybot/docs/design/pf-console.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 전용 계정. TYBot 콘솔(`tybot`)과 다르다 — 같은 계정이면 `/etc/tybot/tybot.env` 를
+# 읽을 수 있고, 그 파일에는 TYBot 의 DATABASE_URL 과 Slack·Anthropic 키가 있다.
+#
+#   sudo useradd --system --no-create-home --shell /sbin/nologin tybot-pf
+User=tybot-pf
+Group=tybot-pf
+
+WorkingDirectory=/opt/tybot
+
+# **PF 전용 설정만 읽는다.** /etc/tybot/tybot.env 를 여기에 적지 않는다.
+#   PF_DATABASE_URL          전용 DB role 접속 문자열
+#   PF_CONSOLE_SECRET        세션 서명 키
+#   PF_CONSOLE_DIST          /pf/ 화면 빌드 산출물 경로
+#   PF_STATE_ROOT            서비스 상태 파일 상위 경로 (기본 /var/lib/tybot-subbots)
+#   PF_CONSOLE_COOKIE_SECURE TLS 를 붙인 **뒤에** 1 로 켠다
+EnvironmentFile=/etc/tybot-pf/console.env
+
+# 루프백에만 연다. 밖으로 나가는 문은 nginx 하나뿐이다(deploy/nginx/tybot-console.conf).
+ExecStart=/opt/tybot/.venv/bin/uvicorn tybot_pf.app:app \
+    --host 127.0.0.1 --port 8788 --app-dir /opt/tybot/src
+
+Restart=on-failure
+RestartSec=5s
+
+# --- 격리 ------------------------------------------------------------------
+#
+# 완료 게이트(§10): PF 계정이 TYBot env/archive/DB 를 읽지 못해야 한다. 파일 권한만
+# 믿지 않고 systemd 에서도 막는다 — 둘 중 하나가 틀렸을 때 나머지가 막아 준다.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# 이 프로세스는 아무것도 쓰지 않는다. 읽기 전용 화면이고, 감사 기록은 DB 로 간다.
+ReadWritePaths=
+
+# TYBot 의 설정과 자료를 **경로 단위로** 가린다. 계정 권한이 잘못 설정돼도 여기서 막힌다.
+InaccessiblePaths=/etc/tybot
+InaccessiblePaths=/var/lib/tybot
+
+# 상태 파일은 읽기만 한다. Hermes 가 쓰고 우리는 본다.
+ReadOnlyPaths=/var/lib/tybot-subbots
+
+# 자기 unit 말고는 systemd 를 만지지 않는다. 오늘 화면에는 restart·stop 이 없고,
+# 나중에 열더라도 고정 helper 를 거친다(§7.3).
+PrivateDevices=true
+
+# 리소스 상한. 조회 화면 하나가 서버를 흔들지 않게.
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

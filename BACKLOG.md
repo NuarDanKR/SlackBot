@@ -128,7 +128,7 @@ _최종 갱신: 2026-09-17_
 | [B-32](#b-32) | 아카이브 v2 전환 — 워크스페이스/채널ID/일자별 원문·첨부 분리 | **높음** | 완료 (Codex/2026-08-31) | 없음 |
 | [B-33](#b-33) | 그룹웨어 알림 → Slack DM 중계 | **높음** | 설계 완료 · 착수 대기 | B-05 |
 | [B-34](#b-34) | 팀 일정 공지 + `/일정` 명령 | **높음** | 추출기 완료 · 수신기·명령 대기 | 없음 |
-| [B-35](#b-35) | 콘솔 TLS — nginx 앞단으로 옮기기 | **높음** | 준비됨 (평문 노출 중) | 없음 |
+| [B-35](#b-35) | 콘솔 TLS — nginx 앞단으로 옮기기 | **높음** | 구성 완료·서버 적용 대기 (Claude/2026-09-22) | 없음 |
 | [B-36](#b-36) | **봇 체계 확정** — 마스터 TYBot + 전문 봇 | **높음** | 설계 완료 (2026-09-02) | B-27a |
 | [B-37](#b-37) | **요약 검토 승인 흐름** (Hermes 흡수) | **높음** | 후보·승인·Canvas 구현 완료·운영 검증 대기 | B-36 |
 | [B-38](#b-38) | 팀 개발자가 전문 봇 배포 — **저장소 분리** | 중 | HTTP v2 기반 구현 완료·실행 배선/운영 검증 대기 | B-36 |
@@ -559,6 +559,66 @@ B-39의 외부 MCP 조사는 공식 법령을 읽는 도구 계층으로 한정�
 
 관련 권고 — 전 채널 협의는 비현실적이다. 콘솔 채널 화면이 **답변이 많은데 담당자가
 없는 채널**을 맨 위로 올린다. 그 순서로 상위 10~20개만 먼저 붙인다.
+
+---
+
+## B-63
+### Hermes 소스 분석과 TYBot Archive Specialist 개선
+
+**우선 높음 · TYBot 구현 완료·프금팀 이관 작업 대기 (Codex/2026-09-21) · 의존 B-44, B-53**
+
+프금팀 Hermes와 TYBot Archive Specialist는 서로 다른 제품으로 운영한다. 프금팀 봇은
+독립 서비스·계정·환경변수·Slack 앱·자료 저장소를 사용하고, TYBot은 Hermes의 검색·판정
+규칙 중 중앙 ACL과 마스터 책임을 침범하지 않는 부분만 계약형 전문가에 이식한다.
+
+- [x] Hermes의 GCP, 비공개 Git 아카이브, systemd, 환경변수 의존 분석
+- [x] 프금팀 개발자용 Rocky 서버 이관 준비 계약과 검증·롤백 절차 작성
+- [x] TYBot 검색 결과에서 사람 대화와 문서·Canvas를 분리해 표시
+- [x] 채널 좁힘을 권한 내 정확·유일 이름으로만 적용하고 모호한 이름은 거부
+- [x] 별칭 재검색을 한 번으로 제한하고 실제 자료 없음과 탐색 실패를 구분
+- [x] 관련 테스트 76건, 전체 pytest, Ruff 검증. 전체 중 WSL 의존 30건은 환경 실패
+
+내부 정본: [Hermes 서버 이관과 TYBot 통합 — 내부 오너 계획](docs/design/pf-hermes-owner-plan.md)
+
+---
+
+## B-64
+### 프금팀 Hermes 서버 이관과 독립 운영 콘솔
+
+**우선 긴급 · 읽기 전용 `/pf/` 콘솔 구현 완료·서버 배포 대기 (Claude/2026-09-22) ·
+프금팀 코드 변경 및 인프라 준비 대기 · 의존 B-35**
+
+프금팀의 독립 Hermes를 개인 GCP에서 TYBot과 같은 서버로 옮기되, TYBot과 계정·환경변수·
+Slack 앱·모델 키·자료·로그·배포 장애를 공유하지 않는다. 기존 TYBot 전문 봇 콘솔은
+TYBot이 호출하는 계약형/HTTP 전문가를 전제로 하므로 프금팀 독립 Slack 봇을 그대로
+등록하지 않는다.
+
+프금팀 전달본: [Hermes 서버 이관 준비 계약](docs/design/pf-hermes-migration-handoff.md)
+
+내부 실행 계획: [Hermes 서버 이관과 TYBot 통합 — 내부 오너 계획](docs/design/pf-hermes-owner-plan.md) §7~10
+
+우리 측 단계:
+
+- [ ] 서비스 키, 업무/인프라 소유자, RPO/RTO, 비용·장애 연락 계약 확정
+- [ ] `pf-hermes` 전용 OS 계정·경로·SELinux·resource limit·백업 구성
+- [ ] 전용 Slack 앱·Anthropic key·코드/자료 Git deploy key 발급과 교체 절차
+- [ ] 고정 systemd unit, 안전한 수동 배포·원자적 롤백 helper와 runbook
+- [ ] GCP 대비 24시간 shadow 수집·권한·비용·응답 검증 후 단일 인스턴스 전환
+- [x] `/pf/` 별도 backend·cookie·DB role·service-scope RBAC (2026-09-22)
+      — [`src/tybot_pf/`](src/tybot_pf/), [`deploy/pf-hermes-console.service`](deploy/pf-hermes-console.service),
+      [`deploy/sql/pf_console_schema.sql`](deploy/sql/pf_console_schema.sql)
+- [x] PF 읽기 전용 상태·수집/Git·배치·비용·감사 화면
+      — [`console-web/src/pf/`](console-web/src/pf/). 상태 파일이 없는 지금은
+      「상태 없음」 으로 보인다(빈 화면이 아니다)
+- [x] PF 계정의 TYBot env/archive/API/DB 접근 거부와 시크릿 비노출 **자동 검사**
+      — [`tests/test_pf_isolation.py`](tests/test_pf_isolation.py),
+      [`tests/test_pf_console_api.py`](tests/test_pf_console_api.py)
+- [ ] 서버 배포와 smoke — 설계 [`pf-console.md`](docs/design/pf-console.md) §8·§9
+- [ ] allowlist 운영 action과 릴리스 제출·분리 승인·활성화·롤백 자동화
+      (고정 helper·lock·timeout·감사가 먼저다. 오늘 열지 않았다)
+
+권장 콘솔 구조는 같은 UI 소스를 재사용하되 `/pf/`를 별도 프로세스로 reverse proxy하는
+방식이다. 기존 FastAPI에 React route만 추가하는 것은 권한 격리가 아니므로 금지한다.
 
 ---
 
@@ -1489,7 +1549,7 @@ inbox 하위 `notify/` 폴더. **신규 방화벽 규칙 0건.**
 
 ## B-35
 ### 콘솔 TLS — nginx 앞단으로 옮기기
-**우선 높음 · 상태 준비됨 · 의존 없음**
+**우선 높음 · 구성 완료·서버 적용 대기 (Claude/2026-09-22) · 의존 없음**
 
 2026-09-01 에 콘솔을 사내망 전체에 열었다(`--host 0.0.0.0`, 오너 승인).
 **평문 HTTP 다. 임시 상태로 두기로 한 것이며, 이 항목이 그 약속이다.**
@@ -1510,8 +1570,18 @@ inbox 하위 `notify/` 폴더. **신규 방화벽 규칙 0건.**
   쿠키가 전송되지 않아 로그인이 안 된다
 - 인증서: 사내 CA 발급이 1순위. 없으면 자체 서명으로 시작해도 평문보다 낫다
 
-**완료 조건**
+**구성 (2026-09-22 완료)**
+- [x] nginx 설정 — [`deploy/nginx/tybot-console.conf`](deploy/nginx/tybot-console.conf).
+      443 TLS 종료 → `127.0.0.1:8787`(TYBot) · `127.0.0.1:8788`(PF). 80 은 308 로 넘긴다
+- [x] `tybot-console.service` 를 `--host 127.0.0.1` 로 되돌림
+- [x] 적용 순서를 unit 주석과 [`docs/design/pf-console.md`](docs/design/pf-console.md) §8 에 박음
+      — **`CONSOLE_COOKIE_SECURE=1` 은 TLS 뒤에.** 먼저 켜면 쿠키가 안 가서
+      「비밀번호가 틀렸다」 처럼 보인다
+- [x] 회귀 시험 — `tests/test_pf_isolation.py`
+
+**완료 조건 (서버에서 확인)**
 - [ ] `curl -sI http://<서버>:8787/` 가 접속되지 않음(콘솔이 밖에 안 열려 있음)
+- [ ] `curl -sI http://<서버>:8788/` 가 접속되지 않음(PF 콘솔도 마찬가지)
 - [ ] HTTPS 로 로그인되고 쿠키에 `Secure` 가 붙음
 - [ ] 평문 80 접속이 443 으로 넘어감
 
