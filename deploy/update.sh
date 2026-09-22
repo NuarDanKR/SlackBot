@@ -82,7 +82,18 @@ if ! PYTHONPATH="$SRC/src" "$APP/.venv/bin/python" -m pytest -q "$SRC/tests" \
 fi
 
 log "배포"
-TYBOT_INSTALL_HINTS=0 bash "$SRC/deploy/install.sh"
+# install.sh 는 부가 구성 요소가 빠졌을 때 **끝까지 돌고 4 로 끝난다.**
+# 여기서 `set -e` 로 멈추면 코드는 배치됐는데 서비스는 옛 프로세스 그대로가 되고,
+# 그게 2026-09-22 에 콘솔이 안 살아난 이유다 — 문서 변환기 하나가 1/6 단계에서
+# 배포를 끊었다. 그래서 종료 코드를 받아 두고 **끝까지 간 뒤** 알린다.
+INSTALL_RC=0
+TYBOT_INSTALL_HINTS=0 bash "$SRC/deploy/install.sh" || INSTALL_RC=$?
+if ((INSTALL_RC == 4)); then
+  log "설치 중 일부 구성 요소가 준비되지 않았습니다(위 ⚠ 참조). 배포는 계속합니다."
+elif ((INSTALL_RC != 0)); then
+  log "설치 실패(코드 $INSTALL_RC) — 배포 중단. 운영 프로세스는 그대로 유지됩니다."
+  exit "$INSTALL_RC"
+fi
 
 log "스키마 적용 및 앱 계정 검사"
 bash "$APP/deploy/apply-schema.sh"
@@ -115,4 +126,11 @@ if systemctl is-active --quiet tybot; then
 else
   log "기동 실패 — journalctl -u tybot -n 50 확인"
   exit 1
+fi
+
+# 서비스가 다 뜬 뒤에 미뤄 둔 실패를 알린다. **여기서 실패로 끝내는 이유**는
+# 0 으로 끝내면 콘솔 배포 화면이 성공으로 표시하고, 그러면 아무도 안 고치기 때문이다.
+if ((INSTALL_RC == 4)); then
+  log "다만 일부 구성 요소가 빠졌습니다 — 위 ⚠ 를 보고 고친 뒤 다시 배포하세요."
+  exit 4
 fi

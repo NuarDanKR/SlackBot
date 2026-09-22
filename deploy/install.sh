@@ -15,6 +15,10 @@ PY=python3.11
 INSTALL_DOCUMENT_CONVERTERS=${INSTALL_DOCUMENT_CONVERTERS:-1}
 KORDOC_VERSION=4.12.0
 
+# 배포를 끊지 않고 **끝에서** 알릴 실패들. 부가 기능이 없다고 서비스 재시작까지
+# 막으면, 고치려고 누른 배포가 오히려 서비스를 세운다.
+DEFERRED_FAILURES=()
+
 [[ $EUID -eq 0 ]] || { echo "root 로 실행하세요 (sudo)"; exit 1; }
 
 echo "== 1/6 시스템 패키지 =="
@@ -71,12 +75,25 @@ if [[ "$INSTALL_DOCUMENT_CONVERTERS" == "1" ]]; then
     fi
     if ! npm list -g --depth=0 "kordoc@$KORDOC_VERSION" >/dev/null 2>&1; then
       echo "  kordoc $KORDOC_VERSION + 내장 OCR 설치"
-      npm install -g --no-audit --no-fund "kordoc@$KORDOC_VERSION"
+      npm install -g --no-audit --no-fund "kordoc@$KORDOC_VERSION" || true
     fi
-    command -v kordoc >/dev/null || {
-      echo "kordoc 설치 후 실행 파일을 찾지 못했습니다."
-      exit 1
-    }
+    # npm 전역 prefix 가 root PATH 에 없으면 설치는 됐는데 못 찾는다. 흔한 경우라
+    # 실제 경로를 한 번 더 본다.
+    if ! command -v kordoc >/dev/null; then
+      NPM_BIN="$(npm prefix -g 2>/dev/null)/bin"
+      [[ -x "$NPM_BIN/kordoc" ]] && export PATH="$NPM_BIN:$PATH"
+    fi
+    if ! command -v kordoc >/dev/null; then
+      # **여기서 죽지 않는다.** 2026-09-22 에 이 exit 1 이 1/6 단계에서 배포를
+      # 끊었고, 코드 배치도 서비스 재시작도 안 돌았다. 문서 변환기 하나 때문에
+      # 콘솔이 못 살아났다 — 「실패한 배포가 현재 서비스를 중지해서는 안 된다」.
+      #
+      # 대신 끝까지 가고 **끝에서 실패로 끝낸다**(exit 4). 배포는 완료되고,
+      # 실패 사실은 종료 코드와 마지막 안내에 남는다. 조용히 넘어가지 않는 이유는
+      # HWP/HWPX·스캔 PDF 가 변환되지 않는 것이 오류 없이 「첨부가 비어 있음」 으로만
+      # 보이기 때문이다.
+      DEFERRED_FAILURES+=("kordoc 실행 파일을 찾지 못했습니다 — HWP/HWPX·스캔 PDF 변환이 멈춥니다")
+    fi
   fi
 fi
 
@@ -475,4 +492,22 @@ cat <<EOF
   6) sudo systemctl enable --now tybot-console
   7) 8787 포트는 사내망/VPN 출발지에만 허용하세요.
 EOF
+fi
+
+# 미뤄 둔 실패. **배포는 끝났고 서비스는 돌지만, 이 스크립트는 실패로 끝난다.**
+# 0 으로 끝내면 호출한 쪽(update.sh·콘솔 배포)이 성공으로 보고하고, 그러면 아무도
+# 안 고친다.
+if ((${#DEFERRED_FAILURES[@]})); then
+  echo
+  echo "⚠ 배포는 끝났지만 아래가 준비되지 않았습니다 — 그 기능만 멈춥니다." >&2
+  for item in "${DEFERRED_FAILURES[@]}"; do
+    echo "   ✗ $item" >&2
+  done
+  echo >&2
+  echo "   kordoc 이라면:" >&2
+  echo "     npm prefix -g            # 전역 prefix 확인" >&2
+  echo "     npm install -g kordoc@$KORDOC_VERSION" >&2
+  echo "     ls -l \"\$(npm prefix -g)/bin/kordoc\"" >&2
+  echo "   설치 없이 넘어가려면 INSTALL_DOCUMENT_CONVERTERS=0 으로 다시 실행하세요." >&2
+  exit 4
 fi

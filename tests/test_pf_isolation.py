@@ -416,3 +416,52 @@ def test_the_console_error_message_gives_no_broken_command():
     assert "uvicorn tybot.console.app" not in message, (
         "화면이 서버에서 실패하는 명령을 안내합니다."
     )
+
+
+def test_a_missing_optional_component_does_not_stop_the_deploy():
+    """부가 구성 요소가 배포를 끊으면, 고치려고 누른 배포가 서비스를 세운다.
+
+    2026-09-22. 문서 변환기(kordoc) 실행 파일을 못 찾자 `install.sh` 가 1/6 단계에서
+    `exit 1` 했다. 코드 배치도, 서비스 재시작도, 바인딩 안전장치도 돌지 않았다 —
+    콘솔이 죽은 채로 남았고 복구하려면 SSH 가 필요했다.
+
+    「실패한 배포가 현재 서비스를 중지해서는 안 된다」(오너 계획 §9).
+    """
+    install = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+
+    # 변환기 **확인 블록**만 본다. 변수 선언부터 자르면 root 검사(`exit 1`)까지
+    # 딸려 들어와 엉뚱한 것을 잡는다. 주석도 뺀다 — 거기서는 옛 `exit 1` 을 설명한다.
+    start = install.index('if [[ "$INSTALL_DOCUMENT_CONVERTERS" == "1" ]]; then')
+    block = _directives(install[start : install.index("== 2/6", start)])
+
+    assert "exit 1" not in block, (
+        "문서 변환기 확인이 배포를 즉시 끊습니다 — 서비스 재시작이 안 돕니다."
+    )
+    assert "DEFERRED_FAILURES" in block, "실패를 미뤄 둘 자리가 없습니다."
+
+
+def test_a_deferred_failure_still_ends_as_a_failure():
+    """조용히 넘어가면 콘솔 배포 화면이 성공으로 표시하고, 아무도 안 고친다.
+
+    HWP/HWPX·스캔 PDF 가 변환되지 않는 것은 오류 없이 「첨부가 비어 있음」 으로만
+    보인다 — 그래서 종료 코드로라도 말해야 한다.
+    """
+    install = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+    update = (DEPLOY / "update.sh").read_text(encoding="utf-8")
+
+    assert "exit 4" in install, "미뤄 둔 실패가 성공으로 끝납니다."
+    # update.sh 는 4 를 받고도 **계속 가고**, 끝에서 4 로 끝낸다.
+    assert "INSTALL_RC" in update
+    assert 'bash "$SRC/deploy/install.sh" || INSTALL_RC=$?' in update, (
+        "update.sh 가 install.sh 의 실패에서 곧바로 멈춥니다."
+    )
+    assert "exit 4" in update
+
+
+def test_the_restart_happens_before_the_deploy_gives_up():
+    """순서가 전부다. 재시작이 실패 보고보다 뒤에 있으면 고친 것이 아니다."""
+    update = (DEPLOY / "update.sh").read_text(encoding="utf-8")
+
+    restart = update.index("systemctl restart tybot")
+    give_up = update.rindex("exit 4")
+    assert restart < give_up, "서비스 재시작보다 먼저 포기합니다."
