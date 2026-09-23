@@ -283,3 +283,39 @@ def test_v3_does_not_open_a_new_port():
     )
     for banned in ("http://", "https://", "0.0.0.0", "bind("):
         assert banned not in source, f"v3 가 네트워크를 엽니다: {banned}"
+
+
+# --- 2026-09-23 결정 -----------------------------------------------------------
+def test_live_slack_is_not_handed_out_by_default():
+    """분리 결정 §4.C 가 「방금 올린 것」 문제를 **수집 완료 ack** 로 푼다.
+
+    Hermes 에 Slack 경로를 또 주면 수집 주인이 둘이 되고, 그건 이번 분리가
+    없애려던 것이다.
+    """
+    assert "fetch_recent_slack" not in v3.DEFAULT_TOOLS
+    assert "fetch_recent_slack" in v3.TOOLS      # 줄 수는 있다. 기본이 아닐 뿐이다
+
+    body = _body(_request())
+    assert "fetch_recent_slack" not in body["tools"]["allow"]
+
+
+def test_live_slack_can_still_be_granted_on_purpose():
+    """기본으로 새지 않는 것과 영영 못 주는 것은 다르다."""
+    body = _body(_request(allow=(*v3.DEFAULT_TOOLS, "fetch_recent_slack")))
+    assert "fetch_recent_slack" in body["tools"]["allow"]
+
+
+def test_a_partial_answer_is_answered_not_failed():
+    """읽은 것이 있는데 `failed` 로 버리면 사람은 답을 못 받고, 마스터 폴백이
+    같은 자료를 다시 찾는다. 대신 어디까지 찾았는지를 `uncertain` 에 적는다."""
+    got = _validate(
+        _response(
+            status=v3.STATUS_ANSWERED,
+            answer="지금까지 찾은 것은 …",
+            used_evidence=["e7"],
+            uncertain=["예산이 끝나 2026-08 이전은 보지 못했습니다"],
+        )
+    )
+
+    assert not got.should_fall_back
+    assert got.uncertain

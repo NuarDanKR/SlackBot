@@ -55,6 +55,12 @@ MAX_TOOL_RESULT_BYTES = 32 * 1024
 # 가 조용히 돌아오고, 모델은 그 도구가 없는 줄 알고 다른 길로 간다.
 TOOLS = ("search", "read_channel", "read_document", "fetch_recent_slack")
 
+# 기본으로 주는 것. **`fetch_recent_slack` 은 빠져 있다**(2026-09-23 결정).
+# 분리 결정 §4.C 가 「방금 올린 것」 문제를 **수집 완료 ack** 로 푼다. Hermes 에
+# Slack 경로를 또 주면 수집 주인이 둘이 되고, 그건 이번 분리가 없애려던 것이다.
+# 필요하면 `allow` 로 명시해야 한다 — 기본으로 새지 않는다.
+DEFAULT_TOOLS = ("search", "read_channel", "read_document")
+
 # 응답 상태 넷. **「모른다」 와 「못 찾았다」 와 「고장났다」 를 가른다** — 셋을 하나로
 # 묶으면 화면에서 원인을 못 가리고, 그러면 고칠 곳도 못 정한다.
 STATUS_ANSWERED = "answered"
@@ -127,7 +133,7 @@ class Request:
     # v2 와 달리 **선택**이다. 도구로만 자료가 나가므로 씨앗 근거가 없어도 된다.
     evidence: tuple = ()
     follow_up: tuple[FollowUpRef, ...] = ()
-    allow: tuple[str, ...] = TOOLS
+    allow: tuple[str, ...] = DEFAULT_TOOLS
     budget: ToolBudget = field(default_factory=ToolBudget)
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     deadline_ms: int = DEADLINE_MS
@@ -365,6 +371,7 @@ __all__ = [
     "ANSWER_ENDPOINT",
     "CANCEL_ENDPOINT",
     "DEADLINE_MS",
+    "DEFAULT_TOOLS",
     "FALLBACK_STATUSES",
     "MAX_OUTPUT_CHARS",
     "MAX_REQUEST_BYTES",
