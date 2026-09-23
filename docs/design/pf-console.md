@@ -1,5 +1,19 @@
 # PF 운영 콘솔 (`/pf/`) — 읽기 전용 상태 화면
 
+> **보류 (2026-09-23 오너 결정).** 이 화면은 더 진행하지 않는다.
+>
+> [Archiving Bot 분리와 Hermes 직접 호출](archiving-bot-separation-2026-09-23.md)로
+> 계획이 바뀌면서 **전제가 사라졌다.** 이 화면은 우리 서버에 뜬 standalone
+> pf-hermes 의 `health.json` 을 보는 구조인데, 새 계획에서 Hermes 는 자기 수집·
+> Git writer 없이 TY DMZ 의 **전문 봇**으로 돈다. 볼 상태 파일이 생기지 않는다.
+>
+> 같은 문서 §5 가 「외부에서 접근 가능한 새 포트는 열지 않는다」 고도 정했다.
+>
+> 앞으로는 **TYBot 콘솔(8787)에 통합**한다 — PF 팀 최신 git 반영도 기존 전문 봇
+> 화면에서 한다. 아래 내용은 그때 재사용할 판단만 남기고 둔다. 특히
+> **상태 파일 allowlist**(§4)와 **서비스별 권한을 역할과 분리하는 것**(§3)은
+> 대상이 Archiving Bot·Hermes 실행본으로 바뀔 뿐 그대로 쓸 수 있다.
+
 > 작성: 2026-09-22
 > 범위: 오너 계획 [`pf-hermes-owner-plan.md`](pf-hermes-owner-plan.md) §7~§12 의 3단계
 > 상태: 구현 완료 · 서버 배포·smoke 대기
@@ -182,6 +196,48 @@ nginx 를 붙이고 나면 다음 배포에서 drop-in 이 저절로 사라진�
 > 더 헤매게 만드는 것이다.
 
 ## 8. 서버 적용
+
+```bash
+# 스키마 → PF DB role → 설치 → 권한. 스크립트가 순서와 확인을 맡는다.
+sudo /opt/tybot/deploy/apply-schema.sh
+
+sudo -u postgres psql -p 55432 -d tyslackai -c   "CREATE ROLE tybot_pf_console LOGIN PASSWORD '<암호>';"
+sudo /opt/tybot/deploy/apply-schema.sh          # GRANT 가 role 존재를 보고 붙는다
+
+sudo /opt/tybot/deploy/setup-pf-console.sh --dry-run
+sudo /opt/tybot/deploy/setup-pf-console.sh
+sudo vi /etc/tybot-pf/console.env               # 암호와 세션 키를 넣는다
+sudo systemctl enable --now pf-hermes-console
+sudo /opt/tybot/deploy/setup-pf-console.sh --verify
+
+# 권한. **이 행이 없으면 로그인은 되는데 아무것도 안 보인다.**
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/pf_grant.py   add <회사이메일> --role viewer
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/pf_grant.py list
+```
+
+`setup-pf-console.sh --verify` 가 「빠뜨려도 조용히 실패하는」 셋을 각각 다른 문장으로
+말한다. 셋 다 화면에서는 똑같이 「PF 콘솔이 고장났나」 로 보이기 때문이다.
+
+| 빠진 것 | 화면에 보이는 것 |
+|---|---|
+| `dist-pf` 빌드 | 빈 404 — API 는 뜨는데 화면이 없다 |
+| DB role · env 값 | 로그인이 503, 「서버 오류」 |
+| `console_user_service` 행 | 로그인은 되는데 「볼 수 있는 서비스가 없습니다」 |
+
+### 주소
+- nginx 없이: `http://<서버>:8788/pf/` — **`/pf/` 까지 붙여야 한다.** 앱이 라우트를
+  그 아래 등록하므로 8788 루트에는 아무것도 없다
+- nginx 를 붙인 뒤: `https://<서버>/pf/`
+
+### 어드민이라는 역할은 없다
+TYBot 콘솔의 `admin` 과 PF 의 역할은 **다른 축**이다. PF 에서 무엇을 볼 수 있는지는
+`console_user_service` 행이 정하고, TYBot 관리자라도 그 행이 없으면 아무것도 못 본다.
+
+오늘은 역할 넷이 전부 조회만 한다. 그래서 「PF 어드민」 을 만드는 일은
+`pf_grant.py add <이메일> --role viewer` 한 줄이다. 나중에 운영 action 을 열 때
+`operator`·`approver` 가 갈린다.
+
+## 8.1 옛 절차 (참고)
 
 ```bash
 # 0. 스키마 (managed_service · console_user_service · pf_audit_event)

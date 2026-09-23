@@ -22,10 +22,35 @@ import sys
 from pathlib import Path
 
 PF_ROOT = Path(__file__).resolve().parents[1] / "src" / "tybot_pf"
+PF_HOST_SETUP = Path(__file__).resolve().parents[1] / "deploy" / "setup-pf-hermes-host.sh"
 
 
 def _modules() -> list[Path]:
     return sorted(PF_ROOT.glob("*.py"))
+
+
+def test_pf_host_setup_has_fixed_isolated_paths_and_no_secret_arguments():
+    """호스트 준비가 편의상 TYBot 경로나 임의 인자로 넓어지지 않는다."""
+    script = PF_HOST_SETUP.read_text(encoding="utf-8")
+
+    assert "SVC=pf-hermes" in script
+    assert "ARCHIVE_ROOT=$STATE_ROOT/archive" in script
+    assert "HERMES_DATA_ROOT=/var/lib/tybot-subbots/pf-hermes/archive" in script
+    assert "HERMES_STATE_ROOT=/var/lib/tybot-subbots/pf-hermes/state" in script
+    assert "chmod 640 \"$ENV_FILE\"" in script
+    assert "root:$SVC" in script
+    assert "node_major" in script and "node_major >= 20" in script
+
+    for forbidden in (
+        "/etc/tybot/tybot.env",
+        "/var/lib/tybot/archive",
+        "/var/lib/tybot/qa-log",
+    ):
+        assert forbidden in script
+
+    assert "--token" not in script
+    assert "StrictHostKeyChecking=no" not in script
+    assert "setenforce 0" not in script
 
 
 def _directives(unit_text: str) -> str:
@@ -465,3 +490,105 @@ def test_the_restart_happens_before_the_deploy_gives_up():
     restart = update.index("systemctl restart tybot")
     give_up = update.rindex("exit 4")
     assert restart < give_up, "서비스 재시작보다 먼저 포기합니다."
+
+
+# --- PF 콘솔 설치 ---------------------------------------------------------------
+def test_the_deploy_builds_the_pf_screen_too():
+    """`npm run build` 만 돌리면 /pf/ 가 화면 없이 API 만 뜬다.
+
+    브라우저에는 빈 404 가 보이고, 그건 「PF 콘솔이 고장났나」 로 읽힌다.
+    """
+    install = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+
+    assert "npm run build:all" in install, "PF 화면(dist-pf)이 빌드되지 않습니다."
+    assert "dist-pf/index.html" in install, "PF 화면 산출물을 확인하지 않습니다."
+
+
+def test_the_pf_console_setup_checks_what_fails_silently():
+    """빠뜨려도 조용히 실패하는 셋을 각각 **다른 문장**으로 말해야 한다.
+
+    셋 다 「PF 콘솔이 고장났나」 로 똑같이 보이기 때문이다.
+    """
+    script = (DEPLOY / "setup-pf-console.sh").read_text(encoding="utf-8")
+
+    # (a) 화면이 없다 → API 만 뜨고 빈 404
+    assert "dist-pf" in script and "빈 404" in script
+    # (b) DB role 이 없다 → 로그인이 503
+    assert "503" in script
+    # (c) 권한 행이 없다 → 로그인은 되는데 아무것도 안 보인다
+    assert "볼 수 있는 서비스가 없습니다" in script
+
+
+def test_the_pf_console_setup_takes_no_secret_arguments():
+    """인자로 받으면 shell 이력과 배포 로그에 남는다."""
+    script = _directives((DEPLOY / "setup-pf-console.sh").read_text(encoding="utf-8"))
+
+    for banned in ("--password", "--secret", "--token"):
+        assert banned not in script, f"시크릿을 인자로 받습니다: {banned}"
+
+
+def test_the_pf_console_setup_tells_how_to_make_the_db_role_but_does_not_make_it():
+    """`CREATE ROLE` 은 암호를 받아야 하고, 그 암호가 스크립트를 지나가면 안 된다.
+
+    **안내하는 것과 실행하는 것은 다르다.** 명령을 보여 주는 것은 맞고, 실행하면
+    암호가 shell 이력과 배포 로그에 남는다.
+    """
+    script = _directives((DEPLOY / "setup-pf-console.sh").read_text(encoding="utf-8"))
+
+    lines = [line for line in script.splitlines() if "CREATE ROLE" in line]
+    assert lines, "DB role 만드는 방법을 알려 주지 않습니다."
+    for line in lines:
+        stripped = line.strip()
+        assert stripped.startswith(("todo+=", "echo")), (
+            f"CREATE ROLE 을 실행합니다: {stripped}"
+        )
+
+
+def test_the_pf_console_setup_verifies_the_db_isolation_both_ways():
+    """막히는 것만 보면 「전부 막혔는데 서비스도 안 도는」 상태를 통과로 읽는다."""
+    script = (DEPLOY / "setup-pf-console.sh").read_text(encoding="utf-8")
+
+    assert "managed_service" in script, "PF 표를 읽을 수 있는지 확인하지 않습니다."
+    assert "raw_line" in script, "TYBot 표에 닿지 못하는지 확인하지 않습니다."
+
+
+# --- 권한 부여 도구 --------------------------------------------------------------
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+
+def test_the_grant_tool_lives_outside_the_pf_package():
+    """PF 패키지가 TYBot DB 를 알면 격리가 깨진다.
+
+    권한을 주려면 `console_user_service` 에 써야 하는데, PF DB role 에는 그 권한이
+    없다 — 조회만 여는 화면이 자기 권한을 넓힐 수 있으면 조회 화면이 아니다.
+    """
+    assert (SCRIPTS / "pf_grant.py").exists()
+    assert not (PF_ROOT / "grant.py").exists(), "권한 도구가 PF 패키지 안에 있습니다."
+
+
+def test_the_grant_tool_matches_the_stored_email_case():
+    """대소문자가 다르면 행은 들어가는데 로그인한 사람과 안 맞고, 화면은 비어 있다."""
+    source = (SCRIPTS / "pf_grant.py").read_text(encoding="utf-8")
+
+    assert "lower(email) = lower(%s)" in source
+    # 넣을 때는 **DB 에 적힌 철자**를 쓴다.
+    assert "actual" in source
+
+
+def test_the_grant_tool_refuses_an_account_that_cannot_log_in():
+    """`console_user` 에 없는 이메일에 권한을 주면 그 행은 영원히 아무 일도 안 한다."""
+    source = (SCRIPTS / "pf_grant.py").read_text(encoding="utf-8")
+
+    assert "콘솔 계정이 없습니다" in source
+    assert "비활성 계정입니다" in source
+
+
+def test_the_grant_tool_reads_back_what_it_wrote():
+    """「넣었다」 와 「들어갔다」 는 다르다."""
+    source = (SCRIPTS / "pf_grant.py").read_text(encoding="utf-8")
+    insert = source.index("INSERT INTO console_user_service")
+    after = source[insert:]
+
+    assert "SELECT role FROM console_user_service" in after, (
+        "넣은 뒤에 읽어서 보여 주지 않습니다."
+    )

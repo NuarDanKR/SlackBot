@@ -308,8 +308,12 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
       echo "  ! Node $(node -v 2>/dev/null || echo 없음) 로는 빌드할 수 없습니다(20.19+ 필요)"
       return 1
     fi
-    ( cd "$APP_DIR/console-web" && npm ci --no-audit --no-fund && npm run build ) || return 1
+    # **둘을 같이 빌드한다**(`build:all`). TYBot 콘솔(`dist/`)과 PF 콘솔(`dist-pf/`)은
+    # 같은 소스에서 나오지만 산출물이 따로다. `build` 만 돌리면 `/pf/` 가 화면 없이
+    # API 만 뜨고, 브라우저에는 빈 404 가 보인다 — 「PF 콘솔이 고장났나」 로 읽힌다.
+    ( cd "$APP_DIR/console-web" && npm ci --no-audit --no-fund && npm run build:all ) || return 1
     [[ -f "$APP_DIR/console-web/dist/index.html" ]] || return 1
+    [[ -f "$APP_DIR/console-web/dist-pf/index.html" ]] || return 1
   }
 
   if [[ "${OFFLINE:-0}" == "1" ]]; then
@@ -317,7 +321,7 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   else
     echo "  콘솔 화면 빌드"
     if build_console; then
-      echo "  화면 빌드 완료: $APP_DIR/console-web/dist"
+      echo "  화면 빌드 완료: $APP_DIR/console-web/dist · dist-pf"
     else
       echo "  ! 콘솔 화면 빌드 실패 — 이전 화면으로 성공 처리하지 않습니다."
       exit 1
