@@ -760,9 +760,16 @@ class ArchiveStore:
         """
         # 같은 줄이 두 번 들어올 수 있다 — 색인 결과와 낡은 문서 파일 스캔이
         # 겹칠 때다. 그대로 두면 같은 사실이 두 번 인용되고, 근거 줄 수도 부풀려진다.
+        #
+        # 키는 **줄이 실제로 있는 파일**이어야 한다. `doc.path` 를 쓰면 안 된다 —
+        # `_merge()` 가 일자 파일을 합치면서 모든 줄에 같은 `path`(가장 최근 파일)를
+        # 달아 주는데, `lineno` 는 파일마다 1부터 다시 세므로 **다른 날의 다른 줄이
+        # 같은 키가 된다.** 그러면 둘 중 하나가 검색 결과에서 조용히 빠진다.
+        # 실측(PF 자료 43채널 2061줄): 2061줄 중 **1750줄**이 다른 줄과 키가 겹쳤다.
+        # 오류도 0건도 아니고 「그 말은 없었다」 로만 보이는 종류의 실패다.
         unique: dict[tuple, SearchHit] = {}
         for hit in hits:
-            key = (str(hit.doc.path), hit.line.lineno)
+            key = (str(hit.line.source_path or hit.doc.path), hit.line.lineno)
             kept = unique.get(key)
             if kept is None or hit.score > kept.score:
                 unique[key] = hit
