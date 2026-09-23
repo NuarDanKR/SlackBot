@@ -319,6 +319,13 @@ class ArchiveStore:
         legacy = self.root / "channels"
         # v2를 먼저 읽어 v1과 같은 라인이 있으면 새 경로를 출처로 남긴다.
         files = sorted(v2.glob("*/channels/*/raw/*.md")) if v2.is_dir() else []
+        # 구조 1 — 채널당 파일 하나(`channels/<slug>__<id>.md`). 아직 수집이 쓰지
+        # 않는 모양이라 운영 아카이브에는 하나도 없다. 그런데 읽는 쪽이 이걸 모르면
+        # 구조 1 로 만든 아카이브가 **오류 없이 통째로 안 보인다** — 파일은 있고
+        # 검색만 비어서, 실측이 「구조 1 이 빠르다」 로 나온다(아무것도 안 읽으니까).
+        # 구조를 고르기 전에 두 배치를 같은 눈으로 읽을 수 있어야 한다.
+        if v2.is_dir():
+            files.extend(sorted(v2.glob("*/channels/*.md")))
         if dm_scope and v2.is_dir():
             from .writer import _slugify
 
