@@ -39,6 +39,8 @@ from .. import (
 from ..access import RequestContext
 from ..answer import Answer, AnswerEngine
 from ..archive import writer
+from ..archive.attachment_writer import raw_lines_for
+from ..archive.attachment_writer import write_docs as write_attachment_docs
 from ..archive.canvas import canvas_lines
 from ..archive.channel_files import ChannelFileScan, referenced_files
 from ..archive.channel_files import collect as collect_channel_files
@@ -77,7 +79,13 @@ from ..collection_status import report as collection_report
 from ..compose import join_sections, truncated_notice, write_from_facts
 from ..config import cost_state_path
 from ..db import connect as db_connect
-from ..evidence_refs import attachment_refs_to_json, refs_from_json, refs_to_json
+from ..evidence_refs import (
+    MAX_ATTACHMENT_REFS,
+    MAX_REFS,
+    attachment_refs_to_json,
+    refs_from_json,
+    refs_to_json,
+)
 from ..failures import failure_message
 from ..feedback import (
     SLASH_HELP,
@@ -316,6 +324,54 @@ CHANNEL_SCOPE_NOTICE = (
     "_조회 범위: 현재 채널만 · 여러 채널 통합 조회는 TYBot 개인 DM에서 요청하세요._"
 )
 MAX_THREAD_CONTEXT_CHARS = 6000
+
+
+def _carry_context(answers: list, last):
+    """복합 답변이 다음 턴에 물려줄 **좌표를 합친 Answer**.
+
+    예전에는 마지막 하위질문의 답(`last`)으로만 QA 레코드를 썼다. 그래서 근거를
+    가진 앞 조각의 좌표가 통째로 사라졌다 — 화면에는 두 답이 다 나갔는데 기록에는
+    마지막 것만 남는다.
+
+    운영에서 그대로 터졌다(2026-09-22). 파일 8건을 나열한 답 뒤에 되묻기 한 조각이
+    붙었고, 기록에 남은 것은 되묻기였다. 다음 질문에서 사람이 「너가 말해준
+    첨부파일들 기준으로」 라고 가리켰지만 로그는 `refs_requested=0` — 열 좌표가
+    아예 없었다. 그리고 그 답이 또 좌표 없이 기록돼 **같은 자리를 반복**했다.
+
+    합치는 것은 **좌표와 출처뿐**이다. 답변 문장은 합치지 않는다 — 이어 가는 것은
+    문장이 아니라 원문 좌표다(원칙 1).
+    """
+    rows = [a for a in answers if a is not None]
+    if len(rows) <= 1:
+        return last
+    merged = last if last is not None else rows[-1]
+    seen_refs, refs = set(), []
+    seen_files, files = set(), []
+    seen_cites, cites = set(), []
+    terms: list[str] = []
+    for ans in rows:
+        for ref in getattr(ans, "evidence_refs", ()) or ():
+            key = repr(ref)
+            if key not in seen_refs:
+                seen_refs.add(key)
+                refs.append(ref)
+        for ref in getattr(ans, "attachment_refs", ()) or ():
+            key = repr(ref)
+            if key not in seen_files:
+                seen_files.add(key)
+                files.append(ref)
+        for cite in getattr(ans, "citations", ()) or ():
+            if cite not in seen_cites:
+                seen_cites.add(cite)
+                cites.append(cite)
+        for term in getattr(ans, "subject_terms", ()) or ():
+            if term not in terms:
+                terms.append(term)
+    merged.evidence_refs = refs[:MAX_REFS]
+    merged.attachment_refs = files[:MAX_ATTACHMENT_REFS]
+    merged.citations = cites
+    merged.subject_terms = terms
+    return merged
 
 # 판정은 됐지만 지금 배포가 못 하는 산출물 동작. **조용히 다른 것을 해 주지
 # 않는다** — 한 일과 요청이 어긋나면 사람은 봇이 한 일을 믿을 수 없게 된다(§3.2).
@@ -2867,6 +2923,7 @@ class WorkspaceBot:
         if decision.tasks:
             artifact = decision.tasks[0].artifact
         sections: list[str] = []
+        answers: list = []
         ctx: RequestContext | None = None
         last: Answer | None = None
         for master_task in decision.tasks:
@@ -2907,6 +2964,7 @@ class WorkspaceBot:
                     seed_hits=self._uploaded_now(ctx, event),
                 )
             last = ans
+            answers.append(ans)
             sections.append(ans.to_slack(preserve_markdown=True))
             task_traces.append(
                 {
@@ -2932,7 +2990,9 @@ class WorkspaceBot:
             source=first.source,
             question=raw_text,
         )
-        finish(join_sections(sections), intent=merged, ans=last, ctx=ctx)
+        finish(
+            join_sections(sections), intent=merged, ans=_carry_context(answers, last), ctx=ctx
+        )
 
     # --- 수집 -------------------------------------------------------------
     def _messages_from(self, client, event: dict) -> list:
@@ -2967,14 +3027,49 @@ class WorkspaceBot:
             )
             # 파일↔줄 연결을 들고 있어야 writer 뒤에 반영을 확인할 수 있다.
             self._pending_attachments = staged
+            # 첨부 정본을 먼저 쓴다. **원문보다 먼저**여야 한다 — 원문에 참조만
+            # 남기고 정본 쓰기가 실패하면 그 첨부 본문은 어디에도 없다.
+            self._write_attachment_docs(client, staged, channel_id)
             for item in staged:
-                for ln in item.lines:
+                # 분리가 켜져 있으면 본문은 정본으로 가고 원문에는 참조만 남는다.
+                # 고르는 자리를 한 곳에 둔다 — 호출부마다 고르면 한 군데가 빠지고,
+                # 그 경로만 옛 모양으로 쓰인다.
+                for ln in raw_lines_for(item):
                     out.append(writer.IncomingMessage(
                         ts=ts, speaker=speaker, text=ln, source_ts=source_ts,
                     ))
                 for w in item.warnings:
                     log.warning("첨부 처리 경고 ch=%s: %s", channel_id, w)
         return out
+
+    def _write_attachment_docs(self, client, staged, channel_id: str) -> None:
+        """첨부 정본을 쓴다. **수집을 막지 않는다.**
+
+        못 써도 원본과 staging 은 남아 있으므로 나중에 다시 만들 수 있다. 반대로
+        수집이 멈추면 놓친 원본은 되돌릴 수 없다 — Slack 백필은 분당 1요청이라
+        사실상 복구가 안 된다.
+
+        분리가 꺼져 있어도 쓴다. 본문은 아직 원문에도 들어가므로 중복이지만,
+        **켜기 전에 정본이 쌓여 있어야** 켠 날 과거 첨부가 통째로 안 보이는 일이
+        없다. 중복 계수는 `attachment_doc.usable_evidence()` 가 막는다.
+        """
+        if not staged:
+            return
+        channel = self._channel_name(client, channel_id) or channel_id
+        try:
+            write_attachment_docs(
+                self.archive_dir,
+                staged,
+                workspace=self.workspace,
+                channel_id=channel_id,
+                channel=channel,
+                visibility="공개",
+                acl=frozenset({channel}),
+            )
+        except Exception as exc:
+            log.warning(
+                "첨부 정본 쓰기 실패 ch=%s: %s", channel_id, type(exc).__name__
+            )
 
     def _stage_referenced_files(
         self, client, channel_id: str, file_ids, *, speaker: str
@@ -3006,12 +3101,13 @@ class WorkspaceBot:
             storage,
             workspace=self.workspace,
         )
+        self._write_attachment_docs(client, staged, channel_id)
         now = datetime.now(UTC)
         for item in staged:
             warnings.extend(item.warnings)
             out.extend(
                 writer.IncomingMessage(ts=now, speaker=speaker, text=line)
-                for line in item.lines
+                for line in raw_lines_for(item)
             )
         return out, warnings, staged
 

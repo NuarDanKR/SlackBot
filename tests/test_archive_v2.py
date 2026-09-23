@@ -160,7 +160,12 @@ def test_staged_attachment_rejects_all_extracted_lines_when_any_line_contains_pi
 
     lines, warnings = stage_files([raw_file], "xoxb-test", storage)
 
-    assert lines == ["[첨부:수집제외] 자료.txt (txt, 1KB)"]
+    # 본문은 한 줄도 안 나가고 참조만 남는다. **참조는 남아야 한다** — 없으면
+    # 사람이 원문을 읽을 때 파일이 있었다는 사실 자체가 사라진다.
+    #
+    # `id:` 는 이 줄과 첨부 정본을 잇는 좌표다(분리 결정 §3). 예전에는 이름뿐이라
+    # 같은 이름이 두 번 올라온 채널에서 맞춤이 틀렸다.
+    assert lines == ["[첨부:수집제외] 자료.txt (txt, 1KB) · id:F-PII"]
     assert warnings and "주민등록번호" in warnings[0]
     metadata = json.loads(
         (storage.staging_dir / "F-PII" / "metadata.json").read_text("utf-8")
@@ -221,8 +226,11 @@ def test_image_is_ocr_converted_without_waiting_for_a_command(
     lines, warnings = stage_files([raw_file], "xoxb-test", storage)
 
     assert warnings == []
+    # 참조 줄은 `id:` 를 들고, 본문은 그 뒤에 온다. 아직 `lines` 는 둘을 이어
+    # 붙인 값이다 — 분리는 호출부가 `reference_lines`/`body_lines` 를 골라 쓰면서
+    # 일어난다(분리 결정 §3).
     assert lines == [
-        "[첨부:자동변환] 현장사진.png (png, 1KB)",
+        "[첨부:자동변환] 현장사진.png (png, 1KB) · id:F-IMAGE",
         "[첨부추출:현장사진.png] OCR 본문",
     ]
     metadata = json.loads(

@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -104,14 +104,24 @@ class SlackFile:
     def is_convertible(self) -> bool:
         return can_convert(self.filetype)
 
-    def describe(self, state: str | None = None) -> str:
-        """원문에 남기는 한 줄 설명. 본문을 못 넣는 경우에도 흔적은 남는다."""
+    def describe(self, state: str | None = None, *, file_id: str = "") -> str:
+        """원문에 남기는 한 줄 설명. 본문을 못 넣는 경우에도 흔적은 남는다.
+
+        `file_id` 를 주면 뒤에 붙인다. **이 줄과 첨부 정본을 잇는 유일한 좌표다** —
+        없으면 이름으로 맞춰야 하고, 같은 이름이 두 번 올라온 채널에서는 그 맞춤이
+        틀린다(`attachment_trace` 가 같은 문제를 겪었다).
+
+        옛 줄에는 없다. 그래서 새 reader 는 ID 가 있으면 ID 로, 없으면 이름으로
+        맞춘다 — 그 다리는 옛 줄이 사라지면 저절로 걷힌다.
+        """
         kb = max(1, self.size // 1024)
         if state is None:
             state = "본문 수집" if self.is_text else ("변환" if self.is_convertible else "미변환")
         text = f"[첨부:{state}] {self.name} ({self.filetype or self.mimetype or '?'}, {kb}KB)"
         if self.permalink:
             text += f" · <{self.permalink}|원본 파일>"
+        if file_id:
+            text += f" · id:{file_id}"
         return text
 
 
@@ -157,6 +167,17 @@ class StagedAttachmentResult:
     metadata_path: Path
     warnings: list[str]
     extracted: bool = False
+    # 원문에 남길 **참조 줄**. 「이 파일이 여기 있었다」 만 말한다.
+    #
+    # 첨부 본문을 raw 에 복제하지 않기로 했다(분리 결정 §3). 그래도 참조는 남아야
+    # 한다 — 없으면 사람이 원문을 읽을 때 파일이 있었다는 사실 자체가 사라지고,
+    # 첨부 정본과 그 메시지를 잇는 좌표도 끊긴다.
+    reference_lines: list[str] = field(default_factory=list)
+    # 변환 본문 줄. **정본 문서로 가고 raw 에는 안 들어간다**(분리 뒤).
+    #
+    # `lines` 는 당분간 둘을 이어 붙인 값이다. 한 번에 바꾸면 옛 호출부가 조용히
+    # 본문을 잃는데, 그 손실은 오류가 아니라 「첨부가 검색에 안 잡힘」 으로 나타난다.
+    body_lines: list[str] = field(default_factory=list)
     # 파일이 올라온 시각(epoch 초). 0 이면 모른다 — 호출부가 수집 시각으로
     # 채우지 않고 **모른다는 사실을 그대로** 다뤄야 한다.
     created: int = 0
@@ -542,18 +563,22 @@ def stage_attachments(
             label = "수집제외"
         else:
             label = "처리실패"
-        own_lines = [f.describe(label)]
+        # 참조와 본문을 **만드는 자리에서** 가른다. 뒤에서 문자열을 보고 나누면
+        # 표식이 바뀔 때마다 그 파싱이 조용히 어긋난다.
+        own_reference = [f.describe(label, file_id=str(f.id or file_id))]
+        own_body: list[str] = []
         if extracted is not None:
             tag = "첨부본문" if f.is_text else "첨부추출"
-            body_lines = [line.strip() for line in extracted.splitlines() if line.strip()]
+            extracted_lines = [line.strip() for line in extracted.splitlines() if line.strip()]
             # **`0` 은 무제한이다.** `[:0]` 으로 읽으면 본문이 통째로 사라진다 —
             # 상한을 없애는 변경에서 가장 조용한 실패가 여기였다.
-            truncated = bool(MAX_TEXT_LINES) and len(body_lines) > MAX_TEXT_LINES
-            kept = body_lines[:MAX_TEXT_LINES] if MAX_TEXT_LINES else body_lines
+            truncated = bool(MAX_TEXT_LINES) and len(extracted_lines) > MAX_TEXT_LINES
+            kept = extracted_lines[:MAX_TEXT_LINES] if MAX_TEXT_LINES else extracted_lines
             for line in kept:
-                own_lines.append(f"[{tag}:{f.name}] {line}")
+                own_body.append(f"[{tag}:{f.name}] {line}")
             if truncated:
-                own_lines.append(f"[{tag}:{f.name}] …(이하 생략, 원본 링크에서 확인)")
+                own_body.append(f"[{tag}:{f.name}] …(이하 생략, 원본 링크에서 확인)")
+        own_lines = [*own_reference, *own_body]
 
         from ..attachment_trace import line_hash
 
@@ -561,6 +586,8 @@ def stage_attachments(
             file_id=str(f.id or file_id),
             name=f.name,
             lines=own_lines,
+            reference_lines=own_reference,
+            body_lines=own_body,
             line_hashes=[line_hash(ln) for ln in own_lines],
             metadata_path=staged / "metadata.json",
             warnings=list(own_warnings),
