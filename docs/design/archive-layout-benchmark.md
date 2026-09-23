@@ -401,13 +401,45 @@ Hermes 쪽이 같다면 결정 근거는 우리가 치르는 비용뿐이다.
 않는다. 공개로 찍었다가 틀리면 사내 대화가 권한 없는 사람에게 열리고, 비공개로
 찍었다가 틀리면 사람이 못 볼 뿐이다(절대 원칙 3).
 
-### 재현
+### 재현 — git 체크아웃에서
 
 ```bash
 python scripts/archive_layout_convert.py --from pf --source <스냅샷> --to a --out <lab>/a
 python scripts/archive_layout_convert.py --from pf --source <스냅샷> --to b --out <lab>/b
 python scripts/archive_layout_convert.py --verify <lab>/a <lab>/b
-python -m pytest tests/test_archive_layout_equivalence.py tests/test_search_merged_dedup.py
+python -m pytest tests/test_archive_layout_equivalence.py tests/test_archive_provenance.py \
+                 tests/test_search_merged_dedup.py
+```
+
+커밋은 `source` 에서 자동으로 읽는다(위 실행에서 `eeb50045fe88…` 이 잡혔다).
+
+### 재현 — ZIP 으로 받은 사본에서
+
+**`--source-commit` 을 손으로 준다.** ZIP 에는 `.git` 이 없어 커밋을 읽을 수 없고,
+그대로 두면 manifest 의 `source_commit` 이 `null` 이 된다. 그러면 나중에 「이
+변환이 PF 의 어느 release 였나」 를 아무 데서도 못 찾는다.
+
+```bash
+unzip pf-hermes-archive.zip -d <lab>/snapshot
+
+python scripts/archive_layout_convert.py --from pf --source <lab>/snapshot --to a \
+    --out <lab>/a --source-commit eeb50045fe8813ff2bfb2e7b9a5f8d1e1f227881
+python scripts/archive_layout_convert.py --from pf --source <lab>/snapshot --to b \
+    --out <lab>/b --source-commit eeb50045fe8813ff2bfb2e7b9a5f8d1e1f227881
+python scripts/archive_layout_convert.py --verify <lab>/a <lab>/b
+```
+
+**두 실행에 같은 값을 준다.** 다르게 주면 manifest 가 갈리고, 사이드카 바이트
+비교가 실패한다 — 구조 차이가 아닌데 그렇게 보인다.
+
+그리고 `source_snapshot_sha256` 이 git 체크아웃에서 돌린 값과 **같은지 본다.**
+같으면 ZIP 이 그 커밋의 내용과 일치한다는 뜻이고, 다르면 ZIP 이 다른 시점이거나
+푸는 과정에서 무언가 바뀐 것이다. 커밋 SHA 는 그것을 말해 주지 못한다 — 사람이
+적어 넣은 값이기 때문이다.
+
+```bash
+python -c "import json,sys; print(json.load(open(sys.argv[1],encoding='utf-8'))['source_snapshot_sha256'])" \
+    <lab>/a/workspaces/pf/provenance/manifest.json
 ```
 
 운영 경로(`/var/lib/tybot/archive` 등)를 `--out` 으로 주면 거부한다.
@@ -424,7 +456,24 @@ workspaces/<workspace>/provenance/<stable_id>.jsonl
 workspaces/<workspace>/provenance/manifest.json
 ```
 
-`<stable_id>` 는 채널 ID, PF 자료처럼 없으면 `legacy-<slug>`.
+`<stable_id>` 는 채널 ID, PF 자료처럼 없으면 `legacy-<16 hex>` 다.
+
+**이름 slug 를 쓰지 않는다.** `_slugify` 는 경로에 못 쓰는 글자를 지우므로,
+그 글자만 다른 두 채널(`#팀_자금/주간` · `#팀_자금:주간`)이 **같은 파일**이 된다.
+권한이 다른 두 채널이 합쳐지면 그건 유출이다(절대 원칙 3). 해시는
+`sha256({"channel":…,"workspace":…})` 의 앞 16자이고 길이도 고정이다.
+
+`legacy-` 접두어는 남긴다 — 이 값이 **Slack ID 가 아니라는 사실**이 경로 이름만
+보고도 드러나야 한다. 사람이 이걸 들고 Slack 에서 찾으면 안 된다.
+
+원문 파일명은 여전히 읽힌다 — 구조 1 은 `<slug>__<id>.md` 라 이름이 앞에 온다.
+
+    a_용인8구역__legacy-29899532aeaabd54.md
+
+**쓰기 전에 `(workspace, stable_id)` 중복을 확인하고, 겹치면 멈춘다.** 겹친 채로
+쓰면 뒤에 쓴 채널이 앞의 것을 덮는다. 구조 1 은 파일 하나라 통째로 사라지고,
+구조 2 는 같은 날짜 파일만 덮여 **일부만** 사라진다. 어느 쪽도 오류를 내지
+않는다 — 파일은 멀쩡하고 줄만 없다. 그래서 경고가 아니라 중단이다.
 
 **`channels/` 밖에 둔다.** `ArchiveStore._files()` 가 `*/channels/…` 를 훑으므로,
 그 아래 두면 언젠가 글롭에 걸려 답변 근거로 나간다. 확장자가 `.md` 가 아니라
@@ -454,6 +503,12 @@ workspaces/<workspace>/provenance/manifest.json
 ### 결정적 직렬화
 
 UTF-8 · `sort_keys=True` · `separators=(",", ":")` · **LF**.
+
+**해시도 같은 직렬화를 쓴다.** 칸을 이어 붙여 해싱하지 않는다 — 전에는
+`"|".join([ts, speaker, text, …])` 이었고, 본문에 `|` 가 들어가면 칸 경계가 밀려
+**서로 다른 메시지가 같은 해시**를 냈다. 우리 자료에서 `|` 는 표를 붙여 넣을 때
+흔하다. `record_sha256` 과 검증용 해시가 같은 함수(`canonical_digest`)를 쓰므로,
+한쪽만 바뀌어 검증이 조용히 약해지는 일도 없다.
 
 `sort_keys` 가 없으면 dict 삽입 순서가 바뀔 때 파일이 달라지고, 텍스트 모드로 쓰면
 Windows 에서 CRLF 가 된다. 그 차이는 두 배치 비교에서 **「구조 차이」 로 보인다.**

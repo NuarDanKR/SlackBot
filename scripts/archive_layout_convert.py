@@ -76,6 +76,53 @@ PROTECTED = ("/var/lib/tybot/archive", "/var/lib/tybot/objects", "/var/lib/tybot
 
 
 # ---------------------------------------------------------------------------
+# 해시 — **칸 경계가 모호하면 안 된다**
+# ---------------------------------------------------------------------------
+
+def canonical_json(payload: dict) -> bytes:
+    """결정적 직렬화. 해시와 사이드카가 **같은 규칙**을 쓴다.
+
+    `sort_keys` 가 없으면 dict 삽입 순서가 바뀔 때 값이 달라지고, 그 차이는 두
+    배치 비교에서 「구조 차이」 로 보인다.
+    """
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return text.encode("utf-8")
+
+
+def canonical_digest(payload: dict) -> str:
+    """칸을 이어 붙여 해싱하지 않는다.
+
+    전에는 `"|".join([ts, speaker, text, …])` 이었다. 본문에 `|` 가 들어가면 칸
+    경계가 밀려, **서로 다른 메시지가 같은 해시**를 낼 수 있다. 우리 자료에서
+    `|` 는 표를 붙여 넣을 때 흔하다.
+
+    JSON 이 칸 경계를 인용부호로 들고 있으므로 그 모호함이 없다. 사이드카가 쓰는
+    직렬화와 같은 함수라, 한쪽만 바뀌어 조용히 갈라지는 일도 없다.
+    """
+    return hashlib.sha256(canonical_json(payload)).hexdigest()
+
+
+def legacy_channel_id(workspace: str, channel: str) -> str:
+    """ID 가 없는 채널의 자리표시자. **이름 slug 가 아니라 결정적 해시다.**
+
+    slug 를 쓰면 두 가지가 깨진다.
+
+    1. **서로 다른 채널이 같은 slug** 가 될 수 있다. `_slugify` 는 경로에 못 쓰는
+       글자를 지우므로, 그 글자만 다른 두 채널이 한 파일로 합쳐진다 — 권한이
+       다른 두 채널이 합쳐지면 그건 유출이다(절대 원칙 3)
+    2. slug 는 **길이가 제각각**이라 경로 길이 상한에 걸리는 채널이 생긴다
+
+    해시는 길이가 고정이고 충돌이 사실상 없다. 그래도 §쓰기 전에 충돌을 확인한다 —
+    「사실상 없다」 를 근거로 유출 가능성을 열어 두지 않는다.
+
+    `legacy-` 접두어를 남기는 이유: 이 값이 **Slack ID 가 아니라는 사실**이 경로
+    이름만 보고도 드러나야 한다. 사람이 이걸 들고 Slack 에서 찾으면 안 된다.
+    """
+    digest = canonical_digest({"workspace": workspace, "channel": channel})
+    return f"legacy-{digest[:16]}"
+
+
+# ---------------------------------------------------------------------------
 # 중간표현
 # ---------------------------------------------------------------------------
 
@@ -136,11 +183,14 @@ class Message:
         시각·본문·첨부·thread 좌표를 전부 넣는다. 하나라도 빼면 그 칸이 배치 사이에
         달라져도 검증이 통과한다.
         """
-        raw = "|".join([
-            self.ts, self.speaker, self.text, self.message_ts, self.thread_ts,
-            ",".join(self.attachments),
-        ])
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return canonical_digest({
+            "ts": self.ts,
+            "speaker": self.speaker,
+            "text": self.text,
+            "message_ts": self.message_ts,
+            "thread_ts": self.thread_ts,
+            "attachments": list(self.attachments),
+        })
 
 
 @dataclass
@@ -156,7 +206,7 @@ class Channel:
     @property
     def stable_id(self) -> str:
         """경로에 쓸 식별자. **있는 값을 쓰기만 한다** — 지어내면 원본과 대조가 안 된다."""
-        return self.channel_id or f"legacy-{_slugify(self.channel)}"
+        return self.channel_id or legacy_channel_id(self.workspace, self.channel)
 
     def key(self) -> str:
         return f"{self.workspace}/{self.stable_id}"
@@ -478,17 +528,6 @@ def _workspace_base(out: Path, workspace: str) -> Path:
 # 출처 사이드카 — **원문 밖에** 둔다
 # ---------------------------------------------------------------------------
 
-def _dump(row: dict) -> bytes:
-    """결정적 직렬화. 같은 입력이면 **언제나 같은 바이트**여야 한다.
-
-    `sort_keys` 가 없으면 파이썬 판이나 dict 삽입 순서가 바뀔 때 파일이 달라지고,
-    그 차이는 두 배치 비교에서 「구조 차이」 로 보인다. `ensure_ascii=False` 로
-    한글을 그대로 쓴다 — `\\uXXXX` 로 부풀리면 사람이 못 읽고 용량만 는다.
-    """
-    text = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return text.encode("utf-8")
-
-
 def write_provenance(
     channels: list[Channel],
     out: Path,
@@ -529,7 +568,7 @@ def write_provenance(
         base.mkdir(parents=True, exist_ok=True)
         for ch in sorted(group, key=lambda c: c.stable_id):
             rows = [
-                _dump({
+                canonical_json({
                     "schema_version": PROVENANCE_SCHEMA,
                     "ordinal": ordinal,
                     "source_timestamp_text": msg.ts,
@@ -548,7 +587,7 @@ def write_provenance(
             written.append(path)
 
         manifest = base / "manifest.json"
-        manifest.write_bytes(_dump({
+        manifest.write_bytes(canonical_json({
             "schema_version": PROVENANCE_SCHEMA,
             "workspace": workspace,
             "source_kind": source_kind,
@@ -631,6 +670,39 @@ def emit_b(channels: list[Channel], out: Path) -> list[Path]:
 EMIT = {"a": emit_a, "b": emit_b}
 
 
+class DuplicateChannelId(Exception):
+    """`(workspace, stable_id)` 가 겹쳤다. **쓰기 전에** 멈춘다."""
+
+
+def check_unique_ids(channels: list[Channel]) -> None:
+    """같은 자리에 두 채널이 떨어지는지 **쓰기 전에** 본다.
+
+    겹친 채로 쓰면 뒤에 쓴 채널이 앞의 것을 덮는다. 구조 1 은 파일 하나라 통째로
+    사라지고, 구조 2 는 같은 날짜 파일만 덮여 **일부만** 사라진다. 어느 쪽도
+    오류를 내지 않는다 — 파일은 멀쩡하고 줄만 없다.
+
+    그리고 두 채널의 권한이 다르면 그건 유출이다. 덮어쓴 쪽의 `acl` 로 앞 채널의
+    대화가 열린다(절대 원칙 3). 그래서 경고가 아니라 **중단**이다.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    clashes: list[str] = []
+    for ch in channels:
+        key = (ch.workspace, ch.stable_id)
+        first = seen.get(key)
+        if first is None:
+            seen[key] = ch.channel
+        elif first != ch.channel:
+            clashes.append(f"{ch.workspace}/{ch.stable_id} ← 「{first}」 · 「{ch.channel}」")
+        else:
+            # 이름까지 같다. 입력에 같은 채널이 두 번 들어온 것이라 이것도 막는다 —
+            # 합치면 메시지가 두 배가 되고, 검증은 그것을 「b 에만 있는 줄」 로 말한다.
+            clashes.append(f"{ch.workspace}/{ch.stable_id} ← 「{first}」 가 두 번")
+    if clashes:
+        raise DuplicateChannelId(
+            "채널 식별자가 겹칩니다. 쓰지 않고 멈춥니다:\n  " + "\n  ".join(clashes)
+        )
+
+
 def build(
     channels: list[Channel],
     out: Path,
@@ -644,6 +716,7 @@ def build(
     출처 쓰기를 호출부에 맡기지 않는 이유: 한 군데서 빠지면 그 배치만 사이드카가
     없고, 비교는 「경로 집합이 다르다」 로만 말한다. 원인을 변환에서 찾게 된다.
     """
+    check_unique_ids(channels)
     raw = EMIT[layout](channels, out)
     prov = write_provenance(
         channels, out, source_kind=source_kind, source_commit=source_commit
@@ -697,8 +770,16 @@ def tally(root: Path) -> Tally:
         result.acl[key] = (doc.visibility, frozenset(doc.acl), frozenset(doc.share_with))
         order: list[str] = []
         for line in doc.raw_lines:
-            raw = "|".join([line.ts, line.speaker, line.text, line.message_ts])
-            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            # `Message.key` 와 **같은 직렬화**를 쓴다. 칸이 다른 이유는 목적이
+            # 달라서다 — 여기는 다시 읽은 원문 줄이라 `thread_ts` 가 없고 첨부는
+            # 이미 본문에 붙어 있다. 규칙이 갈리면 한쪽만 고쳤을 때 검증이 조용히
+            # 약해진다.
+            digest = canonical_digest({
+                "ts": line.ts,
+                "speaker": line.speaker,
+                "text": line.text,
+                "message_ts": line.message_ts,
+            })
             result.keys[digest] += 1
             order.append(digest)
             for match in ATTACH_IN_LINE.finditer(line.text):

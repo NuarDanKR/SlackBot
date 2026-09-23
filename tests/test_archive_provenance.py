@@ -213,7 +213,7 @@ def test_row_shape_matches_the_agreed_contract(tmp_path):
     """칸 이름과 값의 모양. 합의한 계약이라 시험으로 고정한다."""
     source = _pf_source(tmp_path, {"자금.md": PF_CHANNEL})
     _build(source, tmp_path / "a", "a")
-    row = _rows(tmp_path / "a", "legacy-팀_자금(ABB540)_주간보고")[0]
+    row = _rows(tmp_path / "a", conv.legacy_channel_id("pf", "#팀_자금(ABB540)_주간보고"))[0]
 
     assert row["schema_version"] == conv.PROVENANCE_SCHEMA
     # `ts` 가 아니라 `source_timestamp_text` — Slack `message_ts` 와 혼동된다
@@ -300,3 +300,88 @@ def test_raw_lines_carry_no_provenance(tmp_path):
         text = path.read_text(encoding="utf-8")
         assert "snapshot" not in text
         assert "slack-export" not in text
+
+
+# --- 식별자와 해시 -----------------------------------------------------------
+
+def test_legacy_id_is_a_hash_not_a_slug():
+    """자리표시자 ID 는 이름을 그대로 쓰지 않는다.
+
+    `legacy-` 접두어는 남긴다 — 이 값이 **Slack ID 가 아니라는 사실**이 경로
+    이름만 보고도 드러나야 한다. 사람이 이걸 들고 Slack 에서 찾으면 안 된다.
+    """
+    got = conv.legacy_channel_id("pf", "#팀_자금(ABB540)_주간보고")
+
+    assert got.startswith("legacy-")
+    assert "자금" not in got
+    assert len(got) == len("legacy-") + 16
+    assert got == conv.legacy_channel_id("pf", "#팀_자금(ABB540)_주간보고")
+
+
+def test_channels_that_slugify_the_same_get_different_ids():
+    """slug 를 쓰면 합쳐지던 두 채널이 이제 갈린다.
+
+    `_slugify` 는 경로에 못 쓰는 글자를 지운다. 그래서 그 글자만 다른 두 채널이
+    **같은 파일**이 됐다. 권한이 다른 두 채널이 합쳐지면 그건 유출이다
+    (절대 원칙 3).
+    """
+    from tybot.archive.writer import _slugify
+
+    a, b = "#팀_자금/주간", "#팀_자금:주간"
+    assert _slugify(a) == _slugify(b), "이 시험이 재는 상황이 아니다"
+    assert conv.legacy_channel_id("pf", a) != conv.legacy_channel_id("pf", b)
+
+
+def test_same_channel_name_in_different_workspaces_gets_different_ids():
+    """워크스페이스가 다르면 다른 채널이다."""
+    assert conv.legacy_channel_id("pf", "#공지") != conv.legacy_channel_id("tyit", "#공지")
+
+
+def test_duplicate_stable_id_stops_before_writing(tmp_path):
+    """겹치면 **쓰기 전에** 멈춘다.
+
+    겹친 채로 쓰면 뒤에 쓴 채널이 앞의 것을 덮는다. 구조 1 은 파일 하나라 통째로
+    사라지고, 구조 2 는 같은 날짜 파일만 덮여 일부만 사라진다. 어느 쪽도 오류를
+    내지 않는다 — 파일은 멀쩡하고 줄만 없다.
+    """
+    msg = conv.Message(ts="2026-06-11 09:00", speaker="가", text="나")
+    twin = [
+        conv.Channel(
+            workspace="pf", channel="#같은이름", channel_id="C1",
+            visibility="private", acl=frozenset(), share_with=frozenset(),
+            messages=[msg],
+        )
+        for _ in range(2)
+    ]
+    twin[1].channel = "#다른이름"      # 이름은 달라도 ID 가 같다
+
+    out = tmp_path / "out"
+    with pytest.raises(conv.DuplicateChannelId) as caught:
+        conv.build(twin, out, "a", source_kind="ty_archive")
+
+    assert "pf/C1" in str(caught.value)
+    assert not out.exists(), "멈추기 전에 아무것도 쓰지 않아야 한다"
+
+
+def test_canonical_digest_is_not_fooled_by_separators_in_the_body():
+    """칸을 이어 붙여 해싱하지 않는다.
+
+    전에는 `"|".join([ts, speaker, text, …])` 이었다. 본문에 `|` 가 들어가면 칸
+    경계가 밀려 서로 다른 메시지가 같은 해시를 냈다. 우리 자료에서 `|` 는 표를
+    붙여 넣을 때 흔하다.
+    """
+    left = conv.Message(ts="2026-06-11 09:00", speaker="가", text="나|다")
+    right = conv.Message(ts="2026-06-11 09:00", speaker="가|나", text="다")
+
+    assert left.key() != right.key()
+
+
+def test_message_key_and_tally_share_one_serialization(tmp_path):
+    """검증용 해시도 같은 규칙을 쓴다.
+
+    규칙이 갈리면 한쪽만 고쳤을 때 검증이 조용히 약해진다 — 통과는 계속 하는데
+    잡아내던 것을 못 잡는다.
+    """
+    payload = {"ts": "2026-06-11 09:00", "speaker": "가", "text": "나"}
+    assert conv.canonical_digest(payload) == conv.canonical_digest(dict(reversed(list(payload.items()))))
+    assert conv.canonical_json(payload) == b'{"speaker":"\xea\xb0\x80","text":"\xeb\x82\x98","ts":"2026-06-11 09:00"}'
