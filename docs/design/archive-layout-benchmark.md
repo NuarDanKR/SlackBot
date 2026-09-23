@@ -411,3 +411,85 @@ python -m pytest tests/test_archive_layout_equivalence.py tests/test_search_merg
 ```
 
 운영 경로(`/var/lib/tybot/archive` 등)를 `--out` 으로 주면 거부한다.
+
+## 11. 출처 사이드카 계약 (2026-09-23 오너 승인)
+
+PF 자료에는 Slack `message_ts` 가 **하나도 없다**(2061건 전부). 변환된 줄을 원본으로
+되짚는 길이 `legacy_source_ref` 뿐이므로, 이건 편의가 아니라 **되짚기의 유일한 수단**이다.
+
+### 경로
+
+```
+workspaces/<workspace>/provenance/<stable_id>.jsonl
+workspaces/<workspace>/provenance/manifest.json
+```
+
+`<stable_id>` 는 채널 ID, PF 자료처럼 없으면 `legacy-<slug>`.
+
+**`channels/` 밖에 둔다.** `ArchiveStore._files()` 가 `*/channels/…` 를 훑으므로,
+그 아래 두면 언젠가 글롭에 걸려 답변 근거로 나간다. 확장자가 `.md` 가 아니라
+안전한 것이 아니다 — 그건 지금 글롭의 성질이지 구조의 성질이 아니다.
+
+**구조 1 과 구조 2 에서 경로도 바이트도 같다.** 출처는 배치와 무관한 사실이다.
+다르면 「어느 배치로 만들었나」 가 되짚기에 영향을 주게 되고, 그건 구조를 고르는
+일과 아무 상관이 없어야 한다.
+
+### 한 줄의 모양
+
+```json
+{"legacy_source_ref":{"kind":"pf_git_snapshot","snapshot_sha256":"<64 hex>","source_line":11,"source_path":"slack-export/channels/a_용인8구역.md"},"message_ts":null,"ordinal":0,"record_sha256":"<64 hex>","schema_version":1,"source_timestamp_text":"2026-06-11 08:58"}
+```
+
+| 칸 | 규칙 |
+|---|---|
+| `ordinal` | 채널 안 **0-based** 순번 |
+| `source_timestamp_text` | `ts` 라고 하지 않는다 — Slack `message_ts` 와 혼동된다 |
+| `message_ts` | 없으면 **`null`**. 빈 문자열은 「있는데 비었다」 와 구분되지 않는다 |
+| `source_path` | **source 루트 기준 POSIX 상대경로.** basename 도 절대경로도 아니다 |
+| `record_sha256` | 본문 동일성 해시. `ordinal` 과 **함께** 쓴다 |
+
+`ordinal` 만 보면 줄이 하나 끼어들었을 때 그 뒤가 전부 어긋난 채 맞아 보이고,
+`record_sha256` 만 보면 같은 문장이 두 번 나온 채널에서 어느 쪽인지 못 가린다.
+
+### 결정적 직렬화
+
+UTF-8 · `sort_keys=True` · `separators=(",", ":")` · **LF**.
+
+`sort_keys` 가 없으면 dict 삽입 순서가 바뀔 때 파일이 달라지고, 텍스트 모드로 쓰면
+Windows 에서 CRLF 가 된다. 그 차이는 두 배치 비교에서 **「구조 차이」 로 보인다.**
+
+### 스냅샷 해시 — git 커밋과 **다른 값**이다
+
+manifest 에 둘을 따로 둔다.
+
+| 칸 | 뜻 |
+|---|---|
+| `source_commit` | 저장소의 어느 지점. 예: `eeb50045fe88…` |
+| `source_snapshot_sha256` | **변환에 실제로 넣은 내용.** 예: `12538ec420f2…` |
+
+작업 디렉터리가 더러우면 둘이 갈라지고, 그때 믿을 것은 스냅샷 해시다.
+
+지문은 정렬된 (상대경로, 파일 내용 SHA-256) 을 누적해 만든다. 경로와 내용 사이에
+길이를 끼운다 — 없으면 `ab`+`c` 와 `a`+`bc` 가 같은 바이트열이 되어, 이름을 갈라
+붙인 다른 스냅샷이 같은 지문을 낸다.
+
+| | |
+|---|---|
+| 내용이 한 글자 바뀌면 | 지문이 **바뀐다** |
+| 내용이 같고 상대경로만 바뀌면 | 지문이 **바뀐다** |
+| 절대 경로만 다르면(같은 사본, 다른 자리) | 지문이 **같다** |
+
+기록에는 full 64 hex 를 쓰고 **화면 표시만** 앞 12자를 쓴다. 앞자리만 남기면
+언젠가 부딪히고, 부딪힌 날 그 사실을 알아챌 방법이 없다.
+
+### 실측 결과 (PF 스냅샷 43채널)
+
+```
+사이드카 파일 44개 (채널 43 + manifest)
+출처 줄 2061개 = 메시지 2061개          ← 메시지마다 정확히 하나
+a == b  (배치 무관)  True
+a == a2 (재현성)     True
+CR 있는 파일          없음
+```
+
+회귀 시험: `tests/test_archive_provenance.py` (16건).

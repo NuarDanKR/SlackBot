@@ -85,8 +85,10 @@ def _channels() -> list[conv.Channel]:
 def batches(tmp_path: Path) -> tuple[ArchiveStore, ArchiveStore]:
     channels = _channels()
     a, b = tmp_path / "a", tmp_path / "b"
-    conv.emit_a(channels, a)
-    conv.emit_b(channels, b)
+    # `build` 를 쓴다. `emit_*` 만 부르면 출처 사이드카가 안 써지고, 그러면 이
+    # 시험이 **운영에서 나올 모양과 다른 것**을 비교하게 된다.
+    conv.build(channels, a, "a", source_kind="ty_archive")
+    conv.build(channels, b, "b", source_kind="ty_archive")
     return ArchiveStore(a), ArchiveStore(b)
 
 
@@ -180,9 +182,11 @@ def test_round_trip_through_our_own_reader(tmp_path: Path):
     """
     channels = _channels()
     b = tmp_path / "b"
-    conv.emit_b(channels, b)
+    conv.build(channels, b, "b", source_kind="ty_archive")
     again, notes = conv.read_ty(b)
     a2 = tmp_path / "a2"
-    conv.emit_a(again, a2)
-    conv.emit_a(channels, tmp_path / "a")
-    assert conv.verify(tmp_path / "a", a2) == [], notes
+    conv.build(again, a2, "a", source_kind="ty_archive")
+    conv.build(channels, tmp_path / "a", "a", source_kind="ty_archive")
+    # 출처는 비교하지 않는다 — a2 는 b 를 읽어서 나왔으므로 `source_path` 가
+    # b 의 일자 파일을 가리킨다. 그게 **맞는** 값이다. 원문만 같으면 된다.
+    assert [p for p in conv.verify(tmp_path / "a", a2) if "출처" not in p] == [], notes

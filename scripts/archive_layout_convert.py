@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import json
 import re
 import sys
 from collections import Counter, defaultdict
@@ -66,6 +67,9 @@ from tybot.archive.writer import _slugify  # noqa: E402
 LAYOUTS = ("a", "b")
 SOURCES = ("ty", "pf")
 RAW_HEADING = "## 원문 (자동 취합, 편집 금지)"
+# 출처 사이드카 스키마. 칸이 바뀌면 올린다 — 읽는 쪽이 옛 파일을 만났을 때
+# 「빠진 칸」 과 「원래 없던 칸」 을 구분할 수 있어야 한다.
+PROVENANCE_SCHEMA = 1
 
 # 운영 경로. 실수로 여기에 쓰지 않는다.
 PROTECTED = ("/var/lib/tybot/archive", "/var/lib/tybot/objects", "/var/lib/tybot/staging")
@@ -74,6 +78,31 @@ PROTECTED = ("/var/lib/tybot/archive", "/var/lib/tybot/objects", "/var/lib/tybot
 # ---------------------------------------------------------------------------
 # 중간표현
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SourceRef:
+    """이 메시지가 원본 어디서 왔나.
+
+    **절대 경로를 담지 않는다.** 담으면 같은 사본을 다른 자리에서 변환했을 때
+    값이 달라지고, 두 배치의 사이드카가 바이트로 같지 않게 된다. 그러면 「구조
+    차이」 로 보이지만 실은 변환한 사람의 홈 디렉터리 차이다.
+    """
+
+    kind: str = ""               # "pf_git_snapshot" | "ty_archive"
+    snapshot_sha256: str = ""    # full 64 hex. 화면 표시만 앞 12자를 쓴다
+    source_path: str = ""        # source 루트 기준 POSIX 상대경로
+    source_line: int = 0
+
+    def as_json(self) -> dict | None:
+        if not self.kind:
+            return None
+        return {
+            "kind": self.kind,
+            "snapshot_sha256": self.snapshot_sha256,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+        }
+
 
 @dataclass(frozen=True)
 class Message:
@@ -89,7 +118,9 @@ class Message:
     thread_ts: str = ""
     attachments: tuple[str, ...] = ()
     # 어디서 왔나. PF 자료처럼 좌표가 없는 것을 되짚는 유일한 길이다.
-    legacy_ref: str = ""
+    # **원문 줄에는 넣지 않는다** — 원문이 오염되고, 배치 사이 바이트 동등성도
+    # 깨진다. 별도 사이드카(`provenance/<id>.jsonl`)로 나간다.
+    source_ref: SourceRef = SourceRef()
 
     @property
     def day(self) -> date | None:
@@ -144,6 +175,8 @@ def read_ty(source: Path) -> tuple[list[Channel], list[str]]:
     """
     notes: list[str] = []
     store = ArchiveStore(source)
+    files = store.source_files()
+    snapshot = snapshot_digest(files, source) if files else ""
     out: list[Channel] = []
     for doc in store.docs():
         if getattr(doc, "dm_user", None):
@@ -164,12 +197,30 @@ def read_ty(source: Path) -> tuple[list[Channel], list[str]]:
                     speaker=line.speaker,
                     text=line.text,
                     message_ts=line.message_ts,
-                    legacy_ref=f"{line.source_path}:{line.lineno}" if line.source_path else "",
+                    source_ref=_ty_ref(line, source, snapshot),
                 )
                 for line in doc.raw_lines
             ],
         ))
     return out, notes
+
+
+def _ty_ref(line, source: Path, snapshot: str) -> SourceRef:
+    """우리 아카이브 줄의 출처. 경로는 **source 기준 상대**다."""
+    if not line.source_path:
+        return SourceRef()
+    try:
+        rel = Path(line.source_path).relative_to(source).as_posix()
+    except ValueError:
+        # source 밖 파일. 절대 경로를 남기느니 경로를 비운다 — 절대 경로는
+        # 변환한 사람의 자리를 사이드카에 새겨 넣는다.
+        return SourceRef()
+    return SourceRef(
+        kind="ty_archive",
+        snapshot_sha256=snapshot,
+        source_path=rel,
+        source_line=line.lineno,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,14 +256,17 @@ def read_pf(source: Path, *, workspace: str = "pf") -> tuple[list[Channel], list
     if not files:
         return [], [f"PF 채널 파일을 찾지 못했다: {root}"]
 
-    snapshot = _snapshot_id(files)
+    # 지문은 **source 기준**으로 잰다. `root` 기준으로 재면 `slack-export/channels/`
+    # 가 경로에서 빠져, 다른 폴더의 같은 이름 파일과 구분되지 않는다.
+    snapshot = snapshot_digest(files, source)
     for path in files:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
             notes.append(f"{path.name}: 읽지 못함 ({type(exc).__name__})")
             continue
-        name, messages, dropped = _parse_pf_channel(text, path, snapshot)
+        rel = path.relative_to(source).as_posix()
+        name, messages, dropped = _parse_pf_channel(text, rel, snapshot)
         if not name:
             notes.append(f"{path.name}: 채널 이름을 찾지 못해 건너뛴다")
             continue
@@ -236,18 +290,54 @@ def read_pf(source: Path, *, workspace: str = "pf") -> tuple[list[Channel], list
     return channels, notes
 
 
-def _snapshot_id(files: list[Path]) -> str:
-    """이 스냅샷의 지문. 되짚을 때 「어느 사본이었나」 를 말한다."""
+def _file_sha256(path: Path) -> str:
     h = hashlib.sha256()
-    for path in files:
-        h.update(path.name.encode("utf-8"))
-        with contextlib.suppress(OSError):
-            h.update(str(path.stat().st_size).encode("ascii"))
-    return h.hexdigest()[:12]
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def snapshot_digest(files: list[Path], root: Path) -> str:
+    """이 스냅샷의 지문. **내용으로 잰다.**
+
+    전에는 파일 이름과 크기만 해싱했다. 그러면 내용이 바뀌어도 같은 값이 나오고,
+    `legacy_source_ref` 가 「어느 사본이었나」 를 말하지 못한다. 되짚으러 간
+    사람이 **다른 내용을 보고도 맞는 줄 안다** — 지문이 없느니만 못하다.
+
+    세 성질을 지킨다.
+
+    | | |
+    |---|---|
+    | 내용이 한 글자 바뀌면 | 지문이 바뀐다 |
+    | 내용이 같고 상대경로만 바뀌면 | 지문이 바뀐다 (어느 채널 파일인지가 뜻이다) |
+    | 절대 경로만 다르면(같은 사본, 다른 자리) | 지문이 **같다** |
+
+    경로와 내용 사이에 길이를 끼우는 이유: 길이가 없으면 `ab`+`c` 와 `a`+`bc` 가
+    같은 바이트열이 되어, 이름을 갈라 붙인 다른 스냅샷이 같은 지문을 낼 수 있다.
+
+    내부 기록에는 full 64 hex 를 쓴다. 앞자리만 남기면 언젠가 부딪히고, 부딪힌
+    날 그 사실을 알아챌 방법이 없다. 사람에게 보일 때만 앞 12자를 쓴다.
+    """
+    entries = sorted(
+        (path.relative_to(root).as_posix(), path) for path in files
+    )
+    h = hashlib.sha256()
+    for rel, path in entries:
+        rel_bytes = rel.encode("utf-8")
+        h.update(f"{len(rel_bytes)}:".encode("ascii"))
+        h.update(rel_bytes)
+        h.update(_file_sha256(path).encode("ascii"))
+    return h.hexdigest()
+
+
+def short(digest: str) -> str:
+    """사람에게 보여 줄 때만 줄인다. 파일에 적는 값은 줄이지 않는다."""
+    return digest[:12]
 
 
 def _parse_pf_channel(
-    text: str, path: Path, snapshot: str
+    text: str, rel_path: str, snapshot: str
 ) -> tuple[str, list[Message], int]:
     name = ""
     messages: list[Message] = []
@@ -267,7 +357,12 @@ def _parse_pf_channel(
                 text=" ".join(line.strip() for line in body if line.strip()),
                 message_ts="",          # PF 자료에는 없다. 지어내지 않는다
                 attachments=tuple(attachments),
-                legacy_ref=f"pf:{snapshot}:{path.name}:{current['line']}",
+                source_ref=SourceRef(
+                    kind="pf_git_snapshot",
+                    snapshot_sha256=snapshot,
+                    source_path=rel_path,
+                    source_line=current["line"],
+                ),
             ))
         body, attachments, current = [], [], None
 
@@ -375,6 +470,113 @@ def _channels_base(out: Path, ch: Channel) -> Path:
     return out / "workspaces" / _slugify(ch.workspace) / "channels"
 
 
+def _workspace_base(out: Path, workspace: str) -> Path:
+    return out / "workspaces" / _slugify(workspace)
+
+
+# ---------------------------------------------------------------------------
+# 출처 사이드카 — **원문 밖에** 둔다
+# ---------------------------------------------------------------------------
+
+def _dump(row: dict) -> bytes:
+    """결정적 직렬화. 같은 입력이면 **언제나 같은 바이트**여야 한다.
+
+    `sort_keys` 가 없으면 파이썬 판이나 dict 삽입 순서가 바뀔 때 파일이 달라지고,
+    그 차이는 두 배치 비교에서 「구조 차이」 로 보인다. `ensure_ascii=False` 로
+    한글을 그대로 쓴다 — `\\uXXXX` 로 부풀리면 사람이 못 읽고 용량만 는다.
+    """
+    text = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return text.encode("utf-8")
+
+
+def write_provenance(
+    channels: list[Channel],
+    out: Path,
+    *,
+    source_kind: str,
+    source_commit: str = "",
+) -> list[Path]:
+    """`workspaces/<ws>/provenance/<stable_id>.jsonl` 을 쓴다.
+
+    ## 왜 원문이 아니라 사이드카인가
+    출처를 원문 줄에 끼우면 세 가지가 한꺼번에 깨진다 — 원문이 편집되고(절대 원칙 1),
+    두 배치의 원문 바이트가 달라져 동등성 증명이 못 서고, 검색이 그 문자열을 근거로
+    잡는다.
+
+    ## 왜 두 배치에서 같은 바이트여야 하나
+    구조 1 은 채널당 파일 하나, 구조 2 는 날짜별로 갈린다. **출처는 그와 무관한
+    사실**이다. 사이드카가 배치마다 다르면 「어느 배치로 만든 아카이브냐」 가
+    되짚기에 영향을 주게 되고, 그건 구조를 고르는 일과 아무 상관이 없어야 한다.
+    그래서 경로도 내용도 배치를 타지 않는다.
+
+    ## 왜 `channels/` 밖인가
+    `ArchiveStore._files()` 가 `*/channels/…` 를 훑는다. 그 아래 두면 언젠가
+    글롭에 걸려 **답변 근거로 나간다.** 확장자가 `.md` 가 아니라 안전하다고 볼
+    수도 있지만, 그건 지금 글롭의 성질이지 구조의 성질이 아니다.
+
+    ## 키
+    `ordinal`(채널 안 0-based 순번)과 `record_sha256`(본문 동일성)을 **함께** 쓴다.
+    해시만으로는 같은 문장이 두 번 나온 채널에서 어느 쪽인지 못 가리고, 순번만
+    쓰면 줄이 하나 끼어들었을 때 그 뒤가 전부 어긋난 채 조용히 맞아 보인다.
+    """
+    written: list[Path] = []
+    per_ws: dict[str, list[Channel]] = defaultdict(list)
+    for ch in channels:
+        per_ws[ch.workspace].append(ch)
+
+    for workspace, group in sorted(per_ws.items()):
+        base = _workspace_base(out, workspace) / "provenance"
+        base.mkdir(parents=True, exist_ok=True)
+        for ch in sorted(group, key=lambda c: c.stable_id):
+            rows = [
+                _dump({
+                    "schema_version": PROVENANCE_SCHEMA,
+                    "ordinal": ordinal,
+                    "source_timestamp_text": msg.ts,
+                    # Slack 좌표는 없으면 **null** 이다. 빈 문자열로 두면 「좌표가
+                    # 있는데 비었다」 와 구분되지 않는다.
+                    "message_ts": msg.message_ts or None,
+                    "legacy_source_ref": msg.source_ref.as_json(),
+                    "record_sha256": msg.key(),
+                })
+                for ordinal, msg in enumerate(ch.messages)
+            ]
+            path = base / f"{ch.stable_id}.jsonl"
+            # **LF 로 쓴다.** 텍스트 모드로 쓰면 Windows 에서 CRLF 가 되어 같은
+            # 입력이 플랫폼마다 다른 바이트를 낸다.
+            path.write_bytes(b"".join(row + b"\n" for row in rows))
+            written.append(path)
+
+        manifest = base / "manifest.json"
+        manifest.write_bytes(_dump({
+            "schema_version": PROVENANCE_SCHEMA,
+            "workspace": workspace,
+            "source_kind": source_kind,
+            # **git 커밋과 스냅샷 해시는 다른 값이다.** 커밋은 「저장소의 어느
+            # 지점」 이고 스냅샷 해시는 「변환에 실제로 넣은 내용」 이다. 작업
+            # 디렉터리가 더러우면 둘이 갈라지고, 그때 믿을 것은 스냅샷 해시다.
+            "source_commit": source_commit or None,
+            "source_snapshot_sha256": _snapshot_of(group),
+            "channel_count": len(group),
+            "message_count": sum(len(ch.messages) for ch in group),
+        }) + b"\n")
+        written.append(manifest)
+    return written
+
+
+def _snapshot_of(channels: list[Channel]) -> str | None:
+    """이 배치가 물고 있는 스냅샷 해시. 하나여야 한다."""
+    seen = {
+        msg.source_ref.snapshot_sha256
+        for ch in channels for msg in ch.messages
+        if msg.source_ref.snapshot_sha256
+    }
+    if len(seen) == 1:
+        return seen.pop()
+    # 둘 이상이면 섞인 입력이다. 아무거나 고르면 되짚기가 틀린 사본을 가리킨다.
+    return None
+
+
 def emit_a(channels: list[Channel], out: Path) -> list[Path]:
     """구조 1 — 채널당 파일 하나. `<slug>__<id>.md`
 
@@ -427,6 +629,26 @@ def emit_b(channels: list[Channel], out: Path) -> list[Path]:
 
 
 EMIT = {"a": emit_a, "b": emit_b}
+
+
+def build(
+    channels: list[Channel],
+    out: Path,
+    layout: str,
+    *,
+    source_kind: str = "",
+    source_commit: str = "",
+) -> tuple[list[Path], list[Path]]:
+    """배치 하나를 통째로 만든다 — 원문과 출처 사이드카를 **함께**.
+
+    출처 쓰기를 호출부에 맡기지 않는 이유: 한 군데서 빠지면 그 배치만 사이드카가
+    없고, 비교는 「경로 집합이 다르다」 로만 말한다. 원인을 변환에서 찾게 된다.
+    """
+    raw = EMIT[layout](channels, out)
+    prov = write_provenance(
+        channels, out, source_kind=source_kind, source_commit=source_commit
+    )
+    return raw, prov
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +752,51 @@ def verify(a: Path, b: Path) -> list[str]:
             f"첨부 참조가 다르다: a={sum(ta.attachments.values())}건"
             f" b={sum(tb.attachments.values())}건"
         )
+
+    # 6. 출처 사이드카 — **바이트로** 같아야 한다
+    problems += _verify_provenance(a, b, ta)
+    return problems
+
+
+def provenance_files(root: Path) -> dict[str, bytes]:
+    """배치의 출처 사이드카. 키는 `workspaces/` 기준 상대 POSIX 경로."""
+    base = root / "workspaces"
+    if not base.is_dir():
+        return {}
+    return {
+        path.relative_to(base).as_posix(): path.read_bytes()
+        for path in sorted(base.glob("*/provenance/*"))
+        if path.is_file()
+    }
+
+
+def _verify_provenance(a: Path, b: Path, ta: Tally) -> list[str]:
+    """사이드카가 두 배치에서 같은가, 그리고 **메시지마다 정확히 한 줄인가.**
+
+    바이트 비교만 하면 「둘 다 비었다」 도 통과한다. 그래서 원문 줄 수와 맞춰
+    본다 — 사이드카가 통째로 안 써진 경우가 바로 그 모양이다.
+    """
+    problems: list[str] = []
+    fa, fb = provenance_files(a), provenance_files(b)
+    if set(fa) != set(fb):
+        only_a = sorted(set(fa) - set(fb))[:5]
+        only_b = sorted(set(fb) - set(fa))[:5]
+        problems.append(f"출처 사이드카 경로가 다르다: a 에만 {only_a}, b 에만 {only_b}")
+    for name in sorted(set(fa) & set(fb)):
+        if fa[name] != fb[name]:
+            problems.append(f"출처 사이드카 내용이 다르다: {name}")
+
+    # 채널마다 원문 줄 수와 사이드카 줄 수가 같아야 한다.
+    for key, count in sorted(ta.per_channel.items()):
+        workspace, _, channel_id = key.partition("/")
+        name = f"{_slugify(workspace)}/provenance/{channel_id}.jsonl"
+        blob = fa.get(name)
+        if blob is None:
+            problems.append(f"출처 사이드카가 없다: {name}")
+            continue
+        rows = blob.count(b"\n")
+        if rows != count:
+            problems.append(f"출처 줄 수가 원문과 다르다: {name} 원문={count} 출처={rows}")
     return problems
 
 
@@ -547,6 +814,27 @@ def _refuse_operational(path: Path, what: str) -> str | None:
             if cand == guarded or cand.startswith(guarded + "/"):
                 return f"{what}이 운영 경로입니다: {path}"
     return None
+
+
+def _git_commit(source: Path) -> str:
+    """입력 저장소의 커밋. **없어도 변환은 돈다.**
+
+    스냅샷 해시가 진짜 근거이고 커밋은 편의다. 여기서 실패하면 조용히 비워 둔다 —
+    git 이 없다는 이유로 변환을 못 하게 만들 이유가 없다.
+    """
+    import subprocess
+
+    for candidate in (source, *source.parents):
+        if not (candidate / ".git").exists():
+            continue
+        with contextlib.suppress(Exception):
+            out = subprocess.run(
+                ["git", "-C", str(candidate), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=10, check=True,
+            )
+            return out.stdout.strip()
+        return ""
+    return ""
 
 
 def _utf8_console() -> None:
@@ -572,6 +860,10 @@ def main() -> int:
     parser.add_argument("--out", help="배치를 쓸 경로")
     parser.add_argument(
         "--verify", nargs=2, metavar=("A", "B"), help="두 배치가 같은 내용인지 본다"
+    )
+    parser.add_argument(
+        "--source-commit", default="",
+        help="입력 저장소의 git 커밋 SHA. 주지 않으면 source 에서 읽어 본다",
     )
     _utf8_console()
     args = parser.parse_args()
@@ -619,11 +911,21 @@ def main() -> int:
             print(f"  · {note}")
         return 1
 
-    written = EMIT[args.to](channels, out)
+    commit = args.source_commit or _git_commit(source)
+    written, prov = build(
+        channels, out, args.to,
+        source_kind="pf_git_snapshot" if args.source_kind == "pf" else "ty_archive",
+        source_commit=commit,
+    )
     messages = sum(len(ch.messages) for ch in channels)
     no_coord = sum(1 for ch in channels for m in ch.messages if not m.message_ts)
     print(f"배치 {args.to}: 채널 {len(channels)}개, 메시지 {messages}개, 파일 {len(written)}개")
     print(f"  → {out}")
+    digest = _snapshot_of(channels)
+    if digest:
+        # git 커밋과 **다른 값**이다. 커밋은 저장소의 지점, 이것은 실제로 넣은 내용.
+        print(f"  · 스냅샷 {short(digest)}… · 커밋 {short(commit) + '…' if commit else '(없음)'}")
+    print(f"  · 출처 사이드카 {len(prov)}개 (원문 밖, 두 배치에서 같은 바이트)")
     if no_coord:
         # 지어내지 않았다는 사실을 **숫자로** 말한다. 조용히 비워 두면 나중에
         # 「왜 permalink 가 없나」 를 코드에서 찾게 된다.
