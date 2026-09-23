@@ -318,6 +318,11 @@ def test_scripts_that_need_the_database_load_the_env_file():
         needs_db = "DATABASE_URL" in code or "conversion_queue" in code
         if not needs_db or "def main(" not in code:
             continue
+        # **DATABASE_URL 을 거부하는 스크립트는 반대 경우다.** 설정을 읽으면
+        # 운영 DSN 이 들어오고, 그게 바로 막으려던 것이다(실측 스크립트가 운영
+        # 색인에 쓰는 일). "DB 를 쓴다" 와 "DB 이름을 언급한다" 는 다르다.
+        if "operational_db_refusal" in code:
+            continue
         if "load_env_file()" not in code:
             offenders.append(path.name)
     assert not offenders, (

@@ -307,22 +307,10 @@ def bench_search_warm(
     out = []
     store = ArchiveStore(root)
     ctx = RequestContext(workspace="", role="exec")
-    file_a = root / target.file_a.relative_to(_batch_root(target.file_a))
     for query in queries:
         sample = Samples(f"M2 검색 warm(쓰기중) · 구조{layout} · 「{query}」")
         for n in range(rounds + WARMUP):
-            if layout == "a":
-                ingest_layout_a(root, file_a, _message(10_000 + n))
-            else:
-                writer.ingest(
-                    root,
-                    workspace=target.workspace,
-                    channel=target.channel,
-                    channel_id=target.channel_id or None,
-                    messages=[_message(10_000 + n)],
-                    visibility="private",
-                    acl=[target.channel],
-                )
+            _append_one(root, layout, target, 10_000 + n)
             with timed(sample):
                 store.search(query, ctx, limit=20)
         del sample.values[:WARMUP]
@@ -331,33 +319,219 @@ def bench_search_warm(
 
 
 # ---------------------------------------------------------------------------
-# M4 — 증분 재색인
+# M4 — 증분 재색인. **운영 DB 에 닿지 않는 것이 이 절의 전부다**
 # ---------------------------------------------------------------------------
+#
+# `search_index.reindex` 는 `_connect()` 로 붙고, `_connect()` 는 `DATABASE_URL`
+# **하나만** 읽는다. 그래서 전용 DSN 을 인자로 넘기는 길이 없다. 환경 변수를
+# 잠시 바꿔 끼우는 수밖에 없는데, 그 순간이 곧 운영 색인을 더럽힐 수 있는 자리다.
+#
+# `raw_line` 에는 **지우는 경로가 없다**(원문을 편집하지 않는 것이 계약이라
+# 옛 행은 쌓이기만 한다). 그래서 실수로 운영 DB 에 넣으면 되돌릴 수 없다.
+# 「실측용 줄이 답변 근거로 나간다」 가 된다.
+#
+# 자물쇠를 셋 건다. 하나라도 안 맞으면 재지 않는다.
+#
+# 1. `DATABASE_URL` 이 **설정돼 있으면 거부한다.** 비어 있어야 한다 —
+#    운영 셸에서 무심코 돌리는 경우가 이 모양이다
+# 2. `TYBOT_BENCH_INDEX_DSN` 이 **있어야** 한다. 기본값을 두지 않는다
+# 3. 그 DSN 의 **DB 이름에 실측 표시**가 있어야 한다. 이름으로 확인할 수 없는
+#    DB 에는 쓰지 않는다
 
-def bench_reindex(root: Path, layout: str, rounds: int) -> tuple[list[Samples], str]:
-    """색인을 다시 세운다. **운영 DB 는 쓰지 않는다**(§8).
+BENCH_DSN_ENV = "TYBOT_BENCH_INDEX_DSN"
+# DB 이름에 이 중 하나가 없으면 실측용으로 보지 않는다.
+BENCH_DB_MARKERS = ("bench", "lab", "test")
 
-    DB 가 없으면 재지 않고 **왜 못 쟀는지**를 돌려준다. 빈 표를 내면 나중에 보는
-    사람이 「0이었나 안 쟀나」 를 구분하지 못한다.
+
+def _dsn_database(dsn: str) -> str:
+    """DSN 에서 DB 이름만 꺼낸다. URL 형태와 키워드 형태를 **둘 다** 받는다.
+
+    못 읽으면 빈 문자열이다. 그때는 「이름으로 실측용임을 확인할 수 없다」 이므로
+    거부한다 — 모르면 막는다.
     """
+    text = dsn.strip()
+    if "://" in text:
+        from urllib.parse import urlparse
+
+        with contextlib.suppress(ValueError):
+            return urlparse(text).path.lstrip("/").split("?")[0]
+        return ""
+    found = re.search(r"(?:^|\s)dbname\s*=\s*('[^']*'|\"[^\"]*\"|\S+)", text)
+    return found.group(1).strip("'\"") if found else ""
+
+
+def operational_db_refusal() -> str:
+    """`DATABASE_URL` 이 있으면 **실측 자체를 시작하지 않는다.**
+
+    M4 만의 문제가 아니다. `archive_write_lock` 은 `DATABASE_URL` 이 있으면 파일
+    락 대신 PostgreSQL advisory 락으로 바꾼다(`tybot/lock.py`). 그래서 M1·M2 의
+    수집도 그 DB 에 붙는다 — 붙을 수 없으면 **멈추고**, 붙으면 운영 DB 에 락을
+    잡는다. 둘 다 원하는 것이 아니다.
+
+    조용히 지우지 않고 **거부하고 말한다.** 환경 변수를 말없이 건드리면, 같은
+    셸에서 이어 치는 다음 명령이 왜 다르게 도는지 아무도 모른다.
+    """
+    if not os.environ.get("DATABASE_URL", "").strip():
+        return ""
+    return (
+        "DATABASE_URL 이 설정돼 있어 실측을 시작하지 않습니다.\n"
+        "  · M4 는 이 값으로 색인에 붙습니다 — 운영 DB 면 `raw_line` 에 실측용 줄이\n"
+        "    들어가고, 그 표에는 지우는 경로가 없습니다(§8)\n"
+        "  · 아카이브 쓰기 잠금도 이 값이 있으면 DB advisory 락으로 바뀝니다.\n"
+        "    M1·M2 수집이 그 DB 에 붙거나, 못 붙으면 멈춥니다\n"
+        f"  이 셸에서 DATABASE_URL 을 비우고 {BENCH_DSN_ENV} 만 주세요."
+    )
+
+
+def index_bench_refusal() -> str:
+    """M4 를 돌려도 되는가. 안 되면 **왜 안 되는지**를 문자열로 돌려준다.
+
+    예외로 던지지 않는다. 다른 항목은 재고 이것만 건너뛰는 것이 맞고, 건너뛴
+    이유는 보고서에 그대로 실린다 — 빈 칸을 보고 「0이었나 안 쟀나」 를 헷갈리지
+    않게 한다.
+    """
+    if os.environ.get("DATABASE_URL", "").strip():
+        return (
+            "DATABASE_URL 이 설정돼 있어 M4 를 거부한다. `search_index` 는 이 값으로만"
+            " 붙으므로 재는 순간 그 DB 에 행이 들어가고, `raw_line` 에는 지우는 경로가"
+            f" 없다(§8). 이 셸에서 DATABASE_URL 을 비우고 {BENCH_DSN_ENV} 만 주어라"
+        )
+    dsn = os.environ.get(BENCH_DSN_ENV, "").strip()
+    if not dsn:
+        return (
+            f"{BENCH_DSN_ENV} 이 없어 건너뛴다 — 운영 DB 를 쓰지 않기로 했으므로(§8)"
+            " 실측 전용 DSN 을 주어야 잰다"
+        )
+    name = _dsn_database(dsn)
+    if not name:
+        return (
+            f"{BENCH_DSN_ENV} 에서 DB 이름을 읽지 못해 거부한다 — 실측용인지 확인할 수"
+            " 없는 DB 에는 쓰지 않는다"
+        )
+    if not any(marker in name.lower() for marker in BENCH_DB_MARKERS):
+        return (
+            f"{BENCH_DSN_ENV} 의 DB 이름이 「{name}」 이라 거부한다. 이름으로 실측용임을"
+            f" 알 수 없으면 돌리지 않는다 — 이름에 {' · '.join(BENCH_DB_MARKERS)} 중"
+            " 하나를 넣은 DB 를 따로 만들어라"
+        )
+    return ""
+
+
+@contextlib.contextmanager
+def _use_bench_dsn(dsn: str):
+    """`DATABASE_URL` 을 **잠시만** 실측 DSN 으로 바꾼다.
+
+    `finally` 로 되돌리는 것이 요점이다. 안 되돌리면 이 프로세스에서 이어 도는
+    다른 코드가 실측 DB 를 운영 DB 로 알고 쓴다.
+    """
+    before = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = dsn
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = before
+
+
+def bench_connect(dsn: str):
+    """실측 DB 연결. 시험에서 갈아 끼울 수 있도록 한 자리에 둔다."""
+    import psycopg
+
+    return psycopg.connect(dsn)
+
+
+def reset_index(dsn: str) -> None:
+    """회차마다 `raw_line` 을 비운다.
+
+    **구조 A 와 B 가 섞이지 않게 하는 유일한 장치다.** 안 비우면 두 번째 배치의
+    재색인이 이미 들어간 행을 만나 `ON CONFLICT DO NOTHING` 으로 대부분 넘어가고,
+    그러면 「구조 B 가 훨씬 빠르다」 가 나온다 — 일을 안 했기 때문이다.
+
+    회차 사이에도 비운다. 안 그러면 1회차만 진짜 색인이고 2회차부터는 전부
+    충돌 처리라, 회차를 늘릴수록 중위값이 거짓으로 내려간다.
+    """
+    with bench_connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("TRUNCATE raw_line")
+        with contextlib.suppress(Exception):
+            conn.commit()
+
+
+def _append_one(root: Path, layout: str, target: Target, n: int) -> None:
+    """대상 채널에 한 줄 더한다. 배치에 맞는 경로로."""
+    if layout == "a":
+        ingest_layout_a(root, root / target.file_a.relative_to(_batch_root(target.file_a)),
+                        _message(n))
+        return
+    writer.ingest(
+        root,
+        workspace=target.workspace,
+        channel=target.channel,
+        channel_id=target.channel_id or None,
+        messages=[_message(n)],
+        visibility="private",
+        acl=[target.channel],
+    )
+
+
+def bench_reindex(
+    root: Path, layout: str, rounds: int, target: Target
+) -> tuple[list[Samples], str]:
+    """전체 재색인과 **증분** 재색인을 나눠 잰다.
+
+    운영 잡(`search_index.main`)은 늘 **모든 문서**를 훑고, 「증분」 은
+    `ON CONFLICT DO NOTHING` 에서 나온다. 그래서 증분을 재려면 색인이 이미 차
+    있어야 하고, 그 상태를 만드는 전체 재색인도 한 번 돌게 된다 — 공짜로 나오는
+    숫자이므로 같이 적는다.
+
+    한 회차:
+
+    1. `TRUNCATE` — A·B 가 섞이지 않게(§`reset_index`)
+    2. 전체 재색인 **(잰다)** — 빈 색인에서 채우는 비용
+    3. 메시지 한 건 추가
+    4. 전체 문서 재훑기 **(잰다)** — 이게 운영에서 말하는 「증분」 이다
+
+    ## `DATABASE_URL` 노출을 **재색인 호출로만** 좁힌다
+
+    처음에는 회차 전체를 `_use_bench_dsn` 으로 감쌌다. 그랬더니 3번(메시지 추가)이
+    멈췄다 — `archive_write_lock` 은 `DATABASE_URL` 이 **있으면** 파일 락 대신
+    PostgreSQL advisory 락으로 바뀐다(`tybot/lock.py`). 즉 실측 DSN 을 걸어 둔
+    동안은 아카이브 쓰기 잠금까지 그 DB 로 간다.
+
+    시험에서는 멈추는 것으로 드러났지만, 서버에서는 **조용히 실측 DB 에 advisory
+    락을 잡는** 모양이 된다. 그래서 환경 변수를 거는 창을 재색인 두 줄로만 줄인다.
+    파일을 만지는 동안에는 `DATABASE_URL` 이 없다.
+
+    `store.docs()` 를 타이머 안에서 부르는 것은 일부러다 — 운영 잡
+    (`search_index.main`)도 파싱과 색인을 한 번에 돈다.
+    """
+    refusal = index_bench_refusal()
+    if refusal:
+        return [], refusal
     try:
         from tybot import search_index
     except Exception as exc:  # noqa: BLE001
         return [], f"색인 모듈을 불러오지 못했다({type(exc).__name__})"
-    if not os.environ.get("TYBOT_BENCH_INDEX_DSN"):
-        return [], (
-            "TYBOT_BENCH_INDEX_DSN 이 없어 건너뛴다 — 운영 DB 를 쓰지 않기로 했으므로"
-            "(§8) 실측 전용 DSN 을 주어야 잰다"
-        )
-    if not hasattr(search_index, "rebuild"):
-        return [], "search_index.rebuild 이 없다 — 이 항목은 서버에서 잰다"
 
-    sample = Samples(f"M4 증분 재색인 · 구조{layout}")
-    store = ArchiveStore(root)
-    for _ in range(rounds):
-        with timed(sample):
-            search_index.rebuild(store)
-    return [sample], ""
+    dsn = os.environ[BENCH_DSN_ENV].strip()
+    full = Samples(f"M4 전체 재색인 · 구조{layout}")
+    incremental = Samples(f"M4 증분 재색인 · 구조{layout}")
+    try:
+        for n in range(rounds):
+            reset_index(dsn)
+            store = ArchiveStore(root)
+            with _use_bench_dsn(dsn), timed(full):
+                search_index.reindex(store.docs(), store.root)
+            _append_one(root, layout, target, 90_000 + n)
+            # 파일이 바뀌었으니 **새 store** 로 읽는다. 같은 store 를 쓰면
+            # 캐시 무효화까지 측정에 섞여 무엇을 잰 것인지 흐려진다.
+            store = ArchiveStore(root)
+            with _use_bench_dsn(dsn), timed(incremental):
+                search_index.reindex(store.docs(), store.root)
+    except Exception as exc:  # noqa: BLE001 - 못 잰 이유를 보고서에 싣는다
+        return [], f"M4 를 돌리다 실패했다 ({type(exc).__name__}: {exc})"
+    return [full, incremental], ""
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +614,11 @@ def main() -> int:
     _utf8_console()
     args = parser.parse_args()
 
+    problem = operational_db_refusal()
+    if problem:
+        print(problem)
+        return 2
+
     roots = {"a": Path(args.a).expanduser(), "b": Path(args.b).expanduser()}
     out_dir = Path(args.out).expanduser()
     for path, what in ((roots["a"], "구조 1"), (roots["b"], "구조 2"), (out_dir, "출력")):
@@ -478,7 +657,9 @@ def main() -> int:
     for layout in LAYOUTS:
         samples += bench_search_cold(work[layout], queries, args.rounds, layout)
         samples += bench_search_warm(work[layout], biggest, queries, args.rounds, layout)
-        got, why = bench_reindex(work[layout], layout, max(1, args.rounds // 10))
+        got, why = bench_reindex(
+            work[layout], layout, max(1, args.rounds // 10), biggest
+        )
         samples += got
         if why:
             skipped.append(f"M4 증분 재색인 · 구조{layout}: {why}")
