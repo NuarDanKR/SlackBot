@@ -96,13 +96,15 @@ def test_turning_off_returns_the_channel_to_master():
     그건 누락인데 오류가 안 난다.
 
     출발점이 중요하다. 이미 master 인 채널에서 끄면 주인을 유지해도 결과가 같아
-    시험이 아무것도 안 본다. 그래서 **실제로 갈 수 있는 경로**로 archiver 가
-    주인인 shadow 를 만들어 놓고 끈다(active → paused → shadow → off).
+    시험이 아무것도 안 본다. 그래서 **실제로 갈 수 있는 경로**로 active 에서
+    역인수한 뒤 끈다(active → paused → shadow → off).
     """
     active = _channel(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1700000000.0001")
     paused = plan_mode_change(active, ChannelMode.PAUSED)
-    shadow = plan_mode_change(paused, ChannelMode.SHADOW)
-    assert shadow.writer_owner == WriterOwner.ARCHIVER, "이 시험이 재는 상황이 아니다"
+    shadow = plan_mode_change(
+        paused, ChannelMode.SHADOW, cutover_ts="1700001000.0001"
+    )
+    assert shadow.writer_owner == WriterOwner.MASTER
 
     after = plan_mode_change(shadow, ChannelMode.OFF)
 
@@ -127,6 +129,28 @@ def test_active_cannot_go_straight_back_to_shadow():
         plan_mode_change(active, ChannelMode.SHADOW)
 
 
+def test_reverse_cutover_returns_live_writes_to_master():
+    active = _channel(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1700000000.0001")
+    paused = plan_mode_change(active, ChannelMode.PAUSED)
+
+    shadow = plan_mode_change(
+        paused, ChannelMode.SHADOW, cutover_ts="1700001000.0001"
+    )
+
+    assert shadow.writer_owner == WriterOwner.MASTER
+    assert shadow.cutover_ts == "1700001000.0001"
+    assert owns_write(shadow, WriterOwner.MASTER)
+    assert not owns_write(shadow, WriterOwner.ARCHIVER)
+
+
+def test_reverse_cutover_needs_a_new_coordinate():
+    active = _channel(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1700000000.0001")
+    paused = plan_mode_change(active, ChannelMode.PAUSED)
+
+    with pytest.raises(TransitionRefused, match="역인수 좌표"):
+        plan_mode_change(paused, ChannelMode.SHADOW)
+
+
 # --- 동시 쓰기 ---------------------------------------------------------------
 
 @pytest.mark.parametrize(
@@ -135,7 +159,6 @@ def test_active_cannot_go_straight_back_to_shadow():
         (ChannelMode.OFF, WriterOwner.MASTER),
         (ChannelMode.SHADOW, WriterOwner.MASTER),
         (ChannelMode.ACTIVE, WriterOwner.ARCHIVER),
-        (ChannelMode.PAUSED, WriterOwner.ARCHIVER),
     ],
 )
 def test_exactly_one_writer_owns_a_channel(mode, owner):
@@ -145,6 +168,14 @@ def test_exactly_one_writer_owns_a_channel(mode, owner):
     owners = [who for who in WriterOwner if owns_write(state, who)]
 
     assert len(owners) == 1, f"{mode}/{owner} 에서 주인이 {owners}"
+
+
+def test_paused_channel_has_no_live_writer():
+    paused = _channel(
+        ChannelMode.PAUSED, WriterOwner.ARCHIVER, "1700000000.0001"
+    )
+
+    assert [who for who in WriterOwner if owns_write(paused, who)] == []
 
 
 def test_shadow_never_writes_live():
@@ -367,9 +398,14 @@ def test_missing_retention_blocks_production():
     assert "bot_dm_attachment" in blockers[0]
 
 
-def test_zero_is_not_the_same_as_unset():
-    """`0` 은 「즉시 삭제」 라는 결정이고 `None` 은 「아직 안 정함」 이다."""
-    assert production_blockers({"bot_conversation_audit": 0, "bot_dm_attachment": 0}) == []
+def test_zero_is_not_a_valid_retention_period():
+    """DB와 마찬가지로 0일은 운영 정책으로 인정하지 않는다."""
+    blockers = production_blockers(
+        {"bot_conversation_audit": 0, "bot_dm_attachment": 0}
+    )
+
+    assert len(blockers) == 2
+    assert all("1일 이상" in blocker for blocker in blockers)
 
 
 def test_all_set_clears_the_gate():
@@ -381,6 +417,15 @@ def test_attachment_separation_without_a_reader_is_blocked():
     blockers = production_blockers(
         {"bot_conversation_audit": 90, "bot_dm_attachment": 30},
         flags={"separate_attachments": True, "attachment_reader_ready": False},
+    )
+
+    assert any("읽는 쪽" in item for item in blockers)
+
+
+def test_missing_reader_flag_is_fail_closed():
+    blockers = production_blockers(
+        {"bot_conversation_audit": 90, "bot_dm_attachment": 30},
+        flags={"separate_attachments": True},
     )
 
     assert any("읽는 쪽" in item for item in blockers)

@@ -4,7 +4,7 @@
 > 선행: [Archiving Bot 분리](archiving-bot-separation-2026-09-23.md) ·
 > [저장 구조 실측·권고](../verification/2026-09-23-archive-layout-benchmark.md)(구조 2)
 > 구현: `deploy/sql/archiving_schema.sql` · `src/tybot/archive/archiving_state.py`
-> 시험: `tests/test_archiving_schema.py`(26) · `tests/test_archiving_state.py`(43)
+> 시험: `tests/test_archiving_schema.py`(31) · `tests/test_archiving_state.py`(46)
 > 읽는 사람: Archiving Bot 을 만드는 쪽, 서버 구성을 정하는 쪽(Codex), PF Hermes 개발자
 
 ## 0. 지금 하지 않는 것 — **먼저 읽는다**
@@ -56,8 +56,8 @@
 - 표 `bot_conversation_audit` — 이름에 `audit` 을 넣었다. 다음 사람이 이 표를 보고
   「대화가 있네, 검색에 넣자」 고 하지 않도록 이름이 용도를 말해야 한다
 - 표 `archive_retention_policy` — `retention_days` 가 **nullable** 이다.
-  `NULL`(안 정함)과 `0`(즉시 삭제)은 다른 결정이고, `NOT NULL DEFAULT 0` 으로 두면
-  「안 정함」 을 표현할 수 없어 게이트가 막을 것이 없어진다
+  `NULL`은 아직 정하지 않은 값이고, 운영값은 **1일 이상**만 허용한다. `0`을
+  즉시 삭제로 해석하면 기록이 생성되자마자 사라져 감사 계약이 성립하지 않는다
 - `production_blockers()` — 정책값이 비어 있으면 전환을 막는다.
   안 막으면 기본값이 **「영구 보관」** 이 된다. 개인 대화를 영구 보관하는 것은
   아무도 결정한 적이 없는데 그냥 그렇게 된다
@@ -93,8 +93,8 @@
 
 - 표 `archive_message_revision` — 키가 `(workspace, channel_id, message_ts, revision_no)`.
   덮어쓰는 경로가 없다
-- 뷰 `archive_message_current` — 조회하는 쪽마다 「최신 고르기」 SQL 을 쓰면 한
-  군데가 `redact` 를 빼먹고 지워진 것을 보여 준다. 한 자리에 둔다
+- 뷰 `archive_message_current` — 최신 revision 을 고른 뒤 `delete`·`redact`를
+  **뷰 자체에서 제외한다.** 호출자가 필터를 빼먹어도 지워진 메시지는 나오지 않는다
 - 제약 `..._first_is_create` — 첫 revision 은 반드시 `create`. `change` 로 시작하면
   원본이 없다는 뜻이고, 그때 무엇이 무엇으로 바뀌었는지 말할 수 없다
 - 제약 `..._redact_is_bare` — `redact` 는 `body_sha256` 을 **비운다.**
@@ -142,6 +142,10 @@
 | Archiver DB role | **설정 조회 + 상태 기록만.** 전용 최소권한 |
 | 설정 변경 | append-only audit |
 
+기능 스위치는 `(name, scope, scope_key)`로 식별한다. `scope`는 `global`·
+`workspace`·`channel` 중 하나이고, 전역이 아니면 대상 key가 반드시 있어야 한다.
+그래야 같은 기능을 전체에는 끄고 파일럿 workspace에만 켤 수 있다.
+
 ENV 로 두면 채널을 늘릴 때마다 SSH 가 필요하고, 그건 **쓸 수 있는 사람이 한 명**
 이라는 뜻이다. 실제로 그래서 「대기 31건·처리 0건」 이 났다(CLAUDE.md).
 
@@ -152,6 +156,7 @@ ENV 로 두면 채널을 늘릴 때마다 SSH 가 필요하고, 그건 **쓸 수
 | 어디에도 `DELETE` | 아카이빙 봇은 지우는 일을 하지 않는다. 권한이 있으면 언젠가 쓴다 |
 | 설정 표의 `UPDATE` | 봇이 자기 모드를 바꿀 수 있으면 **shadow 가 안전장치가 아니게 된다** |
 | 감사 표의 `UPDATE` | 고쳐지는 감사는 감사가 아니다 |
+| 설정 변경 감사의 `INSERT` | 설정을 바꾸지 못하는 봇이 변경 기록을 만들 이유도 없다 |
 | 시크릿 표 일체 | 절대 원칙 6 |
 
 ---
@@ -181,6 +186,10 @@ ENV 로 두면 채널을 늘릴 때마다 SSH 가 필요하고, 그건 **쓸 수
   첨부 손실 0」 을 확인할 기회가 사라진다. 급할 때 건너뛰고 싶어지는 단계다
 - `active` 로 갈 때 `writer_owner` 와 `cutover_ts` 가 **같이** 움직인다. 따로 두면
   「active 인데 주인은 master」 가 만들어지고, 그 상태에서 둘이 다 쓴다
+- `paused`에서는 어느 writer도 운영 원문을 쓰지 않는다. 재개할 때 이전 owner를
+  보고 `active` 또는 `shadow`로 돌아간다
+- `active` 이후 `shadow`로 롤백할 때는 새 역인수 좌표를 받고 운영 owner를
+  Master로 돌린다. 좌표 없이 owner만 바꾸는 롤백은 허용하지 않는다
 - cutover 는 **뒤로 못 간다.** 되돌리면 이미 넘긴 구간을 두 writer 가 다 썼다고
   생각한다
 - 표 `archive_refusal` — 본문·일치 문자열을 안 든다. PII 를 막으려고 만든 표가
@@ -215,8 +224,8 @@ ENV 로 두면 채널을 늘릴 때마다 SSH 가 필요하고, 그건 **쓸 수
 |---|---|
 | 스키마 | `deploy/sql/archiving_schema.sql` (`apply-schema.sh` 목록에 등록) |
 | 상태 전이 | `src/tybot/archive/archiving_state.py` |
-| 스키마 회귀시험 | `tests/test_archiving_schema.py` — 26건 |
-| 상태 전이 회귀시험 | `tests/test_archiving_state.py` — 43건 |
+| 스키마 회귀시험 | `tests/test_archiving_schema.py` — 31건 |
+| 상태 전이 회귀시험 | `tests/test_archiving_state.py` — 46건 |
 
 ### 왜 스키마와 코드 **둘 다** 에 두는가
 

@@ -89,6 +89,14 @@ def test_active_channel_must_belong_to_the_archiver(sql):
     assert "writer_owner" in body and "'archiver'" in body
 
 
+def test_off_and_shadow_channels_belong_to_master(sql):
+    """그림자 수집 중에도 운영 원문은 Master가 쓴다."""
+    body = _constraint(sql, "archive_channel_mode_owner_matches")
+
+    assert "'off'" in body and "'shadow'" in body
+    assert "'master'" in body
+
+
 def test_archiver_ownership_requires_a_cutover_coordinate(sql):
     """없으면 「언제부터 이 봇 몫인가」 를 나중에 아무도 모른다."""
     body = _constraint(sql, "archive_channel_mode_cutover_present")
@@ -172,6 +180,14 @@ def test_the_first_revision_must_be_a_create(sql):
     assert "revision_no > 1" in body and "'create'" in body
 
 
+def test_revision_order_is_enforced_by_a_trigger(sql):
+    """행 하나만 보는 CHECK로는 revision 2부터 넣는 일을 막을 수 없다."""
+    assert "CREATE OR REPLACE FUNCTION enforce_archive_message_revision_order()" in sql
+    assert "CREATE TRIGGER archive_message_revision_order" in sql
+    assert "NEW.revision_no <> latest_no + 1" in sql
+    assert "latest_kind = 'redact'" in sql
+
+
 def test_redacted_rows_keep_no_body_hash(sql):
     """짧은 본문은 사전 대입으로 해시에서 되찾힌다.
 
@@ -195,6 +211,9 @@ def test_search_reads_one_view_not_scattered_sql(sql):
     assert "CREATE OR REPLACE VIEW archive_message_current" in sql
     assert "DISTINCT ON (workspace, channel_id, message_ts)" in sql
     assert "revision_no DESC" in sql
+    view = sql[sql.index("CREATE OR REPLACE VIEW archive_message_current"):]
+    view = view[:view.index(";")]
+    assert "kind NOT IN ('delete', 'redact')" in view
 
 
 # --- 첨부 revision 은 덮어쓰지 않는다 ----------------------------------------
@@ -278,6 +297,14 @@ def test_every_feature_flag_defaults_to_off(sql):
     assert "enabled" not in seed
 
 
+def test_feature_flags_can_be_scoped_without_name_collisions(sql):
+    """같은 기능을 전역과 특정 workspace에서 각각 설정할 수 있어야 한다."""
+    assert "PRIMARY KEY (name, scope, scope_key)" in sql
+    body = _constraint(sql, "archive_feature_flag_scope_valid")
+    assert "'global'" in body and "'workspace'" in body and "'channel'" in body
+    assert "scope_key" in body
+
+
 # --- archiver 역할은 최소권한이다 --------------------------------------------
 
 def _archiver_grants(sql: str) -> list[str]:
@@ -306,14 +333,39 @@ def test_archiver_cannot_change_its_own_mode(sql):
     assert "UPDATE" not in block.split("archive_channel_mode")[0][-80:]
 
 
+def test_archiver_cannot_forge_config_audit(sql):
+    """설정을 바꾸지 못하는 역할이 설정 변경 감사도 만들면 안 된다."""
+    block = sql[sql.index("rolname = 'tybot_archiver'"):]
+    block = block[: block.index("END IF;")]
+
+    assert "REVOKE ALL PRIVILEGES ON TABLE archive_config_audit" in block
+    grants = "\n".join(part for part in block.split("EXECUTE") if "GRANT" in part)
+    assert "archive_config_audit" not in grants
+
+
 def test_append_only_tables_get_no_update(sql):
     """감사가 고쳐지면 감사가 아니다."""
     block = sql[sql.index("rolname = 'tybot_archiver'"):]
     block = block[: block.index("END IF;")]
-    for table in ("archive_message_revision", "archive_refusal", "archive_config_audit"):
+    for table in ("archive_message_revision", "archive_refusal"):
         line = next(part for part in block.split("EXECUTE") if table in part)
         assert "UPDATE" not in line, f"{table} 에 UPDATE 가 있다"
         assert "INSERT" in line, table
+
+
+def test_runtime_role_cannot_update_or_delete_append_only_audit(sql):
+    block = sql[sql.index("rolname = 'tyslackai'"):]
+    block = block[: block.index("END IF;")]
+    append_grant = next(
+        part for part in block.split("EXECUTE")
+        if "archive_message_revision" in part and "GRANT SELECT, INSERT" in part
+    )
+
+    assert "UPDATE" not in append_grant
+    assert "DELETE" not in append_grant
+    assert "SELECT, INSERT" in append_grant
+    assert "REVOKE UPDATE, DELETE ON TABLE" in block
+    assert "archive_message_revision, archive_refusal, archive_config_audit" in block
 
 
 def test_archiver_gets_no_secret_tables(sql):

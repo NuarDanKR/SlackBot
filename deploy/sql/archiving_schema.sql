@@ -36,7 +36,7 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS archive_channel_mode (
     workspace       text NOT NULL,
     channel_id      text NOT NULL,
-    -- off      수집하지 않는다
+    -- off      Archiver 는 수집하지 않고 Master 가 운영 원문을 쓴다
     -- shadow   수집해서 **그림자 경로**에 쓴다. 운영 아카이브는 건드리지 않는다
     -- active   수집해서 운영 아카이브에 쓴다
     -- paused   잠시 멈춘다. 재개하면 watermark 뒤부터 이어 받는다
@@ -66,7 +66,11 @@ CREATE TABLE IF NOT EXISTS archive_channel_mode (
 -- 상태인데 주인은 master 라고 적혀 있으면, 어느 쪽 말을 믿어야 하는지 알 수 없다.
 ALTER TABLE archive_channel_mode DROP CONSTRAINT IF EXISTS archive_channel_mode_owner_matches;
 ALTER TABLE archive_channel_mode ADD CONSTRAINT archive_channel_mode_owner_matches
-    CHECK (mode <> 'active' OR writer_owner = 'archiver');
+    CHECK (
+        mode = 'paused'
+        OR (mode IN ('off', 'shadow') AND writer_owner = 'master')
+        OR (mode = 'active' AND writer_owner = 'archiver')
+    );
 
 -- 주인이 archiver 면 인수 좌표가 있어야 한다. 없으면 「언제부터 이 봇 몫인가」 를
 -- 나중에 아무도 모른다.
@@ -111,25 +115,47 @@ CREATE INDEX IF NOT EXISTS archive_config_audit_channel
 -- **기본값은 전부 꺼짐이다.** 읽는 쪽이 붙기 전에 켜면 그 자료가 조용히 답변에서
 -- 빠진다(`attachment_writer.separate_attachments` 주석과 같은 이유).
 CREATE TABLE IF NOT EXISTS archive_feature_flag (
-    name            text PRIMARY KEY,
+    name            text NOT NULL,
     enabled         boolean NOT NULL DEFAULT false,
     -- 워크스페이스별로 다르게 켤 수 있어야 한다. 전역만 있으면 파일럿이 불가능하다.
     scope           text NOT NULL DEFAULT 'global',
+    scope_key       text NOT NULL DEFAULT '',
     description     text NOT NULL DEFAULT '',
     updated_at      timestamptz NOT NULL DEFAULT now(),
-    updated_by      text NOT NULL DEFAULT ''
+    updated_by      text NOT NULL DEFAULT '',
+    PRIMARY KEY (name, scope, scope_key)
 );
 
-INSERT INTO archive_feature_flag (name, description) VALUES
+-- 4ecf634 초안이 `name` 하나만 PK 로 만든 DB도 다시 적용하면 안전하게 확장한다.
+ALTER TABLE archive_feature_flag
+    ADD COLUMN IF NOT EXISTS scope_key text NOT NULL DEFAULT '';
+ALTER TABLE archive_feature_flag
+    DROP CONSTRAINT IF EXISTS archive_feature_flag_pkey;
+ALTER TABLE archive_feature_flag
+    ADD CONSTRAINT archive_feature_flag_pkey PRIMARY KEY (name, scope, scope_key);
+ALTER TABLE archive_feature_flag
+    DROP CONSTRAINT IF EXISTS archive_feature_flag_scope_valid;
+ALTER TABLE archive_feature_flag
+    ADD CONSTRAINT archive_feature_flag_scope_valid CHECK (
+        scope IN ('global', 'workspace', 'channel')
+        AND ((scope = 'global' AND scope_key = '')
+             OR (scope <> 'global' AND scope_key <> ''))
+    );
+
+INSERT INTO archive_feature_flag (name, scope, scope_key, description) VALUES
     ('separate_attachments',
+     'global', '',
      '첨부 본문을 raw 에서 떼고 별도 정본에만 둔다. 읽는 쪽이 붙은 뒤에 켠다'),
     ('preserve_edit_delete',
+     'global', '',
      'message_changed·message_deleted 를 revision 으로 보존한다'),
     ('require_attachment_ack',
+     'global', '',
      '첨부가 ready 가 되기 전에는 검색 가능하다고 말하지 않는다'),
     ('archiver_writes_live',
+     'global', '',
      '아카이빙 봇이 운영 아카이브에 쓴다. 채널별 writer_owner 보다 상위 차단기다')
-ON CONFLICT (name) DO NOTHING;
+ON CONFLICT (name, scope, scope_key) DO NOTHING;
 
 
 -- ---------------------------------------------------------------------------
@@ -141,7 +167,7 @@ ON CONFLICT (name) DO NOTHING;
 -- 아무도 결정한 적이 없는데 그냥 그렇게 된다.
 CREATE TABLE IF NOT EXISTS archive_retention_policy (
     name            text PRIMARY KEY,
-    retention_days  integer,                -- NULL = **아직 안 정했다**. 0 과 다르다
+    retention_days  integer,                -- NULL = **아직 안 정했다**. 운영값은 1일 이상
     approved_by     text NOT NULL DEFAULT '',
     approved_at     timestamptz,
     description     text NOT NULL DEFAULT ''
@@ -269,6 +295,66 @@ ALTER TABLE archive_message_revision DROP CONSTRAINT IF EXISTS archive_message_r
 ALTER TABLE archive_message_revision ADD CONSTRAINT archive_message_revision_redact_is_bare
     CHECK (kind <> 'redact' OR (body_sha256 = '' AND reason_code <> ''));
 
+-- CHECK 만으로는 revision 2를 첫 행으로 넣거나 번호를 건너뛰는 것을 막을 수 없다.
+-- 좌표별 advisory lock으로 첫 INSERT 경쟁도 직렬화하고, 직전 revision이 정확히
+-- 하나 앞인지 확인한다. 같은 PK의 재시도는 본래 PK/ON CONFLICT가 처리하게 둔다.
+CREATE OR REPLACE FUNCTION enforce_archive_message_revision_order()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    latest_no integer;
+    latest_kind text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtext(NEW.workspace || chr(31) || NEW.channel_id),
+        hashtext(NEW.message_ts)
+    );
+
+    IF EXISTS (
+        SELECT 1
+          FROM archive_message_revision
+         WHERE workspace = NEW.workspace
+           AND channel_id = NEW.channel_id
+           AND message_ts = NEW.message_ts
+           AND revision_no = NEW.revision_no
+    ) THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT revision_no, kind
+      INTO latest_no, latest_kind
+      FROM archive_message_revision
+     WHERE workspace = NEW.workspace
+       AND channel_id = NEW.channel_id
+       AND message_ts = NEW.message_ts
+     ORDER BY revision_no DESC
+     LIMIT 1;
+
+    IF latest_no IS NULL THEN
+        IF NEW.revision_no <> 1 OR NEW.kind <> 'create' THEN
+            RAISE EXCEPTION 'first archive revision must be create revision 1';
+        END IF;
+    ELSE
+        IF NEW.revision_no <> latest_no + 1 THEN
+            RAISE EXCEPTION 'archive revision must follow %, got %', latest_no, NEW.revision_no;
+        END IF;
+        IF latest_kind = 'redact' THEN
+            RAISE EXCEPTION 'redacted archive message cannot receive another revision';
+        END IF;
+        IF NEW.kind = 'create' THEN
+            RAISE EXCEPTION 'create is only valid for the first archive revision';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS archive_message_revision_order ON archive_message_revision;
+CREATE TRIGGER archive_message_revision_order
+BEFORE INSERT ON archive_message_revision
+FOR EACH ROW EXECUTE FUNCTION enforce_archive_message_revision_order();
+
 CREATE INDEX IF NOT EXISTS archive_message_revision_latest
     ON archive_message_revision (workspace, channel_id, message_ts, revision_no DESC);
 
@@ -276,14 +362,19 @@ CREATE INDEX IF NOT EXISTS archive_message_revision_latest
 -- 뷰로 두는 이유: 조회하는 쪽마다 「최신을 고르는 SQL」 을 쓰면 한 군데가 어긋나
 -- 그 경로만 지워진 문장을 보여 준다.
 CREATE OR REPLACE VIEW archive_message_current AS
-SELECT DISTINCT ON (workspace, channel_id, message_ts)
-       workspace, channel_id, message_ts, revision_no, kind,
+SELECT workspace, channel_id, message_ts, revision_no, kind,
        author_id, body_sha256, doc_path, line_no, recorded_at
-  FROM archive_message_revision
- ORDER BY workspace, channel_id, message_ts, revision_no DESC;
+  FROM (
+        SELECT DISTINCT ON (workspace, channel_id, message_ts)
+               workspace, channel_id, message_ts, revision_no, kind,
+               author_id, body_sha256, doc_path, line_no, recorded_at
+          FROM archive_message_revision
+         ORDER BY workspace, channel_id, message_ts, revision_no DESC
+       ) AS latest
+ WHERE kind NOT IN ('delete', 'redact');
 
 COMMENT ON VIEW archive_message_current IS
-    '메시지별 최신 revision. 검색은 여기서 kind NOT IN (delete, redact) 만 본다.';
+    '메시지별 최신 비삭제 revision. 삭제·redact는 이 뷰에서 이미 제외한다.';
 
 
 -- ---------------------------------------------------------------------------
@@ -406,6 +497,10 @@ COMMENT ON TABLE bot_conversation_audit IS
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tybot_archiver') THEN
+        -- 이전 초안이 부여한 권한도 재적용 시 실제로 회수한다. GRANT 목록에서
+        -- 빼는 것만으로는 PostgreSQL의 기존 권한이 사라지지 않는다.
+        REVOKE ALL PRIVILEGES ON TABLE archive_config_audit FROM tybot_archiver;
+        REVOKE ALL PRIVILEGES ON SEQUENCE archive_config_audit_id_seq FROM tybot_archiver;
         -- 설정: 읽기만
         EXECUTE 'GRANT SELECT ON TABLE'
                 ' archive_channel_mode, archive_feature_flag, archive_retention_policy'
@@ -416,22 +511,30 @@ BEGIN
                 ' TO tybot_archiver';
         -- append-only: INSERT 만. UPDATE 도 DELETE 도 없다
         EXECUTE 'GRANT SELECT, INSERT ON TABLE'
-                ' archive_message_revision, archive_refusal, archive_config_audit'
+                ' archive_message_revision, archive_refusal'
                 ' TO tybot_archiver';
         EXECUTE 'GRANT SELECT ON archive_message_current TO tybot_archiver';
         EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE'
-                ' archive_refusal_id_seq, archive_config_audit_id_seq'
+                ' archive_refusal_id_seq'
                 ' TO tybot_archiver';
     END IF;
 
     -- 콘솔·봇 본체는 기존 역할을 쓴다.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
+        REVOKE UPDATE, DELETE ON TABLE
+            archive_message_revision, archive_refusal, archive_config_audit
+            FROM tyslackai;
+        REVOKE UPDATE ON TABLE bot_conversation_audit FROM tyslackai;
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE'
                 ' archive_channel_mode, archive_feature_flag, archive_retention_policy,'
-                ' archive_ingest_state, archive_attachment_revision,'
-                ' archive_message_revision, archive_refusal, archive_config_audit,'
-                ' bot_conversation_audit'
+                ' archive_ingest_state, archive_attachment_revision'
                 ' TO tyslackai';
+        EXECUTE 'GRANT SELECT, INSERT ON TABLE'
+                ' archive_message_revision, archive_refusal, archive_config_audit'
+                ' TO tyslackai';
+        -- 대화 감사는 보존기간 만료 작업만 DELETE 한다. 본문 수정은 허용하지 않는다.
+        EXECUTE 'GRANT SELECT, INSERT, DELETE ON TABLE'
+                ' bot_conversation_audit TO tyslackai';
         EXECUTE 'GRANT SELECT ON archive_message_current TO tyslackai';
         EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE'
                 ' archive_refusal_id_seq, archive_config_audit_id_seq,'

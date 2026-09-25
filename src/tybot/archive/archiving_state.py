@@ -112,6 +112,36 @@ def plan_mode_change(
             current.workspace, current.channel_id, target, WriterOwner.ARCHIVER, ts
         )
 
+    if target == ChannelMode.SHADOW:
+        # 첫 파일럿은 master 가 운영 원문을 계속 쓰고 archiver 는 그림자에만 쓴다.
+        # active 이후 shadow 로 되돌리는 것은 운영 writer 를 master 로 넘기는
+        # 역인수다. 새 좌표 없이 소유권만 바꾸면 그 경계에서 중복·누락이 생긴다.
+        if current.writer_owner == WriterOwner.ARCHIVER:
+            if not cutover_ts:
+                raise TransitionRefused(
+                    "active 이후 shadow 로 돌아가려면 역인수 좌표(cutover_ts)가 "
+                    "필요합니다. 이 ts 이후가 master 몫입니다"
+                )
+            if current.cutover_ts and cutover_ts < current.cutover_ts:
+                raise TransitionRefused(
+                    f"역인수 좌표는 기존 인수 좌표보다 앞설 수 없습니다: "
+                    f"{current.cutover_ts} → {cutover_ts}"
+                )
+            return ChannelState(
+                current.workspace,
+                current.channel_id,
+                target,
+                WriterOwner.MASTER,
+                cutover_ts,
+            )
+        return ChannelState(
+            current.workspace,
+            current.channel_id,
+            target,
+            WriterOwner.MASTER,
+            current.cutover_ts,
+        )
+
     if target == ChannelMode.OFF:
         # 꺼진 채널의 주인은 master 로 돌아간다. archiver 가 주인인 채로 꺼지면
         # **아무도 안 쓰는 구간**이 생기고, 그건 누락인데 오류가 안 난다.
@@ -119,8 +149,8 @@ def plan_mode_change(
             current.workspace, current.channel_id, target, WriterOwner.MASTER, ""
         )
 
-    # shadow · paused 는 주인을 바꾸지 않는다. 그림자는 운영에 안 쓰고,
-    # 일시정지는 주인을 유지해야 재개할 때 이어 받는다.
+    # paused 는 이전 주인을 유지해 어느 모드로 재개할지 판정한다. 다만 paused
+    # 동안에는 어느 쪽도 운영 원문을 쓰지 않는다(`owns_write`).
     return ChannelState(
         current.workspace, current.channel_id, target,
         current.writer_owner, current.cutover_ts,
@@ -143,9 +173,11 @@ def may_write_live(state: ChannelState, *, archiver_flag: bool) -> bool:
 
 def owns_write(state: ChannelState, actor: WriterOwner) -> bool:
     """이 actor 가 지금 이 채널을 쓸 주인인가. **둘이 동시에 참이 되지 않는다.**"""
-    if state.mode in (ChannelMode.OFF, ChannelMode.PAUSED):
+    if state.mode == ChannelMode.PAUSED:
+        return False
+    if state.mode in (ChannelMode.OFF, ChannelMode.SHADOW):
         return actor == WriterOwner.MASTER
-    return state.writer_owner == actor
+    return actor == WriterOwner.ARCHIVER
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +407,13 @@ def production_blockers(
         for name in REQUIRED_RETENTION
         if retention.get(name) is None
     ]
+    blockers.extend(
+        f"보존 기간은 1일 이상이어야 합니다: {name}"
+        for name in REQUIRED_RETENTION
+        if retention.get(name) is not None and retention[name] <= 0
+    )
     flags = flags or {}
-    if flags.get("separate_attachments") and not flags.get("attachment_reader_ready", True):
+    if flags.get("separate_attachments") and not flags.get("attachment_reader_ready", False):
         # 읽는 쪽이 없는데 분리를 켜면 그 본문이 조용히 답변에서 빠진다.
         blockers.append(
             "첨부 분리가 켜져 있는데 읽는 쪽이 준비되지 않았습니다"
