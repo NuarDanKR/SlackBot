@@ -14,7 +14,8 @@ from pathlib import Path
 
 from slack_sdk.errors import SlackApiError
 
-from .archive import writer
+from .archive import ingest_ack, writer
+from .archive.archiving_state import IngestState
 from .archive.attachment_writer import raw_lines_for
 from .archive.attachment_writer import write_docs as write_attachment_docs
 from .archive.revision_store import record_revision
@@ -134,6 +135,9 @@ class ShadowCollector:
         self.cfg = cfg
         self.root = root
         self._names: dict[str, str] = {}
+        #: 지금 처리 중인 채널. `_ack` 가 좌표를 인자로 받으면 호출부마다
+        #: 넘겨야 하고, 한 군데가 빠지면 그 경로만 엉뚱한 채널에 기록한다.
+        self._ack_channel = ""
         self._store = ArchiveStore(root)
 
     def ingest_event(self, client, event: dict) -> str:
@@ -160,6 +164,13 @@ class ShadowCollector:
         if not event.get("user") or not event.get("ts"):
             return "skipped-identity"
 
+        # 여기서부터가 **이 메시지를 우리가 맡았다**는 뜻이다. 앞의 skip 들은
+        # 범위 밖이라 상태를 남기지 않는다 — 남기면 「받았는데 안 됐다」 가
+        # 쌓여서 진짜 미완료를 덮는다.
+        message_ts = str(event["ts"])
+        self._ack_channel = channel_id
+        self._ack(message_ts, IngestState.RECEIVED)
+
         from .archive.files import attachment_storage
 
         storage = attachment_storage(self.root, self.cfg.key, channel_id)
@@ -172,6 +183,7 @@ class ShadowCollector:
             ),
         )
         if not messages:
+            self._ack(message_ts, IngestState.FAILED, error_code="no-message")
             return "skipped-empty"
         if staged:
             write_attachment_docs(
@@ -191,15 +203,40 @@ class ShadowCollector:
             messages=messages,
             acl=[channel],
         )
+        # 원문이 파일에 들어갔다. 첨부는 아직일 수 있다.
+        if result.written:
+            self._ack(
+                message_ts, IngestState.RAW_WRITTEN,
+                attachment_total=len(staged), attachment_ready=0,
+                doc_path=self._relative_doc_path(result.path),
+            )
         if staged:
+            # 첨부가 있으면 **본문만으로 ready 라고 하지 않는다.**
+            self._ack(
+                message_ts, IngestState.ATTACHMENT_PENDING,
+                attachment_total=len(staged), attachment_ready=0,
+            )
             try:
                 confirm_archived(
                     self._store, staged, workspace=self.cfg.key, channel_id=channel_id
                 )
             except Exception:
                 log.exception("[%s] attachment archive confirmation failed", self.cfg.key)
+                self._ack(message_ts, IngestState.PARTIAL, error_code="attachment-unconfirmed")
                 return "metadata-unconfirmed"
+            # 확인까지 끝난 첨부만 센다. 「썼다」 와 「확인됐다」 는 다른 사실이다.
+            self._ack(
+                message_ts, IngestState.READY,
+                attachment_total=len(staged), attachment_ready=len(staged),
+            )
         if result.refused:
+            # 일부만 들어갔으면 partial, 하나도 못 들어갔으면 refused 다.
+            # 거부 본문은 남기지 않는다(절대 원칙 5) — 사유 코드만 든다.
+            self._ack(
+                message_ts,
+                IngestState.PARTIAL if result.written else IngestState.REFUSED,
+                error_code="screened",
+            )
             return "partial" if result.written else "refused"
         if (
             (event.get("text") or "").strip()
@@ -212,7 +249,11 @@ class ShadowCollector:
                 doc_path=self._relative_doc_path(result.path),
             )
         ):
+            self._ack(message_ts, IngestState.PARTIAL, error_code="revision-unconfirmed")
             return "metadata-unconfirmed"
+        if not staged:
+            # 첨부가 없으면 원문이 곧 전부다.
+            self._ack(message_ts, IngestState.READY)
         return "written" if result.written else "duplicate"
 
     def _speaker(self, client, user_id: str) -> str:
@@ -302,6 +343,30 @@ class ShadowCollector:
         ):
             return "metadata-unconfirmed"
         return "revision-written" if result.written else "revision-duplicate"
+
+    def _ack(self, message_ts: str, target, **values) -> None:
+        """수집 상태를 남긴다. **실패해도 수집을 막지 않는다.**
+
+        놓친 원본은 되돌릴 수 없다 — Slack 백필은 분당 1요청이라 사실상 복구가
+        안 된다. 반대로 ACK 는 나중에 다시 만들 수 있다. 그래서 여기서는 기록만
+        시도하고 결과를 보지 않는다.
+
+        그림자 모드라 `written_to="shadow"` 다. 인수 전까지 이 기록이 운영
+        아카이브를 가리킨다고 읽히면 안 된다.
+        """
+        try:
+            ingest_ack.advance(
+                workspace=self.cfg.key,
+                channel_id=self._ack_channel,
+                message_ts=message_ts,
+                target=target,
+                written_to="shadow",
+                **values,
+            )
+        except Exception:
+            # `advance` 도 안에서 삼키지만 여기서 한 번 더 막는다. 저 안의 처리가
+            # 바뀌어도 수집은 계속 돌아야 한다 — 한쪽만 고치는 날이 오기 때문이다.
+            log.exception("[%s] 수집 상태 기록 실패 ts=%s", self.cfg.key, message_ts)
 
     def _relative_doc_path(self, path: Path | str) -> str:
         candidate = Path(path)

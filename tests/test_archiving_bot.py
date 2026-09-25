@@ -229,3 +229,93 @@ def test_revision_doc_path_is_relative_to_archive_root(tmp_path):
     )
     with pytest.raises(archiving_bot.ArchiverConfigError, match="escaped"):
         collector._relative_doc_path(tmp_path / "outside.md")
+
+
+# --- ACK (수집 상태) ----------------------------------------------------------
+#
+# 수집기가 **단계마다** 상태를 남긴다. 안 남기면 Master 가 「방금 올린 것이
+# 검색되나」 에 답할 근거가 없고, 근거가 없으면 사람은 추측으로 답하는 봇을 본다.
+
+
+@pytest.fixture
+def acked(monkeypatch):
+    """`ingest_ack.advance` 가 받은 것을 모은다. DB 를 요구하지 않는다."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        archiving_bot.ingest_ack, "advance", lambda **kw: calls.append(kw) or None
+    )
+    return calls
+
+
+def _event(**over) -> dict:
+    return {
+        "channel_type": "channel",
+        "channel": "C12345678",
+        "user": "U12345678",
+        "ts": "1790070000.000001",
+        "text": "회의 일정은 10시입니다.",
+    } | over
+
+
+def test_a_plain_message_goes_received_then_raw_written_then_ready(tmp_path, acked):
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    assert collector.ingest_event(Client(), _event()) == "written"
+
+    assert [str(call["target"]) for call in acked] == [
+        "received", "raw_written", "ready",
+    ]
+    assert {call["message_ts"] for call in acked} == {"1790070000.000001"}
+    assert {call["channel_id"] for call in acked} == {"C12345678"}
+
+
+def test_the_shadow_collector_never_claims_it_wrote_live(tmp_path, acked):
+    """인수 전까지 이 기록이 운영 아카이브를 가리킨다고 읽히면 안 된다."""
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _event())
+
+    assert {call["written_to"] for call in acked} == {"shadow"}
+
+
+def test_events_outside_our_scope_leave_no_state(tmp_path, acked):
+    """범위 밖까지 남기면 「받았는데 안 됐다」 가 쌓여 진짜 미완료를 덮는다."""
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _event(channel_type="im"))
+    collector.ingest_event(Client(), _event(channel="C99999999"))
+    collector.ingest_event(Client(), _event(bot_id="B123"))
+
+    assert acked == []
+
+
+def test_a_redelivered_event_records_the_same_states_again(tmp_path, acked):
+    """수집기는 멱등을 판단하지 않는다 — **저장소가** 앞으로만 민다.
+
+    여기서 판단하면 규칙이 두 곳에 생기고, 한 곳만 고치는 날이 온다.
+    """
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _event())
+    acked.clear()
+    assert collector.ingest_event(Client(), _event()) == "duplicate"
+
+    assert str(acked[0]["target"]) == "received"
+
+
+def test_a_failed_ack_does_not_stop_collection(tmp_path, monkeypatch):
+    """놓친 원본은 되돌릴 수 없다. ACK 는 나중에 다시 만들 수 있다."""
+    def boom(**_):
+        raise RuntimeError("DB 다운")
+
+    monkeypatch.setattr(archiving_bot.ingest_ack, "advance", boom)
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    assert collector.ingest_event(Client(), _event()) == "written"
+    files = list((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md"))
+    assert files and "회의 일정은 10시입니다." in files[0].read_text(encoding="utf-8")
