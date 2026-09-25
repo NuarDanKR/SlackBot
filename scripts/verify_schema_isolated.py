@@ -404,6 +404,21 @@ def main() -> int:
         return 1
     print("\n4. 권한 회수·부여 — 통과")
     print(f"\n네 가지 모두 통과했습니다 (금지 {len(FORBIDDEN)}건 · 필수 {len(REQUIRED)}건).")
+
+    # 통과를 **지문과 함께** 남긴다. 콘솔의 release gate 가 이 파일을 본다.
+    #
+    # 지문에 묶는 이유: 검증 뒤에 스키마를 고치면 게이트가 다시 닫혀야 한다.
+    # 「한 번 했으니 됐다」 로 두면 고친 부분은 **아무도 확인하지 않은 채로** 간다.
+    # 그리고 고치는 것은 늘 검증 뒤다.
+    sys.path.insert(0, str(ROOT / "src"))
+    from tybot.console.release_gate import record_pass
+
+    marker = record_pass(
+        by=os.getenv("USER") or os.getenv("USERNAME") or "unknown",
+        dsn_label=dsn_database(args.dsn),
+    )
+    print(f"검증 기록: {marker}")
+    print("콘솔의 active 전환 잠금이 이 기록으로 열립니다.")
     return 0
 
 

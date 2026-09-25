@@ -1,27 +1,34 @@
-"""콘솔 운영 손잡이 — **전이 함수를 우회하지 못한다.**
+"""콘솔 운영 손잡이 — **전이 함수와 게이트를 우회하지 못한다.**
 
-결정: 2026-09-25 오너 확정 §5·§6.
+결정: 2026-09-25 오너 §5·§6·§9·§10.
 
-여기서 막는 것 둘.
+여기서 막는 것 셋.
 
-1. **콘솔 SQL 이 `mode` 와 `writer_owner` 를 따로 갱신하는 것.** 따로 바꾸면
-   「active 인데 주인은 master」 가 만들어지고, 그 상태에서 두 writer 가 같은
-   파일에 쓴다. 줄이 섞이고 `doc_count` 가 유실되는데 아무도 예외를 안 받는다
+1. **`mode` 와 `writer_owner` 를 따로 갱신하는 것.** 따로 바꾸면 「active 인데
+   주인은 master」 가 만들어지고, 그 상태에서 두 writer 가 같은 파일에 쓴다.
+   줄이 섞이고 `doc_count` 가 유실되는데 아무도 예외를 안 받는다
 2. **사람과 사유 없이 바꾸는 것.** 없으면 사고가 났을 때 범위를 정할 수 없다
+3. **검증 안 된 스키마로 `active` 에 가는 것.** DBA 권한이 없어 격리 DB 검증을
+   못 하는 동안, 「했다고 기억하는」 것을 막는다
 
-DB 를 요구하지 않는다 — 요구하면 개발 PC 에서 안 돌고, **안 도는 시험은 지켜
-주지 않는다.** 커서를 갈아 끼우고 어떤 SQL 이 나가는지 본다.
+가짜 저장소를 쓴다. 커서를 흉내 내면 시험이 규칙이 아니라 SQL 문장 모양을
+지키게 된다.
 """
 
 from __future__ import annotations
 
-import re
+import sys
 from pathlib import Path
 
 import pytest
 
-from tybot.archive.archiving_state import ChannelMode, ChannelState, WriterOwner
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from fake_archiving_repo import FakeArchivingRepo
+
+from tybot.archive.archiving_state import ChannelMode, WriterOwner
 from tybot.console import archiving_admin as admin
+from tybot.console import release_gate
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = (ROOT / "src" / "tybot" / "console" / "archiving_admin.py").read_text(
@@ -29,61 +36,23 @@ SOURCE = (ROOT / "src" / "tybot" / "console" / "archiving_admin.py").read_text(
 )
 
 
-class FakeCursor:
-    """나간 SQL 과 인자를 모은다. 돌려줄 행은 미리 넣어 둔다."""
-
-    def __init__(self, rows: list[dict | None]) -> None:
-        self.rows = list(rows)
-        self.calls: list[tuple[str, tuple]] = []
-
-    def execute(self, sql, params=()):
-        self.calls.append((" ".join(str(sql).split()), tuple(params or ())))
-
-    def fetchone(self):
-        return self.rows.pop(0) if self.rows else None
-
-    def fetchall(self):
-        return []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
-
-
-class FakeConn:
-    def __init__(self, cursor: FakeCursor) -> None:
-        self._cursor = cursor
-
-    def cursor(self):
-        return self._cursor
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
+@pytest.fixture
+def repo() -> FakeArchivingRepo:
+    return FakeArchivingRepo()
 
 
 @pytest.fixture
-def cursor(monkeypatch):
-    holder: dict[str, FakeCursor] = {}
-
-    def make(rows):
-        cur = FakeCursor(rows)
-        holder["cur"] = cur
-        monkeypatch.setattr(admin, "_connect", lambda: FakeConn(cur))
-        return cur
-
-    return make
+def gate_open(monkeypatch, tmp_path):
+    """검증을 통과한 상태를 만든다. **지문까지 맞춘다.**"""
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    release_gate.record_pass(by="dba", dsn_label="tybot_schema_test")
+    return tmp_path
 
 
-def _sql_of(cur: FakeCursor, needle: str) -> tuple[str, tuple]:
-    for sql, params in cur.calls:
-        if needle in sql:
-            return sql, params
-    raise AssertionError(f"{needle} 를 담은 SQL 이 없다: {[c[0][:60] for c in cur.calls]}")
+@pytest.fixture
+def gate_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    return tmp_path
 
 
 # --- 사람과 사유 없이는 못 바꾼다 --------------------------------------------
@@ -99,73 +68,146 @@ def test_an_actor_without_a_reason_is_refused():
         admin.Actor("dan", "   ")
 
 
-def test_every_write_records_the_actor_and_the_reason(cursor):
-    cur = cursor([{"mode": "off", "writer_owner": "master", "cutover_ts": ""}])
+def test_every_write_records_the_actor_and_the_reason(repo, gate_closed):
+    admin.set_channel_mode(
+        "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
+    )
 
-    admin.set_channel_mode("tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"))
+    assert len(repo.audit_rows) == 1
+    assert repo.audit_rows[0]["actor"] == "dan"
+    assert repo.audit_rows[0]["reason"] == "파일럿"
 
-    _, params = _sql_of(cur, "INSERT INTO archive_config_audit")
-    assert params[0] == "dan"
-    assert "파일럿" in params
+
+# --- 검증 게이트 -------------------------------------------------------------
+
+def test_active_is_blocked_until_the_schema_is_verified(repo, gate_closed):
+    """DBA 권한이 없어 검증을 못 하는 동안 **운영 주인이 바뀌지 않는다.**"""
+    repo.given_channel("tyit", "C1", "shadow")
+
+    with pytest.raises(admin.AdminRefused) as caught:
+        admin.set_channel_mode(
+            "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "인수"),
+            cutover_ts="1700000000.0001", repo=repo,
+        )
+
+    assert "active 전환" in str(caught.value)
+    assert "검증" in str(caught.value)
+    assert repo.channel_rows[("tyit", "C1")]["mode"] == "shadow", "아무것도 안 바뀐다"
+    assert repo.audit_rows == []
+
+
+def test_shadow_is_not_blocked_by_the_gate(repo, gate_closed):
+    """그림자는 운영 원문을 안 건드린다. 막으면 개발이 멈춘다."""
+    after = admin.set_channel_mode(
+        "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
+    )
+
+    assert after.mode == ChannelMode.SHADOW
+
+
+def test_active_works_once_the_schema_is_verified(repo, gate_open):
+    repo.given_channel("tyit", "C1", "shadow")
+
+    after = admin.set_channel_mode(
+        "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "인수"),
+        cutover_ts="1700000000.0001", repo=repo,
+    )
+
+    assert after.mode == ChannelMode.ACTIVE
+    assert after.writer_owner == WriterOwner.ARCHIVER
+
+
+def test_the_gate_is_checked_before_the_transition(repo, gate_closed):
+    """전이가 통과한 뒤에 막으면 「갈 수 있는데 안 보내 준다」 로 보인다.
+
+    그때 사람은 규칙을 의심하고, 규칙을 의심하면 우회할 길을 찾는다.
+    """
+    repo.given_channel("tyit", "C1", "off")
+
+    with pytest.raises(admin.AdminRefused) as caught:
+        admin.set_channel_mode(
+            "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "급함"),
+            cutover_ts="1700000000.0001", repo=repo,
+        )
+
+    # 전이 규칙(off→active 금지)이 아니라 **게이트** 사유가 먼저 나온다
+    assert "검증" in str(caught.value)
+
+
+@pytest.mark.parametrize("name", sorted(admin.GATED_FLAGS))
+def test_turning_on_a_dangerous_flag_needs_the_gate(repo, gate_closed, name):
+    """켜는 순간 운영 원문의 모양이 바뀌는 스위치들이다."""
+    with pytest.raises(admin.AdminRefused, match="검증"):
+        admin.set_feature_flag(name, True, admin.Actor("dan", "지금"), repo=repo)
+
+    assert repo.flag_rows == {}
+
+
+@pytest.mark.parametrize("name", sorted(admin.GATED_FLAGS))
+def test_turning_a_dangerous_flag_off_is_never_blocked(repo, gate_closed, name):
+    """**사고 때 내리는 손잡이를 검증 상태로 막으면, 막아야 할 순간에 못 막는다.**"""
+    repo.given_flag(name, True)
+
+    admin.set_feature_flag(name, False, admin.Actor("dan", "사고 대응"), repo=repo)
+
+    assert repo.flag_rows[(name, "global", "")]["enabled"] is False
+
+
+def test_the_detail_view_says_what_is_gated_and_why(repo, gate_closed):
+    """눌러 보고 거절당하는 것보다 회색 버튼이 낫다."""
+    repo.given_retention("bot_conversation_audit")
+    repo.given_retention("bot_dm_attachment")
+
+    detail = admin.workspace_detail("tyit", repo=repo)
+
+    assert detail["schemaGate"]["verified"] is False
+    assert "검증" in detail["schemaGate"]["reason"]
+    assert "active" in detail["gatedModes"]
+    assert "archiver_writes_live" in detail["gatedFlags"]
 
 
 # --- 전이 함수를 지난다 ------------------------------------------------------
 
-def test_an_illegal_transition_never_reaches_the_database(cursor):
-    """`off → active` 는 SQL 이 나가기 전에 막힌다."""
-    cur = cursor([{"mode": "off", "writer_owner": "master", "cutover_ts": ""}])
+def test_an_illegal_transition_never_reaches_the_repository(repo, gate_open):
+    """`off → active` 는 저장 전에 막힌다."""
+    repo.given_channel("tyit", "C1", "off")
 
     with pytest.raises(admin.AdminRefused, match="off → active"):
         admin.set_channel_mode(
             "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "급함"),
-            cutover_ts="1700000000.0001",
+            cutover_ts="1700000000.0001", repo=repo,
         )
 
-    assert not [sql for sql, _ in cur.calls if sql.startswith("INSERT INTO archive_channel_mode")]
-    assert not [sql for sql, _ in cur.calls if "archive_config_audit" in sql]
+    assert repo.channel_rows[("tyit", "C1")]["mode"] == "off"
+    assert repo.audit_rows == []
 
 
-def test_mode_and_owner_are_written_in_one_statement(cursor):
-    """따로 쓰는 UPDATE 가 있으면 둘이 갈라지는 순간이 생긴다."""
-    cur = cursor([{"mode": "shadow", "writer_owner": "master", "cutover_ts": ""}])
+def test_mode_and_owner_move_together(repo, gate_open):
+    repo.given_channel("tyit", "C1", "shadow")
 
-    after = admin.set_channel_mode(
+    admin.set_channel_mode(
         "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "인수"),
-        cutover_ts="1700000000.0001",
+        cutover_ts="1700000000.0001", repo=repo,
     )
 
-    assert after.writer_owner == WriterOwner.ARCHIVER
-    sql, params = _sql_of(cur, "INSERT INTO archive_channel_mode")
-    assert "mode" in sql and "writer_owner" in sql
-    assert "active" in params and "archiver" in params
+    saved = repo.channel_rows[("tyit", "C1")]
+    assert (saved["mode"], saved["writer_owner"]) == ("active", "archiver")
+    assert saved["cutover_ts"] == "1700000000.0001"
 
 
-def test_the_owner_comes_from_the_transition_not_the_caller(cursor):
+def test_the_owner_is_not_a_caller_argument():
     """호출부가 주인을 고를 수 있으면 전이 규칙이 장식이 된다."""
     import inspect
 
-    signature = inspect.signature(admin.set_channel_mode)
-
-    assert "writer_owner" not in signature.parameters
-
-
-def test_no_sql_in_this_module_updates_the_owner_on_its_own():
-    """`writer_owner` 만 건드리는 SQL 이 하나라도 있으면 그 경로가 규칙 밖이다."""
-    for statement in re.findall(r"UPDATE archive_channel_mode.*?\"\"\"", SOURCE, re.S):
-        assert "mode" in statement, statement[:80]
+    assert "writer_owner" not in inspect.signature(admin.set_channel_mode).parameters
 
 
 def test_the_transition_helper_is_called_from_exactly_one_place():
-    """전이 계산이 여러 자리에 있으면 한쪽만 고치는 날이 온다.
-
-    문자열로 세지 않는다 — 주석과 import 까지 세어져서, 설명을 한 줄 더 쓰면
-    시험이 깨진다. **호출 지점**을 센다.
-    """
+    """전이 계산이 여러 자리에 있으면 한쪽만 고치는 날이 온다."""
     import ast
 
     calls = [
-        node
-        for node in ast.walk(ast.parse(SOURCE))
+        node for node in ast.walk(ast.parse(SOURCE))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "plan_mode_change"
@@ -174,35 +216,38 @@ def test_the_transition_helper_is_called_from_exactly_one_place():
     assert len(calls) == 1, f"{len(calls)}곳에서 전이를 계산한다"
 
 
-def test_a_reverse_cutover_goes_through_the_same_path(cursor):
+def test_this_module_contains_no_sql():
+    """SQL 이 규칙과 섞이면 시험이 문장 모양을 지키게 된다."""
+    for keyword in ("INSERT INTO", "UPDATE ", "SELECT ", "DELETE FROM"):
+        assert keyword not in SOURCE, keyword
+
+
+def test_a_reverse_cutover_goes_through_the_same_path(repo, gate_open):
     """역인수도 좌표를 요구한다. 콘솔이 그 규칙을 우회하지 않는다."""
-    cur = cursor([{"mode": "paused", "writer_owner": "archiver", "cutover_ts": "1700000000.0001"}])
+    repo.given_channel("tyit", "C1", "paused", "archiver", "1700000000.0001")
 
     with pytest.raises(admin.AdminRefused, match="역인수 좌표"):
-        admin.set_channel_mode("tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "롤백"))
+        admin.set_channel_mode(
+            "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "롤백"), repo=repo
+        )
 
-    assert not [sql for sql, _ in cur.calls if sql.startswith("INSERT INTO archive_channel_mode")]
 
-
-def test_an_unknown_channel_starts_from_off(cursor):
+def test_an_unknown_channel_starts_from_off(repo, gate_open):
     """행이 없으면 `off` 에서 출발한다. 없는 채널을 바로 active 로 켤 수 없다."""
-    cur = cursor([None])
-
     with pytest.raises(admin.AdminRefused, match="off → active"):
         admin.set_channel_mode(
             "tyit", "C-NEW", ChannelMode.ACTIVE, admin.Actor("dan", "신규"),
-            cutover_ts="1700000000.0001",
+            cutover_ts="1700000000.0001", repo=repo,
         )
-    assert cur.calls, "조회는 했어야 한다"
 
 
-def test_plan_is_the_only_calculation_point():
-    """`plan` 이 `archiving_state` 를 감싸는 유일한 자리다."""
-    state = ChannelState("tyit", "C1", ChannelMode.SHADOW, WriterOwner.MASTER)
+def test_the_channel_row_is_locked_before_it_is_read(repo, gate_closed):
+    """읽고 쓰는 사이에 남이 바꾸면 전이 판정이 옛 상태에서 나온다."""
+    admin.set_channel_mode(
+        "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
+    )
 
-    after = admin.plan(state, ChannelMode.ACTIVE, cutover_ts="1700000000.0001")
-
-    assert after.writer_owner == WriterOwner.ARCHIVER
+    assert repo.locked == [("tyit", "C1")]
 
 
 # --- 기능 스위치 -------------------------------------------------------------
@@ -212,91 +257,87 @@ def test_plan_is_the_only_calculation_point():
     [("global", "tyit"), ("workspace", ""), ("channel", "")],
     ids=["global-with-key", "workspace-without-key", "channel-without-key"],
 )
-def test_flag_scope_and_target_must_agree(cursor, scope, scope_key):
+def test_flag_scope_and_target_must_agree(repo, gate_closed, scope, scope_key):
     """범위와 대상이 어긋나면 그 스위치가 무엇에 걸리는지 아무도 모른다."""
-    cursor([])
-
     with pytest.raises(admin.AdminRefused, match="대상"):
         admin.set_feature_flag(
-            "separate_attachments", True, admin.Actor("dan", "파일럿"),
-            scope=scope, scope_key=scope_key,
+            "require_attachment_ack", True, admin.Actor("dan", "파일럿"),
+            scope=scope, scope_key=scope_key, repo=repo,
         )
 
 
-def test_an_unknown_scope_is_refused(cursor):
-    cursor([])
-
+def test_an_unknown_scope_is_refused(repo, gate_closed):
     with pytest.raises(admin.AdminRefused, match="범위"):
         admin.set_feature_flag(
-            "x", True, admin.Actor("dan", "왜"), scope="everywhere", scope_key="k"
+            "x", True, admin.Actor("dan", "왜"), scope="everywhere", scope_key="k",
+            repo=repo,
         )
 
 
-def test_turning_a_flag_on_is_audited_with_the_old_value(cursor):
+def test_turning_a_flag_on_is_audited_with_the_old_value(repo, gate_closed):
     """이전 값이 없으면 감사를 보고 「무엇이 바뀌었나」 를 알 수 없다."""
-    cur = cursor([{"enabled": False}])
+    repo.given_flag("require_attachment_ack", False, "workspace", "tyit")
 
     admin.set_feature_flag(
-        "separate_attachments", True, admin.Actor("dan", "reader 준비됨"),
-        scope="workspace", scope_key="tyit",
+        "require_attachment_ack", True, admin.Actor("dan", "ACK 준비됨"),
+        scope="workspace", scope_key="tyit", repo=repo,
     )
 
-    _, params = _sql_of(cur, "INSERT INTO archive_config_audit")
-    assert "false" in params and "true" in params
+    entry = repo.audit_rows[-1]
+    assert (entry["old_value"], entry["new_value"]) == ("false", "true")
+    assert entry["workspace"] == "tyit"
 
 
 # --- 보존 정책 ---------------------------------------------------------------
 
-def test_zero_days_is_refused(cursor):
+@pytest.mark.parametrize("days", [0, -1])
+def test_a_non_positive_retention_is_refused(repo, gate_closed, days):
     """기록이 생기자마자 사라지면 감사 계약이 성립하지 않는다."""
-    cursor([])
+    repo.given_retention("bot_conversation_audit")
 
     with pytest.raises(admin.AdminRefused, match="1일 이상"):
-        admin.set_retention("bot_conversation_audit", 0, admin.Actor("dan", "법무 요청"))
+        admin.set_retention("bot_conversation_audit", days, admin.Actor("dan", "법무"))
 
 
-def test_negative_days_is_refused(cursor):
-    cursor([])
-
-    with pytest.raises(admin.AdminRefused, match="1일 이상"):
-        admin.set_retention("bot_conversation_audit", -1, admin.Actor("dan", "오타"))
-
-
-def test_an_unknown_policy_is_refused(cursor):
+def test_an_unknown_policy_is_refused(repo, gate_closed):
     """없는 이름을 조용히 만들면 게이트가 보는 행과 다른 행이 생긴다."""
-    cursor([None])
-
     with pytest.raises(admin.AdminRefused, match="없는 보존 정책"):
-        admin.set_retention("made_up", 30, admin.Actor("dan", "실수"))
+        admin.set_retention("made_up", 30, admin.Actor("dan", "실수"), repo=repo)
+
+    assert repo.retention_rows == {}
 
 
-def test_setting_a_policy_records_who_approved_it(cursor):
+def test_setting_a_policy_records_who_approved_it(repo, gate_closed):
     """사람이 없으면 나중에 그 값을 바꿔도 되는지 아무도 모른다."""
-    cur = cursor([{"retention_days": None}])
+    repo.given_retention("bot_conversation_audit")
 
-    admin.set_retention("bot_conversation_audit", 90, admin.Actor("dan", "법무 승인 2026-09-25"))
+    admin.set_retention(
+        "bot_conversation_audit", 90, admin.Actor("dan", "법무 승인"), repo=repo
+    )
 
-    sql, params = _sql_of(cur, "UPDATE archive_retention_policy")
-    assert "approved_by" in sql and "approved_at" in sql
-    assert "dan" in params
+    assert repo.retention_rows["bot_conversation_audit"]["retention_days"] == 90
+    assert repo.retention_rows["bot_conversation_audit"]["approved_by"] == "dan"
 
 
-def test_clearing_a_policy_is_also_recorded(cursor):
+def test_clearing_a_policy_is_also_recorded(repo, gate_closed):
     """되돌리는 것도 결정이다. 기록이 없으면 왜 비었는지 모른다."""
-    cur = cursor([{"retention_days": 90}])
+    repo.given_retention("bot_conversation_audit", 90)
 
-    admin.set_retention("bot_conversation_audit", None, admin.Actor("dan", "재검토"))
+    admin.set_retention(
+        "bot_conversation_audit", None, admin.Actor("dan", "재검토"), repo=repo
+    )
 
-    _, params = _sql_of(cur, "INSERT INTO archive_config_audit")
-    assert "90" in params
+    assert repo.audit_rows[-1]["old_value"] == "90"
+    assert repo.audit_rows[-1]["new_value"] == ""
+    assert repo.retention_rows["bot_conversation_audit"]["approved_by"] == ""
 
 
-# --- 화면이 막힌 이유를 직접 보여 준다 ----------------------------------------
+def test_setting_retention_unblocks_production(repo, gate_closed):
+    """게이트가 실제로 열리는지 본다 — 안 열리면 목록이 장식이다."""
+    repo.given_retention("bot_conversation_audit", 90)
+    repo.given_retention("bot_dm_attachment", 30)
 
-def test_the_detail_view_carries_the_production_blockers():
-    """안 보여 주면 누군가 막힌 이유를 찾으러 서버에 들어간다."""
-    assert "blockers" in SOURCE
-    assert "production_blockers" in SOURCE
+    assert admin.workspace_detail("tyit", repo=repo)["blockers"] == []
 
 
 def test_only_global_flags_feed_the_gate():

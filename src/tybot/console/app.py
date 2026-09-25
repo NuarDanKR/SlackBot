@@ -34,6 +34,7 @@ from ..managed_env import request_restart
 from . import (
     account_store,
     answer_records,
+    archiving_admin,
     audit_store,
     channel_admin,
     collection_jobs,
@@ -2068,6 +2069,130 @@ def put_workspace(key: str, body: WorkspaceBody, request: Request, user: User) -
         "budget": reader.cost_budget({row["key"]: row["limit_usd"] for row in rows}),
         "restartPending": restart_needed,
     }
+
+
+# ---------------------------------------------------------------------------
+# Archiving Bot 운영 — 2026-09-25 오너 결정 §5·§6·§10
+#
+# 화면이 바꾸는 것은 **설정뿐**이다. 수집·쓰기는 봇이 하고, 봇은 이 설정을 읽는다.
+# 그래서 여기서 실수해도 원문이 즉시 바뀌지는 않는다 — 다만 그 다음 수집부터
+# 바뀌므로, 사유 없이는 못 바꾸게 하고 전부 감사에 남긴다.
+# ---------------------------------------------------------------------------
+
+
+class ChannelModeBody(BaseModel):
+    mode: Literal["off", "shadow", "active", "paused"]
+    # **사유는 선택이 아니다.** 기본값을 두면 전부 그 기본값으로 남고,
+    # 그건 기록이 아니다.
+    reason: str = Field(min_length=1)
+    cutoverTs: str = ""
+
+
+class FeatureFlagBody(BaseModel):
+    name: str = Field(min_length=1)
+    enabled: bool
+    reason: str = Field(min_length=1)
+    scope: Literal["global", "workspace", "channel"] = "global"
+    scopeKey: str = ""
+
+
+class RetentionBody(BaseModel):
+    name: str = Field(min_length=1)
+    # `None` 은 「아직 안 정함」 이다. `0` 과 다르다 — 0 으로 두면 기록이 생기자마자
+    # 사라져 감사 계약이 성립하지 않는다.
+    days: int | None = Field(default=None, ge=1)
+    reason: str = Field(min_length=1)
+
+
+@app.get("/api/workspaces/{key}/archiving")
+def get_workspace_archiving(key: str, user: User) -> dict:
+    """상세 화면이 쓰는 것 전부. **한 번에** 준다.
+
+    화면이 따로 여러 번 부르면 보는 순간의 상태가 서로 다른 시각의 것이 되고,
+    그때 사람은 자기가 누른 것이 안 먹었다고 생각해 한 번 더 누른다.
+    """
+    _require_admin(user)
+    try:
+        return archiving_admin.workspace_detail(key.strip().lower())
+    except workspace_store.WorkspaceStoreError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.put("/api/workspaces/{key}/archiving/channels/{channel_id}")
+def put_channel_mode(
+    key: str, channel_id: str, body: ChannelModeBody, request: Request, user: User
+) -> dict:
+    """채널 모드. `active` 는 스키마 검증 전까지 막힌다(오너 결정 §10)."""
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    try:
+        after = archiving_admin.set_channel_mode(
+            workspace, channel_id.strip(), body.mode,
+            archiving_admin.Actor(user.email, body.reason),
+            cutover_ts=body.cutoverTs.strip(),
+        )
+    except archiving_admin.AdminRefused as e:
+        # 422 다. 서버가 고장난 것이 아니라 **규칙이 막은 것**이고, 화면은 그
+        # 사유를 사람에게 그대로 보여 줘야 한다.
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except workspace_store.WorkspaceStoreError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    _audit_event(
+        actor=user.email, category="workspace", action="archiving_channel_mode",
+        target_type="channel", target_id=channel_id.strip(), workspace=workspace,
+        outcome="succeeded",
+        metadata={"mode": str(after.mode), "writerOwner": str(after.writer_owner)},
+    )
+    return archiving_admin.workspace_detail(workspace)
+
+
+@app.put("/api/workspaces/{key}/archiving/flags")
+def put_feature_flag(
+    key: str, body: FeatureFlagBody, request: Request, user: User
+) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    try:
+        archiving_admin.set_feature_flag(
+            body.name.strip(), body.enabled,
+            archiving_admin.Actor(user.email, body.reason),
+            scope=body.scope, scope_key=body.scopeKey.strip(),
+        )
+    except archiving_admin.AdminRefused as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except workspace_store.WorkspaceStoreError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    _audit_event(
+        actor=user.email, category="workspace", action="archiving_flag",
+        target_type="flag", target_id=body.name.strip(), workspace=workspace,
+        outcome="succeeded",
+        metadata={"enabled": body.enabled, "scope": body.scope},
+    )
+    return archiving_admin.workspace_detail(workspace)
+
+
+@app.put("/api/workspaces/{key}/archiving/retention")
+def put_retention(key: str, body: RetentionBody, request: Request, user: User) -> dict:
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    try:
+        archiving_admin.set_retention(
+            body.name.strip(), body.days,
+            archiving_admin.Actor(user.email, body.reason),
+        )
+    except archiving_admin.AdminRefused as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except workspace_store.WorkspaceStoreError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    _audit_event(
+        actor=user.email, category="workspace", action="archiving_retention",
+        target_type="retention", target_id=body.name.strip(), workspace=workspace,
+        outcome="succeeded", metadata={"days": body.days},
+    )
+    return archiving_admin.workspace_detail(workspace)
 
 
 # ---------------------------------------------------------------------------
