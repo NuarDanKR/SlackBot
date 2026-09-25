@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
+import { ArchivingPanel } from '../components/ArchivingPanel'
 import { SetupGuide } from '../components/SetupGuide'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Chip, Failed, Loading, Metric, PageHead, Section, fmt } from '../components/primitives'
@@ -186,6 +187,9 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmSave, setConfirmSave] = useState(false)
+  // 펼친 워크스페이스 키. 하나만 연다 — 여럿 열면 목록이 길어져
+  // "어느 줄을 보고 있었나"를 잃는다.
+  const [openDetail, setOpenDetail] = useState<string | null>(null)
 
   useEffect(() => {
     if (resource.data) {
@@ -386,16 +390,32 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
                     오늘 {fmt.usd(budget.spentByWorkspace[row.key] ?? 0)}
                   </div>}
                 </td>
-                <td className="right"><button className="btn btn-sm btn-quiet" onClick={() => {
-                  setDraft(editDraft(row)); setEditing(true); setError(null)
-                  window.scrollTo({ top: 0, behavior: 'smooth' })
-                }}>편집</button></td>
+                <td className="right">
+                  <button className="btn btn-sm btn-quiet" onClick={() => {
+                    setDraft(editDraft(row)); setEditing(true); setError(null)
+                    window.scrollTo({ top: 0, behavior: 'smooth' })
+                  }}>편집</button>
+                  {/* 상세는 접어 둔다. 워크스페이스마다 펼치면 목록이 길어져서
+                      "어느 줄을 보고 있었나"를 잃는다. */}
+                  <button className="btn btn-sm btn-quiet"
+                    onClick={() => setOpenDetail(openDetail === row.key ? null : row.key)}>
+                    {openDetail === row.key ? '수집 접기' : '수집 상세'}
+                  </button>
+                </td>
               </tr>
             ))}
             {!rows.length && <tr><td colSpan={7}>등록된 워크스페이스가 없습니다.</td></tr>}
           </tbody>
         </table></div></div>
       </Section>
+
+      {openDetail && (
+        <Section title={`${openDetail} 수집 설정`}
+          lead="Archiving Bot 의 서비스 연결, 채널 모드, 기능 스위치, 보존 정책과 변경 기록입니다.">
+          <ArchivingPanel workspace={openDetail} />
+        </Section>
+      )}
+
       <ConfirmDialog open={confirmSave} title={`${draft.label.trim()} 설정을 저장할까요?`}
         detail="워크스페이스 설정과 토큰 변경 사항을 저장한 뒤 TYBot 재시작을 요청합니다. 저장된 토큰 원문은 다시 표시되지 않으며 실행자는 감사 기록에 남습니다."
         confirmLabel={editing ? '변경 저장' : '워크스페이스 등록'} busy={saving}
