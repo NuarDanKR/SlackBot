@@ -35,6 +35,18 @@ STATES = (
 FAILURE_STATES = frozenset({FAILED, UNSUPPORTED, DOWNLOAD_OR_EXTRACT_FAILED})
 
 
+# 판정 코드 → 사람이 읽는 말. 코드는 비민감 값이지만 **사람 말이 아니다.**
+# 여기에 없는 코드는 코드 그대로 보인다 — 새 코드가 생겼을 때 조용히 사라지는
+# 것보다, 낯선 말이라도 보이는 편이 낫다.
+SCREEN_CODE_LABELS = {
+    "resident-registration-number": "주민등록번호 형식",
+    "document-class-registry": "등기부등본류 문서",
+    "document-class-personal-roster": "개인 명단류 문서",
+    "sensitive-term-mentioned": "민감 용어 언급",
+    "sensitive-term-partial-coverage": "민감 용어 언급 · 일부만 확인됨",
+}
+
+
 @dataclass(frozen=True)
 class Attachment:
     """검수 대상 하나. 본문은 담지 않는다 — 경로만 들고 필요할 때 읽는다."""
@@ -80,11 +92,20 @@ class Attachment:
 
     @property
     def screen_note(self) -> str:
-        """사람에게 보일 한 줄. 판정이 없거나 그냥 통과면 빈 문자열이다."""
+        """사람에게 보일 한 줄. 판정이 없거나 그냥 통과면 빈 문자열이다.
+
+        **판정 코드를 그대로 보이지 않는다.** `sensitive-term-mentioned` 가 Slack
+        답변에 그대로 나갔는데(2026-09-22 운영), 읽는 사람은 무슨 뜻인지도 자기가
+        뭘 해야 하는지도 알 수 없다. 코드는 로그·감사·콘솔의 것이고, 답변에는
+        사람 말이 나가야 한다.
+        """
         if self.screen_result in ("", "passed"):
             return ""
         label = "차단" if self.screen_result == "blocked" else "주의"
-        return f"{label}: {', '.join(self.screen_codes)}" if self.screen_codes else label
+        if not self.screen_codes:
+            return label
+        said = [SCREEN_CODE_LABELS.get(code, code) for code in self.screen_codes]
+        return f"{label}: {', '.join(dict.fromkeys(said))}"
 
     @property
     def coverage_note(self) -> str:

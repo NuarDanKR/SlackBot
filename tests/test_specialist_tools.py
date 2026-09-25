@@ -54,15 +54,19 @@ class FakeStore:
         self._require_ctx(ctx)
         return [d for d in self._docs if d.channel not in self._hidden]
 
-    def search(self, query, ctx, *, limit=20):
+    def search(self, query, ctx, *, limit=20, channels=None):
         # **가짜도 ctx 를 요구해야 한다.** 무시하면 도구가 ctx 를 버려도
         # 테스트가 통과한다 — 실제로 그렇게 한 번 새는 것을 못 잡았다.
         self._require_ctx(ctx)
         self.search_calls.append(query)
         out = []
         for doc in self.visible_docs(ctx):
+            if channels is not None and doc.channel not in channels:
+                continue
             for line in doc.raw_lines:
-                if all(word in line.text for word in query.split()):
+                # 실제 ArchiveStore는 OR 후보를 가져온 뒤 일치 낱말 수로 순위를
+                # 매긴다. 일부 일치 폴백을 테스트하려면 가짜도 같은 계약이어야 한다.
+                if any(word in line.text for word in query.split()):
                     out.append(FakeHit(doc, line))
         return out[:limit]
 
@@ -166,6 +170,77 @@ def test_where_narrows_to_a_channel():
     assert "매각" not in got
 
 
+def test_where_rejects_an_ambiguous_channel_name():
+    docs = [
+        FakeDoc("#팀-전산_ABB110-주간회의", "C1", [FakeLine("1", "홍", "기성 1억")]),
+        FakeDoc("#팀-전산_ABB110-월간회의", "C2", [FakeLine("2", "김", "기성 2억")]),
+    ]
+    box = _box(FakeStore(docs))
+
+    got = box.run("search", {"query": "기성", "where": "팀-전산"})
+
+    assert "여러 채널과 일치" in got
+    assert "1억" not in got
+    assert "2억" not in got
+
+
+def test_where_narrows_before_the_global_result_limit():
+    other = FakeDoc(
+        "#팀-전산_ABB110-다른채널",
+        "C2",
+        [FakeLine(str(i), "홍", "기성 자료") for i in range(tools.MAX_SEARCH_HITS)],
+    )
+    wanted = FakeDoc(
+        "#팀-전산_ABB110-주간회의",
+        "C1",
+        [FakeLine("99", "김", "기성 지정채널")],
+    )
+    box = _box(FakeStore([other, wanted]))
+
+    got = box.run("search", {"query": "기성", "where": "주간회의"})
+
+    assert "지정채널" in got
+    assert "다른채널" not in got
+
+
+def test_where_keeps_zero_result_diagnostics_inside_the_channel():
+    other = FakeDoc(
+        "#팀-전산_ABB110-다른채널",
+        "C2",
+        [FakeLine("1", "홍", "특수표현 있음")],
+    )
+    wanted = FakeDoc(
+        "#팀-전산_ABB110-주간회의",
+        "C1",
+        [FakeLine("2", "김", "일반 내용")],
+    )
+    box = _box(FakeStore([other, wanted]))
+
+    got = box.run(
+        "search",
+        {"query": "특수표현 없음", "where": "주간회의"},
+    )
+
+    assert "특수표현 0건" in got
+
+
+def test_search_separates_documents_from_human_conversation():
+    box = _box(_store())
+
+    got = box.run("search", {"query": "3.2억"})
+
+    assert got.index("## 문서·첨부") < got.index("[첨부추출:가정산서.xlsx]")
+    assert got.index("## 사람 대화") < got.index("기성금 3.2억 지급")
+
+
+def test_search_marks_partial_term_matches():
+    box = _box(_store())
+
+    got = box.run("search", {"query": "3공구 존재하지않음"})
+
+    assert "(1/2 낱말)" in got
+
+
 # --- 무엇을 열었는지 기억한다 -------------------------------------------------
 def test_touched_records_the_documents_used():
     """출처는 마스터가 붙인다. 모델이 본문에 적은 것을 믿고 만들면 그게 환각이다."""
@@ -212,6 +287,29 @@ def test_touched_does_not_record_lines_beyond_the_tool_output_limit():
     box = _box(FakeStore([doc]))
     box.run("search", {"query": "공통"})
     assert [hit.line.ts for hit in box.touched.evidence_hits] == ["1", "2"]
+
+
+def test_search_group_headers_count_toward_the_touched_output_limit(monkeypatch):
+    """그룹 제목 뒤로 잘린 줄은 내부 근거 목록에도 들어가면 안 된다."""
+    monkeypatch.setattr(tools, "MAX_TOOL_CHARS", 100)
+    docs = [
+        FakeDoc(
+            "#문서채널",
+            "C1",
+            [FakeLine("1", "홍", "[첨부추출:x] 공통 " + "가" * 50)],
+        ),
+        FakeDoc(
+            "#대화채널",
+            "C2",
+            [FakeLine("2", "김", "공통 대화")],
+        ),
+    ]
+    box = _box(FakeStore(docs))
+
+    got = box.run("search", {"query": "공통"})
+
+    assert "이하 생략" in got
+    assert [hit.line.ts for hit in box.touched.evidence_hits] == ["1"]
 
 
 # --- 실시간 조회 --------------------------------------------------------------

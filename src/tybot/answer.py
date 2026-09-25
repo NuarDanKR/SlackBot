@@ -669,8 +669,17 @@ def _attachment_status_block(attachments, *, asked: bool = False) -> str:
     아무 말도 안 하면 사용자는 문제가 없다고 읽는다.
     """
     items = list(attachments or ())
+    # **묻지 않았으면 붙이지 않는다.** 예전에는 첨부가 있기만 하면 블록을 돌려줘서,
+    # 요약·검색 답변 끝에 파일 변환 상태가 따라 붙었다. 근거가 0건인 순간에는 그
+    # 블록이 답을 통째로 대체했다(2026-09-22 운영). 문서가 말하던 계약을 코드가
+    # 지키지 않고 있었다.
+    #
+    # 근거로 쓴 첨부의 변환 상태는 이 블록이 아니라 `evidence_note()` 의
+    # `withheld`·`partial_attachments` 가 알린다 — 그쪽은 답과 함께 나간다.
+    if not asked:
+        return ""
     if not items:
-        return MISSING_ATTACHMENT_STATUS if asked else ""
+        return MISSING_ATTACHMENT_STATUS
     lines = [f"• {status_line(a)}" for a in items[:10]]
     if len(items) > 10:
         lines.append(f"… 외 {len(items) - 10}건")

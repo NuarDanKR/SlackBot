@@ -52,6 +52,13 @@ MAX_LIVE_MESSAGES = 50
 # 갔을 때 찾지 못한다. 그 순간 출처는 신뢰를 만드는 것이 아니라 깎는다.
 LIVE_MARK = "[실시간]"
 
+DOCUMENT_PREFIXES = (
+    "[첨부추출:",
+    "[첨부본문:",
+    "[캔버스:수집]",
+    "[캔버스본문:",
+)
+
 
 # --- 예산 (설계: hermes-integration-fidelity.md §3-C) -------------------------
 #
@@ -345,20 +352,59 @@ class ToolBox:
         return f"(알 수 없는 도구: {name})"
 
     # -- 검색 ------------------------------------------------------------
+    def _channels_matching(self, name: str) -> set[str] | None:
+        """권한 안에서 채널 이름을 정확 또는 유일 부분 일치로 푼다.
+
+        일자별 원문은 같은 채널 문서가 여러 개다. 문서 하나를 고르지 않고 채널명
+        집합을 돌려줘야 모든 날짜가 검색 범위에 남는다. 모호하면 ``None``이다.
+        """
+        wanted = name.strip().lstrip("#")
+        if not wanted:
+            return set()
+        names = {
+            str(doc.channel or "")
+            for doc in self.store.visible_docs(self.ctx)
+            if str(doc.channel or "")
+        }
+        exact = {channel for channel in names if channel.lstrip("#") == wanted}
+        if exact:
+            return exact
+        partial = {channel for channel in names if wanted in channel.lstrip("#")}
+        return partial if len(partial) == 1 else None
+
     def _search(self, args: dict) -> str:
         query = str(args.get("query") or "").strip()
         if not query:
             return "(검색어가 비었습니다)"
         where = str(args.get("where") or "").strip()
-        hits = self.store.search(query, self.ctx, limit=MAX_SEARCH_HITS)
+        scoped_channels: frozenset[str] | None = None
         if where:
-            hits = [h for h in hits if where in h.doc.channel]
+            channels = self._channels_matching(where)
+            if channels is None:
+                return (
+                    f"(채널 범위 「{where}」가 없거나 여러 채널과 일치합니다. "
+                    "검색 결과의 정확한 채널 이름으로 다시 지정하세요.)"
+                )
+            scoped_channels = frozenset(channels)
+            hits = self.store.search(
+                query,
+                self.ctx,
+                limit=MAX_SEARCH_HITS,
+                channels=scoped_channels,
+            )
+        else:
+            hits = self.store.search(query, self.ctx, limit=MAX_SEARCH_HITS)
         if not hits:
             # **낱말별 건수를 준다.** 없다고만 하면 모델이 낱말을 바꿔 다시 부르고,
             # 그게 가장 흔한 낭비다(Hermes 실측).
             counts = []
             for word in query.split()[:5]:
-                found = self.store.search(word, self.ctx, limit=MAX_SEARCH_HITS)
+                found = self.store.search(
+                    word,
+                    self.ctx,
+                    limit=MAX_SEARCH_HITS,
+                    channels=scoped_channels,
+                )
                 counts.append(f"{word} {len(found)}건")
             return (
                 f"「{query}」 로 찾은 것이 없습니다.\n"
@@ -366,18 +412,45 @@ class ToolBox:
                 "위 건수를 보고 의미를 유지하는 동의어·문서명으로 다시 찾거나, "
                 "관련 채널과 문서를 열어 보세요. 같은 검색은 반복하지 마세요."
             )
-        lines = [
-            f"[{hit.line.ts}] ({hit.doc.channel}) {hit.line.speaker}: {hit.line.text}"
-            for hit in hits
-        ]
+        from .search_index import tokens_of
+
+        terms = list(dict.fromkeys(tokens_of(query)))
+        grouped = [("문서·첨부", []), ("사람 대화", [])]
+        for hit in hits:
+            text = str(hit.line.text or "")
+            target = grouped[0][1] if text.startswith(DOCUMENT_PREFIXES) else grouped[1][1]
+            hay = f"{hit.line.speaker} {text}".lower()
+            matched = sum(1 for term in terms if term in hay)
+            partial = (
+                f" ({matched}/{len(terms)} 낱말)"
+                if terms and matched < len(terms)
+                else ""
+            )
+            target.append(
+                (hit, f"[{hit.line.ts}] ({hit.doc.channel}){partial} "
+                 f"{hit.line.speaker}: {text}")
+            )
+
+        lines: list[str] = []
         used = 0
-        for hit, rendered in zip(hits, lines, strict=False):
-            start = used + (1 if used else 0)
-            if start >= MAX_TOOL_CHARS:
-                break
-            self.touched.record_line(hit.doc, hit.line)
+
+        def append_line(rendered: str) -> int:
+            nonlocal used
+            start = used + (1 if lines else 0)
+            lines.append(rendered)
             used = start + len(rendered)
-        return _clip("\n".join(lines))
+            return start
+
+        for label, items in grouped:
+            if not items:
+                continue
+            if lines:
+                append_line("")
+            append_line(f"## {label} {len(items)}건")
+            for hit, rendered in items:
+                if append_line(rendered) < MAX_TOOL_CHARS:
+                    self.touched.record_line(hit.doc, hit.line)
+        return _clip("\n".join(lines), MAX_TOOL_CHARS)
 
     # -- 읽기 ------------------------------------------------------------
     def _pick_channel(self, name: str):

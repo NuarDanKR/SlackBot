@@ -671,7 +671,14 @@ class ArchiveStore:
 
         return rel_path(path, self.root)
 
-    def search(self, query: str, ctx: RequestContext, *, limit: int = 20) -> list[SearchHit]:
+    def search(
+        self,
+        query: str,
+        ctx: RequestContext,
+        *,
+        limit: int = 20,
+        channels: frozenset[str] | None = None,
+    ) -> list[SearchHit]:
         """근거 줄 찾기. 색인(DB)을 먼저 보고, 못 보면 파일을 훑는다.
 
         **권한은 여기서, 코드가 판정한다**(`visible_docs`). 색인에는 이미 통과한
@@ -687,6 +694,11 @@ class ArchiveStore:
             return []
 
         docs = self.visible_docs(ctx)
+        if channels is not None:
+            # 전문 봇의 `where`는 검색 결과를 받은 뒤 자르는 조건이 아니다.
+            # 먼저 권한을 적용한 문서에서 범위를 더 좁힌다. 반대로 이 인자로
+            # visible_docs 밖 문서를 열 수는 없다.
+            docs = [doc for doc in docs if doc.channel in channels]
         found = search_index.candidates(query, sorted({d.channel for d in docs if d.channel}))
         if found is None:
             return self._scan(query, tokens, docs, limit)

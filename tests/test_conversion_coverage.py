@@ -452,3 +452,26 @@ def test_render_coverage_is_only_for_slide_formats():
 
     assert cov.unit == ""
     assert cov.total is None
+
+
+def test_a_screening_code_is_shown_as_words_not_as_a_code(tmp_path):
+    """`sensitive-term-mentioned` 가 Slack 답변에 그대로 나갔다(2026-09-22).
+
+    코드는 로그·감사·콘솔의 것이다. 읽는 사람은 그 말이 무슨 뜻인지도, 자기가
+    뭘 해야 하는지도 알 수 없다. 모르는 코드는 코드 그대로 보인다 — 조용히
+    사라지는 것보다 낫다.
+    """
+    from tybot.attachment_review import Attachment, status_line
+
+    def _item(*codes: str) -> Attachment:
+        return Attachment(
+            workspace="pilot", channel_id="C1", file_id="F1", name="주간보고.xlsx",
+            filetype="xlsx", mimetype="application/vnd.ms-excel", size=1,
+            status="converted", object_path=None, meta_path=tmp_path / "m.json",
+            extracted=True, screen_result="passed_with_notice", screen_codes=codes,
+        )
+
+    said = status_line(_item("sensitive-term-mentioned"))
+    assert "민감 용어 언급" in said
+    assert "sensitive-term-mentioned" not in said
+    assert "미확인코드" in status_line(_item("미확인코드"))

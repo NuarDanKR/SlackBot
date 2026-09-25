@@ -424,3 +424,37 @@ def test_long_answer_automatically_creates_canvas_or_readable_fallback(monkeypat
         assert "*진행 중*" in reply
     else:
         assert "Canvas 열기" in reply
+
+
+# --- 복합 답변이 근거 좌표를 잃지 않는다 (2026-09-22 운영) --------------------
+def test_a_compound_answer_keeps_every_task_s_evidence_coordinates():
+    """마지막 task 로만 기록하면 **근거를 가진 앞 task 의 좌표가 통째로 사라진다.**
+
+    운영에서 실제로 났다 — 8개 파일을 나열한 답 뒤에 되묻기 한 조각이 붙었고,
+    기록에는 되묻기의 메타데이터만 남았다. 다음 턴 로그가 `refs_requested=0` 이다.
+    사람은 "너가 말해준 파일들" 이라고 가리켰는데 봇은 열 좌표가 없었다.
+    """
+    from tybot.evidence_refs import ARCHIVE_LINE, AttachmentRef, EvidenceRef
+
+    ref = EvidenceRef(
+        kind=ARCHIVE_LINE, workspace="mgmt", channel_id="C1",
+        document_path="a.md", line_no=3,
+    )
+    answered = Answer(
+        "파일 8건입니다", ["[전산팀]정기보고, 📄a.md"], "m", 0.0, 20, "answered",
+        evidence_refs=[ref],
+        attachment_refs=[AttachmentRef(workspace="mgmt", channel_id="C1", file_id="F1")],
+        subject_terms=["정기보고"],
+    )
+    clarify = Answer("어떤 자료를 기준으로 답할지 확실하지 않습니다.", [], None, 0.0, 0, "clarify")
+    bot = _bot(
+        [Intent("search", question="몇 건이야"), Intent("search", question="혼재 여부")],
+        [answered, clarify],
+    )
+
+    _handle(bot, "파일이 혼재됐는데 어제 오늘 몇 건이야")
+
+    (rec,) = bot.qa_log.records
+    assert rec.evidence_refs, "근거 좌표가 기록에서 사라지면 다음 턴이 아무것도 못 연다"
+    assert rec.attachment_refs
+    assert rec.citations == ["[전산팀]정기보고, 📄a.md"]

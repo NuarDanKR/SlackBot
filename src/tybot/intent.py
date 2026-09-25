@@ -264,6 +264,32 @@ ATTACHMENT_STATUS_RE = re.compile(
     r"(첨부|변환|파일\s*(상태|처리|변환)|"
     r"처리\s*(가\s*)?(안\s*된|되지\s*않은|실패|못한)|미처리|변환\s*실패)"
 )
+
+# **첨부의 처리 상태를 묻는가.** 첨부를 가리키기만 하는 것과 구별한다.
+#
+# `ATTACHMENT_STATUS_RE` 의 첫 대안은 그냥 `첨부` 라, 그것만으로 판정하면
+# "첨부파일 기준으로 요약해줘" 가 상태 질문이 된다. 자료 낱말 하나로 의도를
+# 단정하는 것은 `SOURCE_CAPABILITY_RE` 가 업무 질문을 도움말로 삼킨 것과 같은
+# 병이다(2026-09-18). 상태를 묻는 말은 따로 있다.
+ATTACHMENT_STATUS_ASK_RE = re.compile(
+    r"((상태|처리\s*결과|변환\s*(상태|결과|여부)|진행\s*상황)|"
+    r"(처리|변환)\s*(가\s*)?(안\s*된|되지\s*않은|실패|못한|됐|되었|완료)|"
+    r"미처리|읽었|읽혔|들어왔)"
+)
+
+
+def asks_attachment_status(text: str) -> bool:
+    """첨부의 **처리 상태**를 묻는 질문인가.
+
+    첨부를 근거 범위로 가리키는 것("그 첨부들 기준으로 요약해줘")과 다르다.
+    그 구별이 무너지면 요약 요청에 파일 상태 한 줄이 답으로 나간다.
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    return bool(
+        ATTACHMENT_STATUS_RE.search(body) and ATTACHMENT_STATUS_ASK_RE.search(body)
+    )
 # 주제어에서 걸러낼 지칭·요청 표현. 주제가 아니라 **가리키는 말**이다.
 REFERENCE_STOPWORDS = frozenset(
     {
@@ -755,7 +781,7 @@ def apply_followup(text: str, tasks: list[Intent], *, has_prior: bool) -> list[I
         question=question,
         reference_mode=mode,
         topic_terms=topic_terms_of(text, terms),
-        include_attachment_status=attachments,
+        include_attachment_status=attachments and asks_attachment_status(text),
         standalone_question=tasks[0].standalone_question,
         required_capability=tasks[0].required_capability,
         suggested_specialist=tasks[0].suggested_specialist,
@@ -908,7 +934,13 @@ def plan(
                     planner_model=str(getattr(resp, "model", "") or ""),
                     reference_mode=reference_mode,
                     topic_terms=(terms[:8] if reference_mode == "prior_topic" else []),
-                    include_attachment_status=(reference_mode == "prior_attachments"),
+                    # **가리킴과 물음은 다르다.** `prior_attachments` 는 「이전 턴의
+                    # 그 첨부들을 대상으로」 라는 **범위**일 뿐, 「첨부 상태를
+                    # 알려 달라」 는 **요청**이 아니다. 둘을 같은 값으로 묶었더니
+                    # "너가 말해준 첨부들 기준으로 요약해줘" 가 상태 질문이 되고,
+                    # 원문 복원이 빗나간 순간 **파일 상태 한 줄만** 답으로 나갔다
+                    # (2026-09-22 운영). 상태를 묻는지는 질문 문구로 본다.
+                    include_attachment_status=asks_attachment_status(question or text),
                     asks_about_our_sources=asks_about_sources,
                     # 표시 제안. **여기서 검증하지 않는다** — 열거형·제목·지원
                     # 여부는 `master_planner.artifact_for()` 한 곳에서 본다.

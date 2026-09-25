@@ -197,3 +197,46 @@ def test_a_purely_deictic_follow_up_still_refuses_to_widen(engine):
 
     assert ans.reason == "no_hits"
     assert "다시 확인하지 못했습니다" in ans.text
+
+
+def test_pointing_at_attachments_is_not_asking_their_status():
+    """「너가 말해준 첨부들 기준으로 요약해줘」 는 **범위**이지 상태 질문이 아니다.
+
+    둘을 같은 값으로 묶었더니 요약 요청에 「관련 파일 상태 • xxx.xlsx — 변환 완료」
+    한 줄만 나갔다(2026-09-22 운영). 물은 것의 절반이 아니라 0% 다.
+    """
+    from tybot.intent import asks_attachment_status
+
+    for pointing in (
+        "그 첨부들 기준으로 요약해줘",
+        "너가 말해준 첨부파일들 기준으로 월간 회의 내용 알려줘",
+    ):
+        assert not asks_attachment_status(pointing), pointing
+    for asking in ("첨부 변환 상태 알려줘", "처리 안 된 첨부 알려줘", "그 파일 변환 됐어?"):
+        assert asks_attachment_status(asking), asking
+
+
+def test_a_status_block_never_replaces_the_answer(engine):
+    """상태를 묻지 않았으면 상태 블록은 아예 붙지 않는다.
+
+    예전에는 첨부가 있기만 하면 블록이 따라 붙었고, 근거가 0건인 순간 그 블록이
+    답을 통째로 대체했다. 근거로 쓴 첨부의 변환 상태는 `evidence_note()` 가 알린다.
+    """
+    from pathlib import Path
+
+    from tybot.attachment_review import Attachment
+
+    eng, _ = engine
+    followup = _Followup(topic_terms=["기성금"], dropped=[])
+    followup.attachments = [Attachment(
+        workspace="pilot", channel_id="C1", file_id="F1", name="주간보고.xlsx",
+        filetype="xlsx", mimetype="application/vnd.ms-excel", size=10,
+        status="converted", object_path=None, meta_path=Path("meta.json"),
+    )]
+    intent = Intent("summary", terms=["기성금"], question="그 첨부들 기준으로 요약해줘")
+    assert not intent.include_attachment_status
+
+    ans = eng._respond_scoped("그 첨부들 기준으로 요약해줘", _ctx(), intent, followup)
+
+    assert "관련 파일 상태" not in ans.text
+    assert "3억 2천만원" in ans.text or ans.citations, "본문 없이 닫혔다"
