@@ -1,251 +1,154 @@
-# Hermes 서버 이관 준비 계약
+# Hermes archive handoff and TYBot merge contract
 
-작성: 2026-09-21  
-독자: 프금팀 Hermes 개발 AI 및 운영 이관 담당자  
-대상: 프금팀이 개발·운영하는 `Hermes`
+> **현재 상태 (2026-09-23):** 이 문서는 개발용 archive snapshot 인계 계약으로만
+> 사용한다. 수집·파일 변환은 별도 Archiving Bot이 소유하고, PF Hermes는 그 기능을
+> 제거하는 것으로 결정됐다. 실제 구현은
+> [PF Hermes 수정 요청](pf-hermes-archiver-integration-request.md), 전체 책임 경계는
+> [Archiving Bot 분리](archiving-bot-separation-2026-09-23.md)를 우선한다.
 
-이 문서에서 제품명은 `Hermes`로 표기한다. `pf-hermes`는 TYBot과 같은 서버에서
-충돌 없이 운영하기 위한 서버 내부 식별자이며, Hermes의 공식 제품명이나 버전명이 아니다.
+작성: 2026-09-22
+독자: 프금팀 Hermes 개발자와 개발 AI 에이전트
 
-## 1. 확인된 현재 구조
+이 문서에서 프금팀 제품은 `Hermes`라고 부른다. `pf-hermes`는 TYBot 저장소에서
+대상을 구분하는 내부 식별자일 뿐 제품명이나 버전명이 아니다.
 
-Hermes는 현재 독립 Node.js Slack 봇이다. TYBot 내부의 기록 검색 전문가와는 다른
-제품이다. 이 문서에서는 프금팀 제품만 `Hermes`라고 부른다.
+프금팀 개발자나 AI 에이전트가 실제 코드를 수정할 때는 먼저
+[`pf-hermes-developer-work-order.md`](pf-hermes-developer-work-order.md)를 따른다. 이 문서는
+양측의 인계 범위와 책임 계약이고, 작업지시서는 파일·schema·명령·완료 기준을 정의한다.
 
-| 항목 | 소스에서 확인한 현재 값 |
+## 1. 확정된 방향
+
+이전의 "Hermes 프로세스를 GCP에서 TYBot 서버로 옮긴다"는 계획은 취소됐다.
+
+1. Hermes 원본 서비스와 소스는 GCP에서 계속 운영한다.
+2. 2026-09-23에는 **Hermes 자료 Git의 archive snapshot만** TYBot 서버의 격리 구역으로
+   복제한다.
+3. Hermes와 TYBot Archive Specialist의 장점은 TYBot 코드 안에서 통합한다.
+4. 통합 기능은 TYBot 워크스페이스에서 먼저 검증한다.
+5. 검증이 끝나면 프금팀에도 독립 Hermes가 아니라 TYBot을 적용한다.
+
+따라서 프금팀은 Rocky용 systemd, 환경 파일, 서비스 계정 또는 배포 스크립트를 만들지
+않는다. GCP의 Slack token, Anthropic key와 `.env`도 TYBot 서버로 옮기지 않는다.
+
+## 2. 내일 제공할 archive snapshot
+
+GCP Hermes를 중지하거나 자료 Git 이력을 다시 쓰지 않고 다음을 제공한다.
+
+| 제공물 | 필수 내용 |
 |---|---|
-| 실행 위치 | Google Cloud VM `hermes`, project `whk-hermes`, zone `us-west1-b` |
-| 코드 저장소 | 기본 예시 `git@github.com:wkimclementia/hermes.git` |
-| 자료 저장소 | 기본 예시 `git@github.com:wkimclementia/hermes-archive-tec.git` |
-| 서버 경로 | 코드 `/opt/hermes/code`, 자료 `/opt/hermes/archive` |
-| 런타임 | Node.js 20+, Slack Bolt Socket Mode |
-| 모델 | Anthropic API 직접 호출 |
-| 서비스 | `hermes.service`, OS 계정 `hermes` |
-| 자료 동기화 | 별도 Git 저장소를 15분마다 pull, 수집 시 commit/push |
-| 설정 | 코드 쪽 `.env`와 자료 저장소의 `config.json` |
+| 기준 commit | 자료 Git full SHA, 기준 시각(KST), 기본 branch |
+| 접근 방법 | 만료 가능한 read-only deploy key 또는 암호화한 archive 묶음 |
+| 구조 설명 | `config.json`, `slack-export/`, `documents/`, 상태 JSON의 의미 |
+| 채널 표 | workspace/team ID, channel ID, 현재 이름, 공개/비공개 여부 |
+| 자료 분류 | 사람 원문, 첨부 변환본, 사람 승인 요약, AI 요약, 봇 답변 구분 |
+| 제외 목록 | 봇 답변, digest, 대화 로그, cache, lock, 임시 파일과 local stamp |
+| 증분 기준 | 마지막 수집 timestamp/cursor와 이후 변경분을 다시 내는 방법 |
+| 검증값 | 파일 수, Git tree SHA, 가능하면 파일별 SHA-256 manifest |
 
-따라서 “개인 GCP에서 실행하고 개인 Git 저장소를 아카이브로 사용한다”는 이해가
-소스와 일치한다. 저장소가 실제로 private인지 Git 호스팅 설정 자체는 스냅샷만으로
-검증할 수 없지만, SSH deploy key와 write 권한을 전제로 한 배포 문서는 비공개 운영
-형태를 가리킨다.
+Git URL, deploy key와 API token은 문서나 채팅에 적지 않는다. 승인된 별도 비밀 전달
+경로로만 공유한다.
 
-## 2. 목표 구조와 넘지 말아야 할 경계
+## 3. 프금팀 개발자가 해야 할 일
 
-프금팀 Hermes와 TYBot은 같은 Rocky 서버에 있어도 **별도 서비스**다. 소스, 환경,
-Slack 토큰, 모델 키, 자료, 로그와 장애 범위를 공유하지 않는다.
+### 3.1 자료 의미와 권한을 확정한다
+
+다음 경계를 파일·필드 단위로 설명한다.
+
+- `slack-export/channels/*.md`: 사람 메시지와 스레드 원문 범위, timestamp와 permalink
+- `documents/projects/**/*.md`: Slack 첨부 변환본인지 사람이 만든 파생 문서인지,
+  원본 file ID와 Slack 링크
+- `slack-export/index.md`, `documents/index.md`: 색인이며 원문이 아님
+- `.sync-state.json`, `.pending-work.json`, `.pending-edits.json`, `.backfill-state.json`:
+  운영 상태이며 답변 근거가 아님
+- digest, summary, convo-log와 bot placeholder: 원문으로 import하면 안 되는 파생 출력
+
+모호한 자료는 `unknown`으로 둔다. TYBot은 분류가 끝날 때까지 검색에서 제외한다.
+채널은 이름이 아니라 `workspace_id + channel_id`로 식별하고, 권한을 확정하지 못한 자료는
+비공개로 분류한다. 삭제·보관·이름 변경 상태도 함께 제공한다.
+
+### 3.2 다섯 skill의 동작 계약을 fixture로 제공한다
+
+`.claude/skills`를 TYBot에 그대로 복사하지 않는다. skill은 대화형 Claude 도구, 로컬 Git,
+개인 승인 흐름을 전제하기 때문이다. 대신 아래 불변조건을 비식별 합성 fixture로 제공한다.
+
+| PF skill | 제공해야 할 계약/fixture | TYBot에서 그대로 가져오지 않는 것 |
+|---|---|---|
+| `archive-run` | partial/unchecked/error를 0으로 보지 않음, 마감 순서, 동시 실행 방지 | 대화형 Git pull/lock/commit/push |
+| `slack-sync` | 증분 cursor, 스레드, 새 채널, 이름 변경, 수정·삭제, 봇 발언 제외 | Slack MCP 개인 인증과 Markdown 직접 편집 |
+| `doc-archive` | 대화/문서 분리, file ID·원문 링크, 부분 변환, 공개 승인, 원본 누락 | kordoc 직접 호출 절차와 건별 Git commit UI |
+| `archive-inbox` | 후보는 근거가 아님, 원문 대조, 반영/제외/보류, 승인 후 hash | 상단 요약 직접 편집과 local stamp |
+| `hermes-install` | 단계별 preflight, 채널 참여, backfill, 완료 증적, 재개 지점 | GCP/Node 설치와 별도 Hermes 배포 |
+
+각 fixture에는 입력, 기대 분류, 기대 출처, 기대 권한, 실패 코드가 있어야 한다. 운영 원문을
+fixture로 복사하지 않는다.
+
+### 3.3 GCP Hermes는 유지한다
+
+이번 단계에서 실행 프로세스, 코드 저장소, `.env`, Slack 앱, 모델 키, 07:00/17:00 작업과
+자료 Git commit/push 절차를 바꾸지 않는다. snapshot 뒤에도 GCP 자료가 늘어나므로 TYBot
+전환 직전에 최종 delta snapshot을 한 번 더 제공할 수 있어야 한다.
+
+## 4. 우리 팀이 해야 할 일
+
+snapshot은 live archive에 직접 복사하지 않는다.
 
 ```text
-/opt/tybot/                              TYBot 릴리스, Hermes가 읽지 못함
-/var/lib/tybot/                          TYBot 중앙 아카이브, Hermes가 읽지 못함
-/etc/tybot/tybot.env                     TYBot 자격, Hermes가 읽지 못함
-
-/opt/tybot-subbots/pf-hermes/code/  프금팀 Hermes 불변 릴리스
-/var/lib/tybot-subbots/pf-hermes/   archive, cache, lock, runtime state
-/etc/tybot-subbots/pf-hermes.env    프금팀 전용 시크릿
-/etc/tybot-subbots/pf-hermes.json   비시크릿 운영 설정 또는 그 위치
+/var/lib/tybot/imports/pf-hermes/<snapshot-id>/source
 ```
 
-권장 서비스 계정은 `pf-hermes`, unit 이름은 `pf-hermes.service`다. 기존의 일반 이름
-`hermes.service`,
-`/opt/hermes`, 사용자 `hermes`를 그대로 쓰면 향후 다른 부서 Hermes 및 TYBot의
-운영 명칭과 충돌한다.
+우리 팀은 다음 관문을 구현한다.
 
-이 이관은 두 봇의 아카이브를 합치는 작업이 아니다. 프금팀 자료는 프금팀 서비스가
-소유한다. TYBot 중앙 원문으로 옮기려면 별도의 B-29 데이터 이관 관문(봇 출력 제외,
-기본 비공개, PII 선검사, 출처 좌표 보존)을 통과해야 한다.
+1. Git SHA, 파일 수와 hash 검증
+2. 사람 원문·첨부 변환본·파생 출력·unknown 분류
+3. 봇 발언, AI 요약, digest와 운영 상태 제외
+4. PII 검사와 불명확 자료 격리
+5. workspace/channel ID와 ACL 매핑
+6. timestamp, file ID, permalink와 source commit 보존
+7. 중복 제거와 재실행 가능한 dry-run importer
+8. 사람 승인 후에만 TYBot v2 archive 반영
 
-## 3. Hermes 개발자가 다음 release에 반영할 변경
+변환 후 정본은 기존 TYBot 형식이지만 importer만 쓴다.
 
-### 3.1 환경 파일을 명시적으로 선택한다
-
-현재 `dotenv`가 작업 디렉터리의 `.env`를 암묵적으로 읽는 구조를 없애거나, 최소한
-다음 우선순위를 구현한다.
-
-1. `HERMES_ENV_FILE`이 있으면 그 절대경로만 읽는다.
-2. 운영 모드에서 값이 없으면 시작을 실패한다.
-3. 개발 모드에서만 저장소 루트 `.env`를 허용한다.
-4. 이미 프로세스에 주입된 환경변수를 `.env` 값으로 덮어쓰지 않는다.
-
-운영 unit은 다음처럼 전용 파일을 주입한다.
-
-```ini
-[Service]
-Environment=NODE_ENV=production
-Environment=HERMES_INSTANCE=pf
-EnvironmentFile=/etc/tybot-subbots/pf-hermes.env
+```text
+/var/lib/tybot/archive/workspaces/<workspace>/channels/<channel-id>__<name>/raw/YYYY-MM-DD.md
 ```
 
-전용 env에 허용할 값:
+## 5. 통합 후 책임 경계
 
-```dotenv
-SLACK_BOT_TOKEN=...
-SLACK_APP_TOKEN=...
-ANTHROPIC_API_KEY=...
-HERMES_DATA_ROOT=/var/lib/tybot-subbots/pf-hermes/archive
-HERMES_CONFIG_FILE=/etc/tybot-subbots/pf-hermes.json
-HERMES_INSTANCE=pf
-```
+| 기능 | 소유자 |
+|---|---|
+| 사용자 의도·복합 요청 분해 | TYBot Master |
+| 근거 검색·ACL·출처 | TYBot Archive Specialist |
+| 실시간/소급 수집 | collection worker와 채널 관리 콘솔 |
+| 첨부·Canvas 변환 | conversion worker와 재시도 queue |
+| 요약 후보·검토 | summary review workflow |
+| 작업 순서·잠금·checkpoint | job runner와 콘솔 |
+| 원문 반영·ACL·PII 예외 승인 | 사람 |
+| 답변/검토 Canvas 생성과 공유 | TYBot delivery |
+| 설치·workspace onboarding | 배포 preflight와 채널 관리 콘솔 |
 
-`GCP_VM`, `GCP_PROJECT`, `GCP_ZONE`은 런타임 필수값에서 제거한다. GCP 배포 확인은
-GCP 전용 개발 스크립트의 선택 기능으로 남기고 Rocky 운영 health에 포함하지 않는다.
+Master는 의도를 분류하고 allowlist된 job을 요청할 수 있지만 Git, 변환, 원문 편집,
+commit/push를 직접 실행하지 않는다.
 
-### 3.2 모든 쓰기 경로를 하나의 상태 루트 아래로 모은다
+## 6. 현재 운영 결함의 목표 동작
 
-코드에서 로그, lock, cache, health, ingest 임시 파일과 대화 로그 경로를 찾아
-`HERMES_STATE_ROOT` 또는 config의 명시적 절대경로로 받는다. 기본값으로 코드 저장소나
-현재 작업 디렉터리에 쓰지 않는다. systemd의 `ReadWritePaths`는 아래 하나만 허용한다.
+- **원문 Canvas 수집/변환 실패**: conversion queue에서 재시도하고 콘솔 진단에 표시한다.
+- **검토 Canvas 생성/권한 실패**: 같은 요약 후보를 DM으로 fallback하고 원인 코드를
+  콘솔에 표시한다.
+- **첨부 파일 DM**: 성공/실패 상세를 보내지 않는다. 성공 본문은 그날 요약의 근거로만
+  쓰고 실패·지원 불가는 콘솔에서만 본다.
+- **요약 검토 DM**: 계속 보낸다. 미발송은 `no-reviewer`, `no-new-source`,
+  `no-accepted-candidate`, `already-sent`, `no-client`, `dm-failed`로 구분한다.
 
-```ini
-ReadWritePaths=/var/lib/tybot-subbots/pf-hermes
-```
+Canvas 실패 때문에 요약 검토 DM 전체가 사라져서는 안 된다.
 
-### 3.3 인스턴스 정체성을 외부화한다
+## 7. 인계 완료 기준
 
-서비스명, 로그 식별자, lock 이름, cron/timer 이름, 상태 파일과 Git commit author에
-하드코딩된 `hermes`를 인스턴스 키로 분리한다. 최소 지원값은 다음과 같다.
+- commit/hash가 확인된 read-only snapshot을 받았다.
+- 원문/파생 자료 경계와 channel ID/visibility가 문서화됐다.
+- 다섯 skill의 회귀 fixture와 delta 방법을 받았다.
+- GCP Hermes는 중단·이전·재설정되지 않았다.
+- TYBot live archive에는 아직 직접 섞이지 않았다.
 
-- `HERMES_INSTANCE=pf`
-- `HERMES_SERVICE_NAME=pf-hermes`
-- `HERMES_DATA_ROOT`
-- `HERMES_STATE_ROOT`
-- `HERMES_CONFIG_FILE`
-
-같은 호스트에 두 인스턴스를 띄우는 테스트에서 lock, 로그와 자료 경로가 겹치지 않아야
-한다. 단, 같은 Slack 앱 토큰을 두 인스턴스에 넣는 구성은 지원하지 말고 시작 시 경고한다.
-
-### 3.4 배포물을 Rocky 8/9용으로 분리한다
-
-현재 setup은 Debian/GCP 전제를 갖는다. 기존 파일을 조건문으로 계속 늘리지 말고
-다음 산출물을 별도로 제공한다.
-
-- `deploy/rocky/pf-hermes.service`
-- `deploy/rocky/pf-hermes-archive-pull.service`
-- `deploy/rocky/pf-hermes-archive-pull.timer`
-- `deploy/rocky/install.sh` 또는 사람이 검토 가능한 설치 체크리스트
-
-운영 unit의 필수 보안 설정:
-
-```ini
-User=pf-hermes
-Group=pf-hermes
-WorkingDirectory=/opt/tybot-subbots/pf-hermes/code
-ExecStart=/usr/bin/node src/index.js
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/tybot-subbots/pf-hermes
-UMask=0077
-```
-
-서비스는 `/opt/tybot`, `/var/lib/tybot`, `/etc/tybot`에 읽기 권한을 받지 않는다.
-새 인바운드 포트도 열지 않는다. Socket Mode와 Git/Anthropic을 위한 아웃바운드만 쓴다.
-
-### 3.5 Git 아카이브 실패를 봇 실행 실패와 분리한다
-
-자료 Git 인증은 코드 저장소 키와 분리된 read/write deploy key를 쓴다. pull/push
-실패가 현재 메모리의 Slack 응답 프로세스를 죽이지 않아야 하며, 다음 상태를 구분한다.
-
-- 로컬 수집 성공 / Git push 실패
-- Git pull 충돌
-- 원격 인증 실패
-- 자료 저장소가 예상 commit보다 뒤처짐
-
-충돌 시 자동 merge나 force push를 하지 않는다. ingest를 중지하고 health를 degraded로
-표시한다. 원본과 봇 생성 요약이 같은 Git 이력에 있다면 경로와 파일 표식을 명시해
-향후 데이터 이관 시 기계적으로 제외할 수 있어야 한다.
-
-### 3.6 시작 전 구성 검증을 강화한다
-
-`npm run check:offline`에서 실제 API 호출 없이 아래를 실패로 잡는다.
-
-- env/config/state/data 경로가 서로 다른 인스턴스 경로인지
-- env 파일 권한이 group/other readable이 아닌지
-- Slack bot/app token과 모델 키가 비어 있거나 예시값인지
-- 자료 저장소 쓰기 가능, 코드 저장소 쓰기 불필요
-- TYBot 경로를 가리키는 설정이 하나라도 있는지
-- 서비스 계정과 파일 소유자가 다른지
-
-로그에는 값이 아니라 변수명과 설정 출처만 남긴다.
-
-## 4. 서버 운영자가 준비할 것
-
-1. 전용 OS 계정과 디렉터리를 만든다.
-2. 검증된 tag/commit을 `/opt/tybot-subbots/pf-hermes/code`에 배포한다.
-3. 전용 archive Git을 `/var/lib/tybot-subbots/pf-hermes/archive`에 clone한다.
-4. 전용 env/config를 배치하고 mode `0600`, owner `root:pf-hermes`로 제한한다.
-5. 기존 개인 GCP와 **다른 Slack 앱 토큰 세트**인지 확인한다.
-6. offline check, archive check, Slack read-only smoke test 순서로 실행한다.
-7. GCP 인스턴스를 먼저 끄지 말고 새 서버를 답변 비활성 shadow 모드로 검증한다.
-8. 전환 시점에 기존 GCP 봇을 정지한 뒤 새 서비스를 시작한다. 같은 토큰의 동시 실행은
-   중복 답변과 중복 수집을 만든다.
-
-실제 시크릿과 clone URL은 이 문서나 TYBot 저장소에 기록하지 않는다.
-
-## 5. 인수 테스트
-
-- 전용 env 없이 서비스가 fail-closed로 종료된다.
-- TYBot env만 존재하는 호스트에서도 Hermes가 그 값을 읽지 않는다.
-- Hermes 계정으로 `/etc/tybot/tybot.env`와 `/var/lib/tybot/archive`를 읽지 못한다.
-- 프금팀 공개/비공개 채널 권한 회귀가 기존 GCP 결과와 일치한다.
-- archive pull 실패 중에도 기존 로컬 자료로 답하며 degraded 상태를 표시한다.
-- Anthropic 장애, Slack 재연결, Git 충돌이 각각 다른 error code로 기록된다.
-- 서비스 재시작 후 중복 digest, 중복 ingest, 중복 답변이 없다.
-- 로그와 health 출력에 토큰, 질문 원문, 비공개 문서 본문이 노출되지 않는다.
-- 24시간 shadow 관찰 후 비용, 응답시간, 수집 건수와 Git commit 수를 GCP와 대조한다.
-
-## 6. 롤백
-
-1. 새 서비스를 정지한다.
-2. 새 서버에서 추가된 archive commit이 원격에 정상 push됐는지 확인한다.
-3. 동일 토큰을 쓰는 프로세스가 0개인지 확인한 뒤 기존 GCP 서비스를 다시 시작한다.
-4. DNS나 인바운드 전환은 없으므로 Slack 앱 설정을 되돌리지 않는다.
-5. 실패 시점, 새 서버 commit, 마지막 Slack event timestamp를 남겨 중복 수집 범위를
-   계산한다. 원문을 삭제해 맞추지 않는다.
-
-## 7. 다른 제품과의 경계
-
-같은 서버에는 TYBot이 운영하는 내부 기록 전문가도 있지만, 이 문서에서는 이를
-**TYBot Archive Specialist**라고 부른다. 내부 등록 key가 우연히 `hermes`인 것뿐이며,
-프금팀 Hermes의 프로세스·저장소·배포 대상이 아니다.
-
-Hermes 개발자는 다음을 전제로 작업한다.
-
-- TYBot 소스, 중앙 아카이브, DB, Slack 토큰을 읽거나 호출하지 않는다.
-- Hermes의 Slack 수집, Git 아카이브, LLM, digest와 답변 동작은 Hermes 안에 유지한다.
-- TYBot Archive Specialist의 계약이나 프롬프트를 수정하지 않는다.
-- 두 제품 사이에 런타임 호출이나 데이터 동기화를 새로 만들지 않는다.
-
-## 8. 프금팀 제출물
-
-이관 검토를 요청할 때 다음을 하나의 불변 release tag 또는 고정 commit으로 제출한다.
-
-1. 3장의 환경·상태·인스턴스 분리 변경
-2. Rocky용 systemd unit과 설치 전 검사 스크립트
-3. `package-lock.json`과 Node.js 지원 버전
-4. offline/archive/live-read 검사의 실행 명령과 기대 결과
-5. 민감정보 없는 health JSON 스키마와 원자적 기록 구현
-6. GCP 전용 기능을 끈 Rocky 운영 설정 예시
-7. 변경 파일 목록, 알려진 제한, 이전 release로 되돌리는 절차
-8. 다음 실패를 구분하는 error code: Slack, Anthropic, Git pull, Git push, conflict,
-   archive invalid, config invalid
-
-health JSON에는 실행 commit, 시작 시각, 마지막 Slack 연결·수집·Git 동기화·digest 성공,
-미push commit 수, 당일 모델 사용량과 오류 코드만 담는다. 토큰, 질문·답변, 문서 본문과
-private channel 이름은 담지 않는다.
-
-## 9. 완료 정의
-
-프금팀 개발 작업은 다음이 모두 자동 검사될 때 완료다.
-
-- 명시적 env/config/state 경로 없이 production 시작이 실패한다.
-- 코드 디렉터리에 `.env`, 로그, lock, cache 또는 임시 파일을 쓰지 않는다.
-- 두 인스턴스 fixture가 경로·lock·로그를 공유하지 않는다.
-- TYBot 경로를 설정하면 offline check가 실패한다.
-- health 생성은 Slack·Anthropic 호출 없이 2초 안에 끝난다.
-- archive Git 장애가 프로세스 전체 종료나 force push로 이어지지 않는다.
-- 같은 Slack token의 중복 인스턴스 가능성을 시작 전에 경고한다.
-- 테스트와 로그가 시크릿 값을 출력하지 않는다.
-
-서버 계정 생성, 시크릿 발급, 백업, `/pf/` 콘솔과 실제 전환은 서버 운영팀이 담당한다.
-프금팀 release가 이 계약을 통과한 뒤 공동 shadow 검증 일정을 잡는다.
+제품 통합 완료는 별도다. importer와 TYBot pilot QA를 통과하고 사람 승인을 받은 뒤에만
+프금팀에 TYBot을 적용한다.

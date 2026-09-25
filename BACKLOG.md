@@ -152,6 +152,7 @@ _최종 갱신: 2026-09-17_
 | [B-56](#b-56) | **승인 요약을 원문 검색 길잡이로 사용** | 높음 | 구현 완료·운영 검증 대기 (Claude/2026-09-17) | B-37, B-40, B-50 |
 | [B-57](#b-57) | **봇과의 DM — 개인 작업공간(수집·본인 전용·강한 맥락)** | **높음** | 구현 완료·운영 검증 대기 (Claude/2026-09-18) | B-40, B-44 |
 | [B-58](#b-58) | **2026-09-18 답변 문제 패킷 수정(분류 폴백·범위 복귀·피드백 재시도)** | **높음** | 구현 완료·운영 검증 대기 (Claude/2026-09-18) | B-44, B-47, B-57 |
+| [B-65](#b-65) | **Archiving Bot 분리·PF 원본 Hermes 직접 호출** | **긴급** | 진행중 (Codex/2026-09-23, 그림자 수집만 구현) | B-38, B-42, B-63 |
 
 ---
 
@@ -565,45 +566,56 @@ B-39의 외부 MCP 조사는 공식 법령을 읽는 도구 계층으로 한정�
 ## B-63
 ### Hermes 소스 분석과 TYBot Archive Specialist 개선
 
-**우선 높음 · TYBot 구현 완료·프금팀 이관 작업 대기 (Codex/2026-09-21) · 의존 B-44, B-53**
+**우선 높음 · PF skill 계약 분석 완료·통합 importer/fixture 대기 (Codex/2026-09-22) · 의존 B-44, B-53**
 
-프금팀 Hermes와 TYBot Archive Specialist는 서로 다른 제품으로 운영한다. 프금팀 봇은
-독립 서비스·계정·환경변수·Slack 앱·자료 저장소를 사용하고, TYBot은 Hermes의 검색·판정
-규칙 중 중앙 ACL과 마스터 책임을 침범하지 않는 부분만 계약형 전문가에 이식한다.
+> 2026-09-23 PF·IT 협의로 아래의 GCP 유지/수집 선행 실행 순서는
+> [B-65](#b-65)의 TYBot → PF 원본 Hermes 호출 선행안으로 바뀌었다.
+> 기존 조사 결과만 참고한다.
+
+프금팀 Hermes 원본 runtime은 GCP에 유지한다. `archive-run`, `slack-sync`, `doc-archive`,
+`archive-inbox`, `hermes-install`의 불변조건을 TYBot의 Master, worker, 콘솔과 사람 승인
+경계로 나눠 이식한다. 통합본은 TYBot에서 먼저 검증하고 이후 프금팀에도 TYBot을 적용한다.
 
 - [x] Hermes의 GCP, 비공개 Git 아카이브, systemd, 환경변수 의존 분석
-- [x] 프금팀 개발자용 Rocky 서버 이관 준비 계약과 검증·롤백 절차 작성
+- [x] 프금팀 개발자용 archive snapshot·skill fixture 인계 계약 작성
+- [x] 프금팀 개발자/AI가 바로 구현할 파일·schema·fixture·검증 작업지시서 작성 —
+      [`pf-hermes-developer-work-order.md`](docs/design/pf-hermes-developer-work-order.md)
 - [x] TYBot 검색 결과에서 사람 대화와 문서·Canvas를 분리해 표시
 - [x] 채널 좁힘을 권한 내 정확·유일 이름으로만 적용하고 모호한 이름은 거부
 - [x] 별칭 재검색을 한 번으로 제한하고 실제 자료 없음과 탐색 실패를 구분
 - [x] 관련 테스트 76건, 전체 pytest, Ruff 검증. 전체 중 WSL 의존 30건은 환경 실패
+- [ ] PF archive source/derived/unknown inventory와 dry-run importer
+- [ ] 다섯 skill의 비식별 회귀 fixture와 TYBot shadow QA
+- [ ] TYBot pilot 승인 후 PF workspace rollout과 최종 delta import
 
-내부 정본: [Hermes 서버 이관과 TYBot 통합 — 내부 오너 계획](docs/design/pf-hermes-owner-plan.md)
+내부 정본: [PF archive 이전과 Hermes 통합 — 내부 실행 계획](docs/design/pf-hermes-owner-plan.md)
 
 ---
 
 ## B-64
-### 프금팀 Hermes 서버 이관과 독립 운영 콘솔
+### PF archive 이전과 TYBot 통합 운영 화면
 
-**우선 긴급 · 읽기 전용 `/pf/` 콘솔 구현 완료·서버 배포 대기 (Claude/2026-09-22) ·
-프금팀 코드 변경 및 인프라 준비 대기 · 의존 B-35**
+**우선 긴급 · 방향 변경 반영·archive snapshot 이전 대기 (Codex/2026-09-22) · 의존 B-35, B-63**
 
-프금팀의 독립 Hermes를 개인 GCP에서 TYBot과 같은 서버로 옮기되, TYBot과 계정·환경변수·
-Slack 앱·모델 키·자료·로그·배포 장애를 공유하지 않는다. 기존 TYBot 전문 봇 콘솔은
-TYBot이 호출하는 계약형/HTTP 전문가를 전제로 하므로 프금팀 독립 Slack 봇을 그대로
-등록하지 않는다.
+> 2026-09-23 협의: PF archive 복제는 Archiving Bot 개발용 격리 snapshot이며
+> 운영 자료 전환은 아니다. Node Hermes TY DMZ 실행과 Archiving 분리는
+> [B-65](#b-65)를 따른다.
 
-프금팀 전달본: [Hermes 서버 이관 준비 계약](docs/design/pf-hermes-migration-handoff.md)
+2026-09-22 오너 결정으로 Hermes runtime의 Rocky 이전은 취소했다. GCP Hermes는 그대로
+운영하고 PF archive의 불변 snapshot만 TYBot 서버의 live archive 밖으로 가져온다. `/pf/`
+화면은 당분간 snapshot/import/QA 상태를 읽기 전용으로 보여 주며 GCP Hermes를 제어하지 않는다.
 
-내부 실행 계획: [Hermes 서버 이관과 TYBot 통합 — 내부 오너 계획](docs/design/pf-hermes-owner-plan.md) §7~10
+프금팀 전달본: [Hermes archive handoff and TYBot merge contract](docs/design/pf-hermes-migration-handoff.md)
+
+내부 실행 계획: [PF archive 이전과 Hermes 통합 — 내부 실행 계획](docs/design/pf-hermes-owner-plan.md)
 
 우리 측 단계:
 
-- [ ] 서비스 키, 업무/인프라 소유자, RPO/RTO, 비용·장애 연락 계약 확정
-- [ ] `pf-hermes` 전용 OS 계정·경로·SELinux·resource limit·백업 구성
-- [ ] 전용 Slack 앱·Anthropic key·코드/자료 Git deploy key 발급과 교체 절차
-- [ ] 고정 systemd unit, 안전한 수동 배포·원자적 롤백 helper와 runbook
-- [ ] GCP 대비 24시간 shadow 수집·권한·비용·응답 검증 후 단일 인스턴스 전환
+- [ ] 자료 Git full SHA, read-only 전달, channel ID/visibility mapping 확정
+- [ ] `/var/lib/tybot/imports/pf-hermes/<snapshot-id>`에 snapshot·manifest·inventory 생성
+- [ ] live archive 직접 쓰기 방지와 immutable snapshot 검사
+- [ ] source/derived/unknown·PII·ACL 관문을 가진 importer 구현
+- [ ] TYBot shadow/pilot 검증 후 PF rollout과 최종 delta 계획 승인
 - [x] `/pf/` 별도 backend·cookie·DB role·service-scope RBAC (2026-09-22)
       — [`src/tybot_pf/`](src/tybot_pf/), [`deploy/pf-hermes-console.service`](deploy/pf-hermes-console.service),
       [`deploy/sql/pf_console_schema.sql`](deploy/sql/pf_console_schema.sql)
@@ -616,16 +628,36 @@ TYBot이 호출하는 계약형/HTTP 전문가를 전제로 하므로 프금팀 
 - [x] `/pf/` 를 nginx 없이 평문으로 연다 (오너 결정 2026-09-22). `install.sh` 안전장치가
       두 콘솔 모두 `0.0.0.0` 으로 유지하고, nginx 를 붙이면 다음 배포에서 저절로
       루프백으로 돌아간다. **방화벽에서 8787·8788 출발지를 좁혀 둔 상태여야 한다**
-- [x] 이관 수동 runbook — [`docs/deploy/pf-hermes-migration-runbook.md`](docs/deploy/pf-hermes-migration-runbook.md)
-- [x] 전용 계정·경로·권한 구성과 **격리 확인** — [`deploy/setup-pf-hermes-host.sh`](deploy/setup-pf-hermes-host.sh)
+- [x] 과거 runtime 이관 runbook에 **사용 중지** 표시 —
+      [`docs/deploy/pf-hermes-migration-runbook.md`](docs/deploy/pf-hermes-migration-runbook.md)
+- [x] 전용 runtime host 준비 스크립트는 보존하되 이번 작업에서 실행하지 않음 —
+      [`deploy/setup-pf-hermes-host.sh`](deploy/setup-pf-hermes-host.sh)
 - [x] 상태 파일 계약 검사 — [`scripts/check_pf_health.py`](scripts/check_pf_health.py).
       화면은 새는 것을 막고 이 도구는 깨진 것을 말한다
-- [ ] 서버 배포와 smoke — 설계 [`pf-console.md`](docs/design/pf-console.md) §8·§9
-- [ ] allowlist 운영 action과 릴리스 제출·분리 승인·활성화·롤백 자동화
-      (고정 helper·lock·timeout·감사가 먼저다. 오늘 열지 않았다)
+- [ ] `/pf/`를 snapshot/import/QA 상태 모델로 조정하고 서버 smoke
+- [ ] allowlist import action은 importer·lock·dry-run·감사 구현 후에만 개방
 
-권장 콘솔 구조는 같은 UI 소스를 재사용하되 `/pf/`를 별도 프로세스로 reverse proxy하는
-방식이다. 기존 FastAPI에 React route만 추가하는 것은 권한 격리가 아니므로 금지한다.
+---
+
+## B-65
+### Archiving Bot 분리·PF 원본 Hermes 직접 호출
+
+**긴급 · 진행중 (Codex/2026-09-23) · 의존 B-38, B-42, B-63**
+
+결정: [Archiving Bot 분리와 Hermes 직접 호출](docs/design/archiving-bot-separation-2026-09-23.md).
+PF 요청: [Hermes 수정 작업지시](docs/design/pf-hermes-archiver-integration-request.md).
+
+- [x] 별도 Slack 앱·env·운영 archive와 격리된 **채널 그림자 수집** 실행본·테스트
+- [x] PF Hermes v1.3에서 제거/유지할 기능과 Slack DM 검토 계약 문서화
+- [ ] PF archive 개발용 snapshot의 SHA·ACL·출처 inventory 확인 후 DMZ 격리 반입
+- [ ] Archiving Bot의 DM 좌표 전달, edit/delete, Canvas, 첨부 독립 정본·reader
+- [ ] PF Node Hermes specialist 모드와 TYBot v3 도구/권한 계약·콘솔 실제 호출
+- [ ] Hermes의 Slack Canvas/DM 검토·정정·승인/만료 구현
+- [ ] TY workspace pilot 통과 후 TYBot 수집·변환·검토 writer 중지
+- [ ] PF pilot 통과 후 PF GCP 수집·답변을 각각 drain하고 진입점 전환
+
+콘솔의 프로세스·세션·DB role 격리는 유지한다. 다만 runtime restart/deploy 기능은 만들지
+않고 archive snapshot, mapping, dry-run, QA 결과만 노출한다.
 
 ---
 

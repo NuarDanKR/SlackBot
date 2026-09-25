@@ -7,6 +7,9 @@ secrets/
 *_token*
 service-account*.json
 
+# Claude Code가 이 PC에서만 쓰는 권한 허용 목록. 사용자 경로와 로컬 명령을 담는다.
+.claude/settings.local.json
+
 # 개인정보 / 아카이브 제외 대상
 **/등기부*
 **/계약자명단*

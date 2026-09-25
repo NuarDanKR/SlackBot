@@ -2,6 +2,11 @@
 
 _2026-08-27 · Hermes(`tec-wmo6240`)는 TYBot 의 **합병 대상**이다. MD 아카이브를 중앙으로 옮긴다._
 
+> **2026-09-23 변경:** 이 문서의 G1~G5 자료 반입 관문은 계속 유효하지만, 한 번의
+> 이관과 즉시 Hermes 정지를 전제로 한 일정 및 TYBot 내부 흡수안은 폐기됐다. 현재
+> 역할 경계의 정본은 [Archiving Bot 분리](archiving-bot-separation-2026-09-23.md),
+> PF 구현 지시는 [PF Hermes 수정 요청](pf-hermes-archiver-integration-request.md)이다.
+
 ## 이 문서가 다루는 것
 Hermes 의 MD 아카이브와 첨부를 중앙 아카이브로 **한 번** 옮기는 작업. 되돌리기가
 가장 어려운 작업이므로, 무엇을 검사하고 무엇을 거절하는지 먼저 못 박는다.
