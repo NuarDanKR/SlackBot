@@ -79,6 +79,21 @@ def _validate_token(token: str, prefix: str, label: str) -> str:
     return value
 
 
+def canonical_archive_path(archive_root: Path | str, key: str) -> str:
+    """이 워크스페이스 원문이 **실제로 있는** 경로.
+
+    정본은 `<ARCHIVE_DIR>/workspaces/<key>/` 다(`writer.channel_dir`).
+    등록할 때는 `<ARCHIVE_DIR>/<key>` 로 적어 두었는데, 이 값은 화면에만 쓰이므로
+    봇은 멀쩡히 돌았다. 대신 **그 화면을 보고 서버에 들어간 사람이 빈 디렉터리를
+    본다.** 「아카이브가 비었다」 로 읽히고, 그때 사람은 수집이 죽은 줄 안다.
+
+    화면에 보이는 경로가 실제와 다르면 그건 정보가 아니라 **오정보**다.
+    `/` 로 적는다 — 이 값은 리눅스 서버 경로이고, 개발 PC 에서 등록해도
+    `\\` 가 섞이면 안 된다.
+    """
+    return f"{str(archive_root).replace(chr(92), '/').rstrip('/')}/workspaces/{key}"
+
+
 def list_workspaces() -> list[dict]:
     try:
         with _connect() as conn, conn.cursor() as cur:
@@ -207,7 +222,7 @@ def save_workspace(
                     error = NULL,
                     limit_usd = excluded.limit_usd
                 """,
-                (db_key, label, role, state, limit_usd, str(archive_root / key), actor),
+                (db_key, label, role, state, limit_usd, canonical_archive_path(archive_root, key), actor),
             )
             cur.execute("DELETE FROM workspace_readable WHERE reader = %s", (db_key,))
             for target in targets:
