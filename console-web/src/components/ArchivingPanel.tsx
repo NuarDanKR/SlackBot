@@ -103,6 +103,8 @@ const SERVICE_LABEL: Record<ServiceRow['service'], string> = {
   hermes_direct: 'Hermes 직접 호출 (공존 기간)',
 }
 
+const SERVICES: ServiceRow['service'][] = ['master', 'archiver', 'hermes_direct']
+
 const MODE_LABEL: Record<ChannelMode, string> = {
   off: '수집 안 함',
   shadow: '그림자',
@@ -141,14 +143,16 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
   if (res.error && !data) return <Failed what="Archiving 설정" detail={res.error.message} onRetry={res.reload} />
   if (!data) return null
 
-  async function send(path: string, body: unknown) {
+  async function send(path: string, body: unknown): Promise<boolean> {
     setBusy(true)
     setError(null)
     try {
       setDetail(await api.put<ArchivingDetail>(path, body))
+      return true
     } catch (caught) {
       // 422 는 고장이 아니라 **규칙이 막은 것**이다. 사유를 그대로 보여 준다.
       setError(caught instanceof ApiError ? caught.message : String(caught))
+      return false
     } finally {
       setBusy(false)
     }
@@ -156,6 +160,9 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
 
   const base = `/api/workspaces/${encodeURIComponent(workspace)}/archiving`
   const gate = data.schemaGate
+  const attachmentReaderReady = data.flags.some((row) =>
+    row.name === 'attachment_reader_ready' && row.scope === 'global' && row.enabled,
+  )
 
   return (
     <>
@@ -212,34 +219,21 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
         <div className="card card-pad"><div className="table-scroll"><table className="table">
           <thead><tr><th>서비스</th><th>상태</th><th>토큰</th><th>Slack 신원</th></tr></thead>
           <tbody>
-            {data.services.map((row) => (
-              <tr key={row.service}>
-                <td>{SERVICE_LABEL[row.service]}</td>
-                <td>
-                  {row.state === 'enabled'
-                    ? <Chip tone="ok">연결됨</Chip>
-                    : <Chip tone="plain">{row.state === 'error' ? '오류' : '중지'}</Chip>}
-                  {row.error && <div className="hint warn">{row.error}</div>}
-                </td>
-                <td>
-                  <div className="mono">{row.bot_mask ?? '미등록'}</div>
-                  <div className="mono">{row.app_mask ?? '미등록'}</div>
-                </td>
-                <td>
-                  {identityChip(row)}
-                  <div className="hint mono">
-                    {row.team_id || '-'} · {row.bot_user_id || '-'}
-                  </div>
-                  {row.identity_error && <div className="hint warn">{row.identity_error}</div>}
-                  {row.identity_checked_at && (
-                    <div className="hint">{fmt.dayClock(row.identity_checked_at)}</div>
-                  )}
-                </td>
-              </tr>
+            {SERVICES.map((service) => (
+              <ServiceRowView
+                key={service}
+                service={service}
+                row={data.services.find((item) => item.service === service)}
+                busy={busy}
+                onSave={async (botToken, appToken, note, reason) => send(
+                  `${base}/services/${service}`,
+                  { botToken, appToken, note, reason },
+                )}
+                onVerify={(reason) => send(
+                  `${base}/services/${service}/verify`, { reason },
+                )}
+              />
             ))}
-            {!data.services.length && (
-              <tr><td colSpan={4}>등록된 서비스가 없습니다. Master 토큰을 먼저 이관하세요.</td></tr>
-            )}
           </tbody>
         </table></div></div>
       </Section>
@@ -255,7 +249,7 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
             {data.channels.map((row) => (
               <ChannelRowView
                 key={row.channel_id} row={row} busy={busy} gate={gate}
-                gatedModes={data.gatedModes}
+                gatedModes={data.gatedModes} blockers={data.blockers}
                 onChange={(mode, reason, cutoverTs) => void send(
                   `${base}/channels/${encodeURIComponent(row.channel_id)}`,
                   { mode, reason, cutoverTs },
@@ -280,6 +274,7 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
               <FlagRowView
                 key={`${row.name}:${row.scope}:${row.scope_key}`} row={row} busy={busy}
                 gate={gate} gatedFlags={data.gatedFlags}
+                dependencyLocked={row.name === 'separate_attachments' && !attachmentReaderReady}
                 onChange={(enabled, reason) => void send(`${base}/flags`, {
                   name: row.name, enabled, reason, scope: row.scope, scopeKey: row.scope_key,
                 })}
@@ -332,18 +327,96 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
   )
 }
 
-function ChannelRowView({ row, busy, gate, gatedModes, onChange }: {
+function ServiceRowView({ service, row, busy, onSave, onVerify }: {
+  service: ServiceRow['service']
+  row?: ServiceRow
+  busy: boolean
+  onSave: (botToken: string, appToken: string, note: string, reason: string) => Promise<boolean>
+  onVerify: (reason: string) => Promise<boolean>
+}) {
+  const [botToken, setBotToken] = useState('')
+  const [appToken, setAppToken] = useState('')
+  const [note, setNote] = useState('')
+  const [reason, setReason] = useState('')
+  const tokenPair = botToken.startsWith('xoxb-') && appToken.startsWith('xapp-')
+  const canSave = tokenPair && reason.trim().length > 0 && !busy
+  const canVerify = Boolean(row?.bot_mask && row?.app_mask) && reason.trim().length > 0 && !busy
+
+  async function save() {
+    if (await onSave(botToken, appToken, note, reason)) {
+      setBotToken('')
+      setAppToken('')
+      setNote('')
+      setReason('')
+    }
+  }
+
+  async function verify() {
+    if (await onVerify(reason)) setReason('')
+  }
+
+  return (
+    <tr>
+      <td>
+        <div>{SERVICE_LABEL[service]}</div>
+        <input className="input" placeholder="메모" value={note} disabled={busy}
+          onChange={(event) => setNote(event.target.value)} />
+      </td>
+      <td>
+        {row?.state === 'enabled'
+          ? <Chip tone="ok">연결됨</Chip>
+          : <Chip tone="plain">{row?.state === 'error' ? '오류' : '중지'}</Chip>}
+        {row?.error && <div className="hint warn">{row.error}</div>}
+      </td>
+      <td>
+        <div className="mono">{row?.bot_mask ?? '미등록'}</div>
+        <div className="mono">{row?.app_mask ?? '미등록'}</div>
+        <input className="input mono" type="password" autoComplete="new-password"
+          placeholder="xoxb-..." value={botToken} disabled={busy}
+          onChange={(event) => setBotToken(event.target.value)} />
+        <input className="input mono" type="password" autoComplete="new-password"
+          placeholder="xapp-..." value={appToken} disabled={busy}
+          onChange={(event) => setAppToken(event.target.value)} />
+      </td>
+      <td>
+        {row ? identityChip(row) : <Chip tone="plain">신원 미확인</Chip>}
+        <div className="hint mono">
+          {row?.team_id || '-'} · {row?.bot_user_id || '-'}
+        </div>
+        {row?.identity_error && <div className="hint warn">{row.identity_error}</div>}
+        {row?.identity_checked_at && (
+          <div className="hint">{fmt.dayClock(row.identity_checked_at)}</div>
+        )}
+        <input className="input" placeholder="작업 사유 (필수)" value={reason}
+          disabled={busy} onChange={(event) => setReason(event.target.value)} />
+        <div className="form-row">
+          <button className="btn btn-sm" disabled={!canSave} onClick={() => void save()}>
+            토큰 저장
+          </button>
+          <button className="btn btn-sm" disabled={!canVerify} onClick={() => void verify()}>
+            신원 확인
+          </button>
+        </div>
+      </td>
+    </tr>
+  )
+}
+
+function ChannelRowView({ row, busy, gate, gatedModes, blockers, onChange }: {
   row: ChannelRow
   busy: boolean
   gate: SchemaGate
   gatedModes: string[]
+  blockers: string[]
   onChange: (mode: ChannelMode, reason: string, cutoverTs: string) => void
 }) {
   const [mode, setMode] = useState<ChannelMode>(row.mode)
   const [reason, setReason] = useState('')
   const [cutover, setCutover] = useState('')
 
-  const locked = !gate.verified && gatedModes.includes(mode)
+  const schemaLocked = !gate.verified && gatedModes.includes(mode)
+  const policyLocked = mode === 'active' && blockers.length > 0
+  const locked = schemaLocked || policyLocked
   // 인수·역인수는 좌표가 필요하다. 없으면 서버가 거절하는데, 그걸 눌러 보고
   // 알게 하지 않는다.
   const needsCutover =
@@ -382,25 +455,30 @@ function ChannelRowView({ row, busy, gate, gatedModes, onChange }: {
             disabled={busy} onChange={(event) => setReason(event.target.value)} />
           <button className="btn btn-sm" disabled={!ready}
             onClick={() => onChange(mode, reason, cutover)}>적용</button>
-          {locked && <span className="field-help warn">스키마 검증 뒤에 열립니다.</span>}
+          {schemaLocked && <span className="field-help warn">스키마 검증 뒤에 열립니다.</span>}
+          {!schemaLocked && policyLocked && (
+            <span className="field-help warn">운영 전환 조건을 먼저 해결하세요.</span>
+          )}
         </div>
       </td>
     </tr>
   )
 }
 
-function FlagRowView({ row, busy, gate, gatedFlags, onChange }: {
+function FlagRowView({ row, busy, gate, gatedFlags, dependencyLocked, onChange }: {
   row: FlagRow
   busy: boolean
   gate: SchemaGate
   gatedFlags: string[]
+  dependencyLocked: boolean
   onChange: (enabled: boolean, reason: string) => void
 }) {
   const [reason, setReason] = useState('')
   const next = !row.enabled
   // **끄는 것은 막지 않는다.** 사고 때 내리는 손잡이를 검증 상태로 막으면
   // 막아야 할 순간에 못 막는다.
-  const locked = next && !gate.verified && gatedFlags.includes(row.name)
+  const schemaLocked = next && !gate.verified && gatedFlags.includes(row.name)
+  const locked = schemaLocked || (next && dependencyLocked)
   const ready = reason.trim().length > 0 && !locked && !busy
 
   return (
@@ -422,7 +500,10 @@ function FlagRowView({ row, busy, gate, gatedFlags, onChange }: {
             onClick={() => onChange(next, reason)}>
             {next ? '켜기' : '끄기'}
           </button>
-          {locked && <span className="field-help warn">스키마 검증 뒤에 켤 수 있습니다.</span>}
+          {schemaLocked && <span className="field-help warn">스키마 검증 뒤에 켤 수 있습니다.</span>}
+          {!schemaLocked && next && dependencyLocked && (
+            <span className="field-help warn">첨부 reader 준비를 먼저 확인하세요.</span>
+          )}
         </div>
       </td>
     </tr>

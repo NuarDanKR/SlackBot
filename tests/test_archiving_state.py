@@ -394,8 +394,9 @@ def test_missing_retention_blocks_production():
     """
     blockers = production_blockers({"bot_conversation_audit": 90, "bot_dm_attachment": None})
 
-    assert len(blockers) == 1
-    assert "bot_dm_attachment" in blockers[0]
+    retention = [item for item in blockers if "보존 기간" in item]
+    assert len(retention) == 1
+    assert "bot_dm_attachment" in retention[0]
 
 
 def test_zero_is_not_a_valid_retention_period():
@@ -404,12 +405,21 @@ def test_zero_is_not_a_valid_retention_period():
         {"bot_conversation_audit": 0, "bot_dm_attachment": 0}
     )
 
-    assert len(blockers) == 2
-    assert all("1일 이상" in blocker for blocker in blockers)
+    retention = [item for item in blockers if "보존 기간" in item]
+    assert len(retention) == 2
+    assert all("1일 이상" in blocker for blocker in retention)
 
 
 def test_all_set_clears_the_gate():
-    assert production_blockers({"bot_conversation_audit": 90, "bot_dm_attachment": 30}) == []
+    assert production_blockers(
+        {"bot_conversation_audit": 90, "bot_dm_attachment": 30},
+        flags={
+            "archiver_writes_live": True,
+            "preserve_edit_delete": True,
+            "require_attachment_ack": True,
+            "revision_reader_ready": True,
+        },
+    ) == []
 
 
 def test_attachment_separation_without_a_reader_is_blocked():

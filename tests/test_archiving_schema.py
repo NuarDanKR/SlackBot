@@ -297,6 +297,10 @@ def test_every_feature_flag_defaults_to_off(sql):
     assert "enabled" not in seed
 
 
+def test_attachment_reader_readiness_is_an_explicit_flag(sql):
+    assert "('attachment_reader_ready'" in sql
+
+
 def test_feature_flags_can_be_scoped_without_name_collisions(sql):
     """같은 기능을 전역과 특정 workspace에서 각각 설정할 수 있어야 한다."""
     assert "PRIMARY KEY (name, scope, scope_key)" in sql

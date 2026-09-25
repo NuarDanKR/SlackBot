@@ -13,6 +13,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from copy import deepcopy
+
 
 class FakeArchivingRepo:
     """`ArchivingRepo` 프로토콜의 메모리 구현."""
@@ -25,6 +28,28 @@ class FakeArchivingRepo:
         self.service_rows: list[dict] = []
         #: 잠금을 잡았는지. 진짜 저장소는 좌표별로 잡는다.
         self.locked: list[tuple[str, str]] = []
+        self.transaction_count = 0
+        self.fail_audit = False
+
+    @contextmanager
+    def transaction(self):
+        before = deepcopy((
+            self.channel_rows,
+            self.flag_rows,
+            self.retention_rows,
+            self.audit_rows,
+        ))
+        self.transaction_count += 1
+        try:
+            yield self
+        except Exception:
+            (
+                self.channel_rows,
+                self.flag_rows,
+                self.retention_rows,
+                self.audit_rows,
+            ) = before
+            raise
 
     # -- 서비스 ----------------------------------------------------------
     def services(self, workspace: str) -> list[dict]:
@@ -90,6 +115,8 @@ class FakeArchivingRepo:
         return list(reversed(rows))[:limit]
 
     def add_audit(self, row: dict) -> None:
+        if self.fail_audit:
+            raise RuntimeError("audit failed")
         self.audit_rows.append(dict(row))
 
     # -- 시험 편의 --------------------------------------------------------

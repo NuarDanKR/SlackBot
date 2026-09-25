@@ -43,7 +43,7 @@ def separate_attachments() -> bool:
     }
 
 
-def raw_lines_for(result) -> list[str]:
+def raw_lines_for(result, *, separate: bool | None = None) -> list[str]:
     """이 첨부가 **원문에 남길** 줄.
 
     분리 전에는 참조 + 본문(지금까지 하던 대로), 분리 뒤에는 참조만.
@@ -52,7 +52,8 @@ def raw_lines_for(result) -> list[str]:
     `lines` 중 무엇을 쓸지 매번 고르면 **한 군데가 빠진다.** 그 빠진 경로만 옛
     모양으로 쓰이고, 그건 「어떤 채널은 첨부가 두 번 잡힌다」 로 나타난다.
     """
-    if not separate_attachments():
+    enabled = separate_attachments() if separate is None else separate
+    if not enabled:
         return list(getattr(result, "lines", []) or [])
     reference = list(getattr(result, "reference_lines", []) or [])
     # 옛 결과 객체에는 `reference_lines` 가 없다. 그때 빈 목록을 주면 파일이

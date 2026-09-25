@@ -117,6 +117,10 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     ("tyslackai", "archive_channel_mode", "UPDATE"),
 )
 
+REQUIRED_FUNCTIONS: tuple[tuple[str, str, str], ...] = (
+    ("tybot_archiver", "archiver_runtime_config(text)", "EXECUTE"),
+)
+
 
 def dsn_database(dsn: str) -> str:
     text = dsn.strip()
@@ -229,6 +233,23 @@ def has_privilege(conn, role: str, table: str, privilege: str) -> bool | None:
         return bool(cur.fetchone()[0])
 
 
+def has_function_privilege(
+    conn, role: str, function: str, privilege: str
+) -> bool | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regprocedure(%s) IS NOT NULL AS ok", (function,))
+        if not cur.fetchone()[0]:
+            return None
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+        if not cur.fetchone():
+            return None
+        cur.execute(
+            "SELECT has_function_privilege(%s, %s, %s) AS ok",
+            (role, function, privilege),
+        )
+        return bool(cur.fetchone()[0])
+
+
 #: 이 스키마들이 만드는 표. 여기 없는 표가 있으면 남의 DB 다.
 OUR_TABLE_PREFIXES = (
     "archive_", "workspace", "bot_conversation_audit", "org_unit", "employee",
@@ -335,6 +356,12 @@ def check_privileges(conn) -> list[str]:
             problems.append(f"{role}/{table} 을 확인할 수 없다(역할이나 표가 없다)")
         elif got is False:
             problems.append(f"{role} 에게 {table} 의 {privilege} 권한이 없다")
+    for role, function, privilege in REQUIRED_FUNCTIONS:
+        got = has_function_privilege(conn, role, function, privilege)
+        if got is None:
+            problems.append(f"{role}/{function} 을 확인할 수 없다(역할이나 함수가 없다)")
+        elif got is False:
+            problems.append(f"{role} 에게 {function} 의 {privilege} 권한이 없다")
     return problems
 
 
@@ -344,6 +371,10 @@ def main() -> int:
     parser.add_argument(
         "--preflight-only", action="store_true",
         help="아무것도 바꾸지 않고 준비 상태만 본다(역할·남의 표·DSN 안전성)",
+    )
+    parser.add_argument(
+        "--artifact-out", type=Path,
+        help="검증 결과를 서버 반입용 JSON으로 쓴다. 생략하면 현재 호스트 게이트에 기록한다",
     )
     args = parser.parse_args()
 
@@ -403,7 +434,8 @@ def main() -> int:
             print(f"  ✗ {item}")
         return 1
     print("\n4. 권한 회수·부여 — 통과")
-    print(f"\n네 가지 모두 통과했습니다 (금지 {len(FORBIDDEN)}건 · 필수 {len(REQUIRED)}건).")
+    required_count = len(REQUIRED) + len(REQUIRED_FUNCTIONS)
+    print(f"\n네 가지 모두 통과했습니다 (금지 {len(FORBIDDEN)}건 · 필수 {required_count}건).")
 
     # 통과를 **지문과 함께** 남긴다. 콘솔의 release gate 가 이 파일을 본다.
     #
@@ -416,9 +448,16 @@ def main() -> int:
     marker = record_pass(
         by=os.getenv("USER") or os.getenv("USERNAME") or "unknown",
         dsn_label=dsn_database(args.dsn),
+        destination=args.artifact_out,
     )
     print(f"검증 기록: {marker}")
-    print("콘솔의 active 전환 잠금이 이 기록으로 열립니다.")
+    if args.artifact_out:
+        print(
+            "이 파일은 아직 서버 게이트를 열지 않습니다. 서버에서 "
+            "scripts/install_schema_verification.py 로 설치하세요."
+        )
+    else:
+        print("현재 호스트 콘솔의 active 전환 잠금이 이 기록으로 열립니다.")
     return 0
 
 

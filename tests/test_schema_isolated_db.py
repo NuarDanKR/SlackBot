@@ -164,6 +164,14 @@ def test_the_forbidden_list_covers_what_the_draft_granted():
     assert ("tybot_archiver", "workspace_service_secret", "SELECT") in forbidden
 
 
+def test_archiver_runtime_function_execute_is_required():
+    assert (
+        "tybot_archiver",
+        "archiver_runtime_config(text)",
+        "EXECUTE",
+    ) in verify.REQUIRED_FUNCTIONS
+
+
 def test_the_draft_shape_actually_grants_what_we_then_check():
     """흉내가 비어 있으면 3번 시험이 아무것도 안 본다.
 

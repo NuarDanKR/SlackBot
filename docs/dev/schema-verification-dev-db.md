@@ -17,7 +17,9 @@ gate 로 미뤄 두고** 개발을 계속한다(오너 결정 2026-09-25 §9).
 것이 요점이다 — 검증이 안 끝났다는 사실이 어딘가에 남아 있지 않으면, 사람은
 언젠가 「했다」 고 기억하고 콘솔은 버튼을 그냥 눌러 준다.
 
-여기 적은 절차로 **자기 PC 에서** 검증을 끝내면 게이트가 열린다.
+자기 PC에서 검증을 끝내면 서버 반입용 artifact가 생긴다. 이 파일을 서버가
+배포된 SQL 지문과 다시 대조해 설치해야 서버 게이트가 열린다. 개발 PC의
+`STATE_DIR`과 서버의 `/var/lib/tybot`은 서로 다른 파일시스템이다.
 
 ---
 
@@ -73,7 +75,8 @@ python scripts/verify_schema_isolated.py \
 
 ```bash
 python scripts/verify_schema_isolated.py \
-    --dsn "postgresql://postgres:devonly@localhost:15432/tybot_schema_test"
+    --dsn "postgresql://postgres:devonly@localhost:15432/tybot_schema_test" \
+    --artifact-out schema-verification.json
 ```
 
 끝나면 지운다. 컨테이너를 남겨 두면 다음에 「그때 뭘로 검증했더라」 가 된다.
@@ -128,10 +131,22 @@ TYBOT_SCHEMA_TEST_DSN="postgresql://postgres:devonly@localhost:15432/tybot_schem
 
 ---
 
-## 통과하면 무엇이 달라지나
+## 통과 결과를 서버에 설치한다
 
-스크립트가 `<STATE_DIR>/state/schema-verified.json` 에 **지문과 함께** 통과를
-남긴다. 콘솔이 그 파일을 보고 `active` 전환 잠금을 푼다.
+`schema-verification.json`에는 본문이나 DSN이 아니라 스키마 지문, 검증 시각,
+실행자와 DB 이름만 들어 있다. 이 파일을 서버 임시 경로로 전송한 뒤 배포된
+코드에서 설치한다.
+
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/install_schema_verification.py \
+  /var/lib/tybot/imports/schema-verification.json \
+  --installed-by "$USER"
+```
+
+서버의 SQL 지문이 artifact와 다르면 설치는 거부된다. 설치가 성공하면
+`<STATE_DIR>/state/schema-verified.json`이 원자적으로 교체되고 콘솔의 `active`
+전환 잠금이 열린다.
 
 ```json
 {

@@ -23,6 +23,15 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "deploy" / "tybot-specialist-build"
 DEPLOY = ROOT / "deploy" / "tybot-specialist-deploy"
 BASH = shutil.which("bash")
+if BASH is not None:
+    probe = subprocess.run(
+        [BASH, "-lc", "printf tybot-bash-ok"],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    if probe.returncode != 0 or probe.stdout != b"tybot-bash-ok":
+        BASH = None
 needs_bash = pytest.mark.skipif(BASH is None, reason="bash 없음")
 
 

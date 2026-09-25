@@ -49,6 +49,7 @@ PACE_SECONDS = 65  # 분당 1요청 제한 + 여유
 def _messages_from(
     client, event: dict, bot_token: str, name_cache: dict, storage,
     *, workspace: str = "", channel_id: str = "", staged_out: list | None = None,
+    attachment_line_selector=None,
 ) -> list:
     ts = datetime.fromtimestamp(float(event["ts"]), tz=UTC)
     uid = event.get("user", "unknown")
@@ -86,11 +87,16 @@ def _messages_from(
         if staged_out is not None:
             staged_out.extend(staged)
         for item in staged:
+            lines = (
+                attachment_line_selector(item)
+                if attachment_line_selector is not None
+                else item.lines
+            )
             out.extend(
                 writer.IncomingMessage(
                     ts=ts, speaker=speaker, text=ln, source_ts=source_ts,
                 )
-                for ln in item.lines
+                for ln in lines
             )
             for w in item.warnings:
                 log.warning("첨부 처리 경고: %s", w)

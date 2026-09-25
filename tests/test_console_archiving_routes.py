@@ -115,8 +115,67 @@ def test_unset_retention_shows_up_as_a_blocker(client, repo):
 
     body = client.get(BASE, headers=headers).json()
 
-    assert len(body["blockers"]) == 2
-    assert all("보존 기간" in item for item in body["blockers"])
+    retention = [item for item in body["blockers"] if "보존 기간" in item]
+    assert len(retention) == 2
+
+
+def test_service_tokens_are_saved_but_never_returned(client, repo, monkeypatch):
+    captured = {}
+
+    def save_service(workspace, service, **kwargs):
+        captured.update(workspace=workspace, service=service, **kwargs)
+        repo.service_rows.append({
+            "service": service,
+            "state": "disabled",
+            "error": None,
+            "team_id": "",
+            "bot_user_id": "",
+            "identity_ok": None,
+            "identity_error": "",
+            "identity_checked_at": None,
+            "bot_mask": "xoxb-1234…cdef",
+            "app_mask": "xapp-1234…cdef",
+            "token_count": 2,
+        })
+
+    monkeypatch.setattr(console_app.workspace_service_store, "save_service", save_service)
+    headers = owner(client) | CSRF
+
+    response = client.put(
+        f"{BASE}/services/archiver",
+        json={
+            "botToken": "xoxb-secret-bot",
+            "appToken": "xapp-secret-app",
+            "reason": "별도 앱 등록",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert captured["workspace"] == "tyit"
+    assert captured["service"] == "archiver"
+    body = response.text
+    assert "xoxb-secret-bot" not in body
+    assert "xapp-secret-app" not in body
+
+
+def test_service_identity_is_checked_server_side(client, repo, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        console_app.workspace_service_identity,
+        "verify_service",
+        lambda workspace, service, *, actor: calls.append((workspace, service, actor)) or "",
+    )
+    headers = owner(client) | CSRF
+
+    response = client.put(
+        f"{BASE}/services/archiver/verify",
+        json={"reason": "토큰 교체 후 확인"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert calls == [("tyit", "archiver", "dan@taeyoung.com")]
 
 
 # --- 사유 --------------------------------------------------------------------
@@ -198,6 +257,44 @@ def test_turning_a_gated_flag_off_is_allowed(client, repo):
     assert repo.flag_rows[("archiver_writes_live", "global", "")]["enabled"] is False
 
 
+def test_workspace_flag_cannot_target_a_different_workspace(client, repo):
+    headers = owner(client) | CSRF
+
+    response = client.put(
+        f"{BASE}/flags",
+        json={
+            "name": "require_attachment_ack",
+            "enabled": True,
+            "reason": "범위 확인",
+            "scope": "workspace",
+            "scopeKey": "mgmt",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert ("require_attachment_ack", "workspace", "mgmt") not in repo.flag_rows
+
+
+def test_channel_flag_cannot_target_another_workspaces_channel(client, repo):
+    repo.given_channel("mgmt", "C0OTHER", "shadow")
+    headers = owner(client) | CSRF
+
+    response = client.put(
+        f"{BASE}/flags",
+        json={
+            "name": "require_attachment_ack",
+            "enabled": True,
+            "reason": "범위 확인",
+            "scope": "channel",
+            "scopeKey": "C0OTHER",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+
+
 # --- 되는 것 ------------------------------------------------------------------
 
 def test_shadow_is_not_gated(client, repo):
@@ -267,8 +364,9 @@ def test_setting_retention_clears_that_blocker(client, repo):
         headers=headers,
     ).json()
 
-    assert len(body["blockers"]) == 1
-    assert "bot_dm_attachment" in body["blockers"][0]
+    retention = [item for item in body["blockers"] if "보존 기간" in item]
+    assert len(retention) == 1
+    assert "bot_dm_attachment" in retention[0]
 
 
 def test_a_write_without_the_csrf_header_is_rejected(client, repo):

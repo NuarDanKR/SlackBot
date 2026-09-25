@@ -1,0 +1,26 @@
+# Shadow-only Archiving Bot app. Install separately from TYBot in each workspace.
+display_information:
+  name: TY Archiving
+  description: 사내 채널 원문과 첨부를 수집하는 별도 앱
+  background_color: "#146b68"
+features:
+  bot_user:
+    display_name: ty-archiving
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - channels:history
+      - groups:history
+      - channels:read
+      - groups:read
+      - users:read
+      - files:read
+      - canvases:read
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+  socket_mode_enabled: true
+  token_rotation_enabled: false

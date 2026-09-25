@@ -50,6 +50,44 @@ def test_recording_a_pass_opens_the_gate():
     assert status.verified_dsn_label == "tybot_schema_test"
 
 
+def test_a_portable_artifact_does_not_open_the_local_gate(tmp_path):
+    artifact = tmp_path / "verification.json"
+
+    gate.record_pass(
+        by="developer", dsn_label="tybot_schema_test", destination=artifact
+    )
+
+    assert artifact.is_file()
+    assert gate.gate_status().verified is False
+
+
+def test_matching_artifact_can_be_installed(tmp_path):
+    artifact = tmp_path / "verification.json"
+    gate.record_pass(
+        by="developer", dsn_label="tybot_schema_test", destination=artifact
+    )
+
+    installed = gate.install_verified_artifact(artifact, installed_by="operator")
+
+    assert installed == gate.marker_path()
+    assert gate.gate_status().verified is True
+    payload = json.loads(installed.read_text(encoding="utf-8"))
+    assert payload["installed_by"] == "operator"
+
+
+def test_artifact_for_another_schema_is_refused(tmp_path, monkeypatch):
+    artifact = tmp_path / "verification.json"
+    gate.record_pass(
+        by="developer", dsn_label="tybot_schema_test", destination=artifact
+    )
+    monkeypatch.setattr(gate, "schema_fingerprint", lambda *_: "f" * 64)
+
+    with pytest.raises(gate.GateClosed, match="스키마가 다릅니다"):
+        gate.install_verified_artifact(artifact, installed_by="operator")
+
+    assert not gate.marker_path().is_file()
+
+
 # --- 지문에 묶인다 -----------------------------------------------------------
 
 def test_changing_the_schema_closes_the_gate_again(monkeypatch, tmp_path):

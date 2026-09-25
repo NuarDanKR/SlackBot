@@ -53,6 +53,8 @@ from . import (
     specialist_zip,
     summary_review_store,
     timer_manager,
+    workspace_service_identity,
+    workspace_service_store,
     workspace_store,
 )
 from .auth import (
@@ -2104,6 +2106,17 @@ class RetentionBody(BaseModel):
     reason: str = Field(min_length=1)
 
 
+class WorkspaceServiceBody(BaseModel):
+    botToken: str = ""
+    appToken: str = ""
+    note: str = ""
+    reason: str = Field(min_length=1)
+
+
+class WorkspaceServiceVerifyBody(BaseModel):
+    reason: str = Field(min_length=1)
+
+
 @app.get("/api/workspaces/{key}/archiving")
 def get_workspace_archiving(key: str, user: User) -> dict:
     """상세 화면이 쓰는 것 전부. **한 번에** 준다.
@@ -2116,6 +2129,79 @@ def get_workspace_archiving(key: str, user: User) -> dict:
         return archiving_admin.workspace_detail(key.strip().lower())
     except workspace_store.WorkspaceStoreError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.put("/api/workspaces/{key}/archiving/services/{service}")
+def put_workspace_service(
+    key: str,
+    service: Literal["master", "archiver", "hermes_direct"],
+    body: WorkspaceServiceBody,
+    request: Request,
+    user: User,
+) -> dict:
+    """Store a service token pair; responses contain masks only."""
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    bot_token = body.botToken.strip()
+    app_token = body.appToken.strip()
+    if not bot_token or not app_token:
+        raise HTTPException(status_code=422, detail="봇 토큰과 앱 토큰을 함께 입력하세요.")
+    try:
+        workspace_service_store.save_service(
+            workspace,
+            service,
+            actor=user.email,
+            bot_token=bot_token,
+            app_token=app_token,
+            note=body.note.strip() or body.reason,
+        )
+    except workspace_store.WorkspaceStoreError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email,
+        category="workspace",
+        action="workspace_service_token",
+        target_type="service",
+        target_id=service,
+        workspace=workspace,
+        outcome="succeeded",
+        metadata={"reason": body.reason},
+    )
+    return archiving_admin.workspace_detail(workspace)
+
+
+@app.put("/api/workspaces/{key}/archiving/services/{service}/verify")
+def verify_workspace_service(
+    key: str,
+    service: Literal["master", "archiver", "hermes_direct"],
+    body: WorkspaceServiceVerifyBody,
+    request: Request,
+    user: User,
+) -> dict:
+    """Verify the stored bot/app token pair and persist its Slack identity."""
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    try:
+        problem = workspace_service_identity.verify_service(
+            workspace, service, actor=user.email
+        )
+    except workspace_store.WorkspaceStoreError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+    _audit_event(
+        actor=user.email,
+        category="workspace",
+        action="workspace_service_identity",
+        target_type="service",
+        target_id=service,
+        workspace=workspace,
+        outcome="succeeded",
+        metadata={"reason": body.reason},
+    )
+    return archiving_admin.workspace_detail(workspace)
 
 
 @app.put("/api/workspaces/{key}/archiving/channels/{channel_id}")
@@ -2159,6 +2245,7 @@ def put_feature_flag(
             body.name.strip(), body.enabled,
             archiving_admin.Actor(user.email, body.reason),
             scope=body.scope, scope_key=body.scopeKey.strip(),
+            workspace_context=workspace,
         )
     except archiving_admin.AdminRefused as e:
         raise HTTPException(status_code=422, detail=str(e)) from e

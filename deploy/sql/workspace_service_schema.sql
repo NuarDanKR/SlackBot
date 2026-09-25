@@ -105,6 +105,44 @@ CREATE TABLE IF NOT EXISTS workspace_service_secret (
 COMMENT ON TABLE workspace_service_secret IS
     '서비스별 봇/앱 토큰. 평문 저장 금지, 복호화 조회 API 금지. 콘솔은 mask 만 읽는다.';
 
+-- Archiver 런타임은 자기 서비스 토큰만 시작할 때 읽는다. 표 SELECT를 주지 않고
+-- SECURITY DEFINER 함수로 열을 제한해 master/Hermes 토큰이 같은 계정에 보이지 않게 한다.
+CREATE OR REPLACE FUNCTION archiver_runtime_config(requested_workspace text)
+RETURNS TABLE (
+    state text,
+    team_id text,
+    bot_user_id text,
+    master_bot_user_id text,
+    bot_ciphertext bytea,
+    app_ciphertext bytea
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT a.state,
+           a.team_id,
+           a.bot_user_id,
+           coalesce(m.bot_user_id, ''),
+           bot.ciphertext,
+           app.ciphertext
+      FROM workspace_service a
+      JOIN workspace_service_secret bot
+        ON bot.workspace = a.workspace AND bot.service = a.service AND bot.kind = 'bot'
+      JOIN workspace_service_secret app
+        ON app.workspace = a.workspace AND app.service = a.service AND app.kind = 'app'
+      LEFT JOIN workspace_service m
+        ON m.workspace = a.workspace AND m.service = 'master'
+     WHERE a.workspace = requested_workspace
+       AND a.service = 'archiver'
+       AND a.state = 'enabled'
+       AND a.identity_ok IS TRUE
+       AND m.identity_ok IS TRUE
+       AND coalesce(m.bot_user_id, '') <> ''
+$$;
+
+REVOKE ALL ON FUNCTION archiver_runtime_config(text) FROM PUBLIC;
+
 
 -- ---------------------------------------------------------------------------
 -- 3. 기존 토큰을 master 서비스로 옮긴다
@@ -160,15 +198,14 @@ BEGIN
                 ' workspace_service, workspace_service_secret TO tyslackai';
     END IF;
 
-    -- **archiver 는 자기 토큰 표를 못 읽는다.** 기동할 때 토큰은 env 로 받는다
-    -- (오너 결정 §5 — Slack token 은 env/secret store 에 유지).
-    -- DB 에서 읽을 수 있으면, DB 를 읽을 수 있는 다른 것도 전부 읽을 수 있게 된다.
+    -- archiver 는 시크릿 표를 직접 못 읽는다. 위 함수로 자기 서비스 토큰만 받는다.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tybot_archiver') THEN
         REVOKE ALL PRIVILEGES ON TABLE workspace_service_secret FROM tybot_archiver;
         REVOKE ALL PRIVILEGES ON TABLE workspace_service FROM tybot_archiver;
         -- 자기 서비스 행은 읽어야 한다 — 어느 워크스페이스에 붙는지, 신원이
         -- 무엇이어야 하는지를 확인한다. 그 표에 토큰은 없다.
         EXECUTE 'GRANT SELECT ON TABLE workspace_service TO tybot_archiver';
+        EXECUTE 'GRANT EXECUTE ON FUNCTION archiver_runtime_config(text) TO tybot_archiver';
     END IF;
 END
 $$;

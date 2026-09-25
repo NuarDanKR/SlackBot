@@ -56,6 +56,21 @@ GATED_FLAGS: frozenset[str] = frozenset({
     "archiver_writes_live", "separate_attachments", "preserve_edit_delete",
 })
 
+KNOWN_FLAGS: frozenset[str] = frozenset({
+    "archiver_writes_live",
+    "attachment_reader_ready",
+    "preserve_edit_delete",
+    "require_attachment_ack",
+    "revision_reader_ready",
+    "separate_attachments",
+})
+
+GLOBAL_ONLY_FLAGS: frozenset[str] = frozenset({
+    "archiver_writes_live",
+    "attachment_reader_ready",
+    "revision_reader_ready",
+})
+
 
 class AdminRefused(WorkspaceStoreError):
     """콘솔 조작이 거절됐다. **사유를 사람 말로 들고 있다.**"""
@@ -152,37 +167,43 @@ def set_channel_mode(
             raise AdminRefused(str(exc)) from exc
 
     store = repo or default_repo()
-    row = store.channel_state(workspace, channel_id)
-    current = (
-        ChannelState(
-            workspace, channel_id,
-            ChannelMode(row["mode"]), WriterOwner(row["writer_owner"]),
-            str(row.get("cutover_ts") or ""),
+    with store.transaction() as tx:
+        row = tx.channel_state(workspace, channel_id)
+        current = (
+            ChannelState(
+                workspace, channel_id,
+                ChannelMode(row["mode"]), WriterOwner(row["writer_owner"]),
+                str(row.get("cutover_ts") or ""),
+            )
+            if row
+            else ChannelState(workspace, channel_id, ChannelMode.OFF, WriterOwner.MASTER)
         )
-        if row
-        else ChannelState(workspace, channel_id, ChannelMode.OFF, WriterOwner.MASTER)
-    )
-    try:
-        after = plan_mode_change(current, mode, cutover_ts=cutover_ts)
-    except TransitionRefused as exc:
-        raise AdminRefused(str(exc)) from exc
+        try:
+            after = plan_mode_change(current, mode, cutover_ts=cutover_ts)
+        except TransitionRefused as exc:
+            raise AdminRefused(str(exc)) from exc
 
-    store.save_channel_state({
-        "workspace": workspace,
-        "channel_id": channel_id,
-        "mode": str(after.mode),
-        "writer_owner": str(after.writer_owner),
-        "cutover_ts": after.cutover_ts,
-        "updated_by": actor.name,
-    })
-    # 모드와 주인을 **한 기록에** 남긴다. 따로 남기면 나중에 둘이 같이 움직였는지
-    # 확인할 수 없다.
-    _audit(
-        store, actor, SUBJECT_CHANNEL, workspace, channel_id,
-        field="mode+writer_owner",
-        old=f"{current.mode}/{current.writer_owner}@{current.cutover_ts or '-'}",
-        new=f"{after.mode}/{after.writer_owner}@{after.cutover_ts or '-'}",
-    )
+        if mode == ChannelMode.ACTIVE:
+            blockers = _production_blockers(tx, workspace, [channel_id])
+            if blockers:
+                raise AdminRefused(
+                    "운영 전환 조건이 남아 있습니다: " + " / ".join(blockers)
+                )
+
+        tx.save_channel_state({
+            "workspace": workspace,
+            "channel_id": channel_id,
+            "mode": str(after.mode),
+            "writer_owner": str(after.writer_owner),
+            "cutover_ts": after.cutover_ts,
+            "updated_by": actor.name,
+        })
+        _audit(
+            tx, actor, SUBJECT_CHANNEL, workspace, channel_id,
+            field="mode+writer_owner",
+            old=f"{current.mode}/{current.writer_owner}@{current.cutover_ts or '-'}",
+            new=f"{after.mode}/{after.writer_owner}@{after.cutover_ts or '-'}",
+        )
     return after
 
 
@@ -193,6 +214,7 @@ def set_feature_flag(
     *,
     scope: str = "global",
     scope_key: str = "",
+    workspace_context: str = "",
     repo: ArchivingRepo | None = None,
 ) -> None:
     """기능 스위치. 전역·워크스페이스·채널 범위를 구분해 켠다.
@@ -202,6 +224,10 @@ def set_feature_flag(
     """
     if scope not in ("global", "workspace", "channel"):
         raise AdminRefused(f"알 수 없는 범위입니다: {scope}")
+    if name not in KNOWN_FLAGS:
+        raise AdminRefused(f"알 수 없는 기능 스위치입니다: {name}")
+    if name in GLOBAL_ONLY_FLAGS and scope != "global":
+        raise AdminRefused(f"{name} 스위치는 전역 범위에서만 바꿀 수 있습니다.")
     if (scope == "global") != (not scope_key):
         raise AdminRefused(
             "전역 스위치에는 대상이 없어야 하고, 전역이 아니면 대상이 있어야 합니다."
@@ -212,19 +238,37 @@ def set_feature_flag(
         except GateClosed as exc:
             raise AdminRefused(str(exc)) from exc
 
+    if workspace_context and scope == "workspace" and scope_key != workspace_context:
+        raise AdminRefused("요청 경로와 다른 워크스페이스 설정은 바꿀 수 없습니다.")
+
     store = repo or default_repo()
-    row = store.flag(name, scope, scope_key)
-    before = "" if row is None else str(bool(row["enabled"])).lower()
-    store.save_flag({
-        "name": name, "scope": scope, "scope_key": scope_key,
-        "enabled": enabled, "updated_by": actor.name,
-    })
-    _audit(
-        store, actor, SUBJECT_FLAG,
-        scope_key if scope == "workspace" else "",
-        scope_key if scope == "channel" else "",
-        field=f"{name}@{scope}", old=before, new=str(enabled).lower(),
-    )
+    with store.transaction() as tx:
+        if workspace_context and scope == "channel":
+            known_channels = {
+                str(row["channel_id"]) for row in tx.channels(workspace_context)
+            }
+            if scope_key not in known_channels:
+                raise AdminRefused("요청 워크스페이스에 없는 채널입니다.")
+
+        if enabled and name == "separate_attachments":
+            reader = tx.flag("attachment_reader_ready", "global", "")
+            if not reader or not bool(reader["enabled"]):
+                raise AdminRefused(
+                    "첨부 reader 준비가 확인되기 전에는 첨부 분리를 켤 수 없습니다."
+                )
+
+        row = tx.flag(name, scope, scope_key)
+        before = "" if row is None else str(bool(row["enabled"])).lower()
+        tx.save_flag({
+            "name": name, "scope": scope, "scope_key": scope_key,
+            "enabled": enabled, "updated_by": actor.name,
+        })
+        _audit(
+            tx, actor, SUBJECT_FLAG,
+            scope_key if scope == "workspace" else "",
+            scope_key if scope == "channel" else "",
+            field=f"{name}@{scope}", old=before, new=str(enabled).lower(),
+        )
 
 
 def set_retention(
@@ -238,17 +282,29 @@ def set_retention(
     if days is not None and days <= 0:
         raise AdminRefused("보존 기간은 1일 이상이어야 합니다.")
     store = repo or default_repo()
-    row = store.retention_row(name)
-    if row is None:
-        raise AdminRefused(f"없는 보존 정책입니다: {name}")
-    before = row.get("retention_days")
-    if store.save_retention(name, days, actor.name) == 0:
-        raise AdminRefused(f"없는 보존 정책입니다: {name}")
-    _audit(
-        store, actor, SUBJECT_RETENTION, "", "",
-        field=name,
-        old="" if before is None else str(before),
-        new="" if days is None else str(days),
+    with store.transaction() as tx:
+        row = tx.retention_row(name)
+        if row is None:
+            raise AdminRefused(f"없는 보존 정책입니다: {name}")
+        before = row.get("retention_days")
+        if tx.save_retention(name, days, actor.name) == 0:
+            raise AdminRefused(f"없는 보존 정책입니다: {name}")
+        _audit(
+            tx, actor, SUBJECT_RETENTION, "", "",
+            field=name,
+            old="" if before is None else str(before),
+            new="" if days is None else str(days),
+        )
+
+
+def _production_blockers(
+    repo: ArchivingRepo, workspace: str, channel_ids: list[str]
+) -> list[str]:
+    retention = repo.retention()
+    flags = repo.flags(workspace, channel_ids)
+    return production_blockers(
+        {str(row["name"]): row["retention_days"] for row in retention},
+        flags=_flag_map(flags),
     )
 
 

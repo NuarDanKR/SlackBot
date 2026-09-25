@@ -138,7 +138,8 @@
 |---|---|
 | 채널별 mode | `off` / `shadow` / `active` / `paused` 를 **DB** 에서 |
 | 콘솔에서 관리 | 첨부 분리, edit/delete, ACK, pilot, writer owner |
-| env/secret store | Slack token, DB bootstrap DSN, 암호키 |
+| 콘솔 암호화 저장 | 서비스별 Slack bot/app token. 화면과 감사에는 mask만 표시 |
+| env/credential | Archiver 전용 DB bootstrap DSN, 콘솔과 같은 Fernet 암호키 |
 | Archiver DB role | **설정 조회 + 상태 기록만.** 전용 최소권한 |
 | 설정 변경 | append-only audit |
 
@@ -157,7 +158,7 @@ ENV 로 두면 채널을 늘릴 때마다 SSH 가 필요하고, 그건 **쓸 수
 | 설정 표의 `UPDATE` | 봇이 자기 모드를 바꿀 수 있으면 **shadow 가 안전장치가 아니게 된다** |
 | 감사 표의 `UPDATE` | 고쳐지는 감사는 감사가 아니다 |
 | 설정 변경 감사의 `INSERT` | 설정을 바꾸지 못하는 봇이 변경 기록을 만들 이유도 없다 |
-| 시크릿 표 일체 | 절대 원칙 6 |
+| 시크릿 표 직접 조회 | 절대 원칙 6. `archiver_runtime_config()`가 확인된 Archiver 토큰 쌍만 반환 |
 
 ---
 

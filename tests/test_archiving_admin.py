@@ -55,6 +55,18 @@ def gate_closed(monkeypatch, tmp_path):
     return tmp_path
 
 
+def _ready_for_active(repo: FakeArchivingRepo) -> None:
+    repo.given_retention("bot_conversation_audit", 90)
+    repo.given_retention("bot_dm_attachment", 30)
+    for name in (
+        "archiver_writes_live",
+        "preserve_edit_delete",
+        "require_attachment_ack",
+        "revision_reader_ready",
+    ):
+        repo.given_flag(name, True)
+
+
 # --- 사람과 사유 없이는 못 바꾼다 --------------------------------------------
 
 def test_an_actor_without_a_name_is_refused():
@@ -107,6 +119,7 @@ def test_shadow_is_not_blocked_by_the_gate(repo, gate_closed):
 
 def test_active_works_once_the_schema_is_verified(repo, gate_open):
     repo.given_channel("tyit", "C1", "shadow")
+    _ready_for_active(repo)
 
     after = admin.set_channel_mode(
         "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "인수"),
@@ -184,6 +197,7 @@ def test_an_illegal_transition_never_reaches_the_repository(repo, gate_open):
 
 def test_mode_and_owner_move_together(repo, gate_open):
     repo.given_channel("tyit", "C1", "shadow")
+    _ready_for_active(repo)
 
     admin.set_channel_mode(
         "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "인수"),
@@ -250,6 +264,39 @@ def test_the_channel_row_is_locked_before_it_is_read(repo, gate_closed):
     assert repo.locked == [("tyit", "C1")]
 
 
+def test_state_and_audit_use_one_transaction(repo, gate_closed):
+    admin.set_channel_mode(
+        "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
+    )
+
+    assert repo.transaction_count == 1
+
+
+def test_audit_failure_rolls_back_the_state_change(repo, gate_closed):
+    repo.given_channel("tyit", "C1", "off")
+    repo.fail_audit = True
+
+    with pytest.raises(RuntimeError, match="audit failed"):
+        admin.set_channel_mode(
+            "tyit", "C1", ChannelMode.SHADOW,
+            admin.Actor("dan", "파일럿"), repo=repo,
+        )
+
+    assert repo.channel_rows[("tyit", "C1")]["mode"] == "off"
+
+
+def test_active_is_blocked_while_production_policy_is_incomplete(repo, gate_open):
+    repo.given_channel("tyit", "C1", "shadow")
+
+    with pytest.raises(admin.AdminRefused, match="운영 전환 조건"):
+        admin.set_channel_mode(
+            "tyit", "C1", ChannelMode.ACTIVE,
+            admin.Actor("dan", "인수"), cutover_ts="1700000000.0001", repo=repo,
+        )
+
+    assert repo.channel_rows[("tyit", "C1")]["mode"] == "shadow"
+
+
 # --- 기능 스위치 -------------------------------------------------------------
 
 @pytest.mark.parametrize(
@@ -286,6 +333,37 @@ def test_turning_a_flag_on_is_audited_with_the_old_value(repo, gate_closed):
     entry = repo.audit_rows[-1]
     assert (entry["old_value"], entry["new_value"]) == ("false", "true")
     assert entry["workspace"] == "tyit"
+
+
+def test_attachment_separation_requires_the_global_reader(repo, gate_open):
+    with pytest.raises(admin.AdminRefused, match="reader 준비"):
+        admin.set_feature_flag(
+            "separate_attachments", True, admin.Actor("dan", "분리"), repo=repo
+        )
+
+    repo.given_flag("attachment_reader_ready", True)
+    admin.set_feature_flag(
+        "separate_attachments", True, admin.Actor("dan", "분리"), repo=repo
+    )
+    assert repo.flag_rows[("separate_attachments", "global", "")]["enabled"] is True
+
+
+def test_workspace_scope_is_bound_to_the_request_workspace(repo, gate_closed):
+    with pytest.raises(admin.AdminRefused, match="다른 워크스페이스"):
+        admin.set_feature_flag(
+            "require_attachment_ack", True, admin.Actor("dan", "설정"),
+            scope="workspace", scope_key="mgmt", workspace_context="tyit", repo=repo,
+        )
+
+
+def test_channel_scope_must_belong_to_the_request_workspace(repo, gate_closed):
+    repo.given_channel("mgmt", "C-MGMT", "shadow")
+
+    with pytest.raises(admin.AdminRefused, match="없는 채널"):
+        admin.set_feature_flag(
+            "require_attachment_ack", True, admin.Actor("dan", "설정"),
+            scope="channel", scope_key="C-MGMT", workspace_context="tyit", repo=repo,
+        )
 
 
 # --- 보존 정책 ---------------------------------------------------------------
@@ -336,6 +414,13 @@ def test_setting_retention_unblocks_production(repo, gate_closed):
     """게이트가 실제로 열리는지 본다 — 안 열리면 목록이 장식이다."""
     repo.given_retention("bot_conversation_audit", 90)
     repo.given_retention("bot_dm_attachment", 30)
+    for name in (
+        "archiver_writes_live",
+        "preserve_edit_delete",
+        "require_attachment_ack",
+        "revision_reader_ready",
+    ):
+        repo.given_flag(name, True)
 
     assert admin.workspace_detail("tyit", repo=repo)["blockers"] == []
 

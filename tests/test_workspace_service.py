@@ -218,11 +218,15 @@ def test_audit_records_only_the_mask():
 
 
 def test_the_archiver_role_cannot_read_service_secrets():
-    """봇은 토큰을 env 로 받는다. DB 에서 읽을 수 있으면 DB 를 읽는 것이 전부 읽는다."""
+    """런타임 함수만 열고 시크릿 표 전체는 읽지 못한다."""
     sql = _sql()
 
     assert "REVOKE ALL PRIVILEGES ON TABLE workspace_service_secret FROM tybot_archiver" in sql
     assert "GRANT SELECT ON TABLE workspace_service TO tybot_archiver" in sql
+    assert "GRANT EXECUTE ON FUNCTION archiver_runtime_config(text) TO tybot_archiver" in sql
+    assert "a.state = 'enabled'" in sql
+    assert "m.identity_ok IS TRUE" in sql
+    assert "a.service = 'archiver'" in sql
 
 
 # --- 기존 토큰 이관 -----------------------------------------------------------

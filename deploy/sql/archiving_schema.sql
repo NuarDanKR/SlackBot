@@ -143,6 +143,12 @@ ALTER TABLE archive_feature_flag
     );
 
 INSERT INTO archive_feature_flag (name, scope, scope_key, description) VALUES
+    ('attachment_reader_ready',
+     'global', '',
+     '분리된 첨부 정본을 검색기가 읽고 중복 없이 근거로 사용할 수 있다'),
+    ('revision_reader_ready',
+     'global', '',
+     '검색기가 메시지 revision의 최신 상태를 적용하고 삭제본을 근거에서 제외한다'),
     ('separate_attachments',
      'global', '',
      '첨부 본문을 raw 에서 떼고 별도 정본에만 둔다. 읽는 쪽이 붙은 뒤에 켠다'),
@@ -247,9 +253,8 @@ CREATE INDEX IF NOT EXISTS archive_ingest_state_unfinished
 -- 원문은 안 고친다(절대 원칙 1). 그런데 사람이 고친 문장도 원문이다. 둘을 함께
 -- 지키는 길은 하나뿐이다 — **고친 것을 새 revision 으로 쌓고, 검색은 최신만 본다.**
 --
--- 지금 코드는 `message_changed`·`message_deleted` 를 통째로 버린다
--- (`archiving_bot.ingest_event`). 그 결과 틀린 숫자를 고쳐도 봇은 영원히 옛
--- 숫자를 근거로 답한다. 원칙 7(두 시점 함께 표기)이 작동할 재료가 아예 없다.
+-- Archiving Bot은 `message_changed`·`message_deleted`를 아래 revision으로
+-- 보존한다. 검색 reader가 이 표의 최신 상태를 적용하기 전에는 운영 전환하지 않는다.
 --
 -- **본문은 여기 없다.** 본문은 MD 파일에 있고 이 표는 좌표와 hash 만 든다.
 CREATE TABLE IF NOT EXISTS archive_message_revision (

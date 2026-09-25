@@ -154,14 +154,25 @@ def gate_status() -> GateStatus:
     )
 
 
-def record_pass(*, by: str, dsn_label: str) -> Path:
+def _write_marker(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+    )
+    os.replace(temporary, path)
+    return path
+
+
+def record_pass(
+    *, by: str, dsn_label: str, destination: Path | None = None
+) -> Path:
     """검증 통과를 남긴다. **통과했을 때만 부른다.**
 
     `dsn_label` 은 DB **이름**이다. DSN 전체를 적으면 비밀번호가 상태 파일에
     남고, 상태 파일은 로그처럼 복사된다.
     """
-    path = marker_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = destination or marker_path()
     payload = {
         "fingerprint": schema_fingerprint(),
         "at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -169,10 +180,33 @@ def record_pass(*, by: str, dsn_label: str) -> Path:
         "dsn_label": dsn_label,
         "files": list(sorted(GATED_SQL)),
     }
-    path.write_bytes(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
-    )
-    return path
+    return _write_marker(path, payload)
+
+
+def install_verified_artifact(source: Path, *, installed_by: str) -> Path:
+    """Install a portable verification result only for this deployed schema."""
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise GateClosed(f"검증 artifact를 읽지 못했습니다: {type(exc).__name__}") from exc
+
+    recorded = str(payload.get("fingerprint") or "")
+    current = schema_fingerprint()
+    if recorded != current:
+        raise GateClosed(
+            "검증 artifact와 배포된 스키마가 다릅니다: "
+            f"artifact {recorded[:12] or '?'} · 서버 {current[:12]}"
+        )
+    if not str(payload.get("at") or "") or not str(payload.get("by") or ""):
+        raise GateClosed("검증 artifact에 검증 시각 또는 실행자가 없습니다.")
+    dsn_label = str(payload.get("dsn_label") or "")
+    if not dsn_label or any(token in dsn_label for token in ("://", "@", "password")):
+        raise GateClosed("검증 artifact의 DB 표시는 이름이어야 하며 DSN이면 안 됩니다.")
+
+    installed = dict(payload)
+    installed["installed_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    installed["installed_by"] = installed_by.strip() or "unknown"
+    return _write_marker(marker_path(), installed)
 
 
 class GateClosed(RuntimeError):

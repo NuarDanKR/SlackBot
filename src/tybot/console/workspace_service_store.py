@@ -245,6 +245,10 @@ def record_identity(
                     not problem, actor, workspace, str(name),
                 ),
             )
+            if int(cur.rowcount or 0) != 1:
+                raise ServiceStoreError(
+                    f"등록되지 않은 서비스라 신원을 기록할 수 없습니다: {workspace}/{name}"
+                )
             _audit(
                 cur, actor, workspace,
                 field=f"service.{name}.identity",

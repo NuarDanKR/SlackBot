@@ -26,6 +26,15 @@ HELPER = ROOT / "deploy" / "tybot-specialist-run"
 TARGET = ROOT / "deploy" / "tybot-specialists.target"
 
 BASH = shutil.which("bash")
+if BASH is not None:
+    probe = subprocess.run(
+        [BASH, "-lc", "printf tybot-bash-ok"],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    if probe.returncode != 0 or probe.stdout != b"tybot-bash-ok":
+        BASH = None
 
 
 def _unit() -> str:

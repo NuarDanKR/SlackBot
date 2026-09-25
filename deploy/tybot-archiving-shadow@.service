@@ -1,0 +1,31 @@
+[Unit]
+Description=TYBot Archiving Bot shadow collector for %i
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/tybot/archiver-%i.env
+
+[Service]
+Type=simple
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=TYBOT_ENV_FILE=/etc/tybot/archiver-%i.env
+Environment=ARCHIVER_CONFIG_SOURCE=db
+Environment=ARCHIVER_WORKSPACE=%i
+Environment=LOCK_DIR=/var/lib/tybot/archiver-shadow/%i/.locks
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.archiving_bot
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-archiving-shadow
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tybot/archiver-shadow
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Deliberately no [Install]: start only after app/token and shadow path review.

@@ -391,6 +391,12 @@ def config_digest(config: dict) -> str:
 
 #: 운영값이 정해져 있어야 하는 정책들. 스키마 §4 의 행 이름과 같다.
 REQUIRED_RETENTION: tuple[str, ...] = ("bot_conversation_audit", "bot_dm_attachment")
+REQUIRED_PRODUCTION_FLAGS: tuple[str, ...] = (
+    "archiver_writes_live",
+    "preserve_edit_delete",
+    "require_attachment_ack",
+    "revision_reader_ready",
+)
 
 
 def production_blockers(
@@ -413,6 +419,11 @@ def production_blockers(
         if retention.get(name) is not None and retention[name] <= 0
     )
     flags = flags or {}
+    blockers.extend(
+        f"운영 기능 스위치가 꺼져 있습니다: {name}"
+        for name in REQUIRED_PRODUCTION_FLAGS
+        if not flags.get(name, False)
+    )
     if flags.get("separate_attachments") and not flags.get("attachment_reader_ready", False):
         # 읽는 쪽이 없는데 분리를 켜면 그 본문이 조용히 답변에서 빠진다.
         blockers.append(

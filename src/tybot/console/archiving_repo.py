@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Protocol
 
 from .workspace_store import _connect
@@ -38,13 +40,32 @@ class ArchivingRepo(Protocol):
     def save_retention(self, name: str, days: int | None, approved_by: str) -> int: ...
     def audit(self, workspace: str, limit: int) -> list[dict]: ...
     def add_audit(self, row: dict) -> None: ...
+    def transaction(self) -> Iterator[ArchivingRepo]: ...
 
 
 class PostgresArchivingRepo:
     """진짜 저장소. **잠금은 여기서 잡는다** — 좌표를 아는 곳이 여기다."""
 
-    def __init__(self, connect=_connect) -> None:
+    def __init__(self, connect=_connect, *, transaction_cursor=None) -> None:
         self._connect = connect
+        self._transaction_cursor = transaction_cursor
+
+    @contextmanager
+    def transaction(self) -> Iterator[PostgresArchivingRepo]:
+        """Use one transaction for lock, decision, write and audit."""
+        if self._transaction_cursor is not None:
+            yield self
+            return
+        with self._connect() as conn, conn.cursor() as cur:
+            yield PostgresArchivingRepo(self._connect, transaction_cursor=cur)
+
+    @contextmanager
+    def _cursor(self):
+        if self._transaction_cursor is not None:
+            yield self._transaction_cursor
+            return
+        with self._connect() as conn, conn.cursor() as cur:
+            yield cur
 
     # -- 서비스 --------------------------------------------------------
     def services(self, workspace: str) -> list[dict]:
@@ -59,7 +80,7 @@ class PostgresArchivingRepo:
 
     # -- 채널 모드 ------------------------------------------------------
     def channel_state(self, workspace: str, channel_id: str) -> dict | None:
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s))",
                 (f"archive-mode:{workspace}/{channel_id}",),
@@ -82,7 +103,7 @@ class PostgresArchivingRepo:
         나눠 쓰면 둘이 갈라지는 순간이 생기고, 그 순간 두 writer 가 같은 파일에
         쓴다고 판단한다.
         """
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO archive_channel_mode
@@ -105,7 +126,7 @@ class PostgresArchivingRepo:
             )
 
     def channels(self, workspace: str) -> list[dict]:
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 SELECT channel_id, mode, writer_owner, cutover_ts, cutover_at,
@@ -124,7 +145,7 @@ class PostgresArchivingRepo:
 
         전역만 보여 주면 「전역은 꺼졌는데 왜 켜져 있나」 를 화면에서 못 답한다.
         """
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 SELECT name, scope, scope_key, enabled, description,
@@ -134,13 +155,14 @@ class PostgresArchivingRepo:
                     OR (scope = 'workspace' AND scope_key = %s)
                     OR (scope = 'channel' AND scope_key = ANY(%s))
                  ORDER BY name, scope, scope_key
+                 FOR SHARE
                 """,
                 (workspace, list(channel_ids)),
             )
             return [dict(row) for row in cur.fetchall()]
 
     def flag(self, name: str, scope: str, scope_key: str) -> dict | None:
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 SELECT enabled FROM archive_feature_flag
@@ -153,7 +175,7 @@ class PostgresArchivingRepo:
             return dict(row) if row else None
 
     def save_flag(self, row: dict) -> None:
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO archive_feature_flag
@@ -169,11 +191,11 @@ class PostgresArchivingRepo:
 
     # -- 보존 정책 ------------------------------------------------------
     def retention(self) -> list[dict]:
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 SELECT name, retention_days, approved_by, approved_at, description
-                  FROM archive_retention_policy ORDER BY name
+                  FROM archive_retention_policy ORDER BY name FOR SHARE
                 """
             )
             return [dict(row) for row in cur.fetchall()]
@@ -184,7 +206,7 @@ class PostgresArchivingRepo:
         조용히 만들지 않는다. 없는 이름으로 행이 생기면 게이트가 보는 행과 다른
         행이 만들어지고, 그때 게이트는 계속 「안 정했다」 라고 말한다.
         """
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 UPDATE archive_retention_policy
@@ -200,9 +222,12 @@ class PostgresArchivingRepo:
             return int(cur.rowcount or 0)
 
     def retention_row(self, name: str) -> dict | None:
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
-                "SELECT retention_days FROM archive_retention_policy WHERE name = %s",
+                """
+                SELECT retention_days FROM archive_retention_policy
+                 WHERE name = %s FOR UPDATE
+                """,
                 (name,),
             )
             row = cur.fetchone()
@@ -210,7 +235,7 @@ class PostgresArchivingRepo:
 
     # -- 감사 ------------------------------------------------------------
     def audit(self, workspace: str, limit: int = 50) -> list[dict]:
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 SELECT at, actor, subject, channel_id, field,
@@ -224,7 +249,7 @@ class PostgresArchivingRepo:
             return [dict(row) for row in cur.fetchall()]
 
     def add_audit(self, row: dict) -> None:
-        with self._connect() as conn, conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO archive_config_audit
