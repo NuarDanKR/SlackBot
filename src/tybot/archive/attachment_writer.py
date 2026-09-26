@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .attachment_doc import FAILED, PENDING, USABLE, AttachmentDoc, from_staged, render
 
@@ -116,7 +117,37 @@ def _placeholder_upgrade(existing: str, incoming: str) -> bool:
     }
     old_stable = {key: str(value) for key, value in old.items() if key not in ignored}
     new_stable = {key: str(value) for key, value in new.items() if key not in ignored}
+    if old_stable.get("permalink") != new_stable.get("permalink"):
+        file_id = old_stable.get("file_id", "")
+        if file_id != new_stable.get("file_id", "") or not _same_slack_file_link(
+            old_stable.get("permalink", ""),
+            new_stable.get("permalink", ""),
+            file_id,
+        ):
+            return False
+        old_stable.pop("permalink", None)
+        new_stable.pop("permalink", None)
     return old_stable == new_stable
+
+
+def _same_slack_file_link(old: str, new: str, file_id: str) -> bool:
+    """Return true only when both URLs identify the same Slack file."""
+
+    if not file_id:
+        return False
+
+    def identifies(url: str) -> bool:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        parts = [unquote(part) for part in parsed.path.split("/") if part]
+        return (
+            parsed.scheme.lower() == "https"
+            and (host == "slack.com" or host.endswith(".slack.com"))
+            and "files" in parts
+            and file_id in parts
+        )
+
+    return identifies(old) and identifies(new)
 
 
 def write_docs(

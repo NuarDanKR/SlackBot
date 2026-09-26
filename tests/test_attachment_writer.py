@@ -219,6 +219,97 @@ def test_a_failed_placeholder_can_become_success_at_the_same_revision(tmp_path):
     assert "복구된 본문" in body
 
 
+def test_a_failed_placeholder_accepts_a_new_link_for_the_same_slack_file(tmp_path):
+    """Slack domain changes must not leave a recovered file permanently failed."""
+    identity = {
+        "converter_name": "hwpx:primary",
+        "converter_version": "1",
+        "converter_config": {"mode": "precise"},
+    }
+    (failed,) = _write(
+        tmp_path,
+        [
+            _staged(
+                tmp_path,
+                body=None,
+                conversion_state="failed",
+                error_code="converter_timeout",
+                permalink="https://old-team.slack.com/files/U1/F1/report",
+                **identity,
+            )
+        ],
+    )
+
+    (recovered,) = _write(
+        tmp_path,
+        [
+            _staged(
+                tmp_path,
+                body="recovered body",
+                conversion_state="succeeded",
+                error_code="",
+                permalink="https://new-team.slack.com/files/U1/F1/report",
+                **identity,
+            )
+        ],
+    )
+
+    assert recovered.revision == failed.revision
+    body = (tmp_path / "archive" / recovered.relative_path()).read_text(
+        encoding="utf-8"
+    )
+    assert "conversion_state: succeeded" in body
+    assert "https://new-team.slack.com/files/U1/F1/report" in body
+
+
+@pytest.mark.parametrize(
+    "permalink",
+    [
+        "https://new-team.slack.com/files/U1/F2/report",
+        "https://new-team.slack.com/archives/C1/p1234567890",
+        "https://example.com/files/U1/F1/report",
+    ],
+)
+def test_a_failed_placeholder_rejects_a_link_to_another_source(tmp_path, permalink):
+    identity = {
+        "converter_name": "hwpx:primary",
+        "converter_version": "1",
+        "converter_config": {"mode": "precise"},
+    }
+    (failed,) = _write(
+        tmp_path,
+        [
+            _staged(
+                tmp_path,
+                body=None,
+                conversion_state="failed",
+                error_code="converter_timeout",
+                permalink="https://old-team.slack.com/files/U1/F1/report",
+                **identity,
+            )
+        ],
+    )
+    path = tmp_path / "archive" / failed.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = _write(
+        tmp_path,
+        [
+            _staged(
+                tmp_path,
+                body="must not replace the placeholder",
+                conversion_state="succeeded",
+                error_code="",
+                permalink=permalink,
+                **identity,
+            )
+        ],
+    )
+
+    assert written == []
+    assert path.read_text(encoding="utf-8") == before
+
+
 def test_a_policy_blocked_document_cannot_be_upgraded_at_the_same_revision(tmp_path):
     """A technical retry must never overwrite a policy refusal."""
     identity = {
