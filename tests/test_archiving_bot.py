@@ -257,17 +257,64 @@ def _event(**over) -> dict:
     } | over
 
 
+def _targets(calls: list[dict]) -> list[str]:
+    return [str(call["target"]) for call in calls]
+
+
 def test_a_plain_message_goes_received_then_raw_written_then_ready(tmp_path, acked):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
     collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
 
     assert collector.ingest_event(Client(), _event()) == "written"
 
-    assert [str(call["target"]) for call in acked] == [
-        "received", "raw_written", "ready",
-    ]
-    assert {call["message_ts"] for call in acked} == {"1790070000.000001"}
-    assert {call["channel_id"] for call in acked} == {"C12345678"}
+    assert _targets(acked) == ["received", "raw_written", "ready"]
+
+
+def test_ready_is_recorded_last_after_every_check(tmp_path, acked):
+    """앞에서 찍으면 그 뒤 단계가 실패해도 이미 「됐다」 고 적힌 채로 남는다.
+
+    그리고 `ready` 는 terminal 이라 되돌려지지 않는다.
+    """
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _event())
+
+    assert _targets(acked)[-1] == "ready"
+
+
+def test_a_screened_message_never_reaches_ready(tmp_path, acked, monkeypatch):
+    """PII 로 거부된 것은 원문에 없다. 「됐다」 고 하면 찾으러 간 사람이 못 찾는다."""
+    import dataclasses
+
+    real = archiving_bot.writer.ingest
+
+    def refuse(*args, **kwargs):
+        got = real(*args, **kwargs)
+        return dataclasses.replace(got, written=0, refused=[("U1", "rrn")])
+
+    monkeypatch.setattr(archiving_bot.writer, "ingest", refuse)
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    assert collector.ingest_event(Client(), _event()) == "refused"
+
+    assert "ready" not in _targets(acked)
+    assert _targets(acked)[-1] == "refused"
+
+
+def test_a_failed_revision_record_never_reaches_ready(tmp_path, acked, monkeypatch):
+    """revision 기록이 빠지면 나중에 수정·삭제를 못 잇는다. 그건 완료가 아니다."""
+    monkeypatch.setattr(
+        archiving_bot.ShadowCollector, "_record_revision", lambda *a, **k: False
+    )
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    assert collector.ingest_event(Client(), _event()) == "metadata-unconfirmed"
+
+    assert "ready" not in _targets(acked)
+    assert _targets(acked)[-1] == "partial"
 
 
 def test_the_shadow_collector_never_claims_it_wrote_live(tmp_path, acked):
@@ -278,6 +325,24 @@ def test_the_shadow_collector_never_claims_it_wrote_live(tmp_path, acked):
     collector.ingest_event(Client(), _event())
 
     assert {call["written_to"] for call in acked} == {"shadow"}
+
+
+def test_two_channels_do_not_mix_their_ack_coordinates(tmp_path, acked):
+    """**두 채널을 번갈아 처리해도 좌표가 섞이지 않는다.**
+
+    전에는 채널을 인스턴스에 들고 있어서, 뒤에 온 이벤트가 앞의 좌표를 덮고
+    엉뚱한 채널에 기록했다. 한 프로세스가 여러 채널을 보는 것이 정상 동작이다.
+    """
+    env = _env(tmp_path)
+    env["ARCHIVER_CHANNEL_IDS_TYIT"] = "C12345678,C87654321"
+    cfg = archiving_bot.load_archiver_workspaces(env)[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _event(channel="C12345678", ts="1.0001"))
+    collector.ingest_event(Client(), _event(channel="C87654321", ts="2.0002"))
+
+    pairs = {(call["channel_id"], call["message_ts"]) for call in acked}
+    assert pairs == {("C12345678", "1.0001"), ("C87654321", "2.0002")}
 
 
 def test_events_outside_our_scope_leave_no_state(tmp_path, acked):
@@ -293,10 +358,7 @@ def test_events_outside_our_scope_leave_no_state(tmp_path, acked):
 
 
 def test_a_redelivered_event_records_the_same_states_again(tmp_path, acked):
-    """수집기는 멱등을 판단하지 않는다 — **저장소가** 앞으로만 민다.
-
-    여기서 판단하면 규칙이 두 곳에 생기고, 한 곳만 고치는 날이 온다.
-    """
+    """수집기는 멱등을 판단하지 않는다 — **저장소가** 앞으로만 민다."""
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
     collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
 
@@ -304,11 +366,14 @@ def test_a_redelivered_event_records_the_same_states_again(tmp_path, acked):
     acked.clear()
     assert collector.ingest_event(Client(), _event()) == "duplicate"
 
-    assert str(acked[0]["target"]) == "received"
+    # 재전달에서도 **파일 확인 결과로** 사실을 다시 남긴다. 그래야 DB 가 죽어
+    # 있던 동안의 빈 구간이 복구된다.
+    assert _targets(acked) == ["received", "ready"]
 
 
 def test_a_failed_ack_does_not_stop_collection(tmp_path, monkeypatch):
     """놓친 원본은 되돌릴 수 없다. ACK 는 나중에 다시 만들 수 있다."""
+
     def boom(**_):
         raise RuntimeError("DB 다운")
 
@@ -319,3 +384,85 @@ def test_a_failed_ack_does_not_stop_collection(tmp_path, monkeypatch):
     assert collector.ingest_event(Client(), _event()) == "written"
     files = list((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md"))
     assert files and "회의 일정은 10시입니다." in files[0].read_text(encoding="utf-8")
+
+
+# --- 수정·삭제 revision 의 ACK ------------------------------------------------
+
+
+def _changed(**over) -> dict:
+    return {
+        "channel_type": "channel",
+        "channel": "C12345678",
+        "subtype": "message_changed",
+        "ts": "1790070100.000001",
+        "event_ts": "1790070100.000001",
+        "message": {"ts": "1790070000.000001", "user": "U12345678", "text": "11시입니다"},
+        "previous_message": {
+            "ts": "1790070000.000001",
+            "user": "U12345678",
+            "text": "10시입니다",
+        },
+    } | over
+
+
+def _deleted(**over) -> dict:
+    return {
+        "channel_type": "channel",
+        "channel": "C12345678",
+        "subtype": "message_deleted",
+        "ts": "1790070200.000001",
+        "event_ts": "1790070200.000001",
+        "deleted_ts": "1790070000.000001",
+        "previous_message": {
+            "ts": "1790070000.000001",
+            "user": "U12345678",
+            "text": "10시입니다",
+        },
+    } | over
+
+
+def test_a_changed_message_stops_at_raw_written(tmp_path, acked):
+    """revision reader 전에는 `ready` 가 아니다.
+
+    지금 검색은 `[수정 전]` 줄을 그대로 집는다. 「검색 가능」 이라고 말하면
+    **고치기 전 문장을 찾아 주겠다고 약속**하는 셈이다.
+    """
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _changed())
+
+    assert _targets(acked) == ["received", "raw_written"]
+
+
+def test_a_deleted_message_is_never_marked_ready(tmp_path, acked):
+    """지워진 것을 「검색 가능」 이라고 하면 지운 사람의 뜻을 뒤집는다."""
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _deleted())
+
+    assert "ready" not in _targets(acked)
+
+
+def test_revision_acks_use_the_original_message_coordinate(tmp_path, acked):
+    """수정본의 `ts` 가 아니라 **원본 메시지의 `ts`** 로 기록한다.
+
+    아니면 같은 메시지의 상태가 수정할 때마다 새로 생겨서, 「그 메시지가
+    검색되나」 에 답할 수 없다.
+    """
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _changed())
+
+    assert {call["message_ts"] for call in acked} == {"1790070000.000001"}
+
+
+def test_revision_acks_are_shadow_only(tmp_path, acked):
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    collector.ingest_event(Client(), _deleted())
+
+    assert {call["written_to"] for call in acked} == {"shadow"}

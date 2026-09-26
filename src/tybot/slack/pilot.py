@@ -2669,6 +2669,39 @@ class WorkspaceBot:
         finally:
             progress.close()
 
+    def _ingest_notice(self, event: dict) -> str:
+        """이 요청이 **첨부를 달고 왔으면** 그 수집 상태를 한 줄로 말한다.
+
+        ## 왜 답변에 붙이나
+
+        사람은 파일을 올리면서 그 파일에 대해 묻는다. 그때 아무 말도 안 하면,
+        답이 그 파일을 읽고 나온 것처럼 읽힌다. 실제로는 변환이 큐를 지나므로
+        대개 아직이고, 그 답은 **올리기 전 자료로만** 만든 것이다.
+
+        ## 왜 여기서 판정하지 않나
+
+        문구도 판정도 `ingest_ack` 가 한다. 여기서 「ready 면 검색 가능」 같은
+        규칙을 다시 쓰면, 그 규칙이 두 곳에 생기고 한 곳만 고치는 날이 온다.
+        특히 **그림자 수집도 `ready` 가 된다** — 운영 검색은 못 찾는데.
+
+        실패해도 답변을 막지 않는다. 상태를 못 봤다고 질문에 못 답하면 사람은
+        봇이 죽은 줄 안다.
+        """
+        if not event.get("files"):
+            return ""
+        channel_id = str(event.get("channel") or "")
+        message_ts = str(event.get("ts") or "")
+        if not channel_id or not message_ts:
+            return ""
+        try:
+            from ..archive import ingest_ack
+
+            claim = ingest_ack.claim(self.workspace, channel_id, message_ts)
+        except Exception as exc:
+            log.warning("[%s] 수집 상태 조회 실패: %s", self.workspace, exc)
+            return ""
+        return f"_첨부 상태: {claim}_" if claim else ""
+
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
         # 처리 시작부터 하나의 ID를 공유해야 분류 호출과 최종 질문·답변 원본을
         # 시간 추정 없이 정확히 연결할 수 있다.
@@ -2727,6 +2760,12 @@ class WorkspaceBot:
                 reply = f"{reply}\n\n{notice}".rstrip()
             if ans is not None and ctx is not None and (ctx.channel_id or ctx.channel):
                 reply = f"{reply}\n\n{CHANNEL_SCOPE_NOTICE}"
+            # 첨부를 올리면서 물은 경우, **그 첨부가 지금 근거가 되나**를 같이
+            # 말한다. 안 말하면 사람은 방금 올린 파일이 답에 반영됐다고 읽는다 —
+            # 변환은 큐를 지나므로 대개 아직이다.
+            ingest_notice = self._ingest_notice(event)
+            if ingest_notice:
+                reply = f"{reply}\n\n{ingest_notice}"
             # 아카이브 근거로 답한 경우에만 '근거 보기' 를 붙인다. 버튼이 있는데
             # 눌러도 아무것도 안 나오면 없는 것만 못하다.
             fallback_kw = {"text": message(reply)}

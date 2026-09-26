@@ -135,9 +135,6 @@ class ShadowCollector:
         self.cfg = cfg
         self.root = root
         self._names: dict[str, str] = {}
-        #: 지금 처리 중인 채널. `_ack` 가 좌표를 인자로 받으면 호출부마다
-        #: 넘겨야 하고, 한 군데가 빠지면 그 경로만 엉뚱한 채널에 기록한다.
-        self._ack_channel = ""
         self._store = ArchiveStore(root)
 
     def ingest_event(self, client, event: dict) -> str:
@@ -168,8 +165,7 @@ class ShadowCollector:
         # 범위 밖이라 상태를 남기지 않는다 — 남기면 「받았는데 안 됐다」 가
         # 쌓여서 진짜 미완료를 덮는다.
         message_ts = str(event["ts"])
-        self._ack_channel = channel_id
-        self._ack(message_ts, IngestState.RECEIVED)
+        self._ack(channel_id, message_ts, IngestState.RECEIVED)
 
         from .archive.files import attachment_storage
 
@@ -183,7 +179,7 @@ class ShadowCollector:
             ),
         )
         if not messages:
-            self._ack(message_ts, IngestState.FAILED, error_code="no-message")
+            self._ack(channel_id, message_ts, IngestState.FAILED, error_code="no-message")
             return "skipped-empty"
         if staged:
             write_attachment_docs(
@@ -203,17 +199,17 @@ class ShadowCollector:
             messages=messages,
             acl=[channel],
         )
-        # 원문이 파일에 들어갔다. 첨부는 아직일 수 있다.
+        # 원문이 파일에 들어갔다. **아직 ready 가 아니다** — 뒤에 볼 것이 남았다.
         if result.written:
             self._ack(
-                message_ts, IngestState.RAW_WRITTEN,
+                channel_id, message_ts, IngestState.RAW_WRITTEN,
                 attachment_total=len(staged), attachment_ready=0,
                 doc_path=self._relative_doc_path(result.path),
             )
         if staged:
             # 첨부가 있으면 **본문만으로 ready 라고 하지 않는다.**
             self._ack(
-                message_ts, IngestState.ATTACHMENT_PENDING,
+                channel_id, message_ts, IngestState.ATTACHMENT_PENDING,
                 attachment_total=len(staged), attachment_ready=0,
             )
             try:
@@ -222,18 +218,16 @@ class ShadowCollector:
                 )
             except Exception:
                 log.exception("[%s] attachment archive confirmation failed", self.cfg.key)
-                self._ack(message_ts, IngestState.PARTIAL, error_code="attachment-unconfirmed")
+                self._ack(
+                    channel_id, message_ts, IngestState.PARTIAL,
+                    error_code="attachment-unconfirmed",
+                )
                 return "metadata-unconfirmed"
-            # 확인까지 끝난 첨부만 센다. 「썼다」 와 「확인됐다」 는 다른 사실이다.
-            self._ack(
-                message_ts, IngestState.READY,
-                attachment_total=len(staged), attachment_ready=len(staged),
-            )
         if result.refused:
             # 일부만 들어갔으면 partial, 하나도 못 들어갔으면 refused 다.
             # 거부 본문은 남기지 않는다(절대 원칙 5) — 사유 코드만 든다.
             self._ack(
-                message_ts,
+                channel_id, message_ts,
                 IngestState.PARTIAL if result.written else IngestState.REFUSED,
                 error_code="screened",
             )
@@ -249,11 +243,18 @@ class ShadowCollector:
                 doc_path=self._relative_doc_path(result.path),
             )
         ):
-            self._ack(message_ts, IngestState.PARTIAL, error_code="revision-unconfirmed")
+            self._ack(
+                channel_id, message_ts, IngestState.PARTIAL,
+                error_code="revision-unconfirmed",
+            )
             return "metadata-unconfirmed"
-        if not staged:
-            # 첨부가 없으면 원문이 곧 전부다.
-            self._ack(message_ts, IngestState.READY)
+        # **여기가 마지막이다.** 첨부 확인·거부 판정·revision 기록을 전부 지난
+        # 뒤에만 ready 다. 앞에서 찍으면 그 뒤 단계가 실패해도 이미 「됐다」 고
+        # 적힌 상태로 남고, 그 상태는 되돌리지 않는다(terminal).
+        self._ack(
+            channel_id, message_ts, IngestState.READY,
+            attachment_total=len(staged), attachment_ready=len(staged),
+        )
         return "written" if result.written else "duplicate"
 
     def _speaker(self, client, user_id: str) -> str:
@@ -280,6 +281,11 @@ class ShadowCollector:
         user_id = str(source.get("user") or previous.get("user") or "")
         if not message_ts or not user_id:
             return "skipped-identity"
+        # 수정·삭제도 수집이다. 다만 **`ready` 로 올리지 않는다** —
+        # revision reader 가 붙기 전에는 검색이 `[수정 전]`·`[삭제 전]` 줄을
+        # 그대로 집는다. 「검색 가능」 이라고 말하면 지워진 문장을 찾아 주겠다고
+        # 약속하는 셈이다.
+        self._ack(channel_id, message_ts, IngestState.RECEIVED)
         event_ts = str(event.get("event_ts") or event.get("ts") or message_ts)
         when = datetime.fromtimestamp(float(event_ts), tz=UTC)
         speaker = self._speaker(client, user_id)
@@ -330,6 +336,11 @@ class ShadowCollector:
             acl=[channel],
         )
         if result.refused:
+            self._ack(
+                channel_id, message_ts,
+                IngestState.PARTIAL if result.written else IngestState.REFUSED,
+                error_code="screened",
+            )
             return "partial" if result.written else "refused"
         if not self._record_revision(
             channel_id=channel_id,
@@ -341,26 +352,40 @@ class ShadowCollector:
             doc_path=self._relative_doc_path(result.path),
             previous_body=old_body,
         ):
+            self._ack(
+                channel_id, message_ts, IngestState.PARTIAL,
+                error_code="revision-unconfirmed",
+            )
             return "metadata-unconfirmed"
+        # 원문에는 들어갔다. **여기서 멈춘다** — `raw_written` 까지다.
+        # `ready` 는 revision reader 가 붙어 「최신 비삭제만 보인다」 가 참이
+        # 된 뒤에나 말할 수 있다.
+        self._ack(
+            channel_id, message_ts, IngestState.RAW_WRITTEN,
+            doc_path=self._relative_doc_path(result.path),
+        )
         return "revision-written" if result.written else "revision-duplicate"
 
-    def _ack(self, message_ts: str, target, **values) -> None:
+    def _ack(self, channel_id: str, message_ts: str, target, **values) -> None:
         """수집 상태를 남긴다. **실패해도 수집을 막지 않는다.**
 
         놓친 원본은 되돌릴 수 없다 — Slack 백필은 분당 1요청이라 사실상 복구가
-        안 된다. 반대로 ACK 는 나중에 다시 만들 수 있다. 그래서 여기서는 기록만
-        시도하고 결과를 보지 않는다.
+        안 된다. 반대로 ACK 는 나중에 다시 만들 수 있다.
 
-        그림자 모드라 `written_to="shadow"` 다. 인수 전까지 이 기록이 운영
+        좌표를 **인자로 받는다.** 전에는 인스턴스에 들고 있었는데, 두 채널의
+        이벤트가 번갈아 들어오면 뒤에 온 것이 앞의 좌표를 덮어 **엉뚱한 채널에
+        기록**한다. 한 프로세스가 여러 채널을 보는 것이 정상 동작이다.
+
+        그림자 모드라 `written_to=SHADOW` 다. 인수 전까지 이 기록이 운영
         아카이브를 가리킨다고 읽히면 안 된다.
         """
         try:
             ingest_ack.advance(
                 workspace=self.cfg.key,
-                channel_id=self._ack_channel,
+                channel_id=channel_id,
                 message_ts=message_ts,
                 target=target,
-                written_to="shadow",
+                written_to=ingest_ack.SHADOW,
                 **values,
             )
         except Exception:
