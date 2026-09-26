@@ -162,9 +162,20 @@ def _keep_in_group(members, resolver, workspace, channel_id, message_ts) -> set[
     if latest.removed:
         return set()
 
+    if latest.kind == "create" and len(members) == 1:
+        # 사람이 실제 본문을 `[수정 후]` 같은 글자로 시작할 수 있다. DB 최신 상태가
+        # create 라면 수집기가 만든 revision 표시가 아니라 사람 원문이므로, 표시를
+        # 떼지 않은 전체 본문 해시로 확인해 그대로 남긴다.
+        for index, line, _ in marked:
+            text = str(getattr(line, "text", "") or "").strip()
+            if body_digest(text) == latest.body_sha256:
+                return {index}
+        return set()
+
     # 최신 본문과 해시가 맞는 줄 **하나만**. 두 번 고치면 `[수정 후]` 가 둘인데,
-    # 지금 본문은 하나뿐이다.
-    for index, _, (marker, body) in marked:
+    # 지금 본문은 하나뿐이다. 같은 본문으로 되돌린 경우에는 가장 나중에 append 된
+    # 줄이 최신 revision 이므로 뒤에서부터 찾는다.
+    for index, _, (marker, body) in reversed(marked):
         if marker == CURRENT_MARKER and body_digest(body) == latest.body_sha256:
             return {index}
     # 파일과 DB 가 안 맞는다. 무엇이 지금인지 모르므로 보여 주지 않는다.

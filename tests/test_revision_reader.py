@@ -77,6 +77,23 @@ def test_only_the_last_body_survives_two_edits():
     assert _visible(TWICE, _revision("change", "12시입니다")) == ["[수정 후] 12시입니다"]
 
 
+def test_returning_to_an_old_body_uses_the_latest_matching_line():
+    lines = [
+        _line("10시입니다", 1),
+        _line("[수정 전] 10시입니다", 2),
+        _line("[수정 후] 11시입니다", 3),
+        _line("[수정 전] 11시입니다", 4),
+        _line("[수정 후] 10시입니다", 5),
+    ]
+
+    got = reader.visible_lines(
+        lines, workspace=WS, channel_id=CH,
+        lookup=lambda *_: _revision("change", "10시입니다"),
+    )
+
+    assert [line.lineno for line in got] == [5]
+
+
 def test_the_middle_body_is_excluded_too():
     got = _visible(TWICE, _revision("change", "12시입니다"))
 
@@ -241,6 +258,22 @@ def test_a_coordinate_without_markers_is_untouched():
     got = reader.visible_lines(lines, workspace=WS, channel_id=CH, lookup=_boom)
 
     assert [line.text for line in got] == ["10시입니다"]
+
+
+def test_a_human_message_may_start_with_a_revision_marker():
+    line = _line("[수정 후] 표를 확인해 주세요", 1)
+
+    got = reader.visible_lines(
+        [line], workspace=WS, channel_id=CH,
+        lookup=lambda *_: _revision("create", line.text),
+    )
+
+    assert got == [line]
+
+
+def test_stale_create_metadata_does_not_expose_a_pre_edit_body():
+    """표시줄은 생겼는데 change 기록이 실패했다면 최신을 모르므로 감춘다."""
+    assert _visible(EDITED, _revision("create", "10시입니다")) == []
 
 
 def test_legacy_survives_even_when_the_database_is_down():
@@ -505,3 +538,39 @@ def test_a_database_outage_hides_the_revision_but_not_the_rest(tmp_path, monkeyp
     texts = [line.text for doc in store.docs() for line in doc.raw_lines]
 
     assert texts == ["옛 자료 한 줄"]
+
+
+def test_reindex_cleanup_uses_source_path_and_hash(monkeypatch, tmp_path):
+    """대표 경로+line_no만 지우면 다른 날짜의 정상 행도 함께 사라진다."""
+    from scripts import reindex_revisions
+    from tybot import search_index
+
+    old_path = tmp_path / "raw" / "2026-09-25.md"
+    new_path = tmp_path / "raw" / "2026-09-26.md"
+    hidden = RawLine("2026-09-25 09:00", "U1", "[수정 전] 옛 본문", 10, old_path, TS)
+    current = RawLine("2026-09-26 09:00", "U1", "[수정 후] 새 본문", 10, new_path, TS)
+    doc = ArchiveDoc(
+        path=new_path, workspace=WS, channel="#팀_자금", visibility="private",
+        acl=frozenset({"#팀_자금"}), share_with=frozenset(), last_ingested=None,
+        channel_id=CH, schema_version=2, raw_lines=[hidden, current],
+    )
+
+    class Store:
+        root = tmp_path
+
+        @staticmethod
+        def audit_docs(*, dm_scope):
+            assert dm_scope == "*"
+            return [doc]
+
+    monkeypatch.setattr(
+        reader, "index_excluded_keys",
+        lambda *_args, **_kwargs: {(str(old_path), 10)},
+    )
+
+    keys = reindex_revisions.stale_keys(Store())
+    digest = search_index.content_sha(doc.channel, hidden.lineno, hidden.text)
+
+    assert ("raw/2026-09-25.md", 10, digest) in keys
+    assert ("raw/2026-09-26.md", 10, digest) in keys
+    assert all(len(key) == 3 for key in keys)

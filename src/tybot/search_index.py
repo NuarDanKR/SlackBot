@@ -164,9 +164,9 @@ def indexed_counts(doc_paths: list[str]) -> dict[str, int] | None:
     """문서별로 색인에 든 줄 수. **DB 를 못 보면 `None`.**
 
     설계 §7.1 은 문서별 manifest(`archive_content_sha`)를 두자고 한다. 우리 아카이브는
-    **append-only** 라(원문 편집 금지, 원칙 1) 줄 수만으로도 같은 판정이 된다 —
-    줄이 늘면 색인이 낡은 것이고, 줄이 그대로면 내용도 그대로다. 표를 하나 더 만들고
-    동기화하는 비용을 치르지 않는 이유다.
+    **append-only** 라(원문 편집 금지, 원칙 1) 일반적으로 줄 수로 판정할 수 있다.
+    다만 revision reader가 과거 줄을 숨기면 DB 행이 파일의 현재 가시 줄보다 많을
+    수 있으므로 호출부는 수가 **정확히 같은지** 본다.
 
     이 방법이 못 잡는 것: 파일을 손으로 고쳐 **줄 수를 유지한 채** 내용만 바꾼 경우.
     그건 원칙 1 위반이고, 그때는 재색인을 사람이 돌린다.
@@ -224,12 +224,15 @@ def reindex(docs, root=None, *, batch: int = 1000) -> dict:
                     rows.append((
                         doc.workspace,
                         doc.channel,
-                        rel_path(doc.path, root),
+                        # 합쳐진 채널 문서의 대표 경로가 아니라 줄이 실제로 있는
+                        # 일자 파일 경로다. 일자 파일마다 line_no가 다시 시작하므로
+                        # 대표 경로를 쓰면 서로 다른 날의 같은 번호가 충돌한다.
+                        rel_path(line.source_path or doc.path, root),
                         line.lineno,
                         line.ts,
                         line.speaker,
                         line.text,
-                        _sha(doc.channel, line.lineno, line.text),
+                        content_sha(doc.channel, line.lineno, line.text),
                     ))
                     if len(rows) >= batch:
                         written += _flush(cur, rows)
@@ -244,7 +247,8 @@ def reindex(docs, root=None, *, batch: int = 1000) -> dict:
     return {"docs": seen_docs, "lines": written}
 
 
-def _sha(channel: str, lineno: int, text: str) -> str:
+def content_sha(channel: str, lineno: int, text: str) -> str:
+    """`raw_line.content_sha` 계약. 정리·재색인도 이 함수 하나를 쓴다."""
     import hashlib
 
     raw = f"{channel}|{lineno}|{text}"

@@ -725,19 +725,23 @@ class ArchiveStore:
         if found is None:
             return self._scan(query, tokens, docs, limit)
 
-        # 색인이 넣은 것과 **같은 함수로** 키를 만든다. 한쪽만 절대 경로면 매칭이
-        # 전부 실패하고, 오류 없이 파일 스캔으로 되돌아간다.
-        by_path = {search_index.rel_path(d.path, self.root): d for d in docs}
+        # 색인이 넣은 것과 같은 실제 파일 좌표로 찾는다. 병합 문서의 `doc.path`는
+        # 최신 일자 파일 하나뿐이지만 line_no는 일자 파일마다 다시 시작한다.
+        indexed_lines: dict[tuple[str, int], tuple[ArchiveDoc, RawLine]] = {}
+        expected_counts: dict[str, int] = {}
+        for doc in docs:
+            for line in doc.raw_lines:
+                path = search_index.rel_path(line.source_path or doc.path, self.root)
+                indexed_lines[(path, line.lineno)] = (doc, line)
+                expected_counts[path] = expected_counts.get(path, 0) + 1
         hits: list[SearchHit] = []
         for cand in found:
-            doc = by_path.get(cand.doc_path)
+            entry = indexed_lines.get((cand.doc_path, cand.line_no))
             # 색인에 있으나 지금 권한으로는 안 보이는 문서 — 조용히 건너뛴다.
             # 색인이 낡아 문서가 사라진 경우도 같은 자리로 떨어진다.
-            if doc is None:
+            if entry is None:
                 continue
-            line = next((ln for ln in doc.raw_lines if ln.lineno == cand.line_no), None)
-            if line is None:
-                continue
+            doc, line = entry
             score = search_index.score_line(tokens, query, line.speaker, line.text)
             if score:
                 hits.append(SearchHit(doc=doc, line=line, score=score))
@@ -751,10 +755,10 @@ class ArchiveStore:
         # 「예전 것만 나오는」 답이 된다(설계 §2.2·§7.2).
         #
         # 낡은 문서만 파일에서 보완한다. 전체 아카이브를 매번 훑지 않는다.
-        hits += self._stale_hits(query, tokens, docs, by_path)
+        hits += self._stale_hits(query, tokens, docs, expected_counts)
         return self._rank(hits, limit)
 
-    def _stale_hits(self, query, tokens, docs, by_path) -> list[SearchHit]:
+    def _stale_hits(self, query, tokens, docs, expected_counts) -> list[SearchHit]:
         """색인이 뒤처진 문서만 파일에서 찾아 보탠다.
 
         색인 경로와 **같은 점수 함수**를 쓴다(`_scan`). 다른 점수를 쓰면 같은 질문에
@@ -762,14 +766,26 @@ class ArchiveStore:
         """
         from .. import search_index
 
-        counts = search_index.indexed_counts(list(by_path))
+        counts = search_index.indexed_counts(list(expected_counts))
         if counts is None:
             # DB 를 못 봤다. 이미 색인 결과를 받은 뒤이므로 여기서 전체 스캔으로
             # 되돌아가지 않는다 — 두 번 부담을 지우는 대신 있는 것으로 답한다.
             return []
+        stale_paths = {
+            path
+            for path, expected in expected_counts.items()
+            # 적어도 같은 것이 아니라 **정확히 같아야** 최신이다. revision reader
+            # 이전의 숨김 행이 남으면 DB 쪽 수가 더 많아지는 경우도 있다.
+            if counts.get(path, 0) != expected
+        }
         stale = [
-            doc for path, doc in by_path.items()
-            if counts.get(path, 0) < len(doc.raw_lines)
+            doc
+            for doc in docs
+            if any(
+                search_index.rel_path(line.source_path or doc.path, self.root)
+                in stale_paths
+                for line in doc.raw_lines
+            )
         ]
         if not stale:
             return []

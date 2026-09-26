@@ -12,7 +12,7 @@ import pytest
 
 from tybot import search_index
 from tybot.access import RequestContext
-from tybot.archive.store import ArchiveStore
+from tybot.archive.store import ArchiveDoc, ArchiveStore, RawLine
 
 MINE = "#팀_전산(ABB155)_주간보고"
 OTHER = "#현장_김해외동(180182)_채팅방"
@@ -197,6 +197,18 @@ def test_unreadable_db_does_not_trigger_a_full_scan(indexed, store, monkeypatch)
     assert len(got) == 1
 
 
+def test_extra_stale_index_rows_trigger_a_file_scan(indexed, store, monkeypatch):
+    """revision reader 이전 행이 남으면 색인 수가 현재 보이는 줄보다 많다."""
+    path, doc = indexed
+    monkeypatch.setattr(
+        search_index, "indexed_counts", lambda paths: {path: len(doc.raw_lines) + 1}
+    )
+
+    got = store.search("기성금", _ctx(MINE))
+
+    assert len(got) == 2
+
+
 def test_merged_results_are_not_duplicated(indexed, store, monkeypatch):
     """같은 줄이 색인과 파일 양쪽에서 오면 같은 사실이 두 번 인용된다."""
     path, _doc = indexed
@@ -225,3 +237,74 @@ def test_stale_and_fresh_use_the_same_score(indexed, store, monkeypatch):
             hit.line.speaker, hit.line.text,
         )
         assert hit.score == expected
+
+
+def test_reindex_uses_each_lines_real_daily_file(monkeypatch, tmp_path):
+    """병합 문서의 대표 경로를 쓰면 다른 날짜의 같은 line_no가 충돌한다."""
+    paths = [tmp_path / "raw" / "2026-09-25.md", tmp_path / "raw" / "2026-09-26.md"]
+    doc = ArchiveDoc(
+        path=paths[1], workspace="pilot", channel=MINE, visibility="private",
+        acl=frozenset({MINE}), share_with=frozenset(), last_ingested=None,
+        raw_lines=[
+            RawLine("2026-09-25 09:00", "홍길동", "첫날", 10, paths[0]),
+            RawLine("2026-09-26 09:00", "홍길동", "둘째날", 10, paths[1]),
+        ],
+    )
+    captured = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    monkeypatch.setattr(search_index, "_connect", lambda: Conn())
+    monkeypatch.setattr(
+        search_index, "_flush",
+        lambda _cur, rows: captured.extend(rows) or len(rows),
+    )
+
+    search_index.reindex([doc], tmp_path)
+
+    assert [row[2] for row in captured] == [
+        "raw/2026-09-25.md", "raw/2026-09-26.md",
+    ]
+
+
+def test_index_candidate_uses_path_and_line_number_together(monkeypatch, tmp_path):
+    """두 일자 파일의 같은 line_no 중 후보가 가리킨 정확한 줄을 연다."""
+    old_path = tmp_path / "raw" / "2026-09-25.md"
+    new_path = tmp_path / "raw" / "2026-09-26.md"
+    doc = ArchiveDoc(
+        path=new_path, workspace="pilot", channel=MINE, visibility="private",
+        acl=frozenset({MINE}), share_with=frozenset(), last_ingested=None,
+        raw_lines=[
+            RawLine("2026-09-25 09:00", "홍길동", "예전 회의", 10, old_path),
+            RawLine("2026-09-26 09:00", "홍길동", "최신 회의", 10, new_path),
+        ],
+    )
+    archive = ArchiveStore(tmp_path)
+    monkeypatch.setattr(archive, "visible_docs", lambda _ctx: [doc])
+    monkeypatch.setattr(
+        search_index, "candidates",
+        lambda *_: [_candidate("raw/2026-09-26.md", 10)],
+    )
+    monkeypatch.setattr(
+        search_index, "indexed_counts",
+        lambda paths: {path: 1 for path in paths},
+    )
+
+    got = archive.search("회의", _ctx(MINE))
+
+    assert [hit.line.text for hit in got] == ["최신 회의"]
