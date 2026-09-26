@@ -179,6 +179,87 @@ def test_writing_the_same_revision_again_is_idempotent(tmp_path):
     assert again.revision == first.revision
 
 
+def test_a_failed_placeholder_can_become_success_at_the_same_revision(tmp_path):
+    """A transient failure must not permanently reserve the revision path."""
+    identity = {
+        "converter_name": "hwpx:primary",
+        "converter_version": "1",
+        "converter_config": {"mode": "precise"},
+    }
+    (failed,) = _write(
+        tmp_path,
+        [
+            _staged(
+                tmp_path,
+                body=None,
+                conversion_state="failed",
+                error_code="converter_timeout",
+                **identity,
+            )
+        ],
+    )
+
+    (recovered,) = _write(
+        tmp_path,
+        [
+            _staged(
+                tmp_path,
+                body="복구된 본문",
+                conversion_state="succeeded",
+                converted_at="2026-09-23T11:00:00+00:00",
+                error_code="",
+                **identity,
+            )
+        ],
+    )
+
+    assert recovered.revision == failed.revision
+    body = (tmp_path / "archive" / recovered.relative_path()).read_text(encoding="utf-8")
+    assert "conversion_state: succeeded" in body
+    assert "복구된 본문" in body
+
+
+def test_a_policy_blocked_document_cannot_be_upgraded_at_the_same_revision(tmp_path):
+    """A technical retry must never overwrite a policy refusal."""
+    identity = {
+        "converter_name": "hwpx:primary",
+        "converter_version": "1",
+        "converter_config": {"mode": "precise"},
+    }
+    (blocked,) = _write(
+        tmp_path,
+        [
+            _staged(
+                tmp_path,
+                body=None,
+                conversion_state="blocked",
+                error_code="pii_refused",
+                **identity,
+            )
+        ],
+    )
+    path = tmp_path / "archive" / blocked.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = _write(
+        tmp_path,
+        [
+            _staged(
+                tmp_path,
+                body="정책상 쓰면 안 되는 본문",
+                conversion_state="succeeded",
+                converted_at="2026-09-23T11:00:00+00:00",
+                error_code="",
+                **identity,
+            )
+        ],
+    )
+
+    assert written == []
+    assert path.read_text(encoding="utf-8") == before
+    assert "정책상 쓰면 안 되는 본문" not in before
+
+
 def test_the_same_revision_is_never_overwritten_with_other_content(tmp_path):
     """**덮으면 이미 나간 답변의 출처가 조용히 달라진다.**
 

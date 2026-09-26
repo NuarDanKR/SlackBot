@@ -16,11 +16,12 @@ from slack_sdk.errors import SlackApiError
 
 from .archive import ingest_ack, writer
 from .archive.archiving_state import IngestState
+from .archive.attachment_doc import CONVERTED
 from .archive.attachment_writer import raw_lines_for
 from .archive.attachment_writer import write_docs as write_attachment_docs
 from .archive.revision_store import record_revision
 from .archive.store import ArchiveStore
-from .attachment_trace import confirm_archived
+from .attachment_trace import ARCHIVE_DONE, confirm_archived, line_hash
 from .channels import should_collect
 from .collect import _messages_from
 from .lock import AlreadyRunning, instance_lock
@@ -177,20 +178,11 @@ class ShadowCollector:
             attachment_line_selector=lambda item: raw_lines_for(
                 item, separate=self.cfg.separate_attachments
             ),
+            separate_attachments=self.cfg.separate_attachments,
         )
         if not messages:
             self._ack(channel_id, message_ts, IngestState.FAILED, error_code="no-message")
             return "skipped-empty"
-        if staged:
-            write_attachment_docs(
-                self.root,
-                staged,
-                workspace=self.cfg.key,
-                channel_id=channel_id,
-                channel=channel,
-                visibility="private" if info.get("is_private") else "public",
-                acl=frozenset({channel}),
-            )
         result = writer.ingest(
             self.root,
             workspace=self.cfg.key,
@@ -213,6 +205,19 @@ class ShadowCollector:
                 attachment_total=len(staged), attachment_ready=0,
                 doc_path=self._relative_doc_path(result.path),
             )
+        canonical_docs = []
+        if staged and raw_confirmed:
+            # A canonical attachment without its raw Slack reference has no
+            # verifiable provenance. Publish it only after raw is confirmed.
+            canonical_docs = write_attachment_docs(
+                self.root,
+                staged,
+                workspace=self.cfg.key,
+                channel_id=channel_id,
+                channel=channel,
+                visibility="private" if info.get("is_private") else "public",
+                acl=frozenset({channel}),
+            )
         if staged:
             # 첨부가 있으면 **본문만으로 ready 라고 하지 않는다.**
             self._ack(
@@ -220,8 +225,17 @@ class ShadowCollector:
                 attachment_total=len(staged), attachment_ready=0,
             )
             try:
-                confirm_archived(
-                    self._store, staged, workspace=self.cfg.key, channel_id=channel_id
+                archive_states = confirm_archived(
+                    self._store,
+                    staged,
+                    workspace=self.cfg.key,
+                    channel_id=channel_id,
+                    hash_selector=lambda item: [
+                        line_hash(line)
+                        for line in raw_lines_for(
+                            item, separate=self.cfg.separate_attachments
+                        )
+                    ],
                 )
             except Exception:
                 log.exception("[%s] attachment archive confirmation failed", self.cfg.key)
@@ -230,6 +244,19 @@ class ShadowCollector:
                     error_code="attachment-unconfirmed",
                 )
                 return "metadata-unconfirmed"
+            canonical_ready = {
+                doc.file_id
+                for doc in canonical_docs
+                if doc.conversion_state == CONVERTED and doc.text.strip()
+            }
+            attachment_ready = sum(
+                1
+                for item in staged
+                if archive_states.get(item.file_id) == ARCHIVE_DONE
+                and item.file_id in canonical_ready
+            )
+        else:
+            attachment_ready = 0
         if result.refused:
             # 일부만 들어갔으면 partial, 하나도 못 들어갔으면 refused 다.
             # 거부 본문은 남기지 않는다(절대 원칙 5) — 사유 코드만 든다.
@@ -258,10 +285,21 @@ class ShadowCollector:
         # **여기가 마지막이다.** 첨부 확인·거부 판정·revision 기록을 전부 지난
         # 뒤에만 ready 다. 앞에서 찍으면 그 뒤 단계가 실패해도 이미 「됐다」 고
         # 적힌 상태로 남고, 그 상태는 되돌리지 않는다(terminal).
-        self._ack(
-            channel_id, message_ts, IngestState.READY,
-            attachment_total=len(staged), attachment_ready=len(staged),
+        final_state = (
+            IngestState.READY
+            if not staged or attachment_ready == len(staged)
+            else IngestState.PARTIAL
         )
+        self._ack(
+            channel_id,
+            message_ts,
+            final_state,
+            attachment_total=len(staged),
+            attachment_ready=attachment_ready,
+            error_code="" if final_state == IngestState.READY else "attachment-not-searchable",
+        )
+        if final_state != IngestState.READY:
+            return "partial"
         return "written" if result.written else "duplicate"
 
     def _speaker(self, client, user_id: str) -> str:

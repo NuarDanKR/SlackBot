@@ -49,7 +49,7 @@ PACE_SECONDS = 65  # 분당 1요청 제한 + 여유
 def _messages_from(
     client, event: dict, bot_token: str, name_cache: dict, storage,
     *, workspace: str = "", channel_id: str = "", staged_out: list | None = None,
-    attachment_line_selector=None,
+    attachment_line_selector=None, separate_attachments: bool | None = None,
 ) -> list:
     ts = datetime.fromtimestamp(float(event["ts"]), tz=UTC)
     uid = event.get("user", "unknown")
@@ -83,6 +83,7 @@ def _messages_from(
                 message_ts=str(event.get("ts") or ""),
                 thread_ts=str(event.get("thread_ts") or ""),
             ),
+            separate_attachments=separate_attachments,
         )
         if staged_out is not None:
             staged_out.extend(staged)

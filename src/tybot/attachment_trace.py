@@ -445,7 +445,12 @@ ARCHIVE_FAILED = "failed"
 
 
 def confirm_archived(
-    store_or_lines, results, *, workspace: str = "", channel_id: str = ""
+    store_or_lines,
+    results,
+    *,
+    workspace: str = "",
+    channel_id: str = "",
+    hash_selector=None,
 ) -> dict[str, str]:
     """첨부별로 원문 반영을 확인하고 metadata 에 기록한다. 파일 ID → 상태.
 
@@ -460,7 +465,11 @@ def confirm_archived(
     have = {line_hash(ln) for ln in lines}
     out: dict[str, str] = {}
     for item in results or []:
-        hashes = list(getattr(item, "line_hashes", None) or [])
+        hashes = list(
+            hash_selector(item)
+            if hash_selector is not None
+            else (getattr(item, "line_hashes", None) or [])
+        )
         file_id = str(getattr(item, "file_id", "") or "")
         if not hashes:
             # 넣을 줄이 없었다면 확인할 것도 없다. 실패로 적으면 없는 고장을 만든다.

@@ -28,7 +28,7 @@ import logging
 import os
 from pathlib import Path
 
-from .attachment_doc import AttachmentDoc, from_staged, render
+from .attachment_doc import FAILED, PENDING, USABLE, AttachmentDoc, from_staged, render
 
 logger = logging.getLogger("tybot.archive.attachment_writer")
 
@@ -90,6 +90,35 @@ def _comparable(text: str) -> tuple:
     return (tuple(sorted(front.items())), body.strip())
 
 
+def _placeholder_upgrade(existing: str, incoming: str) -> bool:
+    """Whether a failed attempt may become output at the same revision.
+
+    A transient converter failure and its later success have the same source,
+    converter, version and config, hence the same revision. The failed document
+    carries no evidence body. Allow only that one-way state upgrade while keeping
+    every provenance and ACL field identical.
+    """
+    from .store import parse_frontmatter
+
+    old = parse_frontmatter(existing) or {}
+    new = parse_frontmatter(incoming) or {}
+    if (
+        old.get("conversion_state") not in {FAILED, PENDING}
+        or new.get("conversion_state") not in USABLE
+    ):
+        return False
+    ignored = {
+        *VOLATILE_FIELDS,
+        "conversion_state",
+        "error_code",
+        "coverage_read",
+        "coverage_total",
+    }
+    old_stable = {key: str(value) for key, value in old.items() if key not in ignored}
+    new_stable = {key: str(value) for key, value in new.items() if key not in ignored}
+    return old_stable == new_stable
+
+
 def write_docs(
     archive_root: Path | str,
     results,
@@ -138,6 +167,12 @@ def write_docs(
             if path.exists():
                 existing = path.read_text(encoding="utf-8")
                 if same_evidence(existing, body):
+                    written.append(doc)
+                    continue
+                if _placeholder_upgrade(existing, body):
+                    tmp = path.with_suffix(".md.tmp")
+                    tmp.write_text(body, encoding="utf-8")
+                    tmp.replace(path)
                     written.append(doc)
                     continue
                 logger.error(

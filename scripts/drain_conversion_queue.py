@@ -192,7 +192,8 @@ def publish_reconversion(
     시각·화자를 찾아 같은 채널 원문에 추가하며, 좌표가 모호하면 추측하지 않는다.
     """
     from tybot import search_index
-    from tybot.archive import writer
+    from tybot.archive import attachment_writer, writer
+    from tybot.archive.attachment_doc import CONVERTED
     from tybot.archive.store import ArchiveStore
     from tybot.attachment_trace import confirm_archived, line_hash
 
@@ -250,6 +251,72 @@ def publish_reconversion(
     if len(coordinates) != 1:
         return False, "archive_origin_ambiguous", False
     doc, source = candidates[0]
+
+    staged = SimpleNamespace(
+        file_id=job.file_id,
+        line_hashes=[],
+        metadata_path=meta_path,
+    )
+    canonical = attachment_writer.write_docs(
+        archive_dir,
+        [staged],
+        workspace=job.workspace,
+        channel_id=job.channel_id,
+        channel=doc.channel,
+        visibility=doc.visibility,
+        acl=doc.acl,
+    )
+    current = next((item for item in canonical if item.file_id == job.file_id), None)
+    if current is None:
+        return False, "attachment_canonical_write_failed", True
+    if current.conversion_state != CONVERTED or not current.text.strip():
+        # Keep a partial revision for audit, but never close it as searchable.
+        return False, "partial_conversion", False
+
+    separated = (
+        bool(meta["separate_attachments"])
+        if "separate_attachments" in meta
+        else attachment_writer.separate_attachments()
+    )
+    if separated:
+        # The original raw reference already exists. A retry must not put the
+        # extracted body back into raw after attachment separation.
+        staged.line_hashes = [line_hash(source.text)]
+        states = confirm_archived(
+            ArchiveStore(pathlib.Path(archive_dir)),
+            [staged],
+            workspace=job.workspace,
+            channel_id=job.channel_id,
+        )
+        if states.get(job.file_id) != "archived":
+            return False, "archive_write_unconfirmed", True
+        try:
+            refreshed = ArchiveStore(pathlib.Path(archive_dir))
+            canonical_path = (
+                pathlib.Path(archive_dir) / current.relative_path()
+            ).resolve()
+            docs = [
+                item
+                for item in refreshed.docs()
+                if item.path.resolve() == canonical_path
+            ]
+            if not docs:
+                return False, "archive_document_missing", True
+            search_index.reindex(docs, refreshed.root)
+        except search_index.IndexError_:
+            _update_publish_meta(
+                meta_path, index_state="failed", index_error_code="index_failed"
+            )
+            return False, "index_failed", True
+        _update_publish_meta(
+            meta_path,
+            index_state="succeeded",
+            index_error_code=None,
+            indexed_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        )
+        _reconcile_ingest_ack(pathlib.Path(archive_dir), job, raw_origin)
+        return True, "", False
+
     when = datetime.strptime(source.ts, "%Y-%m-%d %H:%M").replace(tzinfo=writer.KST)
     filetype = str(meta.get("filetype") or pathlib.Path(name).suffix.lstrip(".")).lower()
     size = max(1, int(meta.get("declared_size") or 0) // 1024)
@@ -309,6 +376,57 @@ def _update_publish_meta(meta_path: pathlib.Path, **fields) -> None:
     tmp = meta_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(meta_path)
+
+
+def _reconcile_ingest_ack(
+    archive_root: pathlib.Path,
+    job: queue.Job,
+    message_ts: str,
+) -> None:
+    """Advance a separated attachment message after a successful retry.
+
+    The canonical files, rather than the retry that happened to finish, decide
+    the ready count. This keeps concurrent retries and redelivery idempotent.
+    """
+    if not message_ts:
+        return
+
+    from tybot.archive import attachment_reader, ingest_ack
+    from tybot.archive.archiving_state import IngestState
+    from tybot.archive.attachment_doc import CONVERTED
+
+    status = ingest_ack.read(job.workspace, job.channel_id, message_ts)
+    if status is None or status.state not in {
+        IngestState.ATTACHMENT_PENDING,
+        IngestState.PARTIAL,
+    }:
+        return
+    total = status.progress.attachment_total
+    if total <= 0:
+        return
+
+    loaded = [
+        doc
+        for path in attachment_reader.source_files(archive_root)
+        if (doc := attachment_reader.load_checked(path, archive_root)) is not None
+        and doc.workspace == job.workspace
+        and doc.channel_id == job.channel_id
+        and doc.message_ts == message_ts
+        and doc.conversion_state == CONVERTED
+        and doc.text.strip()
+    ]
+    ready = min(total, len(attachment_reader.current_by_file(loaded)))
+    target = IngestState.READY if ready >= total else IngestState.PARTIAL
+    ingest_ack.advance(
+        workspace=job.workspace,
+        channel_id=job.channel_id,
+        message_ts=message_ts,
+        target=target,
+        attachment_total=total,
+        attachment_ready=ready,
+        written_to=status.written_to,
+        error_code="" if target == IngestState.READY else "attachment-not-searchable",
+    )
 
 
 def backfill(archive_dir: str, *, apply: bool) -> int:

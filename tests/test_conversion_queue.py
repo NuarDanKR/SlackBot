@@ -372,6 +372,12 @@ def test_reconversion_is_not_complete_until_archived_and_indexed(tmp_path, monke
         "slack_file_id": "F1",
         "declared_size": 1024,
         "origin_message_ts": str(when.timestamp()),
+        "conversion_state": "succeeded",
+        "sha256": "abcdef1234567890",
+        "converter_name": "txt:primary",
+        "converter_version": "1",
+        "converter_config": {},
+        "converted_at": "2026-09-14T00:00:00+00:00",
     })
     meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     (meta_path.parent / "extracted.md").write_text(
@@ -402,6 +408,155 @@ def test_reconversion_is_not_complete_until_archived_and_indexed(tmp_path, monke
     assert saved["index_state"] == "succeeded"
     assert saved["indexed_at"]
     assert indexed
+
+
+def test_separated_reconversion_writes_only_the_canonical_document(tmp_path, monkeypatch):
+    """A retry must not put extracted attachment text back into raw."""
+    import drain_conversion_queue as drain
+
+    from tybot import search_index
+    from tybot.archive import writer
+    from tybot.archive.store import ArchiveStore
+
+    archive = tmp_path / "archive"
+    when = datetime(2026, 9, 14, 9, 0, tzinfo=writer.KST)
+    reference = "[첨부:처리실패] 보고서.txt (txt, 1KB) · id:F1"
+    writer.ingest(
+        archive,
+        workspace="pilot",
+        channel="#팀-전산_test",
+        channel_id="C1",
+        messages=[
+            writer.IncomingMessage(
+                ts=when,
+                speaker="홍길동",
+                text=reference,
+                source_ts=str(when.timestamp()),
+            )
+        ],
+        acl=["#팀-전산_test"],
+    )
+    meta_path = _staged(tmp_path)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.update(
+        {
+            "slack_file_id": "F1",
+            "declared_size": 1024,
+            "origin_message_ts": str(when.timestamp()),
+            "separate_attachments": True,
+            "conversion_state": "succeeded",
+            "sha256": "abcdef1234567890",
+            "converter_name": "txt:primary",
+            "converter_version": "1",
+            "converter_config": {},
+            "converted_at": "2026-09-14T00:00:00+00:00",
+        }
+    )
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (meta_path.parent / "extracted.md").write_text(
+        "<!-- 로컬 재변환본 -->\n# 보고서.txt\n\n정본에만 있을 내용\n",
+        encoding="utf-8",
+    )
+    indexed = []
+    reconciled = []
+    monkeypatch.setattr(search_index, "reindex", lambda docs, root: indexed.extend(docs) or {})
+    monkeypatch.setattr(
+        drain,
+        "_reconcile_ingest_ack",
+        lambda root, job, message_ts: reconciled.append((root, job.file_id, message_ts)),
+    )
+    job = queue.Job(
+        id=1,
+        workspace="pilot",
+        channel_id="C1",
+        file_id="F1",
+        original_sha256="",
+        pipeline_version="1",
+        state="leased",
+        attempt_count=1,
+    )
+
+    assert drain.publish_reconversion(str(archive), meta_path, job) == (True, "", False)
+    assert drain.publish_reconversion(str(archive), meta_path, job) == (True, "", False)
+
+    source_lines = [
+        line.text for doc in ArchiveStore(archive).source_docs() for line in doc.raw_lines
+    ]
+    assert source_lines.count(reference) == 1
+    assert not any("정본에만 있을 내용" in line for line in source_lines)
+    canonical = list(archive.glob("workspaces/pilot/channels/C1/attachments/F1/*.md"))
+    assert len(canonical) == 1
+    assert "정본에만 있을 내용" in canonical[0].read_text(encoding="utf-8")
+    assert indexed
+    assert len(reconciled) == 2
+
+
+def test_successful_retries_reconcile_the_message_ack_from_canonical_files(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    import drain_conversion_queue as drain
+
+    from tybot.archive import attachment_reader, ingest_ack
+    from tybot.archive.archiving_state import IngestProgress, IngestState
+
+    docs = {
+        tmp_path / "F1.md": SimpleNamespace(
+            workspace="pilot",
+            channel_id="C1",
+            message_ts="1.0001",
+            conversion_state="succeeded",
+            text="첫 문서",
+        ),
+        tmp_path / "F2.md": SimpleNamespace(
+            workspace="pilot",
+            channel_id="C1",
+            message_ts="1.0001",
+            conversion_state="succeeded",
+            text="둘째 문서",
+        ),
+        tmp_path / "other.md": SimpleNamespace(
+            workspace="other",
+            channel_id="C1",
+            message_ts="1.0001",
+            conversion_state="succeeded",
+            text="다른 워크스페이스",
+        ),
+    }
+    monkeypatch.setattr(attachment_reader, "source_files", lambda root: list(docs))
+    monkeypatch.setattr(
+        attachment_reader, "load_checked", lambda path, root: docs[path]
+    )
+    monkeypatch.setattr(attachment_reader, "current_by_file", lambda loaded: loaded)
+    monkeypatch.setattr(
+        ingest_ack,
+        "read",
+        lambda *_: ingest_ack.AckStatus(
+            IngestProgress(IngestState.PARTIAL, attachment_total=2, attachment_ready=1),
+            written_to="shadow",
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(ingest_ack, "advance", lambda **kwargs: calls.append(kwargs))
+    job = queue.Job(
+        id=1,
+        workspace="pilot",
+        channel_id="C1",
+        file_id="F2",
+        original_sha256="",
+        pipeline_version="1",
+        state="leased",
+        attempt_count=1,
+    )
+
+    drain._reconcile_ingest_ack(tmp_path, job, "1.0001")
+
+    assert len(calls) == 1
+    assert calls[0]["target"] == IngestState.READY
+    assert calls[0]["attachment_ready"] == 2
+    assert calls[0]["written_to"] == "shadow"
+    assert calls[0]["error_code"] == ""
 
 
 # =============================================================================

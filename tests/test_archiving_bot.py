@@ -270,6 +270,74 @@ def test_a_plain_message_goes_received_then_raw_written_then_ready(tmp_path, ack
     assert _targets(acked) == ["received", "raw_written", "ready"]
 
 
+def test_an_attachment_is_not_ready_when_its_canonical_document_failed(
+    tmp_path, acked, monkeypatch
+):
+    """A raw reference alone must never make a failed attachment searchable."""
+    import dataclasses
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from tybot.archive import writer
+
+    reference = "[첨부:처리실패] 보고서.pdf (pdf, 1KB) · id:F1"
+    staged = SimpleNamespace(
+        file_id="F1",
+        reference_lines=[reference],
+        lines=[reference, "[첨부추출:보고서.pdf] 불완전 본문"],
+    )
+
+    def fake_messages(*_args, staged_out, attachment_line_selector, **kwargs):
+        assert kwargs["separate_attachments"] is True
+        staged_out.append(staged)
+        lines = attachment_line_selector(staged)
+        assert lines == [reference]
+        return [
+            writer.IncomingMessage(
+                ts=datetime.fromtimestamp(1790070000.000001, tz=UTC),
+                speaker="U12345678",
+                text=reference,
+                source_ts="1790070000.000001",
+            )
+        ]
+
+    def fake_confirm(_store, results, **kwargs):
+        assert kwargs["hash_selector"](results[0]) == [
+            archiving_bot.line_hash(reference)
+        ]
+        return {"F1": archiving_bot.ARCHIVE_DONE}
+
+    def fake_write(*_args, **_kwargs):
+        raw = list((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md"))
+        assert raw, "canonical attachment must be written only after raw provenance"
+        return []
+
+    monkeypatch.setattr(archiving_bot, "_messages_from", fake_messages)
+    monkeypatch.setattr(archiving_bot, "write_attachment_docs", fake_write)
+    monkeypatch.setattr(archiving_bot, "confirm_archived", fake_confirm)
+    cfg = dataclasses.replace(
+        archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
+        separate_attachments=True,
+    )
+    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+
+    assert collector.ingest_event(
+        Client(), _event(text="", subtype="file_share", files=[{"id": "F1"}])
+    ) == "partial"
+
+    assert _targets(acked) == [
+        "received",
+        "raw_written",
+        "attachment_pending",
+        "partial",
+    ]
+    assert acked[-1]["attachment_ready"] == 0
+    raw = next((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md"))
+    text = raw.read_text(encoding="utf-8")
+    assert reference in text
+    assert "불완전 본문" not in text
+
+
 def test_ready_is_recorded_last_after_every_check(tmp_path, acked):
     """앞에서 찍으면 그 뒤 단계가 실패해도 이미 「됐다」 고 적힌 채로 남는다.
 

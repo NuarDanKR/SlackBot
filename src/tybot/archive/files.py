@@ -389,6 +389,7 @@ def stage_attachments(
     storage: AttachmentStorage,
     *,
     origin: AttachmentOrigin | None = None,
+    separate_attachments: bool | None = None,
 ) -> list[StagedAttachmentResult]:
     """원본을 격리 저장하고 **파일별로** 원문 줄과 줄 지문을 돌려준다.
 
@@ -538,6 +539,11 @@ def stage_attachments(
                 "archive_line_hashes": [],
                 "archived_at": None,
                 "archive_error_code": None,
+                **(
+                    {"separate_attachments": separate_attachments}
+                    if separate_attachments is not None
+                    else {}
+                ),
             }
             (staged / "metadata.json").write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
