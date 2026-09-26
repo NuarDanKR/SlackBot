@@ -71,6 +71,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_DIR = ROOT / "deploy" / "sql"
+SYSTEM_ENV_FILES = (Path("/etc/tybot/tybot.env"),)
 
 # 이름에 이 중 하나가 **있어야** 격리 DB 로 본다.
 #
@@ -145,8 +146,11 @@ def configured_databases() -> set[str]:
     비밀번호는 읽지도 돌려주지도 않는다 — 필요한 것은 DB 이름뿐이다.
     """
     names: set[str] = set()
-    for candidate in (os.getenv("TYBOT_ENV_FILE"), str(ROOT / ".env"),
-                      "/etc/tybot/tybot.env"):
+    for candidate in (
+        os.getenv("TYBOT_ENV_FILE"),
+        ROOT / ".env",
+        *SYSTEM_ENV_FILES,
+    ):
         if not candidate:
             continue
         path = Path(candidate)

@@ -368,7 +368,7 @@ def test_a_redelivered_event_records_the_same_states_again(tmp_path, acked):
 
     # 재전달에서도 **파일 확인 결과로** 사실을 다시 남긴다. 그래야 DB 가 죽어
     # 있던 동안의 빈 구간이 복구된다.
-    assert _targets(acked) == ["received", "ready"]
+    assert _targets(acked) == ["received", "raw_written", "ready"]
 
 
 def test_a_failed_ack_does_not_stop_collection(tmp_path, monkeypatch):

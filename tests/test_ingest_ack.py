@@ -258,8 +258,8 @@ def test_a_line_that_still_fails_is_kept(monkeypatch, tmp_path):
     assert ingest_ack.outbox_path("tyit").is_file()
 
 
-def test_a_corrupt_line_is_dropped_instead_of_blocking(monkeypatch, tmp_path):
-    """남겨 두면 매 회차 같은 자리에서 멈춘다."""
+def test_a_corrupt_line_is_quarantined_instead_of_disappearing(monkeypatch, tmp_path):
+    """재시도는 막지 않되 깨졌다는 감사 사실을 없애지 않는다."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
     monkeypatch.setenv("STATE_DIR", str(tmp_path))
     path = ingest_ack.outbox_path("tyit")
@@ -269,6 +269,30 @@ def test_a_corrupt_line_is_dropped_instead_of_blocking(monkeypatch, tmp_path):
 
     assert ingest_ack.drain_outbox("tyit") == {"applied": 0, "left": 0}
     assert not path.exists()
+    assert ingest_ack.dead_letter_path("tyit").read_text(encoding="utf-8") == "{ broken\n"
+
+
+def test_a_successful_write_drains_facts_left_by_an_outage(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    path = ingest_ack.outbox_path("tyit")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "workspace": "tyit", "channel_id": "C0", "message_ts": "0.0001",
+            "target": "received", "attachment_total": None,
+            "attachment_ready": None, "written_to": "shadow", "doc_path": "",
+            "error_code": "", "queued_at": "2026-09-26T00:00:00+00:00",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    cur = FakeCursor([None, None])
+    monkeypatch.setattr(ingest_ack, "_connect", lambda: FakeConn(cur))
+
+    assert _advance() == IngestState.RECEIVED
+
+    assert not path.exists()
+    assert [row["state"] for row in cur.saved] == ["received", "received"]
 
 
 def test_failing_to_spool_raises_an_operational_warning(broken_db, monkeypatch, caplog):
@@ -324,6 +348,15 @@ def test_shadow_ready_is_never_reported_as_operationally_searchable(state):
     assert claim == ingest_ack.SHADOW_CLAIM
     assert "검색할 수 있습니다" not in claim
     assert ingest_ack.is_searchable("tyit", "C1", "1.0001") is False
+
+
+@pytest.mark.parametrize(
+    "progress", [IngestState.RECEIVED, IngestState.RAW_WRITTEN, IngestState.PARTIAL]
+)
+def test_every_shadow_state_names_the_shadow_destination(state, progress):
+    state(_status(progress, written_to="shadow"))
+
+    assert ingest_ack.claim("tyit", "C1", "1.0001") == ingest_ack.SHADOW_CLAIM
 
 
 def test_ready_without_a_destination_is_not_searchable_either(state):

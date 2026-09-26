@@ -147,6 +147,9 @@ def test_reading_the_config_file_never_applies_it(monkeypatch, tmp_path):
 def test_a_missing_config_file_is_not_an_error(monkeypatch, tmp_path):
     monkeypatch.setenv("TYBOT_ENV_FILE", str(tmp_path / "gone.env"))
     monkeypatch.setattr(verify, "ROOT", tmp_path)
+    # 서버의 실제 /etc/tybot/tybot.env 유무가 단위시험 결과를 바꾸면 배포에서만
+    # 실패한다. 시스템 후보 검사는 별도 통합 경로의 책임이고 여기서는 입력을 격리한다.
+    monkeypatch.setattr(verify, "SYSTEM_ENV_FILES", ())
 
     assert verify.configured_databases() == set()
 

@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..lock import AlreadyRunning, FileLock, LockUnavailable
 from .archiving_state import (
     IngestProgress,
     IngestState,
@@ -121,17 +122,31 @@ def outbox_path(workspace: str) -> Path:
     return base / "state" / "ingest-ack-outbox" / f"{workspace}.jsonl"
 
 
+def dead_letter_path(workspace: str) -> Path:
+    """파싱할 수 없는 행을 보존하는 감사 경로."""
+    return outbox_path(workspace).with_suffix(".bad.jsonl")
+
+
+def _outbox_lock(path: Path) -> FileLock:
+    return FileLock(path.with_suffix(".lock"), label=f"ACK outbox {path.stem}")
+
+
 def _spool(payload: dict) -> bool:
     """DB 에 못 쓴 것을 파일에 쌓는다. 파일에도 못 쓰면 `False`."""
     path = outbox_path(str(payload.get("workspace") or "unknown"))
+    lock = _outbox_lock(path)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        lock.acquire(timeout=20)
         line = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(line + "\n")
         return True
-    except OSError:
+    except (AlreadyRunning, LockUnavailable, OSError):
+        log.exception("outbox 에 ACK 를 쓰지 못했다 path=%s", path)
         return False
+    finally:
+        lock.release()
 
 
 def drain_outbox(workspace: str) -> dict:
@@ -144,34 +159,49 @@ def drain_outbox(workspace: str) -> dict:
     if not enabled() or not path.is_file():
         return {"applied": 0, "left": 0}
 
+    lock = _outbox_lock(path)
     try:
+        # append 와 정리를 같은 잠금으로 직렬화한다. 그렇지 않으면 read_text 뒤에
+        # 들어온 새 ACK 를 아래 write_text/unlink 가 지울 수 있다.
+        lock.acquire(timeout=20)
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (AlreadyRunning, LockUnavailable, OSError):
         log.exception("outbox 를 읽지 못했다 ws=%s", workspace)
         return {"applied": 0, "left": 0}
 
-    applied, leftover = 0, []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except ValueError:
-            # 깨진 줄은 버린다. 남겨 두면 매 회차 같은 자리에서 멈춘다.
-            log.warning("outbox 에 깨진 줄이 있어 건너뛴다 ws=%s", workspace)
-            continue
-        if _write(payload) is None:
-            leftover.append(line)
-        else:
-            applied += 1
-
     try:
+        applied, leftover, corrupt = 0, [], []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                # 재시도를 막지는 않되 감사 사실을 없애지도 않는다.
+                log.error("outbox 에 깨진 줄이 있어 격리한다 ws=%s", workspace)
+                corrupt.append(line)
+                continue
+            if _write(payload) is None:
+                leftover.append(line)
+            else:
+                applied += 1
+
+        if corrupt:
+            bad = dead_letter_path(workspace)
+            with bad.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write("\n".join(corrupt) + "\n")
         if leftover:
-            path.write_text("\n".join(leftover) + "\n", encoding="utf-8", newline="\n")
+            replacement = path.with_suffix(".tmp")
+            replacement.write_text(
+                "\n".join(leftover) + "\n", encoding="utf-8", newline="\n"
+            )
+            replacement.replace(path)
         else:
             path.unlink(missing_ok=True)
     except OSError:
         log.exception("outbox 를 정리하지 못했다 ws=%s", workspace)
+    finally:
+        lock.release()
     return {"applied": applied, "left": len(leftover)}
 
 
@@ -250,6 +280,15 @@ def advance(
     if enabled():
         got = _write(payload)
         if got is not None:
+            # DB 가 다시 살아난 첫 성공에서 장애 중 쌓인 사실도 함께 복구한다.
+            # drain 은 `_write` 를 직접 호출하므로 재귀하지 않는다.
+            if outbox_path(workspace).is_file():
+                drained = drain_outbox(workspace)
+                if drained["applied"]:
+                    log.info(
+                        "ACK outbox 복구 ws=%s applied=%s left=%s",
+                        workspace, drained["applied"], drained["left"],
+                    )
             return got
     # 여기 왔다는 것은 DB 가 없거나 못 썼다는 뜻이다. 사실을 잃지 않는다.
     if not _spool(payload):
@@ -395,8 +434,9 @@ def claim_for(status: AckStatus | None, *, require_ack: bool = True) -> str:
     """상태 하나를 문장으로. 읽기와 갈라 두어 시험이 DB 없이 전부 본다."""
     if status is None:
         return UNKNOWN_CLAIM
-    if status.state == IngestState.READY and status.written_to != LIVE:
-        # **여기가 요점이다.** 그림자도 `ready` 가 되지만 운영 검색은 못 찾는다.
+    if status.written_to != LIVE:
+        # ready 전 단계도 그림자 기록이다. 일반 진행 문구만 내면 운영 아카이브에
+        # 원문이 들어간 것으로 오해할 수 있으므로 목적지를 먼저 밝힌다.
         return SHADOW_CLAIM
     return searchable_claim(status.progress, require_ack=require_ack)
 

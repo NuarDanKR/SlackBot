@@ -37,13 +37,13 @@ ANSWER = Answer(
 )
 
 
-def _ask(bot, *, files=None) -> str:
+def _ask(bot, *, files=None, in_channel=True) -> str:
     """실제 요청 핸들러를 통과시킨다. 돌려주는 것은 **사람이 받는 문장**이다."""
     sent: list[str] = []
     event = {"text": "이 파일 기준으로 기성 얼마야?", "user": "U1", "channel": "C1", "ts": "1.0"}
     if files is not None:
         event["files"] = files
-    bot._handle(event, Mock(), lambda **kw: sent.append(kw["text"]), in_channel=True)
+    bot._handle(event, Mock(), lambda **kw: sent.append(kw["text"]), in_channel=in_channel)
     return "\n".join(sent)
 
 
@@ -185,6 +185,16 @@ def test_an_empty_file_list_gets_no_notice(bot, ack):
     ack(_status(IngestState.READY, written_to="live"))
 
     assert "첨부 상태" not in _ask(bot, files=[])
+
+
+def test_a_dm_attachment_is_not_reported_as_archived(bot, ack):
+    ack(_status(IngestState.READY, written_to="live"))
+
+    reply = _ask(bot, files=FILES, in_channel=False)
+
+    assert "현재 요청 처리에만 사용" in reply
+    assert "아카이브하지 않습니다" in reply
+    assert "검색할 수 있습니다" not in reply
 
 
 # --- 판정이 한 곳에만 있다 -----------------------------------------------------

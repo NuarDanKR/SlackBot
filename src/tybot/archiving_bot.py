@@ -200,7 +200,14 @@ class ShadowCollector:
             acl=[channel],
         )
         # 원문이 파일에 들어갔다. **아직 ready 가 아니다** — 뒤에 볼 것이 남았다.
-        if result.written:
+        # 새로 쓴 경우뿐 아니라 Slack 재전달로 이미 같은 원문이 확인된 경우도
+        # raw_written 이다. ACK 장애 때 원문만 저장된 뒤 재전달되면 이 단계를
+        # 다시 남겨야 received -> ready 점프가 거부되어 영원히 received 에
+        # 머무는 일을 막는다.
+        raw_confirmed = bool(result.written) or (
+            not result.refused and result.path.is_file()
+        )
+        if raw_confirmed:
             self._ack(
                 channel_id, message_ts, IngestState.RAW_WRITTEN,
                 attachment_total=len(staged), attachment_ready=0,
@@ -421,6 +428,12 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     collector = ShadowCollector(cfg, root)
     app = App(token=cfg.bot_token)
     validate_slack_identity(cfg, app.client.auth_test())
+    recovered = ingest_ack.drain_outbox(cfg.key)
+    if recovered["applied"] or recovered["left"]:
+        log.info(
+            "[%s] ACK outbox recovery applied=%s left=%s",
+            cfg.key, recovered["applied"], recovered["left"],
+        )
 
     @app.event("message")
     def on_message(event, client):

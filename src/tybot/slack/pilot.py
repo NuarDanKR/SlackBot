@@ -2669,7 +2669,7 @@ class WorkspaceBot:
         finally:
             progress.close()
 
-    def _ingest_notice(self, event: dict) -> str:
+    def _ingest_notice(self, event: dict, *, in_channel: bool) -> str:
         """이 요청이 **첨부를 달고 왔으면** 그 수집 상태를 한 줄로 말한다.
 
         ## 왜 답변에 붙이나
@@ -2689,6 +2689,8 @@ class WorkspaceBot:
         """
         if not event.get("files"):
             return ""
+        if not in_channel:
+            return "_첨부 상태: DM 첨부는 현재 요청 처리에만 사용하며 아카이브하지 않습니다._"
         channel_id = str(event.get("channel") or "")
         message_ts = str(event.get("ts") or "")
         if not channel_id or not message_ts:
@@ -2763,7 +2765,7 @@ class WorkspaceBot:
             # 첨부를 올리면서 물은 경우, **그 첨부가 지금 근거가 되나**를 같이
             # 말한다. 안 말하면 사람은 방금 올린 파일이 답에 반영됐다고 읽는다 —
             # 변환은 큐를 지나므로 대개 아직이다.
-            ingest_notice = self._ingest_notice(event)
+            ingest_notice = self._ingest_notice(event, in_channel=in_channel)
             if ingest_notice:
                 reply = f"{reply}\n\n{ingest_notice}"
             # 아카이브 근거로 답한 경우에만 '근거 보기' 를 붙인다. 버튼이 있는데
