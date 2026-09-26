@@ -83,6 +83,13 @@ USABLE = (CONVERTED, PARTIAL)
 
 REVISION_LENGTH = 12
 
+#: 본문이 없을 때 대신 적는 줄. **읽는 쪽이 이걸 본문으로 오해하면 안 된다** —
+#: 「PII 로 막혔다」 가 검색 결과로 나오면 그 자체가 근거처럼 보인다.
+NO_BODY_PREFIX = "> 본문이 없습니다:"
+
+#: 부분 변환본에 붙는 안내. 본문이 아니라 메타다.
+PARTIAL_PREFIX = "> 부분 변환본입니다"
+
 
 class AttachmentDocError(RuntimeError):
     """정본 문서를 만들 수 없다."""
@@ -269,7 +276,11 @@ def render(doc: AttachmentDoc) -> str:
     `visibility`·`acl`)을 반드시 담는다 — 없으면 스키마 오류로 문서 전체가
     검색에서 빠지고, 그 사실은 오류 없이 「자료가 없음」 으로 보인다.
     """
-    acl = ",".join(sorted(doc.acl)) if doc.acl else ""
+    # **대괄호로 싼다.** 채널명은 `#` 로 시작하는데, 맨 값으로 적으면
+    # 프론트매터 파서가 그 자리부터 주석으로 읽어 **ACL 이 통째로 빈다**
+    # (`store._strip_comment`). 빈 ACL 은 「제한 없음」 으로 읽힐 수 있으므로
+    # 그건 권한이 조용히 넓어지는 길이다. 채널 문서 writer 가 이미 이 모양이다.
+    acl = "[" + ", ".join(sorted(doc.acl)) + "]" if doc.acl else "[]"
     head = [
         "---",
         f"workspace: {doc.workspace}",
@@ -317,7 +328,7 @@ def render(doc: AttachmentDoc) -> str:
     else:
         # 본문이 없어도 **문서는 남긴다.** 「PII 로 막혔다」 와 「그런 파일이 없다」
         # 는 사람이 할 일이 다르다.
-        body.append(f"> 본문이 없습니다: {_state_note(doc)}")
+        body.append(f"{NO_BODY_PREFIX} {_state_note(doc)}")
     return "\n".join([*head, "", *body]) + "\n"
 
 

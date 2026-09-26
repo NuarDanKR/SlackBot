@@ -425,7 +425,16 @@ class ArchiveStore:
         #
         # 감사 조회는 `audit_docs()` 로 간다. 같은 함수에 플래그를 두면 호출부
         # 하나가 기본값을 잘못 줘서 지워진 문장이 답변에 나간다.
-        return [revision_reader.apply(doc) for doc in merged]
+        channels = [revision_reader.apply(doc) for doc in merged]
+        # 첨부 정본은 **별도 문서**로 붙인다. 채널 문서에 합치면 사람 발언과
+        # 문서 본문이 한 줄기가 되고, 문서의 8월 금액과 사람이 9월에 정정한
+        # 금액이 같은 목록에 오른다(절대 원칙 7 이 막으려던 것).
+        #
+        # 중복 방지는 `channels` 를 넘겨 판정한다 — 분리 스위치가 꺼져 있는 동안
+        # 같은 본문이 raw 에도 있기 때문이다.
+        from . import attachment_reader
+
+        return channels + attachment_reader.archive_docs(self.root, channels)
 
     def audit_docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
         """**전부** 돌려준다 — 과거 revision 포함. 감사 조회 전용.
@@ -439,7 +448,11 @@ class ArchiveStore:
             grouped.setdefault(
                 (doc.workspace, doc.channel_id or doc.channel), []
             ).append(doc)
-        return [self._merge(parts) for parts in grouped.values()]
+        from . import attachment_reader
+
+        merged = [self._merge(parts) for parts in grouped.values()]
+        # 감사에서는 **전부** 본다 — 과거 revision, 실패·부분 변환본까지.
+        return merged + attachment_reader.audit_archive_docs(self.root)
 
     def source_docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
         """실제 원문 파일별 문서. 콘솔 파일 목록과 점검에 사용한다.

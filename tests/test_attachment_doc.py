@@ -72,7 +72,8 @@ def test_the_acl_is_inherited_from_the_channel():
     from tybot.archive.store import parse_frontmatter
 
     fm = parse_frontmatter(ad.render(_doc(acl=frozenset({"C1", "C2"}))))
-    assert set(str(fm["acl"]).split(",")) == {"C1", "C2"}
+    # 대괄호 형태여야 한다 — 맨 값으로 적으면 채널명의  를 주석으로 읽는다
+    assert set(fm["acl"]) == {"C1", "C2"}
 
 
 # --- 상태를 잃지 않는다 ----------------------------------------------------------
