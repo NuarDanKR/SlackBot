@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..access import RequestContext, can_access
+from . import revision_reader
 
 logger = logging.getLogger("tybot.archive.store")
 _legacy_warning_counts: dict[Path, int] = {}
@@ -417,6 +418,27 @@ class ArchiveStore:
                     doc.path,
                 )
             grouped.setdefault((doc.workspace, identity), []).append(doc)
+        merged = [self._merge(parts) for parts in grouped.values()]
+        # **수정·삭제된 줄은 여기서 빠진다.** 한 자리에서 거르는 이유는 직접
+        # 조회와 색인 조회가 같은 결과를 내야 하기 때문이다 — 색인 경로도
+        # `visible_docs` 가 준 문서에서 줄을 찾는다(`_scan`·`candidates`).
+        #
+        # 감사 조회는 `audit_docs()` 로 간다. 같은 함수에 플래그를 두면 호출부
+        # 하나가 기본값을 잘못 줘서 지워진 문장이 답변에 나간다.
+        return [revision_reader.apply(doc) for doc in merged]
+
+    def audit_docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
+        """**전부** 돌려준다 — 과거 revision 포함. 감사 조회 전용.
+
+        일반 답변 경로는 절대 이걸 부르지 않는다. 부르면 지워진 문장이 근거가
+        되고, 그건 지운 사람의 뜻을 뒤집는 것이다.
+        """
+        loaded = self.source_docs(dm_scope=dm_scope)
+        grouped: dict[tuple[str, str], list[ArchiveDoc]] = {}
+        for doc in loaded:
+            grouped.setdefault(
+                (doc.workspace, doc.channel_id or doc.channel), []
+            ).append(doc)
         return [self._merge(parts) for parts in grouped.values()]
 
     def source_docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
