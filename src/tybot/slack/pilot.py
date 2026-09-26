@@ -3104,7 +3104,12 @@ class WorkspaceBot:
                 workspace=self.workspace,
                 channel_id=channel_id,
                 channel=channel,
-                visibility="공개",
+                # **`public`·`private` 만 값이다.** 전에는 `"공개"` 를 적었는데,
+                # `can_access` 는 `"public"` 이 아닌 값을 전부 비공개로 읽으므로
+                # 권한은 같았지만 **정본 검증이 그 문서를 통째로 거절한다**
+                # (`attachment_reader.validate`) — 자료가 조용히 사라진다.
+                # 같은 채널 원문(`writer.ingest` 기본값)과 같은 값을 쓴다.
+                visibility="private",
                 acl=frozenset({channel}),
             )
         except Exception as exc:

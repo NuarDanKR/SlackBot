@@ -101,6 +101,40 @@ FOLD_TAIL = _limit("TYBOT_CONVERT_FOLD_TAIL")
 MAX_CELL = _limit("TYBOT_CONVERT_MAX_CELL")
 CONVERTIBLE = {"xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp"}
 
+#: 변환 로직의 판. **출력이 달라지는 변경마다 올린다.**
+#:
+#: 이 값이 정본 revision 에 들어간다(`attachment_doc.revision_for`). 안 올리면
+#: 더 나은 변환기로 다시 읽어도 **같은 경로에 덮어쓰게** 되고, 그 변환본을 인용한
+#: 답변의 출처를 눌렀을 때 인용된 문장이 없다.
+CONVERTER_VERSION = "1"
+
+
+def config_snapshot() -> dict:
+    """출력을 바꾸는 설정들. **revision 에 들어간다.**
+
+    상한을 올리면 같은 파일에서 더 많은 줄이 나온다 — 그건 다른 변환본이다.
+    설정을 revision 에서 빼면 그 차이가 같은 경로에 겹쳐 쓰이고, 옛 답변의
+    출처가 조용히 달라진다.
+    """
+    return {
+        "max_lines": MAX_LINES,
+        "max_total_chars": MAX_TOTAL_CHARS,
+        "fold_head": FOLD_HEAD,
+        "fold_tail": FOLD_TAIL,
+        "max_cell": MAX_CELL,
+    }
+
+
+def converter_name(filetype: str, flags=()) -> str:
+    """어떤 변환기가 읽었나. **폴백은 다른 변환기다.**
+
+    폴백은 정밀 변환과 동등하지 않다(설계 §6) — 글자는 나와도 도형·이미지 안의
+    값은 안 나온다. 같은 이름으로 두면 나중에 정밀 변환이 성공했을 때 그 결과가
+    폴백 결과와 같은 revision 이 되어 덮어쓴다.
+    """
+    kind = (filetype or "").strip().lower() or "unknown"
+    return f"{kind}:fallback" if FALLBACK_CONVERTER in set(flags) else f"{kind}:primary"
+
 
 class ConvertError(RuntimeError):
     """변환 실패. 목록 줄은 남기고 경고로 올린다."""

@@ -83,6 +83,56 @@ def source_files(root: Path | str) -> list[Path]:
     return sorted(base.glob(ATTACHMENT_GLOB)) if base.is_dir() else []
 
 
+#: 없으면 문서로 세지 않는 칸. 하나라도 비면 그 문서는 **좌표가 없는 본문**이다 —
+#: 출처를 붙일 수도, 권한을 판정할 수도, 중복을 막을 수도 없다.
+REQUIRED_FIELDS = ("workspace", "channel_id", "file_id", "revision", "conversion_state")
+
+#: 프론트매터가 말할 수 있는 공개 범위. 다른 값은 **모르는 값**이고, 모르면 막는다.
+VALID_VISIBILITY = ("public", "private")
+
+
+class BrokenDoc(ValueError):
+    """정본으로 읽을 수 없다. **사유를 들고 있다.**"""
+
+
+def validate(doc: AttachmentDoc, path: Path, root: Path | str) -> str:
+    """이 문서를 근거로 써도 되나. 안 되면 **사유**를 돌려준다.
+
+    ## 왜 검증하나
+
+    정본은 우리가 쓴 파일이지만, 손으로 고쳐지거나 반쯤 쓰이거나 옛 형식으로
+    남아 있을 수 있다. 그때 조용히 읽으면 세 가지가 난다.
+
+    1. **권한이 없는 문서가 열린다** — ACL 이 비면 「제한 없음」 으로 읽힌다
+       (2026-09-26 실제로 그랬다: `render` 가 `#` 로 시작하는 채널명을 맨 값으로
+       적어 파서가 주석으로 읽었다)
+    2. **엉뚱한 채널의 근거가 된다** — 경로와 프론트매터 좌표가 어긋난 경우
+    3. **상태를 모른 채 본문을 쓴다** — 알 수 없는 `conversion_state`
+
+    셋 다 오류가 안 난다. 그래서 여기서 막는다.
+    """
+    for field_name in REQUIRED_FIELDS:
+        if not str(getattr(doc, field_name, "") or "").strip():
+            return f"필수 칸이 비었다: {field_name}"
+    if doc.visibility not in VALID_VISIBILITY:
+        return f"알 수 없는 visibility: {doc.visibility!r}"
+    if doc.visibility == "private" and not doc.acl:
+        # 비공개인데 열쇠가 없다. 「아무도 못 본다」 가 아니라 판정 기준이 없는
+        # 것이고, `can_access` 는 빈 ACL 을 제한 없음으로 읽을 수 있다.
+        return "비공개 문서인데 ACL 이 비었다"
+
+    # 경로와 프론트매터가 **같은 좌표**를 말해야 한다. 어긋나면 어느 쪽이 참인지
+    # 고를 근거가 없다 — 한쪽을 믿으면 다른 쪽 채널의 근거가 된다.
+    expected = Path(root) / doc.relative_path()
+    try:
+        same = expected.resolve() == Path(path).resolve()
+    except OSError:
+        same = str(expected) == str(path)
+    if not same:
+        return f"경로와 좌표가 어긋난다: {path}"
+    return ""
+
+
 def load(path: Path) -> AttachmentDoc | None:
     """정본 한 장. 못 읽으면 `None` — **조용히 건너뛰지는 않는다**(로그를 남긴다).
 
@@ -117,8 +167,27 @@ def load(path: Path) -> AttachmentDoc | None:
         filetype=str(front.get("filetype") or ""),
         sha256=str(front.get("sha256") or ""),
         staged_at=str(front.get("staged_at") or ""),
+        converted_at=str(front.get("converted_at") or ""),
+        converter_name=str(front.get("converter_name") or ""),
+        converter_version=str(front.get("converter_version") or ""),
         error_code=str(front.get("error_code") or ""),
     )
+
+
+def load_checked(path: Path, root: Path | str) -> AttachmentDoc | None:
+    """검증까지 통과한 문서만. 깨졌으면 `None` 이고 **로그가 남는다.**
+
+    조용히 건너뛰지 않는 이유: 정본이 안 읽히면 그 자료는 답변에서 사라지는데,
+    사라진 것과 없는 것은 화면에서 구분되지 않는다.
+    """
+    doc = load(path)
+    if doc is None:
+        return None
+    problem = validate(doc, path, root)
+    if problem:
+        log.warning("첨부 정본을 근거로 쓰지 않는다 (%s): %s", problem, path)
+        return None
+    return doc
 
 
 def _body(text: str) -> str:
@@ -144,38 +213,54 @@ def _body(text: str) -> str:
 def current_by_file(docs: list[AttachmentDoc]) -> list[AttachmentDoc]:
     """`(채널, file ID)` 마다 **최신 revision 하나.**
 
-    `attachment_doc.pick_current` 는 file ID 만 본다. 채널까지 넣는 이유는
-    좌표를 온전히 쓰기 위해서다 — 같은 ID 가 두 채널에 보이는 상황을 우리가 만든
-    적은 없지만, 권한이 다른 두 채널이 하나로 접히는 실수는 조용하고 크다.
+    `attachment_doc.pick_current` 는 file ID 만 본다. 워크스페이스와 채널까지
+    넣는 이유는 좌표를 온전히 쓰기 위해서다 — 권한이 다른 둘이 하나로 접히는
+    실수는 조용하고 크다. 워크스페이스가 다르면 회사 경계를 넘는다(원칙 4).
 
-    최신 판정은 `staged_at` 이다. 없으면 바꾸지 않는다 — 모르는 것으로 아는 것을
-    덮으면 최신이 옛것으로 밀린다.
+    최신 판정은 **`converted_at`** 이다. `staged_at` 은 metadata 를 쓴 시각이라
+    재변환에서 둘이 갈리고, 그때 옛 변환본이 최신으로 올라올 수 있다. 없으면
+    `staged_at` 으로 내려간다. 둘 다 없으면 바꾸지 않는다 — 모르는 것으로 아는
+    것을 덮으면 최신이 옛것으로 밀린다.
     """
-    newest: dict[tuple[str, str], AttachmentDoc] = {}
+    newest: dict[tuple[str, str, str], AttachmentDoc] = {}
     for doc in docs:
-        key = (doc.channel_id, doc.file_id)
+        key = (doc.workspace, doc.channel_id, doc.file_id)
         current = newest.get(key)
         if current is None or _newer(doc, current):
             newest[key] = doc
-    return sorted(newest.values(), key=lambda d: (d.channel_id, d.file_id, d.revision))
+    return sorted(
+        newest.values(),
+        key=lambda d: (d.workspace, d.channel_id, d.file_id, d.revision),
+    )
+
+
+def _stamp(doc: AttachmentDoc) -> str:
+    """최신 판정에 쓰는 시각. 변환이 끝난 때가 먼저다."""
+    return doc.converted_at or doc.staged_at or ""
 
 
 def _newer(candidate: AttachmentDoc, current: AttachmentDoc) -> bool:
-    if not candidate.staged_at:
+    mine, theirs = _stamp(candidate), _stamp(current)
+    if not mine:
         return False
-    if not current.staged_at:
+    if not theirs:
         return True
-    return candidate.staged_at > current.staged_at
+    return mine > theirs
 
 
 def evidence(root: Path | str, channel_docs) -> list[AttachmentDoc]:
     """일반 근거로 쓸 첨부. 상태·revision·중복 셋 다 거른다."""
-    loaded = [doc for doc in (load(path) for path in source_files(root)) if doc]
+    loaded = [
+        doc for doc in (load_checked(path, root) for path in source_files(root)) if doc
+    ]
     legacy = legacy_index(channel_docs)
     current = current_by_file(
         [doc for doc in loaded if doc.conversion_state in GENERAL_EVIDENCE and doc.text.strip()]
     )
-    return [doc for doc in current if not legacy.has(doc.channel_id, doc.name)]
+    return [
+        doc for doc in current
+        if not legacy.has(doc.workspace, doc.channel_id, doc.name)
+    ]
 
 
 def all_revisions(root: Path | str) -> list[AttachmentDoc]:
@@ -202,7 +287,7 @@ def as_archive_doc(doc: AttachmentDoc, root: Path | str) -> ArchiveDoc:
     출처를 누르면 파일이 올라온 자리로 간다(요구 6).
     """
     path = Path(root) / doc.relative_path()
-    stamp = (doc.staged_at or "")[:16].replace("T", " ")
+    stamp = _stamp(doc)[:16].replace("T", " ")
     speaker = doc.name or doc.file_id
     lines = [
         RawLine(
@@ -221,7 +306,7 @@ def as_archive_doc(doc: AttachmentDoc, root: Path | str) -> ArchiveDoc:
         # 넓게 열릴 수 없다.
         acl=doc.acl,
         share_with=frozenset(),
-        last_ingested=doc.staged_at or None,
+        last_ingested=_stamp(doc) or None,
         channel_id=doc.channel_id,
         schema_version=1,
         raw_lines=lines,

@@ -99,12 +99,31 @@ def write_docs(
         if doc is None:
             continue
         path = root / doc.relative_path()
+        body = render(doc)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            # **같은 revision 경로를 다른 내용으로 덮지 않는다.**
+            #
+            # revision 은 원본·변환기·판·설정에서 결정적으로 나온다. 그러니 같은
+            # 경로에 다른 내용이 나왔다면 그 넷 중 무언가가 revision 에 안 들어갔다는
+            # 뜻이다 — 덮으면 그 변환본을 인용한 답변의 출처가 조용히 달라진다.
+            #
+            # 같은 내용이면 아무 일도 안 한다(멱등). 다르면 **쓰지 않고 알린다.**
+            if path.exists():
+                existing = path.read_text(encoding="utf-8")
+                if existing == body:
+                    written.append(doc)
+                    continue
+                logger.error(
+                    "같은 revision 경로에 다른 내용이 나왔다 file=%s rev=%s — "
+                    "덮지 않는다. 변환기 신원이 revision 에 빠졌을 수 있다",
+                    doc.file_id, doc.revision,
+                )
+                continue
             # 원자적으로 바꾼다. 반쯤 쓰인 문서를 검색이 읽으면 프론트매터가
             # 잘려 스키마 오류가 되고, 그 채널 문서가 통째로 빠진다.
             tmp = path.with_suffix(".md.tmp")
-            tmp.write_text(render(doc), encoding="utf-8")
+            tmp.write_text(body, encoding="utf-8")
             tmp.replace(path)
         except OSError as exc:
             logger.warning(

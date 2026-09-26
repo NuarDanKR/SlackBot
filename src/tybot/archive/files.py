@@ -266,6 +266,22 @@ def queue_retry(
         logger.warning("재처리 큐에 올리지 못했다 file=%s: %s", file_id, exc)
 
 
+def _converter_identity(filetype: str, coverage) -> dict:
+    """이 변환을 만든 도구·판·설정. **모르면 넣지 않는다.**
+
+    빈 문자열을 넣으면 「모른다」 가 「없다」 로 바뀌고, 그러면 서로 다른 변환이
+    같은 revision 으로 접힌다.
+    """
+    from . import convert
+
+    flags = tuple(getattr(coverage, "flags", ()) or ())
+    return {
+        "converter_name": convert.converter_name(filetype, flags),
+        "converter_version": convert.CONVERTER_VERSION,
+        "converter_config": convert.config_snapshot(),
+    }
+
+
 def attachment_storage(
     archive_root: Path | str, workspace: str, channel_id: str
 ) -> AttachmentStorage:
@@ -516,6 +532,15 @@ def stage_attachments(
                    if screen_result is not None else {}),
                 "retryable": retryable if state != "pii_refused" else False,
                 "staged_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                # --- 변환기 신원. **정본 revision 이 이 셋에서 나온다**
+                # (`attachment_doc.revision_for`). 없으면 같은 원본을 더 나은
+                # 변환기로 다시 읽어도 같은 경로에 덮어쓰게 되고, 그 변환본을
+                # 인용한 답변의 출처가 조용히 달라진다.
+                **_converter_identity(f.filetype, coverage),
+                # 변환이 **끝난** 시각. `staged_at` 은 이 metadata 를 쓴 시각이라
+                # 재변환에서 둘이 갈린다. 최신 판정은 변환 시각으로 해야 한다.
+                **({"converted_at": datetime.now(UTC).isoformat(timespec="seconds")}
+                   if state == "converted" else {}),
                 # 얼마나 읽었나. **모르는 값은 `null`** 이다 — 0 이나 100% 로
                 # 만들면 모르는 것을 안다고 적는 셈이다.
                 **(coverage.to_json() if coverage is not None else {}),

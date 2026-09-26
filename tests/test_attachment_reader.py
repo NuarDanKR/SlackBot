@@ -175,7 +175,8 @@ class _Line:
 
 
 class _ChannelDoc:
-    def __init__(self, channel_id, lines):
+    def __init__(self, channel_id, lines, workspace=WS):
+        self.workspace = workspace
         self.channel_id = channel_id
         self.raw_lines = [_Line(text) for text in lines]
 
@@ -186,6 +187,16 @@ def test_a_body_already_in_raw_is_not_counted_twice(archive):
     channels = [_ChannelDoc(CH, ["[첨부추출:기성내역.xlsx] 9월 기성 청구액은 15억입니다"])]
 
     assert reader.evidence(archive, channels) == []
+
+
+def test_the_bridge_does_not_cross_workspaces(archive):
+    """다른 워크스페이스의 같은 채널 ID 가 이 채널 정본을 지우면 **회사 경계를 넘는다.**"""
+    _write(archive, _doc())
+    channels = [
+        _ChannelDoc(CH, ["[첨부추출:기성내역.xlsx] 남의 회사 본문"], workspace="other")
+    ]
+
+    assert len(reader.evidence(archive, channels)) == 1
 
 
 def test_the_bridge_only_covers_the_same_channel(archive):
@@ -390,52 +401,89 @@ def test_a_member_sees_it(archive):
     assert [d for d in store.visible_docs(member) if "attachments" in str(d.path)]
 
 
-# --- 재색인 dry-run -------------------------------------------------------------
+# --- 9. 소급·다중 워크스페이스·깨진 정본 ----------------------------------------
+#
+# 2026-09-26 오너 지시 7번. 네 가지 다 **오류 없이 틀리는** 길이다.
 
-def test_the_reindex_plan_keeps_only_the_current_revision(archive, monkeypatch):
-    """스크립트가 판정을 다시 쓰지 않는다 — reader 가 고른 것만 넣는다."""
-    import sys
+def test_a_reconversion_makes_a_new_revision_and_wins(archive):
+    """같은 원본을 더 나은 변환기로 다시 읽으면 **새 판이 서고, 그게 근거다.**
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-    import reindex_attachments
+    옛 판을 덮지 않는 것이 계약이므로(되짚기), 최신 판정이 틀리면 옛 본문이
+    답변에 남는다. 판정 기준은 `converted_at` 이다 — `staged_at` 은 metadata 를
+    쓴 시각이라 재변환에서 둘이 갈린다.
+    """
+    first = _doc(
+        revision=attachment_doc.revision_for(
+            sha256="a" * 64, converter_name="xlsx:fallback", converter_version="1",
+        ),
+        text="9월 기성 12억(일부만 읽힘)",
+        converter_name="xlsx:fallback", converter_version="1",
+        staged_at="2026-09-22T10:00:00+00:00",
+        converted_at="2026-09-22T10:00:05+00:00",
+    )
+    second = _doc(
+        revision=attachment_doc.revision_for(
+            sha256="a" * 64, converter_name="xlsx:primary", converter_version="1",
+        ),
+        text="9월 기성 청구액은 15억입니다",
+        converter_name="xlsx:primary", converter_version="1",
+        # metadata 는 그대로 두고 변환만 다시 돌린 경우다.
+        staged_at="2026-09-22T10:00:00+00:00",
+        converted_at="2026-09-25T09:00:00+00:00",
+    )
+    assert first.revision != second.revision, "재변환이 같은 경로를 쓰면 덮어쓴다"
+    _write(archive, first)
+    _write(archive, second)
 
-    _channel_raw(archive)
-    _write(archive, _doc(revision="old000000000", text="옛 판",
-                         staged_at="2026-08-01T10:00:00+00:00"))
-    _write(archive, _doc(revision="new000000000", text="새 판",
-                         staged_at="2026-09-22T10:00:00+00:00"))
+    got = reader.evidence(archive, [])
 
-    keep, stale = reindex_attachments.plan(ArchiveStore(archive))
-
-    assert [str(doc.path).endswith("new000000000.md") for doc in keep] == [True]
-    assert stale, "옛 판 좌표가 정리 목록에 있어야 한다"
-    assert all("old000000000" in path for path, _, _ in stale)
+    assert [doc.revision for doc in got] == [second.revision]
+    assert "15억" in got[0].text
 
 
-def test_the_reindex_plan_is_empty_when_there_is_nothing_to_do(archive):
-    import sys
+def test_the_same_file_id_in_two_workspaces_stays_two_documents(archive):
+    """워크스페이스가 접히면 **한쪽 ACL 로 다른 회사 본문이 열린다**(원칙 4)."""
+    _write(archive, _doc(text="우리 기성 15억"))
+    _write(archive, _doc(workspace="tyfin", text="남의 기성 99억",
+                         channel="#팀_회계(ABB999)_주간보고",
+                         acl=frozenset({"#팀_회계(ABB999)_주간보고"})))
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-    import reindex_attachments
+    got = reader.evidence(archive, [])
 
-    _channel_raw(archive)
-    _write(archive, _doc())
-
-    keep, stale = reindex_attachments.plan(ArchiveStore(archive))
-
-    assert len(keep) == 1
-    assert stale == []
+    assert sorted(doc.workspace for doc in got) == ["tyfin", "tyit"]
+    assert {doc.text for doc in got} == {"우리 기성 15억", "남의 기성 99억"}
 
 
-def test_the_reindex_script_refuses_without_a_database(monkeypatch, capsys):
-    import sys
+def test_an_existing_document_with_an_empty_acl_is_not_evidence(archive):
+    """빈 ACL 은 「제한 없음」 으로 읽힐 수 있다. 막는 쪽이 기본값이다(원칙 3).
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-    import reindex_attachments
+    2026-09-26 이전 `render` 가 실제로 그런 문서를 썼다 — 채널명이 `#` 로 시작해
+    파서가 주석으로 읽었다. 그 문서들이 아직 디스크에 있다.
+    """
+    path = archive / _doc().relative_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        attachment_doc.render(_doc()).replace(f"acl: [{CHANNEL}]", "acl:"),
+        encoding="utf-8",
+    )
 
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr(sys, "argv", ["reindex_attachments.py", "--dry-run"])
-    monkeypatch.setattr("tybot.envfile.load_env_file", lambda: "")
+    assert reader.evidence(archive, []) == []
+    assert [d for d in ArchiveStore(archive).docs() if "attachments" in str(d.path)] == []
 
-    assert reindex_attachments.main() == 2
-    assert "DATABASE_URL" in capsys.readouterr().out
+
+def test_a_document_filed_under_the_wrong_channel_is_refused(archive):
+    """경로와 프론트매터 좌표가 어긋나면 **엉뚱한 채널의 근거**가 된다.
+
+    그림자 수집 경로를 잘못 적으면 그렇게 된다 — 파일은 `C_OTHER` 아래 있고
+    문서는 자기가 `C0FUND` 라고 말한다. 어느 쪽이 참인지 고를 근거가 없다.
+    """
+    doc = _doc()
+    wrong = (
+        archive / "workspaces" / WS / "channels" / "C_OTHER"
+        / "attachments" / doc.file_id / f"{doc.revision}.md"
+    )
+    wrong.parent.mkdir(parents=True, exist_ok=True)
+    wrong.write_text(attachment_doc.render(doc), encoding="utf-8")
+
+    assert reader.source_files(archive) == [wrong], "글롭에는 걸려야 한다"
+    assert reader.evidence(archive, []) == []

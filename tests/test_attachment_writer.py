@@ -66,7 +66,9 @@ def _write(tmp_path, results):
         workspace="tyit",
         channel_id="C1",
         channel="#팀-전산_abb155-공지",
-        visibility="공개",
+        # **`public`·`private` 만 값이다.** 오래 `"공개"` 를 넘겼고, 권한은
+        # 같았지만(모르는 값은 비공개로 읽힌다) 정본 검증이 그 문서를 거절했다.
+        visibility="private",
         acl=frozenset({"#팀-전산_abb155-공지"}),
     )
 
@@ -167,14 +169,48 @@ def test_a_blocked_attachment_still_gets_a_document(tmp_path):
     assert "개인정보" in body
 
 
-def test_rewriting_the_same_revision_replaces_it(tmp_path):
-    """같은 원본을 다시 변환하면 같은 판이다. 판이 쌓이면 근거가 늘어난 것처럼 보인다."""
-    _write(tmp_path, [_staged(tmp_path)])
-    (doc,) = _write(tmp_path, [_staged(tmp_path, body="고친 본문")])
+def test_writing_the_same_revision_again_is_idempotent(tmp_path):
+    """같은 판을 다시 써도 판이 쌓이지 않는다. 쌓이면 근거가 늘어난 것처럼 보인다."""
+    (first,) = _write(tmp_path, [_staged(tmp_path)])
+    (again,) = _write(tmp_path, [_staged(tmp_path)])
 
-    holder = (tmp_path / "archive" / doc.relative_path()).parent
-    assert [p.name for p in sorted(holder.glob("*.md"))] == [f"{doc.revision}.md"]
-    assert "고친 본문" in (tmp_path / "archive" / doc.relative_path()).read_text(encoding="utf-8")
+    holder = (tmp_path / "archive" / first.relative_path()).parent
+    assert [p.name for p in sorted(holder.glob("*.md"))] == [f"{first.revision}.md"]
+    assert again.revision == first.revision
+
+
+def test_the_same_revision_is_never_overwritten_with_other_content(tmp_path):
+    """**덮으면 이미 나간 답변의 출처가 조용히 달라진다.**
+
+    revision 은 원본·변환기·판·설정에서 결정적으로 나온다. 같은 경로에 다른
+    내용이 나왔다면 그 넷 중 하나가 revision 에 안 들어갔다는 뜻이고, 그건
+    덮어쓸 이유가 아니라 **고쳐야 할 신호**다.
+    """
+    (doc,) = _write(tmp_path, [_staged(tmp_path)])
+    path = tmp_path / "archive" / doc.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = _write(tmp_path, [_staged(tmp_path, body="고친 본문")])
+
+    assert written == [], "덮어쓰기를 성공으로 보고하면 안 된다"
+    assert path.read_text(encoding="utf-8") == before
+    assert "고친 본문" not in before
+
+
+def test_what_the_writer_wrote_is_what_the_reader_accepts(tmp_path):
+    """쓰는 쪽과 읽는 쪽의 계약이 갈리면 **자료가 조용히 사라진다.**
+
+    실제로 그랬다 — writer 가 `visibility: 공개` 를 적었고, reader 는 모르는 값
+    이라 문서를 통째로 거절했다. 오류는 없었다.
+    """
+    from tybot.archive import attachment_reader
+
+    (doc,) = _write(tmp_path, [_staged(tmp_path)])
+    root = tmp_path / "archive"
+    path = root / doc.relative_path()
+
+    assert attachment_reader.load_checked(path, root) is not None
+    assert len(attachment_reader.evidence(root, [])) == 1
 
 
 def test_no_temporary_file_is_left_behind(tmp_path):
@@ -205,6 +241,7 @@ def test_the_same_attachment_is_not_counted_twice_during_the_overlap(tmp_path):
     class _RawDoc:
         channel_id: str
         raw_lines: list
+        workspace: str = "tyit"
 
     @dataclass
     class _Line:

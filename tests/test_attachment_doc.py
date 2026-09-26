@@ -247,6 +247,7 @@ class _Line:
 class _RawDoc:
     channel_id: str
     raw_lines: list = field(default_factory=list)
+    workspace: str = "tyit"
 
 
 def test_legacy_extract_lines_are_found_per_channel():
@@ -255,10 +256,12 @@ def test_legacy_extract_lines_are_found_per_channel():
         _RawDoc("C2", [_Line("[첨부본문:메모.txt] 한 줄")]),
     ])
 
-    assert index.has("C1", "주간보고.hwpx")
-    assert index.has("C2", "메모.txt")
+    assert index.has("tyit", "C1", "주간보고.hwpx")
+    assert index.has("tyit", "C2", "메모.txt")
     # 채널이 다르면 다른 첨부다.
-    assert not index.has("C2", "주간보고.hwpx")
+    assert not index.has("tyit", "C2", "주간보고.hwpx")
+    # 워크스페이스가 다르면 **다른 회사**다(원칙 4).
+    assert not index.has("tyfin", "C1", "주간보고.hwpx")
 
 
 def test_a_plain_line_is_not_mistaken_for_an_attachment():

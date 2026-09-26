@@ -120,6 +120,12 @@ class AttachmentDoc:
     filetype: str = ""
     sha256: str = ""
     staged_at: str = ""
+    # 변환이 **끝난** 시각. `staged_at` 은 metadata 를 쓴 시각이라 재변환에서 둘이
+    # 갈린다. 최신 판정은 이쪽으로 한다 — 없으면 `staged_at` 으로 내려간다.
+    converted_at: str = ""
+    # 어떤 변환기가 읽었나. revision 의 재료이자, 나중에 그 판을 재현하는 근거다.
+    converter_name: str = ""
+    converter_version: str = ""
     # 얼마나 읽었나. 모르면 None — 0 으로 만들면 모르는 것을 안다고 적는 셈이다.
     coverage_read: int | None = None
     coverage_total: int | None = None
@@ -160,20 +166,50 @@ def _safe(value: str) -> str:
     return cleaned[:120] or "_"
 
 
-def revision_of(sha256: str, *, staged_at: str = "") -> str:
-    """이 변환본의 판 번호.
+def revision_for(
+    *,
+    sha256: str,
+    converter_name: str = "",
+    converter_version: str = "",
+    config: dict | None = None,
+    staged_at: str = "",
+) -> str:
+    """이 변환본의 판 번호. **원본만으로 정하지 않는다.**
 
-    원본 sha256 앞자리를 쓴다 — 같은 원본을 다시 변환하면 같은 revision 이므로
-    덮어쓰기가 되고, 원본이 바뀌면 새 판이 된다.
+    전에는 원본 sha256 앞자리였다. 그러면 같은 파일을 **더 나은 변환기로 다시
+    읽어도 같은 경로**가 되어 덮어쓴다. 그 변환본을 인용한 답변이 이미 나가
+    있으면, 사람이 출처를 눌렀을 때 인용된 문장이 없다.
 
-    sha256 을 모르면 시각으로 대신한다. 좋지 않지만 **경로를 못 만드는 것보다는
-    낫다** — 못 만들면 그 첨부는 정본이 아예 안 생긴다.
+    네 가지에서 나온다 — 원본 해시, 변환기 이름, 변환기 판, 출력에 영향을 주는
+    설정. 하나라도 다르면 다른 판이고, 다른 판은 **덮지 않고 나란히 쌓인다**.
+
+    `archiving_state.attachment_revision` 과 같은 규칙을 쓴다. 두 곳이 갈리면
+    DB 가 아는 revision 과 파일 경로가 어긋나고, 그때 근거를 못 찾는다.
+
+    변환기를 모르는 옛 metadata 는 **원본 해시만으로** 계산한다 — 그래야 이미
+    쓰여 있는 정본의 경로가 바뀌지 않는다.
     """
     digest = (sha256 or "").strip()
-    if digest:
+    if not digest:
+        stamp = re.sub(r"[^0-9]", "", staged_at or "")[:14]
+        return f"t{stamp}" if stamp else "unknown"
+    if not converter_name:
+        # 옛 metadata. 경로를 바꾸면 이미 있는 정본이 고아가 된다.
         return digest[:REVISION_LENGTH]
-    stamp = re.sub(r"[^0-9]", "", staged_at or "")[:14]
-    return f"t{stamp}" if stamp else "unknown"
+
+    from .archiving_state import attachment_revision
+
+    return attachment_revision(
+        source_sha256=digest,
+        converter_name=converter_name,
+        converter_version=converter_version,
+        config=config or {},
+    )[:REVISION_LENGTH]
+
+
+def revision_of(sha256: str, *, staged_at: str = "") -> str:
+    """옛 이름. 변환기를 모르는 호출부가 아직 쓴다."""
+    return revision_for(sha256=sha256, staged_at=staged_at)
 
 
 # ---------------------------------------------------------------------------
@@ -226,8 +262,12 @@ def from_staged(
         channel=channel,
         file_id=file_id,
         name=str(meta.get("name") or ""),
-        revision=revision_of(
-            str(meta.get("sha256") or ""), staged_at=str(meta.get("staged_at") or "")
+        revision=revision_for(
+            sha256=str(meta.get("sha256") or ""),
+            converter_name=str(meta.get("converter_name") or ""),
+            converter_version=str(meta.get("converter_version") or ""),
+            config=meta.get("converter_config") or {},
+            staged_at=str(meta.get("staged_at") or ""),
         ),
         visibility=visibility,
         acl=frozenset(acl),
@@ -238,6 +278,9 @@ def from_staged(
         filetype=str(meta.get("filetype") or ""),
         sha256=str(meta.get("sha256") or ""),
         staged_at=str(meta.get("staged_at") or ""),
+        converted_at=str(meta.get("converted_at") or ""),
+        converter_name=str(meta.get("converter_name") or ""),
+        converter_version=str(meta.get("converter_version") or ""),
         coverage_read=_int_or_none(meta.get("coverage_read")),
         coverage_total=_int_or_none(meta.get("coverage_total")),
         error_code=str(meta.get("error_code") or ""),
@@ -307,6 +350,12 @@ def render(doc: AttachmentDoc) -> str:
         head.append(f"sha256: {doc.sha256}")
     if doc.staged_at:
         head.append(f"staged_at: {doc.staged_at}")
+    if doc.converted_at:
+        head.append(f"converted_at: {doc.converted_at}")
+    if doc.converter_name:
+        head.append(f"converter_name: {doc.converter_name}")
+    if doc.converter_version:
+        head.append(f"converter_version: {doc.converter_version}")
     if doc.coverage_total is not None:
         head.append(f"coverage_read: {doc.coverage_read}")
         head.append(f"coverage_total: {doc.coverage_total}")
@@ -359,23 +408,30 @@ class LegacyIndex:
     이름으로 다리를 놓는다(모듈 머리말).
     """
 
-    by_channel: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: 키는 `(workspace, channel_id)` 다. 채널 ID 만 쓰면 다른 워크스페이스의
+    #: 같은 채널 ID 가 이 채널 정본을 지운다 — 회사 경계를 넘는 실수다(원칙 4).
+    by_channel: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
 
-    def has(self, channel_id: str, name: str) -> bool:
+    def has(self, workspace: str, channel_id: str, name: str) -> bool:
         if not name:
             return False
-        return name in self.by_channel.get(channel_id or "", frozenset())
+        return name in self.by_channel.get(
+            (workspace or "", channel_id or ""), frozenset()
+        )
 
 
 def legacy_index(docs) -> LegacyIndex:
     """채널 원문에서 `[첨부추출:…]`·`[첨부본문:…]` 이름을 걷는다."""
-    found: dict[str, set[str]] = {}
+    found: dict[tuple[str, str], set[str]] = {}
     for doc in docs:
-        channel_id = str(getattr(doc, "channel_id", "") or "")
+        key = (
+            str(getattr(doc, "workspace", "") or ""),
+            str(getattr(doc, "channel_id", "") or ""),
+        )
         for line in getattr(doc, "raw_lines", []):
             match = LEGACY_LINE.match(str(getattr(line, "text", "")))
             if match:
-                found.setdefault(channel_id, set()).add(match.group("name").strip())
+                found.setdefault(key, set()).add(match.group("name").strip())
     return LegacyIndex({key: frozenset(value) for key, value in found.items()})
 
 
@@ -413,4 +469,7 @@ def usable_evidence(
     - file ID 당 최신 revision 하나만
     """
     current = pick_current([doc for doc in attachments if doc.usable])
-    return [doc for doc in current if not legacy.has(doc.channel_id, doc.name)]
+    return [
+        doc for doc in current
+        if not legacy.has(doc.workspace, doc.channel_id, doc.name)
+    ]
