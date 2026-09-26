@@ -51,6 +51,7 @@ from tybot.archive.convert import (
     Coverage,
     can_convert,
     collect_coverage,
+    conversion_stamp,
     convert,
 )
 from tybot.archive.store import ArchiveStore
@@ -120,6 +121,13 @@ def _record_result(item, *, status: str, error: str = "", body: list[str] | None
             "reprocessed_at": datetime.now(UTC).isoformat(timespec="seconds"),
             **(ScreenMetadata.of(screen_result).to_json() if screen_result else {}),
             **(coverage.to_json() if coverage else {}),
+            # 재변환도 **최초 수집과 같은 함수**로 변환기 신원을 적는다. 빼면
+            # 정본 revision 이 옛 신원으로 계산돼 더 나은 변환 결과가 같은 경로에
+            # 겹치고, writer 가 거절한다 — 사람에게는 「안 바뀐다」 로만 보인다.
+            **conversion_stamp(
+                str(meta.get("filetype") or ""), coverage,
+                produced=body is not None and status != "pii_refused",
+            ),
         })
         tmp = item.meta_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

@@ -239,3 +239,59 @@ def test_the_repair_reads_rights_from_the_real_channel_document(archive):
     assert len(found) == 1 and found[0].fixable
     assert repair.apply_fix(found[0]) is True
     assert len(reader.evidence(archive, channels)) == 1
+
+
+# --- 권한 문제가 아닌 것 ----------------------------------------------------------
+#
+# 2026-09-26 오너 QA 4번. 복구 대상은 권한 칸뿐이지만, **막는 대상은 reader 가
+# 거절하는 전부**다. 좁게 막으면 사라진 자료를 못 본 채 재색인이 지나간다.
+
+def test_an_unknown_conversion_state_blocks_but_is_not_fixable(archive):
+    """「다 읽었다」 인지 「절반만」 인지 모르는 문서를 본문으로 쓰면 안 된다."""
+    _write(archive, _doc(conversion_state="이상한상태"))
+
+    (found,) = repair.survey(archive, [_Channel()])
+
+    assert found.code == "unknown_state"
+    assert not found.fixable
+    assert "사람이 확인" in repair.blocking_reason([found])
+
+
+def test_a_missing_required_field_blocks_but_is_not_fixable(archive):
+    """좌표가 없는 본문은 출처도 권한도 중복 방지도 할 수 없다."""
+    _write(archive, _doc(), mangle=lambda t: t.replace("file_id: F1\n", ""))
+
+    (found,) = repair.survey(archive, [_Channel()])
+
+    assert found.code == "missing_field"
+    assert not found.fixable
+
+
+def test_a_path_mismatch_blocks_but_is_not_fixable(archive):
+    """경로와 좌표가 어긋나면 어느 쪽이 참인지 고를 근거가 없다."""
+    doc = _doc()
+    wrong = (
+        archive / "workspaces" / WS / "channels" / "C_OTHER"
+        / "attachments" / doc.file_id / f"{doc.revision}.md"
+    )
+    wrong.parent.mkdir(parents=True, exist_ok=True)
+    wrong.write_text(attachment_doc.render(doc), encoding="utf-8")
+
+    (found,) = repair.survey(archive, [_Channel()])
+
+    assert found.code == "path_mismatch"
+    assert not found.fixable
+
+
+def test_the_survey_uses_the_readers_judgement(archive):
+    """판정이 두 곳에 있으면 한 곳만 고치는 날이 오고, 그날 둘이 갈린다."""
+    from tybot.archive import attachment_reader as reader_mod
+
+    _write(archive, _doc(conversion_state="이상한상태"))
+    path = reader_mod.source_files(archive)[0]
+
+    problem = reader_mod.validate(reader_mod.load(path), path, archive)
+    (found,) = repair.survey(archive, [_Channel()])
+
+    assert found.code == problem.code
+    assert found.problem == problem.message

@@ -136,6 +136,30 @@ def converter_name(filetype: str, flags=()) -> str:
     return f"{kind}:fallback" if FALLBACK_CONVERTER in set(flags) else f"{kind}:primary"
 
 
+def conversion_stamp(filetype: str, coverage=None, *, produced: bool) -> dict:
+    """metadata 에 적을 **변환기 신원과 변환 시각.**
+
+    최초 수집(`files.stage_attachments`)과 재변환(`drain_conversion_queue`·
+    `convert_staged_attachments`)이 **같은 함수를 쓴다.** 한쪽만 적으면 재변환한
+    첨부의 revision 이 옛 신원으로 계산되어 **같은 경로에 겹쳐 쓰이려 하고**,
+    그 순간 writer 가 거절하거나(지금) 덮어쓴다(전에). 둘 다 사람이 모른다.
+
+    `produced` 는 본문이 나왔나다. 안 나왔으면 변환 시각을 적지 않는다 — 실패한
+    시도를 「이때 변환됨」 으로 적으면 최신 판정이 실패 쪽으로 기운다.
+    """
+    from datetime import UTC, datetime
+
+    flags = tuple(getattr(coverage, "flags", ()) or ())
+    stamp = {
+        "converter_name": converter_name(filetype, flags),
+        "converter_version": CONVERTER_VERSION,
+        "converter_config": config_snapshot(),
+    }
+    if produced:
+        stamp["converted_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    return stamp
+
+
 class ConvertError(RuntimeError):
     """변환 실패. 목록 줄은 남기고 경고로 올린다."""
 

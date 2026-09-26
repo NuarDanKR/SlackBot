@@ -182,7 +182,12 @@ def attachment_paths(store: ArchiveStore, keep) -> list[str]:
 
 
 def fetch_existing(paths: list[str]) -> set[Key]:
-    """DB 에 실제로 있는 행의 좌표. 없으면 빈 집합."""
+    """DB 에 실제로 있는 행의 좌표. 없으면 빈 집합.
+
+    **이름으로 읽는다.** `workspace_store._connect` 는 `dict_row` 연결이라 행이
+    `dict` 로 온다 — `row[0]` 은 `KeyError` 다. 그러면 정리 목록이 비는 게 아니라
+    스크립트가 터지고, 터지기 전까지는 아무것도 안 지워진다.
+    """
     if not paths:
         return set()
     from tybot.console.workspace_store import _connect
@@ -193,7 +198,10 @@ def fetch_existing(paths: list[str]) -> set[Key]:
             "WHERE doc_path = ANY(%s)",
             (paths,),
         )
-        return {(str(r[0]), int(r[1]), str(r[2])) for r in cur.fetchall()}
+        return {
+            (str(r["doc_path"]), int(r["line_no"]), str(r["content_sha"]))
+            for r in cur.fetchall()
+        }
 
 
 def plan(store: ArchiveStore, fetch=fetch_existing) -> tuple[list, list[Key]]:
@@ -292,7 +300,9 @@ def main() -> int:
         indexed = search_index.reindex(keep, store.root)
         removed = delete(stale)
 
-    print(f"\n색인한 줄: {indexed['lines']}개")
+    # **실제로 들어간 줄**이다. 보낸 줄 수를 적으면 두 번째 실행도 같은 수를
+    # 보고하고, 그러면 멱등한지 출력으로는 알 수 없다.
+    print(f"\n새로 색인한 줄: {indexed['lines']}개 (보낸 줄 {indexed['seen_lines']}개)")
     print(f"뺀 과거 색인 행: {removed}개")
     print("원문 MD 와 정본 MD 는 건드리지 않았습니다.")
     return 0

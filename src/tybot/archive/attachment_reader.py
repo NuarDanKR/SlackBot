@@ -43,12 +43,18 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from .attachment_doc import (
+    BLOCKED,
     CONVERTED,
+    FAILED,
     NO_BODY_PREFIX,
+    PARTIAL,
     PARTIAL_PREFIX,
+    PENDING,
+    UNSUPPORTED,
     AttachmentDoc,
     legacy_index,
 )
@@ -90,12 +96,37 @@ REQUIRED_FIELDS = ("workspace", "channel_id", "file_id", "revision", "conversion
 #: 프론트매터가 말할 수 있는 공개 범위. 다른 값은 **모르는 값**이고, 모르면 막는다.
 VALID_VISIBILITY = ("public", "private")
 
+#: 우리가 쓰는 변환 상태. 모르는 값이면 본문을 어떻게 다룰지 알 수 없다 —
+#: 「다 읽었다」 인지 「절반만」 인지 「막혔다」 인지가 답을 바꾼다.
+KNOWN_STATES = (CONVERTED, PARTIAL, BLOCKED, FAILED, UNSUPPORTED, PENDING)
+
+#: 채널 권한으로 **되돌릴 수 있는** 문제. 나머지는 사람이 봐야 한다.
+#: `attachment_repair` 가 이 목록으로 고칠 것과 막을 것을 가른다.
+RIGHTS_CODES = ("bad_visibility", "empty_acl")
+
+
+@dataclass(frozen=True)
+class Problem:
+    """정본 한 장이 근거가 못 되는 이유. **코드와 문장을 함께 든다.**
+
+    문장만 돌려주면 읽는 쪽이 문자열을 뒤져 분류하게 되고, 그날 문구를 고치면
+    분류가 조용히 무너진다.
+    """
+
+    code: str
+    message: str
+
+    @property
+    def rights(self) -> bool:
+        """채널 권한으로 되돌릴 수 있나."""
+        return self.code in RIGHTS_CODES
+
 
 class BrokenDoc(ValueError):
     """정본으로 읽을 수 없다. **사유를 들고 있다.**"""
 
 
-def validate(doc: AttachmentDoc, path: Path, root: Path | str) -> str:
+def validate(doc: AttachmentDoc, path: Path, root: Path | str) -> Problem | None:
     """이 문서를 근거로 써도 되나. 안 되면 **사유**를 돌려준다.
 
     ## 왜 검증하나
@@ -113,13 +144,19 @@ def validate(doc: AttachmentDoc, path: Path, root: Path | str) -> str:
     """
     for field_name in REQUIRED_FIELDS:
         if not str(getattr(doc, field_name, "") or "").strip():
-            return f"필수 칸이 비었다: {field_name}"
+            return Problem("missing_field", f"필수 칸이 비었다: {field_name}")
     if doc.visibility not in VALID_VISIBILITY:
-        return f"알 수 없는 visibility: {doc.visibility!r}"
+        return Problem("bad_visibility", f"알 수 없는 visibility: {doc.visibility!r}")
     if doc.visibility == "private" and not doc.acl:
         # 비공개인데 열쇠가 없다. 「아무도 못 본다」 가 아니라 판정 기준이 없는
         # 것이고, `can_access` 는 빈 ACL 을 제한 없음으로 읽을 수 있다.
-        return "비공개 문서인데 ACL 이 비었다"
+        return Problem("empty_acl", "비공개 문서인데 ACL 이 비었다")
+    if doc.conversion_state not in KNOWN_STATES:
+        # 「다 읽었다」 인지 「절반만」 인지 모른 채 본문을 쓰면, 뒤쪽에 있던
+        # 내용을 「없다」 고 답할 수 있다.
+        return Problem(
+            "unknown_state", f"알 수 없는 conversion_state: {doc.conversion_state!r}"
+        )
 
     # 경로와 프론트매터가 **같은 좌표**를 말해야 한다. 어긋나면 어느 쪽이 참인지
     # 고를 근거가 없다 — 한쪽을 믿으면 다른 쪽 채널의 근거가 된다.
@@ -129,8 +166,8 @@ def validate(doc: AttachmentDoc, path: Path, root: Path | str) -> str:
     except OSError:
         same = str(expected) == str(path)
     if not same:
-        return f"경로와 좌표가 어긋난다: {path}"
-    return ""
+        return Problem("path_mismatch", f"경로와 좌표가 어긋난다: {path}")
+    return None
 
 
 def load(path: Path) -> AttachmentDoc | None:
@@ -184,8 +221,8 @@ def load_checked(path: Path, root: Path | str) -> AttachmentDoc | None:
     if doc is None:
         return None
     problem = validate(doc, path, root)
-    if problem:
-        log.warning("첨부 정본을 근거로 쓰지 않는다 (%s): %s", problem, path)
+    if problem is not None:
+        log.warning("첨부 정본을 근거로 쓰지 않는다 (%s): %s", problem.message, path)
         return None
     return doc
 

@@ -31,7 +31,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from .attachment_reader import VALID_VISIBILITY, load, source_files
+from .attachment_reader import VALID_VISIBILITY, load, source_files, validate
 
 log = logging.getLogger("tybot.archive.attachment_repair")
 
@@ -46,6 +46,8 @@ class Finding:
     problem: str
     #: 고칠 값 `(visibility, acl)`. 모르면 `None` — 추측해 채우지 않는다.
     fix: tuple[str, frozenset[str]] | None = None
+    #: `attachment_reader.Problem.code`. 문구가 아니라 이걸로 분류한다.
+    code: str = ""
 
     @property
     def fixable(self) -> bool:
@@ -75,30 +77,32 @@ def channel_rights(channel_docs) -> dict[tuple[str, str], tuple[str, frozenset[s
 
 
 def survey(root: Path | str, channel_docs) -> list[Finding]:
-    """고칠 것과 못 고칠 것. **정상 문서는 나오지 않는다.**"""
+    """근거가 못 되는 정본 전부. **정상 문서는 나오지 않는다.**
+
+    판정은 `attachment_reader.validate` 하나가 한다. 여기서 검사를 다시 쓰면
+    reader 가 거절하는데 여기서는 「깨끗하다」 고 말하는 날이 오고, 그날 재색인이
+    **사라진 자료를 못 본 채** 지나간다.
+
+    고칠 수 있는 것은 **권한 칸뿐**이다(`Problem.rights`). 필수 칸 누락·경로
+    불일치·모르는 상태는 채널 문서로 되돌릴 수 있는 값이 아니다 — 세서 막는다.
+    """
     rights = channel_rights(channel_docs)
     out: list[Finding] = []
     for path in source_files(root):
         doc = load(path)
         if doc is None:
-            out.append(Finding(path, "", "", "정본으로 읽히지 않는다"))
+            out.append(Finding(path, "", "", "정본으로 읽히지 않는다", code="unreadable"))
             continue
-        problem = _rights_problem(doc)
-        if not problem:
+        problem = validate(doc, path, root)
+        if problem is None:
             continue
         key = (doc.workspace, doc.channel_id)
-        out.append(
-            Finding(path, doc.workspace, doc.channel_id, problem, _fix(rights.get(key)))
-        )
+        out.append(Finding(
+            path, doc.workspace, doc.channel_id, problem.message,
+            _fix(rights.get(key)) if problem.rights else None,
+            code=problem.code,
+        ))
     return out
-
-
-def _rights_problem(doc) -> str:
-    if doc.visibility not in VALID_VISIBILITY:
-        return f"알 수 없는 visibility: {doc.visibility!r}"
-    if doc.visibility == "private" and not doc.acl:
-        return "비공개 문서인데 ACL 이 비었다"
-    return ""
 
 
 def _fix(rights: tuple[str, frozenset[str]] | None) -> tuple[str, frozenset[str]] | None:
@@ -122,18 +126,23 @@ def blocking_reason(findings: list[Finding]) -> str:
 
     **고칠 수 있는 것이 남아 있어도 막는다.** 색인은 지금 읽히는 문서만 넣으므로,
     안 고친 문서는 「없는 자료」 로 색인되고 나중에 고쳐도 그 사실이 안 보인다.
+
+    권한 문제가 아닌 것(필수 칸 누락·경로 불일치·모르는 상태)은 복구 대상이
+    아니므로 **사람을 부른다.** 그걸 「고치면 된다」 로 적으면 스크립트를 돌리고
+    건수가 안 줄어드는 자리에서 멈춘다.
     """
     if not findings:
         return ""
     blocked = [f for f in findings if not f.fixable]
+    head = f"근거로 못 쓰는 정본 {len(findings)}건이 있습니다"
     if blocked:
+        kinds = ", ".join(sorted({f.code or "unknown" for f in blocked}))
         return (
-            f"권한 칸이 깨진 정본 {len(findings)}건 중 {len(blocked)}건은 고칠 값이"
-            " 없습니다(채널 문서를 못 찾았거나 채널 권한 자체가 비었습니다)."
-            " 사람이 확인해야 합니다."
+            f"{head} — 그중 {len(blocked)}건은 채널 권한으로 되돌릴 수 없습니다"
+            f"({kinds}). 사람이 확인해야 합니다."
         )
     return (
-        f"권한 칸이 깨진 정본 {len(findings)}건이 남아 있습니다."
+        f"{head} — 전부 채널 권한으로 되돌릴 수 있습니다."
         " 복구를 먼저 반영하세요: scripts/repair_attachment_rights.py --apply"
     )
 

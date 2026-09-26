@@ -141,13 +141,20 @@ def _write_failure_meta(
 def _write_meta(meta_path: pathlib.Path, meta: dict, *, status: str, code: str, body,
                 coverage=None) -> None:
     """메타데이터와 미리보기를 **원자적으로** 바꾼다."""
-    from tybot.archive.convert import PARTIAL
+    from tybot.archive.convert import PARTIAL, conversion_stamp
 
     converted_state = "succeeded"
     if coverage is not None and coverage.state == PARTIAL:
         # 다 읽지 못했다. **성공으로 닫으면 그 답에 우리 출처가 붙는다.**
         converted_state = "partial"
     meta.update(coverage.to_json() if coverage is not None else {})
+    # 재변환도 **최초 수집과 같은 함수**로 변환기 신원을 적는다. 여기를 빼면
+    # 정본 revision 이 옛 신원으로 계산돼, 더 나은 변환기의 결과가 같은 경로에
+    # 겹친다 — writer 가 거절하거나(지금) 덮어쓴다(전에). 둘 다 사람이 모른다.
+    meta.update(conversion_stamp(
+        str(meta.get("filetype") or ""), coverage,
+        produced=body is not None and status != "pii_refused",
+    ))
     meta.update({
         "status": status,
         "conversion_state": "blocked" if status == "pii_refused" else

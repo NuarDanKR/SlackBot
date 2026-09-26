@@ -64,6 +64,32 @@ def raw_lines_for(result, *, separate: bool | None = None) -> list[str]:
     return lines[:1]
 
 
+#: 같은 판인지 볼 때 **세지 않는 칸.** 시각은 변환 결과를 바꾸지 않는다.
+#:
+#: 같은 원본을 같은 변환기·같은 설정으로 다시 읽으면 본문은 같고 시각만 다르다.
+#: 그걸 충돌로 보면 재변환 때마다 error 가 쌓이고, 진짜 충돌이 그 안에 묻힌다.
+#: 반대로 본문이나 **권한·출처 칸**이 다르면 그건 다른 문서다 — 거기서 막는다.
+VOLATILE_FIELDS = ("staged_at", "converted_at", "reprocessed_at")
+
+
+def same_evidence(existing: str, incoming: str) -> bool:
+    """두 정본이 **같은 근거**인가. 시각만 다른 것은 같은 근거다."""
+    return _comparable(existing) == _comparable(incoming)
+
+
+def _comparable(text: str) -> tuple:
+    """시각을 뺀 프론트매터와 본문. 비교에만 쓴다."""
+    from .store import parse_frontmatter
+
+    front = {
+        key: str(value)
+        for key, value in (parse_frontmatter(text) or {}).items()
+        if key not in VOLATILE_FIELDS
+    }
+    _, _, body = text.partition("\n---\n")
+    return (tuple(sorted(front.items())), body.strip())
+
+
 def write_docs(
     archive_root: Path | str,
     results,
@@ -111,7 +137,7 @@ def write_docs(
             # 같은 내용이면 아무 일도 안 한다(멱등). 다르면 **쓰지 않고 알린다.**
             if path.exists():
                 existing = path.read_text(encoding="utf-8")
-                if existing == body:
+                if same_evidence(existing, body):
                     written.append(doc)
                     continue
                 logger.error(

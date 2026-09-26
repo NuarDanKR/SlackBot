@@ -311,8 +311,146 @@ def test_the_script_refuses_while_broken_documents_remain(archive, monkeypatch, 
     monkeypatch.setattr(sys, "argv", ["reindex_attachments.py", "--dry-run"])
 
     assert script.main() == 3
-    assert "권한 칸이 깨진" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "근거로 못 쓰는 정본 1건" in out
+    assert "repair_attachment_rights.py" in out, "고칠 수 있는 건 가는 길을 알려야 한다"
 
 
 def _never_called(paths):
     raise AssertionError(f"색인을 열면 안 된다: {len(paths)}개 경로")
+
+
+# --- 진짜 DB 모양으로 ------------------------------------------------------------
+#
+# 2026-09-26 오너 QA 1·5번. 여기서 확인하는 것은 판정이 아니라 **드라이버 계약**이다.
+#
+# - `workspace_store._connect` 는 `dict_row` 다. 행을 `row[0]` 으로 읽으면 KeyError 고,
+#   그러면 정리가 안 되는 게 아니라 스크립트가 터진다
+# - `ON CONFLICT DO NOTHING` 으로 건너뛴 행을 「넣었다」 로 세면 두 번째 실행도
+#   첫 번째와 같은 건수를 보고한다 — 멱등한지 출력으로는 알 수 없다
+
+
+class FakeCursor:
+    """`raw_line` 한 표. **psycopg 가 하는 대로** 돌려준다."""
+
+    def __init__(self, rows: dict):
+        self._rows = rows
+        self._result: list[dict] = []
+        self.rowcount = -1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def execute(self, sql, params=None):
+        assert "SELECT doc_path" in sql, sql
+        wanted = set(params[0])
+        self._result = [
+            {"doc_path": key[0], "line_no": key[1], "content_sha": key[2]}
+            for key in sorted(self._rows)
+            if key[0] in wanted
+        ]
+        self.rowcount = len(self._result)
+
+    def executemany(self, sql, rows):
+        if "INSERT INTO raw_line" in sql:
+            new = 0
+            for row in rows:
+                key = (row[2], row[3], row[7])
+                if key not in self._rows:
+                    self._rows[key] = row
+                    new += 1
+            self.rowcount = new  # ON CONFLICT 로 건너뛴 행은 안 센다
+            return
+        assert "DELETE FROM raw_line" in sql, sql
+        gone = 0
+        for key in rows:
+            if tuple(key) in self._rows:
+                del self._rows[tuple(key)]
+                gone += 1
+        self.rowcount = gone
+
+    def fetchall(self):
+        return self._result
+
+
+class FakeConn:
+    def __init__(self, rows: dict):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def cursor(self):
+        return FakeCursor(self._rows)
+
+
+def _run_main(monkeypatch, archive, rows) -> str:
+    from tybot import search_index
+    from tybot.console import workspace_store
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/none")
+    monkeypatch.setattr("tybot.envfile.load_env_file", lambda: "")
+    monkeypatch.setattr("tybot.paths.archive_dir", lambda: str(archive))
+    monkeypatch.setattr(search_index, "_connect", lambda: FakeConn(rows))
+    monkeypatch.setattr(workspace_store, "_connect", lambda: FakeConn(rows))
+    monkeypatch.setattr(sys, "argv", ["reindex_attachments.py"])
+
+    assert script.main() == 0
+
+
+def test_rows_are_read_by_name_not_by_position(archive, monkeypatch, capsys):
+    """`dict_row` 연결에서 `row[0]` 은 KeyError 다. 터지면 아무것도 안 지워진다."""
+    rows: dict = {}
+    _write(archive, _doc(revision="old000000000", text="옛 판",
+                         staged_at="2026-08-01T10:00:00+00:00"))
+    _run_main(monkeypatch, archive, rows)
+    capsys.readouterr()
+
+    _write(archive, _doc(revision="new000000000", text="새 판",
+                         staged_at="2026-09-22T10:00:00+00:00"))
+    _run_main(monkeypatch, archive, rows)
+
+    out = capsys.readouterr().out
+    assert "뺀 과거 색인 행: 0개" not in out, "옛 판을 찾아 지웠어야 한다"
+    assert not any("old000000000" in key[0] for key in rows)
+
+
+def test_the_second_run_reports_zero_inserted_and_zero_removed(archive, monkeypatch, capsys):
+    """멱등성은 **출력으로 확인할 수 있어야** 한다."""
+    rows: dict = {}
+    _write(archive, _doc(revision="old000000000", text="옛 판",
+                         staged_at="2026-08-01T10:00:00+00:00"))
+    _run_main(monkeypatch, archive, rows)
+    _write(archive, _doc(revision="new000000000", text="새 판",
+                         staged_at="2026-09-22T10:00:00+00:00"))
+    _run_main(monkeypatch, archive, rows)
+    settled = dict(rows)
+    capsys.readouterr()
+
+    _run_main(monkeypatch, archive, rows)
+
+    out = capsys.readouterr().out
+    assert "새로 색인한 줄: 0개" in out
+    assert "뺀 과거 색인 행: 0개" in out
+    assert rows == settled
+
+
+def test_a_broken_document_stops_the_run_before_the_index(archive, monkeypatch, capsys):
+    """reader 가 거절하는 문서를 색인하면 「없는 자료」 로 굳는다."""
+    rows: dict = {}
+    _write(archive, _doc(conversion_state="누가봐도이상한상태"))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/none")
+    monkeypatch.setattr("tybot.envfile.load_env_file", lambda: "")
+    monkeypatch.setattr("tybot.paths.archive_dir", lambda: str(archive))
+    monkeypatch.setattr(script, "fetch_existing", _never_called)
+    monkeypatch.setattr(sys, "argv", ["reindex_attachments.py", "--dry-run"])
+
+    assert script.main() == 3
+    assert "unknown_state" in capsys.readouterr().out
+    assert rows == {}

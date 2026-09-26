@@ -252,3 +252,50 @@ def test_the_same_attachment_is_not_counted_twice_during_the_overlap(tmp_path):
     ])
 
     assert ad.usable_evidence([doc], legacy) == []
+
+
+# --- 같은 판인가 -----------------------------------------------------------------
+def test_the_same_conversion_at_a_later_time_is_still_the_same_document(tmp_path):
+    """시각만 다른 재변환은 **충돌이 아니다.**
+
+    같은 원본을 같은 변환기·같은 설정으로 다시 읽으면 본문은 같고 `staged_at`·
+    `converted_at` 만 달라진다. 그걸 거절로 보면 재변환마다 error 가 쌓이고,
+    진짜 충돌이 그 안에 묻힌다.
+    """
+    (first,) = _write(tmp_path, [_staged(tmp_path, converted_at="2026-09-23T10:00:00+00:00")])
+    path = tmp_path / "archive" / first.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = _write(tmp_path, [_staged(
+        tmp_path,
+        staged_at="2026-09-26T08:00:00+00:00",
+        converted_at="2026-09-26T08:00:05+00:00",
+    )])
+
+    assert [doc.revision for doc in written] == [first.revision], "멱등 성공이어야 한다"
+    assert path.read_text(encoding="utf-8") == before, "본문이 같으면 다시 쓰지 않는다"
+
+
+def test_a_changed_acl_is_a_conflict_even_with_the_same_body(tmp_path):
+    """본문이 같아도 **권한이 달라지면 다른 문서다.** 조용히 넘기면 범위가 바뀐다."""
+    (doc,) = _write(tmp_path, [_staged(tmp_path)])
+    path = tmp_path / "archive" / doc.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = aw.write_docs(
+        tmp_path / "archive", [_staged(tmp_path)],
+        workspace="tyit", channel_id="C1", channel="#팀-전산_abb155-공지",
+        visibility="public", acl=frozenset({"#다른방"}),
+    )
+
+    assert written == []
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_changed_permalink_is_a_conflict(tmp_path):
+    """출처가 달라진 것도 같은 판이 아니다 — 사람이 누르는 자리가 바뀐다."""
+    _write(tmp_path, [_staged(tmp_path, permalink="https://slack.example/a")])
+
+    written = _write(tmp_path, [_staged(tmp_path, permalink="https://slack.example/b")])
+
+    assert written == []

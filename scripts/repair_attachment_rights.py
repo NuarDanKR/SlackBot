@@ -63,11 +63,11 @@ def main() -> int:
 
     fixable = [f for f in findings if f.fixable]
     blocked = [f for f in findings if not f.fixable]
-    print(f"권한 칸이 깨진 정본: {len(findings)}건")
+    print(f"근거로 못 쓰는 정본: {len(findings)}건")
     print(f"  · 채널 권한으로 고칠 수 있음: {len(fixable)}건")
     print(f"  · 고칠 값이 없음(사람 확인): {len(blocked)}건")
     for finding in blocked[:10]:
-        print(f"      {finding.path}: {finding.problem}")
+        print(f"      [{finding.code or 'unknown'}] {finding.path}: {finding.problem}")
     if len(blocked) > 10:
         print(f"      … 외 {len(blocked) - 10}건")
 

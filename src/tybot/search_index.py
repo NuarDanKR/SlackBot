@@ -206,12 +206,16 @@ def reindex(docs, root=None, *, batch: int = 1000) -> dict:
     (원칙 1) 줄이 사라지는 일은 문서가 다시 쓰일 때뿐이고, 그때는 `content_sha` 가
     달라져 새 행이 들어온다. 옛 행은 쌓이지만 점수 계산에서 걸러진다 —
     문서에 없는 줄 번호는 조회 뒤 매칭에서 떨어진다.
+
+    `lines` 는 **실제로 들어간 줄**이다(`ON CONFLICT` 로 건너뛴 행 제외). 보낸 줄
+    수는 `seen_lines` 로 따로 돌려준다 — 둘이 같으면 전부 새 줄이었다는 뜻이다.
     """
     conn = _connect()
     if conn is None:
         raise IndexError_("DATABASE_URL 이 없거나 DB 에 붙지 못했습니다.")
 
     written = 0
+    seen_lines = 0
     seen_docs = 0
     try:
         with conn, conn.cursor() as cur:
@@ -234,6 +238,7 @@ def reindex(docs, root=None, *, batch: int = 1000) -> dict:
                         line.text,
                         content_sha(doc.channel, line.lineno, line.text),
                     ))
+                    seen_lines += 1
                     if len(rows) >= batch:
                         written += _flush(cur, rows)
                         rows = []
@@ -243,8 +248,8 @@ def reindex(docs, root=None, *, batch: int = 1000) -> dict:
     except Exception as exc:
         raise IndexError_(f"색인 실패: {exc}") from exc
 
-    log.info("검색 색인 문서=%d 줄=%d", seen_docs, written)
-    return {"docs": seen_docs, "lines": written}
+    log.info("검색 색인 문서=%d 보낸 줄=%d 새 줄=%d", seen_docs, seen_lines, written)
+    return {"docs": seen_docs, "lines": written, "seen_lines": seen_lines}
 
 
 def content_sha(channel: str, lineno: int, text: str) -> str:
@@ -256,6 +261,12 @@ def content_sha(channel: str, lineno: int, text: str) -> str:
 
 
 def _flush(cur, rows: list[tuple]) -> int:
+    """넣은 줄 수. **`ON CONFLICT` 로 건너뛴 행은 안 센다.**
+
+    보낸 줄 수를 돌려주면 두 번째 실행도 첫 번째와 같은 건수를 보고한다 — 그러면
+    멱등한지 아닌지를 출력으로는 알 수 없다. `rowcount` 를 못 읽는 드라이버에서만
+    보낸 줄 수로 내려간다.
+    """
     if not rows:
         return 0
     cur.executemany(
@@ -268,7 +279,10 @@ def _flush(cur, rows: list[tuple]) -> int:
         """,
         rows,
     )
-    return len(rows)
+    affected = getattr(cur, "rowcount", None)
+    if affected is None or affected < 0:
+        return len(rows)
+    return int(affected)
 
 
 def indexed_at() -> str | None:
