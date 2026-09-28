@@ -584,6 +584,89 @@ def test_the_route_survives_a_reassignment(conn):
         assert cur.fetchone()[0] == "shadow"
 
 
+@needs_db
+def test_an_existing_specialist_bot_enters_the_catalog(conn):
+    """승인받아 쓰던 전문 봇이 카탈로그에 없으면, 그 봇의 라우트는 주인이 없다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO specialist_bot"
+            " (key, name, domain, adapter, state, health, created_by, updated_by)"
+            " VALUES ('atlas','아틀라스','건설','prompt','disabled','ok','test','test')"
+        )
+        cur.execute(
+            "INSERT INTO specialist_bot"
+            " (key, name, domain, adapter, state, health, created_by, updated_by)"
+            " VALUES ('nomen','   ','법률','prompt','enabled','ok','test','test')"
+        )
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT display_name, category, slack_connectable, internally_invokable,"
+            "       state"
+            "  FROM bot_catalog WHERE key = 'atlas'"
+        )
+        row = cur.fetchone()
+        assert row is not None, "기존 전문 봇이 카탈로그에 없다"
+        assert row[0] == "아틀라스"
+        assert row[1] == "specialist"
+        assert (row[2], row[3]) == (False, True), "전문 봇은 Slack 에 직접 안 붙는다"
+        # 런타임 상태를 복제하면 두 값이 갈리는 날이 온다(§4.2).
+        assert row[4] == "active"
+        cur.execute("SELECT display_name FROM bot_catalog WHERE key = 'nomen'")
+        assert cur.fetchone()[0] == "nomen", "이름이 비면 화면에 이름 없는 행이 보인다"
+        cur.execute("SELECT count(*) FROM bot_catalog")
+        assert cur.fetchone()[0] == 6, "재적용이 행을 늘리면 멱등이 아니다"
+
+
+@needs_db
+def test_the_catalog_backfill_does_not_overwrite_edits(conn):
+    """재적용이 사람이 고친 표시 이름을 되돌리면 **조용한 롤백**이다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO specialist_bot"
+            " (key, name, domain, adapter, state, health, created_by, updated_by)"
+            " VALUES ('atlas','아틀라스','건설','prompt','enabled','ok','test','test')"
+        )
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE bot_catalog SET display_name = '건설봇' WHERE key='atlas'")
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT display_name FROM bot_catalog WHERE key='atlas'")
+        assert cur.fetchone()[0] == "건설봇"
+
+
+@needs_db
+def test_the_console_role_cannot_delete_connection_rows(conn):
+    """그만 쓰는 것은 retired·disabled 다. 지우면 있었다는 사실까지 사라진다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        for table in (
+            "bot_catalog", "bot_connection", "bot_connection_secret", "specialist_route",
+        ):
+            cur.execute(
+                "SELECT has_table_privilege('tyslackai', %s, 'DELETE'),"
+                "       has_table_privilege('tyslackai', %s, 'SELECT'),"
+                "       has_table_privilege('tyslackai', %s, 'UPDATE')",
+                (table, table, table),
+            )
+            can_delete, can_read, can_update = cur.fetchone()
+            assert not can_delete, f"{table} 에 DELETE 가 남아 있다"
+            assert can_read and can_update, f"{table} 을 콘솔이 못 쓴다"
+
+
 # --- 지우기 전에 확인한다 ----------------------------------------------------
 
 class _Cur:

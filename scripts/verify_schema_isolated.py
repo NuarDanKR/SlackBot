@@ -110,6 +110,12 @@ FORBIDDEN: tuple[tuple[str, str, str], ...] = (
     ("tyslackai", "archive_message_revision", "DELETE"),
     ("tyslackai", "archive_config_audit", "UPDATE"),
     ("tyslackai", "bot_conversation_audit", "UPDATE"),
+    # 연결을 그만 쓰는 것은 retired·disabled 다. 행을 지우면 그 연결이 있었다는
+    # 사실과 언제 누가 껐는지가 함께 사라진다.
+    ("tyslackai", "bot_catalog", "DELETE"),
+    ("tyslackai", "bot_connection", "DELETE"),
+    ("tyslackai", "bot_connection_secret", "DELETE"),
+    ("tyslackai", "specialist_route", "DELETE"),
 )
 
 #: 있어야 하는 권한. 없으면 봇에게는 그 표가 없는 것과 같다(2026-09-14 실측).

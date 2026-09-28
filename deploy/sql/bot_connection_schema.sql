@@ -68,6 +68,32 @@ VALUES
     ('clio',     'Clio',          'specialist',  'Slack AI TFT', false, true)
 ON CONFLICT (key) DO NOTHING;
 
+-- 이미 등록된 **다른 전문 봇**도 들여온다.
+--
+-- 네 봇만 seed 하면, 승인받아 쓰고 있던 전문 봇이 카탈로그에 없다. 그 상태에서
+-- `specialist_route` 는 배정을 backfill 하는데 화면은 그 봇을 모른다 — 「어느 봇의
+-- 라우트인지 모르는 행」 이 생기고, 그건 사람이 지우기도 어렵다.
+--
+-- `internally_invokable` 은 true 다. 전문 봇은 Master 내부 호출로만 불린다 —
+-- Slack 에 직접 붙으면 우리가 권한을 판정할 자리가 사라진다(CLAUDE.md 봇 체계).
+-- Hermes 의 PF 직접 연결은 공존 기간의 예외이고 위에서 이미 true 로 적었다.
+--
+-- 표시 이름은 그 봇이 쓰던 이름을 그대로 쓴다. 비어 있으면 key 로 대신한다 —
+-- `display_name` 이 비면 화면에 이름 없는 행이 보인다.
+-- **`state` 는 옮기지 않는다.** 여기 `active`/`retired` 는 봇의 정체성이 살아
+-- 있는가이고, `specialist_bot.state` 는 지금 켜져 있는가다. 복제하면 두 값이
+-- 갈리는 날이 오고, 그날 어느 쪽이 참인지 고를 근거가 없다(§4.2).
+INSERT INTO bot_catalog
+    (key, display_name, category, owner_team, slack_connectable, internally_invokable)
+SELECT s.key,
+       coalesce(nullif(btrim(s.name), ''), s.key),
+       'specialist',
+       '',
+       false,
+       true
+  FROM specialist_bot s
+ON CONFLICT (key) DO NOTHING;
+
 
 -- ---------------------------------------------------------------------------
 -- 2. Slack 연결
@@ -328,10 +354,24 @@ ON CONFLICT (specialist, workspace) DO NOTHING;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE'
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON TABLE'
                 ' bot_catalog, bot_connection, bot_connection_secret,'
                 ' specialist_route TO tyslackai';
         EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE bot_connection_id_seq TO tyslackai';
+        -- **지우는 권한은 주지 않는다.**
+        --
+        -- 연결을 그만 쓰는 것은 `state = 'retired'` 이고, 라우트를 끄는 것은
+        -- `route_mode = 'disabled'` 다. 행을 지우면 그 연결이 있었다는 사실과
+        -- 언제 누가 껐는지가 함께 사라진다 — 사고 뒤에 범위를 정할 수 없다.
+        --
+        -- 시크릿도 같다. 토큰 행을 지우면 연결은 남고 mask 만 없어져서, 화면은
+        -- 「토큰을 넣은 적 없는 연결」 로 보인다.
+        --
+        -- 선언에서 빼는 것만으로는 이미 준 권한이 사라지지 않는다. 명시적으로
+        -- 회수한다(2026-09-14 실측: 초안이 준 권한이 그대로 남아 있었다).
+        EXECUTE 'REVOKE DELETE ON TABLE'
+                ' bot_catalog, bot_connection, bot_connection_secret,'
+                ' specialist_route FROM tyslackai';
     END IF;
 
     -- archiver 는 시크릿 표를 직접 못 읽는다. 위 함수로 자기 연결 토큰만 받는다.

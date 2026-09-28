@@ -328,10 +328,67 @@ def test_the_function_keeps_the_old_start_conditions(sql):
 def test_the_console_role_can_manage_connections(sql):
     """권한이 없으면 콘솔에게는 그 표가 **없는 것과 같다**(2026-09-14 실측)."""
     assert re.search(
-        r"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE'\s*'\s*"
+        r"GRANT SELECT, INSERT, UPDATE ON TABLE'\s*'\s*"
         r" bot_catalog, bot_connection, bot_connection_secret,'\s*'\s*"
         r" specialist_route TO tyslackai",
         sql,
     )
     # bigserial 이라 시퀀스 권한이 따로 필요하다 — 없으면 INSERT 가 권한 오류로 죽는다.
     assert "GRANT USAGE, SELECT ON SEQUENCE bot_connection_id_seq TO tyslackai" in sql
+
+
+def test_the_console_role_cannot_delete_rows(sql):
+    """그만 쓰는 것은 `retired`·`disabled` 다.
+
+    행을 지우면 그 연결이 있었다는 사실과 **언제 누가 껐는지**가 함께 사라진다.
+    선언에서 빼는 것만으로는 이미 준 권한이 안 사라지므로 명시적으로 회수한다.
+    """
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" not in sql
+    assert re.search(
+        r"REVOKE DELETE ON TABLE'\s*'\s*"
+        r" bot_catalog, bot_connection, bot_connection_secret,'\s*'\s*"
+        r" specialist_route FROM tyslackai",
+        sql,
+    )
+
+
+def _backfill_block(sql: str) -> str:
+    """`specialist_bot` 에서 들여오는 INSERT **하나만**.
+
+    첫 `INSERT INTO bot_catalog` 부터 훑으면 네 봇 seed 까지 함께 잡힌다. 그러면
+    seed 에 있는 값이 backfill 의 값으로 세어져, backfill 이 무엇을 넣든 통과한다.
+    """
+    found = re.search(
+        r"INSERT INTO bot_catalog(?:(?!INSERT INTO bot_catalog).)*?"
+        r"FROM specialist_bot s\s*ON CONFLICT \(key\) (?:\w+ \w+);",
+        sql, re.S,
+    )
+    return found.group(0) if found else ""
+
+
+def test_existing_specialist_bots_enter_the_catalog(sql):
+    """네 봇만 seed 하면 **이미 승인받아 쓰던 전문 봇이 카탈로그에 없다.**
+
+    그 상태로 라우트를 backfill 하면 「어느 봇의 라우트인지 모르는 행」 이 생긴다.
+    """
+    block = _backfill_block(sql)
+
+    assert block, "specialist_bot backfill 이 없다"
+    assert "ON CONFLICT (key) DO NOTHING" in block, "재적용이 사람이 고친 값을 덮는다"
+    # 키를 **그대로** 옮긴다. 바꿔 적으면 라우트·배정과 이어지지 않는다.
+    assert re.search(r"SELECT\s+s\.key,", block)
+    # 전문 봇은 Master 내부 호출로만 불린다 — Slack 에 직접 붙으면 권한 판정 자리가
+    # 사라진다(CLAUDE.md 봇 체계). 칸 순서는 INSERT 의 열 순서와 같아야 한다.
+    assert re.search(r"'specialist',\s*'',\s*false,\s*true\b", block)
+
+
+def test_the_catalog_does_not_copy_the_runtime_state(sql):
+    """`bot_catalog.state` 는 정체성이고 `specialist_bot.state` 는 지금 켜졌나다.
+
+    복제하면 두 값이 갈리는 날이 오고, 그날 어느 쪽이 참인지 고를 근거가 없다(§4.2).
+    """
+    block = _backfill_block(sql)
+
+    assert block
+    assert "s.state" not in block
+    assert "s.health" not in block
