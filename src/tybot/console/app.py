@@ -3014,6 +3014,11 @@ def start_channel_review_job(
     return {"job": job}
 
 
+# [라이선스 현황 추가] 라우트는 license_routes.py 에 있다. 이 파일을 덜 고치려고 등록만 여기서 한다.
+from . import license_routes  # noqa: E402 - 위 함수들이 정의된 뒤에 불러야 한다
+
+app.include_router(license_routes.router)
+
 # 정적 `/` 마운트는 모든 `/api/*` 라우트보다 반드시 뒤에 둔다. Starlette는 등록
 # 순서대로 라우트를 찾으므로 앞에 두면 이후 API가 정적 파일의 404로 가로채진다.
 mount_frontend()

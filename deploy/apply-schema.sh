@@ -53,6 +53,7 @@ FILES=(
   workspace_service_schema.sql  # workspace 하나에 서비스 여럿. workspace 를 참조한다
   bot_connection_schema.sql   # 봇 하나에 연결 여럿. workspace_service 를 복사한다
   pf_console_schema.sql       # /pf/ 콘솔. console_user 를 참조한다
+  slack_license_schema.sql    # [라이선스 현황 추가] 할당 수. 목록에 있어야 서버에 표가 생긴다
   # 데이터 보정(멱등). 구조가 다 선 뒤에 돌린다.
   schedule_folder_acl_default.sql
   schedule_dm_fixed_ten.sql

@@ -16,6 +16,8 @@ import { EnvSettings } from './pages/EnvSettings'
 import { Harness } from './pages/Harness'
 import { Home } from './pages/Home'
 import { AnswerDashboard, OperationsDashboard, ConsoleDashboard } from './pages/LifecycleDashboards'
+// [라이선스 현황 추가] 메뉴 목록과 경로→화면 연결이 이 파일에만 있어 import·메뉴·화면 연결 세 줄만 더했다.
+import { Licenses } from './pages/Licenses'
 import { ServiceLogs } from './pages/ServiceLogs'
 import type { ErrorLogContext } from './pages/ServiceLogs'
 import { SpecialistAnalytics, SpecialistManagement } from './pages/Specialists'
@@ -47,6 +49,7 @@ const NAV: NavGroup[] = [
   ] },
   { label: '운영', path: '/manage', minimum: 'developer', items: [
     { path: '/manage', label: '운영 현황', minimum: 'developer' },
+    { path: '/manage/licenses', label: '라이선스 현황', minimum: 'admin' },
     { path: '/manage/specialists', label: '전문 봇 관리', minimum: 'developer', capability: 'specialists' },
     { path: '/manage/commands', label: '명령 진단', minimum: 'developer' },
     { path: '/manage/logs', label: '서비스 로그', minimum: 'developer' },
@@ -164,6 +167,7 @@ export default function App() {
       {path === '/answer/usage' && <Usage canViewLogs={user.role !== 'guest'} showRecent={false} query={location.query} navigate={navigate} onOpenErrorLogs={(context) => navigate(withQuery('/manage/logs', { workspace: context.workspace, at: context.at, level: 'error' }))} />}
       {path === '/answer/rules' && <Harness />}
       {path === '/manage' && <OperationsDashboard user={user} navigate={navigate} />}
+      {path === '/manage/licenses' && <Licenses onToast={toast} />}
       {path === '/manage/specialists' && <SpecialistManagement user={user} query={location.query} onToast={toast} />}
       {path === '/manage/commands' && <CommandDiagnostics />}
       {path === '/manage/logs' && <ServiceLogs context={logContext} />}
