@@ -195,6 +195,17 @@ def test_every_target_schema_file_exists():
         assert (verify.SQL_DIR / name).is_file(), name
 
 
+def test_the_trigram_fallback_installs_its_extension_before_creating_the_index():
+    sql = (verify.SQL_DIR / "index_schema.sql").read_text(encoding="utf-8")
+    fallback_start = sql.index("ELSE", sql.index("extname = 'pg_bigm'"))
+    fallback_end = sql.index("END IF;", fallback_start)
+    fallback = sql[fallback_start:fallback_end]
+
+    extension = fallback.index("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    index = fallback.index("CREATE INDEX IF NOT EXISTS raw_line_trgm_fallback")
+    assert extension < index
+
+
 # --- DSN 이 있을 때만 -------------------------------------------------------
 
 def _prepared(conn):
