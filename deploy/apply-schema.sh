@@ -51,6 +51,7 @@ FILES=(
   conversion_alert_schema.sql
   archiving_schema.sql        # Archiving Bot. 채널 모드·수집 상태·revision·감사
   workspace_service_schema.sql  # workspace 하나에 서비스 여럿. workspace 를 참조한다
+  bot_connection_schema.sql   # 봇 하나에 연결 여럿. workspace_service 를 복사한다
   pf_console_schema.sql       # /pf/ 콘솔. console_user 를 참조한다
   # 데이터 보정(멱등). 구조가 다 선 뒤에 돌린다.
   schedule_folder_acl_default.sql

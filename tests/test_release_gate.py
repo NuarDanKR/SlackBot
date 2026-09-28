@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -192,8 +193,12 @@ def test_the_marker_lives_outside_the_database():
     """검증 대상이 DB 인데 결과를 그 DB 에 적으면, 표가 잘못 섰을 때 결과도 못 읽는다."""
     source = Path(gate.__file__).read_text(encoding="utf-8")
 
-    for keyword in ("SELECT ", "INSERT ", "psycopg", "_connect"):
+    for keyword in ("SELECT ", "INSERT ", "psycopg"):
         assert keyword not in source, keyword
+    # `_connect` 를 **부르지** 않는가. 맨 문자열로 보면 스키마 파일 이름
+    # (`bot_connection_schema.sql`)에 걸린다 — 그건 DB 접속이 아니다.
+    assert not re.search(r"_connect\s*\(", source)
+    assert not re.search(r"import\s+.*_connect", source)
 
 
 # --- 막는 쪽 ------------------------------------------------------------------
