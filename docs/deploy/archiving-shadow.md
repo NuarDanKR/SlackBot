@@ -78,6 +78,27 @@ Archiving Bot의 수집 범위는 **앱이 초대된 공개·비공개 채널**�
 초대하면 수집한다. DM과 그룹 DM은 수집하지 않는다. 변환은 아직 이벤트 처리 중
 동기 실행이므로 큰 파일이 많은 채널은 부하 측정 없이 한꺼번에 추가하지 않는다.
 
+기존 Master 참여 채널에 Archiver를 일괄 초대할 때는 Master의 채널 멤버십을
+정본으로 삼는다. 토큰을 명령행에 넣지 않고 서버 설정에서 읽으며, 기본 실행은
+미리보기다.
+
+```bash
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env \
+  /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/invite_archiver_to_master_channels.py \
+  --workspace tyit
+
+# 대상 건수를 확인한 뒤 실제 초대
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env \
+  /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/invite_archiver_to_master_channels.py \
+  --workspace tyit --apply
+```
+
+Master 앱은 `channels:manage`(공개)와 `groups:write`(비공개) 권한이 있고 해당
+채널의 멤버여야 한다. Slack Connect, 보관 채널, 워크스페이스 정책상 초대가 금지된
+채널은 실패 목록에 남기며 다른 채널의 처리는 계속한다.
+
 ## PF archive 개발용 복제
 
 PF 자료 Git의 **full commit SHA**를 고정하고 회사가 승인한
