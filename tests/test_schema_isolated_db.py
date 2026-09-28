@@ -228,6 +228,8 @@ def test_clean_install_on_an_empty_database(conn):
 @needs_db
 def test_applying_the_same_schema_twice_is_safe(conn):
     """재적용이 안전하지 않으면 배포가 한 번짜리가 된다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
     verify.apply_files(conn, verify.TARGET_FILES)
 
     assert verify.check_privileges(conn) == []
@@ -240,6 +242,8 @@ def test_reapplying_over_the_draft_revokes_what_it_granted(conn):
     선언에서 표를 빼는 것만으로는 이미 준 권한이 사라지지 않는다. 명시적
     `REVOKE` 가 실제로 도는지는 진짜 DB 에서만 보인다.
     """
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
     verify.draft_shape(conn)
     assert verify.has_privilege(
         conn, "tybot_archiver", "archive_config_audit", "INSERT"
