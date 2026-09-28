@@ -4,10 +4,12 @@
 
 1. **admin 만** 본다. 조직별 인원이 드러난다
 2. 활성은 **사람 계정만** 센다 — 봇·Slackbot·비활성·단일 채널 게스트는 빠진다
-3. 표에는 **Slack 연동 워크스페이스만** 나온다. 할당은 사람이 적는다
+3. 연동 워크스페이스는 활성을 Slack 에서, 직접 추가한 워크스페이스는 사람이 적은 값을 쓴다.
+   할당은 둘 다 사람이 적는다. 「Slack확산TFT」 는 표에서 뺀다
 4. Slack 이 실패한 워크스페이스는 **0 이 아니라 「모름」** 이다. 0 으로 보이면
    할당을 줄여도 된다고 읽힌다
 5. 토큰은 응답에 실리지 않는다
+6. **지울 수 있는 것은 직접 추가한 워크스페이스뿐**이다
 """
 from __future__ import annotations
 
@@ -128,6 +130,48 @@ def test_only_linked_workspaces_are_listed_with_stored_allocation():
     assert rows["mgmt"]["guests"] == 2
 
 
+def test_the_rollout_workspace_is_left_out_whatever_its_spacing():
+    linked = {
+        "tyit": ("전산팀", TOKEN),
+        "tft": ("Slack확산TFT", TOKEN),
+        "tft2": (" slack 확산 tft ", TOKEN),
+    }
+
+    assert set(license_store.without_excluded(linked)) == {"tyit"}
+    report = license_store.build_report(linked, {}, {})
+    assert [row["label"] for row in report["rows"]] == ["전산팀"]
+    assert report["linkedCount"] == 1
+
+
+def test_manual_rows_use_the_typed_active_count():
+    manual = [{"id": 7, "label": "토목", "allocated": 80, "active": 3, "created_by": "dan@taeyoung.com"}]
+
+    report = license_store.build_report({"tyit": ("전산팀", TOKEN)}, {}, {}, manual)
+    row = next(item for item in report["rows"] if item["kind"] == "manual")
+
+    assert row == {
+        "kind": "manual", "id": 7, "workspace": None, "label": "토목",
+        "allocated": 80, "active": 3, "guests": 0, "fetchedAt": None, "error": None,
+    }
+    assert report["linkedCount"] == 1           # 직접 추가한 곳은 연동 수에 들지 않는다
+
+
+def test_manual_names_must_be_unique_and_not_clash():
+    ok = license_store.validate_manual(
+        [{"label": " 토목 ", "allocated": 80, "active": 3}], linked_labels={"전산팀"}
+    )
+    assert ok == [{"id": None, "label": "토목", "allocated": 80, "active": 3}]
+    for bad in (
+        [{"label": "", "allocated": 1, "active": 0}],
+        [{"label": "토목", "allocated": 1, "active": -1}],
+        [{"label": "전 산 팀", "allocated": 1, "active": 0}],        # 연동 이름과 같다
+        [{"label": "slack확산tft", "allocated": 1, "active": 0}],    # 제외한 이름
+        [{"label": "토목", "allocated": 1, "active": 0}, {"label": "토 목", "allocated": 2, "active": 0}],
+    ):
+        with pytest.raises(license_store.LicenseStoreError):
+            license_store.validate_manual(bad, linked_labels={"전산팀"})
+
+
 def test_validation_accepts_only_linked_workspaces_and_counts():
     assert license_store.validate([{"workspace": "TYIT", "allocated": 8}], linked={"tyit"}) == [("tyit", 8)]
     for bad in (
@@ -147,6 +191,7 @@ def stub(monkeypatch):
     saved = {}
     monkeypatch.setattr(license_store, "linked_workspaces", lambda: {"tyit": ("전산팀", TOKEN)})
     monkeypatch.setattr(license_store, "list_stored", lambda: {})
+    monkeypatch.setattr(license_store, "list_manual", lambda: [])
     monkeypatch.setattr(
         license_store, "active_counts",
         lambda tokens, refresh=False: {
@@ -156,9 +201,10 @@ def stub(monkeypatch):
     )
 
     def fake_save(**values):
-        license_store.validate(values["rows"], values["linked"])
+        license_store.validate(values["rows"], set(values["linked"]))
+        license_store.validate_manual(values["manual"], {label for label, _ in values["linked"].values()})
         saved.update(values)
-        return {"saved": len(values["rows"])}
+        return {"saved": len(values["rows"]), "added": 0, "updated": 0, "deleted": len(values["removed"])}
 
     monkeypatch.setattr(license_store, "save", fake_save)
     return saved
@@ -186,3 +232,24 @@ def test_saving_requires_csrf_and_rejects_bad_rows(client, stub):
     assert client.put("/api/licenses", json=bad, headers=headers | CSRF).status_code == 422
     negative = {"rows": [{"workspace": "tyit", "allocated": -1}]}
     assert client.put("/api/licenses", json=negative, headers=headers | CSRF).status_code == 422
+
+
+def test_added_and_removed_workspaces_reach_the_store(client, stub):
+    body = {
+        "rows": [],
+        "manual": [{"label": "토목", "allocated": 80, "active": 3}],
+        "removed": [7],
+    }
+
+    response = client.put("/api/licenses", json=body, headers=owner(client) | CSRF)
+
+    assert response.status_code == 200, response.text
+    assert stub["manual"] == [{"id": None, "label": "토목", "allocated": 80, "active": 3}]
+    assert stub["removed"] == [7]
+
+
+def test_a_linked_workspace_cannot_be_deleted(client, stub):
+    """삭제 칸은 직접 추가한 행의 번호만 받는다 — 연동 워크스페이스 키는 들어갈 자리가 없다."""
+    body = {"rows": [], "removed": ["tyit"]}
+
+    assert client.put("/api/licenses", json=body, headers=owner(client) | CSRF).status_code == 422
