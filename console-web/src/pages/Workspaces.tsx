@@ -208,7 +208,6 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
     return <Failed what="워크스페이스 목록을" detail={resource.error.message} onRetry={resource.reload} />
   }
 
-  const editingRow = editing ? rows.find((row) => row.key === draft.key) : undefined
   // 봇 토큰은 여기서 받지 않는다. 이 화면은 **조직 metadata** 만 다룬다 —
   // 연결은 봇마다 다르고(Master·Archiver·Hermes) 그 정본은 봇 관리에 있다.
   const ready = KEY_RE.test(draft.key) && draft.label.trim().length > 0

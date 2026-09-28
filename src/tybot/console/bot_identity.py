@@ -30,17 +30,34 @@ class SlackUnavailable(WorkspaceStoreError):
     """Slack 이 답하지 않았다. **저장은 그대로다**(§7.5 → 503)."""
 
 
-def _tokens(workspace: str, bot_key: str) -> tuple[str, str]:
+def _tokens(workspace: str, bot_key: str) -> tuple[str, str, str]:
     """이 연결의 봇·앱 토큰. 쌍이 아니면 거절한다."""
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT s.kind, s.ciphertext
-              FROM bot_connection c
-              JOIN bot_connection_secret s ON s.connection_id = c.id
-             WHERE c.workspace = %s AND c.bot_key = %s
-               AND c.connector_type = 'slack_socket'
-               AND s.kind IN ('bot', 'app')
+            WITH target AS (
+                SELECT id
+                  FROM bot_connection
+                 WHERE workspace = %s AND bot_key = %s
+                   AND connector_type = 'slack_socket'
+            ), fingerprint AS (
+                SELECT t.id,
+                       coalesce(
+                           md5(string_agg(
+                               s.kind || ':' || md5(s.ciphertext), ',' ORDER BY s.kind
+                           )),
+                           ''
+                       ) AS value
+                  FROM target t
+                  LEFT JOIN bot_connection_secret s ON s.connection_id = t.id
+                 GROUP BY t.id
+            )
+            SELECT s.kind, s.ciphertext, f.value AS fingerprint
+              FROM target t
+              JOIN bot_connection_secret s ON s.connection_id = t.id
+              JOIN fingerprint f ON f.id = t.id
+             WHERE s.kind IN ('bot', 'app')
+             ORDER BY s.kind
             """,
             (workspace, bot_key),
         )
@@ -52,10 +69,16 @@ def _tokens(workspace: str, bot_key: str) -> tuple[str, str]:
         )
     try:
         cipher = _fernet()
-        return (
+        tokens = (
             cipher.decrypt(encrypted["bot"]).decode("utf-8"),
             cipher.decrypt(encrypted["app"]).decode("utf-8"),
         )
+        fingerprints = {str(row["fingerprint"]) for row in rows}
+        if len(fingerprints) != 1 or not next(iter(fingerprints)):
+            raise bot_admin.BotAdminRefused(
+                "Slack 토큰 쌍의 검증 지문을 읽지 못했습니다. 다시 시도하세요."
+            )
+        return (*tokens, next(iter(fingerprints)))
     except (InvalidToken, UnicodeDecodeError) as exc:
         raise bot_admin.BotAdminRefused(
             "저장된 Slack 토큰을 현재 키로 읽지 못했습니다."
@@ -75,8 +98,7 @@ def verify_connection(
     connection = store.connection(workspace, bot_key)
     if connection is None:
         raise bot_admin.BotAdminRefused(f"없는 연결입니다: {workspace}/{bot_key}")
-    bot_token, app_token = _tokens(workspace, bot_key)
-    fingerprint = store.secret_fingerprint(int(connection["id"]))
+    bot_token, app_token, fingerprint = _tokens(workspace, bot_key)
     if client_factory is None:
         from slack_sdk import WebClient
 

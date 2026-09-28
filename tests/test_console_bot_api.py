@@ -182,6 +182,59 @@ def test_a_reason_is_required(client, repo):
 
 # --- 신원 검사 ------------------------------------------------------------------
 
+def test_token_pair_and_fingerprint_are_read_from_one_sql_snapshot(monkeypatch):
+    """검증한 토큰과 기록에 쓸 지문이 서로 다른 시점의 값이면 안 된다."""
+    rows = [
+        {"kind": "app", "ciphertext": b"encrypted-app", "fingerprint": "fp-1"},
+        {"kind": "bot", "ciphertext": b"encrypted-bot", "fingerprint": "fp-1"},
+    ]
+
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            self.calls.append((query, params))
+
+        def fetchall(self):
+            return rows
+
+    cursor = Cursor()
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return cursor
+
+    class Cipher:
+        @staticmethod
+        def decrypt(value):
+            return value.removeprefix(b"encrypted-")
+
+    monkeypatch.setattr(bot_identity, "_connect", Connection)
+    monkeypatch.setattr(bot_identity, "_fernet", Cipher)
+
+    assert bot_identity._tokens("tyit", "master") == ("bot", "app", "fp-1")
+    assert len(cursor.calls) == 1
+    query, params = cursor.calls[0]
+    assert params == ("tyit", "master")
+    assert "WITH target AS" in query
+    assert "fingerprint AS" in query
+    assert "md5(s.ciphertext)" in query
+    assert "f.value AS fingerprint" in query
+
+
 def _slack(team="T1", user="U2", *, fail=False):
     class _Client:
         def __init__(self, token):
@@ -202,7 +255,7 @@ def _slack(team="T1", user="U2", *, fail=False):
 
 def test_identity_enables_the_connection(client, repo, monkeypatch):
     repo.given_connection("tyit", "archiver", state="draft")
-    monkeypatch.setattr(bot_identity, "_tokens", lambda ws, key: (BOT, APP))
+    monkeypatch.setattr(bot_identity, "_tokens", lambda ws, key: (BOT, APP, "fp"))
     monkeypatch.setattr(
         bot_identity, "verify_connection",
         lambda ws, key, *, actor, client_factory=None, repo=None: bot_admin.record_identity(
