@@ -86,7 +86,8 @@ RESERVED_DB_MARKERS = ("bench", "lab", "index", "prod", "tyslackai")
 
 #: 검증 대상. `apply-schema.sh` 순서를 따른다 — 뒤 파일이 앞 파일의 표를 참조한다.
 TARGET_FILES = ("index_schema.sql", "console_schema.sql",
-                "archiving_schema.sql", "workspace_service_schema.sql")
+                "archiving_schema.sql", "workspace_service_schema.sql",
+                "bot_connection_schema.sql")
 
 #: 역할에서 **없어야 하는** 권한. (역할, 표, 권한)
 #:
@@ -102,10 +103,19 @@ FORBIDDEN: tuple[tuple[str, str, str], ...] = (
     ("tybot_archiver", "archive_refusal", "DELETE"),
     ("tybot_archiver", "archive_ingest_state", "DELETE"),
     ("tybot_archiver", "workspace_service_secret", "SELECT"),
+    # 새 연결 표도 같다 — 이관 뒤에도 Archiver 는 남의 토큰을 못 본다(§4.4).
+    ("tybot_archiver", "bot_connection_secret", "SELECT"),
+    ("tybot_archiver", "bot_connection", "UPDATE"),
     ("tyslackai", "archive_message_revision", "UPDATE"),
     ("tyslackai", "archive_message_revision", "DELETE"),
     ("tyslackai", "archive_config_audit", "UPDATE"),
     ("tyslackai", "bot_conversation_audit", "UPDATE"),
+    # 연결을 그만 쓰는 것은 retired·disabled 다. 행을 지우면 그 연결이 있었다는
+    # 사실과 언제 누가 껐는지가 함께 사라진다.
+    ("tyslackai", "bot_catalog", "DELETE"),
+    ("tyslackai", "bot_connection", "DELETE"),
+    ("tyslackai", "bot_connection_secret", "DELETE"),
+    ("tyslackai", "specialist_route", "DELETE"),
 )
 
 #: 있어야 하는 권한. 없으면 봇에게는 그 표가 없는 것과 같다(2026-09-14 실측).
@@ -114,12 +124,18 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     ("tybot_archiver", "archive_ingest_state", "INSERT"),
     ("tybot_archiver", "archive_message_revision", "INSERT"),
     ("tybot_archiver", "workspace_service", "SELECT"),
+    ("tybot_archiver", "bot_connection", "SELECT"),
     ("tyslackai", "workspace_service_secret", "SELECT"),
+    ("tyslackai", "bot_connection_secret", "SELECT"),
+    ("tyslackai", "bot_connection", "UPDATE"),
+    ("tyslackai", "bot_catalog", "INSERT"),
+    ("tyslackai", "specialist_route", "UPDATE"),
     ("tyslackai", "archive_channel_mode", "UPDATE"),
 )
 
 REQUIRED_FUNCTIONS: tuple[tuple[str, str, str], ...] = (
     ("tybot_archiver", "archiver_runtime_config(text)", "EXECUTE"),
+    ("tybot_archiver", "archiver_connection_config(text)", "EXECUTE"),
 )
 
 
@@ -260,6 +276,10 @@ OUR_TABLE_PREFIXES = (
     "user_identity", "raw_line", "console_", "usage_", "specialist_", "harness_",
     "qa_", "answer_", "deploy_",
 )
+OUR_TABLE_NAMES = frozenset({
+    "anomaly", "audit_query", "bot_catalog", "bot_connection",
+    "bot_connection_secret", "channel", "sync_run",
+})
 
 REQUIRED_ROLES = ("tyslackai", "tybot_archiver")
 
@@ -295,7 +315,8 @@ def foreign_tables(conn) -> list[str]:
         names = [str(row[0]) for row in cur.fetchall()]
     return [
         name for name in names
-        if not any(name.startswith(prefix) for prefix in OUR_TABLE_PREFIXES)
+        if name not in OUR_TABLE_NAMES
+        and not any(name.startswith(prefix) for prefix in OUR_TABLE_PREFIXES)
     ]
 
 

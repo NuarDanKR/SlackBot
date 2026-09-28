@@ -195,6 +195,17 @@ def test_every_target_schema_file_exists():
         assert (verify.SQL_DIR / name).is_file(), name
 
 
+def test_the_trigram_fallback_installs_its_extension_before_creating_the_index():
+    sql = (verify.SQL_DIR / "index_schema.sql").read_text(encoding="utf-8")
+    fallback_start = sql.index("ELSE", sql.index("extname = 'pg_bigm'"))
+    fallback_end = sql.index("END IF;", fallback_start)
+    fallback = sql[fallback_start:fallback_end]
+
+    extension = fallback.index("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    index = fallback.index("CREATE INDEX IF NOT EXISTS raw_line_trgm_fallback")
+    assert extension < index
+
+
 # --- DSN 이 있을 때만 -------------------------------------------------------
 
 def _prepared(conn):
@@ -228,6 +239,8 @@ def test_clean_install_on_an_empty_database(conn):
 @needs_db
 def test_applying_the_same_schema_twice_is_safe(conn):
     """재적용이 안전하지 않으면 배포가 한 번짜리가 된다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
     verify.apply_files(conn, verify.TARGET_FILES)
 
     assert verify.check_privileges(conn) == []
@@ -240,6 +253,8 @@ def test_reapplying_over_the_draft_revokes_what_it_granted(conn):
     선언에서 표를 빼는 것만으로는 이미 준 권한이 사라지지 않는다. 명시적
     `REVOKE` 가 실제로 도는지는 진짜 DB 에서만 보인다.
     """
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
     verify.draft_shape(conn)
     assert verify.has_privilege(
         conn, "tybot_archiver", "archive_config_audit", "INSERT"
@@ -350,6 +365,316 @@ def test_two_services_cannot_share_a_bot_user(conn):
             )
 
 
+# --- 봇 연결 이관 (2026-09-28 콘솔 개편 §5·§11.1) -----------------------------
+
+def _workspace(cur, key: str = "tyit") -> None:
+    cur.execute(
+        "INSERT INTO workspace (key, label, archive_path, created_by)"
+        " VALUES (%s,'전산팀','/var/lib/tybot/archive/workspaces/tyit','test')"
+        " ON CONFLICT (key) DO NOTHING",
+        (key,),
+    )
+
+
+def _legacy_service(cur, service: str, *, bot_user: str, cipher: str, mask: str) -> None:
+    """옛 표에 있는 연결 하나 — 신원까지 확인돼 `enabled` 인 상태."""
+    cur.execute(
+        "INSERT INTO workspace_service"
+        " (workspace, service, state, team_id, bot_user_id, identity_ok)"
+        " VALUES ('tyit', %s, 'enabled', 'T1', %s, true)",
+        (service, bot_user),
+    )
+    for kind in ("bot", "app"):
+        cur.execute(
+            "INSERT INTO workspace_service_secret"
+            " (workspace, service, kind, ciphertext, mask, updated_by)"
+            " VALUES ('tyit', %s, %s, %s, %s, 'test')",
+            (service, kind, cipher.encode(), f"{mask}-{kind}"),
+        )
+
+
+@needs_db
+def test_the_three_legacy_services_move_to_their_bot_keys(conn):
+    """`hermes_direct` 가 `hermes` 가 되는 것이 이 이관의 요점이다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        _legacy_service(cur, "master", bot_user="U1", cipher="c1", mask="m1")
+        _legacy_service(cur, "archiver", bot_user="U2", cipher="c2", mask="m2")
+        _legacy_service(cur, "hermes_direct", bot_user="U3", cipher="c3", mask="m3")
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT bot_key, connector_type, state, bot_user_id FROM bot_connection"
+            " WHERE workspace='tyit' ORDER BY bot_key"
+        )
+        rows = cur.fetchall()
+        assert [r[0] for r in rows] == ["archiver", "hermes", "master"]
+        assert {r[1] for r in rows} == {"slack_socket"}
+        assert {r[2] for r in rows} == {"enabled"}, "상태가 바뀌면 이관이 아니다"
+        cur.execute("SELECT count(*) FROM bot_connection WHERE bot_key='hermes_direct'")
+        assert cur.fetchone()[0] == 0, "Hermes 가 콘솔에서 다시 둘이 된다"
+        cur.execute("SELECT count(*) FROM workspace_service WHERE workspace='tyit'")
+        assert cur.fetchone()[0] == 3, "옛 표를 지우면 Archiver 가 다음 기동에서 안 뜬다"
+
+
+@needs_db
+def test_the_migration_carries_the_ciphertext_and_mask_unchanged(conn):
+    """토큰을 다시 암호화하면 키가 바뀐 날 전부 못 읽는다. 재발급도 하지 않는다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        _legacy_service(cur, "hermes_direct", bot_user="U3", cipher="secret3", mask="m3")
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT s.kind, s.ciphertext, s.mask FROM bot_connection_secret s"
+            "  JOIN bot_connection c ON c.id = s.connection_id"
+            " WHERE c.workspace='tyit' AND c.bot_key='hermes' ORDER BY s.kind"
+        )
+        rows = cur.fetchall()
+        assert [r[0] for r in rows] == ["app", "bot"]
+        assert {bytes(r[1]) for r in rows} == {b"secret3"}
+        assert {r[2] for r in rows} == {"m3-app", "m3-bot"}
+
+
+@needs_db
+def test_a_newer_token_is_not_overwritten_by_the_legacy_copy(conn):
+    """재적용이 콘솔에서 넣은 새 토큰을 옛 값으로 되돌리면 **조용한 롤백**이다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        _legacy_service(cur, "archiver", bot_user="U2", cipher="old", mask="old")
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE bot_connection_secret SET ciphertext = %s, mask = 'new'"
+            "  FROM bot_connection c"
+            " WHERE c.id = bot_connection_secret.connection_id AND c.bot_key='archiver'",
+            (b"new",),
+        )
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT s.mask FROM bot_connection_secret s"
+            "  JOIN bot_connection c ON c.id = s.connection_id WHERE c.bot_key='archiver'"
+        )
+        assert [r[0] for r in cur.fetchall()] == ["new"]
+
+
+@needs_db
+def test_the_migration_is_recorded_once(conn):
+    """감사가 재적용마다 쌓이면 **언제 옮겼는지**를 세는 것이 무의미해진다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        _legacy_service(cur, "hermes_direct", bot_user="U3", cipher="c3", mask="m3")
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT old_value, new_value FROM archive_config_audit"
+            " WHERE subject='bot_connection' AND workspace='tyit'"
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 1, rows
+        assert rows[0][0] == "workspace_service.hermes_direct"
+        assert rows[0][1] == "bot_connection.hermes/slack_socket"
+
+
+@needs_db
+def test_two_connections_cannot_share_a_bot_user(conn):
+    """같은 앱을 두 번 등록하면 Socket Mode 를 두 곳에서 열게 된다."""
+    import psycopg
+
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        cur.execute(
+            "INSERT INTO bot_connection (workspace, bot_key, team_id, bot_user_id)"
+            " VALUES ('tyit','master','T1','U1')"
+        )
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            cur.execute(
+                "INSERT INTO bot_connection (workspace, bot_key, team_id, bot_user_id)"
+                " VALUES ('tyit','archiver','T1','U1')"
+            )
+
+
+@needs_db
+def test_a_connection_cannot_be_enabled_without_identity(conn):
+    """검사 전에 켤 수 있으면 토큰을 잘못 붙인 채로 수집이 시작된다."""
+    import psycopg
+
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute(
+                "INSERT INTO bot_connection (workspace, bot_key, state)"
+                " VALUES ('tyit','archiver','enabled')"
+            )
+
+
+@needs_db
+def test_routes_are_backfilled_by_what_actually_routes_today(conn):
+    """오늘 안 불리는 배정을 `active` 로 적으면 이관이 라우팅을 **바꾼다**."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        for key, state, health in (
+            ("hermes", "enabled", "ok"),
+            ("clio", "disabled", "ok"),
+            ("atlas", "enabled", "error"),
+        ):
+            cur.execute(
+                "INSERT INTO specialist_bot"
+                " (key, name, domain, adapter, state, health, created_by, updated_by)"
+                " VALUES (%s, %s, '업무', 'prompt', %s, %s, 'test', 'test')",
+                (key, key, state, health),
+            )
+            cur.execute(
+                "INSERT INTO specialist_workspace (specialist, workspace)"
+                " VALUES (%s, 'tyit')",
+                (key,),
+            )
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT specialist, route_mode FROM specialist_route"
+            " WHERE workspace='tyit' ORDER BY specialist"
+        )
+        assert cur.fetchall() == [
+            ("atlas", "disabled"), ("clio", "disabled"), ("hermes", "active"),
+        ]
+
+
+@needs_db
+def test_the_route_survives_a_reassignment(conn):
+    """배정 저장은 전량 삭제·재삽입이다. 같은 행에 상태를 두면 매번 초기화된다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        cur.execute(
+            "INSERT INTO specialist_bot"
+            " (key, name, domain, adapter, state, health, created_by, updated_by)"
+            " VALUES ('hermes','Hermes','업무','prompt','enabled','ok','test','test')"
+        )
+        cur.execute(
+            "INSERT INTO specialist_workspace (specialist, workspace)"
+            " VALUES ('hermes','tyit')"
+        )
+        cur.execute(
+            "INSERT INTO specialist_route (specialist, workspace, route_mode)"
+            " VALUES ('hermes','tyit','shadow')"
+        )
+        # `specialist_store` 가 배정을 저장하는 방식 그대로.
+        cur.execute("DELETE FROM specialist_workspace WHERE specialist='hermes'")
+        cur.execute(
+            "INSERT INTO specialist_workspace (specialist, workspace)"
+            " VALUES ('hermes','tyit')"
+        )
+        cur.execute(
+            "SELECT route_mode FROM specialist_route WHERE specialist='hermes'"
+        )
+        assert cur.fetchone()[0] == "shadow"
+
+
+@needs_db
+def test_an_existing_specialist_bot_enters_the_catalog(conn):
+    """승인받아 쓰던 전문 봇이 카탈로그에 없으면, 그 봇의 라우트는 주인이 없다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO specialist_bot"
+            " (key, name, domain, adapter, state, health, created_by, updated_by)"
+            " VALUES ('atlas','아틀라스','건설','prompt','disabled','ok','test','test')"
+        )
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT display_name, category, slack_connectable, internally_invokable,"
+            "       state"
+            "  FROM bot_catalog WHERE key = 'atlas'"
+        )
+        row = cur.fetchone()
+        assert row is not None, "기존 전문 봇이 카탈로그에 없다"
+        assert row[0] == "아틀라스"
+        assert row[1] == "specialist"
+        assert (row[2], row[3]) == (False, True), "전문 봇은 Slack 에 직접 안 붙는다"
+        # 런타임 상태를 복제하면 두 값이 갈리는 날이 온다(§4.2).
+        assert row[4] == "active"
+        cur.execute("SELECT count(*) FROM bot_catalog")
+        assert cur.fetchone()[0] == 5, "재적용이 행을 늘리면 멱등이 아니다"
+
+
+@needs_db
+def test_the_catalog_backfill_does_not_overwrite_edits(conn):
+    """재적용이 사람이 고친 표시 이름을 되돌리면 **조용한 롤백**이다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO specialist_bot"
+            " (key, name, domain, adapter, state, health, created_by, updated_by)"
+            " VALUES ('atlas','아틀라스','건설','prompt','enabled','ok','test','test')"
+        )
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE bot_catalog SET display_name = '건설봇' WHERE key='atlas'")
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT display_name FROM bot_catalog WHERE key='atlas'")
+        assert cur.fetchone()[0] == "건설봇"
+
+
+@needs_db
+def test_the_console_role_cannot_delete_connection_rows(conn):
+    """그만 쓰는 것은 retired·disabled 다. 지우면 있었다는 사실까지 사라진다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        for table in (
+            "bot_catalog", "bot_connection", "bot_connection_secret", "specialist_route",
+        ):
+            cur.execute(
+                "SELECT has_table_privilege('tyslackai', %s, 'DELETE'),"
+                "       has_table_privilege('tyslackai', %s, 'SELECT'),"
+                "       has_table_privilege('tyslackai', %s, 'UPDATE')",
+                (table, table, table),
+            )
+            can_delete, can_read, can_update = cur.fetchone()
+            assert not can_delete, f"{table} 에 DELETE 가 남아 있다"
+            assert can_read and can_update, f"{table} 을 콘솔이 못 쓴다"
+
+
 # --- 지우기 전에 확인한다 ----------------------------------------------------
 
 class _Cur:
@@ -411,7 +736,21 @@ def test_preflight_refuses_a_database_that_holds_someone_elses_tables():
 
 def test_preflight_passes_on_a_database_that_only_holds_our_tables():
     """앞선 실행이 남긴 우리 표는 정상이다. 그걸 막으면 두 번 못 돌린다."""
-    cur = _Cur([(1,), (1,), [("archive_channel_mode",), ("workspace_service",)]])
+    cur = _Cur([
+        (1,),
+        (1,),
+        [
+            ("anomaly",),
+            ("archive_channel_mode",),
+            ("audit_query",),
+            ("bot_catalog",),
+            ("bot_connection",),
+            ("bot_connection_secret",),
+            ("channel",),
+            ("sync_run",),
+            ("workspace_service",),
+        ],
+    ])
 
     assert verify.preflight(_Conn(cur)) == []
 

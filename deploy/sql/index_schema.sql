@@ -174,6 +174,8 @@ BEGIN
         CREATE INDEX IF NOT EXISTS raw_line_bigm
             ON raw_line USING gin (body gin_bigm_ops);
     ELSE
+        -- 깨끗한 DB에도 fallback 이 동작하도록 trusted 기본 확장을 준비한다.
+        EXECUTE 'CREATE EXTENSION IF NOT EXISTS pg_trgm';
         CREATE INDEX IF NOT EXISTS raw_line_trgm_fallback
             ON raw_line USING gin (body gin_trgm_ops);
         RAISE WARNING 'pg_bigm 이 없어 pg_trgm 으로 대체했다. 2글자 한국어 검색(기성·타설)은 인덱스를 타지 못한다. 슈퍼유저로 CREATE EXTENSION pg_bigm; 실행 후 이 파일을 다시 적용할 것.';

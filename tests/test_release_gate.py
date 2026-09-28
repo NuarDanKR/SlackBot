@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -188,12 +189,52 @@ def test_the_marker_stores_a_database_name_not_a_dsn():
         assert secret not in body, secret
 
 
+#: DB 를 건드리는 흔적. **호출 모양으로 본다.**
+#:
+#: 맨 문자열로 `_connect` 를 찾으면 스키마 파일 이름(`bot_connection_schema.sql`)에
+#: 걸린다. 그렇다고 이스케이프를 잘못 적으면(`\b` 가 백스페이스 문자가 되는 식)
+#: 정규식이 **아무것도 못 찾는 검사**가 되고, 그건 통과하는 빈 시험이다.
+DB_KEYWORDS = ("SELECT ", "INSERT ", "psycopg")
+DB_CALL = re.compile(r"(?<![A-Za-z0-9])_connect\s*\(")
+DB_IMPORT = re.compile(r"import[^\n]*(?<![A-Za-z0-9])_connect(?![A-Za-z0-9])")
+
+
+def db_access(source: str) -> str:
+    """DB 를 건드리는 첫 흔적. 없으면 빈 문자열."""
+    for keyword in DB_KEYWORDS:
+        if keyword in source:
+            return keyword
+    if DB_CALL.search(source):
+        return "_connect("
+    if DB_IMPORT.search(source):
+        return "import _connect"
+    return ""
+
+
 def test_the_marker_lives_outside_the_database():
     """검증 대상이 DB 인데 결과를 그 DB 에 적으면, 표가 잘못 섰을 때 결과도 못 읽는다."""
     source = Path(gate.__file__).read_text(encoding="utf-8")
 
-    for keyword in ("SELECT ", "INSERT ", "psycopg", "_connect"):
-        assert keyword not in source, keyword
+    assert db_access(source) == ""
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("conn = _connect()", "_connect("),
+    ("    with _connect () as conn:", "_connect("),
+    ("from .workspace_store import _connect", "import _connect"),
+    ('cur.execute("SELECT 1")', "SELECT "),
+    ("import psycopg", "psycopg"),
+    # 잡으면 **안 되는** 것들. 이게 없으면 탐지기를 넓히다가 파일 이름에 걸린다.
+    ('GATED_SQL = ("bot_connection_schema.sql",)', ""),
+    ("SQL_DIR = ROOT / 'deploy' / 'sql'", ""),
+])
+def test_the_detector_catches_database_access(source, expected):
+    """**탐지기 자체를 시험한다.**
+
+    2026-09-28 에 이 검사가 이스케이프 실수로 백스페이스 문자를 찾고 있었다.
+    무엇도 매칭되지 않으니 언제나 통과했고, 그동안 지켜 주는 것이 없었다.
+    """
+    assert db_access(source) == expected
 
 
 # --- 막는 쪽 ------------------------------------------------------------------

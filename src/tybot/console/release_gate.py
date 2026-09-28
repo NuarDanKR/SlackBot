@@ -41,6 +41,7 @@ GATED_SQL = (
     "console_schema.sql",
     "archiving_schema.sql",
     "workspace_service_schema.sql",
+    "bot_connection_schema.sql",
 )
 
 ROOT = Path(__file__).resolve().parents[3]
