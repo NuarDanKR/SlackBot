@@ -55,6 +55,48 @@ ROUTE_MODES = ("disabled", "shadow", "active")
 #: `active` 라우트를 허용하는 런타임 상태. 나머지는 사람이 먼저 고쳐야 한다.
 HEALTHY = "ok"
 
+#: **돌고 있는 봇이 이 표들을 읽는가.**
+#:
+#: 지금은 아니다. Master 는 `workspace_secret`(`workspaces.load_workspaces`),
+#: Archiver 는 `workspace_service`(`archiver_runtime_config`), Master 의 전문 봇
+#: 라우팅은 `specialist_workspace`(`specialist_router`)를 읽는다. 새 표를 읽는
+#: 런타임은 아직 없다 — credential reader 전환은 별도 단계다(§12.2 8단계).
+#:
+#: 그래서 이 화면의 저장은 **기록이지 적용이 아니다.** 그 사실을 화면이 말하지
+#: 않으면, 연결을 끈 사람은 수집이 멈춘 줄 알고 자리를 뜬다. 그 오해는 조용하고
+#: 오래간다 — 아무 오류도 안 나기 때문이다.
+#:
+#: 전환이 끝나면 이 값을 True 로 바꾼다. `test_bot_admin` 이 실제 reader 를 훑어
+#: 값과 코드가 어긋나면 실패시킨다.
+RUNTIME_READS_NEW_TABLES = False
+
+#: 런타임에 영향을 주는 것과 주지 않는 것. 화면 문구의 정본이다.
+RUNTIME_EFFECT_NOW = (
+    "저장·검증은 **콘솔 기록**이다. 돌고 있는 Master·Archiver·Hermes 프로세스는"
+    " 아직 옛 표를 읽는다.",
+    "연결을 끄거나 그만 써도 **수집이 멈추지 않는다.** 수집을 멈추려면 채널 수집"
+    " 설정(모드)과 프로세스를 따로 다뤄야 한다.",
+    "라우트 모드를 바꿔도 **지금 답변 경로는 그대로다.** Master 는 아직 배정"
+    "(`specialist_workspace`)만 보고 라우팅한다.",
+)
+
+
+def runtime_effect() -> dict:
+    """이 화면의 변경이 **지금 돌고 있는 것**에 무엇을 하나.
+
+    사람이 제일 자주 틀리는 자리다. 콘솔에서 껐는데 봇이 계속 도는 것을 보면
+    「콘솔이 고장났다」 로 읽고, 그때 서버에 들어가 프로세스를 죽인다.
+    """
+    return {
+        "appliesNow": RUNTIME_READS_NEW_TABLES,
+        "summary": (
+            "지금은 설정만 기록됩니다. 돌고 있는 봇에는 반영되지 않습니다."
+            if not RUNTIME_READS_NEW_TABLES
+            else "저장 즉시 런타임에 반영됩니다."
+        ),
+        "details": list(RUNTIME_EFFECT_NOW) if not RUNTIME_READS_NEW_TABLES else [],
+    }
+
 
 class BotAdminRefused(WorkspaceStoreError):
     """콘솔 조작이 거절됐다. **사유를 사람 말로 들고 있다.**"""
@@ -177,7 +219,7 @@ def bots(repo: BotRepo | None = None) -> dict:
             "runtime": _runtime_view(runtimes.get(key)),
             "bindings": bindings,
         })
-    return {"bots": out}
+    return {"bots": out, "runtimeEffect": runtime_effect()}
 
 
 def bot_detail(bot_key: str, repo: BotRepo | None = None) -> dict:
@@ -217,7 +259,9 @@ def workspace_connections(workspace: str, repo: BotRepo | None = None) -> dict:
             "slack": slack,
             "internal": internal,
         })
-    return {"workspace": workspace, "bots": rows}
+    return {
+        "workspace": workspace, "bots": rows, "runtimeEffect": runtime_effect(),
+    }
 
 
 def workspace_routes(workspace: str, repo: BotRepo | None = None) -> dict:
@@ -229,7 +273,9 @@ def workspace_routes(workspace: str, repo: BotRepo | None = None) -> dict:
         view["key"] = str(row["specialist"])
         view["runtime"] = _runtime_view(runtimes.get(view["key"]))
         rows.append(view)
-    return {"workspace": workspace, "routes": rows}
+    return {
+        "workspace": workspace, "routes": rows, "runtimeEffect": runtime_effect(),
+    }
 
 
 def audit(workspace: str = "", limit: int = 100, repo: BotRepo | None = None) -> dict:

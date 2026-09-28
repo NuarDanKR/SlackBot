@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -487,3 +488,79 @@ def test_the_module_never_reads_ciphertext():
 
     assert "decrypt" not in source
     assert "ciphertext" not in source.split('"""')[-1]
+
+
+# --- 이 화면의 변경이 지금 돌고 있는 것에 무엇을 하나 ---------------------------
+#
+# 2026-09-29 오너 지시. 사람이 제일 자주 틀리는 자리다 — 콘솔에서 껐는데 봇이
+# 계속 도는 것을 보면 「콘솔이 고장났다」 로 읽고, 그때 서버에 들어가 프로세스를
+# 죽인다.
+
+RUNTIME_READERS = {
+    "Master 워크스페이스·토큰": ROOT / "src" / "tybot" / "workspaces.py",
+    "Archiver 기동 설정": ROOT / "src" / "tybot" / "archiver_runtime_store.py",
+    "Master 의 전문 봇 라우팅": ROOT / "src" / "tybot" / "specialist_router.py",
+}
+NEW_TABLES = ("bot_connection", "bot_catalog", "specialist_route")
+
+
+def test_no_runtime_reader_reads_the_new_tables_yet():
+    """읽는 쪽 전환은 별도 단계다(§12.2 8단계).
+
+    이 시험이 실패하면 전환이 시작된 것이고, 그때 `RUNTIME_READS_NEW_TABLES` 를
+    함께 바꿔야 한다. 두 값이 어긋나면 화면이 **거짓말을 한다.**
+    """
+    def _mentions(source: str, table: str) -> bool:
+        # `specialist_route` 는 `specialist_router` 의 앞부분이기도 하다. 낱말로
+        # 봐야 자기 이름 때문에 걸리지 않는다.
+        return re.search(rf"{table}(?![A-Za-z0-9_])", source) is not None
+
+    reads = {
+        name: [table for table in NEW_TABLES
+               if _mentions(path.read_text(encoding="utf-8"), table)]
+        for name, path in RUNTIME_READERS.items()
+    }
+    touched = {name: tables for name, tables in reads.items() if tables}
+
+    assert touched == {}, f"런타임이 새 표를 읽기 시작했다: {touched}"
+    assert admin.RUNTIME_READS_NEW_TABLES is False
+
+
+def test_the_read_model_says_it_does_not_apply_now(repo):
+    """화면이 잊을 수 없게 **모든 읽기에** 실어 보낸다."""
+    for payload in (
+        admin.bots(repo),
+        admin.workspace_connections("tyit", repo),
+        admin.workspace_routes("tyit", repo),
+    ):
+        effect = payload["runtimeEffect"]
+        assert effect["appliesNow"] is False
+        assert "돌고 있는 봇에는 반영되지 않습니다" in effect["summary"]
+        assert len(effect["details"]) >= 3
+
+
+def test_the_notice_names_what_does_not_stop(repo):
+    """「연결을 껐으니 수집도 멈췄겠지」 가 제일 비싼 오해다."""
+    details = " ".join(admin.runtime_effect()["details"])
+
+    assert "수집이 멈추지 않는다" in details
+    assert "답변 경로는 그대로" in details
+
+
+def test_disabling_a_connection_changes_no_collection_state(repo, actor):
+    """연결 상태와 채널 수집 모드는 **다른 표**다. 한쪽이 다른 쪽을 건드리면
+    화면에서 본 것과 실제가 갈린다."""
+    repo.given_connection("tyit", "archiver", state="enabled", team_id="T1",
+                          bot_user_id="U2", identity_ok=True)
+
+    admin.set_connection_state("tyit", "archiver", "disabled", actor=actor, repo=repo)
+
+    fields = {key for row in repo.audit_rows for key in (row["field"],)}
+    assert fields == {"connection.archiver.slack_socket.state"}
+    # 수집 모드·기능 스위치·writer 인수는 `archiving_admin` 소유다. 이 모듈은
+    # 그 표를 아예 만지지 않는다.
+    source = (ROOT / "src" / "tybot" / "console" / "bot_admin.py").read_text(
+        encoding="utf-8"
+    )
+    for table in ("archive_channel_mode", "archive_feature_flag", "writer_owner"):
+        assert table not in source

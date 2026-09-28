@@ -50,7 +50,7 @@ const NAV: NavGroup[] = [
   { label: '운영', path: '/manage', minimum: 'developer', items: [
     { path: '/manage', label: '운영 현황', minimum: 'developer' },
     { path: '/manage/licenses', label: '라이선스 현황', minimum: 'admin' },
-    { path: '/manage/specialists', label: '전문 봇 관리', minimum: 'developer', capability: 'specialists' },
+    { path: '/manage/bots', label: '봇 관리', minimum: 'developer', capability: 'specialists' },
     { path: '/manage/commands', label: '명령 진단', minimum: 'developer' },
     { path: '/manage/logs', label: '서비스 로그', minimum: 'developer' },
     { path: '/manage/batches', label: '배치 관리', minimum: 'admin' },
@@ -65,7 +65,7 @@ const NAV: NavGroup[] = [
   ] },
 ]
 
-const ALL_PATHS = new Set(['/home', '/collect/status', '/manage/slack', '/answer/questions', '/answer/quality', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
+const ALL_PATHS = new Set(['/home', '/collect/status', '/manage/slack', '/manage/specialists', '/answer/questions', '/answer/quality', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
 
 const RANK: Record<ConsoleRole, number> = { guest: 0, developer: 1, admin: 2 }
 const THEME_LABEL: Record<Theme, string> = { system: '시스템 설정', light: '밝게', dark: '어둡게' }
@@ -109,6 +109,10 @@ export default function App() {
       ? '/answer'
     : location.path === '/manage/slack'
       ? '/manage/commands'
+    // 옛 북마크를 깨지 않는다. 쿼리(선택한 봇·워크스페이스)는 location.query 에
+    // 그대로 있으므로 화면이 이어서 읽는다(§10).
+    : location.path === '/manage/specialists'
+      ? '/manage/bots'
       : location.path
   const [authTick, setAuthTick] = useState(0)
   const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([])
@@ -168,7 +172,7 @@ export default function App() {
       {path === '/answer/rules' && <Harness />}
       {path === '/manage' && <OperationsDashboard user={user} navigate={navigate} />}
       {path === '/manage/licenses' && <Licenses onToast={toast} />}
-      {path === '/manage/specialists' && <SpecialistManagement user={user} query={location.query} onToast={toast} />}
+      {path === '/manage/bots' && <SpecialistManagement user={user} query={location.query} onToast={toast} />}
       {path === '/manage/commands' && <CommandDiagnostics />}
       {path === '/manage/logs' && <ServiceLogs context={logContext} />}
       {path === '/manage/batches' && <BatchTimers onToast={toast} />}
