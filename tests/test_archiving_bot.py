@@ -78,6 +78,15 @@ def test_db_configuration_can_start_before_the_first_channel_invitation(monkeypa
     assert config.allowed_channels == frozenset()
 
 
+def test_instance_lock_is_scoped_to_one_workspace():
+    assert archiving_bot._instance_lock_name("tyit") == "archiving-bot-shadow-tyit"
+    assert archiving_bot._instance_lock_name("mgmt") == "archiving-bot-shadow-mgmt"
+    assert (
+        archiving_bot._instance_lock_name("tyit")
+        != archiving_bot._instance_lock_name("mgmt")
+    )
+
+
 def test_slack_identity_must_match_workspace_and_not_master(tmp_path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
     archiving_bot.validate_slack_identity(

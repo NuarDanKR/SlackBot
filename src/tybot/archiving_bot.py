@@ -535,6 +535,10 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         sync_thread.join(timeout=1)
 
 
+def _instance_lock_name(workspace: str) -> str:
+    return f"archiving-bot-shadow-{workspace}"
+
+
 def main() -> int:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
@@ -550,11 +554,14 @@ def main() -> int:
     configs = load_archiver_workspaces()
     root = shadow_archive_dir()
     root.mkdir(parents=True, exist_ok=True)
-    lock = instance_lock("archiving-bot-shadow")
+    workspace = configs[0].key
+    lock = instance_lock(_instance_lock_name(workspace))
     try:
         lock.acquire()
     except AlreadyRunning as exc:
-        raise ArchiverConfigError("another archiving shadow collector is running") from exc
+        raise ArchiverConfigError(
+            f"another archiving shadow collector is running for {workspace}"
+        ) from exc
     try:
         _serve(configs[0], root)
     finally:
