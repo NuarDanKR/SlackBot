@@ -276,6 +276,10 @@ OUR_TABLE_PREFIXES = (
     "user_identity", "raw_line", "console_", "usage_", "specialist_", "harness_",
     "qa_", "answer_", "deploy_",
 )
+OUR_TABLE_NAMES = frozenset({
+    "anomaly", "audit_query", "bot_catalog", "bot_connection",
+    "bot_connection_secret", "channel", "sync_run",
+})
 
 REQUIRED_ROLES = ("tyslackai", "tybot_archiver")
 
@@ -311,7 +315,8 @@ def foreign_tables(conn) -> list[str]:
         names = [str(row[0]) for row in cur.fetchall()]
     return [
         name for name in names
-        if not any(name.startswith(prefix) for prefix in OUR_TABLE_PREFIXES)
+        if name not in OUR_TABLE_NAMES
+        and not any(name.startswith(prefix) for prefix in OUR_TABLE_PREFIXES)
     ]
 
 

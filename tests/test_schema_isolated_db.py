@@ -736,7 +736,21 @@ def test_preflight_refuses_a_database_that_holds_someone_elses_tables():
 
 def test_preflight_passes_on_a_database_that_only_holds_our_tables():
     """앞선 실행이 남긴 우리 표는 정상이다. 그걸 막으면 두 번 못 돌린다."""
-    cur = _Cur([(1,), (1,), [("archive_channel_mode",), ("workspace_service",)]])
+    cur = _Cur([
+        (1,),
+        (1,),
+        [
+            ("anomaly",),
+            ("archive_channel_mode",),
+            ("audit_query",),
+            ("bot_catalog",),
+            ("bot_connection",),
+            ("bot_connection_secret",),
+            ("channel",),
+            ("sync_run",),
+            ("workspace_service",),
+        ],
+    ])
 
     assert verify.preflight(_Conn(cur)) == []
 
