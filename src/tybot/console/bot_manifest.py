@@ -82,6 +82,40 @@ def known_sha256(manifest_id: str) -> str:
     return str(row["sha256"]) if row else ""
 
 
+def detail(manifest_id: str) -> dict:
+    """정본 **내용**까지. catalog 에 있는 것만 읽는다.
+
+    ## 왜 경로를 안 받나
+
+    화면이 파일 경로를 보내게 하면 그 자리가 곧 경로 탈출이다. 여기서 받는 것은
+    **catalog 의 ID 뿐**이고, 파일 경로는 우리가 코드에 적어 둔 값에서만 나온다.
+    요청자가 고를 수 있는 것은 「어느 정본이냐」 이지 「어느 파일이냐」 가 아니다.
+
+    Manifest YAML 은 시크릿이 아니다 — 스코프와 이벤트 목록이다. 그래서 승인된
+    콘솔 사용자에게 내용을 보여 준다. 대신 **보여 주는 것과 대조했다고 적는 것은
+    다른 동작**이다(§4.2). 보기만으로 확인 상태를 바꾸지 않는다.
+    """
+    row = _entry(manifest_id)
+    if row is None:
+        raise bot_admin.BotAdminRefused(f"등록되지 않은 Manifest 입니다: {manifest_id}")
+    path = ROOT / str(row["sourcePath"])
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        # 파일이 없으면 **없다고 말한다.** 빈 내용을 정상처럼 보여 주면 사람이
+        # 그걸 Slack 에 붙여 넣는다.
+        raise bot_admin.BotAdminRefused(
+            f"정본 파일을 읽지 못했습니다: {row['sourcePath']}"
+        ) from None
+    return {
+        "manifestId": row["manifestId"],
+        "botKey": row["botKey"],
+        "sourcePath": row["sourcePath"],
+        "sha256": row["sha256"],
+        "content": content,
+    }
+
+
 def owner_of(manifest_id: str) -> str:
     """이 Manifest 는 **어느 봇의 것인가.**
 

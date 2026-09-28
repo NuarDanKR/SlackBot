@@ -3,6 +3,12 @@
 기준: [Archiving Bot 분리 결정](../design/archiving-bot-separation-2026-09-23.md)
 상태: 개발/비교 전용. 운영 writer 전환 절차가 아니다.
 
+> **현재 적용 주의 (2026-09-28):** 이 문서는 기존 `workspace_service` 연결을 읽는
+> shadow 실행 절차다. 새 `봇 관리 > 워크스페이스 연결`의 `bot_connection`에 토큰만
+> 등록해도 현재 Archiver runtime은 그 값을 읽지 않는다. 새 연결 정본을 읽는 runtime
+> 전환과 서버 bootstrap이 확인되기 전에는 아래 start 절차를 실행하지 않는다.
+> 콘솔 기반 shadow 운영 목표는 [Archiver Shadow 연결 및 콘솔 운영 사양](../design/archiver-shadow-console-operations-2026-09-28.md)을 따른다.
+
 Slack 계약: [Socket Mode](https://docs.slack.dev/tools/bolt-python/concepts/socket-mode),
 [채널별 message 이벤트](https://docs.slack.dev/reference/events/message/),
 [`auth.test`](https://docs.slack.dev/reference/methods/auth.test/).
@@ -23,8 +29,9 @@ Slack 계약: [Socket Mode](https://docs.slack.dev/tools/bolt-python/concepts/so
   키는 넣지 않는다. DB 역할은 `archiver_runtime_config()` 실행과 Archiving 상태
   표 권한만 가진다. 운영 ArchiveStore 경로와 그림자 경로는 서로 달라야 한다.
 
-예시: `tyit` 워크스페이스를 준비한다. Slack 앱 토큰은 Workspace 상세의
-Archiving 서비스 연결에서 저장하고 신원확인을 통과시킨다.
+예시: `tyit` 워크스페이스를 준비한다. 이 문서의 현재 런타임에서는 Slack 앱 토큰을
+기존 `workspace_service` 연결 경로에 저장하고 신원확인을 통과시켜야 한다. 새 봇 관리
+화면의 연결과 혼용하지 않는다. 두 연결 경로의 통합은 별도 구현 사양을 따른다.
 
 ```text
 # /etc/tybot/archiver-tyit.env (root:tybot, 0640)
@@ -35,6 +42,12 @@ WORKSPACE_SECRET_KEY=<same-fernet-key-used-by-console>
 ARCHIVE_DIR=/var/lib/tybot/archive
 ARCHIVER_SHADOW_DIR=/var/lib/tybot/archiver-shadow/tyit/archive
 ```
+
+다음 명령은 이미 유효한 `/etc/tybot/archiver-tyit.env`가 있고 DB 연결, 암호화 키,
+토큰 신원, 채널 allowlist, 디렉터리 권한이 준비된 경우에만 프로세스를 시작한다.
+env 파일이 없으면 unit의 `ConditionPathExists`로 서비스가 시작되지 않는다. 시작돼도
+과거 메시지를 백필하거나 전체 archive/첨부 변환을 완료하지 않는다. Slack event 수신과
+shadow 기록을 별도로 확인해야 한다.
 
 서버 관리자는 사용자·권한을 확인하고 다음을 실행한다. 파일 내용은
 명령행 인자로 넘기지 않는다. unit에는 `[Install]`이 없어 자동

@@ -61,7 +61,8 @@ def test_identity_check_uses_stored_token_without_returning_it(monkeypatch):
         def auth_test(self):
             return {"team_id": "T123", "user_id": "U456"}
 
-        def apps_connections_open(self):
+        def apps_connections_open(self, *, app_token):
+            observed["socket_app_token"] = app_token
             return {"ok": True, "url": "wss://example.invalid/secret"}
 
     def record(workspace, service, actual, *, actor):
@@ -83,6 +84,7 @@ def test_identity_check_uses_stored_token_without_returning_it(monkeypatch):
     assert result == ""
     assert observed == {
         "tokens": [bot_secret, app_secret],
+        "socket_app_token": app_secret,
         "workspace": "tyit",
         "service": "archiver",
         "team": "T123",

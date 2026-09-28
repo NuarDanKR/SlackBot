@@ -49,7 +49,7 @@ def verify_service(
         client_factory = WebClient
     try:
         result = client_factory(token=bot_token).auth_test()
-        client_factory(token=app_token).apps_connections_open()
+        client_factory(token=app_token).apps_connections_open(app_token=app_token)
     except Exception as exc:
         raise ServiceStoreError(f"Slack 토큰 쌍 확인 실패: {type(exc).__name__}") from exc
     finally:

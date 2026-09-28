@@ -245,12 +245,32 @@ def _slack(team="T1", user="U2", *, fail=False):
                 raise RuntimeError("timeout")
             return {"team_id": team, "user_id": user}
 
-        def apps_connections_open(self):
+        def apps_connections_open(self, *, app_token):
+            assert app_token == self.token
             if fail:
                 raise RuntimeError("timeout")
             return {"ok": True}
 
     return _Client
+
+
+def test_identity_uses_the_sdk_app_token_argument(repo, monkeypatch):
+    """slack-sdk 3.43 requires ``app_token=`` for apps.connections.open."""
+    repo.given_connection("tyit", "archiver", state="draft")
+    monkeypatch.setattr(bot_identity, "_tokens", lambda ws, key: (BOT, APP, "fp"))
+    monkeypatch.setattr(
+        bot_admin,
+        "record_identity",
+        lambda ws, key, **kwargs: "",
+    )
+
+    assert bot_identity.verify_connection(
+        "tyit",
+        "archiver",
+        actor=bot_admin.Actor("owner@example.com", "설치 확인"),
+        client_factory=_slack(),
+        repo=repo,
+    ) == ""
 
 
 def test_identity_enables_the_connection(client, repo, monkeypatch):
@@ -477,3 +497,48 @@ def test_a_manifest_hash_alone_does_not_decide_the_owner(client, repo):
     assert manifest.owner_of("master/slack_socket") == "master"
     assert manifest.owner_of("archiver/slack_socket") == "archiver"
     assert manifest.owner_of("hermes/slack_socket") == "", "PF 승인본은 아직 없다"
+
+
+# --- Manifest 내용 보기 (2026-09-28 §4.2) --------------------------------------
+
+def test_the_manifest_detail_returns_the_file(client, repo):
+    """설치할 때 그대로 붙여 넣는 값이다. 화면 밖에서 파일을 구해 오게 하지 않는다."""
+    body = client.get("/api/bot-manifests/archiver/slack_socket", headers=owner(client))
+
+    assert body.status_code == 200
+    data = body.json()
+    assert data["botKey"] == "archiver"
+    assert data["sourcePath"] == "docs/pilot/archiving-app-manifest.yaml"
+    assert len(data["sha256"]) == 64
+    assert "channels:history" in data["content"], "정본 내용이 그대로 와야 한다"
+    assert set(data) == {"manifestId", "botKey", "sourcePath", "sha256", "content"}
+
+
+def test_the_manifest_detail_needs_admin(client, repo):
+    assert client.get(
+        "/api/bot-manifests/archiver/slack_socket", headers=guest(client),
+    ).status_code == 403
+
+
+@pytest.mark.parametrize("bad", [
+    "../../../etc/passwd",
+    "docs/pilot/slack-app-manifest.yaml",
+    "hermes/slack_socket",
+    "master/slack_socket/../../secrets",
+])
+def test_only_catalog_ids_are_readable(client, repo, bad):
+    """경로를 받으면 그 자리가 곧 경로 탈출이다. 고를 수 있는 것은 정본 ID 뿐이다."""
+    response = client.get(f"/api/bot-manifests/{bad}", headers=owner(client))
+
+    assert response.status_code == 404
+
+
+def test_viewing_does_not_record_an_attestation(client, repo):
+    """보기와 대조는 다른 동작이다. 보기만으로 확인 상태가 바뀌면 그 기록은 거짓이다."""
+    repo.given_connection("tyit", "archiver", state="draft")
+
+    client.get("/api/bot-manifests/archiver/slack_socket", headers=owner(client))
+
+    row = repo.connections("tyit")[0]
+    assert row["manifest_attested_sha256"] == ""
+    assert repo.audit_rows == []

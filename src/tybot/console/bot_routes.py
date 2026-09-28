@@ -298,6 +298,25 @@ def put_manifest_attestation(
     return bot_admin.workspace_connections(key)
 
 
+@router.get("/api/bot-manifests/{manifest_id:path}")
+def get_manifest_detail(manifest_id: str, user: User) -> dict:
+    """정본 하나의 **내용과 hash.** 설치할 때 그대로 붙여 넣는 값이다.
+
+    별도 탭을 찾아가야만 설치 파일을 볼 수 있으면, 사람은 화면 밖에서 파일을
+    구해 온다 — 그 순간 무엇을 붙여 넣었는지 아무도 모른다.
+
+    `manifest_id` 는 catalog 에 있는 값만 받는다. 경로를 받지 않으므로 탈출할
+    자리가 없다. **보기는 대조가 아니다** — 대조 기록은 별도 동작이다(§4.2).
+    """
+    _require_admin(user)
+    from . import bot_manifest
+
+    try:
+        return bot_manifest.detail(manifest_id.strip())
+    except bot_admin.BotAdminRefused as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/api/bot-manifests")
 def get_manifests(user: User) -> dict:
     """정본 Manifest 목록과 hash. **파일에서 직접 센다.**

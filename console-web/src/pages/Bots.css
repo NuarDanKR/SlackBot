@@ -203,3 +203,19 @@
 }
 
 .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+.bots-manifest { margin: 10px 0; }
+
+.bots-manifest-body {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: #f6f7f9;
+  border: 1px solid var(--line, #e4e6eb);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre;
+}

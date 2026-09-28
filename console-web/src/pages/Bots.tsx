@@ -127,6 +127,102 @@ export function RuntimeNotice({ effect }: { effect?: RuntimeEffect }) {
   )
 }
 
+type ManifestDetail = {
+  manifestId: string
+  botKey: string
+  sourcePath: string
+  sha256: string
+  content: string
+}
+
+/**
+ * 연결 상세에서 바로 보는 Slack App Manifest.
+ *
+ * 별도 탭을 찾아가야만 설치 파일을 볼 수 있으면, 사람은 화면 밖에서 파일을 구해
+ * 온다 — 그 순간 무엇을 붙여 넣었는지 아무도 모른다.
+ *
+ * **보기는 대조가 아니다.** 여기서 여닫고 복사해도 「확인함」 이 되지 않는다.
+ * 적용 확인은 사람이 Slack 설정과 SHA-256 을 대조하고 사유를 남기는 별도 동작이고,
+ * 그건 Manifest 탭에 있다(§4.2).
+ */
+function ManifestBlock({
+  botKey,
+  onToast,
+}: {
+  botKey: string
+  onToast: (message: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [detail, setDetail] = useState<ManifestDetail | null>(null)
+  const [problem, setProblem] = useState('')
+
+  async function load() {
+    if (detail || problem) {
+      setOpen(!open)
+      return
+    }
+    try {
+      const found = await api.get<ManifestDetail>(
+        `/api/bot-manifests/${botKey}/slack_socket`,
+      )
+      setDetail(found)
+      setOpen(true)
+    } catch (error) {
+      // 「정본 미등록」 과 「불러오지 못함」 은 사람이 할 일이 다르다.
+      setProblem(
+        error instanceof ApiError && error.status === 404
+          ? '정본 미등록'
+          : '정본을 불러오지 못했습니다.',
+      )
+      setOpen(true)
+    }
+  }
+
+  async function copy() {
+    if (!detail) return
+    try {
+      await navigator.clipboard.writeText(detail.content)
+      onToast('Manifest 를 복사했습니다. 복사만으로는 대조 기록이 남지 않습니다.')
+    } catch {
+      onToast('복사하지 못했습니다. 아래 내용을 직접 선택해 복사하세요.')
+    }
+  }
+
+  return (
+    <div className="bots-manifest">
+      <div className="bots-actions">
+        <button type="button" className="btn ghost btn-sm" onClick={load}>
+          {open ? 'Manifest 접기' : 'Slack App Manifest 보기'}
+        </button>
+        {detail ? (
+          <button type="button" className="btn ghost btn-sm" onClick={copy}>
+            복사
+          </button>
+        ) : null}
+      </div>
+      {open && problem ? (
+        <p className="bots-note">
+          {problem === '정본 미등록'
+            ? '정본 미등록 — 이 봇의 Slack App Manifest 는 아직 저장소에 없습니다. 임의로 만들지 마세요.'
+            : problem}
+        </p>
+      ) : null}
+      {open && detail ? (
+        <>
+          <p className="bots-note">
+            {detail.sourcePath} · SHA-256 {detail.sha256}
+          </p>
+          <p className="bots-note">
+            보기·복사는 설치 편의 기능입니다. 대조 기록은 Manifest 탭에서 사유와 함께
+            남깁니다.
+          </p>
+          <pre className="bots-manifest-body">{detail.content}</pre>
+        </>
+      ) : null}
+    </div>
+  )
+}
+
 function StateChip({
   table,
   value,
@@ -391,7 +487,7 @@ export function WorkspaceConnections({
       <RuntimeNotice effect={view.runtimeEffect} />
       <Section
         title={`${workspace} 연결`}
-        lead="Slack 직접 연결에는 봇/앱 토큰 쌍이 필요합니다. Master 내부 호출에는 토큰이 없습니다."
+        lead="Slack 직접 연결에는 봇/앱 토큰 쌍이 필요합니다. Slack 앱과 토큰은 워크스페이스마다 별도입니다 — 다른 워크스페이스의 토큰을 여기 넣지 마세요. Master 내부 호출에는 토큰이 없습니다."
         aside={
           <select
             className="input"
@@ -454,6 +550,8 @@ export function WorkspaceConnections({
                         </dd>
                       </div>
                     </dl>
+
+                    <ManifestBlock botKey={bot.key} onToast={onToast} />
 
                     {editing ? (
                       <div className="bots-form">
