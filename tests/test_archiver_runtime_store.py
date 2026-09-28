@@ -10,6 +10,7 @@ class Cursor:
         self.channels = channels
         self.flags = flags
         self.query = ""
+        self.queries = []
 
     def __enter__(self):
         return self
@@ -19,6 +20,7 @@ class Cursor:
 
     def execute(self, query, _params=None):
         self.query = query
+        self.queries.append(query)
 
     def fetchone(self):
         return self.config
@@ -53,19 +55,19 @@ def _install(monkeypatch, *, separate=True, reader=True, master="U_MASTER"):
         "bot_ciphertext": cipher.encrypt(b"xoxb-archiver"),
         "app_ciphertext": cipher.encrypt(b"xapp-archiver"),
     }
-    monkeypatch.setattr(
-        runtime,
-        "_connect",
-        lambda: Connection(
-            config,
-            ["C111", "C222"],
-            {
-                "separate_attachments": separate,
-                "attachment_reader_ready": reader,
-            },
-        ),
+    connection = Connection(
+        config,
+        ["C111", "C222"],
+        {
+            "separate_attachments": separate,
+            "attachment_reader_ready": reader,
+        },
     )
+    cursor = connection.cursor()
+    connection.cursor = lambda: cursor
+    monkeypatch.setattr(runtime, "_connect", lambda: connection)
     monkeypatch.setattr(runtime, "_fernet", lambda: cipher)
+    return connection
 
 
 def test_runtime_config_returns_only_decrypted_archiver_pair(monkeypatch):
@@ -79,6 +81,16 @@ def test_runtime_config_returns_only_decrypted_archiver_pair(monkeypatch):
     assert result["separate_attachments"] is True
     assert "bot_ciphertext" not in result
     assert "app_ciphertext" not in result
+
+
+def test_runtime_config_reads_the_new_connection_contract(monkeypatch):
+    connection = _install(monkeypatch)
+
+    runtime.load_runtime_config("tyit")
+
+    queries = connection.cursor().queries
+    assert "archiver_connection_config" in queries[0]
+    assert "archiver_runtime_config" not in queries[0]
 
 
 def test_runtime_config_fails_closed_without_attachment_reader(monkeypatch):

@@ -2,7 +2,8 @@
 
 작성: 2026-09-28  
 대상: Claude Code 구현 담당자 및 TYBot 콘솔 검토자  
-상태: 구현 전 합의 사양. 우선순위는 shadow 파일럿이며, 이 문서만으로 운영 서비스나 `active` 수집을 켜지 않는다.
+상태: Archiver credential reader 전환 구현·서버 배포 대기. 우선순위는 shadow 파일럿이며,
+이 문서만으로 운영 서비스나 `active` 수집을 켜지 않는다.
 
 ## 1. 목표
 
@@ -17,11 +18,10 @@ shadow 경로로 수집을 검증한다. 콘솔의 systemd 시작/중지 UI는 �
 
 - `console-web/src/pages/Bots.tsx`의 새 연결 화면은 `bot_connection`과
   `bot_connection_secret`을 사용한다.
-- 현재 `src/tybot/console/bot_admin.py`는 새 테이블 연결 변경이 런타임에 적용되지
-  않는다고 명시한다(`RUNTIME_READS_NEW_TABLES = False`).
-- `src/tybot/archiver_runtime_store.py`는 `workspace_service`를 읽는
-  `archiver_runtime_config()`에서 토큰을 가져온다. 따라서 새 봇 관리 화면에 토큰만
-  등록하면 현재 shadow 프로세스가 그 토큰을 읽는다고 볼 수 없다.
+- `src/tybot/archiver_runtime_store.py`는 새 연결 정본을 제한적으로 노출하는
+  `archiver_connection_config()`에서 Archiver 토큰과 Master 신원을 가져온다.
+- Master 연결과 전문 봇 라우팅 reader는 아직 옛 정본을 읽는다. 따라서 콘솔은
+  `Archiver 연결만 다음 기동에 적용`된다고 구분해서 표시한다.
 - `deploy/tybot-archiving-shadow@.service`는
   `/etc/tybot/archiver-%i.env`가 있어야 시작하며, 그 파일에서 DB 연결과 암호화 키를
   읽는다. unit은 `[Install]`이 없는 수동 시작 전용이다.
@@ -32,9 +32,8 @@ shadow 경로로 수집을 검증한다. 콘솔의 systemd 시작/중지 UI는 �
 - 채널 allowlist는 이름 규칙이 아니라 채널 ID로 제한한다. 사용자가 명시적으로 선택하고
   Archiver 앱을 초대한 채널이면 Master의 채널 네이밍 규칙에 맞지 않아도 대상이 될 수 있다.
 
-따라서 현재는 **콘솔 연결 저장 → systemd 시작**만으로 완료되지 않는다. 먼저 Archiver
-runtime credential reader를 새 봇 연결 정본으로 이행하고, per-workspace env bootstrap과
-shadow 운영 절차가 준비돼야 한다.
+따라서 현재는 **콘솔 연결 저장 → systemd 시작**만으로 완료되지 않는다. reader 전환이
+포함된 서버 배포, per-workspace env bootstrap, 채널 shadow allowlist가 준비돼야 한다.
 
 ## 3. 운영·개발 경계
 
@@ -42,7 +41,7 @@ shadow 운영 절차가 준비돼야 한다.
 
 | 화면 상태 | 동작 | 저장 경로 | Master 수집 |
 |---|---|---|---|
-| Shadow 준비 | 채널 ID와 연결 신원 확인 | 아직 쓰지 않음 | 계속 운영 |
+| Shadow 준비 | 토큰 등록 시 연결 자동 확인 | 아직 쓰지 않음 | 계속 운영 |
 | Shadow 실행 | Archiver가 허용 채널 이벤트를 별도 수집 | `/var/lib/tybot/archiver-shadow/<workspace>/archive` | 계속 운영 |
 | 중지 | Archiver 프로세스 중지 | 기존 shadow 자료 유지 | 계속 운영 |
 
@@ -57,28 +56,28 @@ shadow 운영 절차가 준비돼야 한다.
 ## 4. 목표 사용자 흐름
 
 1. `봇 관리 > 워크스페이스 연결`에서 TYIT의 Archiver Slack Bot Token과 App-Level Token을
-   등록한다. 평문은 응답에 되돌려 주지 않고 저장 뒤 입력 필드를 비운다.
+   등록한다. 같은 요청에서 bot token과 app token을 Slack에 확인하고, team ID와 bot user
+   ID까지 기록한다. 별도의 `신원 확인` 버튼이나 후속 절차는 두지 않는다. 평문은 응답에
+   되돌려 주지 않고 저장 뒤 입력 필드를 비운다.
 2. 연결 상세에서 해당 봇의 Slack App Manifest 정본을 바로 열고 복사할 수 있어야 한다.
    별도 Manifest 탭을 찾아가야만 설치 파일을 확인할 수 있게 하지 않는다. 관리자는 표시된
    SHA-256과 실제 Slack 앱 설정을 대조한 뒤 확인 기록을 남긴다.
-3. 콘솔이 Slack identity 검증을 수행한다. team ID는 선택한 workspace와 같아야 하고,
-   Archiver bot user ID는 Master bot user ID와 달라야 한다.
-4. 관리자가 채널 목록에서 최대 5개의 채널 ID를 선택한다. 이름은 표시용일 뿐 식별키가
+3. 관리자가 채널 목록에서 최대 5개의 채널 ID를 선택한다. 이름은 표시용일 뿐 식별키가
    아니다. private channel은 Archiver 앱 초대 및 실제 권한이 확인되지 않으면 시작을 막는다.
-5. 서버 사전조건이 준비되지 않은 경우 콘솔은 구체적인 누락 항목만 표시하고 시작을
+4. 서버 사전조건이 준비되지 않은 경우 콘솔은 구체적인 누락 항목만 표시하고 시작을
    비활성화한다. 예: 런타임 credential reader 미배포, DB bootstrap 누락, shadow 경로
-   권한 오류, 연결 미검증, 채널 0개 또는 5개 초과.
-6. 준비 완료 후 승인된 운영자가 `Shadow 수집 시작`을 누른다. 확인 창에는 workspace,
+   권한 오류, 토큰 등록 시 자동 연결 확인 실패, 채널 0개 또는 5개 초과.
+5. 준비 완료 후 승인된 운영자가 `Shadow 수집 시작`을 누른다. 확인 창에는 workspace,
    선택 채널 수, shadow 경로, live archive를 수정하지 않는다는 점을 보여 준다.
-7. 시작 결과와 systemd 상태를 표시한다. 실제 Slack 이벤트가 들어와 파일이 기록되기 전에는
+6. 시작 결과와 systemd 상태를 표시한다. 실제 Slack 이벤트가 들어와 파일이 기록되기 전에는
    `수집 완료`라고 표시하지 않는다.
-8. 사용자는 shadow archive의 건수/최근 이벤트/최근 오류를 확인하고 Master 운영본과
+7. 사용자는 shadow archive의 건수/최근 이벤트/최근 오류를 확인하고 Master 운영본과
    비교한다. 비교 결과를 확인하기 전에는 기존 수집을 끄지 않는다.
 
 ### 4.1 여러 워크스페이스 등록과 파일럿 순서
 
 - 같은 Archiver Manifest를 사용해 `tyit`, `pilot` 등 여러 워크스페이스에 앱을 미리 만들고
-  토큰을 등록·신원 확인할 수 있다.
+  토큰을 등록할 수 있다. 연결 확인은 등록 요청에 포함된다.
 - Slack 앱과 Bot/App Token은 워크스페이스마다 별도다. 한 워크스페이스의 토큰을 다른
   워크스페이스 연결에 재사용하지 않는다.
 - 여러 연결을 등록했다고 여러 collector를 동시에 시작하지 않는다. 최초 shadow 기동은

@@ -202,10 +202,10 @@ def test_no_screen_text_claims_the_runtime_changed(bots_page):
         assert claim not in bots_page, f"런타임 동작을 단정한다: {claim}"
 
 
-def test_saving_says_it_is_not_applied_yet(bots_page):
-    """저장 성공을 「반영됐다」 로 말하지 않는다."""
-    assert "아직 적용되지 않았습니다" in bots_page
-    assert "수집이 시작되지는 않습니다" in bots_page
+def test_saving_distinguishes_connection_from_collection(bots_page):
+    """연결 확인 성공을 collector 기동 성공으로 말하지 않는다."""
+    assert "토큰 등록과 Slack 연결 확인을 마쳤습니다" in bots_page
+    assert "수집은 Archiver 실행 후 시작됩니다" in bots_page
     assert "돌고 있는 프로세스는 그대로입니다" in bots_page
 
 
@@ -213,6 +213,7 @@ def test_the_token_inputs_are_passwords_and_cleared(bots_page):
     """저장 뒤 화면에 평문이 남아 있을 이유가 없다."""
     assert bots_page.count('type="password"') >= 2
     assert "setDraft({ bot: '', botToken: '', appToken: '', reason: '' })" in bots_page
+    assert "? { ...current, botToken: '', appToken: '' }" in bots_page
 
 
 def test_the_page_never_renders_a_plaintext_token_field(bots_page):
@@ -310,7 +311,7 @@ def test_the_routing_screen_requires_a_reason(routing_page):
 
 def test_the_manifest_screen_separates_identity_from_manifest(routing_page):
     """`auth.test` 성공만으로 Manifest 일치를 표시하지 않는다(§6.2)."""
-    assert "신원 확인과는 다른 검사입니다" in routing_page
+    assert "토큰 등록 시 자동 연결 확인과는 다른 검사입니다" in routing_page
     assert "스코프가" in routing_page
     assert "Slack 앱 설정이 바뀌지는 않습니다" in routing_page
 
@@ -386,3 +387,139 @@ def test_the_copy_no_longer_asks_for_tokens(workspaces_page):
 def test_the_mask_is_still_readable(workspaces_page):
     """어떤 토큰이 들어가 있는지는 계속 보여야 한다. 지우는 것은 **입력**뿐이다."""
     assert "botTokenMask" in workspaces_page and "appTokenMask" in workspaces_page
+
+
+# --- Archiving 화면: 파일럿 shadow 만 (2026-09-28 사양) --------------------------
+
+PANEL = WEB / "components" / "ArchivingPanel.tsx"
+
+
+@pytest.fixture(scope="module")
+def panel() -> str:
+    return PANEL.read_text(encoding="utf-8")
+
+
+def test_the_panel_has_no_token_input(panel):
+    """토큰 정본은 bot_connection 이다. 두 화면에서 받으면 어느 쪽이 참인지 모른다."""
+    assert 'type="password"' not in panel
+    assert "botToken" not in panel and "appToken" not in panel
+    assert "/services/" not in panel, "옛 서비스 토큰 API 를 부르면 안 된다"
+
+
+def test_the_panel_points_at_bot_management(panel):
+    """칸만 없애면 사람은 어디서 넣는지 모른다."""
+    assert "#/manage/bots/connections?workspace=" in panel
+    assert "워크스페이스마다 별도" in panel
+
+
+def test_the_modes_say_what_changes(panel):
+    """`미적용` 을 「수집 안 함」 으로만 적으면 원문이 안 쌓이는 줄 안다."""
+    assert "off: '미적용'" in panel
+    assert "shadow: '그림자 수집'" in panel
+    assert "paused: '일시 중지'" in panel
+    assert "Master 가 운영본을 기록합니다" in panel
+    assert "별도 shadow 경로에 기록하고 Master 가 운영본을 계속 기록합니다" in panel
+    assert "현재 파일럿에서는 선택할 수 없습니다" in panel
+    assert "양쪽 writer 인수 상태를 확인한 뒤에만" in panel
+
+
+def test_there_is_no_channel_id_input(panel):
+    """채널 선택의 정본은 **초대**다(2026-09-29).
+
+    ID 를 손으로 넣는 칸을 남겨 두면 초대와 목록이 다시 갈린다 — 초대했는데 안
+    되는 채널과 초대를 풀었는데 남아 있는 채널이 그때 생긴다.
+    """
+    assert "PilotChannelAdd" not in panel
+    assert "CHANNEL_ID_RE" not in panel
+    assert "파일럿 채널 ID" not in panel
+    assert "채널 등록" not in panel
+
+
+def test_there_is_no_channel_limit(panel):
+    """상한을 두면 초대했는데 안 되는 채널이 생긴다."""
+    assert "PILOT_MAX_CHANNELS" not in panel
+    assert "최대 5개" not in panel
+
+
+def test_the_screen_says_the_invite_is_the_source(panel):
+    """사람이 「여기서 골라야 하나」 를 묻지 않게 화면이 먼저 말한다."""
+    assert "초대하면 자동으로 목록에 들어오고" in panel
+    assert "초대가 정본입니다" in panel
+    assert "채널 이름 규칙은 보지 않습니다" in panel
+    assert "DM 은 수집하지" in panel
+
+
+def test_the_channel_table_shows_membership_and_last_event(panel):
+    """「프로세스가 떠 있다」 와 「이벤트가 들어왔다」 는 다르다(오너 지시 10)."""
+    assert "참여 중" in panel and "참여 아님" in panel and "확인 전" in panel
+    assert "last_event_at" in panel
+    assert "아직 없음" in panel
+
+
+def test_the_only_channel_action_is_hold(panel):
+    """콘솔이 줄 수 있는 조작은 「그래도 이 채널은 빼 줘」 라는 예외뿐이다(지시 11)."""
+    assert "수집 중지" in panel and "수집 재개" in panel
+    assert "/hold`" in panel
+    # 모드를 직접 고르는 손잡이는 없앴다. 남겨 두면 초대와 목록이 또 갈린다.
+    assert "<select" not in panel.split("function ChannelRowView")[1]
+    assert "인수 시각" not in panel
+
+
+def test_an_operator_hold_survives_a_re_invite(panel):
+    """끈 사람은 재초대로 되살아났다는 사실을 모른다."""
+    assert "재초대해도 저절로 켜지지 않습니다" in panel
+
+
+def test_the_screen_does_not_promise_active(panel):
+    """운영 수집으로 자동 전환하지 않는다(지시 12)."""
+    assert "운영 수집(writer 인수)으로는 자동 전환하지 않습니다" in panel
+
+
+def test_the_dangerous_switches_cannot_be_turned_on_here(panel):
+    """켜는 순간 운영 원문의 모양이 바뀐다. 파일럿 화면에 그 손잡이를 두지 않는다."""
+    assert "const PILOT_BLOCKED_FLAGS = ['archiver_writes_live', 'separate_attachments']" in panel
+    assert "pilotBlocked" in panel
+    assert "(next && pilotBlocked)" in panel, "끄는 것은 막지 않는다"
+
+
+def test_there_is_no_dev_and_prod_pair(panel):
+    """개발·운영을 함께 고르는 칸을 만들면 둘 다 켜는 날이 온다."""
+    assert "개발" not in panel
+
+
+# --- 연결 상세에서 Manifest 를 바로 본다 ----------------------------------------
+
+def test_the_connection_detail_shows_the_manifest(bots_page):
+    """별도 탭을 찾아가야만 설치 파일을 볼 수 있으면, 사람은 화면 밖에서 구해 온다."""
+    assert "function ManifestBlock" in bots_page
+    assert "<ManifestBlock botKey={bot.key}" in bots_page
+    assert "/api/bot-manifests/${botKey}/slack_socket" in bots_page
+
+
+def test_token_registration_includes_connection_verification(bots_page):
+    """관리자가 저장 뒤 같은 토큰을 다시 확인하는 별도 절차를 밟지 않는다."""
+    assert "Slack 신원 확인" not in bots_page
+    assert "verify-identity" not in bots_page
+    assert "토큰 등록과 Slack 연결 확인을 마쳤습니다" in bots_page
+
+
+def test_viewing_the_manifest_is_not_an_attestation(bots_page):
+    """보기·복사만으로 확인 상태가 바뀌면 그 기록은 거짓이다(§4.2)."""
+    block = bots_page[bots_page.index("function ManifestBlock"):]
+    block = block[:block.index("function StateChip")]
+
+    assert "manifest-attestation" not in block
+    assert "대조 기록은 Manifest 탭에서" in block
+    assert "복사만으로는 대조 기록이 남지 않습니다" in block
+
+
+def test_a_bot_without_a_manifest_says_so(bots_page):
+    """「정본 미등록」 과 「불러오지 못함」 은 사람이 할 일이 다르다."""
+    assert "정본 미등록" in bots_page
+    assert "임의로 만들지 마세요" in bots_page
+
+
+def test_the_manifest_tab_is_kept(bots_page):
+    """전체 catalog 와 대조 이력은 탭에 남는다(요구 5)."""
+    assert "Slack 앱 Manifest" in bots_page
+    assert "/manage/bots/manifests" in bots_page

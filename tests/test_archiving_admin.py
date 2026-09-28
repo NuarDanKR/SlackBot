@@ -433,3 +433,62 @@ def test_only_global_flags_feed_the_gate():
     ]
 
     assert admin._flag_map(flags) == {"separate_attachments": False}
+
+
+# --- 초대 기반 수집: 사람의 예외 설정 (2026-09-29) ------------------------------
+
+def test_turning_collection_off_pauses_the_channel(repo):
+    """콘솔이 줄 수 있는 조작은 「그래도 이 채널은 빼 줘」 뿐이다."""
+    repo.given_channel("tyit", "C1", mode="shadow", membership="joined")
+
+    admin.set_collection_hold(
+        "tyit", "C1", True, actor=admin.Actor("dan", "소음이 많음"), repo=repo,
+    )
+
+    row = repo.channel_rows[("tyit", "C1")]
+    assert row["operator_hold"] is True
+    assert row["mode"] == "paused"
+
+
+def test_turning_it_back_on_returns_to_shadow(repo):
+    repo.given_channel("tyit", "C1", mode="paused", membership="joined",
+                       operator_hold=True)
+
+    admin.set_collection_hold(
+        "tyit", "C1", False, actor=admin.Actor("dan", "다시 필요함"), repo=repo,
+    )
+
+    row = repo.channel_rows[("tyit", "C1")]
+    assert row["operator_hold"] is False
+    assert row["mode"] == "shadow"
+
+
+def test_resuming_a_channel_the_bot_left_does_not_start_collection(repo):
+    """봇이 없는 채널을 켜 봐야 권한 오류만 쌓인다."""
+    repo.given_channel("tyit", "C1", mode="paused", membership="left",
+                       operator_hold=True)
+
+    admin.set_collection_hold(
+        "tyit", "C1", False, actor=admin.Actor("dan", "재개 시도"), repo=repo,
+    )
+
+    assert repo.channel_rows[("tyit", "C1")]["mode"] == "paused"
+
+
+def test_holding_an_unknown_channel_is_refused(repo):
+    with pytest.raises(admin.AdminRefused, match="등록되지 않은 채널"):
+        admin.set_collection_hold(
+            "tyit", "C-NOPE", True, actor=admin.Actor("dan", "시도"), repo=repo,
+        )
+
+
+def test_the_hold_is_audited(repo):
+    repo.given_channel("tyit", "C1", mode="shadow", membership="joined")
+
+    admin.set_collection_hold(
+        "tyit", "C1", True, actor=admin.Actor("dan", "소음이 많음"), repo=repo,
+    )
+
+    (entry,) = [row for row in repo.audit_rows if row["field"] == "collection_hold"]
+    assert entry["new_value"] == "true"
+    assert entry["reason"] == "소음이 많음"

@@ -3,10 +3,10 @@
 기준: [Archiving Bot 분리 결정](../design/archiving-bot-separation-2026-09-23.md)
 상태: 개발/비교 전용. 운영 writer 전환 절차가 아니다.
 
-> **현재 적용 주의 (2026-09-28):** 이 문서는 기존 `workspace_service` 연결을 읽는
-> shadow 실행 절차다. 새 `봇 관리 > 워크스페이스 연결`의 `bot_connection`에 토큰만
-> 등록해도 현재 Archiver runtime은 그 값을 읽지 않는다. 새 연결 정본을 읽는 runtime
-> 전환과 서버 bootstrap이 확인되기 전에는 아래 start 절차를 실행하지 않는다.
+> **현재 적용 주의 (2026-09-28):** Archiver runtime은
+> `봇 관리 > 워크스페이스 연결`의 `bot_connection`에서 검증된 Archiver 토큰을 읽는다.
+> 이 reader 전환이 포함된 코드가 서버에 배포되고 workspace별 bootstrap이 확인되기
+> 전에는 아래 start 절차를 실행하지 않는다.
 > 콘솔 기반 shadow 운영 목표는 [Archiver Shadow 연결 및 콘솔 운영 사양](../design/archiver-shadow-console-operations-2026-09-28.md)을 따른다.
 
 Slack 계약: [Socket Mode](https://docs.slack.dev/tools/bolt-python/concepts/socket-mode),
@@ -24,14 +24,14 @@ Slack 계약: [Socket Mode](https://docs.slack.dev/tools/bolt-python/concepts/so
 - TYBot bot user ID를 확인한다. Archiving Bot은 시작 때
   `auth.test` 결과의 team ID가 설정과 다르거나 user ID가 TYBot과
   같으면 기동을 거절한다.
-- Slack 토큰과 채널 목록은 콘솔 DB에서 관리한다. 독립 env 파일에는 Archiver
+- Slack 토큰은 콘솔 DB에서 관리하고, 수집 채널은 **Archiving Bot 초대 여부**로
+  자동 발견한다. 독립 env 파일에는 Archiver
   전용 DB 접속 정보와 `WORKSPACE_SECRET_KEY`만 두고, TYBot 마스터 토큰이나 LLM
-  키는 넣지 않는다. DB 역할은 `archiver_runtime_config()` 실행과 Archiving 상태
+  키는 넣지 않는다. DB 역할은 `archiver_connection_config()` 실행과 Archiving 상태
   표 권한만 가진다. 운영 ArchiveStore 경로와 그림자 경로는 서로 달라야 한다.
 
-예시: `tyit` 워크스페이스를 준비한다. 이 문서의 현재 런타임에서는 Slack 앱 토큰을
-기존 `workspace_service` 연결 경로에 저장하고 신원확인을 통과시켜야 한다. 새 봇 관리
-화면의 연결과 혼용하지 않는다. 두 연결 경로의 통합은 별도 구현 사양을 따른다.
+예시: `tyit` 워크스페이스를 준비한다. Slack 앱 토큰은
+`봇 관리 > 워크스페이스 연결 > Archiver`에 저장하고 신원확인을 통과시킨다.
 
 ```text
 # /etc/tybot/archiver-tyit.env (root:tybot, 0640)
@@ -44,7 +44,7 @@ ARCHIVER_SHADOW_DIR=/var/lib/tybot/archiver-shadow/tyit/archive
 ```
 
 다음 명령은 이미 유효한 `/etc/tybot/archiver-tyit.env`가 있고 DB 연결, 암호화 키,
-토큰 신원, 채널 allowlist, 디렉터리 권한이 준비된 경우에만 프로세스를 시작한다.
+토큰 신원, 디렉터리 권한이 준비된 경우에만 프로세스를 시작한다.
 env 파일이 없으면 unit의 `ConditionPathExists`로 서비스가 시작되지 않는다. 시작돼도
 과거 메시지를 백필하거나 전체 archive/첨부 변환을 완료하지 않는다. Slack event 수신과
 shadow 기록을 별도로 확인해야 한다.
@@ -68,13 +68,15 @@ Hermes는 그대로 둔다. 첨부 분리 스위치가 꺼져 있으면 기존 T
 비교하기 위해 추출 본문을 shadow raw에도 둔다. 스위치는
 `attachment_reader_ready`가 확인된 뒤에만 켤 수 있고, 켜지면 첨부 정본을 먼저
 쓴 뒤 raw에는 참조만 남긴다. TYBot 검색에는 아직 연결하지 않는다.
-처음에는 최대 5개 채널 ID만 허용한다. 목록 밖 이벤트는 채널 정보 API도
-호출하지 않는다. 변환은 아직 이벤트 처리 중 동기 실행이므로 큰 파일이
-많은 채널은 부하 측정 없이 추가하지 않는다.
+기동 직후와 5분마다 Slack 참여 채널을 DB와 동기화한다. 동기화 전에 첫 이벤트가
+오더라도 그 채널의 실제 참여 여부를 확인한 뒤 `shadow`로 등록하고 수집한다.
+앱을 채널에서 빼면 `paused`, 다시 초대하면 `shadow`로 돌아오며, 콘솔에서 사람이
+중지한 채널(`operator_hold`)은 재초대로 되살아나지 않는다.
 
-Archiving Bot의 수집 범위는 콘솔에서 `shadow` 또는 `active`로 지정한 **채널
-ID 허용목록**으로만 결정한다. TYBot Master의 채널 이름 규칙은 적용하지 않는다.
-따라서 이름 규칙에 맞지 않는 채널도 명시적으로 선택하고 앱을 초대하면 수집한다.
+Archiving Bot의 수집 범위는 **앱이 초대된 공개·비공개 채널**이다. TYBot Master의
+채널 이름 규칙은 적용하지 않는다. 따라서 이름 규칙에 맞지 않는 채널도 앱을
+초대하면 수집한다. DM과 그룹 DM은 수집하지 않는다. 변환은 아직 이벤트 처리 중
+동기 실행이므로 큰 파일이 많은 채널은 부하 측정 없이 한꺼번에 추가하지 않는다.
 
 ## PF archive 개발용 복제
 

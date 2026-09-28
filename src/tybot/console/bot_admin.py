@@ -57,25 +57,31 @@ HEALTHY = "ok"
 
 #: **돌고 있는 봇이 이 표들을 읽는가.**
 #:
-#: 지금은 아니다. Master 는 `workspace_secret`(`workspaces.load_workspaces`),
-#: Archiver 는 `workspace_service`(`archiver_runtime_config`), Master 의 전문 봇
-#: 라우팅은 `specialist_workspace`(`specialist_router`)를 읽는다. 새 표를 읽는
-#: 런타임은 아직 없다 — credential reader 전환은 별도 단계다(§12.2 8단계).
+#: Archiver 는 새 `bot_connection`을 읽는다(`archiver_connection_config`). Master 는
+#: 아직 `workspace_secret`(`workspaces.load_workspaces`), Master 의 전문 봇 라우팅은
+#: `specialist_workspace`(`specialist_router`)를 읽는다. 전환 상태를 하나의 bool 로
+#: 뭉개면 Archiver 연결이 적용된다는 사실 또는 나머지가 미적용이라는 사실 중 하나를
+#: 거짓으로 말하게 된다.
 #:
 #: 그래서 이 화면의 저장은 **기록이지 적용이 아니다.** 그 사실을 화면이 말하지
 #: 않으면, 연결을 끈 사람은 수집이 멈춘 줄 알고 자리를 뜬다. 그 오해는 조용하고
 #: 오래간다 — 아무 오류도 안 나기 때문이다.
 #:
-#: 전환이 끝나면 이 값을 True 로 바꾼다. `test_bot_admin` 이 실제 reader 를 훑어
-#: 값과 코드가 어긋나면 실패시킨다.
-RUNTIME_READS_NEW_TABLES = False
+#: 모든 runtime reader가 전환됐는지를 나타내는 집계다. 화면은 이 값이 false인 동안
+#: 아래 상세를 반드시 보여 준다.
+RUNTIME_READER_STATUS = {
+    "master_connection": False,
+    "archiver_connection": True,
+    "specialist_route": False,
+}
+RUNTIME_READS_NEW_TABLES = all(RUNTIME_READER_STATUS.values())
 
 #: 런타임에 영향을 주는 것과 주지 않는 것. 화면 문구의 정본이다.
 RUNTIME_EFFECT_NOW = (
-    "저장·검증은 **콘솔 기록**이다. 돌고 있는 Master·Archiver·Hermes 프로세스는"
-    " 아직 옛 표를 읽는다.",
-    "연결을 끄거나 그만 써도 **수집이 멈추지 않는다.** 수집을 멈추려면 채널 수집"
-    " 설정(모드)과 프로세스를 따로 다뤄야 한다.",
+    "Archiver 연결의 저장·검증은 **Archiver를 다음에 시작할 때 적용**된다. 이미 실행 중인"
+    " 프로세스를 자동 재시작하지 않으며, 연결을 꺼도 실행 중인 수집이 멈추지 않는다.",
+    "Master 연결은 아직 옛 설정을 읽으므로 이 화면의 변경이 실행 중인 Master에 바로"
+    " 반영되지 않는다.",
     "라우트 모드를 바꿔도 **지금 답변 경로는 그대로다.** Master 는 아직 배정"
     "(`specialist_workspace`)만 보고 라우팅한다.",
 )
@@ -90,7 +96,7 @@ def runtime_effect() -> dict:
     return {
         "appliesNow": RUNTIME_READS_NEW_TABLES,
         "summary": (
-            "지금은 설정만 기록됩니다. 돌고 있는 봇에는 반영되지 않습니다."
+            "Archiver 연결만 다음 기동에 적용됩니다. Master 연결과 라우팅은 아직 기록만 됩니다."
             if not RUNTIME_READS_NEW_TABLES
             else "저장 즉시 런타임에 반영됩니다."
         ),

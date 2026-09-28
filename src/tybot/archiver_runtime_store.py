@@ -14,7 +14,7 @@ def load_runtime_config(workspace: str) -> dict:
     """Return one verified Archiver config; never log or persist plaintext tokens."""
     try:
         with _connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT * FROM archiver_runtime_config(%s)", (workspace,))
+            cur.execute("SELECT * FROM archiver_connection_config(%s)", (workspace,))
             row = cur.fetchone()
             if not row:
                 raise ArchiverRuntimeStoreError(

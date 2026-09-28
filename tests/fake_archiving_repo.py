@@ -71,6 +71,52 @@ class FakeArchivingRepo:
             if ws == workspace
         ]
 
+    def save_membership(self, row: dict) -> None:
+        key = (row["workspace"], row["channel_id"])
+        current = self.channel_rows.setdefault(key, {
+            "channel_id": row["channel_id"], "writer_owner": "master",
+            "cutover_ts": "", "operator_hold": False,
+        })
+        current.update({
+            "mode": row["mode"], "membership": row["membership"],
+            "channel_name": row.get("channel_name", ""),
+            "is_private": row.get("is_private", False),
+            "updated_by": row.get("updated_by", ""),
+        })
+        if row.get("audit"):
+            self.audit_rows.append({
+                "actor": row["updated_by"],
+                "subject": "channel_membership",
+                "workspace": row["workspace"],
+                "channel_id": row["channel_id"],
+                "field": "membership",
+                "old_value": "",
+                "new_value": f"{row['membership']}/{row['mode']}",
+                "reason": row["reason"],
+            })
+
+    def set_operator_hold(self, row: dict) -> int:
+        key = (row["workspace"], row["channel_id"])
+        current = self.channel_rows.get(key)
+        if current is None:
+            return 0
+        current["operator_hold"] = row["hold"]
+        if row["hold"]:
+            current["mode"] = "paused"
+        elif current.get("membership") == "joined":
+            current["mode"] = "shadow"
+        current["updated_by"] = row["actor"]
+        return 1
+
+    def mark_channel_event(self, workspace: str, channel_id: str) -> bool:
+        current = self.channel_rows.get((workspace, channel_id))
+        if not current or current.get("membership") != "joined":
+            return False
+        if current.get("operator_hold") or current.get("mode") not in {"shadow", "active"}:
+            return False
+        current["last_event_at"] = "now"
+        return True
+
     # -- 기능 스위치 ----------------------------------------------------
     def flags(self, workspace: str, channel_ids: list[str]) -> list[dict]:
         wanted = set(channel_ids)
@@ -121,10 +167,14 @@ class FakeArchivingRepo:
 
     # -- 시험 편의 --------------------------------------------------------
     def given_channel(self, workspace: str, channel_id: str, mode: str,
-                      owner: str = "master", cutover_ts: str = "") -> None:
+                      owner: str = "master", cutover_ts: str = "",
+                      membership: str = "unknown", operator_hold: bool = False) -> None:
         self.channel_rows[(workspace, channel_id)] = {
             "workspace": workspace, "channel_id": channel_id, "mode": mode,
             "writer_owner": owner, "cutover_ts": cutover_ts, "updated_by": "seed",
+            # 초대 기반 수집(2026-09-29). 멤버십을 모르는 것과 참여 중인 것은 다르다.
+            "membership": membership, "operator_hold": operator_hold,
+            "channel_name": "", "is_private": False, "last_event_at": None,
         }
 
     def given_flag(self, name: str, enabled: bool, scope: str = "global",

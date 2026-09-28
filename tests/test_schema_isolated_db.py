@@ -173,6 +173,16 @@ def test_archiver_runtime_function_execute_is_required():
         "archiver_runtime_config(text)",
         "EXECUTE",
     ) in verify.REQUIRED_FUNCTIONS
+    assert (
+        "tybot_archiver",
+        "archiver_save_membership(text,text,text,text,text,boolean,text,boolean,text)",
+        "EXECUTE",
+    ) in verify.REQUIRED_FUNCTIONS
+    assert (
+        "tybot_archiver",
+        "archiver_mark_channel_event(text,text)",
+        "EXECUTE",
+    ) in verify.REQUIRED_FUNCTIONS
 
 
 def test_the_draft_shape_actually_grants_what_we_then_check():

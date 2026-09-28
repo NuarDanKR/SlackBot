@@ -53,14 +53,66 @@ CREATE TABLE IF NOT EXISTS archive_channel_mode (
     -- 어느 쪽도 오류를 내지 않는다. 좌표를 박아 두면 나중에 대조할 수 있다.
     cutover_ts      text NOT NULL DEFAULT '',
     cutover_at      timestamptz,
-    -- 파일럿 상한. 코드가 1~5채널로 막고 있고(`archiving_bot.load_archiver_workspaces`)
-    -- 여기서도 표시해 둔다 — 콘솔이 무엇을 왜 못 켜는지 말할 수 있어야 한다.
+    -- 파일럿 표시. 상한 표시용이었으나 **채널 선택이 초대 기반으로 바뀌면서**
+    -- 상한 자체가 사라졌다(2026-09-29). 값은 화면 분류에만 쓴다.
     is_pilot        boolean NOT NULL DEFAULT true,
     note            text NOT NULL DEFAULT '',
     updated_at      timestamptz NOT NULL DEFAULT now(),
     updated_by      text NOT NULL DEFAULT '',
     PRIMARY KEY (workspace, channel_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- 초대 기반 채널 발견 (2026-09-29 오너 지시)
+-- ---------------------------------------------------------------------------
+-- 수집 대상의 정본은 **Archiving Bot 이 초대된 채널**이다. 사람이 채널 ID 를
+-- 손으로 적던 방식은 두 가지를 못 막았다.
+--
+-- 1. 초대는 했는데 등록을 잊어 **수집이 안 되는 채널.** 사람은 초대했으니 된 줄 안다
+-- 2. 초대는 풀었는데 목록에 남아 **권한 오류만 쌓는 채널.** 오류는 로그에만 남는다
+--
+-- 앱 설치만으로 전부 수집하지는 않는다. 초대가 있어야 한다 — 그래서 `membership`
+-- 이 `joined` 일 때만 수집한다. 채널 이름 규칙은 보지 않는다(규칙에 안 맞아도
+-- 초대됐으면 그 방 사람들은 수집을 기대한다).
+ALTER TABLE archive_channel_mode
+    ADD COLUMN IF NOT EXISTS membership text NOT NULL DEFAULT 'unknown';
+ALTER TABLE archive_channel_mode DROP CONSTRAINT IF EXISTS archive_channel_mode_membership;
+ALTER TABLE archive_channel_mode ADD CONSTRAINT archive_channel_mode_membership
+    CHECK (membership IN ('joined', 'left', 'unknown'));
+
+-- 언제 확인한 멤버십인가. 오래된 값을 「지금 참여 중」 으로 읽으면, 이미 쫓겨난
+-- 채널을 계속 수집 대상으로 본다.
+ALTER TABLE archive_channel_mode
+    ADD COLUMN IF NOT EXISTS membership_checked_at timestamptz;
+
+-- 사람이 명시적으로 끈 채널. **재초대해도 저절로 켜지지 않는다.**
+--
+-- 멤버십 상실로 멈춘 것과 사람이 끈 것을 한 칸에 담으면, 다시 초대하는 순간
+-- 사람이 끈 채널까지 되살아난다. 끈 사람은 그 사실을 모른다.
+ALTER TABLE archive_channel_mode
+    ADD COLUMN IF NOT EXISTS operator_hold boolean NOT NULL DEFAULT false;
+
+-- 화면이 「수집되고 있나」 를 답하려면 필요하다. `active` 는 프로세스가 떠 있다는
+-- 뜻일 뿐, 이벤트가 들어왔다는 증거가 아니다.
+ALTER TABLE archive_channel_mode
+    ADD COLUMN IF NOT EXISTS last_event_at timestamptz;
+
+-- 표시용. 이름은 바뀌므로 **키가 아니다**(키는 channel_id).
+ALTER TABLE archive_channel_mode
+    ADD COLUMN IF NOT EXISTS channel_name text NOT NULL DEFAULT '';
+ALTER TABLE archive_channel_mode
+    ADD COLUMN IF NOT EXISTS is_private boolean NOT NULL DEFAULT false;
+
+-- 이미 등록돼 수집 중이던 채널은 **참여 중으로 본다.** 손으로 등록했다는 것은
+-- 초대가 있었다는 뜻이고, 다음 동기화가 실제 값으로 덮는다. `unknown` 으로 두면
+-- 그 사이 수집이 멈춘다.
+UPDATE archive_channel_mode
+   SET membership = 'joined'
+ WHERE membership = 'unknown' AND mode IN ('shadow', 'active');
+
+CREATE INDEX IF NOT EXISTS archive_channel_mode_membership_idx
+    ON archive_channel_mode (workspace, membership);
+
 
 -- active 인데 주인이 archiver 가 아니면 모순이다. 아카이빙 봇이 운영에 쓰는
 -- 상태인데 주인은 master 라고 적혀 있으면, 어느 쪽 말을 믿어야 하는지 알 수 없다.
@@ -104,6 +156,124 @@ CREATE TABLE IF NOT EXISTS archive_config_audit (
 CREATE INDEX IF NOT EXISTS archive_config_audit_recent ON archive_config_audit (at DESC);
 CREATE INDEX IF NOT EXISTS archive_config_audit_channel
     ON archive_config_audit (workspace, channel_id, at DESC);
+
+-- Archiver runtime은 설정 표 UPDATE 권한을 받지 않는다. 대신 초대 동기화에 필요한
+-- 칸만 이 함수로 쓴다. 호출자가 mode='active'를 건네도 기존 active가 아닌 행을
+-- 승격할 수 없고, writer_owner/cutover/operator_hold는 전혀 바꾸지 않는다.
+CREATE OR REPLACE FUNCTION archiver_save_membership(
+    p_workspace text,
+    p_channel_id text,
+    p_requested_mode text,
+    p_membership text,
+    p_channel_name text,
+    p_is_private boolean,
+    p_actor text,
+    p_audit boolean,
+    p_reason text
+) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    current_row archive_channel_mode%ROWTYPE;
+    next_mode text;
+BEGIN
+    IF p_workspace = '' OR p_channel_id = '' THEN
+        RAISE EXCEPTION 'workspace and channel_id are required';
+    END IF;
+    IF p_requested_mode NOT IN ('shadow', 'active', 'paused') THEN
+        RAISE EXCEPTION 'membership sync cannot request mode %', p_requested_mode;
+    END IF;
+    IF p_membership NOT IN ('joined', 'left') THEN
+        RAISE EXCEPTION 'membership sync cannot write membership %', p_membership;
+    END IF;
+
+    SELECT * INTO current_row
+      FROM archive_channel_mode
+     WHERE workspace = p_workspace AND channel_id = p_channel_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        IF p_membership <> 'joined' OR p_requested_mode <> 'shadow' THEN
+            RAISE EXCEPTION 'a new invited channel must start in shadow mode';
+        END IF;
+        INSERT INTO archive_channel_mode
+            (workspace, channel_id, mode, membership, membership_checked_at,
+             channel_name, is_private, updated_by)
+        VALUES
+            (p_workspace, p_channel_id, 'shadow', 'joined', now(),
+             p_channel_name, p_is_private, p_actor);
+        IF p_audit THEN
+            INSERT INTO archive_config_audit
+                (actor, subject, workspace, channel_id, field,
+                 old_value, new_value, reason)
+            VALUES
+                (p_actor, 'channel_membership', p_workspace, p_channel_id,
+                 'membership', '', 'joined/shadow', p_reason);
+        END IF;
+        RETURN;
+    END IF;
+
+    next_mode := CASE
+        WHEN current_row.operator_hold OR p_membership = 'left' THEN 'paused'
+        WHEN p_requested_mode = 'paused' THEN 'paused'
+        WHEN current_row.mode = 'active' THEN 'active'
+        ELSE 'shadow'
+    END;
+    IF p_requested_mode = 'active' AND current_row.mode <> 'active' THEN
+        RAISE EXCEPTION 'membership sync cannot promote a channel to active';
+    END IF;
+
+    UPDATE archive_channel_mode
+       SET mode = next_mode,
+           membership = p_membership,
+           membership_checked_at = now(),
+           channel_name = p_channel_name,
+           is_private = p_is_private,
+           updated_at = now(),
+           updated_by = p_actor
+     WHERE workspace = p_workspace AND channel_id = p_channel_id;
+    IF p_audit THEN
+        INSERT INTO archive_config_audit
+            (actor, subject, workspace, channel_id, field,
+             old_value, new_value, reason)
+        VALUES
+            (p_actor, 'channel_membership', p_workspace, p_channel_id,
+             'membership', current_row.membership || '/' || current_row.mode,
+             p_membership || '/' || next_mode, p_reason);
+    END IF;
+END
+$$;
+
+REVOKE ALL ON FUNCTION archiver_save_membership(
+    text, text, text, text, text, boolean, text, boolean, text
+) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION archiver_mark_channel_event(
+    p_workspace text,
+    p_channel_id text
+) RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    affected integer;
+BEGIN
+    UPDATE archive_channel_mode
+       SET last_event_at = now()
+     WHERE workspace = p_workspace
+       AND channel_id = p_channel_id
+       AND membership = 'joined'
+       AND operator_hold = false
+       AND mode IN ('shadow', 'active');
+    GET DIAGNOSTICS affected = ROW_COUNT;
+    RETURN affected = 1;
+END
+$$;
+
+REVOKE ALL ON FUNCTION archiver_mark_channel_event(text, text) FROM PUBLIC;
 
 
 -- ---------------------------------------------------------------------------
@@ -519,6 +689,11 @@ BEGIN
                 ' archive_message_revision, archive_refusal'
                 ' TO tybot_archiver';
         EXECUTE 'GRANT SELECT ON archive_message_current TO tybot_archiver';
+        EXECUTE 'GRANT EXECUTE ON FUNCTION archiver_save_membership('
+                'text, text, text, text, text, boolean, text, boolean, text)'
+                ' TO tybot_archiver';
+        EXECUTE 'GRANT EXECUTE ON FUNCTION archiver_mark_channel_event('
+                'text, text) TO tybot_archiver';
         EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE'
                 ' archive_refusal_id_seq'
                 ' TO tybot_archiver';
@@ -541,6 +716,11 @@ BEGIN
         EXECUTE 'GRANT SELECT, INSERT, DELETE ON TABLE'
                 ' bot_conversation_audit TO tyslackai';
         EXECUTE 'GRANT SELECT ON archive_message_current TO tyslackai';
+        EXECUTE 'GRANT EXECUTE ON FUNCTION archiver_save_membership('
+                'text, text, text, text, text, boolean, text, boolean, text)'
+                ' TO tyslackai';
+        EXECUTE 'GRANT EXECUTE ON FUNCTION archiver_mark_channel_event('
+                'text, text) TO tyslackai';
         EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE'
                 ' archive_refusal_id_seq, archive_config_audit_id_seq,'
                 ' bot_conversation_audit_id_seq'

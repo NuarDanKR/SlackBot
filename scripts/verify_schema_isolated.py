@@ -136,6 +136,12 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
 REQUIRED_FUNCTIONS: tuple[tuple[str, str, str], ...] = (
     ("tybot_archiver", "archiver_runtime_config(text)", "EXECUTE"),
     ("tybot_archiver", "archiver_connection_config(text)", "EXECUTE"),
+    (
+        "tybot_archiver",
+        "archiver_save_membership(text,text,text,text,text,boolean,text,boolean,text)",
+        "EXECUTE",
+    ),
+    ("tybot_archiver", "archiver_mark_channel_event(text,text)", "EXECUTE"),
 )
 
 

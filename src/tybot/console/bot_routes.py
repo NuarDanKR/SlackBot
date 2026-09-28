@@ -68,10 +68,6 @@ class SlackConnectionBody(BaseModel):
     reason: str = Field(min_length=1)
 
 
-class VerifyBody(BaseModel):
-    reason: str = Field(min_length=1)
-
-
 class ConnectionStateBody(BaseModel):
     state: Literal["disabled", "retired"]
     reason: str = Field(min_length=1)
@@ -165,18 +161,19 @@ def get_migration_check(user: User, workspace: str = "") -> dict:
 def put_slack_connection(
     workspace: str, bot_key: str, body: SlackConnectionBody, request: Request, user: User,
 ) -> dict:
-    """토큰 쌍을 저장한다. **응답에는 mask 만 있다.**
+    """토큰 쌍을 저장하고 같은 요청에서 Slack 연결을 확인한다.
 
-    저장은 켜지 않는다 — 신원 검사를 통과해야 켜진다. 등록과 동시에 켜면 토큰을
-    잘못 붙인 채로 수집이 시작되고, 그건 붙인 사람이 자리를 뜬 뒤에 드러난다.
+    응답에는 mask 만 있다. 연결 확인은 별도 사용자 절차가 아니라 등록의 일부지만,
+    collector 시작은 여전히 별도 동작이다.
     """
     _require_admin(user)
     _check_write_request(request)
     key, bot = workspace.strip().lower(), bot_key.strip().lower()
+    actor = _actor(user, body.reason)
     try:
         bot_admin.save_slack_connection(
             key, bot,
-            actor=_actor(user, body.reason),
+            actor=actor,
             bot_token=body.botToken.strip(),
             app_token=body.appToken.strip(),
             note=body.note.strip(),
@@ -190,22 +187,6 @@ def put_slack_connection(
         target_type="bot_connection", target_id=f"{bot}/slack_socket",
         workspace=key, outcome="succeeded", metadata={"reason": body.reason},
     )
-    return bot_admin.workspace_connections(key)
-
-
-@router.post("/api/workspaces/{workspace}/bot-connections/{bot_key}/slack/verify-identity")
-def verify_slack_identity(
-    workspace: str, bot_key: str, body: VerifyBody, request: Request, user: User,
-) -> dict:
-    """저장된 토큰 쌍으로 Slack 에 물어 신원을 적는다. **평문은 안 돌려준다.**
-
-    앱 토큰까지 확인하는 이유는 Socket Mode 가 그 토큰으로 열리기 때문이다 —
-    봇 토큰만 맞으면 화면은 정상인데 이벤트가 하나도 안 온다.
-    """
-    _require_admin(user)
-    _check_write_request(request)
-    key, bot = workspace.strip().lower(), bot_key.strip().lower()
-    actor = _actor(user, body.reason)
     from . import bot_identity
 
     try:
@@ -214,7 +195,7 @@ def verify_slack_identity(
         # 저장은 그대로다. 「저장이 안 됐나」 를 사람이 다시 묻지 않게 적는다.
         raise HTTPException(
             status_code=503,
-            detail=f"{exc} 토큰은 저장돼 있습니다. 잠시 뒤 다시 확인하세요.",
+            detail=f"{exc} 토큰은 저장됐지만 연결은 활성화하지 않았습니다. 다시 등록하세요.",
         ) from exc
     except bot_admin.BotAdminRefused as exc:
         raise _refused(exc) from exc
@@ -228,7 +209,10 @@ def verify_slack_identity(
             workspace=key, outcome="refused", metadata={"reason": body.reason},
         )
         status = 409 if any(mark in problem for mark in CONFLICT_MARKERS) else 422
-        raise HTTPException(status_code=status, detail=problem)
+        raise HTTPException(
+            status_code=status,
+            detail=f"토큰은 저장됐지만 Slack 연결 확인에 실패했습니다: {problem}",
+        )
     _audit_event(
         actor=user.email, category="workspace", action="bot_connection_identity",
         target_type="bot_connection", target_id=f"{bot}/slack_socket",

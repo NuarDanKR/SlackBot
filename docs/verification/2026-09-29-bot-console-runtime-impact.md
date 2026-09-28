@@ -69,3 +69,29 @@ credential reader 전환은 §12.2 **8단계**다. 그전까지 `bot_connection`
 8단계에서 reader 를 옮긴 뒤 `RUNTIME_READS_NEW_TABLES` 를 `True` 로 바꾸고, 화면
 문구도 「저장 즉시 반영됩니다」 로 바뀐다. 그때부터 연결 중지는 **실제로** 그 봇의
 Slack 연결을 끊는다 — 그 전에 이 문서의 표를 다시 쓴다.
+
+---
+
+## 덧붙임 (2026-09-29) — 초대 기반 채널 발견
+
+채널 선택이 **손으로 적는 ID 목록**에서 **봇 초대**로 바뀌었다(오너 지시).
+
+- 수집 대상의 정본은 `users.conversations` 가 말하는 참여 채널이다
+- 새로 초대되면 자동 등록 + `shadow`. **`active` 로는 자동 전환하지 않는다**
+- 봇이 빠지면 `membership='left'` · `paused`
+- 사람이 끈 채널(`operator_hold`)은 재초대해도 안 켜진다
+- 1~5 채널 상한은 없앴다. 상한을 두면 초대했는데 안 되는 채널이 생긴다
+
+**release gate 영향:** `deploy/sql/archiving_schema.sql` 이 바뀌었다. 그 파일은
+`release_gate.GATED_SQL` 대상이라 **검증 지문이 달라진다** — 기존 검증 artifact 는
+무효이고, 격리 DB 재검증이 필요하다. 운영 DB 에는 적용하지 않았다.
+
+**남은 런타임 작업(이 문서 기준 미완):**
+
+| 무엇 | 어디 | 왜 필요 |
+|---|---|---|
+| 채널 수 1~5 제한 제거 | `archiving_bot.py:65·95` | 초대가 6개를 넘기면 기동이 거절된다 |
+| 새 채널 이벤트에서 등록 | `archiving_bot.py` 이벤트 경로 → `channel_membership.ensure_registered` | 초대 직후 첫 메시지가 동기화보다 먼저 온다 |
+| 기동·주기 동기화 호출 | 기동 경로 + `scripts/sync_archiver_channels.py` 타이머 | 기동 사이에 생긴 초대를 따라잡는다 |
+
+이 셋은 Codex 담당 파일이라 손대지 않았다.

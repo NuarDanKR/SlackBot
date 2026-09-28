@@ -74,8 +74,8 @@ export const CONNECTION_STATES: Record<ConnectionState, Meaning> = {
     tone: 'neutral',
   },
   enabled: {
-    label: '신원 확인됨 · 연결 사용',
-    detail: 'Slack 이 확인해 준 Team·Bot 사용자로 이 워크스페이스에 붙어 있습니다.',
+    label: 'Slack 연결 사용',
+    detail: '토큰 등록 때 확인된 Team·Bot 사용자로 이 워크스페이스에 붙어 있습니다.',
     key: 'enabled',
     tone: 'good',
   },

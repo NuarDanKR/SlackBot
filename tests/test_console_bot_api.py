@@ -8,7 +8,7 @@
    드러난다. 라이선스 화면과 같은 기준(admin)이다
 2. **CSRF 없이 쓰는 것.** 다른 탭이 로그인 쿠키로 토큰을 갈아 끼울 수 있다
 3. **응답에 평문 토큰이 실리는 것**
-4. **연결 저장이 무언가를 켜는 것**
+4. **검증되지 않은 연결이 켜지는 것**
 5. **기존 라이선스·아카이빙 endpoint 가 깨지는 것**
 
 저장소는 가짜다. 여기서 보는 것은 SQL 이 아니라 **HTTP 계약**이다.
@@ -59,6 +59,18 @@ def repo(monkeypatch) -> FakeBotRepo:
     monkeypatch.setattr(bot_admin, "default_repo", lambda: store)
     monkeypatch.setattr(bot_manifest, "default_repo", lambda: store)
     monkeypatch.setattr(bot_identity, "default_repo", lambda: store)
+    monkeypatch.setattr(
+        bot_identity,
+        "verify_connection",
+        lambda ws, key, *, actor, client_factory=None, repo=None: bot_admin.record_identity(
+            ws,
+            key,
+            team_id="T1",
+            bot_user_id=f"U-{key}",
+            actor=actor,
+            token_fingerprint=repo_fingerprint(ws, key),
+        ),
+    )
     return store
 
 
@@ -146,8 +158,8 @@ def test_saving_a_token_returns_only_masks(client, repo):
     assert "xoxb-" in body, "mask 는 보여야 어떤 토큰인지 안다"
 
 
-def test_saving_a_token_does_not_enable_anything(client, repo):
-    """토큰을 넣는 것과 수집이 시작되는 것은 다른 일이다(§9)."""
+def test_saving_a_token_checks_identity_and_enables_the_connection(client, repo):
+    """연결 확인은 등록의 일부다. 별도 버튼을 누르지 않는다."""
     client.put(
         "/api/workspaces/tyit/bot-connections/archiver/slack",
         json={"botToken": BOT, "appToken": APP, "reason": "설치"},
@@ -155,8 +167,8 @@ def test_saving_a_token_does_not_enable_anything(client, repo):
     )
 
     (row,) = repo.connections("tyit")
-    assert row["state"] == "draft"
-    assert row["identity_ok"] is None
+    assert row["state"] == "enabled"
+    assert row["identity_ok"] is True
 
 
 def test_a_bad_token_shape_is_422(client, repo):
@@ -273,31 +285,10 @@ def test_identity_uses_the_sdk_app_token_argument(repo, monkeypatch):
     ) == ""
 
 
-def test_identity_enables_the_connection(client, repo, monkeypatch):
-    repo.given_connection("tyit", "archiver", state="draft")
-    monkeypatch.setattr(bot_identity, "_tokens", lambda ws, key: (BOT, APP, "fp"))
-    monkeypatch.setattr(
-        bot_identity, "verify_connection",
-        lambda ws, key, *, actor, client_factory=None, repo=None: bot_admin.record_identity(
-            ws, key, team_id="T1", bot_user_id="U2", actor=actor,
-            token_fingerprint=repo_fingerprint(ws, key),
-            ),
-    )
-
-    response = client.post(
-        "/api/workspaces/tyit/bot-connections/archiver/slack/verify-identity",
-        json={"reason": "설치 확인"}, headers={**owner(client), **CSRF},
-    )
-
-    assert response.status_code == 200
-    assert repo.connections("tyit")[0]["state"] == "enabled"
-
-
 def test_a_duplicate_bot_user_is_409(client, repo, monkeypatch):
     """같은 앱을 두 번 등록하면 Socket Mode 를 두 곳에서 열게 된다(§7.5)."""
     repo.given_connection("tyit", "master", state="enabled", team_id="T1",
                           bot_user_id="U1", identity_ok=True)
-    repo.given_connection("tyit", "archiver", state="draft")
     monkeypatch.setattr(
         bot_identity, "verify_connection",
         lambda ws, key, *, actor, client_factory=None, repo=None: bot_admin.record_identity(
@@ -306,9 +297,10 @@ def test_a_duplicate_bot_user_is_409(client, repo, monkeypatch):
             ),
     )
 
-    response = client.post(
-        "/api/workspaces/tyit/bot-connections/archiver/slack/verify-identity",
-        json={"reason": "설치 확인"}, headers={**owner(client), **CSRF},
+    response = client.put(
+        "/api/workspaces/tyit/bot-connections/archiver/slack",
+        json={"botToken": BOT, "appToken": APP, "reason": "설치"},
+        headers={**owner(client), **CSRF},
     )
 
     assert response.status_code == 409
@@ -316,20 +308,19 @@ def test_a_duplicate_bot_user_is_409(client, repo, monkeypatch):
 
 def test_slack_being_down_says_the_token_is_saved(client, repo, monkeypatch):
     """「저장이 안 됐나」 를 사람이 다시 묻지 않게 적는다(§7.5)."""
-    repo.given_connection("tyit", "archiver", state="draft")
-
     def _boom(*args, **kwargs):
         raise bot_identity.SlackUnavailable("Slack 토큰 쌍 확인 실패: TimeoutError.")
 
     monkeypatch.setattr(bot_identity, "verify_connection", _boom)
 
-    response = client.post(
-        "/api/workspaces/tyit/bot-connections/archiver/slack/verify-identity",
-        json={"reason": "설치 확인"}, headers={**owner(client), **CSRF},
+    response = client.put(
+        "/api/workspaces/tyit/bot-connections/archiver/slack",
+        json={"botToken": BOT, "appToken": APP, "reason": "설치"},
+        headers={**owner(client), **CSRF},
     )
 
     assert response.status_code == 503
-    assert "저장돼 있습니다" in response.json()["detail"]
+    assert "저장됐지만 연결은 활성화하지 않았습니다" in response.json()["detail"]
 
 
 # --- 연결 중지 ------------------------------------------------------------------

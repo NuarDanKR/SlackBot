@@ -289,7 +289,7 @@ export function BotManifests({
   return (
     <Section
       title="Slack 앱 Manifest"
-      lead="정본 파일의 hash 입니다. Slack 앱 설정과 직접 대조한 뒤, 확인했다는 사실을 연결에 남깁니다. 신원 확인과는 다른 검사입니다."
+      lead="정본 파일의 hash 입니다. Slack 앱 설정과 직접 대조한 뒤, 확인했다는 사실을 연결에 남깁니다. 토큰 등록 시 자동 연결 확인과는 다른 검사입니다."
       aside={
         <select
           className="input"

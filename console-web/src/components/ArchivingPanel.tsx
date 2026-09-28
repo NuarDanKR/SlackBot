@@ -36,6 +36,14 @@ export interface ServiceRow {
 
 export interface ChannelRow {
   channel_id: string
+  /** 초대 여부. 수집 대상의 **정본**이다(2026-09-29). */
+  membership?: 'joined' | 'left' | 'unknown'
+  membership_checked_at?: string | null
+  /** 사람이 끈 채널. 재초대해도 저절로 켜지지 않는다. */
+  operator_hold?: boolean
+  last_event_at?: string | null
+  channel_name?: string
+  is_private?: boolean
   mode: ChannelMode
   writer_owner: 'master' | 'archiver'
   cutover_ts: string
@@ -113,23 +121,13 @@ const MODE_DETAIL: Record<ChannelMode, string> = {
   paused: '양쪽 writer 인수 상태를 확인한 뒤에만 사용합니다.',
 }
 
-const MODES: ChannelMode[] = ['off', 'shadow', 'active', 'paused']
 
-//: 파일럿에서 고를 수 있는 모드. **shadow 하나뿐**이다.
+//: 자동 등록될 때의 모드. 운영 수집으로는 **자동 전환하지 않는다**(오너 지시 12).
 //
-// 운영 수집으로 넘기는 것은 writer 인수이고, 그건 파일럿이 끝난 뒤 별도 승인으로
-// 한다. 화면에서 고를 수 있게 두면 언젠가 눌린다.
-const PILOT_MODES: ChannelMode[] = ['off', 'shadow']
-
-//: 파일럿 채널 상한. 기본값은 **선택 없음**이다.
-const PILOT_MAX_CHANNELS = 5
-
+// 채널 상한은 없앴다 — 대상이 초대로 정해지므로, 상한을 두면 초대했는데 안 되는
+// 채널이 생기고 그건 목록을 손으로 적던 때와 같은 고장이다(2026-09-29).
 //: 이 화면에서 켤 수 없는 스위치. 켜는 순간 운영 원문의 모양이 바뀐다.
 const PILOT_BLOCKED_FLAGS = ['archiver_writes_live', 'separate_attachments']
-
-//: Slack 채널 ID. **이름 규칙은 보지 않는다** — 앱이 초대됐고 사람이 고른
-// 채널이면 규칙에 안 맞아도 수집 대상이다(사양 §3).
-const CHANNEL_ID_RE = /^[CGD][A-Z0-9]{6,}$/
 
 function modeChip(mode: ChannelMode) {
   if (mode === 'active') return <Chip tone="ok">{MODE_LABEL[mode]}</Chip>
@@ -169,8 +167,6 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
 
   const base = `/api/workspaces/${encodeURIComponent(workspace)}/archiving`
   const gate = data.schemaGate
-  // 파일럿 선택 수 = 그림자 수집 중인 채널. `off` 는 등록만 된 상태다.
-  const selectedCount = data.channels.filter((row) => row.mode === 'shadow').length
   const attachmentReaderReady = data.flags.some((row) =>
     row.name === 'attachment_reader_ready' && row.scope === 'global' && row.enabled,
   )
@@ -239,48 +235,43 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
       </Section>
 
       <Section
-        title="파일럿 채널"
-        lead={`Slack 채널 ID 로 고릅니다. 채널 이름 규칙은 보지 않습니다 — 앱이 초대됐고 여기서 고른 채널이면 수집 대상입니다. 파일럿은 최대 ${PILOT_MAX_CHANNELS}개이고 기본값은 선택 없음입니다.`}
+        title="수집 채널"
+        lead="Archiving Bot 을 채널에 초대하면 자동으로 목록에 들어오고 그림자 수집이 시작됩니다. 채널 ID 를 손으로 넣지 않습니다 — 초대가 정본입니다."
       >
         <div className="card card-pad">
-          <PilotChannelAdd
-            busy={busy}
-            existing={data.channels.map((row) => row.channel_id)}
-            selected={selectedCount}
-            onAdd={(channelId, reason) => void send(
-              `${base}/channels/${encodeURIComponent(channelId)}`,
-              { mode: 'off', reason },
-            )}
-          />
           <p className="field-help">
-            지금 그림자 수집 채널 {selectedCount}개 / 최대 {PILOT_MAX_CHANNELS}개.
-            추가한 채널은 <strong>미적용</strong>으로 들어옵니다 — 그림자 수집은 아래에서
-            채널마다 따로 켭니다.
+            공개·비공개 채널 모두 됩니다. 채널 이름 규칙은 보지 않습니다. DM 은 수집하지
+            않습니다. 봇을 채널에서 내보내면 수집이 멈추고 상태가 <strong>참여 아님</strong>
+            으로 기록됩니다.
+          </p>
+          <p className="field-help">
+            목록은 봇 기동 시점과 주기 동기화로 갱신됩니다. 방금 초대한 채널이 아직 안
+            보이면 다음 동기화까지 기다리거나, 그 채널에 메시지가 오면 그때 등록됩니다.
           </p>
         </div>
       </Section>
 
       <Section
         title="채널 수집 모드"
-        lead="그림자 수집은 운영 원문을 건드리지 않습니다. 운영 수집(writer 인수)은 파일럿 범위 밖이라 이 화면에서 고를 수 없습니다."
+        lead="그림자 수집은 운영 원문을 건드리지 않습니다 — Master 가 계속 운영본을 씁니다. 운영 수집(writer 인수)으로는 자동 전환하지 않습니다."
       >
         <div className="card card-pad"><div className="table-scroll"><table className="table">
-          <thead><tr><th>채널</th><th>모드</th><th>운영 원문 주인</th><th>인수 시각</th>
-            <th className="right">바꾸기</th></tr></thead>
+          <thead><tr><th>채널</th><th>참여</th><th>수집 상태</th><th>마지막 이벤트</th>
+            <th>운영 원문 주인</th><th className="right">수집</th></tr></thead>
           <tbody>
             {data.channels.map((row) => (
               <ChannelRowView
-                key={row.channel_id} row={row} busy={busy} gate={gate}
-                gatedModes={data.gatedModes} blockers={data.blockers}
-                atPilotLimit={selectedCount >= PILOT_MAX_CHANNELS}
-                onChange={(mode, reason, cutoverTs) => void send(
-                  `${base}/channels/${encodeURIComponent(row.channel_id)}`,
-                  { mode, reason, cutoverTs },
+                key={row.channel_id} row={row} busy={busy}
+                onHold={(hold, reason) => void send(
+                  `${base}/channels/${encodeURIComponent(row.channel_id)}/hold`,
+                  { hold, reason },
                 )}
               />
             ))}
             {!data.channels.length && (
-              <tr><td colSpan={5}>등록된 채널이 없습니다.</td></tr>
+              <tr><td colSpan={6}>
+                아직 초대된 채널이 없습니다. Slack 에서 Archiving Bot 을 채널에 초대하세요.
+              </td></tr>
             )}
           </tbody>
         </table></div></div>
@@ -352,136 +343,61 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
 }
 
 
-/**
- * 파일럿 채널 추가 — **Slack 채널 ID 로만** 받는다.
- *
- * 이름 규칙(`#팀_…`)은 보지 않는다. 앱이 초대됐고 사람이 여기서 고른 채널이면,
- * 규칙에 안 맞아도 수집 대상이다(사양 §3). 이름을 키로 쓰면 이름이 바뀐 날
- * 수집이 조용히 멈춘다.
- *
- * 추가는 **등록**이지 시작이 아니다. 들어온 채널은 `미적용` 이고, 그림자 수집은
- * 채널마다 따로 켠다.
- */
-function PilotChannelAdd({ busy, existing, selected, onAdd }: {
-  busy: boolean
-  existing: string[]
-  selected: number
-  onAdd: (channelId: string, reason: string) => void
-}) {
-  const [channelId, setChannelId] = useState('')
-  const [reason, setReason] = useState('')
-  const trimmed = channelId.trim().toUpperCase()
-  const duplicate = existing.includes(trimmed)
-  const shaped = CHANNEL_ID_RE.test(trimmed)
-  const ready = shaped && !duplicate && reason.trim().length > 0 && !busy
-
-  return (
-    <div className="field">
-      <label className="field-label" htmlFor="pilot-channel">파일럿 채널 ID</label>
-      <input id="pilot-channel" className="input mono" placeholder="C0123456789"
-        value={channelId} disabled={busy}
-        onChange={(event) => setChannelId(event.target.value)} />
-      <input className="input" placeholder="추가하는 이유 (필수)" value={reason}
-        disabled={busy} onChange={(event) => setReason(event.target.value)} />
-      <button className="btn btn-sm" disabled={!ready}
-        onClick={() => { onAdd(trimmed, reason); setChannelId(''); setReason('') }}>
-        채널 등록
-      </button>
-      {trimmed && !shaped && (
-        <span className="field-help warn">
-          Slack 채널 ID 모양이 아닙니다. 채널 세부정보 아래쪽의 ID 를 붙여 넣으세요.
-        </span>
-      )}
-      {duplicate && <span className="field-help">이미 등록된 채널입니다.</span>}
-      <span className="field-help">
-        Archiver 앱이 그 채널에 초대돼 있어야 수집됩니다. 비공개 채널은 초대 없이는
-        권한 오류로 막힙니다. 지금 그림자 수집 {selected}개.
-      </span>
-    </div>
-  )
-}
-
-function ChannelRowView({
-  row, busy, gate, gatedModes, blockers, atPilotLimit, onChange,
-}: {
+function ChannelRowView({ row, busy, onHold }: {
   row: ChannelRow
   busy: boolean
-  gate: SchemaGate
-  gatedModes: string[]
-  blockers: string[]
-  /** 그림자 채널이 이미 상한이면 더 켤 수 없다. 이미 켜진 채널은 끌 수 있다. */
-  atPilotLimit: boolean
-  onChange: (mode: ChannelMode, reason: string, cutoverTs: string) => void
+  onHold: (hold: boolean, reason: string) => void
 }) {
-  const [mode, setMode] = useState<ChannelMode>(row.mode)
   const [reason, setReason] = useState('')
-  const [cutover, setCutover] = useState('')
-
-  const schemaLocked = !gate.verified && gatedModes.includes(mode)
-  const policyLocked = mode === 'active' && blockers.length > 0
-  // 파일럿에서는 운영 수집·일시 중지를 고르지 않는다. 운영 수집은 writer 인수이고,
-  // 일시 중지는 양쪽 writer 상태를 먼저 확인해야 한다.
-  const pilotLocked = !PILOT_MODES.includes(mode)
-  const overLimit = mode === 'shadow' && row.mode !== 'shadow' && atPilotLimit
-  const locked = schemaLocked || policyLocked || pilotLocked || overLimit
-  // 인수·역인수는 좌표가 필요하다. 없으면 서버가 거절하는데, 그걸 눌러 보고
-  // 알게 하지 않는다.
-  const needsCutover =
-    (mode === 'active' && row.mode !== 'active') ||
-    (mode === 'shadow' && row.writer_owner === 'archiver')
-  const ready = mode !== row.mode && reason.trim().length > 0
-    && (!needsCutover || cutover.trim().length > 0) && !locked && !busy
+  const joined = (row.membership ?? 'unknown') === 'joined'
+  const held = Boolean(row.operator_hold)
+  const ready = reason.trim().length > 0 && !busy
 
   return (
     <tr>
       <td>
         <div className="mono">{row.channel_id}</div>
-        {row.is_pilot && <div className="hint">파일럿</div>}
+        {row.channel_name && <div className="hint">#{row.channel_name}</div>}
+        {row.is_private && <div className="hint">비공개</div>}
+      </td>
+      <td>
+        {/* 「참여 중」 과 「모른다」 는 다르다. 모르는 것을 참여로 읽으면 이미
+            쫓겨난 채널을 계속 대상으로 본다. */}
+        {joined
+          ? <Chip tone="ok">참여 중</Chip>
+          : row.membership === 'left'
+            ? <Chip tone="stalled">참여 아님</Chip>
+            : <Chip tone="plain">확인 전</Chip>}
+        {row.membership_checked_at && (
+          <div className="hint">{fmt.dayClock(row.membership_checked_at)} 확인</div>
+        )}
       </td>
       <td>
         {modeChip(row.mode)}
-        <div className="hint">{MODE_DETAIL[row.mode]}</div>
+        <div className="hint">
+          {held
+            ? '사람이 수집을 꺼 둔 채널입니다. 재초대해도 저절로 켜지지 않습니다.'
+            : MODE_DETAIL[row.mode]}
+        </div>
+      </td>
+      <td>
+        {/* 프로세스가 떠 있다는 것과 이벤트가 들어왔다는 것은 다르다. */}
+        {row.last_event_at
+          ? <span className="mono">{fmt.dayClock(row.last_event_at)}</span>
+          : <span className="hint">아직 없음</span>}
       </td>
       <td>{row.writer_owner === 'archiver' ? 'Archiver' : 'Master'}</td>
-      <td className="mono">{row.cutover_ts || '-'}</td>
       <td className="right">
         <div className="field">
-          <select className="input" value={mode} disabled={busy}
-            onChange={(event) => setMode(event.target.value as ChannelMode)}>
-            {MODES.map((value) => (
-              <option key={value} value={value}
-                disabled={!PILOT_MODES.includes(value)
-                  || (!gate.verified && gatedModes.includes(value))}>
-                {MODE_LABEL[value]}
-                {!PILOT_MODES.includes(value) ? ' (파일럿 범위 밖)' : ''}
-                {PILOT_MODES.includes(value) && !gate.verified && gatedModes.includes(value)
-                  ? ' (검증 필요)' : ''}
-              </option>
-            ))}
-            <span className="field-help">{MODE_DETAIL[mode]}</span>
-          </select>
-          {needsCutover && (
-            <input className="input mono" placeholder="인수 시각 (Slack ts)"
-              value={cutover} disabled={busy}
-              onChange={(event) => setCutover(event.target.value)} />
-          )}
           <input className="input" placeholder="바꾸는 이유 (필수)" value={reason}
             disabled={busy} onChange={(event) => setReason(event.target.value)} />
           <button className="btn btn-sm" disabled={!ready}
-            onClick={() => onChange(mode, reason, cutover)}>적용</button>
-          {schemaLocked && <span className="field-help warn">스키마 검증 뒤에 열립니다.</span>}
-          {!schemaLocked && policyLocked && (
-            <span className="field-help warn">운영 전환 조건을 먼저 해결하세요.</span>
-          )}
-          {pilotLocked && (
-            <span className="field-help warn">
-              파일럿에서는 미적용과 그림자 수집만 고릅니다.
-            </span>
-          )}
-          {overLimit && (
-            <span className="field-help warn">
-              그림자 채널이 최대 {PILOT_MAX_CHANNELS}개입니다. 하나를 먼저 미적용으로
-              되돌리세요.
+            onClick={() => { onHold(!held, reason); setReason('') }}>
+            {held ? '수집 재개' : '수집 중지'}
+          </button>
+          {!joined && !held && (
+            <span className="field-help">
+              봇이 이 채널에 없습니다. 다시 초대하면 그림자 수집으로 돌아옵니다.
             </span>
           )}
         </div>

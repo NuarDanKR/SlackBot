@@ -414,30 +414,17 @@ export function WorkspaceConnections({
         { botToken: draft.botToken, appToken: draft.appToken, reason: draft.reason },
       )
       setData(next)
-      // 저장 성공을 「반영됐다」 로 말하지 않는다. 기록은 됐지만 돌고 있는
-      // 프로세스는 아직 옛 표를 읽는다.
-      onToast('토큰을 저장했습니다. 아직 적용되지 않았습니다 — 신원 확인을 진행하세요.')
+      onToast('토큰 등록과 Slack 연결 확인을 마쳤습니다. 수집은 Archiver 실행 후 시작됩니다.')
       // 입력란은 **즉시 비운다.** 화면에 평문이 남아 있을 이유가 없다.
       setDraft({ bot: '', botToken: '', appToken: '', reason: '' })
     } catch (error) {
       onToast(error instanceof ApiError ? error.message : '저장하지 못했습니다.')
     } finally {
-      setBusy('')
-    }
-  }
-
-  async function verify(botKey: string, reason: string) {
-    setBusy(botKey)
-    try {
-      const next = await api.securePost<WorkspaceResponse>(
-        `/api/workspaces/${encodeURIComponent(workspace)}/bot-connections/${botKey}/slack/verify-identity`,
-        { reason: reason || '신원 확인' },
-      )
-      setData(next)
-      onToast('Slack 신원을 확인해 기록했습니다. 수집이 시작되지는 않습니다.')
-    } catch (error) {
-      onToast(error instanceof ApiError ? error.message : '확인하지 못했습니다.')
-    } finally {
+      // 서버가 토큰을 저장한 뒤 Slack 확인만 실패할 수도 있다. 성공 여부와 무관하게
+      // 평문은 입력란에서 지우고, 재시도할 때 다시 입력받는다.
+      setDraft((current) => current.bot === botKey
+        ? { ...current, botToken: '', appToken: '' }
+        : current)
       setBusy('')
     }
   }
@@ -534,11 +521,11 @@ export function WorkspaceConnections({
                         <dd>{slack?.appTokenMask || '없음'}</dd>
                       </div>
                       <div>
-                        <dt>Slack 신원</dt>
+                        <dt>Slack 연결</dt>
                         <dd>
                           {slack?.identityOk
-                            ? `${slack.teamId} · ${slack.botUserId}`
-                            : slack?.identityError || '아직 확인하지 않음'}
+                            ? `확인됨 · ${slack.teamId} · ${slack.botUserId}`
+                            : slack?.identityError || '토큰 미등록'}
                         </dd>
                       </div>
                       <div>
@@ -621,14 +608,6 @@ export function WorkspaceConnections({
                           }
                         >
                           {slack?.tokenCount ? '토큰 교체' : '토큰 등록'}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn ghost"
-                          disabled={!slack?.tokenCount || busy === bot.key}
-                          onClick={() => verify(bot.key, '신원 확인')}
-                        >
-                          Slack 신원 확인
                         </button>
                         <button
                           type="button"

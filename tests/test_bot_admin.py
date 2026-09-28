@@ -567,7 +567,9 @@ RUNTIME_READERS = {
     "Archiver 기동 설정": ROOT / "src" / "tybot" / "archiver_runtime_store.py",
     "Master 의 전문 봇 라우팅": ROOT / "src" / "tybot" / "specialist_router.py",
 }
-NEW_TABLES = ("bot_connection", "bot_catalog", "specialist_route")
+NEW_TABLES = (
+    "bot_connection", "bot_catalog", "specialist_route", "archiver_connection_config",
+)
 
 
 def mentions_table(source: str, table: str) -> bool:
@@ -623,12 +625,8 @@ def test_the_scan_covers_every_runtime_reader():
         assert path.is_file(), f"{name} 파일이 없다: {path}"
 
 
-def test_no_runtime_reader_reads_the_new_tables_yet():
-    """읽는 쪽 전환은 별도 단계다(§12.2 8단계).
-
-    이 시험이 실패하면 전환이 시작된 것이고, 그때 `RUNTIME_READS_NEW_TABLES` 를
-    함께 바꿔야 한다. 두 값이 어긋나면 화면이 **거짓말을 한다.**
-    """
+def test_runtime_reader_status_matches_the_actual_contracts():
+    """Archiver만 전환됐다. 화면이 전부 적용/미적용이라고 뭉개면 안 된다."""
     reads = {
         name: [table for table in NEW_TABLES
                if mentions_table(path.read_text(encoding="utf-8"), table)]
@@ -636,7 +634,14 @@ def test_no_runtime_reader_reads_the_new_tables_yet():
     }
     touched = {name: tables for name, tables in reads.items() if tables}
 
-    assert touched == {}, f"런타임이 새 표를 읽기 시작했다: {touched}"
+    assert touched == {
+        "Archiver 기동 설정": ["archiver_connection_config"],
+    }
+    assert admin.RUNTIME_READER_STATUS == {
+        "master_connection": False,
+        "archiver_connection": True,
+        "specialist_route": False,
+    }
     assert admin.RUNTIME_READS_NEW_TABLES is False
 
 
@@ -649,7 +654,7 @@ def test_the_read_model_says_it_does_not_apply_now(repo):
     ):
         effect = payload["runtimeEffect"]
         assert effect["appliesNow"] is False
-        assert "돌고 있는 봇에는 반영되지 않습니다" in effect["summary"]
+        assert "Archiver 연결만 다음 기동에 적용" in effect["summary"]
         assert len(effect["details"]) >= 3
 
 
