@@ -55,13 +55,11 @@ interface Draft {
   state: 'enabled' | 'disabled'
   limitUsd: string
   readable: string[]
-  botToken: string
-  appToken: string
 }
 
 const EMPTY: Draft = {
   key: '', label: '', role: 'member', state: 'enabled', limitUsd: '2',
-  readable: [], botToken: '', appToken: '',
+  readable: [],
 }
 const KEY_RE = /^[a-z][a-z0-9-]{1,23}$/
 
@@ -73,8 +71,6 @@ function editDraft(row: WorkspaceEntry): Draft {
     state: row.state === 'disabled' ? 'disabled' : 'enabled',
     limitUsd: String(row.limitUsd),
     readable: [...row.readable],
-    botToken: '',
-    appToken: '',
   }
 }
 
@@ -212,10 +208,10 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
     return <Failed what="워크스페이스 목록을" detail={resource.error.message} onRetry={resource.reload} />
   }
 
-  const tokenPair = Boolean(draft.botToken) === Boolean(draft.appToken)
   const editingRow = editing ? rows.find((row) => row.key === draft.key) : undefined
-  const ready = KEY_RE.test(draft.key) && draft.label.trim().length > 0 && tokenPair &&
-    (editing || (draft.botToken.startsWith('xoxb-') && draft.appToken.startsWith('xapp-')))
+  // 봇 토큰은 여기서 받지 않는다. 이 화면은 **조직 metadata** 만 다룬다 —
+  // 연결은 봇마다 다르고(Master·Archiver·Hermes) 그 정본은 봇 관리에 있다.
+  const ready = KEY_RE.test(draft.key) && draft.label.trim().length > 0
 
   function reset() {
     setDraft(EMPTY)
@@ -240,10 +236,6 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
       const body: Record<string, unknown> = {
         label: draft.label.trim(), role: draft.role, state: draft.state,
         limitUsd: Number(draft.limitUsd), readable: draft.readable,
-      }
-      if (draft.botToken && draft.appToken) {
-        body.botToken = draft.botToken
-        body.appToken = draft.appToken
       }
       const result = await api.put<WorkspaceResponse>(
         `/api/workspaces/${encodeURIComponent(draft.key)}`,
@@ -286,10 +278,8 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
       <Section
         title={editing ? `${draft.label} 설정 편집` : '새 워크스페이스 등록'}
         lead={editing
-          ? editingRow?.tokenInEnv
-            ? '저장하면 현재 서버 설정 파일의 두 토큰을 암호화해 DB로 이전합니다. 새 토큰으로 교체하려면 두 토큰을 함께 입력하세요.'
-            : '토큰 입력란을 비워 두면 기존 DB 토큰을 유지합니다. 교체할 때는 두 토큰을 함께 입력해야 합니다.'
-          : 'Slack 앱에서 받은 봇 토큰과 앱 토큰이 모두 있어야 등록할 수 있습니다.'}
+          ? '조직 이름·역할·상한·열람 범위를 바꿉니다. 봇 토큰은 봇 관리에서 봇별로 등록합니다.'
+          : '조직 정보만 먼저 만듭니다. 봇 연결은 등록 뒤 봇 관리에서 붙입니다.'}
       >
         <div className="card card-pad">
           <div className="form-grid">
@@ -330,16 +320,16 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
               </span>}
             </div>
             <div className="field">
-              <label className="field-label" htmlFor="ws-bot">봇 토큰</label>
-              <input id="ws-bot" className="input mono" type="password" autoComplete="off"
-                placeholder={editing ? '변경할 때만 입력' : 'xoxb-'} value={draft.botToken}
-                onChange={(event) => setDraft({ ...draft, botToken: event.target.value })} />
-            </div>
-            <div className="field">
-              <label className="field-label" htmlFor="ws-app">앱 토큰</label>
-              <input id="ws-app" className="input mono" type="password" autoComplete="off"
-                placeholder={editing ? '변경할 때만 입력' : 'xapp-'} value={draft.appToken}
-                onChange={(event) => setDraft({ ...draft, appToken: event.target.value })} />
+              <span className="field-label">봇 연결</span>
+              {/* 토큰은 봇마다 다르다. 워크스페이스 하나에 Master·Archiver·Hermes 가
+                  각각 붙으므로, 이 화면에 칸 두 개를 두면 어느 봇 것인지 알 수 없다. */}
+              <span className="field-help">
+                봇 토큰은 이 화면에서 받지 않습니다.{' '}
+                <a href={`#/manage/bots/connections${draft.key ? `?workspace=${draft.key}` : ''}`}>
+                  봇 관리 &gt; 워크스페이스 연결
+                </a>
+                에서 봇별로 등록합니다.
+              </span>
             </div>
           </div>
 
@@ -359,7 +349,7 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
 
           <div className="form-row">
             <button className="btn btn-primary" disabled={!ready || saving} onClick={() => setConfirmSave(true)}>
-              {saving ? '저장 중…' : editingRow?.tokenInEnv ? 'DB로 이전 및 저장' : editing ? '변경 저장' : '워크스페이스 등록'}
+              {saving ? '저장 중…' : editing ? '변경 저장' : '워크스페이스 등록'}
             </button>
             {editing && <button className="btn btn-quiet" onClick={reset}>취소</button>}
           </div>
@@ -381,8 +371,9 @@ export function Workspaces({ selectedKey, onToast }: { selectedKey?: string | nu
                 <td>{stateChip(row)}{row.error && <div className="hint warn">{row.error}</div>}</td>
                 <td><div className="mono">{row.botTokenMask}</div><div className="mono">{row.appTokenMask}</div>
                   <div className="hint">{row.tokenInEnv
-                    ? '환경변수 사용 중 · 편집 후 저장하면 암호화 DB로 이전됩니다.'
-                    : `${row.secretUpdatedAt ? fmt.dayClock(row.secretUpdatedAt) : '교체 기록 없음'} · ${row.secretUpdatedBy}`}</div></td>
+                    ? '환경변수 사용 중'
+                    : `${row.secretUpdatedAt ? fmt.dayClock(row.secretUpdatedAt) : '교체 기록 없음'} · ${row.secretUpdatedBy}`}</div>
+                  <div className="hint"><a href={`#/manage/bots/connections?workspace=${row.key}`}>봇 관리에서 연결</a></div></td>
                 <td>{row.readable.length ? row.readable.join(' · ') : '-'}</td>
                 <td className="num">
                   {row.limitUsd > 0 ? fmt.usd(row.limitUsd) : <span className="hint">미설정</span>}

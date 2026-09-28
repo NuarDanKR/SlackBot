@@ -340,3 +340,49 @@ def test_the_tabs_keep_the_chosen_workspace(bots_page):
     """탭을 옮길 때마다 고른 워크스페이스가 사라지면 매번 다시 고르게 된다."""
     for tab in ("routing", "manifests", "audit"):
         assert f"#/manage/bots/{tab}${{workspace ? `?workspace=${{workspace}}` : ''}}" in bots_page
+
+
+# --- 워크스페이스 화면에서 토큰 칸을 뺀다 ---------------------------------------
+#
+# 워크스페이스 하나에 Master·Archiver·Hermes 가 각각 붙는다. 칸 두 개를 두면
+# **어느 봇 토큰인지 알 수 없다** — 그 모호함이 지금까지 「Hermes 가 둘」 이었다.
+
+WORKSPACES = WEB / "pages" / "Workspaces.tsx"
+
+
+@pytest.fixture(scope="module")
+def workspaces_page() -> str:
+    return WORKSPACES.read_text(encoding="utf-8")
+
+
+def test_the_workspace_form_has_no_token_input(workspaces_page):
+    form = workspaces_page[workspaces_page.index("새 워크스페이스 등록"):]
+    form = form[:form.index("크로스 워크스페이스 열람 대상")]
+
+    assert 'id="ws-bot"' not in form
+    assert 'id="ws-app"' not in form
+    assert 'type="password"' not in form
+
+
+def test_the_workspace_draft_carries_no_token(workspaces_page):
+    """화면이 평문을 들고 있으면, 그 화면에서 도는 어떤 스크립트든 읽을 수 있다."""
+    assert "botToken:" not in workspaces_page
+    assert "appToken:" not in workspaces_page
+    assert "body.botToken" not in workspaces_page
+
+
+def test_the_workspace_screen_points_at_bot_management(workspaces_page):
+    """칸을 없애기만 하면 사람은 어디서 넣는지 모른다."""
+    assert "#/manage/bots/connections" in workspaces_page
+    assert "봇 관리" in workspaces_page
+
+
+def test_the_copy_no_longer_asks_for_tokens(workspaces_page):
+    """안내가 화면과 어긋나면 사람은 없는 칸을 찾는다."""
+    assert "봇 토큰과 앱 토큰이 모두 있어야 등록할 수 있습니다" not in workspaces_page
+    assert "두 토큰을 함께 입력" not in workspaces_page
+
+
+def test_the_mask_is_still_readable(workspaces_page):
+    """어떤 토큰이 들어가 있는지는 계속 보여야 한다. 지우는 것은 **입력**뿐이다."""
+    assert "botTokenMask" in workspaces_page and "appTokenMask" in workspaces_page
