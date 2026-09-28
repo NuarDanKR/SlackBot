@@ -309,8 +309,13 @@ def _encrypt_pair(bot_token: str, app_token: str) -> dict:
     한쪽만 받지 않는다 — 봇 토큰만 바꾸면 Socket 은 옛 앱 토큰으로 열리고, 그
     조합이 맞는지 아무도 확인하지 않은 상태가 된다.
     """
-    bot = _validate_token(bot_token, "xoxb-", "봇 토큰")
-    app = _validate_token(app_token, "xapp-", "앱 토큰")
+    try:
+        bot = _validate_token(bot_token, "xoxb-", "봇 토큰")
+        app = _validate_token(app_token, "xapp-", "앱 토큰")
+    except WorkspaceStoreError as exc:
+        # 형식 오류는 **사람이 고칠 수 있는 것**이다(§7.5 → 422). 저장소 오류로
+        # 흘려보내면 503 이 되고, 사람은 서버가 죽은 줄 안다.
+        raise BotAdminRefused(str(exc)) from exc
     cipher = _fernet()
     return {
         "bot": (cipher.encrypt(bot.encode("utf-8")), _mask(bot)),

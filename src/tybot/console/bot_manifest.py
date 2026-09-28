@@ -1,0 +1,121 @@
+"""Slack App Manifest 정본과 **대조 확인**.
+
+설계: `docs/design/workspace-service-console-redesign.md` §6 (2026-09-28)
+
+## 두 가지를 합치지 않는다
+
+| 무엇 | 무슨 질문 | 누가 답하나 |
+|---|---|---|
+| 신원 확인 | 이 토큰이 **누구인가** | Slack `auth.test`(`bot_identity`) |
+| Manifest 적용 확인 | 그 앱이 **무슨 권한을 갖고 있나** | 사람이 정본 hash 와 대조 |
+
+`auth.test` 성공만으로 Manifest 가 일치한다고 표시하지 않는다(§6.2). 토큰은 맞는데
+스코프가 빠져 있으면, 수집은 조용히 절반만 된다 — 그건 오류로 안 나타난다.
+
+## hash 를 DB 에 복사하지 않는다
+
+정본은 저장소의 파일이다. DB 에 적어 두면 파일이 바뀌어도 그 값이 남고, 그때
+화면은 「대조했다」 를 **옛 hash 기준으로** 보여 준다. 그래서 목록은 파일에서
+매번 센다. 연결에 남기는 것은 **사람이 확인했을 때의 hash** 이고, 그 둘이 다르면
+화면이 「정본이 바뀌었다」 고 말할 수 있어야 한다.
+
+Manifest 표(`slack_app_manifest`, §6.1)는 아직 만들지 않는다 — 스키마를 건드리면
+release gate 지문이 바뀌어 격리 DB 재검증이 필요해진다. 지금 필요한 것은 목록과
+대조 기록뿐이고, 둘 다 파일과 기존 열로 된다.
+"""
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+from . import bot_admin
+from .bot_repo import BotRepo, default_repo
+
+ROOT = Path(__file__).resolve().parents[3]
+
+#: 정본 Manifest. **봇 key 로 건다** — 역할 이름으로 걸면 이름을 바꾼 날 끊긴다.
+#:
+#: Hermes 직접 연결 Manifest 는 PF 승인본이라 이 저장소에 없다(§6.1). 없는 것을
+#: 빈 값으로 채우지 않는다 — 「아직 없다」 와 「대조했는데 비었다」 는 다르다.
+MANIFESTS: tuple[tuple[str, str, str], ...] = (
+    ("master", "docs/pilot/slack-app-manifest.yaml", "Slack 진입·답변·명령"),
+    ("archiver", "docs/pilot/archiving-app-manifest.yaml", "채널·첨부·Canvas 수집"),
+)
+
+
+def _sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def catalog() -> dict:
+    """정본 목록과 지금 파일의 hash."""
+    rows = []
+    for bot_key, relative, purpose in MANIFESTS:
+        path = ROOT / relative
+        digest = _sha256(path)
+        rows.append({
+            "manifestId": f"{bot_key}/slack_socket",
+            "botKey": bot_key,
+            "connectorType": "slack_socket",
+            "sourcePath": relative,
+            "purpose": purpose,
+            "sha256": digest,
+            # 파일이 없으면 **없다고 말한다.** 빈 hash 를 정상으로 보이게 두면
+            # 사람이 그 값으로 대조했다고 적을 수 있다.
+            "present": bool(digest),
+        })
+    return {"manifests": rows}
+
+
+def known_sha256(manifest_id: str) -> str:
+    return next(
+        (row["sha256"] for row in catalog()["manifests"]
+         if row["manifestId"] == manifest_id),
+        "",
+    )
+
+
+def attest(
+    workspace: str,
+    bot_key: str,
+    *,
+    manifest_id: str,
+    sha256: str,
+    actor: bot_admin.Actor,
+    repo: BotRepo | None = None,
+) -> None:
+    """관리자가 대조했다고 적는다. **정본 hash 와 다르면 거절한다.**
+
+    다른 값을 그대로 받으면 화면은 「확인됨」 인데 무엇과 확인했는지 모르는 상태가
+    된다. 그 상태는 확인 안 한 것보다 나쁘다 — 사람이 다시 안 본다.
+    """
+    expected = known_sha256(manifest_id)
+    if not expected:
+        raise bot_admin.BotAdminRefused(
+            f"저장소에 없는 Manifest 입니다: {manifest_id}."
+            " PF 승인본처럼 저장소 밖 정본은 아직 대조 대상이 아닙니다."
+        )
+    if sha256 != expected:
+        raise bot_admin.BotAdminRefused(
+            "정본 hash 와 다릅니다. 화면의 값을 그대로 붙여 넣으세요."
+        )
+
+    store = repo or default_repo()
+    with store.transaction() as tx:
+        row = tx.connection(workspace, bot_key)
+        if row is None:
+            raise bot_admin.BotAdminRefused(f"없는 연결입니다: {workspace}/{bot_key}")
+        tx.save_manifest_attestation({
+            "id": int(row["id"]), "manifest_id": manifest_id, "sha256": sha256,
+            "actor": actor.name,
+        })
+        tx.add_audit({
+            "actor": actor.name, "subject": bot_admin.SUBJECT_CONNECTION,
+            "workspace": workspace,
+            "field": f"connection.{bot_key}.slack_socket.manifest",
+            "old_value": "", "new_value": f"{manifest_id}@{sha256[:12]}",
+            "reason": actor.reason,
+        })

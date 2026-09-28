@@ -23,6 +23,7 @@ class FakeBotRepo:
         self.specialist_rows: list[dict] = []
         self.legacy_rows: list[dict] = []
         self.audit_rows: list[dict] = []
+        self.saved_connections: list[dict] = []
         self.locked: list[str] = []
         self.transaction_count = 0
         self._next_id = 1
@@ -115,6 +116,8 @@ class FakeBotRepo:
         return None
 
     def save_connection(self, row: dict) -> int:
+        #: 무엇을 받았나. 「저장이 상태를 건드리지 않는가」 를 시험이 본다.
+        self.saved_connections.append(dict(row))
         for existing in self.connection_rows:
             if (existing["workspace"], existing["bot_key"]) == (
                 row["workspace"], row["bot_key"]
@@ -171,6 +174,13 @@ class FakeBotRepo:
                 row["updated_by"] = actor
                 return 1
         return 0
+
+    def save_manifest_attestation(self, row: dict) -> None:
+        for existing in self.connection_rows:
+            if existing["id"] == row["id"]:
+                existing["manifest_id"] = row["manifest_id"]
+                existing["manifest_attested_sha256"] = row["sha256"]
+                existing["manifest_attested_by"] = row["actor"]
 
     def routes(self, workspace: str = "") -> list[dict]:
         rows = [

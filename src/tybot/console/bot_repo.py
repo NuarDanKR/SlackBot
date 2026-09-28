@@ -41,6 +41,7 @@ class BotRepo(Protocol):
     def reset_identity(self, connection_id: int) -> None: ...
     def record_identity(self, row: dict) -> int: ...
     def set_connection_state(self, connection_id: int, state: str, actor: str) -> int: ...
+    def save_manifest_attestation(self, row: dict) -> None: ...
     def routes(self, workspace: str = "") -> list[dict]: ...
     def route(self, specialist: str, workspace: str) -> dict | None: ...
     def save_route(self, row: dict) -> None: ...
@@ -235,6 +236,27 @@ class PostgresBotRepo:
                 (state, actor, connection_id),
             )
             return int(cur.rowcount or 0)
+
+    def save_manifest_attestation(self, row: dict) -> None:
+        """**사람이 대조했을 때의 hash** 를 적는다.
+
+        신원 검사와 다른 칸이다(§6.2). 하나는 「이 토큰이 누구인가」 이고 다른
+        하나는 「그 앱이 무슨 권한을 갖고 있나」 다 — 합치면 토큰만 맞고 스코프가
+        빠진 앱이 「확인됨」 으로 보인다.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bot_connection
+                   SET manifest_id = %(manifest_id)s,
+                       manifest_attested_sha256 = %(sha256)s,
+                       manifest_attested_at = now(),
+                       manifest_attested_by = %(actor)s,
+                       updated_at = now(), updated_by = %(actor)s
+                 WHERE id = %(id)s
+                """,
+                row,
+            )
 
     # -- Master 내부 호출 라우트 ----------------------------------------
     def routes(self, workspace: str = "") -> list[dict]:

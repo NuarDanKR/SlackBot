@@ -176,6 +176,42 @@ def test_saving_a_connection_does_not_enable_it(repo, actor):
     assert row["identity_ok"] is None
 
 
+def test_saving_never_carries_a_state(repo, actor):
+    """저장이 상태를 들고 가면, 저장소가 그 값을 쓰는 날 **검사 없이 켜진다.**
+
+    상태는 신원 검사를 통과할 때만 바뀐다. 저장 경로에 상태 칸이 있으면 언젠가
+    호출부 하나가 거기에 `enabled` 를 넣는다.
+    """
+    admin.save_slack_connection(
+        "tyit", "archiver", actor=actor, bot_token=BOT, app_token=APP, repo=repo,
+    )
+
+    (saved,) = repo.saved_connections
+    assert "state" not in saved
+    assert set(saved) == {"workspace", "bot_key", "note", "actor"}
+
+
+def test_a_route_whose_assignment_was_removed_cannot_be_turned_on(repo, actor):
+    """배정을 뗀 뒤에도 라우트 행은 남는다(지우지 않으므로).
+
+    그 행을 그대로 켤 수 있으면, 배정 없는 봇이 켜진 것처럼 보이는데 라우터는
+    그 봇을 못 찾는다 — 아무 질문도 안 가는 상태가 제일 오래 간다.
+    """
+    repo.given_route("hermes", "tyit", "disabled")
+
+    with pytest.raises(admin.BotAdminRefused, match="배정"):
+        admin.set_route("tyit", "hermes", "shadow", actor=actor, repo=repo)
+
+
+def test_a_route_whose_assignment_was_removed_can_still_be_turned_off(repo, actor):
+    """끄는 길은 열어 둔다. 배정이 없다고 못 끄면 켜진 행이 영원히 남는다."""
+    repo.given_route("hermes", "tyit", "shadow")
+
+    admin.set_route("tyit", "hermes", "disabled", actor=actor, repo=repo)
+
+    assert repo.route_rows[("hermes", "tyit")]["route_mode"] == "disabled"
+
+
 def test_a_specialist_that_cannot_take_slack_is_refused(repo, actor):
     """전문 봇이 Slack 에 직접 붙으면 권한을 판정할 자리가 사라진다."""
     with pytest.raises(admin.BotAdminRefused, match="Slack 에 직접"):
