@@ -62,6 +62,12 @@ def actor() -> admin.Actor:
     return admin.Actor("dan@taeyoung.com", "PF 공존 준비")
 
 
+def _fingerprint(repo, workspace: str, bot_key: str) -> str:
+    """지금 저장된 토큰 지문. 실제 검증 경로가 들고 오는 값과 같은 것이다."""
+    row = repo.connection(workspace, bot_key)
+    return repo.secret_fingerprint(int(row["id"])) if row else ""
+
+
 # --- 사람과 사유 ---------------------------------------------------------------
 
 def test_an_actor_without_a_name_is_refused():
@@ -281,7 +287,8 @@ def test_identity_passes_and_enables(repo, actor):
     repo.given_connection("tyit", "archiver", state="draft")
 
     problem = admin.record_identity(
-        "tyit", "archiver", team_id="T1", bot_user_id="U2", actor=actor, repo=repo,
+        "tyit", "archiver", team_id="T1", bot_user_id="U2", actor=actor,
+        token_fingerprint=_fingerprint(repo, "tyit", "archiver"), repo=repo,
     )
 
     assert problem == ""
@@ -296,7 +303,8 @@ def test_a_token_from_another_workspace_is_refused(repo, actor):
     repo.given_connection("tyit", "archiver", state="draft")
 
     problem = admin.record_identity(
-        "tyit", "archiver", team_id="T9", bot_user_id="U2", actor=actor, repo=repo,
+        "tyit", "archiver", team_id="T9", bot_user_id="U2", actor=actor,
+        token_fingerprint=_fingerprint(repo, "tyit", "archiver"), repo=repo,
     )
 
     assert "다른 워크스페이스" in problem
@@ -311,7 +319,8 @@ def test_the_same_bot_user_twice_is_refused(repo, actor):
     repo.given_connection("tyit", "archiver", state="draft")
 
     problem = admin.record_identity(
-        "tyit", "archiver", team_id="T1", bot_user_id="U1", actor=actor, repo=repo,
+        "tyit", "archiver", team_id="T1", bot_user_id="U1", actor=actor,
+        token_fingerprint=_fingerprint(repo, "tyit", "archiver"), repo=repo,
     )
 
     assert "봇 사용자" in problem
@@ -324,7 +333,8 @@ def test_a_retired_connection_does_not_block_a_new_one(repo, actor):
     repo.given_connection("tyit", "archiver", state="draft")
 
     problem = admin.record_identity(
-        "tyit", "archiver", team_id="T1", bot_user_id="U1", actor=actor, repo=repo,
+        "tyit", "archiver", team_id="T1", bot_user_id="U1", actor=actor,
+        token_fingerprint=_fingerprint(repo, "tyit", "archiver"), repo=repo,
     )
 
     assert problem == ""
@@ -333,8 +343,64 @@ def test_a_retired_connection_does_not_block_a_new_one(repo, actor):
 def test_recording_identity_for_a_missing_connection_is_refused(repo, actor):
     with pytest.raises(admin.BotAdminRefused, match="등록되지 않은 연결"):
         admin.record_identity(
-            "tyit", "archiver", team_id="T1", bot_user_id="U2", actor=actor, repo=repo,
+            "tyit", "archiver", team_id="T1", bot_user_id="U2", actor=actor,
+            token_fingerprint="", repo=repo,
         )
+
+
+def test_a_token_swapped_during_verification_is_not_recorded(repo, actor):
+    """**옛 토큰으로 받은 「확인됨」 이 새 토큰에 붙으면 안 된다.**
+
+    Slack 에 묻는 동안 다른 사람이 토큰을 갈아 끼울 수 있다. 그 결과를 그대로
+    적으면 연결이 검사 없이 켜지고, 화면은 초록불인데 실제로 붙는 앱은 아무도
+    확인하지 않은 것이다.
+    """
+    repo.given_connection("tyit", "archiver", state="draft")
+    stale = _fingerprint(repo, "tyit", "archiver")
+    # 검사 도중 누군가 토큰을 교체했다.
+    admin.save_slack_connection(
+        "tyit", "archiver", actor=actor, bot_token=BOT, app_token=APP, repo=repo,
+    )
+
+    with pytest.raises(admin.TokenChanged, match="토큰이 바뀌었"):
+        admin.record_identity(
+            "tyit", "archiver", team_id="T1", bot_user_id="U2", actor=actor,
+            token_fingerprint=stale, repo=repo,
+        )
+
+    row = repo.connections("tyit")[0]
+    assert row["state"] == "draft", "검사 안 된 채로 남아야 한다"
+    assert row["identity_ok"] is None
+
+
+def test_the_same_token_pair_verifies_normally(repo, actor):
+    """지문이 그대로면 평소처럼 켜진다 — 잠금이 너무 세면 아무도 못 켠다."""
+    repo.given_connection("tyit", "archiver", state="draft")
+    admin.save_slack_connection(
+        "tyit", "archiver", actor=actor, bot_token=BOT, app_token=APP, repo=repo,
+    )
+    fingerprint = _fingerprint(repo, "tyit", "archiver")
+
+    problem = admin.record_identity(
+        "tyit", "archiver", team_id="T1", bot_user_id="U2", actor=actor,
+        token_fingerprint=fingerprint, repo=repo,
+    )
+
+    assert problem == ""
+    assert repo.connections("tyit")[0]["state"] == "enabled"
+
+
+def test_re_saving_the_same_token_still_changes_the_fingerprint(repo, actor):
+    """Fernet 은 같은 평문도 다르게 암호화한다. 안전한 쪽으로 틀린다."""
+    admin.save_slack_connection(
+        "tyit", "archiver", actor=actor, bot_token=BOT, app_token=APP, repo=repo,
+    )
+    first = _fingerprint(repo, "tyit", "archiver")
+    admin.save_slack_connection(
+        "tyit", "archiver", actor=actor, bot_token=BOT, app_token=APP, repo=repo,
+    )
+
+    assert _fingerprint(repo, "tyit", "archiver") != first
 
 
 # --- 연결 중지 ------------------------------------------------------------------
@@ -504,20 +570,68 @@ RUNTIME_READERS = {
 NEW_TABLES = ("bot_connection", "bot_catalog", "specialist_route")
 
 
+def mentions_table(source: str, table: str) -> bool:
+    """이 소스가 그 표를 **낱말로** 말하나.
+
+    `specialist_route` 는 `specialist_router` 의 앞부분이기도 하다. 그냥 부분
+    문자열로 보면 라우터가 자기 이름 때문에 「새 표를 읽는다」 로 잡힌다.
+
+    2026-09-29: 여기 낱말 경계가 **백스페이스 문자**로 들어가 있었다. 백스페이스
+    뒤에 표 이름이 오는 소스는 없으므로 이 검사는 아무것도 못 찾았다 — 통과하는
+    빈 시험이었고, 런타임이 새 표를 읽기 시작해도 말해 주지 않았다. 그래서
+    탐지기를 밖으로 꺼내 **양성 시험**을 따로 붙인다.
+    """
+    pattern = r"(?<![A-Za-z0-9_])" + re.escape(table) + r"(?![A-Za-z0-9_])"
+    return re.search(pattern, source) is not None
+
+
+@pytest.mark.parametrize("source, table, expected", [
+    ("cur.execute('SELECT 1 FROM bot_connection')", "bot_connection", True),
+    ("    JOIN bot_catalog c ON c.key = s.key", "bot_catalog", True),
+    ("FROM specialist_route r", "specialist_route", True),
+    # 잡으면 **안 되는** 것. 이게 없으면 탐지기를 넓히다가 라우터 이름에 걸린다.
+    ('log = logging.getLogger("tybot.specialist_router")', "specialist_route", False),
+    ("from .bot_connection_helpers import x", "bot_connection", False),
+    ("workspace_service", "bot_connection", False),
+])
+def test_the_table_detector_actually_matches(source, table, expected):
+    """**탐지기 자체를 시험한다.** 못 찾는 탐지기는 언제나 통과한다."""
+    assert mentions_table(source, table) is expected
+
+
+def test_a_reader_that_adopts_a_new_table_is_caught():
+    """전환이 시작되면 이 판정이 **반드시 걸려야** 한다.
+
+    진짜 파일을 고치지 않고, 옮겨 온 모양의 소스에 같은 판정을 돌린다.
+    """
+    migrated = (
+        "def load_runtime_config(workspace):\n"
+        "    cur.execute('SELECT * FROM bot_connection WHERE workspace = %s')\n"
+    )
+
+    assert [table for table in NEW_TABLES if mentions_table(migrated, table)] == [
+        "bot_connection",
+    ]
+
+
+def test_the_scan_covers_every_runtime_reader():
+    """훑는 파일이 비면 「아무도 안 읽는다」 가 **아무것도 안 봤다** 가 된다."""
+    assert set(RUNTIME_READERS) == {
+        "Master 워크스페이스·토큰", "Archiver 기동 설정", "Master 의 전문 봇 라우팅",
+    }
+    for name, path in RUNTIME_READERS.items():
+        assert path.is_file(), f"{name} 파일이 없다: {path}"
+
+
 def test_no_runtime_reader_reads_the_new_tables_yet():
     """읽는 쪽 전환은 별도 단계다(§12.2 8단계).
 
     이 시험이 실패하면 전환이 시작된 것이고, 그때 `RUNTIME_READS_NEW_TABLES` 를
     함께 바꿔야 한다. 두 값이 어긋나면 화면이 **거짓말을 한다.**
     """
-    def _mentions(source: str, table: str) -> bool:
-        # `specialist_route` 는 `specialist_router` 의 앞부분이기도 하다. 낱말로
-        # 봐야 자기 이름 때문에 걸리지 않는다.
-        return re.search(rf"{table}(?![A-Za-z0-9_])", source) is not None
-
     reads = {
         name: [table for table in NEW_TABLES
-               if _mentions(path.read_text(encoding="utf-8"), table)]
+               if mentions_table(path.read_text(encoding="utf-8"), table)]
         for name, path in RUNTIME_READERS.items()
     }
     touched = {name: tables for name, tables in reads.items() if tables}
@@ -564,3 +678,19 @@ def test_disabling_a_connection_changes_no_collection_state(repo, actor):
     )
     for table in ("archive_channel_mode", "archive_feature_flag", "writer_owner"):
         assert table not in source
+
+
+def test_no_source_file_hides_a_control_character():
+    """정규식에 **백스페이스가 들어가면 시험이 조용히 빈다**(2026-09-29 실제로 그랬다).
+
+    눈에 안 보이므로 리뷰에서도 안 걸린다. 그래서 파일 전체를 훑는다 —
+    탭·줄바꿈 말고 제어문자는 우리 소스에 있을 이유가 없다.
+    """
+    control = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+    offenders = []
+    for folder in ("src", "tests", "scripts"):
+        for path in sorted((ROOT / folder).rglob("*.py")):
+            if control.search(path.read_text(encoding="utf-8", errors="replace")):
+                offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []

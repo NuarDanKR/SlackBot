@@ -62,6 +62,15 @@ def repo(monkeypatch) -> FakeBotRepo:
     return store
 
 
+def repo_fingerprint(workspace: str, bot_key: str) -> str:
+    """가짜 검증이 실제 경로처럼 **지금 지문**을 들고 오게 한다."""
+    from tybot.console import bot_admin as admin
+
+    store = admin.default_repo()
+    row = store.connection(workspace, bot_key)
+    return store.secret_fingerprint(int(row["id"])) if row else ""
+
+
 # --- 권한 --------------------------------------------------------------------
 
 @pytest.mark.parametrize("path", [
@@ -198,7 +207,8 @@ def test_identity_enables_the_connection(client, repo, monkeypatch):
         bot_identity, "verify_connection",
         lambda ws, key, *, actor, client_factory=None, repo=None: bot_admin.record_identity(
             ws, key, team_id="T1", bot_user_id="U2", actor=actor,
-        ),
+            token_fingerprint=repo_fingerprint(ws, key),
+            ),
     )
 
     response = client.post(
@@ -219,7 +229,8 @@ def test_a_duplicate_bot_user_is_409(client, repo, monkeypatch):
         bot_identity, "verify_connection",
         lambda ws, key, *, actor, client_factory=None, repo=None: bot_admin.record_identity(
             ws, key, team_id="T1", bot_user_id="U1", actor=actor,
-        ),
+            token_fingerprint=repo_fingerprint(ws, key),
+            ),
     )
 
     response = client.post(
@@ -385,3 +396,31 @@ def test_the_legacy_service_endpoint_still_exists():
 
     assert "/api/workspaces/{key}/archiving/services/{service}" in paths
     assert "/api/workspaces/{key}/archiving/services/{service}/verify" in paths
+
+
+def test_a_manifest_from_another_bot_is_refused(client, repo):
+    """Archiver 연결에 Master Manifest 를 적으면 **둘 다 「확인됨」 으로 보인다.**
+
+    실제로 확인된 것은 하나뿐이고, 어느 쪽인지는 화면에 안 남는다.
+    """
+    repo.given_connection("tyit", "archiver", state="draft")
+    digest = bot_manifest.known_sha256("master/slack_socket")
+
+    response = client.put(
+        "/api/workspaces/tyit/bot-connections/archiver/slack/manifest-attestation",
+        json={"manifestId": "master/slack_socket", "sha256": digest, "reason": "대조"},
+        headers={**owner(client), **CSRF},
+    )
+
+    assert response.status_code == 422
+    assert "master" in response.json()["detail"]
+    assert repo.connections("tyit")[0]["manifest_attested_sha256"] == ""
+
+
+def test_a_manifest_hash_alone_does_not_decide_the_owner(client, repo):
+    """hash 만 맞으면 통과시키면, 봇을 바꿔 붙이는 길이 열린 채로 남는다."""
+    from tybot.console import bot_manifest as manifest
+
+    assert manifest.owner_of("master/slack_socket") == "master"
+    assert manifest.owner_of("archiver/slack_socket") == "archiver"
+    assert manifest.owner_of("hermes/slack_socket") == "", "PF 승인본은 아직 없다"

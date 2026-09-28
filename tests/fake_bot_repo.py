@@ -146,6 +146,16 @@ class FakeBotRepo:
                     1 for key in self.secret_rows if key[0] == connection_id
                 )
 
+    def secret_fingerprint(self, connection_id: int) -> str:
+        import hashlib
+
+        parts = [
+            f"{kind}:{hashlib.md5(bytes(row['ciphertext'])).hexdigest()}"
+            for (cid, kind), row in sorted(self.secret_rows.items())
+            if cid == connection_id
+        ]
+        return hashlib.md5(",".join(parts).encode("utf-8")).hexdigest() if parts else ""
+
     def reset_identity(self, connection_id: int) -> None:
         for row in self.connection_rows:
             if row["id"] == connection_id:

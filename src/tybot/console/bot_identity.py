@@ -71,7 +71,12 @@ def verify_connection(
     repo: BotRepo | None = None,
 ) -> str:
     """Slack 에 물어 신원을 적는다. 통과하면 연결이 켜지고, 아니면 사유를 돌려준다."""
+    store = repo or default_repo()
+    connection = store.connection(workspace, bot_key)
+    if connection is None:
+        raise bot_admin.BotAdminRefused(f"없는 연결입니다: {workspace}/{bot_key}")
     bot_token, app_token = _tokens(workspace, bot_key)
+    fingerprint = store.secret_fingerprint(int(connection["id"]))
     if client_factory is None:
         from slack_sdk import WebClient
 
@@ -92,5 +97,8 @@ def verify_connection(
         team_id=str(result.get("team_id") or ""),
         bot_user_id=str(result.get("user_id") or ""),
         actor=actor,
-        repo=repo or default_repo(),
+        # 검사를 **시작할 때**의 지문이다. 기록 직전에 다시 세서 다르면 거절한다 —
+        # Slack 에 묻는 동안 토큰이 갈릴 수 있다.
+        token_fingerprint=fingerprint,
+        repo=store,
     )

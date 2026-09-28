@@ -454,6 +454,10 @@ def identity_problem(
     return ""
 
 
+class TokenChanged(BotAdminRefused):
+    """검사하는 동안 토큰이 바뀌었다. **그 결과는 이 토큰의 것이 아니다.**"""
+
+
 def record_identity(
     workspace: str,
     bot_key: str,
@@ -461,15 +465,34 @@ def record_identity(
     team_id: str,
     bot_user_id: str,
     actor: Actor,
+    token_fingerprint: str,
     repo: BotRepo | None = None,
 ) -> str:
-    """신원 검사 결과를 적고, 통과했으면 켠다. 사유가 있으면 안 켜고 돌려준다."""
+    """신원 검사 결과를 적고, 통과했으면 켠다. 사유가 있으면 안 켜고 돌려준다.
+
+    ## 왜 지문을 받나
+
+    Slack 에 묻는 동안(왕복 수백 ms~수 초) 다른 사람이 토큰을 갈아 끼울 수 있다.
+    그 사이에 검사 결과를 그대로 적으면 **옛 토큰으로 받은 「확인됨」 이 새 토큰에
+    붙고**, 연결이 검사 없이 `enabled` 가 된다. 화면은 초록불인데 실제로 붙는 앱은
+    아무도 확인하지 않은 것이다.
+
+    그래서 검사를 시작할 때의 지문을 들고 와, 기록 직전에 **같은 트랜잭션에서**
+    다시 센다. 다르면 아무것도 적지 않는다 — 다시 검사하면 될 일이다.
+    """
     store = repo or default_repo()
     with store.transaction() as tx:
         row = tx.connection(workspace, bot_key)
         if row is None:
             raise BotAdminRefused(
                 f"등록되지 않은 연결이라 신원을 기록할 수 없습니다: {workspace}/{bot_key}"
+            )
+        current = tx.secret_fingerprint(int(row["id"]))
+        if current != token_fingerprint:
+            # 옛 결과를 새 토큰에 붙이지 않는다. 지금 상태(검사 안 됨)가 남는 것이
+            # 맞다 — 틀린 초록불보다 낫다.
+            raise TokenChanged(
+                "확인하는 동안 토큰이 바뀌었습니다. 새 토큰으로 다시 확인하세요."
             )
         problem = identity_problem(
             workspace, bot_key, team_id=team_id, bot_user_id=bot_user_id, repo=tx

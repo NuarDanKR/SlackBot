@@ -70,12 +70,27 @@ def catalog() -> dict:
     return {"manifests": rows}
 
 
-def known_sha256(manifest_id: str) -> str:
+def _entry(manifest_id: str) -> dict | None:
     return next(
-        (row["sha256"] for row in catalog()["manifests"]
-         if row["manifestId"] == manifest_id),
-        "",
+        (row for row in catalog()["manifests"] if row["manifestId"] == manifest_id),
+        None,
     )
+
+
+def known_sha256(manifest_id: str) -> str:
+    row = _entry(manifest_id)
+    return str(row["sha256"]) if row else ""
+
+
+def owner_of(manifest_id: str) -> str:
+    """이 Manifest 는 **어느 봇의 것인가.**
+
+    `manifest_id` 는 화면이 보내 주는 값이라 요청의 봇과 다를 수 있다. 그대로
+    받으면 Archiver 연결에 Master Manifest 를 대조했다고 적을 수 있고, 그때
+    화면은 두 연결 다 「확인됨」 으로 보인다 — 실제로 확인된 것은 하나뿐이다.
+    """
+    row = _entry(manifest_id)
+    return str(row["botKey"]) if row else ""
 
 
 def attest(
@@ -97,6 +112,14 @@ def attest(
         raise bot_admin.BotAdminRefused(
             f"저장소에 없는 Manifest 입니다: {manifest_id}."
             " PF 승인본처럼 저장소 밖 정본은 아직 대조 대상이 아닙니다."
+        )
+    owner = owner_of(manifest_id)
+    if owner != bot_key:
+        # 남의 Manifest 로 대조를 적으면 두 연결 다 「확인됨」 으로 보인다.
+        # 실제로 확인된 것은 하나뿐이고, 어느 쪽인지는 화면에 안 남는다.
+        raise bot_admin.BotAdminRefused(
+            f"{manifest_id} 는 {owner} 의 Manifest 입니다. {bot_key} 연결에는"
+            " 대조로 적을 수 없습니다."
         )
     if sha256 != expected:
         raise bot_admin.BotAdminRefused(

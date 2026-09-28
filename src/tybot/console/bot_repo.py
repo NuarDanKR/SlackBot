@@ -38,6 +38,7 @@ class BotRepo(Protocol):
     def connection(self, workspace: str, bot_key: str) -> dict | None: ...
     def save_connection(self, row: dict) -> int: ...
     def save_secrets(self, connection_id: int, secrets: dict, actor: str) -> None: ...
+    def secret_fingerprint(self, connection_id: int) -> str: ...
     def reset_identity(self, connection_id: int) -> None: ...
     def record_identity(self, row: dict) -> int: ...
     def set_connection_state(self, connection_id: int, state: str, actor: str) -> int: ...
@@ -189,6 +190,34 @@ class PostgresBotRepo:
                     """,
                     (connection_id, kind, ciphertext, mask, actor),
                 )
+
+    def secret_fingerprint(self, connection_id: int) -> str:
+        """지금 저장된 토큰 쌍의 **지문.** 바뀌었는지만 본다.
+
+        암호문을 밖으로 꺼내지 않으려고 **DB 안에서** 센다. 이 값은 비밀이 아니고
+        비밀을 되돌릴 수도 없다 — 「같은 것이냐」 만 답한다.
+
+        Fernet 은 같은 평문을 다시 암호화해도 다른 암호문을 낸다. 그래서 토큰을
+        같은 값으로 다시 넣어도 지문이 바뀐다. 그 편이 안전한 쪽으로 틀린다 —
+        검증을 한 번 더 하게 만들 뿐이다.
+
+        md5 를 쓰는 이유: 공격을 막는 값이 아니라 **변경을 알아채는** 값이고,
+        확장 없이 어느 PostgreSQL 에서나 돈다.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT coalesce(
+                           md5(string_agg(kind || ':' || md5(ciphertext), ','
+                                          ORDER BY kind)),
+                           '') AS fingerprint
+                  FROM bot_connection_secret
+                 WHERE connection_id = %s
+                """,
+                (connection_id,),
+            )
+            row = cur.fetchone()
+            return str(row["fingerprint"]) if row else ""
 
     def reset_identity(self, connection_id: int) -> None:
         """토큰이 바뀌면 **이전 검사 결과는 이 토큰의 것이 아니다.**
