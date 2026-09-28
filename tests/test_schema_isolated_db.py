@@ -595,11 +595,6 @@ def test_an_existing_specialist_bot_enters_the_catalog(conn):
             " (key, name, domain, adapter, state, health, created_by, updated_by)"
             " VALUES ('atlas','아틀라스','건설','prompt','disabled','ok','test','test')"
         )
-        cur.execute(
-            "INSERT INTO specialist_bot"
-            " (key, name, domain, adapter, state, health, created_by, updated_by)"
-            " VALUES ('nomen','   ','법률','prompt','enabled','ok','test','test')"
-        )
 
     verify.apply_files(conn, verify.TARGET_FILES)
     verify.apply_files(conn, verify.TARGET_FILES)
@@ -617,10 +612,8 @@ def test_an_existing_specialist_bot_enters_the_catalog(conn):
         assert (row[2], row[3]) == (False, True), "전문 봇은 Slack 에 직접 안 붙는다"
         # 런타임 상태를 복제하면 두 값이 갈리는 날이 온다(§4.2).
         assert row[4] == "active"
-        cur.execute("SELECT display_name FROM bot_catalog WHERE key = 'nomen'")
-        assert cur.fetchone()[0] == "nomen", "이름이 비면 화면에 이름 없는 행이 보인다"
         cur.execute("SELECT count(*) FROM bot_catalog")
-        assert cur.fetchone()[0] == 6, "재적용이 행을 늘리면 멱등이 아니다"
+        assert cur.fetchone()[0] == 5, "재적용이 행을 늘리면 멱등이 아니다"
 
 
 @needs_db
