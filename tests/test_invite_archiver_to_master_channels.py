@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from scripts import invite_archiver_to_master_channels as invite
 
 
@@ -79,3 +81,36 @@ def test_archiver_identity_is_required_before_writing():
         assert "user_id" in str(exc)
     else:
         raise AssertionError("missing Archiver identity must stop invitations")
+
+
+def test_clients_use_console_secret_boundary_not_archiver_runtime_role():
+    created = []
+    token_calls = []
+
+    def client_factory(*, token):
+        created.append(token)
+        return token
+
+    def token_loader(workspace, bot_key):
+        token_calls.append((workspace, bot_key))
+        return "xoxb-archiver"
+
+    clients = invite._clients(
+        "tyit",
+        client_factory=client_factory,
+        master_loader=lambda: [
+            SimpleNamespace(key="tyit", bot_token="xoxb-master")
+        ],
+        token_loader=token_loader,
+    )
+
+    assert clients == ("xoxb-master", "xoxb-archiver")
+    assert created == ["xoxb-master", "xoxb-archiver"]
+    assert token_calls == [("tyit", "archiver")]
+
+
+def test_invite_script_does_not_use_the_archiver_runtime_database_role():
+    source = invite.Path(invite.__file__).read_text(encoding="utf-8")
+
+    assert "archiver_runtime_store" not in source
+    assert "load_runtime_config" not in source

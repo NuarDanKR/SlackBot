@@ -60,17 +60,37 @@ def invite_missing(master_client, archiver_client, *, apply: bool) -> InviteResu
     )
 
 
-def _clients(workspace: str):
-    from slack_sdk import WebClient
+def _clients(
+    workspace: str,
+    *,
+    client_factory=None,
+    master_loader=None,
+    token_loader=None,
+):
+    if client_factory is None:
+        from slack_sdk import WebClient
 
-    from tybot.archiver_runtime_store import load_runtime_config
-    from tybot.workspaces import load_workspaces
+        client_factory = WebClient
+    if master_loader is None:
+        from tybot.workspaces import load_workspaces
 
-    master = next((row for row in load_workspaces() if row.key == workspace), None)
+        master_loader = load_workspaces
+    if token_loader is None:
+        from tybot.console.bot_identity import bot_token_for_admin_operation
+
+        token_loader = bot_token_for_admin_operation
+
+    master = next((row for row in master_loader() if row.key == workspace), None)
     if master is None:
         raise RuntimeError(f"Master workspace configuration not found: {workspace}")
-    archiver = load_runtime_config(workspace)
-    return WebClient(token=master.bot_token), WebClient(token=str(archiver["bot_token"]))
+    archiver_bot_token = token_loader(workspace, "archiver")
+    try:
+        return (
+            client_factory(token=master.bot_token),
+            client_factory(token=archiver_bot_token),
+        )
+    finally:
+        archiver_bot_token = ""
 
 
 def main() -> int:

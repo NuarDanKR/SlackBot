@@ -85,6 +85,17 @@ def _tokens(workspace: str, bot_key: str) -> tuple[str, str, str]:
         ) from exc
 
 
+def bot_token_for_admin_operation(workspace: str, bot_key: str) -> str:
+    """Return a bot token for a narrowly scoped administrative operation.
+
+    Keep decryption in this module so maintenance scripts do not grow a second
+    secret-reading implementation. Callers must not log or persist the result.
+    """
+    bot_token, app_token, _fingerprint = _tokens(workspace, bot_key)
+    del app_token
+    return bot_token
+
+
 def verify_connection(
     workspace: str,
     bot_key: str,
