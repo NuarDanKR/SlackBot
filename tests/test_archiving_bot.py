@@ -109,6 +109,39 @@ def test_shadow_collector_writes_only_shadow_root(tmp_path):
     assert not Path(env["ARCHIVE_DIR"]).exists()
 
 
+def test_allowlisted_channel_does_not_need_the_master_naming_rule(tmp_path):
+    """Archiver scope is the console allowlist, not a channel-name convention."""
+
+    class NonstandardClient(Client):
+        def conversations_info(self, *, channel):
+            return {
+                "channel": {
+                    "id": channel,
+                    "name": "general",
+                    "is_member": True,
+                }
+            }
+
+    env = _env(tmp_path)
+    cfg = archiving_bot.load_archiver_workspaces(env)[0]
+    collector = archiving_bot.ShadowCollector(cfg, archiving_bot.shadow_archive_dir(env))
+    event = {
+        "channel_type": "channel",
+        "channel": "C12345678",
+        "user": "U12345678",
+        "ts": "1790070000.000001",
+        "text": "이름 규칙과 무관하게 수집합니다.",
+    }
+
+    assert collector.ingest_event(NonstandardClient(), event) == "written"
+    raw = next(
+        Path(env["ARCHIVER_SHADOW_DIR"]).glob(
+            "workspaces/*/channels/*/raw/*.md"
+        )
+    )
+    assert "이름 규칙과 무관하게 수집합니다." in raw.read_text(encoding="utf-8")
+
+
 def test_shadow_collector_rejects_bot_and_dm(tmp_path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
     collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")

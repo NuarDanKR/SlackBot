@@ -22,7 +22,6 @@ from .archive.attachment_writer import write_docs as write_attachment_docs
 from .archive.revision_store import record_revision
 from .archive.store import ArchiveStore
 from .attachment_trace import ARCHIVE_DONE, confirm_archived, line_hash
-from .channels import should_collect
 from .collect import _messages_from
 from .lock import AlreadyRunning, instance_lock
 from .workspaces import env_suffix
@@ -152,8 +151,6 @@ class ShadowCollector:
         if info.get("id") != channel_id or not info.get("is_member"):
             return "skipped-membership"
         channel = "#" + str(info.get("name") or "")
-        if not should_collect(channel):
-            return "skipped-rule"
 
         if subtype in ("message_changed", "message_deleted"):
             return self._ingest_revision(client, event, channel, channel_id)
