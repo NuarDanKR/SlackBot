@@ -151,8 +151,8 @@ def test_the_old_url_is_a_known_path(app_source):
 
 def test_the_redirect_does_not_touch_the_query(app_source):
     """선택한 봇·워크스페이스는 URL 에 있다. 경로만 바꾸고 쿼리는 그대로 넘긴다."""
-    render = app_source[app_source.index("{path === '/manage/bots'"):]
-    render = render[:render.index("}\n")]
+    render = app_source[app_source.index("path.startsWith('/manage/bots')"):]
+    render = render[:render.index("      )}")]
 
     assert "query={location.query}" in render
     alias = app_source[app_source.index("const path = location.path"):]
@@ -167,4 +167,112 @@ def test_the_redirect_does_not_touch_the_query(app_source):
 
 def test_the_runtime_screen_is_reused_not_rebuilt(app_source):
     """소스·승인·health 기능을 다시 만들지 않는다(§12.1)."""
-    assert "{path === '/manage/bots' && <SpecialistManagement" in app_source
+    assert "runtime={<SpecialistManagement" in app_source
+
+
+# --- 화면이 런타임을 단정하지 않는다 -------------------------------------------
+#
+# 2026-09-29 오너 지시 3번. 저장은 기록이고 적용이 아니다. 성공처럼 보이는 표시를
+# 하면 연결을 끈 사람은 수집이 멈춘 줄 알고 자리를 뜬다.
+
+BOTS = WEB / "pages" / "Bots.tsx"
+
+#: 화면이 쓰면 안 되는 말. 「지금 그렇게 돌고 있다」 로 읽힌다.
+FORBIDDEN_CLAIMS = (
+    "적용되었습니다", "적용됐습니다", "반영되었습니다", "반영됐습니다",
+    "수집이 시작됩니다", "수집이 시작되었습니다", "수집을 시작합니다",
+    "연결되었습니다", "활성화되었습니다", "이제 동작합니다",
+)
+
+
+@pytest.fixture(scope="module")
+def bots_page() -> str:
+    return BOTS.read_text(encoding="utf-8")
+
+
+def test_the_page_shows_the_runtime_notice(bots_page):
+    """버튼 옆에 작게 적으면 사람은 버튼만 본다. 화면 위쪽에 둔다."""
+    assert "export function RuntimeNotice" in bots_page
+    assert bots_page.count("<RuntimeNotice effect=") >= 2, "목록·연결 양쪽에 있어야 한다"
+    assert "appliesNow" in bots_page
+
+
+def test_no_screen_text_claims_the_runtime_changed(bots_page):
+    for claim in FORBIDDEN_CLAIMS:
+        assert claim not in bots_page, f"런타임 동작을 단정한다: {claim}"
+
+
+def test_saving_says_it_is_not_applied_yet(bots_page):
+    """저장 성공을 「반영됐다」 로 말하지 않는다."""
+    assert "아직 적용되지 않았습니다" in bots_page
+    assert "수집이 시작되지는 않습니다" in bots_page
+    assert "돌고 있는 프로세스는 그대로입니다" in bots_page
+
+
+def test_the_token_inputs_are_passwords_and_cleared(bots_page):
+    """저장 뒤 화면에 평문이 남아 있을 이유가 없다."""
+    assert bots_page.count('type="password"') >= 2
+    assert "setDraft({ bot: '', botToken: '', appToken: '', reason: '' })" in bots_page
+
+
+def test_the_page_never_renders_a_plaintext_token_field(bots_page):
+    """서버는 mask 만 준다. 화면이 평문 칸을 읽으려 하면 계약이 어긋난 것이다."""
+    for field in ("botToken}", "appToken}", ".botToken ", ".appToken "):
+        assert f"slack?.{field}" not in bots_page
+    assert "botTokenMask" in bots_page and "appTokenMask" in bots_page
+
+
+def test_internal_calls_have_no_token_input(bots_page):
+    """내부 호출에는 Slack 토큰이 없다. 입력란을 두면 없는 것을 넣으라고 말하는 셈이다."""
+    # 설명 문구에도 같은 말이 나오므로 **마크업 자리**를 집는다.
+    marker = '<span className="bots-binding-kind">Master 내부 호출</span>'
+    internal = bots_page[bots_page.index(marker):]
+    internal = internal[:internal.index("</article>")]
+
+    assert "type=\"password\"" not in internal
+    assert "내부 호출에는 Slack 토큰이 없습니다" in internal
+
+
+def test_the_mode_words_come_from_one_place(bots_page):
+    """화면마다 문구를 새로 쓰면 같은 상태가 다르게 불린다."""
+    assert "from '../botModes'" in bots_page
+    assert "meaningOf" in bots_page and "tooltipOf" in bots_page
+    # 주 화면 칩에는 뜻만, 키는 title(툴팁)에만.
+    assert "title={tooltipOf(meaning)}" in bots_page
+
+
+def test_the_bot_tabs_are_registered_paths():
+    """새로고침에서 404 가 뜨면 사람은 콘솔이 고장난 줄 안다."""
+    app = APP.read_text(encoding="utf-8")
+
+    for path in ("/manage/bots/connections", "/manage/bots/runtime"):
+        assert path in app
+    assert "BOT_TABS" in app
+
+
+def test_the_tabs_do_not_widen_permission():
+    """탭을 메뉴에 넣지 않으므로 권한은 부모 항목이 정한다."""
+    app = APP.read_text(encoding="utf-8")
+
+    assert "const permissionPath = path.startsWith('/manage/bots')" in app
+    assert "allowed.has(permissionPath)" in app
+
+
+# --- 기존 화면 회귀 -------------------------------------------------------------
+
+def test_the_license_menu_is_untouched():
+    """PR #1 의 메뉴는 이 작업과 무관하게 그대로여야 한다."""
+    app = APP.read_text(encoding="utf-8")
+
+    assert "{ path: '/manage/licenses', label: '라이선스 현황', minimum: 'admin' }" in app
+    assert "{path === '/manage/licenses' && <Licenses onToast={toast} />}" in app
+
+
+def test_the_old_specialist_bookmark_still_lands_on_the_bot_page():
+    """옛 북마크는 새 화면으로 간다. 선택 쿼리는 그대로 남는다."""
+    app = APP.read_text(encoding="utf-8")
+    alias = app[app.index("const path = location.path"):]
+    alias = alias[:alias.index("const [authTick")]
+
+    assert "'/manage/specialists'" in alias and "'/manage/bots'" in alias
+    assert "path.startsWith('/manage/bots')" in app, "그 경로를 그리는 자리가 있어야 한다"

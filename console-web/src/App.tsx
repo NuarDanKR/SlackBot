@@ -17,6 +17,7 @@ import { Harness } from './pages/Harness'
 import { Home } from './pages/Home'
 import { AnswerDashboard, OperationsDashboard, ConsoleDashboard } from './pages/LifecycleDashboards'
 // [라이선스 현황 추가] 메뉴 목록과 경로→화면 연결이 이 파일에만 있어 import·메뉴·화면 연결 세 줄만 더했다.
+import { BotsPage } from './pages/Bots'
 import { Licenses } from './pages/Licenses'
 import { ServiceLogs } from './pages/ServiceLogs'
 import type { ErrorLogContext } from './pages/ServiceLogs'
@@ -65,7 +66,8 @@ const NAV: NavGroup[] = [
   ] },
 ]
 
-const ALL_PATHS = new Set(['/home', '/collect/status', '/manage/slack', '/manage/specialists', '/answer/questions', '/answer/quality', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
+const BOT_TABS = ['/manage/bots', '/manage/bots/connections', '/manage/bots/runtime'] as const
+const ALL_PATHS = new Set(['/home', '/collect/status', '/manage/slack', '/manage/specialists', ...BOT_TABS, '/answer/questions', '/answer/quality', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
 
 const RANK: Record<ConsoleRole, number> = { guest: 0, developer: 1, admin: 2 }
 const THEME_LABEL: Record<Theme, string> = { system: '시스템 설정', light: '밝게', dark: '어둡게' }
@@ -139,7 +141,10 @@ export default function App() {
   const caps = capabilities.data ?? { specialists: false, approvedSummaries: false, summaryReview: false }
   const groups = NAV.filter((group) => RANK[user.role] >= RANK[group.minimum ?? 'guest']).map((group) => ({ ...group, items: group.items.filter((item) => RANK[user.role] >= RANK[item.minimum ?? 'guest'] && (!item.capability || caps[item.capability])) })).filter((group) => group.items.length)
   const allowed = new Set(['/home', ...groups.flatMap((group) => group.items.map((item) => item.path))])
-  const canRender = allowed.has(path)
+  // 봇 관리의 탭(`/manage/bots/...`)은 메뉴에 없다. 권한은 부모 항목이 정하므로
+  // 판정할 때만 부모로 접는다 — 탭마다 메뉴를 늘리면 메뉴가 화면이 된다.
+  const permissionPath = path.startsWith('/manage/bots') ? '/manage/bots' : path
+  const canRender = allowed.has(permissionPath)
   const knownPath = ALL_PATHS.has(location.path)
   const logContext: ErrorLogContext | null = location.query.get('at') ? { at: location.query.get('at')!, workspace: location.query.get('workspace') ?? '' } : null
   function toggleGroup(groupPath: string) {
@@ -172,7 +177,15 @@ export default function App() {
       {path === '/answer/rules' && <Harness />}
       {path === '/manage' && <OperationsDashboard user={user} navigate={navigate} />}
       {path === '/manage/licenses' && <Licenses onToast={toast} />}
-      {path === '/manage/bots' && <SpecialistManagement user={user} query={location.query} onToast={toast} />}
+      {path.startsWith('/manage/bots') && (
+        <BotsPage
+          tab={path === '/manage/bots/connections' ? 'connections' : path === '/manage/bots/runtime' ? 'runtime' : 'list'}
+          query={location.query}
+          navigate={navigate}
+          onToast={toast}
+          runtime={<SpecialistManagement user={user} query={location.query} onToast={toast} />}
+        />
+      )}
       {path === '/manage/commands' && <CommandDiagnostics />}
       {path === '/manage/logs' && <ServiceLogs context={logContext} />}
       {path === '/manage/batches' && <BatchTimers onToast={toast} />}

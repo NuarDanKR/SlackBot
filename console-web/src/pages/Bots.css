@@ -1,0 +1,189 @@
+/* 봇 관리 — 조밀한 표와 카드. 카드 안에 카드를 넣지 않는다(§10). */
+
+.bots-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 16px;
+  border-bottom: 1px solid var(--line, #e4e6eb);
+  flex-wrap: wrap;
+}
+
+.bots-tab {
+  padding: 8px 14px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted, #6b7280);
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.bots-tab.is-active {
+  border-bottom-color: var(--accent, #2563eb);
+  color: var(--text, #111827);
+  font-weight: 600;
+}
+
+/* 저장이 런타임에 닿지 않는다는 사실. **화면 위쪽**에 둔다 — 버튼 옆에 작게
+   적으면 사람은 버튼만 본다. 성공을 뜻하는 초록은 쓰지 않는다. */
+.bots-notice {
+  border: 1px solid #f0c36d;
+  background: #fff8e6;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0 0 16px;
+}
+
+.bots-notice-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.bots-notice-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.bots-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+/* 색만으로 구분하지 않는다 — 글자가 이미 뜻을 말한다(§10). */
+.bots-chip.tone-neutral { background: #eef1f5; color: #374151; border-color: #dde1e7; }
+.bots-chip.tone-good { background: #e8f5ec; color: #1b5e3f; border-color: #bfe3cd; }
+.bots-chip.tone-warn { background: #fff4e0; color: #7a4a06; border-color: #f2d9a8; }
+.bots-chip.tone-bad { background: #fdecec; color: #8a1c1c; border-color: #f3c4c4; }
+
+.bots-bindings > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  flex-wrap: wrap;
+}
+
+.bots-ws {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--muted, #6b7280);
+  min-width: 72px;
+}
+
+.bots-binding {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bots-binding-kind {
+  font-size: 12px;
+  color: var(--muted, #6b7280);
+}
+
+.bots-warn { font-size: 12px; color: #8a1c1c; }
+.bots-muted { color: var(--muted, #9ca3af); font-size: 13px; }
+.bots-sub { font-size: 12px; color: var(--muted, #6b7280); font-weight: 400; }
+.bots-note { font-size: 13px; color: var(--muted, #6b7280); margin: 8px 0 0; }
+
+.bots-ws-list {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bots-ws-card {
+  border: 1px solid var(--line, #e4e6eb);
+  background: var(--card, #fff);
+  border-radius: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  text-align: left;
+}
+
+.bots-ws-key { font-weight: 600; }
+.bots-ws-note { font-size: 12px; color: var(--muted, #6b7280); }
+
+.bots-cards {
+  display: grid;
+  gap: 14px;
+}
+
+.bots-card {
+  border: 1px solid var(--line, #e4e6eb);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--card, #fff);
+}
+
+.bots-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.bots-card-head h3 { margin: 0; font-size: 15px; }
+
+.bots-row {
+  border-top: 1px solid var(--line, #eef0f3);
+  padding-top: 10px;
+  margin-top: 10px;
+}
+
+.bots-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+/* 긴 워크스페이스·봇 이름이 명령 버튼과 겹치지 않게 한다. */
+.bots-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 16px;
+  margin: 0 0 10px;
+}
+
+.bots-facts dt { font-size: 12px; color: var(--muted, #6b7280); }
+.bots-facts dd { margin: 2px 0 0; font-size: 13px; word-break: break-all; }
+
+.bots-form {
+  display: grid;
+  gap: 10px;
+  max-width: 520px;
+}
+
+.bots-form label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.bots-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.linkish {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent, #2563eb);
+  cursor: pointer;
+  text-align: left;
+}
