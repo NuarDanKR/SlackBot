@@ -276,3 +276,67 @@ def test_the_old_specialist_bookmark_still_lands_on_the_bot_page():
 
     assert "'/manage/specialists'" in alias and "'/manage/bots'" in alias
     assert "path.startsWith('/manage/bots')" in app, "그 경로를 그리는 자리가 있어야 한다"
+
+
+# --- 라우팅 · Manifest · 변경 이력 탭 -------------------------------------------
+
+ROUTING = WEB / "pages" / "BotsRouting.tsx"
+
+
+@pytest.fixture(scope="module")
+def routing_page() -> str:
+    return ROUTING.read_text(encoding="utf-8")
+
+
+def test_the_routing_screen_does_not_claim_a_switch(routing_page):
+    """Master 는 아직 배정 표만 보고 라우팅한다. 「전환했다」 로 말하면 거짓이다."""
+    for claim in FORBIDDEN_CLAIMS:
+        assert claim not in routing_page, claim
+    assert "지금 답변 경로는 바뀌지 않습니다" in routing_page
+    assert "<RuntimeNotice effect=" in routing_page
+
+
+def test_route_buttons_use_the_shared_words(routing_page):
+    """버튼에 `active` 라고 적으면 무엇이 달라지는지 말하지 않는 셈이다."""
+    assert "from '../botModes'" in routing_page
+    assert "meaningOf(ROUTE_MODES, mode).label" in routing_page
+    assert "title={tooltipOf(meaningOf(ROUTE_MODES, mode))}" in routing_page
+
+
+def test_the_routing_screen_requires_a_reason(routing_page):
+    """사유가 없으면 사고가 났을 때 범위를 정할 수 없다."""
+    assert "if (!reason.trim())" in routing_page
+
+
+def test_the_manifest_screen_separates_identity_from_manifest(routing_page):
+    """`auth.test` 성공만으로 Manifest 일치를 표시하지 않는다(§6.2)."""
+    assert "신원 확인과는 다른 검사입니다" in routing_page
+    assert "스코프가" in routing_page
+    assert "Slack 앱 설정이 바뀌지는 않습니다" in routing_page
+
+
+def test_the_manifest_screen_says_what_is_missing(routing_page):
+    """없는 것을 빈칸으로 두면 「대조했는데 비었다」 와 구분되지 않는다."""
+    assert "파일 없음" in routing_page
+    assert "아직 대조 대상이 아님" in routing_page
+
+
+def test_the_audit_screen_shows_who_and_why(routing_page):
+    assert "바꾼 사람" in routing_page and "사유" in routing_page
+
+
+def test_all_bot_tabs_are_registered():
+    app = APP.read_text(encoding="utf-8")
+
+    for path in (
+        "/manage/bots/connections", "/manage/bots/routing",
+        "/manage/bots/manifests", "/manage/bots/audit", "/manage/bots/runtime",
+    ):
+        assert path in app
+    assert "BOT_TAB_OF" in app
+
+
+def test_the_tabs_keep_the_chosen_workspace(bots_page):
+    """탭을 옮길 때마다 고른 워크스페이스가 사라지면 매번 다시 고르게 된다."""
+    for tab in ("routing", "manifests", "audit"):
+        assert f"#/manage/bots/{tab}${{workspace ? `?workspace=${{workspace}}` : ''}}" in bots_page

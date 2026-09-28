@@ -187,3 +187,19 @@
   cursor: pointer;
   text-align: left;
 }
+
+.bots-reason {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  max-width: 420px;
+  margin: 0 0 12px;
+}
+
+.bots-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.btn-sm { padding: 4px 10px; font-size: 12px; }

@@ -9,6 +9,7 @@ import {
   meaningOf,
   tooltipOf,
 } from '../botModes'
+import { BotAudit, BotManifests, BotRouting } from './BotsRouting'
 import type { ConsoleUser } from '../types'
 import './Bots.css'
 
@@ -564,6 +565,22 @@ export function WorkspaceConnections({
   )
 }
 
+/**
+ * 연결이 있는 워크스페이스 목록.
+ *
+ * 탭마다 따로 부르면 화면을 옮길 때마다 목록이 깜빡이고, 그 사이 고른 값이
+ * 사라진다. 한 곳에서 읽어 넘긴다.
+ */
+function useWorkspaceKeys(): string[] {
+  const bots = useResource<BotsResponse>('/api/bots')
+  return useMemo(() => {
+    const rows = bots.data?.bots ?? []
+    return Array.from(
+      new Set(rows.flatMap((bot) => bot.bindings.map((binding) => binding.workspace))),
+    ).sort()
+  }, [bots.data])
+}
+
 export function BotsPage({
   tab,
   query,
@@ -571,7 +588,7 @@ export function BotsPage({
   onToast,
   runtime,
 }: {
-  tab: 'list' | 'connections' | 'runtime'
+  tab: 'list' | 'connections' | 'routing' | 'manifests' | 'audit' | 'runtime'
   query: URLSearchParams
   navigate: (path: string) => void
   onToast: (message: string) => void
@@ -581,6 +598,7 @@ export function BotsPage({
 }) {
   const workspace = query.get('workspace') ?? ''
   const bot = query.get('bot') ?? ''
+  const knownWorkspaces = useWorkspaceKeys()
   return (
     <>
       <PageHead
@@ -604,6 +622,27 @@ export function BotsPage({
           워크스페이스 연결
         </a>
         <a
+          href={`#/manage/bots/routing${workspace ? `?workspace=${workspace}` : ''}`}
+          className={`bots-tab ${tab === 'routing' ? 'is-active' : ''}`}
+          aria-current={tab === 'routing' ? 'page' : undefined}
+        >
+          라우팅
+        </a>
+        <a
+          href={`#/manage/bots/manifests${workspace ? `?workspace=${workspace}` : ''}`}
+          className={`bots-tab ${tab === 'manifests' ? 'is-active' : ''}`}
+          aria-current={tab === 'manifests' ? 'page' : undefined}
+        >
+          Slack 앱 Manifest
+        </a>
+        <a
+          href={`#/manage/bots/audit${workspace ? `?workspace=${workspace}` : ''}`}
+          className={`bots-tab ${tab === 'audit' ? 'is-active' : ''}`}
+          aria-current={tab === 'audit' ? 'page' : undefined}
+        >
+          변경 이력
+        </a>
+        <a
           href="#/manage/bots/runtime"
           className={`bots-tab ${tab === 'runtime' ? 'is-active' : ''}`}
           aria-current={tab === 'runtime' ? 'page' : undefined}
@@ -622,6 +661,22 @@ export function BotsPage({
           onToast={onToast}
           onWorkspaceChange={(key) => navigate(`/manage/bots/connections?workspace=${key}`)}
         />
+      ) : tab === 'routing' ? (
+        <BotRouting
+          workspace={workspace}
+          workspaces={knownWorkspaces}
+          onToast={onToast}
+          onWorkspaceChange={(key) => navigate(`/manage/bots/routing?workspace=${key}`)}
+        />
+      ) : tab === 'manifests' ? (
+        <BotManifests
+          workspace={workspace}
+          workspaces={knownWorkspaces}
+          onToast={onToast}
+          onWorkspaceChange={(key) => navigate(`/manage/bots/manifests?workspace=${key}`)}
+        />
+      ) : tab === 'audit' ? (
+        <BotAudit workspace={workspace} />
       ) : (
         runtime ?? null
       )}

@@ -66,7 +66,14 @@ const NAV: NavGroup[] = [
   ] },
 ]
 
-const BOT_TABS = ['/manage/bots', '/manage/bots/connections', '/manage/bots/runtime'] as const
+const BOT_TABS = ['/manage/bots', '/manage/bots/connections', '/manage/bots/routing', '/manage/bots/manifests', '/manage/bots/audit', '/manage/bots/runtime'] as const
+const BOT_TAB_OF: Record<string, 'list' | 'connections' | 'routing' | 'manifests' | 'audit' | 'runtime'> = {
+  '/manage/bots/connections': 'connections',
+  '/manage/bots/routing': 'routing',
+  '/manage/bots/manifests': 'manifests',
+  '/manage/bots/audit': 'audit',
+  '/manage/bots/runtime': 'runtime',
+}
 const ALL_PATHS = new Set(['/home', '/collect/status', '/manage/slack', '/manage/specialists', ...BOT_TABS, '/answer/questions', '/answer/quality', ...NAV.flatMap((group) => group.items.map((item) => item.path))])
 
 const RANK: Record<ConsoleRole, number> = { guest: 0, developer: 1, admin: 2 }
@@ -179,7 +186,7 @@ export default function App() {
       {path === '/manage/licenses' && <Licenses onToast={toast} />}
       {path.startsWith('/manage/bots') && (
         <BotsPage
-          tab={path === '/manage/bots/connections' ? 'connections' : path === '/manage/bots/runtime' ? 'runtime' : 'list'}
+          tab={BOT_TAB_OF[path] ?? 'list'}
           query={location.query}
           navigate={navigate}
           onToast={toast}
