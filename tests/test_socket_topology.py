@@ -13,9 +13,12 @@ Slack 은 같은 앱의 Socket 연결이 여러 개면 payload 를 어느 쪽으
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from tybot.archive import token_topology as topology
 from tybot.archive.token_topology import Connection
+
+ROOT = Path(__file__).resolve().parent.parent
 
 APP_A = "xapp-" + "a" * 30
 APP_B = "xapp-" + "b" * 30
@@ -120,12 +123,25 @@ def test_the_result_object_never_carries_a_token():
     assert APP_A not in repr(result) and BOT_1 not in repr(result)
 
 
-def test_a_fingerprint_cannot_be_matched_across_runs(monkeypatch):
-    """**실행마다 소금이 바뀐다.** 저장할 수 있으면 언젠가 저장되고, 저장된 것은 샌다."""
-    first = topology.fingerprint(APP_A)
-    monkeypatch.setattr(topology, "_SALT", b"different-salt-for-this-run")
+def test_a_fingerprint_cannot_be_matched_across_runs():
+    """**실행마다 소금이 바뀐다.** 저장할 수 있으면 언젠가 저장되고, 저장된 것은 샌다.
 
-    assert topology.fingerprint(APP_A) != first
+    소금을 바꿔치기해서 보지 않는다 — 그러면 소금이 상수로 박혀 있어도 통과한다.
+    **다른 프로세스**에서 같은 토큰을 세어 값이 다른지 본다.
+    """
+    import subprocess
+    import sys
+
+    other = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, 'src');"
+         "from tybot.archive.token_topology import fingerprint;"
+         f"print(fingerprint({APP_A!r}))"],
+        capture_output=True, text=True, cwd=str(ROOT), check=True,
+    ).stdout.strip()
+
+    assert other, "다른 프로세스가 표시를 못 만들었다"
+    assert other != topology.fingerprint(APP_A)
 
 
 def test_an_empty_token_has_no_fingerprint():
