@@ -184,6 +184,25 @@ class ShadowCollector:
         if not event.get("user") or not event.get("ts"):
             return "skipped-identity"
 
+        # 여기서부터는 실시간·소급이 **같은 경로**를 쓴다. 규칙을 복제하면
+        # 같은 대화가 들어온 길에 따라 다르게 남는다.
+        return self.ingest_message(
+            client, event, channel=channel, channel_id=channel_id, is_private=is_private,
+        )
+
+    def ingest_message(
+        self, client, event: dict, *, channel: str, channel_id: str, is_private: bool,
+    ) -> str:
+        """사람 메시지 하나를 **원문·첨부·revision·ACK 까지** 처리한다.
+
+        실시간 이벤트와 소급(`conversations.history`) 메시지가 이 메서드를 함께
+        쓴다. Slack 은 둘을 같은 모양(`ts`·`user`·`text`·`files`)으로 주므로 규칙을
+        복제할 이유가 없다 — 복제하면 PII 검사·ACL·중복 방지·첨부 처리가 두 벌이
+        되고, 한쪽만 고치는 날 **같은 대화가 들어온 길에 따라 다르게 남는다.**
+
+        돌려주는 값은 `written`·`duplicate`·`refused`·`partial` 등이고, 소급
+        engine 은 그 값으로 건수를 센다(`backfill.run`).
+        """
         # 여기서부터가 **이 메시지를 우리가 맡았다**는 뜻이다. 앞의 skip 들은
         # 범위 밖이라 상태를 남기지 않는다 — 남기면 「받았는데 안 됐다」 가
         # 쌓여서 진짜 미완료를 덮는다.
