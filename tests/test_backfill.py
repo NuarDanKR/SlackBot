@@ -91,7 +91,7 @@ def test_every_page_is_read():
         _page([_msg("200.000200")]),
     ])
 
-    found, exhausted = backfill.collect(slack, _target(), sleeper=_sleep)
+    found, exhausted, _meta = backfill.collect(slack, _target(), sleeper=_sleep)
 
     assert [item.ts for item in found] == ["100.000100", "200.000200"]
     assert exhausted is True
@@ -108,7 +108,7 @@ def test_thread_replies_are_pulled_in():
         ]}},
     )
 
-    found, _ = backfill.collect(slack, _target(), sleeper=_sleep)
+    found, _, _meta = backfill.collect(slack, _target(), sleeper=_sleep)
 
     assert [item.ts for item in found] == ["100.000100", "100.000200"]
     assert found[1].thread_ts == "100.000100"
@@ -124,7 +124,7 @@ def test_a_real_history_parent_with_reply_count_loads_the_thread():
         ]}},
     )
 
-    found, _ = backfill.collect(slack, _target(), sleeper=_sleep)
+    found, _, _meta = backfill.collect(slack, _target(), sleeper=_sleep)
 
     assert [item.ts for item in found] == ["100.000100", "100.000200"]
 
@@ -139,7 +139,7 @@ def test_thread_replies_outside_the_requested_range_are_not_written():
         ]}},
     )
 
-    found, _ = backfill.collect(
+    found, _, _meta = backfill.collect(
         slack, _target(), latest="200.000000", sleeper=_sleep
     )
 
@@ -153,7 +153,7 @@ def test_a_reply_is_not_counted_twice():
         replies={"100.000100": {"messages": [_msg("100.000100", thread_ts="100.000100")]}},
     )
 
-    found, _ = backfill.collect(slack, _target(), sleeper=_sleep)
+    found, _, _meta = backfill.collect(slack, _target(), sleeper=_sleep)
 
     assert len(found) == 1
 
@@ -168,7 +168,7 @@ def test_non_human_messages_are_skipped(message):
     """실시간 경로와 **같은 규칙**이다. 다르면 같은 대화가 경로에 따라 다르게 남는다."""
     slack = FakeSlack([_page([message])])
 
-    found, _ = backfill.collect(slack, _target(), sleeper=_sleep)
+    found, _, _meta = backfill.collect(slack, _target(), sleeper=_sleep)
 
     assert found == []
 
@@ -177,7 +177,7 @@ def test_a_file_share_is_a_human_message():
     """첨부가 붙은 메시지는 사람 메시지다. 빼면 그 파일이 영영 안 들어온다."""
     slack = FakeSlack([_page([_msg("100.000100", subtype="file_share", files=[{"id": "F1"}])])])
 
-    found, _ = backfill.collect(slack, _target(), sleeper=_sleep)
+    found, _, _meta = backfill.collect(slack, _target(), sleeper=_sleep)
 
     assert len(found) == 1
 
@@ -188,7 +188,7 @@ def test_a_rate_limit_waits_and_retries():
     slack.rate_limited = 1
     waited: list[float] = []
 
-    found, _ = backfill.collect(slack, _target(), sleeper=waited.append)
+    found, _, _meta = backfill.collect(slack, _target(), sleeper=waited.append)
 
     assert [item.ts for item in found] == ["100.000100"]
     assert waited == [0.01]
@@ -355,3 +355,134 @@ def test_the_cursor_never_moves_backwards():
     _, _, saved = _run(slack, lambda *_: "written", cursor="900.000000")
 
     assert saved == []
+
+
+# --- 범위보다 오래된 스레드 부모 (4단계 지시 3) ---------------------------------
+#
+# `conversations.history(oldest=T0)` 는 T0 이후만 준다. **T0 전에 올라온 글에 T0
+# 이후 답글이 달리면** 부모를 못 찾고, 그 답글은 영영 안 들어온다 — 채널에는
+# 보이는데 아카이브에는 없다. 오류는 나지 않는다.
+
+def test_a_reply_to_an_older_parent_is_collected():
+    """**이 시험이 lookback 의 이유다.** parent < T0, reply >= T0."""
+    parent = "1000.000100"
+    reply = "2000.000100"
+
+    class Lookback(FakeSlack):
+        def conversations_history(self, **kwargs):
+            self.history_calls.append(kwargs)
+            # 거슬러 읽은 구간에서만 부모가 보인다.
+            oldest = float(kwargs.get("oldest") or 0)
+            messages = [_msg(parent, "옛 부모", reply_count=1)] if oldest <= 1000 else []
+            return _page(messages)
+
+    slack = Lookback([], replies={parent: {"messages": [
+        _msg(parent, "옛 부모", reply_count=1),
+        _msg(reply, "새 답글", thread_ts=parent),
+    ]}})
+
+    found, _, meta = backfill.collect(
+        slack, _target(), oldest="1500.000000", sleeper=_sleep, lookback=3600,
+    )
+
+    assert [item.ts for item in found] == [reply], "범위 안 답글만 들어온다"
+    assert meta.orphan_replies == 1, "부모 없는 스레드라는 사실을 센다"
+
+
+def test_the_older_parent_itself_is_not_written():
+    """부모는 범위 밖이다. 같이 쓰면 요청한 기간 밖 자료가 들어온다."""
+    parent = "1000.000100"
+
+    class Lookback(FakeSlack):
+        def conversations_history(self, **kwargs):
+            self.history_calls.append(kwargs)
+            return _page([_msg(parent, "옛 부모", reply_count=1)])
+
+    slack = Lookback([], replies={parent: {"messages": [
+        _msg(parent, "옛 부모", reply_count=1),
+        _msg("2000.000100", "새 답글", thread_ts=parent),
+    ]}})
+
+    found, _, _meta = backfill.collect(
+        slack, _target(), oldest="1500.000000", sleeper=_sleep, lookback=3600,
+    )
+
+    assert parent not in [item.ts for item in found]
+
+
+def test_the_scan_starts_before_the_requested_range():
+    """거슬러 읽지 않으면 옛 부모를 볼 기회 자체가 없다."""
+    slack = FakeSlack([_page([])])
+
+    backfill.collect(slack, _target(), oldest="2000.000000", sleeper=_sleep, lookback=600)
+
+    assert slack.history_calls[0]["oldest"] == "1400.000000"
+
+
+def test_the_scan_does_not_go_before_zero():
+    assert backfill.parent_scan_oldest("100.000000", lookback=9999) == "0.000000"
+
+
+def test_a_whole_channel_scan_has_nothing_to_look_back_to():
+    """범위 시작이 없으면 채널 전체를 읽는다 — 거슬러 갈 것도 없다."""
+    assert backfill.parent_scan_oldest("") == ""
+
+
+def test_an_unparsable_range_is_left_alone():
+    """이상한 값을 0 으로 바꾸면 **채널 전체**를 읽게 된다. 그건 조용한 확대다."""
+    assert backfill.parent_scan_oldest("not-a-ts") == "not-a-ts"
+
+
+def test_a_reply_inside_the_range_to_an_inside_parent_is_not_orphan():
+    """부모가 범위 안이면 스레드가 온전히 들어온다. 그걸 부분으로 세면 안 된다."""
+    parent = "2000.000100"
+    slack = FakeSlack(
+        [_page([_msg(parent, "부모", reply_count=1)])],
+        replies={parent: {"messages": [
+            _msg(parent, "부모", reply_count=1),
+            _msg("2000.000200", "답글", thread_ts=parent),
+        ]}},
+    )
+
+    found, _, meta = backfill.collect(
+        slack, _target(), oldest="1500.000000", sleeper=_sleep, lookback=600,
+    )
+
+    assert len(found) == 2
+    assert meta.orphan_replies == 0
+
+
+def test_the_preview_records_what_it_actually_scanned():
+    """「완전 복구」 라고 단정하지 않는다. 어디까지 찾았는지를 결과가 든다."""
+    slack = FakeSlack([_page([])])
+
+    preview = backfill.plan(
+        slack, [_target()], workspace="tyit", oldest="2000.000000", sleeper=_sleep,
+    )
+    payload = preview.as_json()
+
+    assert payload["scannedFromTs"]
+    assert payload["scannedFromTs"] < "2000.000000"
+    assert "거슬러" in payload["note"]
+    assert "완전" not in payload["note"]
+
+
+def test_the_preview_counts_orphan_threads():
+    """부모 없이 답글만 들어온 스레드 수는 「무엇이 빠졌나」 의 단서다."""
+    parent = "1000.000100"
+
+    class Lookback(FakeSlack):
+        def conversations_history(self, **kwargs):
+            self.history_calls.append(kwargs)
+            return _page([_msg(parent, "옛 부모", reply_count=1)])
+
+    slack = Lookback([], replies={parent: {"messages": [
+        _msg(parent, "옛 부모", reply_count=1),
+        _msg("2000.000100", "새 답글", thread_ts=parent),
+    ]}})
+
+    preview = backfill.plan(
+        slack, [_target()], workspace="tyit", oldest="1500.000000", sleeper=_sleep,
+    )
+
+    assert preview.as_json()["orphanReplies"] == 1

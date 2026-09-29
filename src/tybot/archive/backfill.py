@@ -49,6 +49,18 @@ PAGE_SIZE = 200
 #: `Retry-After` 가 없을 때 기다리는 기본 초.
 DEFAULT_RETRY_SECONDS = 30
 
+#: 스레드 부모를 찾으러 **범위보다 얼마나 더 거슬러 읽나**(초).
+#:
+#: `conversations.history(oldest=T0)` 는 T0 이후 메시지만 준다. 그런데 T0 **전에**
+#: 올라온 글에 T0 이후 답글이 달릴 수 있다. 부모를 못 찾으면 그 답글은 영영 안
+#: 들어온다 — 채널에는 보이는데 아카이브에는 없는 상태다.
+#:
+#: 그래서 부모를 찾을 때만 더 거슬러 읽는다. 그 구간의 **본문은 수집하지 않는다** —
+#: 범위 밖이기 때문이다. 읽는 목적은 「이 스레드가 있다」 를 아는 것뿐이다.
+#:
+#: 기본 14일. 무한히 거슬러 올라가면 오래된 채널에서 한 번 실행이 며칠이 된다.
+PARENT_LOOKBACK_SECONDS = 14 * 24 * 60 * 60
+
 #: 수집하지 않는 메시지. 실시간 경로(`archiving_bot.ingest_event`)와 **같은 규칙**이다.
 #: 다르면 같은 대화가 경로에 따라 다르게 남는다.
 SKIPPED_SUBTYPES = frozenset({
@@ -78,6 +90,14 @@ class Found:
     thread_ts: str = ""
 
 
+@dataclass(frozen=True)
+class CollectMeta:
+    """한 채널을 **어디까지 훑었나.** 건수와 달리 범위에 대한 사실이다."""
+
+    scanned_from_ts: str = ""
+    orphan_replies: int = 0
+
+
 @dataclass
 class Preview:
     """dry-run 결과. **건수와 좌표뿐이다.**"""
@@ -93,6 +113,12 @@ class Preview:
     exhausted: bool = True
     from_ts: str = ""
     to_ts: str = ""
+    #: 스레드 부모를 찾으려고 **실제로 읽은** 가장 이른 지점. 요청한 `from_ts` 보다
+    #: 앞설 수 있다. 「무엇을 근거로 이만큼 찾았나」 를 job 결과가 들고 있어야
+    #: 사람이 빠진 것을 가늠할 수 있다(§4.1).
+    scanned_from_ts: str = ""
+    #: 범위 밖 부모에 달린, 범위 안 답글. 0 이 아니면 그 스레드는 부모 없이 들어온다.
+    orphan_replies: int = 0
 
     def as_json(self) -> dict:
         return {
@@ -107,11 +133,18 @@ class Preview:
             "exhausted": self.exhausted,
             "fromTs": self.from_ts,
             "toTs": self.to_ts,
+            "scannedFromTs": self.scanned_from_ts,
+            "orphanReplies": self.orphan_replies,
             # 「완전 복구」 라고 부르지 않는다(§4.1). 그렇게 부르면 사람이 그 기간을
             # 다시 안 본다.
             "note": (
                 "지금 Slack 에 남아 있는 것만 셉니다. 수정 전 본문과 이미 삭제된"
                 " 메시지는 되찾을 수 없습니다."
+                + (
+                    f" 스레드 부모를 찾으려고 {self.scanned_from_ts} 까지 거슬러"
+                    " 읽었고, 그보다 오래된 부모의 답글은 찾지 못합니다."
+                    if self.scanned_from_ts else ""
+                )
             ),
         }
 
@@ -197,6 +230,19 @@ def _pages(
             return
 
 
+def parent_scan_oldest(oldest: str, *, lookback: float = PARENT_LOOKBACK_SECONDS) -> str:
+    """부모를 찾으러 읽기 시작할 지점. 범위 시작보다 **더 거슬러 간다.**
+
+    범위 시작이 없으면(채널 전체) 거슬러 갈 것도 없다.
+    """
+    if not oldest:
+        return ""
+    try:
+        return f"{max(0.0, float(oldest) - lookback):.6f}"
+    except ValueError:
+        return oldest
+
+
 def collect(
     client,
     target: Target,
@@ -204,21 +250,33 @@ def collect(
     oldest: str = "",
     latest: str = "",
     sleeper: Callable[[float], None] = time.sleep,
-) -> tuple[list[Found], bool]:
-    """한 채널의 사람 메시지와 thread reply 를 모은다. `(결과, 끝까지 읽었나)`.
+    lookback: float = PARENT_LOOKBACK_SECONDS,
+) -> tuple[list[Found], bool, CollectMeta]:
+    """한 채널의 사람 메시지와 thread reply 를 모은다.
 
-    thread 는 `conversations.replies` 로 보충한다. 부모만 읽으면 스레드 안의
-    대화가 통째로 빠지는데, 그 대화가 대개 결론이다.
+    `(결과, 끝까지 읽었나, 어디까지 훑었나)`.
+
+    ## 범위 밖 부모
+
+    `conversations.history(oldest=T0)` 는 T0 이후만 준다. **T0 전에 올라온 글에
+    T0 이후 답글이 달린 경우**, 부모를 못 찾으면 그 답글은 영영 안 들어온다 —
+    채널에는 보이는데 아카이브에는 없다.
+
+    그래서 부모를 찾을 때만 `lookback` 만큼 더 거슬러 읽는다. 그 구간의 **본문은
+    수집하지 않는다**(범위 밖이다). 읽는 목적은 스레드의 존재를 아는 것뿐이고,
+    얼마나 거슬렀는지는 결과에 적는다 — 그보다 오래된 부모는 여전히 못 찾는다.
     """
     found: list[Found] = []
     seen: set[str] = set()
     threads: set[str] = set()
     exhausted = True
+    scan_from = parent_scan_oldest(oldest, lookback=lookback)
+    orphan_replies = 0
 
     for page in _pages(
         client.conversations_history, sleeper=sleeper,
         channel=target.channel_id,
-        **({"oldest": oldest} if oldest else {}),
+        **({"oldest": scan_from} if scan_from else {}),
         **({"latest": latest} if latest else {}),
     ):
         for message in page.get("messages") or []:
@@ -243,7 +301,9 @@ def collect(
             seen.add(ts)
             found.append(Found(target.channel_id, ts, message))
 
-    for thread_ts in threads:
+    for thread_ts in sorted(threads):
+        outside = bool(oldest) and thread_ts < oldest
+        picked = 0
         for page in _pages(
             client.conversations_replies, sleeper=sleeper,
             channel=target.channel_id, ts=thread_ts,
@@ -256,10 +316,15 @@ def collect(
                 ):
                     continue
                 seen.add(ts)
+                picked += 1
                 found.append(Found(target.channel_id, ts, message, thread_ts=thread_ts))
+        if outside and picked:
+            # 부모는 범위 밖이라 안 들어온다. 답글만 들어오는 스레드가 몇 개인지
+            # 세어 둔다 — 「부분」 이라는 사실을 결과가 말할 수 있어야 한다.
+            orphan_replies += 1
 
     found.sort(key=lambda item: item.ts)
-    return found, exhausted
+    return found, exhausted, CollectMeta(scanned_from_ts=scan_from, orphan_replies=orphan_replies)
 
 
 def plan(
@@ -279,7 +344,7 @@ def plan(
     preview = Preview(workspace=workspace, from_ts=oldest, to_ts=latest)
     for target in targets:
         try:
-            found, exhausted = collect(
+            found, exhausted, meta = collect(
                 client, target, oldest=oldest, latest=latest, sleeper=sleeper,
             )
         except SlackDenied as denied:
@@ -295,6 +360,8 @@ def plan(
             1 for item in found if item.payload.get("files")
         )
         preview.exhausted = preview.exhausted and exhausted
+        preview.scanned_from_ts = meta.scanned_from_ts
+        preview.orphan_replies += meta.orphan_replies
     return preview
 
 
@@ -328,7 +395,7 @@ def run(
 
     for target in targets:
         try:
-            found, channel_exhausted = collect(
+            found, channel_exhausted, _meta = collect(
                 client, target, oldest=oldest, latest=latest, sleeper=sleeper,
             )
         except SlackDenied as denied:
