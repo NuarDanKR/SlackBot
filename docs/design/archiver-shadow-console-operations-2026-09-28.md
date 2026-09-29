@@ -1,5 +1,12 @@
 # Archiver Shadow 연결 및 콘솔 운영 사양
 
+> **후속 결정 (2026-09-29):** workspace별 systemd/env 수동 운영은 shadow 초기 파일럿에만
+> 사용한다. 최종 구조는 단일 supervisor, 공통 shadow root, 콘솔 desired state, cursor 기반
+> 소급 수집으로 변경됐다. 구현자는
+> [Archiver 단일 Supervisor·콘솔 운영·소급 수집 작업지시서](archiver-supervisor-backfill-console-2026-09-29.md)를
+> 우선 적용한다. 이 문서의 workspace별 unit과 중복 root는 이행 전 현행 절차를 설명할 뿐
+> 최종 목표가 아니다.
+
 작성: 2026-09-28  
 대상: Claude Code 구현 담당자 및 TYBot 콘솔 검토자  
 상태: Archiver credential reader 전환 구현·서버 배포 대기. 우선순위는 shadow 파일럿이며,
