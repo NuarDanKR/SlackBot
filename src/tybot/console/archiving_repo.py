@@ -33,6 +33,9 @@ class ArchivingRepo(Protocol):
     def channel_state(self, workspace: str, channel_id: str) -> dict | None: ...
     def save_channel_state(self, row: dict) -> None: ...
     def channels(self, workspace: str) -> list[dict]: ...
+    def save_membership(self, row: dict) -> None: ...
+    def mark_channel_event(self, workspace: str, channel_id: str) -> bool: ...
+    def set_operator_hold(self, row: dict) -> int: ...
     def flags(self, workspace: str, channel_ids: list[str]) -> list[dict]: ...
     def flag(self, name: str, scope: str, scope_key: str) -> dict | None: ...
     def save_flag(self, row: dict) -> None: ...
@@ -130,7 +133,9 @@ class PostgresArchivingRepo:
             cur.execute(
                 """
                 SELECT channel_id, mode, writer_owner, cutover_ts, cutover_at,
-                       is_pilot, note, updated_at, updated_by
+                       is_pilot, note, updated_at, updated_by,
+                       membership, membership_checked_at, operator_hold,
+                       last_event_at, channel_name, is_private
                   FROM archive_channel_mode
                  WHERE workspace = %s
                  ORDER BY channel_id
@@ -138,6 +143,63 @@ class PostgresArchivingRepo:
                 (workspace,),
             )
             return [dict(row) for row in cur.fetchall()]
+
+    def save_membership(self, row: dict) -> None:
+        """초대 기반 동기화가 쓰는 자리. **모드와 멤버십을 한 문장에** 쓴다.
+
+        나눠 쓰면 「참여 중인데 멈춘」 과 「빠졌는데 도는」 순간이 생기고, 그 순간
+        수집 여부를 화면에서 설명할 수 없다.
+
+        `writer_owner` 는 건드리지 않는다 — 운영 원문의 주인은 사람이 사유와 함께
+        바꾸는 것이고, 동기화 잡이 할 일이 아니다.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT archiver_save_membership(
+                    %(workspace)s, %(channel_id)s, %(mode)s, %(membership)s,
+                    %(channel_name)s, %(is_private)s, %(updated_by)s,
+                    %(audit)s, %(reason)s
+                )
+                """,
+                row,
+            )
+
+    def set_operator_hold(self, row: dict) -> int:
+        """사람이 그 채널 수집을 끄거나 켠다. **재초대가 이 결정을 뒤집지 않는다.**
+
+        끄면 `paused`, 켜면 참여 중일 때만 `shadow` 로 돌아간다 — 봇이 없는 채널을
+        켜 봐야 권한 오류만 쌓인다.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE archive_channel_mode
+                   SET operator_hold = %(hold)s,
+                       mode = CASE
+                           WHEN %(hold)s THEN 'paused'
+                           WHEN membership = 'joined' THEN 'shadow'
+                           ELSE mode
+                       END,
+                       updated_at = now(), updated_by = %(actor)s
+                 WHERE workspace = %(workspace)s AND channel_id = %(channel_id)s
+                """,
+                row,
+            )
+            return int(cur.rowcount or 0)
+
+    def mark_channel_event(self, workspace: str, channel_id: str) -> bool:
+        """Record an accepted event without granting the runtime table UPDATE."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT archiver_mark_channel_event(%s, %s)",
+                (workspace, channel_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            value = next(iter(row.values())) if hasattr(row, "values") else row[0]
+            return bool(value)
 
     # -- 기능 스위치 ----------------------------------------------------
     def flags(self, workspace: str, channel_ids: list[str]) -> list[dict]:

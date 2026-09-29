@@ -44,7 +44,7 @@ class LicenseRowBody(BaseModel):
 class ManualRowBody(BaseModel):
     """직접 추가한 워크스페이스. `id` 가 없으면 새로 추가한다."""
 
-    id: int | None = None
+    id: int | None = Field(default=None, gt=0, strict=True)
     label: str = Field(min_length=1, max_length=license_store.MAX_LABEL)
     allocated: int = Field(ge=0, le=license_store.MAX_ALLOCATED)
     active: int = Field(ge=0, le=license_store.MAX_ALLOCATED)
@@ -54,7 +54,9 @@ class LicensesBody(BaseModel):
     rows: list[LicenseRowBody] = Field(default_factory=list, max_length=500)
     manual: list[ManualRowBody] = Field(default_factory=list, max_length=500)
     # 직접 추가한 워크스페이스만 지울 수 있다. 연동 워크스페이스는 받을 칸이 없다.
-    removed: list[int] = Field(default_factory=list, max_length=500)
+    removed: list[Annotated[int, Field(gt=0, strict=True)]] = Field(
+        default_factory=list, max_length=500
+    )
 
 
 def _report(*, refresh: bool = False) -> dict:

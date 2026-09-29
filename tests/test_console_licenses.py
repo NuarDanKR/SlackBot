@@ -253,3 +253,26 @@ def test_a_linked_workspace_cannot_be_deleted(client, stub):
     body = {"rows": [], "removed": ["tyit"]}
 
     assert client.put("/api/licenses", json=body, headers=owner(client) | CSRF).status_code == 422
+
+
+@pytest.mark.parametrize("bad_id", [0, -1, True])
+def test_manual_row_ids_must_be_positive_integers(client, stub, bad_id):
+    body = {
+        "rows": [],
+        "manual": [{"id": bad_id, "label": "토목", "allocated": 80, "active": 3}],
+    }
+
+    response = client.put("/api/licenses", json=body, headers=owner(client) | CSRF)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("bad_id", [0, -1, True])
+def test_removed_ids_must_be_positive_integers(client, stub, bad_id):
+    response = client.put(
+        "/api/licenses",
+        json={"rows": [], "removed": [bad_id]},
+        headers=owner(client) | CSRF,
+    )
+
+    assert response.status_code == 422

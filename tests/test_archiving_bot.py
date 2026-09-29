@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from fake_archiving_repo import FakeArchivingRepo
 
 from tybot import archiving_bot
 
@@ -54,6 +55,36 @@ def test_db_configuration_uses_console_managed_service(monkeypatch, tmp_path):
     del env["ARCHIVER_CHANNEL_IDS_TYIT"]
     with pytest.raises(archiving_bot.ArchiverConfigError, match="channel IDs"):
         archiving_bot.load_archiver_workspaces(env)
+
+
+def test_db_configuration_can_start_before_the_first_channel_invitation(monkeypatch):
+    row = {
+        "bot_token": "xoxb-db",
+        "app_token": "xapp-db",
+        "team_id": "T12345678",
+        "master_bot_user_id": "U_MASTER",
+        "channel_ids": [],
+        "separate_attachments": False,
+    }
+    monkeypatch.setattr(
+        "tybot.archiver_runtime_store.load_runtime_config", lambda _key: row
+    )
+
+    (config,) = archiving_bot.load_archiver_workspaces({
+        "ARCHIVER_CONFIG_SOURCE": "db",
+        "ARCHIVER_WORKSPACE": "tyit",
+    })
+
+    assert config.allowed_channels == frozenset()
+
+
+def test_instance_lock_is_scoped_to_one_workspace():
+    assert archiving_bot._instance_lock_name("tyit") == "archiving-bot-shadow-tyit"
+    assert archiving_bot._instance_lock_name("mgmt") == "archiving-bot-shadow-mgmt"
+    assert (
+        archiving_bot._instance_lock_name("tyit")
+        != archiving_bot._instance_lock_name("mgmt")
+    )
 
 
 def test_slack_identity_must_match_workspace_and_not_master(tmp_path):
@@ -154,8 +185,71 @@ def test_shadow_collector_rejects_bot_and_dm(tmp_path):
     }
     assert collector.ingest_event(Client(), {**event, "bot_id": "B123"}) == "skipped-bot-or-system"
     assert collector.ingest_event(Client(), {**event, "channel_type": "im"}) == "skipped-scope"
-    assert collector.ingest_event(Client(), {**event, "channel": "C99999999"}) == "skipped-allowlist"
+    assert collector.ingest_event(Client(), {**event, "channel": "C99999999"}) == "skipped-membership"
     assert not (tmp_path / "shadow").exists()
+
+
+def test_runtime_collector_uses_invitation_state_not_the_legacy_allowlist(tmp_path):
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    repo = FakeArchivingRepo()
+    repo.given_channel("tyit", "C99999999", "shadow", membership="joined")
+    repo.channel_rows[("tyit", "C99999999")]["channel_name"] = "general"
+    collector = archiving_bot.ShadowCollector(
+        cfg, tmp_path / "shadow", membership_repo=repo
+    )
+    event = {
+        "channel_type": "channel",
+        "channel": "C99999999",
+        "user": "U12345678",
+        "ts": "1790070000.000001",
+        "text": "초대된 채널은 이름이나 옛 목록과 무관하게 수집합니다.",
+    }
+
+    assert collector.ingest_event(Client(), event) == "written"
+    assert repo.channel_rows[("tyit", "C99999999")]["last_event_at"] == "now"
+
+
+def test_runtime_collector_respects_operator_hold(tmp_path):
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    repo = FakeArchivingRepo()
+    repo.given_channel(
+        "tyit", "C12345678", "paused", membership="joined", operator_hold=True
+    )
+    collector = archiving_bot.ShadowCollector(
+        cfg, tmp_path / "shadow", membership_repo=repo
+    )
+
+    assert collector.ingest_event(Client(), {
+        "channel_type": "channel",
+        "channel": "C12345678",
+        "user": "U12345678",
+        "ts": "1790070000.000001",
+        "text": "수집하면 안 됩니다.",
+    }) == "skipped-membership"
+    assert not (tmp_path / "shadow").exists()
+
+
+def test_periodic_membership_sync_keeps_running_after_one_failure(monkeypatch):
+    calls = []
+
+    def sync(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("temporary Slack failure")
+
+    class Stop:
+        def __init__(self):
+            self.waits = 0
+
+        def wait(self, _seconds):
+            self.waits += 1
+            return self.waits > 2
+
+    monkeypatch.setattr(archiving_bot.channel_membership, "sync", sync)
+
+    archiving_bot._membership_sync_loop(object(), object(), "tyit", Stop(), 60)
+
+    assert len(calls) == 2
 
 
 def test_changed_message_appends_before_and_after_with_one_revision(tmp_path):

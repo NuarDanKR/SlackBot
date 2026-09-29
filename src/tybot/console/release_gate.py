@@ -42,6 +42,7 @@ GATED_SQL = (
     "archiving_schema.sql",
     "workspace_service_schema.sql",
     "bot_connection_schema.sql",
+    "slack_license_schema.sql",
 )
 
 ROOT = Path(__file__).resolve().parents[3]

@@ -17,6 +17,8 @@ class FakeCursor:
     def __init__(self, row: dict | None):
         self.row = row
         self.statements: list[str] = []
+        # 진짜 psycopg 커서에는 언제나 있다. 없으면 바꾼 행 수를 세는 쪽이 터진다.
+        self.rowcount = 0
 
     def __enter__(self):
         return self

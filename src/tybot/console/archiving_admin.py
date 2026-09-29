@@ -143,6 +143,45 @@ def _flag_map(flags: list[dict]) -> dict[str, bool]:
 # ---------------------------------------------------------------------------
 
 
+SUBJECT_MEMBERSHIP = "channel_membership"
+
+
+def set_collection_hold(
+    workspace: str,
+    channel_id: str,
+    hold: bool,
+    *,
+    actor: Actor,
+    repo: ArchivingRepo | None = None,
+) -> dict:
+    """그 채널 수집을 **끄거나 켠다.** 초대는 건드리지 않는다.
+
+    채널 선택의 정본은 초대다(2026-09-29). 그래서 콘솔이 줄 수 있는 조작은
+    「그래도 이 채널은 빼 줘」 라는 예외뿐이다. 채널을 목록에 넣고 빼는 손잡이를
+    다시 만들면 초대와 목록이 또 갈린다.
+
+    끈 것은 **재초대로 풀리지 않는다.** 멤버십 상실과 사람의 결정을 한 칸에 담으면
+    다시 초대하는 순간 끈 채널까지 되살아나고, 끈 사람은 그 사실을 모른다.
+
+    모드는 저장소가 함께 옮긴다 — 끄면 `paused`, 켜면 참여 중일 때만 `shadow`.
+    봇이 없는 채널을 켜 봐야 권한 오류만 쌓인다.
+    """
+    store = repo or default_repo()
+    with store.transaction() as tx:
+        changed = tx.set_operator_hold({
+            "workspace": workspace, "channel_id": channel_id,
+            "hold": hold, "actor": actor.name,
+        })
+        if not changed:
+            raise AdminRefused(f"등록되지 않은 채널입니다: {channel_id}")
+        _audit(
+            tx, actor, SUBJECT_MEMBERSHIP, workspace, channel_id,
+            field="collection_hold",
+            old=str(not hold).lower(), new=str(hold).lower(),
+        )
+    return workspace_detail(workspace, store)
+
+
 def set_channel_mode(
     workspace: str,
     channel_id: str,

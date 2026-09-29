@@ -472,6 +472,7 @@ def decide_request(
                         "INSERT INTO specialist_workspace (specialist, workspace) VALUES (%s, %s)",
                         (p["key"], workspace),
                     )
+                disable_routes_outside(cur, p["key"], p["workspaces"], actor)
             cur.execute(
                 """
                 UPDATE specialist_change_request
@@ -484,6 +485,29 @@ def decide_request(
         raise
     except Exception as exc:
         raise SpecialistStoreError(f"전문 봇 변경 요청 처리 실패: {exc}") from exc
+
+
+def disable_routes_outside(cur, specialist: str, workspaces, actor: str) -> int:
+    """배정이 빠진 워크스페이스의 내부 호출 라우트를 **끈다.**
+
+    라우트는 별도 표(`specialist_route`)라 배정이 사라져도 남는다. 그대로 두면
+    나중에 같은 워크스페이스에 **다시 배정하는 순간 과거의 `active` 가 되살아
+    난다** — 뗀 사람은 껐다고 알고, 다시 붙인 사람은 켠 적이 없다.
+
+    행을 지우지 않는다. 지우면 언제 누가 껐는지가 사라지고, 콘솔 DB 역할에는
+    DELETE 권한도 없다(2026-09-28 QA).
+    """
+    cur.execute(
+        """
+        UPDATE specialist_route
+           SET route_mode = 'disabled', updated_at = now(), updated_by = %s
+         WHERE specialist = %s
+           AND NOT (workspace = ANY(%s))
+           AND route_mode <> 'disabled'
+        """,
+        (actor, specialist, list(workspaces)),
+    )
+    return int(cur.rowcount or 0)
 
 
 def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "", result: str = "", limit: int = 200) -> list[dict]:

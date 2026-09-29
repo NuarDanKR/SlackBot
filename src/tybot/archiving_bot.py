@@ -8,13 +8,14 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from slack_sdk.errors import SlackApiError
 
-from .archive import ingest_ack, writer
+from .archive import channel_membership, ingest_ack, writer
 from .archive.archiving_state import IngestState
 from .archive.attachment_doc import CONVERTED
 from .archive.attachment_writer import raw_lines_for
@@ -62,8 +63,6 @@ def load_archiver_workspaces(env: dict[str, str] | None = None) -> list[Archiver
 
         row = load_runtime_config(key)
         channel_ids = frozenset(str(value) for value in row["channel_ids"])
-        if not channel_ids or len(channel_ids) > 5:
-            raise ArchiverConfigError(f"archiver pilot needs 1-5 DB channel IDs for {key}")
         return [ArchiverWorkspace(
             key=key,
             bot_token=str(row["bot_token"]),
@@ -92,10 +91,10 @@ def load_archiver_workspaces(env: dict[str, str] | None = None) -> list[Archiver
         ]
         if not bot or not app or not team_id or not master_user_id:
             raise ArchiverConfigError(f"archiver identity or token pair missing for {key}")
-        if not channel_ids or len(channel_ids) > 5 or any(
+        if not channel_ids or any(
             re.fullmatch(r"[CG][A-Z0-9]{8,}", item) is None for item in channel_ids
         ):
-            raise ArchiverConfigError(f"archiver pilot needs 1-5 channel IDs for {key}")
+            raise ArchiverConfigError(f"archiver needs valid channel IDs for {key}")
         master_bot = values.get(f"SLACK_BOT_TOKEN_{suffix}") or values.get("SLACK_BOT_TOKEN")
         master_app = values.get(f"SLACK_APP_TOKEN_{suffix}") or values.get("SLACK_APP_TOKEN")
         if bot == master_bot or app == master_app:
@@ -131,11 +130,39 @@ def shadow_archive_dir(env: dict[str, str] | None = None) -> Path:
 
 
 class ShadowCollector:
-    def __init__(self, cfg: ArchiverWorkspace, root: Path) -> None:
+    def __init__(self, cfg: ArchiverWorkspace, root: Path, *, membership_repo=None) -> None:
         self.cfg = cfg
         self.root = root
+        self._membership_repo = membership_repo
         self._names: dict[str, str] = {}
         self._store = ArchiveStore(root)
+
+    def _collection_channel(self, client, channel_id: str) -> tuple[str, bool] | None:
+        """Resolve an invited channel while respecting the operator stop switch."""
+        if self._membership_repo is not None:
+            channel_membership.ensure_registered(
+                client, self._membership_repo, self.cfg.key, channel_id
+            )
+            row = channel_membership.channel_row(
+                self._membership_repo, self.cfg.key, channel_id
+            )
+            if not channel_membership.is_collectible(row):
+                return None
+            if not self._membership_repo.mark_channel_event(self.cfg.key, channel_id):
+                return None
+            name = str(row.get("channel_name") or "")
+            channel = "#" + name.removeprefix("#") if name else f"#{channel_id}"
+            return channel, bool(row.get("is_private"))
+
+        # Legacy environment configuration remains available for offline tests
+        # and emergency rollback. Production DB configuration passes a repo and
+        # uses Slack membership as the source of truth instead of this snapshot.
+        if channel_id not in self.cfg.allowed_channels:
+            return None
+        info = client.conversations_info(channel=channel_id).get("channel") or {}
+        if info.get("id") != channel_id or not info.get("is_member"):
+            return None
+        return "#" + str(info.get("name") or ""), bool(info.get("is_private"))
 
     def ingest_event(self, client, event: dict) -> str:
         """Ingest a human channel event; skip unsupported events without guessing."""
@@ -145,12 +172,10 @@ class ShadowCollector:
         channel_id = str(event.get("channel") or "")
         if not channel_id:
             return "skipped-channel"
-        if channel_id not in self.cfg.allowed_channels:
-            return "skipped-allowlist"
-        info = client.conversations_info(channel=channel_id).get("channel") or {}
-        if info.get("id") != channel_id or not info.get("is_member"):
+        channel_info = self._collection_channel(client, channel_id)
+        if channel_info is None:
             return "skipped-membership"
-        channel = "#" + str(info.get("name") or "")
+        channel, is_private = channel_info
 
         if subtype in ("message_changed", "message_deleted"):
             return self._ingest_revision(client, event, channel, channel_id)
@@ -212,7 +237,7 @@ class ShadowCollector:
                 workspace=self.cfg.key,
                 channel_id=channel_id,
                 channel=channel,
-                visibility="private" if info.get("is_private") else "public",
+                visibility="private" if is_private else "public",
                 acl=frozenset({channel}),
             )
         if staged:
@@ -456,13 +481,27 @@ class ShadowCollector:
         return True
 
 
+def _membership_sync_loop(client, repo, workspace: str, stop: threading.Event,
+                          interval_seconds: int) -> None:
+    """Refresh invitations between process starts without stopping collection."""
+    while not stop.wait(interval_seconds):
+        try:
+            channel_membership.sync(client, repo, workspace, actor="periodic-membership-sync")
+        except Exception:
+            log.exception("[%s] periodic channel membership sync failed", workspace)
+
+
 def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-    collector = ShadowCollector(cfg, root)
+    from .console.archiving_repo import default_repo
+
     app = App(token=cfg.bot_token)
     validate_slack_identity(cfg, app.client.auth_test())
+    repo = default_repo()
+    channel_membership.sync(app.client, repo, cfg.key, actor="startup-membership-sync")
+    collector = ShadowCollector(cfg, root, membership_repo=repo)
     recovered = ingest_ack.drain_outbox(cfg.key)
     if recovered["applied"] or recovered["left"]:
         log.info(
@@ -478,7 +517,26 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         except Exception:
             log.exception("[%s] archive event failed channel=%s", cfg.key, event.get("channel"))
 
-    SocketModeHandler(app, cfg.app_token).start()
+    stop = threading.Event()
+    interval = int(os.getenv("ARCHIVER_MEMBERSHIP_SYNC_SECONDS", "300"))
+    if interval < 60:
+        raise ArchiverConfigError("ARCHIVER_MEMBERSHIP_SYNC_SECONDS must be at least 60")
+    sync_thread = threading.Thread(
+        target=_membership_sync_loop,
+        args=(app.client, repo, cfg.key, stop, interval),
+        name=f"archiver-membership-{cfg.key}",
+        daemon=True,
+    )
+    sync_thread.start()
+    try:
+        SocketModeHandler(app, cfg.app_token).start()
+    finally:
+        stop.set()
+        sync_thread.join(timeout=1)
+
+
+def _instance_lock_name(workspace: str) -> str:
+    return f"archiving-bot-shadow-{workspace}"
 
 
 def main() -> int:
@@ -496,11 +554,14 @@ def main() -> int:
     configs = load_archiver_workspaces()
     root = shadow_archive_dir()
     root.mkdir(parents=True, exist_ok=True)
-    lock = instance_lock("archiving-bot-shadow")
+    workspace = configs[0].key
+    lock = instance_lock(_instance_lock_name(workspace))
     try:
         lock.acquire()
     except AlreadyRunning as exc:
-        raise ArchiverConfigError("another archiving shadow collector is running") from exc
+        raise ArchiverConfigError(
+            f"another archiving shadow collector is running for {workspace}"
+        ) from exc
     try:
         _serve(configs[0], root)
     finally:

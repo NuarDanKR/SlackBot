@@ -379,3 +379,55 @@ def test_archiver_gets_no_secret_tables(sql):
 
     for secret in ("workspace_secret", "llm_secret", "harness_file"):
         assert secret not in block, secret
+
+
+# --- 초대 기반 채널 발견 (2026-09-29) -------------------------------------------
+
+def test_membership_is_a_closed_set(sql):
+    """「모른다」 를 「참여 중」 으로 읽으면 이미 쫓겨난 채널을 계속 수집 대상으로 본다."""
+    body = _constraint(sql, "archive_channel_mode_membership")
+
+    assert body
+    assert set(re.findall(r"'(\w+)'", body)) == {"joined", "left", "unknown"}
+
+
+def test_the_operator_hold_is_separate_from_membership(sql):
+    """한 칸에 담으면 재초대 한 번에 사람이 끈 채널까지 되살아난다."""
+    assert "ADD COLUMN IF NOT EXISTS operator_hold boolean NOT NULL DEFAULT false" in sql
+    assert "ADD COLUMN IF NOT EXISTS membership text NOT NULL DEFAULT 'unknown'" in sql
+
+
+def test_the_screen_can_tell_whether_events_arrived(sql):
+    """프로세스가 떠 있다는 것과 이벤트가 들어왔다는 것은 다르다."""
+    assert "ADD COLUMN IF NOT EXISTS last_event_at timestamptz" in sql
+    assert "ADD COLUMN IF NOT EXISTS membership_checked_at timestamptz" in sql
+
+
+def test_archiver_membership_write_is_narrowed_by_a_security_definer_function(sql):
+    assert "CREATE OR REPLACE FUNCTION archiver_save_membership" in sql
+    assert "SECURITY DEFINER" in sql
+    assert "membership sync cannot promote a channel to active" in sql
+    assert "REVOKE ALL ON FUNCTION archiver_save_membership" in sql
+    assert "GRANT EXECUTE ON FUNCTION archiver_save_membership" in sql
+    assert "CREATE OR REPLACE FUNCTION archiver_mark_channel_event" in sql
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE archive_channel_mode" not in sql
+
+
+def test_existing_collecting_channels_are_treated_as_joined(sql):
+    """`unknown` 으로 두면 이관 직후 수집이 멈춘다. 손으로 등록했다는 것은 초대가
+    있었다는 뜻이고, 다음 동기화가 실제 값으로 덮는다."""
+    found = re.search(
+        r"UPDATE archive_channel_mode\s+SET membership = 'joined'\s+WHERE (.*?);",
+        sql, re.S,
+    )
+
+    assert found
+    body = " ".join(found.group(1).split())
+    assert "membership = 'unknown'" in body
+    assert "mode IN ('shadow', 'active')" in body
+
+
+def test_the_channel_name_is_not_a_key(sql):
+    """이름은 바뀐다. 키로 쓰면 이름이 바뀐 날 수집이 조용히 멈춘다."""
+    assert "PRIMARY KEY (workspace, channel_id)" in sql
+    assert "ADD COLUMN IF NOT EXISTS channel_name text NOT NULL DEFAULT ''" in sql

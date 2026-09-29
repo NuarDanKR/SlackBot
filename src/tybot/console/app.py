@@ -2233,6 +2233,40 @@ def put_channel_mode(
     return archiving_admin.workspace_detail(workspace)
 
 
+class CollectionHoldBody(BaseModel):
+    hold: bool
+    reason: str = Field(min_length=1)
+
+
+@app.put("/api/workspaces/{key}/archiving/channels/{channel_id}/hold")
+def put_collection_hold(
+    key: str, channel_id: str, body: CollectionHoldBody, request: Request, user: User,
+) -> dict:
+    """그 채널 수집을 끄거나 켠다. **채널 목록은 초대가 정한다.**
+
+    콘솔이 줄 수 있는 조작은 「그래도 이 채널은 빼 줘」 라는 예외뿐이다. 목록에
+    넣고 빼는 손잡이를 다시 만들면 초대와 목록이 또 갈린다(2026-09-29).
+    """
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    try:
+        detail = archiving_admin.set_collection_hold(
+            workspace, channel_id.strip(), body.hold,
+            actor=archiving_admin.Actor(user.email, body.reason),
+        )
+    except archiving_admin.AdminRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except workspace_store.WorkspaceStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="workspace", action="channel_collection_hold",
+        target_type="channel", target_id=channel_id, workspace=workspace,
+        outcome="succeeded", metadata={"reason": body.reason, "hold": body.hold},
+    )
+    return detail
+
+
 @app.put("/api/workspaces/{key}/archiving/flags")
 def put_feature_flag(
     key: str, body: FeatureFlagBody, request: Request, user: User
@@ -3018,6 +3052,11 @@ def start_channel_review_job(
 from . import license_routes  # noqa: E402 - 위 함수들이 정의된 뒤에 불러야 한다
 
 app.include_router(license_routes.router)
+
+# [봇 관리] 라우트는 bot_routes.py 에 있다. 같은 이유로 등록만 여기서 한다.
+from . import bot_routes  # noqa: E402 - 위 함수들이 정의된 뒤에 불러야 한다
+
+app.include_router(bot_routes.router)
 
 # 정적 `/` 마운트는 모든 `/api/*` 라우트보다 반드시 뒤에 둔다. Starlette는 등록
 # 순서대로 라우트를 찾으므로 앞에 두면 이후 API가 정적 파일의 404로 가로채진다.

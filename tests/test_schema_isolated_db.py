@@ -173,6 +173,16 @@ def test_archiver_runtime_function_execute_is_required():
         "archiver_runtime_config(text)",
         "EXECUTE",
     ) in verify.REQUIRED_FUNCTIONS
+    assert (
+        "tybot_archiver",
+        "archiver_save_membership(text,text,text,text,text,boolean,text,boolean,text)",
+        "EXECUTE",
+    ) in verify.REQUIRED_FUNCTIONS
+    assert (
+        "tybot_archiver",
+        "archiver_mark_channel_event(text,text)",
+        "EXECUTE",
+    ) in verify.REQUIRED_FUNCTIONS
 
 
 def test_the_draft_shape_actually_grants_what_we_then_check():
@@ -673,6 +683,69 @@ def test_the_console_role_cannot_delete_connection_rows(conn):
             can_delete, can_read, can_update = cur.fetchone()
             assert not can_delete, f"{table} 에 DELETE 가 남아 있다"
             assert can_read and can_update, f"{table} 을 콘솔이 못 쓴다"
+
+
+@needs_db
+def test_removing_an_assignment_disables_its_route(conn):
+    """재배정 때 과거 `active` 가 되살아나면, 켠 적 없는 봇이 답하기 시작한다."""
+    from tybot.console.specialist_store import disable_routes_outside
+
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        cur.execute(
+            "INSERT INTO workspace (key, label, archive_path, created_by)"
+            " VALUES ('pf','PF','/var/lib/tybot/archive/workspaces/pf','test')"
+        )
+        cur.execute(
+            "INSERT INTO specialist_bot"
+            " (key, name, domain, adapter, state, health, created_by, updated_by)"
+            " VALUES ('hermes','Hermes','업무','prompt','enabled','ok','test','test')"
+        )
+        for ws, mode in (("tyit", "active"), ("pf", "shadow")):
+            cur.execute(
+                "INSERT INTO specialist_route (specialist, workspace, route_mode)"
+                " VALUES ('hermes', %s, %s)",
+                (ws, mode),
+            )
+
+        # tyit 배정만 남기고 pf 를 뗀다.
+        disable_routes_outside(cur, "hermes", ["tyit"], "dan")
+
+        cur.execute(
+            "SELECT workspace, route_mode, updated_by FROM specialist_route"
+            " WHERE specialist='hermes' ORDER BY workspace"
+        )
+        assert cur.fetchall() == [
+            ("pf", "disabled", "dan"), ("tyit", "active", ""),
+        ]
+
+
+@needs_db
+def test_disabling_routes_leaves_already_disabled_rows_alone(conn):
+    """이미 꺼진 행을 다시 쓰면 `updated_by` 가 바뀌어 누가 껐는지가 흐려진다."""
+    from tybot.console.specialist_store import disable_routes_outside
+
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _workspace(cur)
+        cur.execute(
+            "INSERT INTO specialist_bot"
+            " (key, name, domain, adapter, state, health, created_by, updated_by)"
+            " VALUES ('hermes','Hermes','업무','prompt','enabled','ok','test','test')"
+        )
+        cur.execute(
+            "INSERT INTO specialist_route (specialist, workspace, route_mode, updated_by)"
+            " VALUES ('hermes','tyit','disabled','first')"
+        )
+
+        changed = disable_routes_outside(cur, "hermes", [], "second")
+
+        assert changed == 0
+        cur.execute("SELECT updated_by FROM specialist_route WHERE workspace='tyit'")
+        assert cur.fetchone()[0] == "first"
 
 
 # --- 지우기 전에 확인한다 ----------------------------------------------------

@@ -36,6 +36,14 @@ export interface ServiceRow {
 
 export interface ChannelRow {
   channel_id: string
+  /** 초대 여부. 수집 대상의 **정본**이다(2026-09-29). */
+  membership?: 'joined' | 'left' | 'unknown'
+  membership_checked_at?: string | null
+  /** 사람이 끈 채널. 재초대해도 저절로 켜지지 않는다. */
+  operator_hold?: boolean
+  last_event_at?: string | null
+  channel_name?: string
+  is_private?: boolean
   mode: ChannelMode
   writer_owner: 'master' | 'archiver'
   cutover_ts: string
@@ -97,36 +105,35 @@ export interface ArchivingDetail {
   gatedFlags: string[]
 }
 
-const SERVICE_LABEL: Record<ServiceRow['service'], string> = {
-  master: 'Master (TYBot)',
-  archiver: 'Archiver (수집)',
-  hermes_direct: 'Hermes 직접 호출 (공존 기간)',
-}
-
-const SERVICES: ServiceRow['service'][] = ['master', 'archiver', 'hermes_direct']
-
+// 모드는 **무엇이 달라지는지**로 적는다. `off` 를 「수집 안 함」 으로만 적으면
+// 사람은 원문이 안 쌓이는 줄 아는데, 실제로는 Master 가 그대로 쓴다.
 const MODE_LABEL: Record<ChannelMode, string> = {
-  off: '수집 안 함',
-  shadow: '그림자',
+  off: '미적용',
+  shadow: '그림자 수집',
   active: '운영 수집',
-  paused: '일시정지',
+  paused: '일시 중지',
 }
 
-const MODES: ChannelMode[] = ['off', 'shadow', 'active', 'paused']
+const MODE_DETAIL: Record<ChannelMode, string> = {
+  off: 'Archiver 가 수집하지 않고 Master 가 운영본을 기록합니다.',
+  shadow: 'Archiver 는 별도 shadow 경로에 기록하고 Master 가 운영본을 계속 기록합니다.',
+  active: '현재 파일럿에서는 선택할 수 없습니다.',
+  paused: '양쪽 writer 인수 상태를 확인한 뒤에만 사용합니다.',
+}
+
+
+//: 자동 등록될 때의 모드. 운영 수집으로는 **자동 전환하지 않는다**(오너 지시 12).
+//
+// 채널 상한은 없앴다 — 대상이 초대로 정해지므로, 상한을 두면 초대했는데 안 되는
+// 채널이 생기고 그건 목록을 손으로 적던 때와 같은 고장이다(2026-09-29).
+//: 이 화면에서 켤 수 없는 스위치. 켜는 순간 운영 원문의 모양이 바뀐다.
+const PILOT_BLOCKED_FLAGS = ['archiver_writes_live', 'separate_attachments']
 
 function modeChip(mode: ChannelMode) {
   if (mode === 'active') return <Chip tone="ok">{MODE_LABEL[mode]}</Chip>
   if (mode === 'shadow') return <Chip tone="watch">{MODE_LABEL[mode]}</Chip>
   if (mode === 'paused') return <Chip tone="stalled">{MODE_LABEL[mode]}</Chip>
   return <Chip tone="plain">{MODE_LABEL[mode]}</Chip>
-}
-
-function identityChip(row: ServiceRow) {
-  // `null` 은 **아직 확인 안 했다** 다. `false`(확인했고 틀렸다)와 구분한다 —
-  // 둘을 같이 보여 주면 사람이 「검사했는데 실패」 와 「검사를 안 함」 을 못 가린다.
-  if (row.identity_ok === null) return <Chip tone="plain">신원 미확인</Chip>
-  if (row.identity_ok) return <Chip tone="ok">신원 확인됨</Chip>
-  return <Chip tone="stalled">신원 불일치</Chip>
 }
 
 export function ArchivingPanel({ workspace }: { workspace: string }) {
@@ -213,51 +220,58 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
       )}
 
       <Section
-        title="서비스 연결"
-        lead="워크스페이스는 하나이고 여기 붙는 서비스가 여럿입니다. 토큰은 가린 값만 표시됩니다."
+        title="봇 연결"
+        lead="토큰 정본은 봇 관리입니다. 워크스페이스 하나에 Master·Archiver 가 각각 붙고, Slack 앱과 토큰은 워크스페이스마다 별도입니다."
       >
-        <div className="card card-pad"><div className="table-scroll"><table className="table">
-          <thead><tr><th>서비스</th><th>상태</th><th>토큰</th><th>Slack 신원</th></tr></thead>
-          <tbody>
-            {SERVICES.map((service) => (
-              <ServiceRowView
-                key={service}
-                service={service}
-                row={data.services.find((item) => item.service === service)}
-                busy={busy}
-                onSave={async (botToken, appToken, note, reason) => send(
-                  `${base}/services/${service}`,
-                  { botToken, appToken, note, reason },
-                )}
-                onVerify={(reason) => send(
-                  `${base}/services/${service}/verify`, { reason },
-                )}
-              />
-            ))}
-          </tbody>
-        </table></div></div>
+        <div className="card card-pad">
+          <p className="field-help">
+            이 화면에서는 토큰을 받지 않습니다.{' '}
+            <a href={`#/manage/bots/connections?workspace=${encodeURIComponent(workspace)}`}>
+              봇 관리 &gt; 워크스페이스 연결
+            </a>
+            에서 봇별로 등록하고 Slack 신원을 확인하세요. 여기서는 수집 설정만 다룹니다.
+          </p>
+        </div>
+      </Section>
+
+      <Section
+        title="수집 채널"
+        lead="Archiving Bot 을 채널에 초대하면 자동으로 목록에 들어오고 그림자 수집이 시작됩니다. 채널 ID 를 손으로 넣지 않습니다 — 초대가 정본입니다."
+      >
+        <div className="card card-pad">
+          <p className="field-help">
+            공개·비공개 채널 모두 됩니다. 채널 이름 규칙은 보지 않습니다. DM 은 수집하지
+            않습니다. 봇을 채널에서 내보내면 수집이 멈추고 상태가 <strong>참여 아님</strong>
+            으로 기록됩니다.
+          </p>
+          <p className="field-help">
+            목록은 봇 기동 시점과 주기 동기화로 갱신됩니다. 방금 초대한 채널이 아직 안
+            보이면 다음 동기화까지 기다리거나, 그 채널에 메시지가 오면 그때 등록됩니다.
+          </p>
+        </div>
       </Section>
 
       <Section
         title="채널 수집 모드"
-        lead="그림자는 운영 원문을 건드리지 않습니다. 운영 수집으로 넘기려면 인수 시각이 필요합니다."
+        lead="그림자 수집은 운영 원문을 건드리지 않습니다 — Master 가 계속 운영본을 씁니다. 운영 수집(writer 인수)으로는 자동 전환하지 않습니다."
       >
         <div className="card card-pad"><div className="table-scroll"><table className="table">
-          <thead><tr><th>채널</th><th>모드</th><th>운영 원문 주인</th><th>인수 시각</th>
-            <th className="right">바꾸기</th></tr></thead>
+          <thead><tr><th>채널</th><th>참여</th><th>수집 상태</th><th>마지막 이벤트</th>
+            <th>운영 원문 주인</th><th className="right">수집</th></tr></thead>
           <tbody>
             {data.channels.map((row) => (
               <ChannelRowView
-                key={row.channel_id} row={row} busy={busy} gate={gate}
-                gatedModes={data.gatedModes} blockers={data.blockers}
-                onChange={(mode, reason, cutoverTs) => void send(
-                  `${base}/channels/${encodeURIComponent(row.channel_id)}`,
-                  { mode, reason, cutoverTs },
+                key={row.channel_id} row={row} busy={busy}
+                onHold={(hold, reason) => void send(
+                  `${base}/channels/${encodeURIComponent(row.channel_id)}/hold`,
+                  { hold, reason },
                 )}
               />
             ))}
             {!data.channels.length && (
-              <tr><td colSpan={5}>등록된 채널이 없습니다.</td></tr>
+              <tr><td colSpan={6}>
+                아직 초대된 채널이 없습니다. Slack 에서 Archiving Bot 을 채널에 초대하세요.
+              </td></tr>
             )}
           </tbody>
         </table></div></div>
@@ -272,7 +286,8 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
           <tbody>
             {data.flags.map((row) => (
               <FlagRowView
-                key={`${row.name}:${row.scope}:${row.scope_key}`} row={row} busy={busy}
+                key={`${row.name}:${row.scope}:${row.scope_key}`}
+                pilotBlocked={PILOT_BLOCKED_FLAGS.includes(row.name)} row={row} busy={busy}
                 gate={gate} gatedFlags={data.gatedFlags}
                 dependencyLocked={row.name === 'separate_attachments' && !attachmentReaderReady}
                 onChange={(enabled, reason) => void send(`${base}/flags`, {
@@ -327,137 +342,63 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
   )
 }
 
-function ServiceRowView({ service, row, busy, onSave, onVerify }: {
-  service: ServiceRow['service']
-  row?: ServiceRow
-  busy: boolean
-  onSave: (botToken: string, appToken: string, note: string, reason: string) => Promise<boolean>
-  onVerify: (reason: string) => Promise<boolean>
-}) {
-  const [botToken, setBotToken] = useState('')
-  const [appToken, setAppToken] = useState('')
-  const [note, setNote] = useState('')
-  const [reason, setReason] = useState('')
-  const tokenPair = botToken.startsWith('xoxb-') && appToken.startsWith('xapp-')
-  const canSave = tokenPair && reason.trim().length > 0 && !busy
-  const canVerify = Boolean(row?.bot_mask && row?.app_mask) && reason.trim().length > 0 && !busy
 
-  async function save() {
-    if (await onSave(botToken, appToken, note, reason)) {
-      setBotToken('')
-      setAppToken('')
-      setNote('')
-      setReason('')
-    }
-  }
-
-  async function verify() {
-    if (await onVerify(reason)) setReason('')
-  }
-
-  return (
-    <tr>
-      <td>
-        <div>{SERVICE_LABEL[service]}</div>
-        <input className="input" placeholder="메모" value={note} disabled={busy}
-          onChange={(event) => setNote(event.target.value)} />
-      </td>
-      <td>
-        {row?.state === 'enabled'
-          ? <Chip tone="ok">연결됨</Chip>
-          : <Chip tone="plain">{row?.state === 'error' ? '오류' : '중지'}</Chip>}
-        {row?.error && <div className="hint warn">{row.error}</div>}
-      </td>
-      <td>
-        <div className="mono">{row?.bot_mask ?? '미등록'}</div>
-        <div className="mono">{row?.app_mask ?? '미등록'}</div>
-        <input className="input mono" type="password" autoComplete="new-password"
-          placeholder="xoxb-..." value={botToken} disabled={busy}
-          onChange={(event) => setBotToken(event.target.value)} />
-        <input className="input mono" type="password" autoComplete="new-password"
-          placeholder="xapp-..." value={appToken} disabled={busy}
-          onChange={(event) => setAppToken(event.target.value)} />
-      </td>
-      <td>
-        {row ? identityChip(row) : <Chip tone="plain">신원 미확인</Chip>}
-        <div className="hint mono">
-          {row?.team_id || '-'} · {row?.bot_user_id || '-'}
-        </div>
-        {row?.identity_error && <div className="hint warn">{row.identity_error}</div>}
-        {row?.identity_checked_at && (
-          <div className="hint">{fmt.dayClock(row.identity_checked_at)}</div>
-        )}
-        <input className="input" placeholder="작업 사유 (필수)" value={reason}
-          disabled={busy} onChange={(event) => setReason(event.target.value)} />
-        <div className="form-row">
-          <button className="btn btn-sm" disabled={!canSave} onClick={() => void save()}>
-            토큰 저장
-          </button>
-          <button className="btn btn-sm" disabled={!canVerify} onClick={() => void verify()}>
-            신원 확인
-          </button>
-        </div>
-      </td>
-    </tr>
-  )
-}
-
-function ChannelRowView({ row, busy, gate, gatedModes, blockers, onChange }: {
+function ChannelRowView({ row, busy, onHold }: {
   row: ChannelRow
   busy: boolean
-  gate: SchemaGate
-  gatedModes: string[]
-  blockers: string[]
-  onChange: (mode: ChannelMode, reason: string, cutoverTs: string) => void
+  onHold: (hold: boolean, reason: string) => void
 }) {
-  const [mode, setMode] = useState<ChannelMode>(row.mode)
   const [reason, setReason] = useState('')
-  const [cutover, setCutover] = useState('')
-
-  const schemaLocked = !gate.verified && gatedModes.includes(mode)
-  const policyLocked = mode === 'active' && blockers.length > 0
-  const locked = schemaLocked || policyLocked
-  // 인수·역인수는 좌표가 필요하다. 없으면 서버가 거절하는데, 그걸 눌러 보고
-  // 알게 하지 않는다.
-  const needsCutover =
-    (mode === 'active' && row.mode !== 'active') ||
-    (mode === 'shadow' && row.writer_owner === 'archiver')
-  const ready = mode !== row.mode && reason.trim().length > 0
-    && (!needsCutover || cutover.trim().length > 0) && !locked && !busy
+  const joined = (row.membership ?? 'unknown') === 'joined'
+  const held = Boolean(row.operator_hold)
+  const ready = reason.trim().length > 0 && !busy
 
   return (
     <tr>
       <td>
         <div className="mono">{row.channel_id}</div>
-        {row.is_pilot && <div className="hint">파일럿</div>}
+        {row.channel_name && <div className="hint">#{row.channel_name}</div>}
+        {row.is_private && <div className="hint">비공개</div>}
       </td>
-      <td>{modeChip(row.mode)}</td>
+      <td>
+        {/* 「참여 중」 과 「모른다」 는 다르다. 모르는 것을 참여로 읽으면 이미
+            쫓겨난 채널을 계속 대상으로 본다. */}
+        {joined
+          ? <Chip tone="ok">참여 중</Chip>
+          : row.membership === 'left'
+            ? <Chip tone="stalled">참여 아님</Chip>
+            : <Chip tone="plain">확인 전</Chip>}
+        {row.membership_checked_at && (
+          <div className="hint">{fmt.dayClock(row.membership_checked_at)} 확인</div>
+        )}
+      </td>
+      <td>
+        {modeChip(row.mode)}
+        <div className="hint">
+          {held
+            ? '사람이 수집을 꺼 둔 채널입니다. 재초대해도 저절로 켜지지 않습니다.'
+            : MODE_DETAIL[row.mode]}
+        </div>
+      </td>
+      <td>
+        {/* 프로세스가 떠 있다는 것과 이벤트가 들어왔다는 것은 다르다. */}
+        {row.last_event_at
+          ? <span className="mono">{fmt.dayClock(row.last_event_at)}</span>
+          : <span className="hint">아직 없음</span>}
+      </td>
       <td>{row.writer_owner === 'archiver' ? 'Archiver' : 'Master'}</td>
-      <td className="mono">{row.cutover_ts || '-'}</td>
       <td className="right">
         <div className="field">
-          <select className="input" value={mode} disabled={busy}
-            onChange={(event) => setMode(event.target.value as ChannelMode)}>
-            {MODES.map((value) => (
-              <option key={value} value={value}
-                disabled={!gate.verified && gatedModes.includes(value)}>
-                {MODE_LABEL[value]}
-                {!gate.verified && gatedModes.includes(value) ? ' (검증 필요)' : ''}
-              </option>
-            ))}
-          </select>
-          {needsCutover && (
-            <input className="input mono" placeholder="인수 시각 (Slack ts)"
-              value={cutover} disabled={busy}
-              onChange={(event) => setCutover(event.target.value)} />
-          )}
           <input className="input" placeholder="바꾸는 이유 (필수)" value={reason}
             disabled={busy} onChange={(event) => setReason(event.target.value)} />
           <button className="btn btn-sm" disabled={!ready}
-            onClick={() => onChange(mode, reason, cutover)}>적용</button>
-          {schemaLocked && <span className="field-help warn">스키마 검증 뒤에 열립니다.</span>}
-          {!schemaLocked && policyLocked && (
-            <span className="field-help warn">운영 전환 조건을 먼저 해결하세요.</span>
+            onClick={() => { onHold(!held, reason); setReason('') }}>
+            {held ? '수집 재개' : '수집 중지'}
+          </button>
+          {!joined && !held && (
+            <span className="field-help">
+              봇이 이 채널에 없습니다. 다시 초대하면 그림자 수집으로 돌아옵니다.
+            </span>
           )}
         </div>
       </td>
@@ -465,12 +406,16 @@ function ChannelRowView({ row, busy, gate, gatedModes, blockers, onChange }: {
   )
 }
 
-function FlagRowView({ row, busy, gate, gatedFlags, dependencyLocked, onChange }: {
+function FlagRowView({
+  row, busy, gate, gatedFlags, dependencyLocked, pilotBlocked, onChange,
+}: {
   row: FlagRow
   busy: boolean
   gate: SchemaGate
   gatedFlags: string[]
   dependencyLocked: boolean
+  /** 파일럿에서 켤 수 없는 스위치. 켜는 순간 운영 원문의 모양이 바뀐다. */
+  pilotBlocked: boolean
   onChange: (enabled: boolean, reason: string) => void
 }) {
   const [reason, setReason] = useState('')
@@ -478,7 +423,7 @@ function FlagRowView({ row, busy, gate, gatedFlags, dependencyLocked, onChange }
   // **끄는 것은 막지 않는다.** 사고 때 내리는 손잡이를 검증 상태로 막으면
   // 막아야 할 순간에 못 막는다.
   const schemaLocked = next && !gate.verified && gatedFlags.includes(row.name)
-  const locked = schemaLocked || (next && dependencyLocked)
+  const locked = schemaLocked || (next && dependencyLocked) || (next && pilotBlocked)
   const ready = reason.trim().length > 0 && !locked && !busy
 
   return (
@@ -503,6 +448,11 @@ function FlagRowView({ row, busy, gate, gatedFlags, dependencyLocked, onChange }
           {schemaLocked && <span className="field-help warn">스키마 검증 뒤에 켤 수 있습니다.</span>}
           {!schemaLocked && next && dependencyLocked && (
             <span className="field-help warn">첨부 reader 준비를 먼저 확인하세요.</span>
+          )}
+          {next && pilotBlocked && (
+            <span className="field-help warn">
+              파일럿 범위 밖입니다. 이 스위치는 shadow 검증을 마친 뒤 별도 승인으로 켭니다.
+            </span>
           )}
         </div>
       </td>
