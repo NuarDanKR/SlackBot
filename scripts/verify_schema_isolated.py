@@ -87,7 +87,8 @@ RESERVED_DB_MARKERS = ("bench", "lab", "index", "prod", "tyslackai")
 #: 검증 대상. `apply-schema.sh` 순서를 따른다 — 뒤 파일이 앞 파일의 표를 참조한다.
 TARGET_FILES = ("index_schema.sql", "console_schema.sql",
                 "archiving_schema.sql", "workspace_service_schema.sql",
-                "bot_connection_schema.sql")
+                "bot_connection_schema.sql",
+                "archiver_supervisor_schema.sql")
 
 #: 역할에서 **없어야 하는** 권한. (역할, 표, 권한)
 #:
@@ -106,6 +107,11 @@ FORBIDDEN: tuple[tuple[str, str, str], ...] = (
     # 새 연결 표도 같다 — 이관 뒤에도 Archiver 는 남의 토큰을 못 본다(§4.4).
     ("tybot_archiver", "bot_connection_secret", "SELECT"),
     ("tybot_archiver", "bot_connection", "UPDATE"),
+    # 희망 상태는 사람이 정한다. 프로세스가 자기 희망을 적으면 콘솔에서 끈 것이
+    # 되살아난다. 표 단위 UPDATE 가 아니라 열 단위로만 줬는지 확인한다.
+    ("tybot_archiver", "archive_backfill_job", "INSERT"),
+    ("tyslackai", "archive_backfill_job", "DELETE"),
+    ("tyslackai", "archiver_workspace_runtime", "DELETE"),
     ("tyslackai", "archive_message_revision", "UPDATE"),
     ("tyslackai", "archive_message_revision", "DELETE"),
     ("tyslackai", "archive_config_audit", "UPDATE"),
@@ -130,6 +136,10 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     ("tyslackai", "bot_connection", "UPDATE"),
     ("tyslackai", "bot_catalog", "INSERT"),
     ("tyslackai", "specialist_route", "UPDATE"),
+    ("tyslackai", "archiver_workspace_runtime", "INSERT"),
+    ("tyslackai", "archive_backfill_job", "INSERT"),
+    ("tybot_archiver", "archive_channel_cursor", "INSERT"),
+    ("tybot_archiver", "archiver_workspace_runtime", "SELECT"),
     ("tyslackai", "archive_channel_mode", "UPDATE"),
 )
 
