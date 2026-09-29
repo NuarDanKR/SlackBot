@@ -41,19 +41,34 @@ class LicenseRowBody(BaseModel):
     allocated: int = Field(ge=0, le=license_store.MAX_ALLOCATED)
 
 
+class ManualRowBody(BaseModel):
+    """직접 추가한 워크스페이스. `id` 가 없으면 새로 추가한다."""
+
+    id: int | None = Field(default=None, gt=0, strict=True)
+    label: str = Field(min_length=1, max_length=license_store.MAX_LABEL)
+    allocated: int = Field(ge=0, le=license_store.MAX_ALLOCATED)
+    active: int = Field(ge=0, le=license_store.MAX_ALLOCATED)
+
+
 class LicensesBody(BaseModel):
     rows: list[LicenseRowBody] = Field(default_factory=list, max_length=500)
+    manual: list[ManualRowBody] = Field(default_factory=list, max_length=500)
+    # 직접 추가한 워크스페이스만 지울 수 있다. 연동 워크스페이스는 받을 칸이 없다.
+    removed: list[Annotated[int, Field(gt=0, strict=True)]] = Field(
+        default_factory=list, max_length=500
+    )
 
 
 def _report(*, refresh: bool = False) -> dict:
     linked = license_store.linked_workspaces()
     try:
         stored = license_store.list_stored()
+        manual = license_store.list_manual()
     except license_store.LicenseStoreError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     tokens = {key: token for key, (_label, token) in linked.items() if token}
     counts = license_store.active_counts(tokens, refresh=refresh)
-    return license_store.build_report(linked, stored, counts)
+    return license_store.build_report(linked, stored, counts, manual)
 
 
 @router.get("/api/licenses")
@@ -67,12 +82,13 @@ def get_licenses(user: User, refresh: bool = False) -> dict:
 def put_licenses(body: LicensesBody, request: Request, user: User) -> dict:
     _require_admin(user)
     _check_write_request(request)
-    linked = set(license_store.linked_workspaces())
     try:
         result = license_store.save(
             actor=user.email,
             rows=[row.model_dump() for row in body.rows],
-            linked=linked,
+            linked=license_store.linked_workspaces(),
+            manual=[row.model_dump() for row in body.manual],
+            removed=body.removed,
         )
     except license_store.LicenseStoreError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e

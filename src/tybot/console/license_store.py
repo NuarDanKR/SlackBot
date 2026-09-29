@@ -5,9 +5,12 @@
 ## 무엇이 어디서 오나
 | 값 | 출처 |
 |---|---|
-| 워크스페이스 목록 | 워크스페이스 레지스트리 + 환경변수 토큰(= Slack 연동된 곳만) |
-| 할당 | 사람이 입력 → `slack_license` (Slack 에서 가져올 수 없는 값) |
-| 활성 | Slack `users.list` |
+| 워크스페이스 목록 | 워크스페이스 레지스트리 + 환경변수 토큰(= Slack 연동) · 사람이 직접 추가한 행 |
+| 할당 | 사람이 입력 → `slack_license` / `slack_license_manual` (Slack 에서 가져올 수 없는 값) |
+| 활성 | 연동 워크스페이스는 Slack `users.list` · 직접 추가한 곳은 사람이 입력 |
+
+직접 추가한 워크스페이스만 삭제할 수 있다. 연동 워크스페이스는 레지스트리에서 오므로
+여기서 지워도 다음 조회에 다시 나타난다 — 지울 수 있는 것처럼 보이면 안 된다.
 
 ## 활성을 어떻게 세나
 비활성화(deleted)되지 않은 **사람 계정**이다. 봇·앱 계정·Slackbot 은 뺀다.
@@ -39,6 +42,20 @@ KST = timezone(timedelta(hours=9))
 #: `users.list` 를 부르면 Tier 2 한도(분당 20회)에 금방 닿는다.
 CACHE_SECONDS = 600
 MAX_ALLOCATED = 1_000_000
+MAX_LABEL = 80
+
+#: 라이선스 현황에 싣지 않는 연동 워크스페이스(표시 이름 기준).
+#: 「Slack확산TFT」 는 도입 작업용 워크스페이스라 조직 라이선스 비교에서 뺀다(2026-09-28 요청).
+#: 이름은 DB 레지스트리에서 오므로 띄어쓰기·대소문자는 무시하고 비교한다.
+EXCLUDED_LABELS = frozenset({"slack확산tft"})
+
+
+def _label_key(label: str) -> str:
+    return "".join(str(label).split()).casefold()
+
+
+def without_excluded(linked: dict[str, tuple[str, str | None]]) -> dict[str, tuple[str, str | None]]:
+    return {key: value for key, value in linked.items() if _label_key(value[0]) not in EXCLUDED_LABELS}
 
 
 class LicenseStoreError(RuntimeError):
@@ -163,7 +180,7 @@ def linked_workspaces() -> dict[str, tuple[str, str | None]]:
         key = os.getenv("PILOT_WORKSPACE", "pilot").lower()
         label, current = out.get(key, (os.getenv("WORKSPACE_LABEL", "") or key, None))
         out[key] = (label, current or single)
-    return out
+    return without_excluded(out)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +188,7 @@ def linked_workspaces() -> dict[str, tuple[str, str | None]]:
 # ---------------------------------------------------------------------------
 
 def list_stored() -> dict[str, int]:
-    """{워크스페이스 키: 할당 수}."""
+    """연동 워크스페이스의 할당 — {워크스페이스 키: 할당 수}."""
     try:
         with _connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT workspace, allocated FROM slack_license")
@@ -182,8 +199,28 @@ def list_stored() -> dict[str, int]:
         raise LicenseStoreError(f"라이선스 설정 조회 실패: {exc}") from exc
 
 
+def list_manual() -> list[dict]:
+    """직접 추가한 워크스페이스."""
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, label, allocated, active, created_by FROM slack_license_manual ORDER BY id"
+            )
+            return [dict(row) for row in cur.fetchall()]
+    except WorkspaceStoreError as exc:
+        raise LicenseStoreError(str(exc)) from exc
+    except Exception as exc:
+        raise LicenseStoreError(f"직접 추가한 워크스페이스 조회 실패: {exc}") from exc
+
+
+def _count(value, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_ALLOCATED:
+        raise LicenseStoreError(f"{name}은(는) 0~{MAX_ALLOCATED:,} 사이의 정수여야 합니다.")
+    return value
+
+
 def validate(rows: list[dict], linked: set[str]) -> list[tuple[str, int]]:
-    """저장 전에 값을 검사한다. 규칙에 걸리면 422 로 돌려줄 수 있게 이유를 적는다."""
+    """연동 워크스페이스 할당을 검사한다. 규칙에 걸리면 422 로 돌려줄 수 있게 이유를 적는다."""
     clean: list[tuple[str, int]] = []
     seen: set[str] = set()
     for row in rows:
@@ -193,16 +230,56 @@ def validate(rows: list[dict], linked: set[str]) -> list[tuple[str, int]]:
         if workspace in seen:
             raise LicenseStoreError(f"같은 워크스페이스가 두 번 들어왔습니다: {workspace}")
         seen.add(workspace)
-        allocated = row.get("allocated")
-        if isinstance(allocated, bool) or not isinstance(allocated, int) or not 0 <= allocated <= MAX_ALLOCATED:
-            raise LicenseStoreError(f"할당 라이선스는 0~{MAX_ALLOCATED:,} 사이의 정수여야 합니다.")
-        clean.append((workspace, allocated))
+        clean.append((workspace, _count(row.get("allocated"), "할당 라이선스")))
     return clean
 
 
-def save(*, actor: str, rows: list[dict], linked: set[str]) -> dict:
+def validate_manual(rows: list[dict], linked_labels: set[str]) -> list[dict]:
+    """직접 추가한 워크스페이스를 검사한다.
+
+    이름은 연동 워크스페이스와도 겹치면 안 된다 — 같은 이름이 두 줄이면 합계가 두 번
+    잡히고, 어느 쪽이 실제 값인지 사람이 알 수 없다.
+    """
+    clean: list[dict] = []
+    seen: set[str] = set()
+    taken = {_label_key(label) for label in linked_labels}
+    for row in rows:
+        label = str(row.get("label") or "").strip()
+        if not label or len(label) > MAX_LABEL or "\n" in label or "\r" in label:
+            raise LicenseStoreError(f"워크스페이스 이름은 1~{MAX_LABEL}자의 한 줄이어야 합니다.")
+        key = _label_key(label)
+        if key in EXCLUDED_LABELS:
+            raise LicenseStoreError(f"라이선스 현황에서 제외한 워크스페이스입니다: {label}")
+        if key in taken:
+            raise LicenseStoreError(f"Slack 에 연동된 워크스페이스와 이름이 같습니다: {label}")
+        if key in seen:
+            raise LicenseStoreError(f"같은 이름의 워크스페이스가 두 번 들어왔습니다: {label}")
+        seen.add(key)
+        row_id = row.get("id")
+        clean.append({
+            "id": int(row_id) if row_id is not None else None,
+            "label": label,
+            "allocated": _count(row.get("allocated"), "할당 라이선스"),
+            "active": _count(row.get("active"), "활성 라이선스"),
+        })
+    return clean
+
+
+def save(
+    *,
+    actor: str,
+    rows: list[dict],
+    linked: dict[str, tuple[str, str | None]],
+    manual: list[dict] | None = None,
+    removed: list[int] | None = None,
+) -> dict:
     """한 트랜잭션으로 저장한다. 반쯤 저장된 표는 합계가 틀린 표다."""
-    clean = validate(rows, linked)
+    clean = validate(rows, set(linked))
+    manual_rows = validate_manual(manual or [], {label for label, _token in linked.values()})
+    removed_ids = sorted({int(value) for value in (removed or [])})
+    if {row["id"] for row in manual_rows if row["id"] is not None} & set(removed_ids):
+        raise LicenseStoreError("삭제할 워크스페이스를 동시에 수정할 수 없습니다.")
+    result = {"saved": len(clean), "added": 0, "updated": 0, "deleted": 0}
     try:
         with _connect() as conn, conn.cursor() as cur:
             for workspace, allocated in clean:
@@ -217,11 +294,43 @@ def save(*, actor: str, rows: list[dict], linked: set[str]) -> dict:
                     """,
                     (workspace, allocated, actor),
                 )
+            # 지우기를 먼저 한다. 지운 이름으로 다시 추가할 때 UNIQUE 에 걸리지 않게.
+            for row_id in removed_ids:
+                cur.execute("DELETE FROM slack_license_manual WHERE id = %s", (row_id,))
+                result["deleted"] += cur.rowcount
+            for row in manual_rows:
+                if row["id"] is None:
+                    cur.execute(
+                        """
+                        INSERT INTO slack_license_manual
+                            (label, allocated, active, created_by, updated_by)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (row["label"], row["allocated"], row["active"], actor, actor),
+                    )
+                    result["added"] += 1
+                    continue
+                cur.execute(
+                    """
+                    UPDATE slack_license_manual
+                       SET label = %s, allocated = %s, active = %s,
+                           updated_at = now(), updated_by = %s
+                     WHERE id = %s
+                    """,
+                    (row["label"], row["allocated"], row["active"], actor, row["id"]),
+                )
+                if cur.rowcount != 1:
+                    raise LicenseStoreError("다른 곳에서 먼저 삭제된 워크스페이스입니다. 화면을 새로 고쳐 주세요.")
+                result["updated"] += 1
+    except LicenseStoreError:
+        raise
     except WorkspaceStoreError as exc:
         raise LicenseStoreError(str(exc)) from exc
     except Exception as exc:
+        if "slack_license_manual_label_key" in str(exc):
+            raise LicenseStoreError("같은 이름의 워크스페이스가 이미 있습니다.") from exc
         raise LicenseStoreError(f"라이선스 설정 저장 실패: {exc}") from exc
-    return {"saved": len(clean)}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -232,20 +341,23 @@ def build_report(
     linked: dict[str, tuple[str, str | None]],
     stored: dict[str, int],
     counts: dict[str, ActiveCount],
+    manual: list[dict] | None = None,
 ) -> dict:
-    """연동 목록 · 저장된 할당 · Slack 조회 결과를 한 표로 합친다(DB·Slack 없이 시험한다).
+    """연동 목록 · 저장된 할당 · Slack 조회 결과 · 직접 추가한 행을 한 표로 합친다.
 
-    표에 나오는 것은 **연동 워크스페이스뿐**이다. 할당만 저장돼 있고 연동이 끊긴
-    워크스페이스는 보이지 않는다 — 활성 수를 알 수 없는 줄은 비교가 안 된다.
+    DB·Slack 없이 시험한다. 연동이 끊긴 워크스페이스의 할당은 보이지 않는다 —
+    활성 수를 알 수 없는 줄은 비교가 안 된다.
     """
     rows: list[dict] = []
-    for key, (label, token) in linked.items():
+    for key, (label, token) in without_excluded(linked).items():
         count = counts.get(key)
         error = None if token else "봇 토큰이 없어 Slack 에서 조회하지 못했습니다."
         if count and count.error:
             error = count.error
         ok = count is not None and count.error is None
         rows.append({
+            "kind": "slack",
+            "id": None,
             "workspace": key,
             "label": label,
             "allocated": int(stored.get(key, 0)),
@@ -254,11 +366,23 @@ def build_report(
             "fetchedAt": count.fetched_at if ok else None,
             "error": error,
         })
+    for row in manual or []:
+        rows.append({
+            "kind": "manual",
+            "id": int(row["id"]),
+            "workspace": None,
+            "label": str(row["label"]),
+            "allocated": int(row.get("allocated") or 0),
+            "active": int(row.get("active") or 0),
+            "guests": 0,
+            "fetchedAt": None,
+            "error": None,
+        })
     rows.sort(key=lambda row: row["label"])
-    synced = [row for row in rows if row["active"] is not None]
+    synced = [row for row in rows if row["kind"] == "slack" and row["active"] is not None]
     return {
         "rows": rows,
-        "linkedCount": len(linked),
+        "linkedCount": sum(1 for row in rows if row["kind"] == "slack"),
         "syncedCount": len(synced),
         "syncedAt": max((row["fetchedAt"] for row in synced if row["fetchedAt"]), default=None),
         "cacheSeconds": CACHE_SECONDS,

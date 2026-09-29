@@ -120,6 +120,17 @@
   font-weight: 700;
   white-space: nowrap;
 }
+.license-link.manual {
+  padding: 0 8px;
+  background: var(--info-soft);
+  color: var(--info);
+}
+.license-input.license-name {
+  max-width: 240px;
+  border-color: var(--line-2);
+  font-family: var(--font-body);
+  text-align: left;
+}
 .license-total td {
   border-top: 2px solid var(--line-2);
   background: var(--sunk);

@@ -88,7 +88,8 @@ RESERVED_DB_MARKERS = ("bench", "lab", "index", "prod", "tyslackai")
 TARGET_FILES = ("index_schema.sql", "console_schema.sql",
                 "archiving_schema.sql", "workspace_service_schema.sql",
                 "bot_connection_schema.sql",
-                "archiver_supervisor_schema.sql")
+                "archiver_supervisor_schema.sql",
+                "slack_license_schema.sql")
 
 #: 역할에서 **없어야 하는** 권한. (역할, 표, 권한)
 #:
@@ -144,6 +145,14 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     ("tybot_archiver", "archive_channel_cursor", "INSERT"),
     ("tybot_archiver", "archiver_workspace_runtime", "SELECT"),
     ("tyslackai", "archive_channel_mode", "UPDATE"),
+    ("tyslackai", "slack_license", "SELECT"),
+    ("tyslackai", "slack_license", "INSERT"),
+    ("tyslackai", "slack_license", "UPDATE"),
+    ("tyslackai", "slack_license", "DELETE"),
+    ("tyslackai", "slack_license_manual", "SELECT"),
+    ("tyslackai", "slack_license_manual", "INSERT"),
+    ("tyslackai", "slack_license_manual", "UPDATE"),
+    ("tyslackai", "slack_license_manual", "DELETE"),
 )
 
 REQUIRED_FUNCTIONS: tuple[tuple[str, str, str], ...] = (
