@@ -449,6 +449,7 @@ def test_the_license_endpoint_still_answers(client, monkeypatch):
 
     monkeypatch.setattr(license_store, "linked_workspaces", lambda: {})
     monkeypatch.setattr(license_store, "list_stored", lambda: [])
+    monkeypatch.setattr(license_store, "list_manual", lambda: [])
     monkeypatch.setattr(license_store, "active_counts", lambda tokens, refresh=False: {})
 
     assert client.get("/api/licenses", headers=owner(client)).status_code == 200

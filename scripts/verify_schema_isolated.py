@@ -87,7 +87,7 @@ RESERVED_DB_MARKERS = ("bench", "lab", "index", "prod", "tyslackai")
 #: 검증 대상. `apply-schema.sh` 순서를 따른다 — 뒤 파일이 앞 파일의 표를 참조한다.
 TARGET_FILES = ("index_schema.sql", "console_schema.sql",
                 "archiving_schema.sql", "workspace_service_schema.sql",
-                "bot_connection_schema.sql")
+                "bot_connection_schema.sql", "slack_license_schema.sql")
 
 #: 역할에서 **없어야 하는** 권한. (역할, 표, 권한)
 #:
@@ -131,6 +131,14 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     ("tyslackai", "bot_catalog", "INSERT"),
     ("tyslackai", "specialist_route", "UPDATE"),
     ("tyslackai", "archive_channel_mode", "UPDATE"),
+    ("tyslackai", "slack_license", "SELECT"),
+    ("tyslackai", "slack_license", "INSERT"),
+    ("tyslackai", "slack_license", "UPDATE"),
+    ("tyslackai", "slack_license", "DELETE"),
+    ("tyslackai", "slack_license_manual", "SELECT"),
+    ("tyslackai", "slack_license_manual", "INSERT"),
+    ("tyslackai", "slack_license_manual", "UPDATE"),
+    ("tyslackai", "slack_license_manual", "DELETE"),
 )
 
 REQUIRED_FUNCTIONS: tuple[tuple[str, str, str], ...] = (
