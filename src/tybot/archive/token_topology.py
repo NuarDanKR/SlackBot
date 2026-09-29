@@ -55,6 +55,9 @@ class Connection:
     bot_token: str = ""
     app_token: str = ""
     state: str = ""
+    #: Slack 이 확인해 준 team. supervisor 가 **이벤트를 배분할 때** 쓴다 —
+    #: 같은 앱이 여러 워크스페이스에 설치되면 team 말고는 구분할 것이 없다.
+    team_id: str = ""
 
 
 @dataclass

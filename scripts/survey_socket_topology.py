@@ -56,7 +56,7 @@ def load(bot_key: str = "archiver") -> list[token_topology.Connection]:
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT c.workspace, c.bot_key, c.state,
+            SELECT c.workspace, c.bot_key, c.state, c.team_id,
                    max(s.ciphertext) FILTER (WHERE s.kind = 'bot') AS bot_cipher,
                    max(s.ciphertext) FILTER (WHERE s.kind = 'app') AS app_cipher
               FROM bot_connection c
@@ -64,7 +64,7 @@ def load(bot_key: str = "archiver") -> list[token_topology.Connection]:
              WHERE c.connector_type = 'slack_socket'
                AND (%s = '' OR c.bot_key = %s)
                AND c.state <> 'retired'
-             GROUP BY c.workspace, c.bot_key, c.state
+             GROUP BY c.workspace, c.bot_key, c.state, c.team_id
              ORDER BY c.workspace
             """,
             (bot_key, bot_key),
@@ -87,6 +87,7 @@ def load(bot_key: str = "archiver") -> list[token_topology.Connection]:
             bot_token=_plain(row["bot_cipher"]),
             app_token=_plain(row["app_cipher"]),
             state=str(row["state"]),
+            team_id=str(row["team_id"] or ""),
         ))
     return out
 
