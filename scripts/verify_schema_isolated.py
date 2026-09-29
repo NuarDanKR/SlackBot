@@ -110,6 +110,9 @@ FORBIDDEN: tuple[tuple[str, str, str], ...] = (
     # 희망 상태는 사람이 정한다. 프로세스가 자기 희망을 적으면 콘솔에서 끈 것이
     # 되살아난다. 표 단위 UPDATE 가 아니라 열 단위로만 줬는지 확인한다.
     ("tybot_archiver", "archive_backfill_job", "INSERT"),
+    ("tybot_archiver", "archiver_workspace_runtime", "UPDATE"),
+    ("tybot_archiver", "archive_channel_cursor", "UPDATE"),
+    ("tybot_archiver", "archive_backfill_job", "UPDATE"),
     ("tyslackai", "archive_backfill_job", "DELETE"),
     ("tyslackai", "archiver_workspace_runtime", "DELETE"),
     ("tyslackai", "archive_message_revision", "UPDATE"),

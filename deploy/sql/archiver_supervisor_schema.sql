@@ -61,13 +61,16 @@ CREATE TABLE IF NOT EXISTS archiver_workspace_runtime (
 COMMENT ON TABLE archiver_workspace_runtime IS
     '워크스페이스별 수집 희망·관측 상태. 자격증명은 bot_connection 이 정본이다.';
 
--- 희망이 `off` 인데 돌고 있다고 적히면 둘 중 하나가 거짓이다. 그 상태를 표가
--- 허용하면 화면이 「꺼져 있는데 수집 중」 을 보여 주고, 사람은 무엇을 믿어야
--- 할지 모른다. 멈추는 중(`stopping`)을 따로 두지 않았으므로 `stopped` 로 간다.
+-- 예전 초안은 `off + running`을 금지했다. 하지만 shadow worker가 도는 중에 사람이
+-- off를 누르면 supervisor가 generation을 읽고 멈출 때까지 그 조합이 반드시 생긴다.
+-- desired/observed의 차이는 저장하고, 오래 지속될 때 운영 화면에서 장애로 알린다.
 ALTER TABLE archiver_workspace_runtime
     DROP CONSTRAINT IF EXISTS archiver_runtime_off_is_not_running;
-ALTER TABLE archiver_workspace_runtime ADD CONSTRAINT archiver_runtime_off_is_not_running
-    CHECK (desired_mode <> 'off' OR observed_state IN ('stopped', 'error'));
+
+ALTER TABLE archiver_workspace_runtime
+    DROP CONSTRAINT IF EXISTS archiver_runtime_generation_positive;
+ALTER TABLE archiver_workspace_runtime ADD CONSTRAINT archiver_runtime_generation_positive
+    CHECK (generation >= 1);
 
 -- 오류 상태가 아닌데 코드가 남아 있으면 화면이 「정상인데 빨간 글씨」 를 보여 준다.
 ALTER TABLE archiver_workspace_runtime
@@ -145,7 +148,21 @@ CREATE INDEX IF NOT EXISTS archive_backfill_job_recent
 -- 사람은 멈춘 작업을 계속 기다린다.
 ALTER TABLE archive_backfill_job DROP CONSTRAINT IF EXISTS archive_backfill_job_finished;
 ALTER TABLE archive_backfill_job ADD CONSTRAINT archive_backfill_job_finished
-    CHECK (state IN ('queued', 'running') OR finished_at IS NOT NULL);
+    CHECK (
+        (state IN ('queued', 'running') AND finished_at IS NULL)
+        OR (state NOT IN ('queued', 'running') AND finished_at IS NOT NULL)
+    );
+
+ALTER TABLE archive_backfill_job DROP CONSTRAINT IF EXISTS archive_backfill_job_counts_nonnegative;
+ALTER TABLE archive_backfill_job ADD CONSTRAINT archive_backfill_job_counts_nonnegative
+    CHECK (
+        found_count >= 0 AND written_count >= 0 AND duplicate_count >= 0
+        AND refused_count >= 0 AND failed_count >= 0
+    );
+
+ALTER TABLE archive_backfill_job DROP CONSTRAINT IF EXISTS archive_backfill_job_request_nonempty;
+ALTER TABLE archive_backfill_job ADD CONSTRAINT archive_backfill_job_request_nonempty
+    CHECK (btrim(requested_by) <> '' AND btrim(reason) <> '');
 
 
 -- ---------------------------------------------------------------------------
@@ -172,13 +189,21 @@ BEGIN
         -- 콘솔에서 끈 것이 되살아난다.
         -- **열 단위로 준다.** 표 전체에 UPDATE 를 주면 주석이 말하는 경계를
         -- 코드가 지키지 않는다 — 권한은 문장이 아니라 GRANT 가 정한다.
+        EXECUTE 'REVOKE UPDATE ON TABLE archiver_workspace_runtime,'
+                ' archive_channel_cursor, archive_backfill_job FROM tybot_archiver';
         EXECUTE 'GRANT SELECT ON TABLE archiver_workspace_runtime TO tybot_archiver';
         EXECUTE 'GRANT UPDATE (observed_state, heartbeat_at, last_event_at,'
                 ' last_write_at, error_code, error_note, updated_at, updated_by)'
                 ' ON TABLE archiver_workspace_runtime TO tybot_archiver';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON TABLE archive_channel_cursor'
+        EXECUTE 'GRANT SELECT, INSERT ON TABLE archive_channel_cursor'
                 ' TO tybot_archiver';
-        EXECUTE 'GRANT SELECT, UPDATE ON TABLE archive_backfill_job TO tybot_archiver';
+        EXECUTE 'GRANT UPDATE (last_realtime_ts, last_history_ts, last_success_at,'
+                ' retry_after, status, error_code, updated_at)'
+                ' ON TABLE archive_channel_cursor TO tybot_archiver';
+        EXECUTE 'GRANT SELECT ON TABLE archive_backfill_job TO tybot_archiver';
+        EXECUTE 'GRANT UPDATE (state, found_count, written_count, duplicate_count,'
+                ' refused_count, failed_count, error_code, started_at, finished_at)'
+                ' ON TABLE archive_backfill_job TO tybot_archiver';
         EXECUTE 'REVOKE DELETE ON TABLE'
                 ' archiver_workspace_runtime, archive_channel_cursor,'
                 ' archive_backfill_job FROM tybot_archiver';

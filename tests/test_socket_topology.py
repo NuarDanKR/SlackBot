@@ -83,6 +83,17 @@ def test_the_same_bot_token_in_two_workspaces_is_reported():
     assert result.shared_bot_tokens == [["mgmt", "tyit"]]
 
 
+def test_shared_bot_token_is_reported_even_when_app_token_is_missing():
+    """App Token 누락이 더 위험한 Bot Token 오설정을 가리면 안 된다."""
+    result = topology.survey([
+        _conn("tyit", app="", bot=BOT_1),
+        _conn("mgmt", app=APP_A, bot=BOT_1),
+    ])
+
+    assert result.without_app_token == ["tyit"]
+    assert result.shared_bot_tokens == [["mgmt", "tyit"]]
+
+
 def test_distinct_bot_tokens_are_not_reported():
     result = topology.survey([
         _conn("tyit", app=APP_A, bot=BOT_1),

@@ -117,19 +117,14 @@ def plan_observed_change(
 ) -> WorkspaceRuntime:
     """supervisor 가 관측 상태를 보고한다.
 
-    `off` 를 원하는데 `running` 을 보고하면 거절한다 — 둘 중 하나가 거짓이고,
-    그 상태를 저장하면 화면이 「꺼져 있는데 수집 중」 을 보여 준다.
+    desired와 observed가 다른 상태는 거절하지 않는다. 예를 들어 `shadow` worker가
+    돌고 있을 때 사람이 `off`를 누르면, supervisor가 generation을 읽고 멈출 때까지
+    잠시 `off + running`이어야 한다. 이 차이가 오래가면 운영 화면이 장애로 알린다.
 
     오류 코드는 **오류일 때만** 남는다. 정상인데 코드가 남아 있으면 화면이
     「정상인데 빨간 글씨」 가 되고, 그걸 본 사람은 무엇을 믿어야 할지 모른다.
     """
     state = ObservedState(observed)
-    if current.desired_mode is DesiredMode.OFF and state in (
-        ObservedState.STARTING, ObservedState.RUNNING, ObservedState.DEGRADED,
-    ):
-        raise TransitionRefused(
-            f"{current.workspace} 는 수집을 끄기로 돼 있는데 {state} 로 보고됐습니다."
-        )
     if state not in (ObservedState.ERROR, ObservedState.DEGRADED) and error_code:
         raise TransitionRefused("오류가 아닌 상태에 오류 코드를 남길 수 없습니다.")
     if state in (ObservedState.ERROR, ObservedState.DEGRADED) and not error_code:

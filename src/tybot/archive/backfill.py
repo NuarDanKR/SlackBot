@@ -162,6 +162,17 @@ def _is_human(message: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def _in_range(ts: str, *, oldest: str, latest: str) -> bool:
+    """Slack ts가 요청 범위 안인가.
+
+    thread API는 부모를 기준으로 호출하므로 요청한 `latest` 뒤의 답글도 돌려줄 수
+    있다. API 응답 모양에 기대지 않고 쓰기 직전에 한 번 더 막는다.
+    """
+    if oldest and ts < oldest:
+        return False
+    return not (latest and ts > latest)
+
+
 def _pages(
     call: Callable[..., dict], *, sleeper: Callable[[float], None], **kwargs,
 ) -> Iterator[dict]:
@@ -201,7 +212,7 @@ def collect(
     """
     found: list[Found] = []
     seen: set[str] = set()
-    threads: list[str] = []
+    threads: set[str] = set()
     exhausted = True
 
     for page in _pages(
@@ -213,9 +224,21 @@ def collect(
         for message in page.get("messages") or []:
             ts = str(message.get("ts") or "")
             human, _ = _is_human(message)
-            if message.get("thread_ts") and str(message["thread_ts"]) == ts:
-                threads.append(ts)
-            if not human or not ts or ts in seen:
+            # conversations.history의 thread 부모는 보통 thread_ts가 없고
+            # reply_count/latest_reply만 가진다. thread_ts만 보면 답글이 빠진다.
+            is_parent = (
+                bool(ts)
+                and (
+                    (message.get("thread_ts") and str(message["thread_ts"]) == ts)
+                    or bool(message.get("reply_count"))
+                    or bool(message.get("latest_reply"))
+                )
+            )
+            if is_parent:
+                threads.add(ts)
+            if not human or not ts or ts in seen or not _in_range(
+                ts, oldest=oldest, latest=latest
+            ):
                 continue
             seen.add(ts)
             found.append(Found(target.channel_id, ts, message))
@@ -228,7 +251,9 @@ def collect(
             for message in page.get("messages") or []:
                 ts = str(message.get("ts") or "")
                 human, _ = _is_human(message)
-                if not human or not ts or ts in seen:
+                if not human or not ts or ts in seen or not _in_range(
+                    ts, oldest=oldest, latest=latest
+                ):
                     continue
                 seen.add(ts)
                 found.append(Found(target.channel_id, ts, message, thread_ts=thread_ts))

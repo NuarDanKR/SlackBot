@@ -78,10 +78,29 @@ def test_an_unknown_mode_is_refused():
 
 # --- 관측 상태 -------------------------------------------------------------------
 
-def test_a_worker_cannot_report_running_while_switched_off():
-    """둘 중 하나가 거짓이다. 저장하면 화면이 「꺼져 있는데 수집 중」 을 보여 준다."""
-    with pytest.raises(TransitionRefused, match="끄기로"):
-        plan_observed_change(_runtime(desired_mode=DesiredMode.OFF), ObservedState.RUNNING)
+def test_switching_off_preserves_running_until_the_worker_stops():
+    """중지 요청과 실제 정지 사이의 차이를 저장해야 supervisor가 이를 해소할 수 있다."""
+    current = _runtime(
+        desired_mode=DesiredMode.SHADOW,
+        observed_state=ObservedState.RUNNING,
+    )
+
+    after = plan_desired_change(current, DesiredMode.OFF)
+
+    assert after.desired_mode is DesiredMode.OFF
+    assert after.observed_state is ObservedState.RUNNING
+    assert after.generation == current.generation + 1
+
+
+def test_running_observation_is_allowed_while_stop_is_pending():
+    current = _runtime(
+        desired_mode=DesiredMode.OFF,
+        observed_state=ObservedState.RUNNING,
+    )
+
+    after = plan_observed_change(current, ObservedState.RUNNING)
+
+    assert after.observed_state is ObservedState.RUNNING
 
 
 def test_a_switched_off_workspace_may_report_stopped():

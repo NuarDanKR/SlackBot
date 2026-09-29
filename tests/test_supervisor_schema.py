@@ -117,13 +117,10 @@ def test_the_states_are_closed_sets(sql):
     }
 
 
-def test_a_switched_off_workspace_cannot_be_running(sql):
-    """둘 중 하나가 거짓인 상태를 표가 허용하면 화면이 그걸 보여 준다."""
-    body = _constraint(sql, "archiver_runtime_off_is_not_running")
-
-    assert body
-    assert "desired_mode" in body and "'off'" in body
-    assert "observed_state" in body
+def test_switching_off_can_preserve_the_running_observation(sql):
+    """중지 요청 직후에는 off + running이 정상적인 과도 상태다."""
+    assert "DROP CONSTRAINT IF EXISTS archiver_runtime_off_is_not_running" in sql
+    assert "ADD CONSTRAINT archiver_runtime_off_is_not_running" not in sql
 
 
 def test_an_error_code_cannot_outlive_the_error(sql):
@@ -170,11 +167,22 @@ def test_counts_are_kept_apart(sql):
     ):
         assert _column(sql, "archive_backfill_job", column), column
 
+    body = _constraint(sql, "archive_backfill_job_counts_nonnegative")
+    assert body
+    for column in (
+        "found_count", "written_count", "duplicate_count", "refused_count",
+        "failed_count",
+    ):
+        assert f"{column} >= 0" in body
+
 
 def test_a_job_requires_a_person_and_a_reason(sql):
     """소급은 되돌릴 수 없다. 누가 왜 돌렸는지 없으면 나중에 범위를 못 정한다."""
     assert "requested_by  text NOT NULL" in sql
     assert "reason        text NOT NULL" in sql
+    body = _constraint(sql, "archive_backfill_job_request_nonempty")
+    assert "btrim(requested_by) <> ''" in body
+    assert "btrim(reason) <> ''" in body
 
 
 def test_a_finished_job_has_a_finish_time(sql):
@@ -204,6 +212,15 @@ def test_the_archiver_cannot_write_its_own_desired_mode(sql):
     columns = grant.group(1)
     assert "desired_mode" not in columns
     assert "observed_state" in columns and "heartbeat_at" in columns
+
+
+def test_the_archiver_cannot_rewrite_cursor_or_job_identity(sql):
+    flat = re.sub(r"'\s*'", "", " ".join(sql.split()))
+    cursor = re.search(r"GRANT UPDATE \(([^)]*)\) ON TABLE archive_channel_cursor", flat)
+    job = re.search(r"GRANT UPDATE \(([^)]*)\) ON TABLE archive_backfill_job", flat)
+
+    assert cursor and "workspace" not in cursor.group(1) and "channel_id" not in cursor.group(1)
+    assert job and "workspace" not in job.group(1) and "requested_by" not in job.group(1)
 
 
 def test_nobody_can_delete_the_records(sql):

@@ -114,6 +114,38 @@ def test_thread_replies_are_pulled_in():
     assert found[1].thread_ts == "100.000100"
 
 
+def test_a_real_history_parent_with_reply_count_loads_the_thread():
+    """Slack history의 부모는 thread_ts 없이 reply_count만 주는 경우가 일반적이다."""
+    slack = FakeSlack(
+        [_page([_msg("100.000100", reply_count=1, latest_reply="100.000200")])],
+        replies={"100.000100": {"messages": [
+            _msg("100.000100"),
+            _msg("100.000200", "스레드 답글", thread_ts="100.000100"),
+        ]}},
+    )
+
+    found, _ = backfill.collect(slack, _target(), sleeper=_sleep)
+
+    assert [item.ts for item in found] == ["100.000100", "100.000200"]
+
+
+def test_thread_replies_outside_the_requested_range_are_not_written():
+    slack = FakeSlack(
+        [_page([_msg("100.000100", reply_count=2)])],
+        replies={"100.000100": {"messages": [
+            _msg("100.000100"),
+            _msg("150.000000", "범위 안", thread_ts="100.000100"),
+            _msg("250.000000", "범위 밖", thread_ts="100.000100"),
+        ]}},
+    )
+
+    found, _ = backfill.collect(
+        slack, _target(), latest="200.000000", sleeper=_sleep
+    )
+
+    assert [item.ts for item in found] == ["100.000100", "150.000000"]
+
+
 def test_a_reply_is_not_counted_twice():
     """`replies` 는 부모도 함께 준다. 두 번 세면 건수가 부풀고 dedupe 를 믿게 된다."""
     slack = FakeSlack(

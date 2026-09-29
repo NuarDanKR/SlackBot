@@ -686,6 +686,39 @@ def test_the_console_role_cannot_delete_connection_rows(conn):
 
 
 @needs_db
+def test_archiver_can_update_progress_but_not_control_coordinates(conn):
+    """Archiver는 진행 상황만 쓰고 desired·좌표·요청자는 고치지 못한다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    checks = (
+        ("archiver_workspace_runtime", "observed_state", True),
+        ("archiver_workspace_runtime", "desired_mode", False),
+        ("archive_channel_cursor", "last_history_ts", True),
+        ("archive_channel_cursor", "workspace", False),
+        ("archive_channel_cursor", "channel_id", False),
+        ("archive_backfill_job", "state", True),
+        ("archive_backfill_job", "requested_by", False),
+        ("archive_backfill_job", "reason", False),
+    )
+    with conn.cursor() as cur:
+        for table in (
+            "archiver_workspace_runtime", "archive_channel_cursor", "archive_backfill_job",
+        ):
+            cur.execute(
+                "SELECT has_table_privilege('tybot_archiver', %s, 'UPDATE')",
+                (table,),
+            )
+            assert cur.fetchone()[0] is False, f"{table} 에 표 단위 UPDATE 가 남아 있다"
+        for table, column, expected in checks:
+            cur.execute(
+                "SELECT has_column_privilege('tybot_archiver', %s, %s, 'UPDATE')",
+                (table, column),
+            )
+            assert cur.fetchone()[0] is expected, f"{table}.{column} UPDATE 권한이 틀렸다"
+
+
+@needs_db
 def test_removing_an_assignment_disables_its_route(conn):
     """재배정 때 과거 `active` 가 되살아나면, 켠 적 없는 봇이 답하기 시작한다."""
     from tybot.console.specialist_store import disable_routes_outside

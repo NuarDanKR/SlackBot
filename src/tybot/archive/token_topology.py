@@ -94,14 +94,16 @@ def survey(connections: list[Connection]) -> Topology:
     missing: list[str] = []
 
     for item in connections:
+        # Bot Token 중복은 App Token 유무와 무관한 설치 오류다. App Token 이
+        # 비었다고 먼저 건너뛰면 가장 위험한 교차-workspace 오설정을 놓친다.
+        bot_mark = fingerprint(item.bot_token)
+        if bot_mark:
+            by_bot.setdefault(bot_mark, []).append(item.workspace)
         app_mark = fingerprint(item.app_token)
         if not app_mark:
             missing.append(item.workspace)
             continue
         by_app.setdefault(app_mark, []).append(item.workspace)
-        bot_mark = fingerprint(item.bot_token)
-        if bot_mark:
-            by_bot.setdefault(bot_mark, []).append(item.workspace)
 
     groups = [
         SocketGroup(index=order, workspaces=sorted(workspaces))
