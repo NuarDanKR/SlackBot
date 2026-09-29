@@ -126,6 +126,15 @@ def shadow_archive_dir(env: dict[str, str] | None = None) -> Path:
     live = Path(live_supplied).resolve()
     if shadow == live or shadow in live.parents or live in shadow.parents:
         raise ArchiverConfigError("shadow and live archive paths must not overlap")
+    # 첨부 정본은 archive 의 **형제**에 쌓인다(`files.attachment_storage` — objects/,
+    # staging/). 그래서 두 archive 가 겹치지 않아도 부모가 같으면 shadow 첨부가 운영
+    # objects/ 안으로 들어간다. 경로가 다르니 오류가 나지 않고, 나중에 어느 것이
+    # shadow 였는지 구분할 수 없다.
+    if shadow.parent == live.parent:
+        raise ArchiverConfigError(
+            "shadow and live archives must not share a parent directory;"
+            " attachment objects/ and staging/ are siblings of the archive dir"
+        )
     return shadow
 
 

@@ -117,3 +117,27 @@ PF 자료 Git의 **full commit SHA**를 고정하고 회사가 승인한
 `revision_reader_ready`와 `attachment_reader_ready`가 실제 검색 회귀시험으로
 확인되고, Canvas, Hermes의 Slack 검토 DM, TYBot→Node Hermes v3 도구 호출이
 통과하기 전에는 운영 수집이나 변환 기능을 TYBot에서 끄지 않는다.
+
+## 공통 shadow root 로 모으기
+
+파일럿은 워크스페이스마다 root 를 따로 뒀다(`.../archiver-shadow/tyit/archive`).
+단일 supervisor 는 root 하나만 읽으므로, 전환 전에 공통 root 아래로 모은다. 설계는
+[Archiver 단일 Supervisor 작업지시서](../design/archiver-supervisor-backfill-console-2026-09-29.md) §5.
+
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/migrate_shadow_root.py \
+    --source tyit=/var/lib/tybot/archiver-shadow/tyit \
+    --source mgmt=/var/lib/tybot/archiver-shadow/mgmt \
+    --destination /var/lib/tybot/archiver-shadow \
+    --live-archive /var/lib/tybot/archive
+```
+
+`--apply` 없이 실행하면 **아무것도 바꾸지 않고** 계획만 낸다. 복사 건수, 이미 같은
+건수, 내용이 다른 건수와 거부 사유를 먼저 읽는다. `--apply` 를 붙여도 원본은 지우지
+않는다 — 검증 기간 동안 옛 root 를 읽기 전용으로 남긴다.
+
+전환 뒤 supervisor 의 `ARCHIVER_SHADOW_DIR` 은 `/var/lib/tybot/archiver-shadow/archive`
+다. `archiver-shadow` 자체를 주지 않는다. 첨부 정본은 archive 의 **형제**(`objects/`,
+`staging/`)에 쌓이므로, root 를 `/var/lib/tybot/archiver-shadow` 로 주면 첨부가 그
+디렉터리 밖 `/var/lib/tybot/objects` 로 나가 운영 첨부와 섞인다. 같은 이유로
+`shadow_archive_dir()` 이 운영 archive 와 부모가 같은 shadow root 를 거절한다.
