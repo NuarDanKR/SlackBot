@@ -50,6 +50,7 @@ from ..archive.files import (
     stage_attachments,
 )
 from ..archive.store import ArchiveStore
+from ..archive.write_owner import OwnerLookup
 from ..archive.writer import KST
 from ..attachment_trace import confirm_archived
 from ..audit import QALog, QARecord
@@ -471,7 +472,26 @@ class WorkspaceBot:
             heartbeat.state_dir() / "channel-owners.json"
         )
         self.path_problems: dict[str, str] = {}
+        # 이 채널의 운영 원문을 지금 내가 써도 되나(`_write_owner`).
+        self._owner_lookup: OwnerLookup | None = None
         self._register()
+
+    def _write_owner(self) -> OwnerLookup:
+        """이 채널의 운영 원문을 써도 되나를 묻는 자리. **한 봇에 하나.**
+
+        인수한 채널에서는 Archiving Bot 이 쓰므로 Master 는 손을 뗀다 — 둘이 같이
+        쓰면 줄이 섞이고 `doc_count` 갱신이 유실된다
+        (설계 `docs/design/master-collection-handover.md`).
+
+        처음 물을 때 만든다. 기동 시점에 DB 가 없어도 봇은 떠야 하고, 판정은
+        그때그때 표를 읽어 캐시한다.
+        """
+        # `getattr` 인 이유: 이 봇은 시험에서 `__new__` 로도 만들어진다. 없는
+        # 속성으로 터지면 수집 경로가 **판정 전에** 죽고, 그건 이 문지기가 막으려던
+        # 것보다 나쁘다.
+        if getattr(self, "_owner_lookup", None) is None:
+            self._owner_lookup = OwnerLookup(self.workspace)
+        return self._owner_lookup
 
     # --- Slack 조회 헬퍼 ---------------------------------------------------
     def _user_name(self, client, user_id: str) -> str:
@@ -3239,9 +3259,17 @@ class WorkspaceBot:
 
     def _ingest_live(self, client, event) -> None:
         """실시간 원문 append. 실패해도 봇은 계속 살아 있어야 한다."""
-        channel = self._channel_name(client, event.get("channel", ""))
+        channel_id = event.get("channel", "")
+        channel = self._channel_name(client, channel_id)
         if not should_collect(channel):
             log.debug("채널 규칙 밖이라 실시간 수집 생략 ch=%s", channel)
+            return
+        verdict = self._write_owner().master_may_write(channel_id)
+        if not verdict:
+            # **인수된 채널이다.** 여기서 계속 쓰면 같은 대화가 두 봇의 손으로
+            # 두 번 들어간다. 답변·실시간 조회는 그대로다 — 막는 것은 쓰기뿐이다.
+            log.info("인수된 채널이라 Master 는 쓰지 않는다 ch=%s: %s",
+                     channel, verdict.reason)
             return
         msgs = self._messages_from(client, event)
         if not msgs:
@@ -3291,6 +3319,14 @@ class WorkspaceBot:
         channel = self._channel_name(client, channel_id)
         if not should_collect(channel):
             return f"{channel}: 채널 이름이 수집 규칙과 달라 건너뛰었습니다."
+        verdict = self._write_owner().master_may_write(channel_id)
+        if not verdict:
+            # 사람이 직접 시킨 취합이라 **조용히 넘어가지 않는다.** 왜 안 했는지
+            # 말해 주지 않으면 사람은 봇이 고장난 줄 안다.
+            return (
+                f"{channel}: 이 채널의 운영 원문은 Archiving Bot 이 씁니다."
+                f" Master 취합은 하지 않습니다 — {verdict.reason}"
+            )
         try:
             res = client.conversations_history(channel=channel_id, limit=HISTORY_LIMIT)
         except Exception as e:

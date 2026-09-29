@@ -34,6 +34,7 @@ from .archive.files import (
     stage_attachments,
 )
 from .archive.store import ArchiveStore
+from .archive.write_owner import OwnerLookup
 from .attachment_trace import confirm_archived
 from .channels import should_collect
 from .envfile import load_env_file
@@ -108,8 +109,14 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
     from slack_sdk import WebClient
 
     client = WebClient(token=cfg.bot_token)
-    stats = {"channels": 0, "written": 0, "skipped": 0, "skipped_rule": 0, "failed": 0}
+    stats = {
+        "channels": 0, "written": 0, "skipped": 0, "skipped_rule": 0,
+        # 인수돼서 Master 가 손을 뗀 채널. 규칙 밖(`skipped_rule`)과 나눠 센다 —
+        # 합치면 「왜 이 채널이 안 들어오나」 를 로그로 구분할 수 없다.
+        "skipped_owner": 0, "failed": 0,
+    }
     name_cache: dict[str, str] = {}
+    owner = OwnerLookup(cfg.key)
 
     try:
         channels = []
@@ -140,6 +147,13 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
 
     for i, ch in enumerate(channels):
         name = "#" + ch["name"]
+        verdict = owner.master_may_write(ch["id"])
+        if not verdict:
+            # 인수된 채널은 Archiving Bot 이 쓴다. 정시 잡이 계속 메우면 인수
+            # 이후 구간을 두 봇이 쓰게 된다.
+            log.info("[%s] %s 인수된 채널이라 건너뛴다: %s", cfg.key, name, verdict.reason)
+            stats["skipped_owner"] += 1
+            continue
         storage = attachment_storage(archive_dir, cfg.key, ch["id"])
         if i:
             time.sleep(pace)  # 분당 1요청 페이싱
