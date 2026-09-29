@@ -52,6 +52,7 @@ from . import (
     specialist_store,
     specialist_zip,
     summary_review_store,
+    supervisor_admin,
     timer_manager,
     workspace_service_identity,
     workspace_service_store,
@@ -2314,6 +2315,127 @@ def put_retention(key: str, body: RetentionBody, request: Request, user: User) -
         outcome="succeeded", metadata={"days": body.days},
     )
     return archiving_admin.workspace_detail(workspace)
+
+
+# ---------------------------------------------------------------------------
+# Archiver supervisor 운영 — 희망 상태와 소급 수집
+#
+# 여기서 프로세스를 멈추거나 Slack 을 읽지 않는다. 콘솔이 하는 일은 **적는 것**이고,
+# supervisor 가 그것을 읽어 움직인다(작업지시서 §3.1·§8).
+# ---------------------------------------------------------------------------
+
+class ArchiverDesiredBody(BaseModel):
+    mode: Literal["off", "shadow", "live"]
+    reason: str = Field(min_length=1)
+
+
+class BackfillRequestBody(BaseModel):
+    channelId: str = ""
+    fromTs: str = ""
+    toTs: str = ""
+    dryRun: bool = True
+    reason: str = Field(min_length=1)
+
+
+class BackfillCancelBody(BaseModel):
+    reason: str = Field(min_length=1)
+
+
+@app.get("/api/workspaces/{key}/archiver/runtime")
+def get_archiver_runtime(key: str, user: User) -> dict:
+    """희망 상태·관측 상태·cursor·최근 소급 작업을 **한 번에** 준다."""
+    _require_admin(user)
+    try:
+        return supervisor_admin.runtime_detail(key.strip().lower())
+    except workspace_store.WorkspaceStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.put("/api/workspaces/{key}/archiver/desired")
+def put_archiver_desired(
+    key: str, body: ArchiverDesiredBody, request: Request, user: User,
+) -> dict:
+    """수집 희망 상태를 적는다. **프로세스는 여기서 멈추지 않는다.**
+
+    응답의 `runtimeEffect` 를 화면이 그대로 보여 준다. 「적용됐다」 로 보이면 사람은
+    확인하지 않고 떠나고, 안 멈춘 worker 를 아무도 안 본다.
+    """
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    try:
+        detail = supervisor_admin.set_desired_mode(
+            workspace, body.mode,
+            supervisor_admin.Actor(user.email, body.reason),
+        )
+    except supervisor_admin.AdminRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except workspace_store.WorkspaceStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="workspace", action="archiver_desired_mode",
+        target_type="workspace", target_id=workspace, workspace=workspace,
+        outcome="succeeded", metadata={"mode": body.mode, "reason": body.reason},
+    )
+    return detail
+
+
+@app.post("/api/workspaces/{key}/archiver/backfill")
+def post_archiver_backfill(
+    key: str, body: BackfillRequestBody, request: Request, user: User,
+) -> dict:
+    """소급 수집을 줄 세운다. 실제 수집은 supervisor 가 한다.
+
+    미리보기(`dryRun`)가 먼저다. 세어 보지 않고 걸면 분량을 모른 채 rate limit 에
+    걸리고, 중간에 멈춘 것과 다 된 것을 구분할 수 없다.
+    """
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    try:
+        result = supervisor_admin.request_backfill(
+            workspace, supervisor_admin.Actor(user.email, body.reason),
+            channel_id=body.channelId, from_ts=body.fromTs, to_ts=body.toTs,
+            dry_run=body.dryRun,
+        )
+    except supervisor_admin.AdminRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except workspace_store.WorkspaceStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="workspace", action="archiver_backfill",
+        target_type="channel", target_id=body.channelId or "(전체)",
+        workspace=workspace, outcome="succeeded",
+        metadata={
+            "dryRun": body.dryRun, "fromTs": body.fromTs, "toTs": body.toTs,
+            "reason": body.reason,
+        },
+    )
+    return result
+
+
+@app.put("/api/workspaces/{key}/archiver/backfill/{job_id}/cancel")
+def put_archiver_backfill_cancel(
+    key: str, job_id: int, body: BackfillCancelBody, request: Request, user: User,
+) -> dict:
+    """아직 시작하지 않은 요청만 거둔다."""
+    _require_admin(user)
+    _check_write_request(request)
+    workspace = key.strip().lower()
+    try:
+        detail = supervisor_admin.cancel_backfill(
+            workspace, job_id, supervisor_admin.Actor(user.email, body.reason),
+        )
+    except supervisor_admin.AdminRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except workspace_store.WorkspaceStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    _audit_event(
+        actor=user.email, category="workspace", action="archiver_backfill_cancel",
+        target_type="job", target_id=str(job_id), workspace=workspace,
+        outcome="succeeded", metadata={"reason": body.reason},
+    )
+    return detail
 
 
 # ---------------------------------------------------------------------------
