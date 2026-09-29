@@ -14,6 +14,9 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY=python3.11
 INSTALL_DOCUMENT_CONVERTERS=${INSTALL_DOCUMENT_CONVERTERS:-1}
 KORDOC_VERSION=4.12.0
+# 콘솔 화면(console-web)은 별도 저장소다. 서버에서는 이 체크아웃을 읽는다.
+# 비어 있으면 아래 resolve_console_web_src 가 순서대로 찾는다.
+CONSOLE_WEB_SRC=${CONSOLE_WEB_SRC:-}
 
 # 배포를 끊지 않고 **끝에서** 알릴 실패들. 부가 기능이 없다고 서비스 재시작까지
 # 막으면, 고치려고 누른 배포가 오히려 서비스를 세운다.
@@ -110,7 +113,9 @@ mkdir -p "$APP_DIR" "$CONF_DIR" "$DATA_DIR"/{archive,cache,qa-log,reports}
 # 여기를 통째로 tybot 소유로 바꾸면 **다음 배포가 막힌다** — git 은 root 가 남의 소유
 # 저장소에서 도는 것을 `dubious ownership` 으로 거부한다. 그 방어에는 이유가 있어서
 # (저장소의 hook 이 root 로 실행된다) 예외를 두는 대신 소유를 나눈다.
-find "$DATA_DIR" -mindepth 1 -maxdepth 1 ! -name src -exec chown -R tybot:tybot {} +
+# console-web-src(콘솔 화면 저장소 체크아웃)도 같은 이유로 root 소유를 유지한다.
+find "$DATA_DIR" -mindepth 1 -maxdepth 1 ! -name src ! -name console-web-src \
+  -exec chown -R tybot:tybot {} +
 chown tybot:tybot "$DATA_DIR"
 chmod 750 "$DATA_DIR"
 
@@ -142,13 +147,17 @@ echo "== 3/6 코드 배치 =="
 TREE_EXCLUDES=(
   --exclude=./.git --exclude=./.venv --exclude=./.env --exclude=./archive
   --exclude=./wheels
-  --exclude=./console-web/node_modules --exclude=./console-web/dist
+  # console-web 은 별도 저장소다. 여기서 복사하지도, 목적지에서 지우지도 않는다.
+  # 이 줄이 없으면 SlackBot 에서 console-web 을 뺀 순간 아래 정리 루프가
+  # /opt/tybot/console-web 의 소스를 「사라진 파일」 로 보고 전부 지운다.
+  # 배치는 콘솔 단계의 sync_console_web 이 따로 한다.
+  --exclude=./console-web
   --exclude=__pycache__ --exclude=.pytest_cache --exclude='*.egg-info'
 )
 # 목적지에만 있고 지우면 안 되는 것. 소스에 없다고 지우면 배포가 자기 발을 밟는다.
-# (.venv 는 파이썬 환경, console-web/dist 는 서버에서 빌드한 화면,
-#  .deployed-commit 은 무엇이 배포됐는지 남긴 기록)
-KEEP_IN_DEST=("${TREE_EXCLUDES[@]}" --exclude=./.deployed-commit)
+# (.venv 는 파이썬 환경, console-web 은 별도 저장소에서 배치한 화면,
+#  .deployed-commit·.deployed-console-commit 은 무엇이 배포됐는지 남긴 기록)
+KEEP_IN_DEST=("${TREE_EXCLUDES[@]}" --exclude=./.deployed-commit --exclude=./.deployed-console-commit)
 
 if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   # 소유·권한은 가져오지 않는다 — 5단계에서 직접 설정한다.
@@ -296,6 +305,65 @@ fi
 # 관리 콘솔은 선택 설치다. `-e . --no-deps` 는 extras 를 건너뛰므로 따로 깐다.
 # 이걸 빼먹으면 콘솔이 ModuleNotFoundError 로 기동하지 않고, 배포 테스트도 실패한다.
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
+
+  # --- 콘솔 화면 소스 배치 ---
+  # console-web 은 별도 저장소다. 찾는 순서:
+  #   1. CONSOLE_WEB_SRC 환경변수
+  #   2. $DATA_DIR/console-web-src   (서버 표준 위치. update.sh 가 fetch 한다)
+  #   3. $SRC_DIR/console-web         (분리 전 · 전환 기간)
+  # 빌드 위치($APP_DIR/console-web)는 바꾸지 않는다. CONSOLE_DIST·PF 콘솔 경로와
+  # 권한 설정이 모두 그 경로를 전제로 하므로, 옮기면 기존 서버의 tybot.env 까지
+  # 고쳐야 한다.
+  resolve_console_web_src() {
+    local c
+    for c in "$CONSOLE_WEB_SRC" "$DATA_DIR/console-web-src" "$SRC_DIR/console-web"; do
+      [[ -n "$c" && -f "$c/package.json" ]] && { echo "$c"; return 0; }
+    done
+    return 1
+  }
+
+  sync_console_web() {
+    local src dst src_list dst_list stale rel
+    dst="$APP_DIR/console-web"
+    if ! src=$(resolve_console_web_src); then
+      echo "  ! 콘솔 화면 소스를 찾지 못했습니다."
+      echo "    sudo git clone <console-web 저장소 URL> $DATA_DIR/console-web-src"
+      echo "    sudo chown -R root:root $DATA_DIR/console-web-src"
+      return 1
+    fi
+    echo "  화면 소스: $src"
+    if [[ "$(realpath -m "$src")" == "$(realpath -m "$dst")" ]]; then
+      return 0
+    fi
+    # 빌드 산출물·의존성은 목적지에만 있다. 지우면 매 배포가 npm ci 를 처음부터 한다.
+    local excludes=(
+      --exclude=./.git --exclude=./node_modules
+      --exclude=./dist --exclude=./dist-pf --exclude=./tsconfig.tsbuildinfo
+    )
+    # `if ! sync_console_web` 안에서는 set -e 가 꺼진다. 실패를 직접 돌려준다.
+    mkdir -p "$dst" || return 1
+    tar -cf - -C "$src" "${excludes[@]}" . \
+      | tar -xf - -C "$dst" --no-same-owner --no-same-permissions || return 1
+
+    # 소스에서 지운 화면 파일이 남으면 빌드에 섞인다(3/6 단계와 같은 이유).
+    src_list=$(mktemp)
+    dst_list=$(mktemp)
+    tar -cf /dev/null -v -C "$src" "${excludes[@]}" . 2>/dev/null | sed 's:/$::' | sort > "$src_list"
+    tar -cf /dev/null -v -C "$dst" "${excludes[@]}" . 2>/dev/null | sed 's:/$::' | sort > "$dst_list"
+    stale=0
+    while IFS= read -r rel; do
+      [[ -f "$dst/$rel" ]] || continue
+      rm -f "$dst/$rel"
+      stale=$((stale + 1))
+    done < <(comm -13 "$src_list" "$dst_list")
+    rm -f "$src_list" "$dst_list"
+    if [[ $stale -gt 0 ]]; then echo "  화면 소스에서 사라진 파일 ${stale}건 정리"; fi
+  }
+
+  if ! sync_console_web; then
+    echo "  ! 콘솔 화면 소스 배치 실패 — 이전 화면으로 성공 처리하지 않습니다."
+    exit 1
+  fi
 
   # --- 콘솔 화면 빌드 ---
   # 콘솔이 설치된 서버에서 빌드 실패를 무시하면 이전 dist 가 그대로 남는데도

@@ -18,9 +18,11 @@ import re
 from pathlib import Path
 
 import pytest
+from console_web_path import console_src_or_skip
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB = ROOT / "console-web" / "src"
+# console-web 은 별도 저장소다. 못 찾으면 모듈 전체를 skip(배포 게이트에서는 실패).
+WEB = console_src_or_skip()
 MODES = WEB / "botModes.ts"
 APP = WEB / "App.tsx"
 
