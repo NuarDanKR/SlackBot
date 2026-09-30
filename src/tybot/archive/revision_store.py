@@ -45,6 +45,10 @@ def record_revision(
             and str(latest["body_sha256"] or "") == digest
         ):
             return int(latest["revision_no"])
+        if latest and kind == "create":
+            if str(latest["kind"]) in ("create", "change") and str(latest["body_sha256"] or "") == digest:
+                return int(latest["revision_no"])
+            raise ValueError("existing archive revision conflicts with Slack create snapshot")
 
         next_no = int(latest["revision_no"]) + 1 if latest else 1
         if latest is None and kind != "create":

@@ -25,7 +25,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/tybot/archiver-shadow
+ReadWritePaths=/var/lib/tybot/archiver-shadow /var/lib/tybot/state/ingest-ack-outbox
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 # Deliberately no [Install]: start only after app/token and shadow path review.

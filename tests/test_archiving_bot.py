@@ -6,6 +6,19 @@ from fake_archiving_repo import FakeArchivingRepo
 from tybot import archiving_bot
 
 
+def test_shadow_unit_can_replay_ack_outbox_without_live_archive_write_access():
+    unit = (Path(__file__).resolve().parents[1] / "deploy" /
+            "tybot-archiving-shadow@.service").read_text(encoding="utf-8")
+    writable = next(
+        line.removeprefix("ReadWritePaths=").split()
+        for line in unit.splitlines() if line.startswith("ReadWritePaths=")
+    )
+    assert set(writable) == {
+        "/var/lib/tybot/archiver-shadow",
+        "/var/lib/tybot/state/ingest-ack-outbox",
+    }
+
+
 def _env(tmp_path: Path) -> dict[str, str]:
     return {
         "ARCHIVER_CONFIG_SOURCE": "env",
