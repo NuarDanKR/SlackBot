@@ -36,20 +36,51 @@ Master 가 손을 뗀다.
 
 ## 2. 문지기를 어디에 뒀나
 
-`src/tybot/archive/write_owner.py` 하나가 판정하고, Master 의 운영 원문 쓰기
-자리 셋이 그것을 지난다.
+`src/tybot/archive/write_owner.py` 하나가 판정한다. 운영 원문에 쓰는 경로를 전수
+조사해 셋으로 나눴고, 그 목록을 `tests/test_write_paths_inventory.py` 가 든다.
+새 `writer.ingest` 호출부가 생기면 그 시험이 깨지고, 깨진 사람이 분류해야 한다.
+
+### 2.1 문지기를 지나는 곳 — Slack 에서 **새 대화**를 가져온다
 
 | 자리 | 언제 | 인수된 채널에서 |
 |---|---|---|
-| `slack/pilot.py` `WorkspaceBot._ingest_live` | 실시간 이벤트 | 조용히 건너뛴다(로그만) |
-| `slack/pilot.py` `WorkspaceBot._ingest_channel` | 사람이 시킨 취합 | **왜 안 했는지 말한다** |
+| `slack/pilot.py` `_ingest_live` | 실시간 이벤트 | 조용히 건너뛴다(로그만) |
+| `slack/pilot.py` `_ingest_channel` | 사람이 시킨 취합 | **왜 안 했는지 말한다** |
 | `collect.py` `collect_workspace` | 정시 잡 | 건너뛰고 `skipped_owner` 로 센다 |
+| `scripts/backfill_channel_history.py` `backfill_channel` | 운영자 소급 | 건너뛰고 `refused_owner` 로 센다 |
+| `scripts/sync_channel_files.py` `sync_workspace` | 운영자 파일 동기화 | 건너뛰고 사유를 찍는다 |
 
-사람이 직접 시킨 취합만 말로 답하는 이유: 조용히 넘어가면 사람은 봇이 고장난
-줄 알고 다시 누른다. 실시간은 초당 여러 건이라 말하면 채널이 시끄러워진다.
+봇만 막으면 스크립트로 같은 채널에 쓸 수 있다. **그 둘은 같은 아카이브다.**
 
-DM 수집(`_ingest_dm`)은 이 판정을 지나지 않는다. DM 은 그 사람 한 명의 기록이고
-Archiving Bot 이 손대는 영역이 아니다.
+사람이 직접 시킨 것(취합·스크립트)만 말로 답하는 이유: 조용히 넘어가면 사람은
+봇이 고장난 줄 알고 다시 누른다. 실시간은 초당 여러 건이라 말하면 시끄러워진다.
+
+### 2.2 문지기를 안 지나는 곳 — 이미 있는 줄을 채운다
+
+`scripts/convert_staged_attachments.py` · `scripts/drain_conversion_queue.py`
+
+원본 바이트는 이미 `objects/` 에 있고 **Slack 을 부르지 않는다**(시험이 고정한다).
+하는 일은 이미 아카이브에 있는 첨부 줄에 변환 텍스트를 채우는 것이다.
+
+여기를 막으면 인수 **전**에 들어온 첨부가 영영 변환 안 된 채 남는다. 그건 중복이
+아니라 누락이고, 누락 쪽이 나쁘다. 변환 워커는 어느 봇의 소유도 아니다 —
+`tybot-convert` 라는 별도 서비스 계정으로 돈다.
+
+### 2.3 소유권 밖
+
+- `archiving_bot.py` — Archiver 는 자기 root(shadow)에 쓴다. 운영 경로를 열 때는
+  `write_owner.archiver_may_write_live()` 를 지나야 한다(**아직 안 열렸다**)
+- `archive/migrate.py` — v1 → v2 이행. 채널이 아니라 아카이브 전체를 옮긴다
+- `scripts/archive_layout_bench.py` — 실측. 임시 경로에만 쓴다
+- `slack/pilot.py` `_ingest_dm` — DM 은 그 사람 한 명의 기록이고 Archiver 가 손대는
+  영역이 아니다
+
+### 2.4 답변·조회는 그대로다
+
+인수는 **누가 쓰나**를 정할 뿐 누가 읽나를 정하지 않는다. 답변·실시간 Slack 조회·
+검색은 이 판정을 부르지 않고, 읽기 권한은 `access.RequestContext` 가 본다
+(절대 원칙 3). `test_master_handover.py` 가 답변 경로에 `write_owner` 가 들어오지
+않는 것을 고정한다.
 
 ## 3. 둘이 동시에 쓰지 않는 이유
 
@@ -180,11 +211,35 @@ Slack 에만 있다.
 `P` 를 못 읽으면 `backfill_window()` 는 범위를 **좁히지 않고** 빈 값 둘을 돌려준다
 (= 채널 전체). 좁은 범위로 「메웠다」 고 말하는 것이 못 메운 것보다 나쁘다.
 
-### 5.6 되돌리기
+### 5.6 되돌리기 — **두 단계다**
 
-문제가 있으면 그 채널만 `active → shadow` 로 내린다. 역인수에도 **새 좌표가 필요**
-하다 — 좌표 없이 소유권만 바꾸면 그 경계에서 중복·누락이 생긴다
-(`plan_mode_change` 가 거절한다). 되돌린 구간도 같은 방식으로 소급해 메운다.
+`_MODE_EDGES` 에 `active → shadow` 가 **없다.** 한 번에 넘기면 멈추지 않은 채 주인이
+바뀌고, 그건 인수할 때와 똑같은 겹침이다. 길은 하나뿐이다.
+
+```text
+active ──(좌표 불필요)──▶ paused ──(새 좌표 필요)──▶ shadow
+```
+
+1. **먼저 멈춘다**(`active → paused`). 좌표가 필요 없다 — 급할 때 좌표를 정하느라
+   못 멈추면 안 된다. 이 순간 양쪽 다 운영 원문에 안 쓴다
+2. **그다음 넘긴다**(`paused → shadow`). 여기서 **새 역인수 좌표**를 받는다. 좌표
+   없이 소유권만 바꾸면 그 경계에서 중복·누락이 생기고, 기존 인수 좌표보다 앞선
+   좌표도 거절된다(이미 넘긴 구간을 다시 넘기게 된다)
+3. 멈춘 구간은 §5.4-7 과 같은 방식으로 소급해 메운다
+4. 되돌린 채널은 **처음부터 다시 간다.** `handover.plan()` 이 다시 `pause` 부터
+   답한다 — `active` 로 바로 돌아가는 길은 없다
+
+`paused` 는 이전 주인(`archiver`)과 인수 좌표를 **기억한다.** 잊으면 재개할 때 어느
+모드로 갈지 판정할 수 없다.
+
+### 5.7 되돌려도 안 되돌아가는 것
+
+롤백은 **앞으로 누가 쓰나**만 되돌린다. 인수된 동안 Archiver 가 운영 원문에 쓴 줄은
+그대로 남는다. 지우려면 그 범위를 알아야 하고, 그래서 `cutover_ts` 를 기록한다(§4).
+
+지운다는 결정은 사람이 한다. 코드가 자동으로 지우지 않는다 — 원문을 지우는 일은
+되돌릴 수 없고, 롤백의 이유가 「Archiver 가 잘못 썼다」 가 아니라 「속도가 안 난다」
+일 수도 있다.
 
 ## 6. 이번 단계에서 하지 않은 것
 

@@ -32,6 +32,7 @@ from tybot.archive.channel_files import (
 )
 from tybot.archive.files import attachment_storage, staged_line_time
 from tybot.archive.store import ArchiveStore
+from tybot.archive.write_owner import OwnerLookup
 from tybot.attachment_trace import confirm_archived
 from tybot.channels import should_collect
 from tybot.collect import HISTORY_LIMIT, PACE_SECONDS, _messages_from
@@ -145,6 +146,9 @@ class BackfillStats:
     written: int = 0
     files: int = 0
     failures: int = 0
+    #: 인수돼서 Master 가 손을 뗀 채널 수. 실패와 나눠 센다 — 합치면 「소급이 안
+    #: 됐다」 와 「소급할 자리가 아니다」 를 로그로 구분할 수 없다.
+    refused_owner: int = 0
     changed_paths: set[pathlib.Path] = field(default_factory=set)
 
 
@@ -333,11 +337,22 @@ def backfill_channel(
     pace: float,
     max_pages: int = 0,
     pacer: ApiPacer | None = None,
+    owner: OwnerLookup | None = None,
 ) -> BackfillStats:
     from slack_sdk import WebClient
 
     client = WebClient(token=cfg.bot_token)
     channel_id = str(channel["id"])
+    # 인수된 채널에는 Master 가 쓰지 않는다. 이 스크립트는 **새 대화를 Slack 에서
+    # 가져와** 운영 원문에 넣으므로, 막지 않으면 Archiver 가 쓰는 채널에 같은
+    # 대화가 두 번 들어간다(설계 master-collection-handover.md §2).
+    verdict = (owner or OwnerLookup(cfg.key)).master_may_write(channel_id)
+    if not verdict:
+        log.info("[%s] %s 인수된 채널이라 소급하지 않는다: %s",
+                 cfg.key, channel.get("name") or channel_id, verdict.reason)
+        stats = BackfillStats()
+        stats.refused_owner = 1
+        return stats
     state = checkpoints.get(cfg.key, channel_id)
     stats = BackfillStats()
     pacer = pacer or ApiPacer(pace)

@@ -218,3 +218,114 @@ def test_reading_paths_do_not_ask_who_owns_the_writer():
         source = (root / name).read_text(encoding="utf-8")
         assert "write_owner" not in source, name
         assert "master_may_write" not in source, name
+
+
+# --- 운영자 스크립트도 같은 문지기를 지난다 ----------------------------------------
+#
+# 봇만 막으면 스크립트로 같은 채널에 쓸 수 있다. 그 둘은 같은 아카이브다.
+
+@pytest.fixture
+def scripts_path():
+    import sys
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent.parent / "scripts"
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    return root
+
+
+def _no_slack(monkeypatch):
+    """Slack 을 부르면 즉시 터지게 한다. 문지기가 **호출 전에** 서야 한다."""
+    class Exploding:
+        def __init__(self, token=None, **_kw):
+            pass
+
+        def __getattr__(self, name):
+            raise AssertionError(f"인수된 채널인데 Slack 을 불렀다: {name}")
+
+    monkeypatch.setattr("slack_sdk.WebClient", Exploding)
+
+
+def test_the_history_backfill_script_skips_a_handed_over_channel(
+    tmp_path, monkeypatch, scripts_path,
+):
+    """이 스크립트는 새 대화를 Slack 에서 가져와 운영 원문에 넣는다."""
+    import backfill_channel_history as script
+
+    _no_slack(monkeypatch)
+    checkpoints = script.Checkpoints(tmp_path / "state.json")
+    cfg = Mock(key="pilot", bot_token="xoxb-테스트")
+
+    owner = FakeLookup(_handed_over())
+    stats = script.backfill_channel(
+        cfg, {"id": "C1", "name": "팀-전산_ABB110-회의"}, str(tmp_path),
+        checkpoints, pace=0, owner=owner,
+    )
+
+    assert stats.refused_owner == 1
+    assert stats.written == 0
+    # 물어본 채널이 맞는지까지 본다. 엉뚱한 키로 물으면 늘 「내 것」 이 나온다.
+    assert owner.asked == ["C1"]
+
+
+def test_the_history_backfill_script_runs_on_our_channels(
+    tmp_path, monkeypatch, scripts_path,
+):
+    """문지기가 전부를 막으면 그게 사고다."""
+    import backfill_channel_history as script
+
+    seen: list[str] = []
+
+    class Client:
+        def __init__(self, token=None, **_kw):
+            pass
+
+        def conversations_history(self, **kwargs):
+            seen.append(kwargs.get("channel", ""))
+            return {"messages": [], "has_more": False}
+
+    monkeypatch.setattr("slack_sdk.WebClient", Client)
+    # 이 시험이 보는 것은 **문지기가 통과시켰나** 하나다. 캔버스·파일·색인은 다른
+    # 시험 몫이라 여기서는 세우지 않는다.
+    monkeypatch.setattr(script, "_sync_canvas", lambda *a: (0, set()))
+    monkeypatch.setattr(script, "_sync_files", lambda *a: (0, 0, set()))
+    checkpoints = script.Checkpoints(tmp_path / "state.json")
+    cfg = Mock(key="pilot", bot_token="xoxb-테스트")
+
+    stats = script.backfill_channel(
+        cfg, {"id": "C1", "name": "팀-전산_ABB110-회의"}, str(tmp_path),
+        checkpoints, pace=0, max_pages=1, owner=FakeLookup(_still_ours()),
+    )
+
+    assert stats.refused_owner == 0
+    assert seen == ["C1"]
+
+
+def test_the_file_sync_script_skips_a_handed_over_channel(
+    tmp_path, monkeypatch, scripts_path,
+):
+    """인수된 채널의 파일은 Archiver 가 가져온다. 여기서 또 넣으면 두 벌이 된다."""
+    import sync_channel_files as script
+
+    class Client:
+        def __init__(self, token=None, **_kw):
+            pass
+
+    monkeypatch.setattr("slack_sdk.WebClient", Client)
+    monkeypatch.setattr(script, "member_channels", lambda _client: [
+        {"id": "C1", "name": "팀-전산_ABB110-회의"},
+    ])
+    monkeypatch.setattr(script, "scan", lambda *a, **k: pytest.fail(
+        "인수된 채널인데 파일 목록을 훑었다"
+    ))
+    cfg = Mock(key="pilot", bot_token="xoxb-테스트")
+
+    owner = FakeLookup(_handed_over())
+    stats = script.sync_workspace(
+        cfg, str(tmp_path), apply=True, pace=0, owner=owner,
+    )
+
+    assert stats["refused_owner"] == 1
+    assert stats["channels"] == 0
+    assert owner.asked == ["C1"]

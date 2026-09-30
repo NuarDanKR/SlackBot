@@ -22,6 +22,7 @@ from tybot.archive import writer
 from tybot.archive.channel_files import ChannelFileScan, collect, scan
 from tybot.archive.files import attachment_storage, staged_line_time
 from tybot.archive.store import ArchiveStore
+from tybot.archive.write_owner import OwnerLookup
 from tybot.attachment_trace import confirm_archived
 from tybot.channels import should_collect
 from tybot.envfile import load_env_file
@@ -100,13 +101,15 @@ def sync_workspace(
     apply: bool,
     channel_ids: set[str] | None = None,
     pace: float = 3.0,
+    owner: OwnerLookup | None = None,
 ) -> dict[str, int]:
     """워크스페이스의 참여 채널을 채널별로 조회한다."""
     from slack_sdk import WebClient
 
     client = WebClient(token=cfg.bot_token)
     stats = {"channels": 0, "listed": 0, "known": 0, "missing": 0, "collected": 0,
-             "written": 0, "failed": 0}
+             "written": 0, "failed": 0, "refused_owner": 0}
+    gate = owner or OwnerLookup(cfg.key)
     try:
         channels = member_channels(client)
     except Exception as exc:  # noqa: BLE001
@@ -121,6 +124,14 @@ def sync_workspace(
             time.sleep(pace)
         channel_id = str(channel["id"])
         name = "#" + str(channel["name"])
+        # 인수된 채널의 파일은 Archiver 가 가져온다. 여기서 또 넣으면 같은 첨부가
+        # 두 번 들어가고, 원문 줄도 두 벌이 된다.
+        verdict = gate.master_may_write(channel_id)
+        if not verdict:
+            print(f"[{cfg.key}] {name}({channel_id}) · 인수된 채널이라 건너뜁니다"
+                  f" — {verdict.reason}")
+            stats["refused_owner"] += 1
+            continue
         storage = attachment_storage(archive, cfg.key, channel_id)
         result = scan(client, channel_id, storage)
         stats["channels"] += 1
