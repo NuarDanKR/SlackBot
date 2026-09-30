@@ -108,7 +108,7 @@ psql -h localhost -p 15432 -U postgres -d tybot_schema_test -c \
 
 ## pytest 로 돌리기
 
-같은 검증을 시험으로도 돌릴 수 있다. DSN 을 주면 일곱 건이 켜지고, 없으면
+같은 검증을 시험으로도 돌릴 수 있다. DSN 을 주면 **21건**이 켜지고, 없으면
 **사유를 남기고** 건너뛴다.
 
 ```bash
@@ -119,15 +119,20 @@ TYBOT_SCHEMA_TEST_DSN="postgresql://postgres:devonly@localhost:15432/tybot_schem
 조용히 통과시키지 않는 이유: 건너뛴 것을 「했다」 로 읽으면 게이트가 없는 것과
 같다.
 
-| 시험 | 무엇 |
+| 무엇을 보나 | 시험 |
 |---|---|
-| clean install | 빈 DB 최초 적용 |
-| reapply | 같은 스키마 두 번 |
-| draft migration | `4ecf634` 초안이 적용된 DB 에 재적용 |
-| revoke | 위험 권한이 **실제로** 회수되는가 |
-| revision trigger | 번호 건너뛰기 거부 |
-| legacy secret | `workspace_secret` → master 서비스 이관 |
-| service identity | 신원 없이 `enabled` 불가 · 봇 사용자 중복 불가 |
+| 스키마가 선다 | clean install · 같은 스키마 두 번 · 초안(`4ecf634`) 위에 재적용 |
+| **권한이 실제로 회수되나** | 초안이 준 권한 회수 · 콘솔 역할이 연결 행을 못 지움 |
+| **Archiver 열 단위 권한** | 진행 상태는 쓰고 **희망 상태(`desired_mode`)는 못 씀** |
+| 트리거 | revision 번호 건너뛰기 거부 |
+| 토큰 이관 | 옛 `workspace_secret` → master 서비스 · 암호문·mask 보존 · 새 토큰 덮어쓰지 않음 · 한 번만 기록 |
+| 신원 | 신원 없이 `enabled` 불가 · 봇 사용자 중복 불가 (서비스·연결 양쪽) |
+| 라우팅 | 지금 라우팅되는 것으로 backfill · 재배정 후에도 유지 · 배정 제거 시 disabled · 이미 disabled 는 그대로 |
+| 봇 카탈로그 | 기존 specialist 봇 편입 · 사람이 고친 값을 덮지 않음 |
+
+이 중 **Archiver 열 단위 권한**이 이번 supervisor 스키마에서 새로 생긴 것이고,
+선언만 봐서는 확인할 수 없다. PostgreSQL 은 `GRANT` 를 쌓기만 하므로 「선언에
+없다」 와 「권한이 없다」 는 다른 사실이다.
 
 ---
 
