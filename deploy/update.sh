@@ -10,6 +10,10 @@ set -euo pipefail
 SRC=${TYBOT_SRC:-/var/lib/tybot/src}
 APP=/opt/tybot
 BRANCH=${TYBOT_BRANCH:-master}
+# 콘솔 화면(console-web)은 별도 저장소다. 체크아웃이 없으면 전환 기간으로 보고
+# SlackBot 안의 console-web 을 쓴다(install.sh 의 resolve_console_web_src).
+CW_SRC=${CONSOLE_WEB_SRC:-/var/lib/tybot/console-web-src}
+CW_BRANCH=${CONSOLE_WEB_BRANCH:-main}
 
 # 콘솔이 이미 설치돼 있으면 함께 갱신한다.
 if [[ -z ${WITH_CONSOLE:-} ]]; then
@@ -39,6 +43,34 @@ if [[ "$OWNER" != "0" ]]; then
   exit 1
 fi
 
+# --- 콘솔 화면 저장소 ---
+# SlackBot 에 새 커밋이 없어도 화면만 바뀌었으면 배포해야 한다.
+# 이걸 보지 않으면 console-web 에 push 해도 「변경 없음」 으로 끝나고,
+# 서버 화면은 옛 버전 그대로 남는다.
+CW_ACTIVE=0
+CW_CHANGED=0
+if [[ "$WITH_CONSOLE" == "1" && -d "$CW_SRC/.git" ]]; then
+  CW_OWNER=$(stat -c '%u' "$CW_SRC/.git" 2>/dev/null || echo "?")
+  if [[ "$CW_OWNER" != "0" ]]; then
+    log "콘솔 화면 소스 소유자가 root 가 아닙니다 ($CW_SRC, uid=$CW_OWNER)"
+    log "  고치기:  sudo chown -R root:root $CW_SRC"
+    exit 1
+  fi
+  CW_ACTIVE=1
+  git -C "$CW_SRC" fetch --quiet origin "$CW_BRANCH"
+  CW_LOCAL=$(git -C "$CW_SRC" rev-parse HEAD)
+  CW_REMOTE=$(git -C "$CW_SRC" rev-parse "origin/$CW_BRANCH")
+  CW_DEPLOYED=$(cat "$APP/.deployed-console-commit" 2>/dev/null || echo "")
+  if [[ "$CW_LOCAL" != "$CW_REMOTE" || "$CW_DEPLOYED" != "$CW_REMOTE" ]]; then
+    CW_CHANGED=1
+    log "콘솔 화면 변경: 배포됨=${CW_DEPLOYED:0:7} 원격=${CW_REMOTE:0:7}"
+    if [[ "$CW_LOCAL" != "$CW_REMOTE" ]]; then
+      git -C "$CW_SRC" log --oneline "$CW_LOCAL..$CW_REMOTE" | sed 's/^/  /'
+    fi
+  fi
+  export CONSOLE_WEB_SRC="$CW_SRC"
+fi
+
 cd "$SRC"
 git fetch --quiet origin "$BRANCH"
 LOCAL=$(git rev-parse HEAD)
@@ -51,7 +83,8 @@ REMOTE=$(git rev-parse "origin/$BRANCH")
 # 배포됐다고 믿고 넘어간다. 실제로 그렇게 한 번 지나갔다(2026-09-02).
 DEPLOYED=$(cat "$APP/.deployed-commit" 2>/dev/null || echo "")
 
-if [[ "$LOCAL" == "$REMOTE" && "$DEPLOYED" == "$LOCAL" && "${TYBOT_FORCE:-0}" != "1" ]]; then
+if [[ "$LOCAL" == "$REMOTE" && "$DEPLOYED" == "$LOCAL" && "$CW_CHANGED" == "0" \
+      && "${TYBOT_FORCE:-0}" != "1" ]]; then
   log "변경 없음 ($(git rev-parse --short HEAD))"
   exit 0
 fi
@@ -59,6 +92,8 @@ fi
 if [[ "$LOCAL" == "$REMOTE" ]]; then
   if [[ "${TYBOT_FORCE:-0}" == "1" ]]; then
     log "강제 재배포 ($(git rev-parse --short HEAD))"
+  elif [[ "$DEPLOYED" == "$LOCAL" ]]; then
+    log "봇 코드는 그대로, 콘솔 화면만 배포합니다"
   else
     log "새 커밋은 없지만 배포본이 다릅니다 (배포됨=${DEPLOYED:0:7} 소스=$(git rev-parse --short HEAD)) — 배포합니다"
   fi
@@ -69,12 +104,24 @@ if [[ "$LOCAL" != "$REMOTE" ]]; then
   git log --oneline "$LOCAL..$REMOTE" | sed 's/^/  /'
 fi
 git reset --hard --quiet "origin/$BRANCH"
+if [[ "$CW_ACTIVE" == "1" ]]; then
+  git -C "$CW_SRC" reset --hard --quiet "origin/$CW_BRANCH"
+fi
+
+# 화면 소스를 읽는 계약 시험이 「소스 없음」 으로 skip 된 채 통과하지 않게 한다.
+TEST_ENV=(PYTHONPATH="$SRC/src")
+if [[ "$CW_ACTIVE" == "1" ]]; then
+  TEST_ENV+=(CONSOLE_WEB_DIR="$CW_SRC")
+fi
+if [[ "$WITH_CONSOLE" == "1" ]]; then
+  TEST_ENV+=(REQUIRE_CONSOLE_WEB=1)
+fi
 
 log "테스트 실행"
 "$APP/.venv/bin/python" -m pytest --version >/dev/null 2>&1 \
   || "$APP/.venv/bin/pip" install -q pytest
 # editable 설치는 아직 /opt 를 가리키므로 새 소스를 명시한다.
-if ! PYTHONPATH="$SRC/src" "$APP/.venv/bin/python" -m pytest -q "$SRC/tests" \
+if ! env "${TEST_ENV[@]}" "$APP/.venv/bin/python" -m pytest -q "$SRC/tests" \
       -p no:cacheprovider --rootdir "$SRC" 2>&1 | tail -20; then
   log "테스트 실패 — 배포 중단. 운영 프로세스는 그대로 유지됩니다."
   log "커밋 $(git rev-parse --short HEAD) 를 확인하세요."
@@ -102,6 +149,10 @@ bash "$APP/deploy/apply-schema.sh"
 # 상태를 알아채고, 새 커밋이 없어도 배포한다.
 git rev-parse HEAD > "$APP/.deployed-commit"
 chmod 644 "$APP/.deployed-commit"
+if [[ "$CW_ACTIVE" == "1" ]]; then
+  git -C "$CW_SRC" rev-parse HEAD > "$APP/.deployed-console-commit"
+  chmod 644 "$APP/.deployed-console-commit"
+fi
 
 systemctl restart tybot
 
@@ -122,7 +173,11 @@ fi
 sleep 5
 
 if systemctl is-active --quiet tybot; then
-  log "완료: $(git rev-parse --short HEAD) 기동 정상"
+  if [[ "$CW_ACTIVE" == "1" ]]; then
+    log "완료: $(git rev-parse --short HEAD) · 화면 $(git -C "$CW_SRC" rev-parse --short HEAD) 기동 정상"
+  else
+    log "완료: $(git rev-parse --short HEAD) 기동 정상"
+  fi
 else
   log "기동 실패 — journalctl -u tybot -n 50 확인"
   exit 1
