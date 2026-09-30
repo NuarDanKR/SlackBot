@@ -51,8 +51,16 @@ log = logging.getLogger("tybot.archive.legacy_migrate")
 #: 한다. 다르면 여기서 통과한 문서가 목적지에서 거절된다.
 CHANNEL_ID = re.compile(r"(?:[CG][A-Z0-9]{8,}|legacy-[a-f0-9]{16})")
 
-#: 원문 줄에 남은 첨부 표시와 그 파일 ID.
-ATTACHMENT_LINE = re.compile(r"\[첨부(?:추출)?:")
+#: 첨부 **참조** 줄. 파일 하나당 한 줄이고 「이 파일이 있었다」 를 말한다.
+ATTACHMENT_REFERENCE = re.compile(r"\[첨부:")
+
+#: 첨부에서 **뽑아낸 본문** 줄. `files.py` 가 추출 텍스트를 한 줄씩 이 표시와 함께
+#: raw 에 넣는다. 그래서 첨부 하나가 raw 에 수백 줄을 만든다.
+#:
+#: 이 줄들은 **파생 자료**다. 원본 바이트가 `objects/` 에 있으면 다시 만들 수 있다.
+ATTACHMENT_BODY = re.compile(r"\[첨부(?:추출|본문):")
+
+#: 이 줄과 첨부 정본을 잇는 유일한 좌표. 옛 줄에는 없다.
 ATTACHMENT_ID = re.compile(r"·\s*id:([A-Za-z0-9_-]+)")
 
 
@@ -82,7 +90,14 @@ class SourceDoc:
     coordinated: int
     #: 좌표가 없는 줄 수. **어느 것과도 짝짓지 않는다.**
     uncoordinated: int
-    attachment_lines: int
+    #: 사람이 주고받은 줄. **이것이 보존해야 할 원문이다.**
+    human_lines: int
+    #: 그중 좌표가 있는 줄. 소급과 대조할 수 있는 실제 분량이다.
+    human_coordinated: int
+    #: 첨부 참조 줄(파일 하나당 하나).
+    attachment_reference_lines: int
+    #: 첨부에서 뽑아낸 본문 줄. **파생 자료이고, 새 구조의 raw 에는 들어갈 수 없다.**
+    attachment_body_lines: int
     attachment_ids: frozenset[str]
 
 
@@ -123,16 +138,36 @@ class Report:
         return [item for item in self.placements if item.blocked]
 
     def content(self) -> dict:
-        """**내용** — 무엇이 몇 줄이나 옮겨지나."""
+        """**내용** — 무엇이 몇 줄이나 옮겨지나. **세 갈래로 나눠 센다.**
+
+        합쳐서 「원문 N줄」 로 말하면 오해를 부른다. 실측(2026-09-30 운영 아카이브)
+        에서 raw 23만 줄 중 사람 대화는 491줄이었고 나머지는 첨부에서 뽑아낸
+        본문이었다. 그 수를 「옮길 원문」 으로 읽으면 규모도 위험도 잘못 잡는다.
+        """
         lines = sum(item.doc.line_count for item in self.planned)
+        human = sum(item.doc.human_lines for item in self.planned)
+        reference = sum(item.doc.attachment_reference_lines for item in self.planned)
+        body = sum(item.doc.attachment_body_lines for item in self.planned)
         duplicate = sum(item.duplicate_lines for item in self.planned)
         return {
             "documents": len(self.planned),
             "blockedDocuments": len(self.blocked),
             "rawLines": lines,
+            # --- 여기부터가 오해를 막는 세 줄 ---
+            "humanLines": human,
+            "attachmentReferenceLines": reference,
+            "attachmentBodyLines": body,
+            "unclassifiedLines": lines - human - reference - body,
             "duplicateLines": duplicate,
             "newLines": lines - duplicate,
             "unreadable": len(self.unreadable),
+            "note": (
+                "attachmentBodyLines 는 첨부에서 뽑아낸 파생 자료입니다. 새 채널별"
+                " 구조는 raw 에 첨부 본문이 들어오는 것을 기동 단계에서 거부하므로"
+                " (`per-channel-v1 requires separate attachments`), 이 줄들을 그대로"
+                " 옮기면 그 계약을 깹니다. 보존해야 하는 것은 humanLines 와"
+                " objects/ 의 원본입니다."
+            ),
         }
 
     def permissions(self) -> dict:
@@ -152,10 +187,17 @@ class Report:
         """**출처** — 좌표가 있나. 없는 것은 합치지 않는다."""
         coordinated = sum(item.doc.coordinated for item in self.planned)
         uncoordinated = sum(item.doc.uncoordinated for item in self.planned)
+        human = sum(item.doc.human_lines for item in self.planned)
+        human_coordinated = sum(item.doc.human_coordinated for item in self.planned)
         no_id = sum(1 for item in self.blocked if "채널 ID" in item.reason)
         return {
             "coordinatedLines": coordinated,
             "uncoordinatedLines": uncoordinated,
+            # 소급과 실제로 대조할 수 있는 분량. 첨부 본문을 뺀 수다 —
+            # 합쳐 세면 대조 가능성이 실제보다 높아 보인다.
+            "humanLines": human,
+            "humanCoordinatedLines": human_coordinated,
+            "humanUncoordinatedLines": human - human_coordinated,
             "documentsWithoutChannelId": no_id,
             "schemaV1": sum(1 for item in self.planned if item.doc.schema_version == 1),
             "schemaV2": sum(1 for item in self.planned if item.doc.schema_version == 2),
@@ -167,12 +209,16 @@ class Report:
 
     def attachments(self) -> dict:
         """**첨부** — 원문이 가리키는 파일이 실제로 있나."""
-        referenced = sum(item.doc.attachment_lines for item in self.planned)
+        referenced = sum(
+            item.doc.attachment_reference_lines for item in self.planned
+        )
+        body = sum(item.doc.attachment_body_lines for item in self.planned)
         ids: set[str] = set()
         for item in self.planned:
             ids |= item.doc.attachment_ids
         return {
             "referenceLines": referenced,
+            "bodyLines": body,
             "identifiedFiles": len(ids),
             # 좌표(`id:`)가 없는 첨부 줄은 이름으로만 이어져 있다. 옮긴 뒤 이름이
             # 겹치면 잘못 이어지므로, 이 수가 0 이 아니면 사람이 한 번 봐야 한다.
@@ -237,6 +283,11 @@ def read_source(path: Path) -> SourceDoc:
         if match
     }
     coordinated = sum(1 for line in doc.raw_lines if line.message_ts)
+    human = [
+        line for line in doc.raw_lines
+        if not ATTACHMENT_REFERENCE.search(line.text)
+        and not ATTACHMENT_BODY.search(line.text)
+    ]
     return SourceDoc(
         path=path,
         workspace=doc.workspace,
@@ -250,8 +301,13 @@ def read_source(path: Path) -> SourceDoc:
         line_count=len(doc.raw_lines),
         coordinated=coordinated,
         uncoordinated=len(doc.raw_lines) - coordinated,
-        attachment_lines=sum(
-            1 for line in doc.raw_lines if ATTACHMENT_LINE.search(line.text)
+        human_lines=len(human),
+        human_coordinated=sum(1 for line in human if line.message_ts),
+        attachment_reference_lines=sum(
+            1 for line in doc.raw_lines if ATTACHMENT_REFERENCE.search(line.text)
+        ),
+        attachment_body_lines=sum(
+            1 for line in doc.raw_lines if ATTACHMENT_BODY.search(line.text)
         ),
         attachment_ids=frozenset(ids),
     )

@@ -427,3 +427,100 @@ def test_the_report_counts_schema_versions(tmp_path, schema, expected):
     _write(source, schema=schema)
 
     assert _plan(tmp_path).provenance()[expected] == 1
+
+
+# --- 사람 대화와 첨부를 갈라 센다 --------------------------------------------------
+#
+# 2026-09-30 운영 아카이브 실측: raw 236,046 줄 중 사람 대화는 491 줄이었고 나머지는
+# 첨부에서 뽑아낸 본문이었다. 합쳐서 「원문 23만 줄」 로 보고하면 규모도 위험도
+# 잘못 잡는다 — 그 23만 줄은 새 구조의 raw 에 **들어갈 수 없는** 파생 자료다.
+
+BODY_LINE = (
+    "> [2026-09-01 10:01|1759100001.000100] 김현장:"
+    " [첨부추출:착공계.pdf] 공사기간은 2026년 3월까지로 한다"
+)
+REFERENCE_LINE = (
+    "> [2026-09-01 10:00|1759100000.000100] 김현장:"
+    " [첨부:변환] 착공계.pdf (pdf, 120KB) · id:F123"
+)
+HUMAN_LINE = "> [2026-09-01 09:59|1759099999.000100] 이감리: 착공계 확인했습니다."
+
+
+def _mixed(tmp_path):
+    source, _, _ = _roots(tmp_path)
+    _write(source, lines="\n".join([HUMAN_LINE, REFERENCE_LINE, BODY_LINE]))
+    return _plan(tmp_path)
+
+
+def test_attachment_body_is_not_counted_as_conversation(tmp_path):
+    """이 시험이 이 분리의 이유다. 합쳐 세면 첨부 본문이 사람 대화로 보고된다."""
+    content = _mixed(tmp_path).content()
+
+    assert content["rawLines"] == 3
+    assert content["humanLines"] == 1
+    assert content["attachmentReferenceLines"] == 1
+    assert content["attachmentBodyLines"] == 1
+
+
+def test_the_three_kinds_account_for_every_line(tmp_path):
+    """분류 안 된 줄이 남으면 어느 갈래가 새는지 모른다."""
+    content = _mixed(tmp_path).content()
+
+    assert content["unclassifiedLines"] == 0
+    assert (
+        content["humanLines"]
+        + content["attachmentReferenceLines"]
+        + content["attachmentBodyLines"]
+        == content["rawLines"]
+    )
+
+
+def test_the_report_warns_that_body_lines_cannot_move(tmp_path):
+    """새 구조는 raw 에 첨부 본문이 들어오면 기동을 거부한다. 보고서가 그걸 말해야 한다."""
+    note = _mixed(tmp_path).content()["note"]
+
+    assert "per-channel-v1" in note
+    assert "objects/" in note
+
+
+def test_the_new_layout_really_refuses_body_in_raw():
+    """보고서의 경고가 실제 코드에 근거하는지 본다. 근거가 사라지면 경고가 거짓이 된다."""
+    source = (Path(__file__).resolve().parent.parent / "src" / "tybot"
+              / "archiving_bot.py").read_text(encoding="utf-8")
+
+    assert "per-channel-v1 requires separate attachments" in source
+
+
+def test_human_coordinates_exclude_attachment_lines(tmp_path):
+    """소급과 대조할 수 있는 분량은 사람 대화 기준이다.
+
+    합쳐 세면 첨부 줄의 좌표까지 포함돼 대조 가능성이 실제보다 높아 보인다.
+    """
+    provenance = _mixed(tmp_path).provenance()
+
+    assert provenance["coordinatedLines"] == 3
+    assert provenance["humanLines"] == 1
+    assert provenance["humanCoordinatedLines"] == 1
+    assert provenance["humanUncoordinatedLines"] == 0
+
+
+def test_a_human_line_without_a_coordinate_is_counted_apart(tmp_path):
+    source, _, _ = _roots(tmp_path)
+    _write(source, lines="\n".join([
+        "> [2026-09-01 09:59] 이감리: 좌표 없는 옛 줄입니다.",
+        BODY_LINE,
+    ]))
+
+    provenance = _plan(tmp_path).provenance()
+
+    assert provenance["humanLines"] == 1
+    assert provenance["humanCoordinatedLines"] == 0
+    assert provenance["humanUncoordinatedLines"] == 1
+
+
+def test_attachment_body_lines_are_reported_in_the_attachment_section(tmp_path):
+    files = _mixed(tmp_path).attachments()
+
+    assert files["referenceLines"] == 1
+    assert files["bodyLines"] == 1
+    assert files["identifiedFiles"] == 1

@@ -43,8 +43,13 @@ def _human(report: legacy_migrate.Report) -> str:
         "## 내용",
         f"  옮길 문서 {content['documents']}건 · 막힌 문서 {content['blockedDocuments']}건"
         f" · 못 읽은 문서 {content['unreadable']}건",
-        f"  원문 {content['rawLines']}줄 = 새로 옮길 {content['newLines']}줄"
-        f" + 소급과 겹치는 {content['duplicateLines']}줄",
+        f"  raw 전체 {content['rawLines']}줄 — 갈래별로 다음과 같습니다",
+        f"    사람 대화      {content['humanLines']}줄  ← 보존해야 할 원문",
+        f"    첨부 참조      {content['attachmentReferenceLines']}줄",
+        f"    첨부 추출 본문 {content['attachmentBodyLines']}줄  ← 파생 자료",
+        f"    분류 안 됨     {content['unclassifiedLines']}줄",
+        f"  소급과 겹치는 줄 {content['duplicateLines']}",
+        f"  {content['note']}",
         "",
         "## 권한",
         f"  공개 {rights['public']}건 · 비공개 {rights['private']}건",
@@ -53,12 +58,16 @@ def _human(report: legacy_migrate.Report) -> str:
         "",
         "## 출처",
         f"  좌표 있는 줄 {source['coordinatedLines']} · 좌표 없는 줄 {source['uncoordinatedLines']}",
+        f"  그중 사람 대화 {source['humanLines']}줄"
+        f" = 좌표 있음 {source['humanCoordinatedLines']}"
+        f" + 좌표 없음 {source['humanUncoordinatedLines']}",
         f"  채널 ID 가 없어 막힌 문서 {source['documentsWithoutChannelId']}건",
         f"  schema v1 {source['schemaV1']}건 · v2 {source['schemaV2']}건",
         f"  {source['note']}",
         "",
         "## 첨부",
-        f"  첨부 표시 줄 {files['referenceLines']} · 파일 ID 로 이어진 것 {files['identifiedFiles']}",
+        f"  첨부 참조 줄 {files['referenceLines']} · 추출 본문 줄 {files['bodyLines']}",
+        f"  파일 ID 로 이어진 참조 {files['identifiedFiles']}",
         f"  파일 ID 없이 이름으로만 이어진 줄 {files['linesWithoutFileId']}",
     ]
     if data["refusals"]:
