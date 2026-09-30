@@ -9,7 +9,7 @@ import logging
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -139,6 +139,20 @@ def shadow_archive_dir(env: dict[str, str] | None = None) -> Path:
             " attachment objects/ and staging/ are siblings of the archive dir"
         )
     return shadow
+
+
+def shadow_workspace_config(
+    cfg: ArchiverWorkspace, env: dict[str, str] | None = None,
+) -> ArchiverWorkspace:
+    values = os.environ if env is None else env
+    if values.get("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower() != "per-channel-v1":
+        return cfg
+    root = shadow_archive_dir(values)
+    if (root / "workspaces").exists():
+        raise ArchiverConfigError(
+            "per-channel-v1 requires a new shadow root without legacy workspaces"
+        )
+    return replace(cfg, separate_attachments=True)
 
 
 class ShadowCollector:
@@ -641,8 +655,9 @@ def main() -> int:
     log.info("archiver environment loaded from dedicated file")
     configs = load_archiver_workspaces()
     root = shadow_archive_dir()
+    config = shadow_workspace_config(configs[0])
     root.mkdir(parents=True, exist_ok=True)
-    workspace = configs[0].key
+    workspace = config.key
     lock = instance_lock(_instance_lock_name(workspace))
     try:
         lock.acquire()
@@ -651,7 +666,7 @@ def main() -> int:
             f"another archiving shadow collector is running for {workspace}"
         ) from exc
     try:
-        _serve(configs[0], root)
+        _serve(config, root)
     finally:
         lock.release()
     return 0

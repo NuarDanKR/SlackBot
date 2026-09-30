@@ -78,6 +78,47 @@ def test_db_configuration_can_start_before_the_first_channel_invitation(monkeypa
     assert config.allowed_channels == frozenset()
 
 
+def test_new_shadow_layout_separates_attachments_without_changing_db_flag(tmp_path):
+    env = _env(tmp_path)
+    env["ARCHIVER_SHADOW_LAYOUT"] = "per-channel-v1"
+    config = archiving_bot.load_archiver_workspaces(env)[0]
+
+    effective = archiving_bot.shadow_workspace_config(config, env)
+
+    assert config.separate_attachments is False
+    assert effective.separate_attachments is True
+    assert effective.bot_token == config.bot_token
+    archiving_bot.ShadowCollector(effective, tmp_path / "shadow" / "archive",
+                                   layout="per-channel-v1")
+
+
+def test_shadow_attachment_override_requires_isolated_shadow_root(tmp_path):
+    env = _env(tmp_path)
+    env["ARCHIVER_SHADOW_LAYOUT"] = "per-channel-v1"
+    env["ARCHIVER_SHADOW_DIR"] = env["ARCHIVE_DIR"]
+    config = archiving_bot.load_archiver_workspaces(env)[0]
+
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="must not overlap"):
+        archiving_bot.shadow_workspace_config(config, env)
+
+
+def test_new_shadow_layout_refuses_a_legacy_archive_tree(tmp_path):
+    env = _env(tmp_path)
+    env["ARCHIVER_SHADOW_LAYOUT"] = "per-channel-v1"
+    (Path(env["ARCHIVER_SHADOW_DIR"]) / "workspaces").mkdir(parents=True)
+    config = archiving_bot.load_archiver_workspaces(env)[0]
+
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="new shadow root"):
+        archiving_bot.shadow_workspace_config(config, env)
+
+
+def test_legacy_shadow_keeps_database_attachment_setting(tmp_path):
+    env = _env(tmp_path)
+    config = archiving_bot.load_archiver_workspaces(env)[0]
+
+    assert archiving_bot.shadow_workspace_config(config, env) is config
+
+
 def test_instance_lock_is_scoped_to_one_workspace():
     assert archiving_bot._instance_lock_name("tyit") == "archiving-bot-shadow-tyit"
     assert archiving_bot._instance_lock_name("mgmt") == "archiving-bot-shadow-mgmt"
