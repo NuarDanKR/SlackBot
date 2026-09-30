@@ -43,12 +43,18 @@ def _human(report: legacy_migrate.Report) -> str:
         "## 내용",
         f"  옮길 문서 {content['documents']}건 · 막힌 문서 {content['blockedDocuments']}건"
         f" · 못 읽은 문서 {content['unreadable']}건",
-        f"  raw 전체 {content['rawLines']}줄 — 갈래별로 다음과 같습니다",
-        f"    사람 대화      {content['humanLines']}줄  ← 보존해야 할 원문",
+        f"  raw 전체 {content['rawLines']}줄 (이관 가능량 아님) — 갈래별:",
+        f"    사람 대화      {content['humanLines']}줄",
         f"    첨부 참조      {content['attachmentReferenceLines']}줄",
         f"    첨부 추출 본문 {content['attachmentBodyLines']}줄  ← 파생 자료",
         f"    분류 안 됨     {content['unclassifiedLines']}줄",
-        f"  소급과 겹치는 줄 {content['duplicateLines']}",
+        "",
+        f"  >> 이관 대상(사람 대화) {content['humanNewLines']}줄"
+        f" = 사람 대화 {content['humanLines']}"
+        f" - 소급과 겹침 {content['humanDuplicateLines']}",
+        f"     (raw 전체 기준 겹침은 {content['rawDuplicateLines']}줄이고"
+        f" 첨부 줄을 포함합니다)",
+        "",
         f"  {content['note']}",
         "",
         "## 권한",

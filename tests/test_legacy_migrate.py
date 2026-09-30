@@ -225,7 +225,8 @@ def test_a_coordinated_line_matches_the_backfill(tmp_path):
     (item,) = _plan(tmp_path, collected=index).placements
 
     assert item.duplicate_lines == 1
-    assert _plan(tmp_path, collected=index).content()["newLines"] == 0
+    assert item.human_duplicate_lines == 1
+    assert _plan(tmp_path, collected=index).content()["humanNewLines"] == 0
 
 
 def test_a_line_without_a_coordinate_is_never_matched(tmp_path):
@@ -475,20 +476,51 @@ def test_the_three_kinds_account_for_every_line(tmp_path):
     )
 
 
-def test_the_report_warns_that_body_lines_cannot_move(tmp_path):
-    """새 구조는 raw 에 첨부 본문이 들어오면 기동을 거부한다. 보고서가 그걸 말해야 한다."""
+def test_the_note_names_the_real_target(tmp_path):
+    """보고서가 무엇이 이관 대상인지 한 이름으로 말해야 한다."""
     note = _mixed(tmp_path).content()["note"]
 
-    assert "per-channel-v1" in note
-    assert "objects/" in note
+    assert "humanNewLines" in note
+    assert "attachmentBodyLines" in note
 
 
-def test_the_new_layout_really_refuses_body_in_raw():
-    """보고서의 경고가 실제 코드에 근거하는지 본다. 근거가 사라지면 경고가 거짓이 된다."""
+def test_the_note_does_not_claim_the_runtime_inspects_raw(tmp_path):
+    """**이 시험이 정정의 핵심이다.**
+
+    전에는 「새 구조가 raw 의 첨부 본문을 기동 단계에서 거부한다」 고 적었다.
+    코드는 그런 검사를 하지 않는다 — 설정(`separate_attachments`)과 루트 모양
+    (`workspaces/` 유무)만 본다. 그 차이를 뭉개면, 옛 raw 를 새 루트에 넣어도
+    「어차피 런타임이 막아 준다」 고 믿게 된다. 막아 주지 않는다.
+    """
+    note = _mixed(tmp_path).content()["note"]
+
+    assert "내용을 검사하지" in note
+    assert "실행 중에 걸리지 않으므로" in note
+    assert "사람이 지켜야 하는 약속" in note
+
+
+def test_the_refusals_the_note_cites_exist_in_the_code():
+    """근거가 사라지면 경고가 거짓이 된다. 두 거절 문구를 그대로 대조한다."""
     source = (Path(__file__).resolve().parent.parent / "src" / "tybot"
               / "archiving_bot.py").read_text(encoding="utf-8")
 
+    # 루트 모양 검사 — 옛 `workspaces/` 가 있으면 기동하지 않는다.
+    assert "requires a new shadow root without legacy workspaces" in source
+    # 설정 검사 — 첨부 분리가 꺼져 있으면 기동하지 않는다.
     assert "per-channel-v1 requires separate attachments" in source
+
+
+def test_the_runtime_forces_separation_instead_of_checking_files():
+    """강제하는 것이지 검사하는 것이 아니다. 이 구분이 note 의 근거다."""
+    source = (Path(__file__).resolve().parent.parent / "src" / "tybot"
+              / "archiving_bot.py").read_text(encoding="utf-8")
+    config = source[source.index("def shadow_workspace_config("):]
+    config = config[:config.index("class ShadowCollector")]
+
+    assert "replace(cfg, separate_attachments=True)" in config
+    # 파일 내용을 읽는 코드가 없다. 있으면 note 를 다시 써야 한다.
+    for reading in ("read_text", "raw_lines", "open("):
+        assert reading not in config, reading
 
 
 def test_human_coordinates_exclude_attachment_lines(tmp_path):
@@ -524,3 +556,45 @@ def test_attachment_body_lines_are_reported_in_the_attachment_section(tmp_path):
     assert files["referenceLines"] == 1
     assert files["bodyLines"] == 1
     assert files["identifiedFiles"] == 1
+
+
+def test_an_attachment_duplicate_does_not_reduce_the_human_target(tmp_path):
+    """**raw 겹침과 사람 대화 겹침은 다른 수다.**
+
+    소급이 첨부 줄을 이미 가져왔다고 해서 옮길 사람 대화가 주는 것이 아니다.
+    하나로 세면 「옮길 것이 거의 없다」 고 잘못 읽는다 — 실측에서 raw 겹침은
+    첨부 줄이 대부분이었다.
+    """
+    source, _, _ = _roots(tmp_path)
+    _write(source, lines="\n".join([HUMAN_LINE, BODY_LINE]))
+    # 소급이 첨부 본문 줄만 이미 가져왔다.
+    index = {(WS, CID, "1759100001.000100")}
+
+    content = _plan(tmp_path, collected=index).content()
+
+    assert content["rawDuplicateLines"] == 1
+    assert content["humanDuplicateLines"] == 0
+    assert content["humanNewLines"] == 1
+
+
+def test_a_human_duplicate_does_reduce_the_target(tmp_path):
+    """반대로 사람 대화가 겹치면 그만큼 줄어야 한다. 안 줄면 두 벌로 남는다."""
+    source, _, _ = _roots(tmp_path)
+    _write(source, lines="\n".join([HUMAN_LINE, BODY_LINE]))
+    index = {(WS, CID, "1759099999.000100")}
+
+    content = _plan(tmp_path, collected=index).content()
+
+    assert content["rawDuplicateLines"] == 1
+    assert content["humanDuplicateLines"] == 1
+    assert content["humanNewLines"] == 0
+
+
+def test_the_misleading_key_is_gone(tmp_path):
+    """`newLines = rawLines - duplicateLines` 는 첨부 본문을 포함해 이관 가능량처럼
+    보였다. 이름을 남겨 두면 누군가 다시 그 수를 쓴다."""
+    content = _mixed(tmp_path).content()
+
+    assert "newLines" not in content
+    assert "duplicateLines" not in content
+    assert {"rawDuplicateLines", "humanDuplicateLines", "humanNewLines"} <= set(content)

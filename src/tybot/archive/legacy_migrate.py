@@ -109,8 +109,11 @@ class Placement:
     destination: Path | None
     verdict: str
     reason: str = ""
-    #: 소급이 이미 가져온 줄 수(옮길 때 빼야 하는 것). 좌표가 있는 줄만 센다.
+    #: 소급이 이미 가져온 줄 수(좌표가 있는 줄만). raw 전체 기준이라 첨부 줄을
+    #: 포함한다 — 이관 가능량이 아니다.
     duplicate_lines: int = 0
+    #: 그중 **사람 대화** 줄. 실제로 옮길 것에서 빼야 하는 수는 이쪽이다.
+    human_duplicate_lines: int = 0
 
     @property
     def blocked(self) -> bool:
@@ -149,24 +152,40 @@ class Report:
         reference = sum(item.doc.attachment_reference_lines for item in self.planned)
         body = sum(item.doc.attachment_body_lines for item in self.planned)
         duplicate = sum(item.duplicate_lines for item in self.planned)
+        human_duplicate = sum(item.human_duplicate_lines for item in self.planned)
         return {
             "documents": len(self.planned),
             "blockedDocuments": len(self.blocked),
+            "unreadable": len(self.unreadable),
+
+            # --- raw 전체. **이관 가능량이 아니다** -------------------------
             "rawLines": lines,
-            # --- 여기부터가 오해를 막는 세 줄 ---
+            "rawDuplicateLines": duplicate,
+
+            # --- 갈래별 ----------------------------------------------------
             "humanLines": human,
             "attachmentReferenceLines": reference,
             "attachmentBodyLines": body,
             "unclassifiedLines": lines - human - reference - body,
-            "duplicateLines": duplicate,
-            "newLines": lines - duplicate,
-            "unreadable": len(self.unreadable),
+
+            # --- 실제로 옮길 것 ---------------------------------------------
+            #
+            # 예전에는 `newLines = rawLines - duplicateLines` 를 냈다. 그 수는
+            # 첨부 본문을 포함해서 **이관 가능량처럼 보인다** — 실측에서 그 값이
+            # 23만이었고 실제로 옮길 사람 대화는 491 줄이었다.
+            "humanDuplicateLines": human_duplicate,
+            "humanNewLines": human - human_duplicate,
+
             "note": (
-                "attachmentBodyLines 는 첨부에서 뽑아낸 파생 자료입니다. 새 채널별"
-                " 구조는 raw 에 첨부 본문이 들어오는 것을 기동 단계에서 거부하므로"
-                " (`per-channel-v1 requires separate attachments`), 이 줄들을 그대로"
-                " 옮기면 그 계약을 깹니다. 보존해야 하는 것은 humanLines 와"
-                " objects/ 의 원본입니다."
+                "이관 대상은 humanNewLines 입니다. rawLines 에는 첨부에서 뽑아낸"
+                " 본문(attachmentBodyLines)이 들어 있고 그것은 파생 자료라"
+                " 옮기는 대상이 아닙니다."
+                " 새 채널별 구조(per-channel-v1)는 raw 파일의 내용을 검사하지"
+                " 않습니다 — 대신 shadow 루트에 workspaces/ 가 있으면 기동을"
+                " 거부하고(`requires a new shadow root without legacy workspaces`),"
+                " 첨부 분리를 강제해 **앞으로 쓰는** raw 에 본문이 들어가지 않게"
+                " 합니다. 즉 옛 raw 를 그 루트에 넣어도 실행 중에 걸리지 않으므로,"
+                " 넣지 않는 것은 사람이 지켜야 하는 약속입니다."
             ),
         }
 
@@ -392,7 +411,7 @@ def plan(
     """무엇을 어디로 옮길지 세고 **아무것도 바꾸지 않는다.**
 
     `collected` 는 소급·그림자가 이미 가져온 좌표다. 주지 않으면 중복을 0 으로
-    세는 것이 아니라 **대조하지 않았다**는 뜻이고, 보고서의 `duplicateLines` 가
+    세는 것이 아니라 **대조하지 않았다**는 뜻이고, 보고서의 `rawDuplicateLines`·`humanDuplicateLines` 가
     0 으로 나온다. 실제로 옮기기 전에는 반드시 주어야 한다.
     """
     src, dest = Path(source), Path(destination)
@@ -410,28 +429,38 @@ def plan(
             report.unreadable.append((str(path), f"{type(exc).__name__}: {exc}"))
             continue
         target, verdict, reason = _place(doc, dest)
-        duplicates = 0
+        duplicates = human_duplicates = 0
         if verdict == "plan" and index:
-            duplicates = _count_duplicates(path, doc, index)
+            duplicates, human_duplicates = _count_duplicates(path, doc, index)
         report.placements.append(Placement(
             doc=doc, destination=target, verdict=verdict, reason=reason,
-            duplicate_lines=duplicates,
+            duplicate_lines=duplicates, human_duplicate_lines=human_duplicates,
         ))
     return report
 
 
 def _count_duplicates(
     path: Path, doc: SourceDoc, index: set[tuple[str, str, str]],
-) -> int:
-    """소급이 이미 가져온 줄 수. **좌표가 있는 줄만 센다.**
+) -> tuple[int, int]:
+    """소급이 이미 가져온 줄 수 `(raw 전체, 사람 대화)`. **좌표가 있는 줄만 센다.**
 
     좌표가 없는 줄은 후보에도 올리지 않는다. 비슷해 보인다고 합치면 다른 메시지를
     지우거나 같은 메시지를 둘로 남기고, 둘 다 오류를 내지 않는다.
+
+    둘로 나눠 돌려주는 이유: raw 전체 기준 중복에는 첨부 줄이 섞여 있고, 그 수를
+    「옮길 것에서 뺄 수」 로 쓰면 실제로 옮길 사람 대화의 양이 어긋난다.
     """
     loaded = load_doc(path)
-    return sum(
-        1
-        for line in loaded.raw_lines
-        if line.message_ts
-        and (doc.workspace, doc.channel_id, line.message_ts) in index
-    )
+    total = 0
+    human = 0
+    for line in loaded.raw_lines:
+        if not line.message_ts:
+            continue
+        if (doc.workspace, doc.channel_id, line.message_ts) not in index:
+            continue
+        total += 1
+        if not ATTACHMENT_REFERENCE.search(line.text) and not ATTACHMENT_BODY.search(
+            line.text
+        ):
+            human += 1
+    return total, human
