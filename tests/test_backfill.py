@@ -272,7 +272,9 @@ def test_a_clean_run_advances_the_cursor_once():
 
 def test_a_failure_stops_the_channel_and_holds_the_cursor():
     """**이 시험이 cursor 규칙의 이유다.** 실패 뒤에 옮기면 그 구간은 영영 안 메워진다."""
-    slack = FakeSlack([_page([_msg("100.000100"), _msg("200.000200")])])
+    slack = FakeSlack([_page([
+        _msg("100.000100"), _msg("200.000200"), _msg("300.000300")
+    ])])
     calls = {"n": 0}
 
     def ingest(_target, _item):
@@ -282,8 +284,31 @@ def test_a_failure_stops_the_channel_and_holds_the_cursor():
     counts, state, saved = _run(slack, ingest)
 
     assert counts.written == 1 and counts.failed == 1
+    assert calls["n"] == 2
     assert state is JobState.PARTIAL
     assert saved == [], "cursor 는 제자리여야 한다"
+
+
+def test_partial_attachment_does_not_skip_later_messages_or_advance_cursor(caplog):
+    slack = FakeSlack([_page([
+        _msg("100.000100", "first"),
+        _msg("200.000200", "second"),
+        _msg("300.000300", "third"),
+    ])])
+    attempted = []
+
+    def ingest(_target, item):
+        attempted.append(item.ts)
+        return "partial" if item.ts == "100.000100" else "written"
+
+    counts, state, saved = _run(slack, ingest)
+
+    assert attempted == ["100.000100", "200.000200", "300.000300"]
+    assert (counts.found, counts.written, counts.failed) == (3, 2, 1)
+    assert state is JobState.PARTIAL
+    assert saved == []
+    assert "ch=C1 ts=100.000100 outcome=partial" in caplog.text
+    assert "first" not in caplog.text
 
 
 def test_an_exception_in_the_writer_is_counted_not_raised():

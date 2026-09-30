@@ -75,7 +75,27 @@ VOLATILE_FIELDS = ("staged_at", "converted_at", "reprocessed_at")
 
 def same_evidence(existing: str, incoming: str) -> bool:
     """두 정본이 **같은 근거**인가. 시각만 다른 것은 같은 근거다."""
-    return _comparable(existing) == _comparable(incoming)
+    old_front, old_body = _comparable(existing)
+    new_front, new_body = _comparable(incoming)
+    if (old_front, old_body) == (new_front, new_body):
+        return True
+    if old_body != new_body:
+        return False
+    old_fields, new_fields = dict(old_front), dict(new_front)
+    file_id = old_fields.get("file_id", "")
+    if (
+        not file_id
+        or file_id != new_fields.get("file_id")
+        or not old_fields.get("message_ts")
+        or old_fields.get("message_ts") != new_fields.get("message_ts")
+        or not _same_slack_file_link(
+            old_fields.get("permalink", ""), new_fields.get("permalink", ""), file_id
+        )
+    ):
+        return False
+    old_fields.pop("permalink", None)
+    new_fields.pop("permalink", None)
+    return old_fields == new_fields
 
 
 def _comparable(text: str) -> tuple:

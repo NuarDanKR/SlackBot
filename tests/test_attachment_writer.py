@@ -471,3 +471,85 @@ def test_a_changed_permalink_is_a_conflict(tmp_path):
     written = _write(tmp_path, [_staged(tmp_path, permalink="https://slack.example/b")])
 
     assert written == []
+
+
+def test_two_slack_links_to_the_same_file_are_idempotent(tmp_path):
+    (first,) = _write(tmp_path, [_staged(
+        tmp_path,
+        permalink="https://old-team.slack.com/files/U1/F1/report",
+        origin_message_ts="1790000000.000001",
+    )])
+    path = tmp_path / "archive" / first.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = _write(tmp_path, [_staged(
+        tmp_path,
+        permalink="https://new-team.slack.com/files/U1/F1/report",
+        origin_message_ts="1790000000.000001",
+    )])
+
+    assert [doc.revision for doc in written] == [first.revision]
+    assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("permalink, message_ts", [
+    ("https://new-team.slack.com/files/U1/F2/report", "1790000000.000001"),
+    ("https://example.com/files/U1/F1/report", "1790000000.000001"),
+    ("https://new-team.slack.com/files/U1/F1/report", "1790000001.000001"),
+])
+def test_permalink_alias_must_keep_file_identity_and_message_coordinate(
+    tmp_path, permalink, message_ts,
+):
+    (first,) = _write(tmp_path, [_staged(
+        tmp_path,
+        permalink="https://old-team.slack.com/files/U1/F1/report",
+        origin_message_ts="1790000000.000001",
+    )])
+    path = tmp_path / "archive" / first.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = _write(tmp_path, [_staged(
+        tmp_path, permalink=permalink, origin_message_ts=message_ts,
+    )])
+
+    assert written == []
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_permalink_alias_needs_a_message_coordinate(tmp_path):
+    (first,) = _write(tmp_path, [_staged(
+        tmp_path, permalink="https://old-team.slack.com/files/U1/F1/report",
+    )])
+    path = tmp_path / "archive" / first.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = _write(tmp_path, [_staged(
+        tmp_path, permalink="https://new-team.slack.com/files/U1/F1/report",
+    )])
+
+    assert written == []
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_permalink_alias_never_hides_an_acl_change(tmp_path):
+    (first,) = _write(tmp_path, [_staged(
+        tmp_path,
+        permalink="https://old-team.slack.com/files/U1/F1/report",
+        origin_message_ts="1790000000.000001",
+    )])
+    path = tmp_path / "archive" / first.relative_path()
+    before = path.read_text(encoding="utf-8")
+
+    written = aw.write_docs(
+        tmp_path / "archive",
+        [_staged(
+            tmp_path,
+            permalink="https://new-team.slack.com/files/U1/F1/report",
+            origin_message_ts="1790000000.000001",
+        )],
+        workspace="tyit", channel_id="C1", channel="#other",
+        visibility="private", acl=frozenset({"#other"}),
+    )
+
+    assert written == []
+    assert path.read_text(encoding="utf-8") == before

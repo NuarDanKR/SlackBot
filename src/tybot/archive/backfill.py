@@ -428,9 +428,18 @@ def run(
             elif result == "refused":
                 refused += 1
             else:
+                outcome = result if result in {
+                    "partial", "metadata-unconfirmed", "skipped-empty"
+                } else "unexpected"
+                log.warning(
+                    "backfill incomplete ch=%s ts=%s outcome=%s",
+                    target.channel_id, item.ts, outcome,
+                )
                 failed += 1
                 exhausted = False
-                break
+                if result != "partial":
+                    break
+                continue
             highest = item.ts
 
         counts = JobCounts(
