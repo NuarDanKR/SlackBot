@@ -199,6 +199,79 @@ class PostgresSupervisorRepo:
             )
             return cur.rowcount
 
+    def claim_backfill(self, workspace: str) -> dict | None:
+        """Claim one queued job for this workspace in a single transaction."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                WITH picked AS (
+                    SELECT id FROM archive_backfill_job
+                     WHERE workspace = %s AND state = 'queued'
+                     ORDER BY created_at, id
+                     FOR UPDATE SKIP LOCKED
+                     LIMIT 1
+                )
+                UPDATE archive_backfill_job AS job
+                   SET state = 'running', started_at = now()
+                  FROM picked
+                 WHERE job.id = picked.id
+             RETURNING job.id, job.workspace, job.channel_id, job.from_ts,
+                       job.to_ts, job.dry_run, job.state
+                """,
+                (workspace,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def finish_backfill(self, job_id: int, workspace: str, *, state: str,
+                        found: int = 0, written: int = 0, duplicate: int = 0,
+                        refused: int = 0, failed: int = 0,
+                        error_code: str = "") -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE archive_backfill_job
+                   SET state = %s, found_count = %s, written_count = %s,
+                       duplicate_count = %s, refused_count = %s, failed_count = %s,
+                       error_code = %s, finished_at = now()
+                 WHERE id = %s AND workspace = %s AND state = 'running'
+                """,
+                (state, found, written, duplicate, refused, failed, error_code,
+                 job_id, workspace),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("backfill job changed while running")
+
+    def fail_interrupted_backfills(self, workspace: str) -> int:
+        """Call after acquiring the workspace's singleton process lock."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE archive_backfill_job
+                   SET state = 'failed', error_code = 'worker_restarted',
+                       failed_count = failed_count + 1, finished_at = now()
+                 WHERE workspace = %s AND state = 'running'
+                """,
+                (workspace,),
+            )
+            return cur.rowcount
+
+    def save_history_cursor(self, workspace: str, channel_id: str, ts: str) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO archive_channel_cursor
+                       (workspace, channel_id, last_history_ts, last_success_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (workspace, channel_id) DO UPDATE
+                   SET last_history_ts = GREATEST(
+                           archive_channel_cursor.last_history_ts,
+                           EXCLUDED.last_history_ts),
+                       last_success_at = now(), updated_at = now()
+                """,
+                (workspace, channel_id, ts),
+            )
+
 
 def default_repo() -> PostgresSupervisorRepo:
     return PostgresSupervisorRepo()

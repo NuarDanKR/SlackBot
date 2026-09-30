@@ -194,7 +194,7 @@ def plan(
     ready: Preconditions,
     drained_seconds: float | None = None,
     paused_at_ts: str = "",
-    backfill_requested: bool = False,
+    backfill_succeeded: bool = False,
     settle_seconds: float = DRAIN_SETTLE_SECONDS,
 ) -> Step:
     """다음에 무엇을 해야 하나. **아무것도 바꾸지 않는다.**
@@ -209,14 +209,14 @@ def plan(
                     blocked=True)
 
     if stage == Stage.HANDED_OVER:
-        if not backfill_requested:
+        if not backfill_succeeded:
             return Step(
                 "backfill",
-                "인수는 끝났지만 비운 구간을 아직 안 메웠습니다. 그 구간은 그림자에도"
-                " 없고 Slack 에만 있습니다.",
+                "비운 구간의 소급 성공이 확인되지 않았습니다. 그 구간은 그림자에도"
+                " 없고 Slack 에만 있을 수 있습니다.",
                 window=backfill_window(paused_at_ts),
             )
-        return Step("done", "인수가 끝났고 빈 구간도 메웠습니다.")
+        return Step("done", "소급 성공이 확인됐습니다.")
 
     unmet = ready.unmet()
     if unmet:

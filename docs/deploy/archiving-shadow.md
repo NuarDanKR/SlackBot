@@ -3,6 +3,18 @@
 기준: [Archiving Bot 분리 결정](../design/archiving-bot-separation-2026-09-23.md)
 상태: 개발/비교 전용. 운영 writer 전환 절차가 아니다.
 
+> **2026-09-30 경로 결정:** 이 문서의 명령과 예시는 기존 workspace별 shadow
+> 파일럿에만 적용된다. 최종 경로는
+> `/var/lib/tybot/archiver-shadow/<workspace>/<channel-id>__<first-name>/`
+> 아래 `archive/`, `objects/`, `staging/`이다. writer·reader는
+> `ARCHIVER_SHADOW_LAYOUT=per-channel-v1`을 명시한 새 shadow root에서만 이
+> 경로를 사용한다. 기존 workspace별 unit의 기본값은 여전히 `legacy`다.
+> 기존 shadow 자료는 이 문서만 보고 삭제하거나 옮기지 않는다. 새 root로의
+> 전환·소급 검증과 TY/PF 과거 자료 이관은 별도 작업이다.
+> 새 레이아웃은 첨부 분리 설정이 켜져 있어야 기동한다. 첨부 reader와 운영
+> 게이트를 확인하기 전에는 이 플래그를 켜서 서비스를 시작하지 않는다.
+> [후속 설계 §1·§5](../design/archiver-supervisor-backfill-console-2026-09-29.md)를 따른다.
+
 > **현재 적용 주의 (2026-09-28):** Archiver runtime은
 > `봇 관리 > 워크스페이스 연결`의 `bot_connection`에서 검증된 Archiver 토큰을 읽는다.
 > 이 reader 전환이 포함된 코드가 서버에 배포되고 workspace별 bootstrap이 확인되기
@@ -141,3 +153,22 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/migrate_shadow_root
 `staging/`)에 쌓이므로, root 를 `/var/lib/tybot/archiver-shadow` 로 주면 첨부가 그
 디렉터리 밖 `/var/lib/tybot/objects` 로 나가 운영 첨부와 섞인다. 같은 이유로
 `shadow_archive_dir()` 이 운영 archive 와 부모가 같은 shadow root 를 거절한다.
+
+## 소급 작업 실행기
+
+콘솔의 소급 요청은 `archive_backfill_job`에 `queued`로 기록된다. 기존 workspace별
+shadow 서비스에서 소급 실행을 사용하려면 supervisor 스키마를 격리 DB에서 검증하고
+운영 DB에 적용한 다음, 해당 서비스의 전용 환경 파일에
+`ARCHIVER_BACKFILL_ENABLED=1`을 설정해 재시작한다. 기본값은 꺼짐이다.
+
+서비스는 자신의 workspace에 대기 중인 작업만 선점한다. 미리보기는 Slack을 읽고
+건수만 저장하며, 실제 실행은 실시간과 같은 `ShadowCollector.ingest_message()`를
+사용한다. 작업 중 프로세스가 종료되면 재시작 시 그 작업은 `failed`로 닫힌다.
+재시도는 콘솔에서 범위를 다시 미리 보고 새 작업으로 요청한다. 운영 archive나
+Master writer의 소유권은 이 설정으로 바뀌지 않는다.
+
+첨부가 포함된 소급 실행 전에는 해당 workspace의 `separate_attachments` 값을
+확인한다. 이 값이 꺼져 있으면 실시간과 마찬가지로 변환문이 raw에도 기록된다.
+첨부 정본 reader와 재색인을 확인한 뒤 분리 스위치를 켜기 전까지는 미리보기만
+실행하고 첨부 포함 범위의 실제 소급은 보류한다. 소급은 기존 운영 raw의
+`[첨부추출:...]` 줄을 수정하거나 제거하지 않는다.

@@ -6,6 +6,10 @@
 > [Archiver 단일 Supervisor·콘솔 운영·소급 수집 작업지시서](archiver-supervisor-backfill-console-2026-09-29.md)를
 > 우선 적용한다. 이 문서의 workspace별 unit과 중복 root는 이행 전 현행 절차를 설명할 뿐
 > 최종 목표가 아니다.
+> **2026-09-30 경로 결정:** 새 shadow 자료는
+> `/var/lib/tybot/archiver-shadow/<workspace>/<channel-id>__<first-name>/`
+> 아래 `archive/`, `objects/`, `staging/`로 나눈다. 세부 계약은 후속 문서 §1·§5를
+> 따른다. 이 결정은 기존 shadow 폴더를 지금 삭제하라는 지시가 아니다.
 
 작성: 2026-09-28  
 대상: Claude Code 구현 담당자 및 TYBot 콘솔 검토자  

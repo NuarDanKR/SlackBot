@@ -56,6 +56,7 @@ from .attachment_doc import (
     PENDING,
     UNSUPPORTED,
     AttachmentDoc,
+    _safe,
     legacy_index,
 )
 from .store import ArchiveDoc, RawLine, parse_frontmatter
@@ -64,6 +65,7 @@ log = logging.getLogger("tybot.archive.attachment_reader")
 
 #: 정본이 사는 자리. `AttachmentDoc.relative_path()` 와 **같은 모양**이어야 한다.
 ATTACHMENT_GLOB = "*/channels/*/attachments/*/*.md"
+SHADOW_ATTACHMENT_GLOB = "*/*__*/archive/attachments/*/*.md"
 
 #: 일반 근거로 쓰는 상태. **`partial` 은 빠진다**(모듈 머리말).
 #:
@@ -86,7 +88,9 @@ def is_attachment_doc(doc) -> bool:
 def source_files(root: Path | str) -> list[Path]:
     """정본 파일 목록. 없으면 빈 목록 — 아직 아무것도 안 쓴 상태다."""
     base = Path(root) / "workspaces"
-    return sorted(base.glob(ATTACHMENT_GLOB)) if base.is_dir() else []
+    legacy = list(base.glob(ATTACHMENT_GLOB)) if base.is_dir() else []
+    shadow = list(Path(root).glob(SHADOW_ATTACHMENT_GLOB))
+    return sorted(legacy + shadow)
 
 
 #: 없으면 문서로 세지 않는 칸. 하나라도 비면 그 문서는 **좌표가 없는 본문**이다 —
@@ -162,6 +166,20 @@ def validate(doc: AttachmentDoc, path: Path, root: Path | str) -> Problem | None
     # 고를 근거가 없다 — 한쪽을 믿으면 다른 쪽 채널의 근거가 된다.
     expected = Path(root) / doc.relative_path()
     try:
+        parts = Path(path).resolve().relative_to(Path(root).resolve()).parts
+    except ValueError:
+        parts = ()
+    if len(parts) == 6 and parts[2] == "archive" and parts[3] == "attachments":
+        workspace, channel_folder, _, _, file_id, revision = parts
+        if (
+            workspace == doc.workspace
+            and channel_folder.startswith(f"{doc.channel_id}__")
+            and bool(channel_folder.removeprefix(f"{doc.channel_id}__"))
+            and file_id == _safe(doc.file_id)
+            and revision == f"{_safe(doc.revision)}.md"
+        ):
+            return None
+    try:
         same = expected.resolve() == Path(path).resolve()
     except OSError:
         same = str(expected) == str(path)
@@ -208,6 +226,7 @@ def load(path: Path) -> AttachmentDoc | None:
         converter_name=str(front.get("converter_name") or ""),
         converter_version=str(front.get("converter_version") or ""),
         error_code=str(front.get("error_code") or ""),
+        source_path=path,
     )
 
 
@@ -323,7 +342,7 @@ def as_archive_doc(doc: AttachmentDoc, root: Path | str) -> ArchiveDoc:
     줄마다 `message_ts` 를 실어 둔다 — 그 첨부가 붙어 있던 메시지 좌표다.
     출처를 누르면 파일이 올라온 자리로 간다(요구 6).
     """
-    path = Path(root) / doc.relative_path()
+    path = doc.source_path or Path(root) / doc.relative_path()
     stamp = _stamp(doc)[:16].replace("T", " ")
     speaker = doc.name or doc.file_id
     lines = [

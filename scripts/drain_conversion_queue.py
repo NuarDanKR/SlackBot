@@ -60,6 +60,14 @@ def staging_meta(archive_dir: str, job: queue.Job) -> pathlib.Path:
     """
     from tybot.archive.files import _safe_component
 
+    if os.getenv("ARCHIVER_SHADOW_LAYOUT", "").strip().lower() == "per-channel-v1":
+        from tybot.archive.shadow_paths import existing_channel_root
+
+        return (
+            existing_channel_root(archive_dir, job.workspace, job.channel_id)
+            / "staging" / _safe_component(job.file_id) / "metadata.json"
+        )
+
     root = pathlib.Path(archive_dir).parent / "staging" / "workspaces"
     return (
         root
@@ -251,6 +259,9 @@ def publish_reconversion(
     if len(coordinates) != 1:
         return False, "archive_origin_ambiguous", False
     doc, source = candidates[0]
+    channel_archive = (
+        doc.path.parent.parent if doc.path.parent.parent.name == "archive" else None
+    )
 
     staged = SimpleNamespace(
         file_id=job.file_id,
@@ -265,6 +276,7 @@ def publish_reconversion(
         channel=doc.channel,
         visibility=doc.visibility,
         acl=doc.acl,
+        channel_archive=channel_archive,
     )
     current = next((item for item in canonical if item.file_id == job.file_id), None)
     if current is None:
@@ -292,9 +304,17 @@ def publish_reconversion(
             return False, "archive_write_unconfirmed", True
         try:
             refreshed = ArchiveStore(pathlib.Path(archive_dir))
-            canonical_path = (
-                pathlib.Path(archive_dir) / current.relative_path()
-            ).resolve()
+            if channel_archive:
+                from tybot.archive.attachment_doc import _safe
+
+                canonical_path = (
+                    channel_archive / "attachments" / _safe(current.file_id)
+                    / f"{_safe(current.revision)}.md"
+                ).resolve()
+            else:
+                canonical_path = (
+                    pathlib.Path(archive_dir) / current.relative_path()
+                ).resolve()
             docs = [
                 item
                 for item in refreshed.docs()
@@ -660,7 +680,15 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = 0
     for job in jobs:
-        meta_path = staging_meta(archive, job)
+        try:
+            meta_path = staging_meta(archive, job)
+        except ValueError:
+            # A missing or ambiguous channel directory needs operator review.
+            # Do not leave this job leased or stop unrelated queue work.
+            queue.fail(job.id, error_code="staging_path_invalid", retryable=False)
+            print(f"  건너뜀(채널 경로 확인 필요): {job.log_line()}")
+            failed += 1
+            continue
         if not meta_path.is_file():
             # 좌표는 있는데 파일이 없다. **되풀이하지 않는다** — 같은 결과가 나온다.
             queue.fail(job.id, error_code="staging_missing", retryable=False)

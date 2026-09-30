@@ -231,6 +231,7 @@ def ingest(
     share_with: list[str] | None = None,
     imported_from: str | None = None,
     dm_user: str | None = None,
+    channel_directory: Path | None = None,
 ) -> IngestResult:
     """원문을 KST 날짜별 파일에 추가한다. 검증 실패 시 어떤 파일도 쓰지 않는다.
 
@@ -238,6 +239,10 @@ def ingest(
     채널과 다르고, 그 외 검사(PII·중복·형식)는 전부 같은 것을 지난다 — 새 입구를
     만들면서 검사를 새로 짜면 그 입구만 헐거워진다.
     """
+    if channel_directory is not None and (
+        dm_user or not Path(channel_directory).resolve().is_relative_to(Path(root).resolve())
+    ):
+        raise ValueError("channel directory must be inside the archive root")
     with archive_write_lock(root):
         return _ingest_locked(
             root,
@@ -250,6 +255,7 @@ def ingest(
             share_with=share_with,
             imported_from=imported_from,
             dm_user=dm_user,
+            channel_directory=channel_directory,
         )
 
 
@@ -265,9 +271,10 @@ def _ingest_locked(
     share_with: list[str] | None,
     imported_from: str | None,
     dm_user: str | None = None,
+    channel_directory: Path | None = None,
 ) -> IngestResult:
     stable_id = _stable_channel_id(channel, channel_id)
-    directory = (
+    directory = channel_directory or (
         dm_dir(root, workspace, dm_user)
         if dm_user
         else channel_dir(root, workspace, channel, stable_id)
@@ -305,18 +312,14 @@ def _ingest_locked(
         grouped.setdefault(message.ts.astimezone(KST).date(), []).append(line)
 
     fallback_day = messages[0].ts.astimezone(KST).date() if messages else datetime.now(KST).date()
-    fallback_path = doc_path(
-        root, workspace, channel, channel_id=stable_id, day=fallback_day, dm_user=dm_user
-    )
+    fallback_path = directory / "raw" / f"{fallback_day.isoformat()}.md"
     if not grouped:
         return IngestResult(fallback_path, 0, skipped_bot, refused)
 
     stamp = datetime.now(KST).strftime("%Y-%m-%dT%H:%M+09:00")
     pending: dict[Path, str] = {}
     for day, lines in sorted(grouped.items()):
-        path = doc_path(
-            root, workspace, channel, channel_id=stable_id, day=day, dm_user=dm_user
-        )
+        path = directory / "raw" / f"{day.isoformat()}.md"
         text = existing_texts.get(path) or _new_doc(
             workspace,
             channel,

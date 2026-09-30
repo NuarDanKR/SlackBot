@@ -320,6 +320,8 @@ class ArchiveStore:
         legacy = self.root / "channels"
         # v2를 먼저 읽어 v1과 같은 라인이 있으면 새 경로를 출처로 남긴다.
         files = sorted(v2.glob("*/channels/*/raw/*.md")) if v2.is_dir() else []
+        # Archiver shadow v3 is opt-in; the live v2 layout remains readable.
+        files.extend(sorted(self.root.glob("*/*__*/archive/raw/*.md")))
         # 구조 1 — 채널당 파일 하나(`channels/<slug>__<id>.md`). 아직 수집이 쓰지
         # 않는 모양이라 운영 아카이브에는 하나도 없다. 그런데 읽는 쪽이 이걸 모르면
         # 구조 1 로 만든 아카이브가 **오류 없이 통째로 안 보인다** — 파일은 있고

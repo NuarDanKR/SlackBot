@@ -169,10 +169,14 @@ def test_a_handed_over_channel_still_owes_a_backfill():
     assert not step.blocked
 
 
-def test_only_a_requested_backfill_ends_the_handover():
-    step = plan(ACTIVE, ready=READY, paused_at_ts=PAUSED_AT, backfill_requested=True)
+def test_only_a_succeeded_backfill_ends_the_handover():
+    step = plan(ACTIVE, ready=READY, paused_at_ts=PAUSED_AT, backfill_succeeded=True)
 
     assert step.action == "done"
+
+
+def test_a_queued_or_failed_backfill_is_not_done():
+    assert plan(ACTIVE, ready=READY, paused_at_ts=PAUSED_AT).action == "backfill"
 
 
 def test_the_backfill_starts_before_the_pause():

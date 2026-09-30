@@ -267,10 +267,21 @@ def queue_retry(
 
 
 def attachment_storage(
-    archive_root: Path | str, workspace: str, channel_id: str
+    archive_root: Path | str, workspace: str, channel_id: str,
+    *, channel_root: Path | None = None,
 ) -> AttachmentStorage:
-    """ARCHIVE_DIR의 형제인 staging/objects 아래 채널별 저장 위치를 만든다."""
+    """Use a channel root in new shadow layouts; otherwise keep legacy sibling paths."""
     archive = Path(archive_root)
+    if channel_root is not None:
+        base = Path(channel_root).resolve()
+        if not base.is_relative_to(archive.resolve()):
+            raise ValueError("shadow attachment storage escaped its root")
+        return AttachmentStorage(
+            staging_dir=base / "staging",
+            objects_dir=base / "objects",
+            workspace=workspace,
+            channel_id=channel_id,
+        )
     safe_ws = _safe_component(workspace)
     safe_channel = _safe_component(channel_id)
     suffix = Path("workspaces") / safe_ws / "channels" / safe_channel / "attachments"

@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from .attachment_doc import FAILED, PENDING, USABLE, AttachmentDoc, from_staged, render
+from .attachment_doc import FAILED, PENDING, USABLE, AttachmentDoc, _safe, from_staged, render
 
 logger = logging.getLogger("tybot.archive.attachment_writer")
 
@@ -159,6 +159,7 @@ def write_docs(
     channel: str,
     visibility: str,
     acl: frozenset[str],
+    channel_archive: Path | None = None,
 ) -> list[AttachmentDoc]:
     """staged 첨부들을 정본 문서로 쓴다. **쓴 것만 돌려준다.**
 
@@ -184,7 +185,13 @@ def write_docs(
         )
         if doc is None:
             continue
-        path = root / doc.relative_path()
+        if channel_archive is not None:
+            archive = Path(channel_archive).resolve()
+            if not archive.is_relative_to(root.resolve()):
+                raise ValueError("shadow attachment document escaped its root")
+            path = archive / "attachments" / _safe(doc.file_id) / f"{_safe(doc.revision)}.md"
+        else:
+            path = root / doc.relative_path()
         body = render(doc)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

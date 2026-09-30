@@ -131,6 +131,8 @@ class AttachmentDoc:
     coverage_total: int | None = None
     # PII·변환 실패 사유. **코드만** 남긴다(본문·번호 일부를 복제하지 않는다).
     error_code: str = ""
+    # Reader-only coordinate. It is not serialized into the canonical document.
+    source_path: Path | None = field(default=None, compare=False, repr=False)
 
     @property
     def usable(self) -> bool:

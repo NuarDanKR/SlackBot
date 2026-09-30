@@ -15,7 +15,7 @@ from pathlib import Path
 
 from slack_sdk.errors import SlackApiError
 
-from .archive import channel_membership, ingest_ack, writer
+from .archive import channel_membership, ingest_ack, shadow_paths, writer
 from .archive.archiving_state import IngestState
 from .archive.attachment_doc import CONVERTED
 from .archive.attachment_writer import raw_lines_for
@@ -124,13 +124,16 @@ def shadow_archive_dir(env: dict[str, str] | None = None) -> Path:
         raise ArchiverConfigError("ARCHIVE_DIR must be an explicit absolute path")
     shadow = Path(supplied).resolve()
     live = Path(live_supplied).resolve()
+    layout = values.get("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower()
+    if layout not in {"legacy", "per-channel-v1"}:
+        raise ArchiverConfigError("ARCHIVER_SHADOW_LAYOUT must be legacy or per-channel-v1")
     if shadow == live or shadow in live.parents or live in shadow.parents:
         raise ArchiverConfigError("shadow and live archive paths must not overlap")
     # 첨부 정본은 archive 의 **형제**에 쌓인다(`files.attachment_storage` — objects/,
     # staging/). 그래서 두 archive 가 겹치지 않아도 부모가 같으면 shadow 첨부가 운영
     # objects/ 안으로 들어간다. 경로가 다르니 오류가 나지 않고, 나중에 어느 것이
     # shadow 였는지 구분할 수 없다.
-    if shadow.parent == live.parent:
+    if layout == "legacy" and shadow.parent == live.parent:
         raise ArchiverConfigError(
             "shadow and live archives must not share a parent directory;"
             " attachment objects/ and staging/ are siblings of the archive dir"
@@ -139,12 +142,25 @@ def shadow_archive_dir(env: dict[str, str] | None = None) -> Path:
 
 
 class ShadowCollector:
-    def __init__(self, cfg: ArchiverWorkspace, root: Path, *, membership_repo=None) -> None:
+    def __init__(self, cfg: ArchiverWorkspace, root: Path, *, membership_repo=None,
+                 layout: str = "legacy") -> None:
+        if layout not in {"legacy", "per-channel-v1"}:
+            raise ArchiverConfigError("unknown shadow archive layout")
+        if layout == "per-channel-v1" and not cfg.separate_attachments:
+            raise ArchiverConfigError(
+                "per-channel-v1 requires separate attachments; raw must not contain extracted body"
+            )
         self.cfg = cfg
         self.root = root
+        self.layout = layout
         self._membership_repo = membership_repo
         self._names: dict[str, str] = {}
         self._store = ArchiveStore(root)
+
+    def _channel_archive(self, channel_id: str, channel: str) -> Path | None:
+        if self.layout == "legacy":
+            return None
+        return shadow_paths.archive_dir(self.root, self.cfg.key, channel_id, channel)
 
     def _collection_channel(self, client, channel_id: str) -> tuple[str, bool] | None:
         """Resolve an invited channel while respecting the operator stop switch."""
@@ -220,7 +236,11 @@ class ShadowCollector:
 
         from .archive.files import attachment_storage
 
-        storage = attachment_storage(self.root, self.cfg.key, channel_id)
+        channel_archive = self._channel_archive(channel_id, channel)
+        storage = attachment_storage(
+            self.root, self.cfg.key, channel_id,
+            channel_root=channel_archive.parent if channel_archive else None,
+        )
         staged: list = []
         messages = _messages_from(
             client, event, self.cfg.bot_token, self._names, storage,
@@ -240,6 +260,7 @@ class ShadowCollector:
             channel_id=channel_id,
             messages=messages,
             acl=[channel],
+            channel_directory=channel_archive,
         )
         # 원문이 파일에 들어갔다. **아직 ready 가 아니다** — 뒤에 볼 것이 남았다.
         # 새로 쓴 경우뿐 아니라 Slack 재전달로 이미 같은 원문이 확인된 경우도
@@ -267,6 +288,7 @@ class ShadowCollector:
                 channel=channel,
                 visibility="private" if is_private else "public",
                 acl=frozenset({channel}),
+                channel_archive=channel_archive,
             )
         if staged:
             # 첨부가 있으면 **본문만으로 ready 라고 하지 않는다.**
@@ -429,6 +451,7 @@ class ShadowCollector:
             channel_id=channel_id,
             messages=messages,
             acl=[channel],
+            channel_directory=self._channel_archive(channel_id, channel),
         )
         if result.refused:
             self._ack(
@@ -519,6 +542,16 @@ def _membership_sync_loop(client, repo, workspace: str, stop: threading.Event,
             log.exception("[%s] periodic channel membership sync failed", workspace)
 
 
+def _backfill_loop(runner, stop: threading.Event, interval_seconds: int) -> None:
+    while not stop.is_set():
+        try:
+            if runner.run_once():
+                continue
+        except Exception:
+            log.exception("[%s] backfill queue poll failed", runner.workspace)
+        stop.wait(interval_seconds)
+
+
 def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -529,7 +562,10 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     validate_slack_identity(cfg, app.client.auth_test())
     repo = default_repo()
     channel_membership.sync(app.client, repo, cfg.key, actor="startup-membership-sync")
-    collector = ShadowCollector(cfg, root, membership_repo=repo)
+    collector = ShadowCollector(
+        cfg, root, membership_repo=repo,
+        layout=os.getenv("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower(),
+    )
     recovered = ingest_ack.drain_outbox(cfg.key)
     if recovered["applied"] or recovered["left"]:
         log.info(
@@ -555,12 +591,36 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         name=f"archiver-membership-{cfg.key}",
         daemon=True,
     )
+    backfill_thread = None
+    if os.getenv("ARCHIVER_BACKFILL_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        from .archive.backfill_runner import BackfillRunner
+        from .console.supervisor_repo import default_repo as supervisor_repo
+
+        interval_seconds = int(os.getenv("ARCHIVER_BACKFILL_POLL_SECONDS", "15"))
+        if interval_seconds < 5:
+            raise ArchiverConfigError("ARCHIVER_BACKFILL_POLL_SECONDS must be at least 5")
+        runner = BackfillRunner(cfg.key, app.client, collector, supervisor_repo(), repo)
+        interrupted = runner.recover_interrupted()
+        if interrupted:
+            log.warning("[%s] marked %s interrupted backfill jobs failed", cfg.key, interrupted)
+        backfill_thread = threading.Thread(
+            target=_backfill_loop,
+            args=(runner, stop, interval_seconds),
+            name=f"archiver-backfill-{cfg.key}",
+            daemon=True,
+        )
     sync_thread.start()
+    if backfill_thread is not None:
+        backfill_thread.start()
     try:
         SocketModeHandler(app, cfg.app_token).start()
     finally:
         stop.set()
         sync_thread.join(timeout=1)
+        if backfill_thread is not None:
+            backfill_thread.join(timeout=1)
 
 
 def _instance_lock_name(workspace: str) -> str:

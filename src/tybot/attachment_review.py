@@ -193,20 +193,27 @@ def _as_count(value) -> int | None:
 def scan(archive_dir: Path | str, *, status: str | None = None) -> list[Attachment]:
     """검수 폴더 전체를 훑는다. `status` 를 주면 그 상태만."""
     root = staging_root(archive_dir)
-    if not root.is_dir():
-        return []
     out: list[Attachment] = []
-    for meta_path in sorted(root.glob("*/channels/*/attachments/*/metadata.json")):
+    legacy_paths = (
+        root.glob("*/channels/*/attachments/*/metadata.json") if root.is_dir() else ()
+    )
+    shadow_paths = Path(archive_dir).glob("*/*__*/staging/*/metadata.json")
+    for meta_path in sorted([*legacy_paths, *shadow_paths]):
         meta = _read_meta(meta_path)
         if meta is None:
             continue
-        # .../workspaces/<ws>/channels/<ch>/attachments/<file>/metadata.json
-        parts = meta_path.parts
-        try:
-            ws = parts[parts.index("workspaces") + 1]
-            ch = parts[parts.index("channels") + 1]
-        except (ValueError, IndexError):
-            continue
+        if meta_path.is_relative_to(root):
+            parts = meta_path.parts
+            try:
+                ws = parts[parts.index("workspaces") + 1]
+                ch = parts[parts.index("channels") + 1]
+            except (ValueError, IndexError):
+                continue
+        else:
+            parts = meta_path.relative_to(archive_dir).parts
+            if len(parts) != 5 or "__" not in parts[1]:
+                continue
+            ws, ch = parts[0], parts[1].split("__", 1)[0]
         item = _from_meta(meta, meta_path, ws, ch)
         if status is None or item.status == status:
             out.append(item)

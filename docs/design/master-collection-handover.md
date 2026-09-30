@@ -4,6 +4,11 @@
 대상: TYBot 운영자, Claude Code / Codex 구현 담당
 상태: **준비 코드만 구현됨.** 인수는 한 채널도 하지 않았다
 
+> `handover.plan()`은 아직 호출부가 없는 순수 계획 함수다. 현재 Archiver 런타임은
+> shadow root만 열며 `active` 채널을 운영 archive에 쓰지 않는다. 이 상태에서
+> 채널을 `active`로 바꾸면 Master가 쓰기를 멈춘 뒤 운영 원문에 공백이 생길 수
+> 있다. Archiver의 운영 writer 연결과 서버 검증 전에는 인수하지 않는다.
+
 관련: [Archiver Shadow 콘솔 운영](archiver-shadow-console-operations-2026-09-28.md) ·
 [단일 Supervisor·소급 수집](archiver-supervisor-backfill-console-2026-09-29.md) ·
 스키마 `deploy/sql/archiving_schema.sql`

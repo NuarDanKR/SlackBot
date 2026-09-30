@@ -10,7 +10,7 @@
 3. `monkeypatch` 가 넣은 값이 아니라 **되돌려지지 않는다**
 4. 뒤에 오는 시험들이 진짜 DB 에 붙는다
 
-막는 곳은 `conftest.py` 다. 여기서는 그 방벽이 **실제로 서 있는지**만 본다.
+막는 곳은 `conftest.py` 의 수집 전 훅이다. 여기서는 방벽이 실제로 서 있는지 본다.
 방벽이 사라지면 조용히 다시 붙게 되고, 그때는 오류가 아니라 행으로 나타난다.
 """
 
@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
+import pytest
 
 from tybot.envfile import load_env_file
 
@@ -30,6 +32,8 @@ def test_the_env_file_pointer_is_not_the_repo_dotenv():
 
     assert pointer, "conftest 의 세션 픽스처가 안 돌았습니다"
     assert Path(pointer).resolve() != (REPO / ".env").resolve()
+    assert Path(pointer).read_text(encoding="utf-8") == ""
+    assert os.environ.get("ENV_SETTINGS_PATH") == pointer
 
 
 def test_loading_the_env_file_here_brings_no_database_url():
@@ -41,19 +45,12 @@ def test_loading_the_env_file_here_brings_no_database_url():
     assert os.environ.get("DATABASE_URL") == before
 
 
-def test_an_explicitly_exported_dsn_still_wins():
-    """통합 시험을 못 돌리게 막는 것이 아니다. **실수로 붙는 것**을 막는다.
+def test_ambient_database_url_is_rejected_before_collection(monkeypatch):
+    import conftest
 
-    `DATABASE_URL=… python -m pytest` 로 적으면 그대로 쓰인다 —
-    `load_env_file()` 이 `override=False` 이기 때문이다.
-    """
-    os.environ["DATABASE_URL"] = "postgresql://explicit/only-for-this-test"
-    try:
-        load_env_file()
-
-        assert os.environ["DATABASE_URL"] == "postgresql://explicit/only-for-this-test"
-    finally:
-        os.environ.pop("DATABASE_URL", None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example.invalid/tyslackai")
+    with pytest.raises(pytest.UsageError, match="ambient DATABASE_URL"):
+        conftest.pytest_configure(None)
 
 
 def test_the_repo_dotenv_is_not_committed():

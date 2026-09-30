@@ -580,6 +580,39 @@ def test_a_job_coordinate_cannot_escape_the_staging_root(tmp_path):
     assert ".." not in path.parts
 
 
+def test_shadow_queue_finds_staging_beneath_the_channel(tmp_path, monkeypatch):
+    import drain_conversion_queue as drain
+
+    monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
+    root = tmp_path / "archiver-shadow"
+    channel = root / "tyit" / "C12345678__first-name"
+    channel.mkdir(parents=True)
+    job = queue.Job(
+        id=1, workspace="tyit", channel_id="C12345678", file_id="F123",
+        original_sha256="", pipeline_version="1", state="queued", attempt_count=0,
+    )
+
+    assert drain.staging_meta(str(root), job) == channel / "staging" / "F123" / "metadata.json"
+
+
+def test_shadow_queue_records_bad_channel_path_and_continues(tmp_path, monkeypatch):
+    import drain_conversion_queue as drain
+
+    monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
+    job = queue.Job(
+        id=7, workspace="tyit", channel_id="C12345678", file_id="F123",
+        original_sha256="", pipeline_version="1", state="queued", attempt_count=0,
+    )
+    failures = []
+    monkeypatch.setattr(drain.queue, "reclaim_expired", lambda: 0)
+    monkeypatch.setattr(drain.queue, "claim", lambda *args, **kwargs: [job])
+    monkeypatch.setattr(drain.queue, "fail", lambda *args, **kwargs: failures.append((args, kwargs)))
+    monkeypatch.setattr(drain, "load_env_file", lambda: None)
+
+    assert drain.main(["--apply", "--archive", str(tmp_path)]) == drain.EXIT_FAILED
+    assert failures == [((7,), {"error_code": "staging_path_invalid", "retryable": False})]
+
+
 def test_the_lease_owner_must_be_named():
     """회수할 때 누구 것이었는지 모르면 원인을 되짚을 수 없다."""
     with pytest.raises(ValueError):
