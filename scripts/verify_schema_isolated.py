@@ -309,6 +309,11 @@ OUR_TABLE_NAMES = frozenset({
     "bot_connection_secret", "channel", "sync_run",
 })
 
+#: `CREATE TABLE [IF NOT EXISTS] <이름>` 에서 이름만 뽑는다.
+_CREATE_TABLE = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)", re.I
+)
+
 REQUIRED_ROLES = ("tyslackai", "tybot_archiver")
 
 
@@ -330,12 +335,35 @@ def missing_roles(conn) -> list[str]:
         return out
 
 
+def declared_tables() -> frozenset[str]:
+    """검증 대상 SQL 이 **직접 만드는** 표 이름.
+
+    손으로 관리하는 목록과 따로 두지 않는다. 새 스키마 파일이 표를 추가할 때마다
+    사람이 목록을 고쳐야 하면, 언젠가 고치지 않고 그날 검증이 **자기가 만든 표를
+    남의 것으로 보고** 거절한다(2026-09-30 실제 발생 — `archiver_workspace_runtime`,
+    `slack_license`, `slack_license_manual`).
+
+    그러면 첫 실행은 되는데 두 번째부터 안 되고, 그 증상은 「격리 DB 가 아니다」 라는
+    엉뚱한 사유로 나온다.
+    """
+    names: set[str] = set()
+    for filename in TARGET_FILES:
+        path = SQL_DIR / filename
+        if path.is_file():
+            names |= set(_CREATE_TABLE.findall(path.read_text(encoding="utf-8")))
+    return frozenset(names)
+
+
 def foreign_tables(conn) -> list[str]:
     """우리 것이 아닌 표. 하나라도 있으면 **지우지 않는다.**
 
     이름 표시만으로는 부족하다. 누가 `..._schema_test` 라는 이름으로 다른 일을
     하고 있을 수 있고, 그때 `DROP SCHEMA public CASCADE` 는 되돌릴 수 없다.
+
+    「우리 것」 은 세 갈래다 — 접두사, 손으로 적은 이름, 그리고 **검증 대상 SQL 이
+    스스로 선언한 표**. 마지막 갈래가 목록이 낡는 것을 막는다.
     """
+    known = OUR_TABLE_NAMES | declared_tables()
     with conn.cursor() as cur:
         cur.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
@@ -343,7 +371,7 @@ def foreign_tables(conn) -> list[str]:
         names = [str(row[0]) for row in cur.fetchall()]
     return [
         name for name in names
-        if name not in OUR_TABLE_NAMES
+        if name not in known
         and not any(name.startswith(prefix) for prefix in OUR_TABLE_PREFIXES)
     ]
 

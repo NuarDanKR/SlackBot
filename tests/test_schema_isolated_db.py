@@ -216,6 +216,88 @@ def test_the_trigram_fallback_installs_its_extension_before_creating_the_index()
     assert extension < index
 
 
+def test_the_schema_files_declare_what_the_verifier_calls_ours():
+    """검증이 **자기가 만든 표**를 남의 것으로 보면 안 된다.
+
+    2026-09-30 실제로 그랬다. `archiver_supervisor_schema.sql` 과
+    `slack_license_schema.sql` 이 표를 더했는데 손으로 관리하던 목록은 그대로였고,
+    첫 실행은 되는데 **두 번째부터** 「격리 DB 가 아니다」 로 거절했다. 사유가
+    엉뚱해서 원인을 찾는 데 시간이 든다.
+
+    그래서 목록을 SQL 에서 뽑는다. 이 시험은 그 연결이 살아 있는지만 본다.
+    """
+    declared = verify.declared_tables()
+
+    assert declared, "선언된 표를 하나도 못 읽었다 — 정규식이 안 맞는다"
+    for name in ("archiver_workspace_runtime", "archive_channel_cursor",
+                 "archive_backfill_job", "slack_license", "bot_connection"):
+        assert name in declared, name
+
+
+def test_no_declared_table_reads_as_a_stranger():
+    """하나라도 빠지면 그 표가 있는 DB 에서 검증이 통째로 안 돈다."""
+    known = verify.OUR_TABLE_NAMES | verify.declared_tables()
+
+    strangers = [
+        name for name in verify.declared_tables()
+        if name not in known
+        and not any(name.startswith(prefix) for prefix in verify.OUR_TABLE_PREFIXES)
+    ]
+
+    assert strangers == []
+
+
+class _FakeCursor:
+    def __init__(self, names):
+        self.names = names
+
+    def execute(self, sql, params=None):
+        assert "pg_tables" in sql
+
+    def fetchall(self):
+        return [(name,) for name in self.names]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, names):
+        self.names = names
+
+    def cursor(self):
+        return _FakeCursor(self.names)
+
+
+def test_foreign_tables_accepts_what_the_schema_files_declare():
+    """판정 함수 자체를 본다. 목록만 맞고 함수가 안 쓰면 아무것도 안 바뀐다."""
+    ours = ["archiver_workspace_runtime", "slack_license", "slack_license_manual",
+            "archive_channel_cursor", "bot_connection"]
+
+    assert verify.foreign_tables(_FakeConn(ours)) == []
+
+
+def test_foreign_tables_still_names_a_stranger():
+    """넓히다가 판정을 없애면 남의 DB 를 지우는 것을 막을 수 없다."""
+    mixed = ["archiver_workspace_runtime", "payroll", "customer_orders"]
+
+    assert verify.foreign_tables(_FakeConn(mixed)) == ["payroll", "customer_orders"]
+
+
+def test_a_real_stranger_is_still_refused():
+    """넓히다가 판정 자체를 없애면, 남의 DB 를 지우는 것을 막을 수 없다."""
+    known = verify.OUR_TABLE_NAMES | verify.declared_tables()
+
+    for name in ("payroll", "customer_orders", "django_migrations"):
+        assert name not in known, name
+        assert not any(
+            name.startswith(prefix) for prefix in verify.OUR_TABLE_PREFIXES
+        ), name
+
+
 # --- DSN 이 있을 때만 -------------------------------------------------------
 
 def _prepared(conn):
