@@ -71,13 +71,29 @@ def is_synthetic_channel_id(value: str | None) -> bool:
 
 
 def workspace_from_path(path: Path, root: Path | str) -> str:
-    """v1/v2 원문 경로에서 워크스페이스 키를 얻는다."""
+    """원문 경로에서 워크스페이스 키를 얻는다.
+
+    **깨진 문서의 유일한 단서**다. 프론트매터를 못 읽으면 그 파일이 어느
+    워크스페이스 것인지 경로밖에 말해 주지 않고, `unknown` 으로 떨어지면 콘솔에서
+    어디를 찾아야 할지 알 수 없다.
+
+    | 모양 | 워크스페이스 |
+    |---|---|
+    | `workspaces/<ws>/…` · `channels/<ws>/…` | 두 번째 칸 |
+    | `<ws>/<채널ID>__<이름>/archive/…` | **첫 칸** |
+    | `<ws>/dm/<사용자>/archive/…` | **첫 칸** |
+    """
     try:
         parts = path.relative_to(Path(root)).parts
     except ValueError:
         return "unknown"
     if len(parts) >= 2 and parts[0] in {"channels", "workspaces"}:
         return parts[1]
+    # 새 구조는 워크스페이스가 **맨 앞**이다. 두 번째 칸으로 그 구조임을 가린다 —
+    # 아무 두 칸짜리 경로나 워크스페이스로 읽으면 루트에 떨어진 파일이 가짜
+    # 워크스페이스를 만든다.
+    if len(parts) >= 2 and (parts[1] == "dm" or "__" in parts[1]):
+        return parts[0]
     return "unknown"
 
 
@@ -354,6 +370,30 @@ class ArchiveStore:
                     len(legacy_files), legacy,
                 )
         return files
+
+    def legacy_files(self) -> list[Path]:
+        """운영 루트에 **아직 남아 있는 옛 구조** 파일.
+
+        최종 운영 루트는 하나이고, 그 아래에는 Archiver 의 새 구조만 남는다. 옛
+        자료는 루트 **밖**으로 백업한다 — 지우지 않는다.
+
+        옮기기 전에 셀 수 있어야 한다. 「0 건」 을 확인하지 않고 옛 글롭을 떼면
+        **파일은 그대로 있고 근거만 사라진다.** 반대로 안 떼면 옮긴 뒤에도 코드가
+        두 구조를 읽는 것처럼 보인다.
+
+        DM 도 센다. **열지는 않는다** — 경로만 보면 되고, 여는 순간 사람이 특정되지
+        않은 경로가 개인 기록을 읽은 셈이 된다.
+        """
+        v2 = self.root / "workspaces"
+        legacy = self.root / "channels"
+        found: list[Path] = []
+        if v2.is_dir():
+            found.extend(v2.glob("*/channels/*/raw/*.md"))
+            found.extend(v2.glob("*/channels/*.md"))
+            found.extend(v2.glob("*/dm/*/raw/*.md"))
+        if legacy.is_dir():
+            found.extend(legacy.glob("*/*.md"))
+        return sorted(found)
 
     def source_files(self) -> list[Path]:
         """점검·마이그레이션용 실제 원문 파일 목록."""
