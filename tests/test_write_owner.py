@@ -129,9 +129,11 @@ class FakeCursor:
         self.row = row
         self.error = error
         self.queries = 0
+        self.sql = ""
 
     def execute(self, sql, params=None):
         self.queries += 1
+        self.sql = str(sql)
         if self.error:
             raise self.error
 
@@ -204,6 +206,21 @@ def test_without_a_database_the_archiver_does_not_write_live():
     lookup, _ = _lookup(conn=False)
 
     assert not lookup.archiver_may_write_live(CH, archiver_flag=True).allowed
+
+
+def test_archiver_live_switch_is_read_without_update_privilege():
+    lookup, cursor = _lookup({"enabled": True})
+
+    assert lookup.archiver_live_flag() is True
+    assert cursor.queries == 1
+    assert "FOR SHARE" not in cursor.sql.upper()
+    assert "FOR UPDATE" not in cursor.sql.upper()
+
+
+def test_archiver_live_switch_fails_closed_on_database_error():
+    lookup, _ = _lookup(error=RuntimeError("permission denied"))
+
+    assert lookup.archiver_live_flag() is False
 
 
 def test_a_query_error_does_not_raise():

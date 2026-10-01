@@ -237,3 +237,23 @@ class OwnerLookup:
 
     def archiver_may_write_live(self, channel_id: str, *, archiver_flag: bool) -> Decision:
         return self.decide(channel_id, WriterOwner.ARCHIVER, archiver_flag=archiver_flag)
+
+    def archiver_live_flag(self) -> bool:
+        """Read the global kill switch without a row lock or write privilege."""
+        try:
+            with self._open() as conn:
+                if conn is None:
+                    return False
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT enabled FROM archive_feature_flag
+                         WHERE name = %s AND scope = 'global' AND scope_key = ''
+                        """,
+                        ("archiver_writes_live",),
+                    )
+                    row = cur.fetchone()
+            return bool(row and row["enabled"] is True)
+        except Exception as exc:  # noqa: BLE001 - DB failure must close the live gate
+            log.warning("Archiver live switch lookup failed ws=%s: %s", self.workspace, exc)
+            return False

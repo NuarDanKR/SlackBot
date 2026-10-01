@@ -197,13 +197,10 @@ class ShadowCollector:
                 return self.root, ingest_ack.SHADOW, self._store
             if not self._live_enabled or self._live_root is None:
                 return None
-            flags = self._membership_repo.flags(self.cfg.key, [channel_id])
-            flag = any(
-                entry["name"] == "archiver_writes_live" and
-                entry["scope"] == "global" and entry["enabled"] is True
-                for entry in flags
-            )
-            if not flag or self._owner_lookup is None or not self._owner_lookup.archiver_may_write_live(
+            if self._owner_lookup is None:
+                return None
+            flag = self._owner_lookup.archiver_live_flag()
+            if not flag or not self._owner_lookup.archiver_may_write_live(
                 channel_id, archiver_flag=flag
             ):
                 return None

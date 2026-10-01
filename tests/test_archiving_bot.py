@@ -306,6 +306,9 @@ def test_active_channel_writes_only_live_root_when_all_gates_agree(tmp_path, mon
     from tybot.archive.write_owner import decide, state_from_row
 
     class Owner:
+        def archiver_live_flag(self):
+            return bool(repo.flag("archiver_writes_live", "global", "")["enabled"])
+
         def archiver_may_write_live(self, channel_id, *, archiver_flag):
             row = repo.channel_rows[("tyit", channel_id)]
             return decide(state_from_row("tyit", channel_id, row),
@@ -343,6 +346,9 @@ def test_active_channel_denies_write_when_a_gate_is_missing(tmp_path, reason):
         repo.channel_rows[("tyit", "C12345678")]["operator_hold"] = True
 
     class Owner:
+        def archiver_live_flag(self):
+            return bool(repo.flag("archiver_writes_live", "global", "")["enabled"])
+
         def archiver_may_write_live(self, channel_id, *, archiver_flag):
             return reason != "owner"
 
