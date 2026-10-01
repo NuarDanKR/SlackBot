@@ -70,6 +70,7 @@ oauth_config:
       - channels:history      # 공개 채널 원문 수집
       - groups:history        # 비공개 채널 원문 수집
       - im:history            # DM 수신
+      - im:read               # Master DM 상대 확인 (Archiver 인계 전 재승인 필요)
       - mpim:history
       - channels:read         # 채널 목록/멤버십 조회(ACL)
       - groups:read

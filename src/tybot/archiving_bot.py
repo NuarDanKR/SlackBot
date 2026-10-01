@@ -566,6 +566,46 @@ def _backfill_loop(runner, stop: threading.Event, interval_seconds: int) -> None
         stop.wait(interval_seconds)
 
 
+def _dm_handoff_consumer(
+    cfg: ArchiverWorkspace, root: Path, env: dict[str, str] | None = None,
+):
+    values = os.environ if env is None else env
+    if values.get("ARCHIVER_DM_CONSUME_ENABLED", "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        return None
+    if values.get("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower() != "per-channel-v1":
+        raise ArchiverConfigError("DM handoff requires per-channel-v1 shadow layout")
+    handoff_dir = Path(values.get("ARCHIVER_DM_HANDOFF_DIR", ""))
+    if not handoff_dir.is_absolute() or not handoff_dir.is_dir() or handoff_dir.is_symlink():
+        raise ArchiverConfigError("ARCHIVER_DM_HANDOFF_DIR must be an existing absolute directory")
+
+    from .archive.dm_consumer import DmConsumer
+    from .archive.dm_file_handoff import DmFileVault
+    from .archive.dm_inbox import DmInbox
+    from .console.workspace_store import _fernet
+
+    cipher = _fernet()
+    return DmConsumer(
+        workspace=cfg.key, master_bot_user_id=cfg.master_bot_user_id,
+        archive_root=root, inbox=DmInbox(handoff_dir, cipher),
+        file_vault=DmFileVault(handoff_dir, cipher),
+    )
+
+
+def _dm_handoff_loop(consumer, stop: threading.Event, interval_seconds: int) -> None:
+    while not stop.is_set():
+        try:
+            completed, failed = consumer.run_once()
+            if completed or failed:
+                log.info("[%s] DM handoff completed=%s pending=%s",
+                         consumer.workspace, completed, failed)
+        except Exception as exc:  # noqa: BLE001 - a DM poll must not stop channel collection
+            log.warning("[%s] DM handoff poll failed: %s",
+                        consumer.workspace, type(exc).__name__)
+        stop.wait(interval_seconds)
+
+
 def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -605,6 +645,17 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         name=f"archiver-membership-{cfg.key}",
         daemon=True,
     )
+    dm_thread = None
+    dm_consumer = _dm_handoff_consumer(cfg, root)
+    if dm_consumer is not None:
+        dm_interval = int(os.getenv("ARCHIVER_DM_POLL_SECONDS", "15"))
+        if dm_interval < 5:
+            raise ArchiverConfigError("ARCHIVER_DM_POLL_SECONDS must be at least 5")
+        dm_thread = threading.Thread(
+            target=_dm_handoff_loop,
+            args=(dm_consumer, stop, dm_interval),
+            name=f"archiver-dm-{cfg.key}", daemon=True,
+        )
     backfill_thread = None
     if os.getenv("ARCHIVER_BACKFILL_ENABLED", "").strip().lower() in {
         "1", "true", "yes", "on",
@@ -626,6 +677,8 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
             daemon=True,
         )
     sync_thread.start()
+    if dm_thread is not None:
+        dm_thread.start()
     if backfill_thread is not None:
         backfill_thread.start()
     try:
@@ -633,6 +686,8 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     finally:
         stop.set()
         sync_thread.join(timeout=1)
+        if dm_thread is not None:
+            dm_thread.join(timeout=1)
         if backfill_thread is not None:
             backfill_thread.join(timeout=1)
 

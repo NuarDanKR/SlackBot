@@ -48,6 +48,9 @@ WRITE_PATHS: dict[str, str] = {
     # Archiver 는 자기 root(shadow)에 쓴다. 운영 경로를 열 때는
     # `write_owner.archiver_may_write_live()` 를 지나야 한다(아직 안 열렸다).
     "src/tybot/archiving_bot.py": "out-of-scope",
+    # Encrypted Master DM handoff writes only to Archiver's private per-user root.
+    # Channel writer ownership does not govern personal DM storage.
+    "src/tybot/archive/dm_consumer.py": "out-of-scope",
     # v1 -> v2 이행. 채널 단위가 아니라 아카이브 전체를 옮긴다.
     "src/tybot/archive/migrate.py": "out-of-scope",
     # 레이아웃 실측. 임시 경로에만 쓴다.

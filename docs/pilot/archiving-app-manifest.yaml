@@ -4,6 +4,8 @@ display_information:
   description: 사내 채널 원문과 첨부를 수집하는 별도 앱
   background_color: "#146b68"
 features:
+  app_home:
+    messages_tab_enabled: false
   bot_user:
     display_name: ty-archiving
     always_online: false

@@ -6,6 +6,14 @@ from fake_archiving_repo import FakeArchivingRepo
 from tybot import archiving_bot
 
 
+def test_archiver_manifest_disables_messages_tab_and_dm_subscription():
+    manifest = (Path(__file__).resolve().parents[1] / "docs" / "pilot" /
+                "archiving-app-manifest.yaml").read_text(encoding="utf-8")
+    assert "    messages_tab_enabled: false\n" in manifest
+    assert "message.im" not in manifest
+    assert "im:history" not in manifest
+
+
 def test_shadow_unit_can_replay_ack_outbox_without_live_archive_write_access():
     unit = (Path(__file__).resolve().parents[1] / "deploy" /
             "tybot-archiving-shadow@.service").read_text(encoding="utf-8")
@@ -16,6 +24,7 @@ def test_shadow_unit_can_replay_ack_outbox_without_live_archive_write_access():
     assert set(writable) == {
         "/var/lib/tybot/archiver-shadow",
         "/var/lib/tybot/state/ingest-ack-outbox",
+        "-/var/lib/tybot/state/dm-handoff",
     }
 
 
