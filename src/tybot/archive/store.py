@@ -381,6 +381,11 @@ class ArchiveStore:
         **파일은 그대로 있고 근거만 사라진다.** 반대로 안 떼면 옮긴 뒤에도 코드가
         두 구조를 읽는 것처럼 보인다.
 
+        **원문만 세지 않는다.** 첨부 정본은 `attachment_reader.source_files()` 가
+        따로 읽어 근거 문서로 붙인다(`source_docs()` 의 `channels + archive_docs`).
+        raw 는 옮겼는데 첨부 정본이 남아 있으면, 0 을 보고 글롭을 뗀 뒤에도 그
+        자료가 답변에 계속 나온다 — 또는 그 반대로 조용히 사라진다.
+
         DM 도 센다. **열지는 않는다** — 경로만 보면 되고, 여는 순간 사람이 특정되지
         않은 경로가 개인 기록을 읽은 셈이 된다.
         """
@@ -391,6 +396,9 @@ class ArchiveStore:
             found.extend(v2.glob("*/channels/*/raw/*.md"))
             found.extend(v2.glob("*/channels/*.md"))
             found.extend(v2.glob("*/dm/*/raw/*.md"))
+            # 옛 첨부 정본. 새 구조는 채널 디렉터리 **안**(`<id>__<이름>/archive/
+            # attachments/`)이라 이 글롭에 걸리지 않는다.
+            found.extend(v2.glob("*/channels/*/attachments/*/*.md"))
         if legacy.is_dir():
             found.extend(legacy.glob("*/*.md"))
         return sorted(found)

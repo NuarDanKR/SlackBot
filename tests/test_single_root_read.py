@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -336,3 +337,130 @@ def test_an_indexed_candidate_from_another_root_never_becomes_a_hit(tmp_path, mo
     for hit in hits:
         assert hit.doc.path.is_relative_to(tmp_path)
         assert "다른루트" not in str(hit.line.source_path or hit.doc.path)
+
+
+# --- 옛 첨부 정본도 운영 루트에 남은 옛 자료다 -------------------------------------
+#
+# 2026-10-02 지적. `legacy_files()` 가 옛 **raw** 만 셌다. 그런데 첨부 정본은
+# `attachment_reader.source_files()` 가 따로 읽어 **근거 문서로 붙인다**
+# (`ArchiveStore.source_docs()` 의 `channels + archive_docs(...)`).
+#
+# raw 는 옮겼는데 첨부 정본이 남아 있으면 `legacy_files()` 가 0 을 말하고, 그 0 을
+# 보고 옛 글롭을 뗀다. 파일은 그대로 있고 근거만 사라진다 — 또는 그 반대로, 옮겼다고
+# 생각한 자료가 답변에 계속 나온다.
+
+def _old_attachment(root, *, file_id="F1", channel_id=CID):
+    """옛 구조의 첨부 정본 하나. `workspaces/<ws>/channels/<id>/attachments/…`."""
+    from tybot.archive import attachment_doc
+
+    doc = attachment_doc.AttachmentDoc(
+        workspace=WS, channel_id=channel_id, channel=CHANNEL,
+        file_id=file_id, name="기성내역.xlsx", revision="aaaa11112222",
+        visibility="private", acl=frozenset({CHANNEL}),
+        text="9월 기성 청구액은 15억입니다",
+        conversion_state=attachment_doc.CONVERTED,
+        message_ts="1759400000.000100",
+        permalink="https://slack.example/archives/C0FUND/p1759400000000100",
+        filetype="xlsx", sha256="a" * 64, staged_at="2026-09-22T10:00:00+00:00",
+    )
+    path = root / doc.relative_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(attachment_doc.render(doc), encoding="utf-8")
+    return path
+
+
+def test_an_old_attachment_without_any_raw_is_counted_as_legacy(tmp_path):
+    """**이 시험이 이 수정의 이유다.** raw 가 없어도 옛 자료는 남아 있다."""
+    _old_attachment(tmp_path)
+    _new_channel(tmp_path)
+
+    found = ArchiveStore(tmp_path).legacy_files()
+
+    assert len(found) == 1
+    assert found[0].is_relative_to(tmp_path / "workspaces")
+
+
+def test_that_same_attachment_is_still_search_evidence(tmp_path):
+    """센 이유가 이것이다 — 세지 않으면 「없다」 고 말하는데 답변에는 나온다."""
+    _old_attachment(tmp_path)
+    _new_channel(tmp_path)
+
+    docs = ArchiveStore(tmp_path).visible_docs(_channel_ctx())
+
+    assert any("15억" in line.text for doc in docs for line in doc.raw_lines)
+
+
+def test_moving_the_old_attachment_out_clears_both(tmp_path):
+    """백업 뒤에는 집계도 0 이고 근거에서도 사라져야 한다. 둘이 같이 움직인다."""
+    _old_attachment(tmp_path)
+    _new_channel(tmp_path)
+
+    (tmp_path / "workspaces").rename(tmp_path.parent / "backup-attachments")
+
+    store = ArchiveStore(tmp_path)
+    assert store.legacy_files() == []
+    assert not any(
+        "15억" in line.text
+        for doc in store.visible_docs(_channel_ctx())
+        for line in doc.raw_lines
+    )
+
+
+def test_the_new_attachment_layout_is_not_counted_as_legacy(tmp_path):
+    """새 구조의 첨부는 채널 디렉터리 **안**이다. 옛 것으로 세면 전환이 막힌다.
+
+    옛 자료를 하나 같이 둔다. 안 두면 `workspaces/` 가 없어 집계 블록이 통째로
+    안 돌고, 그러면 이 시험이 **다른 이유로** 통과한다.
+    """
+    _old_channel(tmp_path)
+    new = (tmp_path / WS / f"{CID}__팀-전산" / "archive" / "attachments"
+           / "F9" / "bbbb11112222.md")
+    new.parent.mkdir(parents=True, exist_ok=True)
+    new.write_text("새 구조 첨부 정본", encoding="utf-8")
+
+    found = ArchiveStore(tmp_path).legacy_files()
+
+    assert len(found) == 1
+    assert new not in found
+
+
+def test_a_new_layout_only_root_counts_nothing(tmp_path):
+    """백업이 끝난 뒤의 모습. 첨부까지 새 자리에 있으면 0 이다."""
+    _new_channel(tmp_path)
+    attachment = (tmp_path / WS / f"{CID}__팀-전산_ABB110-회의" / "archive"
+                  / "attachments" / "F9" / "bbbb11112222.md")
+    attachment.parent.mkdir(parents=True, exist_ok=True)
+    attachment.write_text("새 구조 첨부 정본", encoding="utf-8")
+
+    assert ArchiveStore(tmp_path).legacy_files() == []
+
+
+def test_old_raw_and_old_attachments_are_counted_together(tmp_path):
+    """한 갈래만 세면 나머지가 남은 채로 0 이 된다."""
+    _old_channel(tmp_path)
+    _old_attachment(tmp_path)
+    _old_attachment(tmp_path, file_id="F2")
+
+    assert len(ArchiveStore(tmp_path).legacy_files()) == 3
+
+
+def test_counting_never_opens_a_file(tmp_path, monkeypatch):
+    """경로만 센다. 여는 순간 사람이 특정되지 않은 경로가 개인 기록을 읽는다."""
+    _old_channel(tmp_path)
+    _old_attachment(tmp_path)
+    dm = tmp_path / "workspaces" / WS / "dm" / "u0br12345" / "raw" / "2026-09-01.md"
+    dm.parent.mkdir(parents=True, exist_ok=True)
+    dm.write_text("열면 안 되는 내용", encoding="utf-8")
+
+    opened: list[str] = []
+    real = Path.read_text
+
+    def _watched(self, *args, **kwargs):
+        opened.append(str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _watched)
+    found = ArchiveStore(tmp_path).legacy_files()
+
+    assert len(found) == 3
+    assert opened == []
