@@ -29,12 +29,15 @@ class FakeCursor:
         self.rows = list(rows)
         self.saved: list[dict] = []
         self.sql: list[str] = []
+        self.promotions: list[tuple] = []
 
     def execute(self, sql, params=()):
         text = " ".join(str(sql).split())
         self.sql.append(text)
         if text.startswith("INSERT INTO archive_ingest_state"):
             self.saved.append(dict(params))
+        if text.startswith("UPDATE archive_ingest_state"):
+            self.promotions.append(tuple(params))
 
     def fetchone(self):
         return self.rows.pop(0) if self.rows else None
@@ -130,6 +133,32 @@ def test_the_same_state_twice_writes_nothing(db):
     _advance(target=IngestState.RAW_WRITTEN, attachment_total=2, attachment_ready=0)
 
     assert cur.saved == []
+
+
+def test_verified_live_reingest_promotes_shadow_ready_ack(db):
+    cur = db([_row("ready", 2, 2)])
+
+    got = _advance(target=IngestState.READY, attachment_total=2, attachment_ready=2,
+                   written_to="live", doc_path="tyit/C123__name/archive/raw/day.md")
+
+    assert got == IngestState.READY
+    assert len(cur.promotions) == 1
+    assert cur.promotions[0][:2] == ("live", "tyit/C123__name/archive/raw/day.md")
+
+
+@pytest.mark.parametrize("change", [
+    {"written_to": "shadow"},
+    {"doc_path": ""},
+    {"attachment_ready": 1},
+])
+def test_incomplete_reingest_cannot_promote_shadow_ack(db, change):
+    cur = db([_row("ready", 2, 2)])
+    values = {"target": IngestState.READY, "attachment_total": 2,
+              "attachment_ready": 2, "written_to": "live", "doc_path": "verified.md"}
+
+    _advance(**(values | change))
+
+    assert cur.promotions == []
 
 
 def test_the_same_state_with_more_attachments_does_write(db):

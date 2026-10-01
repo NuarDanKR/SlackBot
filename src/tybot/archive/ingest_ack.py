@@ -343,6 +343,26 @@ def _write(payload: dict) -> IngestState | None:
                 payload.get("attachment_total"),
                 payload.get("attachment_ready"),
             )
+            if (
+                plan is None and current is not None
+                and current.state == IngestState.READY
+                and payload["target"] == str(IngestState.READY)
+                and current.written_to == SHADOW
+                and payload.get("written_to") == LIVE
+                and payload.get("doc_path")
+                and payload.get("attachment_total") == payload.get("attachment_ready")
+            ):
+                cur.execute(
+                    """
+                    UPDATE archive_ingest_state
+                       SET written_to = %s, doc_path = %s, updated_at = now()
+                     WHERE workspace = %s AND channel_id = %s AND message_ts = %s
+                       AND state = 'ready' AND written_to = 'shadow'
+                    """,
+                    (LIVE, payload["doc_path"], payload["workspace"],
+                     payload["channel_id"], payload["message_ts"]),
+                )
+                return current.state
             if plan is None:
                 return current.state if current else None
 

@@ -48,6 +48,7 @@ Archiver 는 긍정 응답이 있을 때만 운영 경로에 쓴다 — 그래�
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 
@@ -225,6 +226,13 @@ class OwnerLookup:
 
     # -- 부르는 쪽이 읽기 쉬운 이름 -------------------------------------------
     def master_may_write(self, channel_id: str) -> Decision:
+        if os.getenv("TYBOT_MASTER_CHANNEL_WRITES_ENABLED", "1").strip().lower() in {
+            "0", "false", "no", "off",
+        }:
+            return Decision(
+                allowed=False, actor=WriterOwner.MASTER,
+                reason="Master channel archive writes disabled by operator",
+            )
         return self.decide(channel_id, WriterOwner.MASTER)
 
     def archiver_may_write_live(self, channel_id: str, *, archiver_flag: bool) -> Decision:

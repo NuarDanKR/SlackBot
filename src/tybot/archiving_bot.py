@@ -1,8 +1,4 @@
-"""Independent Slack archive collector in shadow mode.
-
-This process never opens the TYBot Socket Mode token and never writes the live
-archive. It is the first, comparison-only step of Archiving Bot extraction.
-"""
+"""Independent Slack archive collector with per-channel shadow/live routing."""
 from __future__ import annotations
 
 import logging
@@ -22,6 +18,7 @@ from .archive.attachment_writer import raw_lines_for
 from .archive.attachment_writer import write_docs as write_attachment_docs
 from .archive.revision_store import record_revision
 from .archive.store import ArchiveStore
+from .archive.write_owner import OwnerLookup
 from .attachment_trace import ARCHIVE_DONE, confirm_archived, line_hash
 from .collect import _messages_from
 from .lock import AlreadyRunning, instance_lock
@@ -157,7 +154,8 @@ def shadow_workspace_config(
 
 class ShadowCollector:
     def __init__(self, cfg: ArchiverWorkspace, root: Path, *, membership_repo=None,
-                 layout: str = "legacy") -> None:
+                 layout: str = "legacy", live_root: Path | None = None,
+                 live_enabled: bool = False, owner_lookup=None) -> None:
         if layout not in {"legacy", "per-channel-v1"}:
             raise ArchiverConfigError("unknown shadow archive layout")
         if layout == "per-channel-v1" and not cfg.separate_attachments:
@@ -170,11 +168,49 @@ class ShadowCollector:
         self._membership_repo = membership_repo
         self._names: dict[str, str] = {}
         self._store = ArchiveStore(root)
+        if live_enabled and (layout != "per-channel-v1" or live_root is None or
+                             root.resolve() == live_root.resolve() or
+                             root.resolve() in live_root.resolve().parents or
+                             live_root.resolve() in root.resolve().parents):
+            raise ArchiverConfigError("live writes require disjoint per-channel-v1 roots")
+        self._live_root = live_root
+        self._live_enabled = live_enabled
+        self._owner_lookup = owner_lookup
+        self._live_store = ArchiveStore(live_root) if live_enabled else None
 
-    def _channel_archive(self, channel_id: str, channel: str) -> Path | None:
+    def _channel_archive(self, channel_id: str, channel: str,
+                         root: Path | None = None) -> Path | None:
         if self.layout == "legacy":
             return None
-        return shadow_paths.archive_dir(self.root, self.cfg.key, channel_id, channel)
+        return shadow_paths.archive_dir(root or self.root, self.cfg.key, channel_id, channel)
+
+    def _destination(self, channel_id: str) -> tuple[Path, str, ArchiveStore] | None:
+        if self._membership_repo is None:
+            return self.root, ingest_ack.SHADOW, self._store
+        try:
+            row = channel_membership.channel_row(
+                self._membership_repo, self.cfg.key, channel_id
+            )
+            if not channel_membership.is_collectible(row):
+                return None
+            if row["mode"] == "shadow":
+                return self.root, ingest_ack.SHADOW, self._store
+            if not self._live_enabled or self._live_root is None:
+                return None
+            flags = self._membership_repo.flags(self.cfg.key, [channel_id])
+            flag = any(
+                entry["name"] == "archiver_writes_live" and
+                entry["scope"] == "global" and entry["enabled"] is True
+                for entry in flags
+            )
+            if not flag or self._owner_lookup is None or not self._owner_lookup.archiver_may_write_live(
+                channel_id, archiver_flag=flag
+            ):
+                return None
+            return self._live_root, ingest_ack.LIVE, self._live_store
+        except Exception:
+            log.exception("[%s] live destination authorization failed ch=%s", self.cfg.key, channel_id)
+            return None
 
     def _collection_channel(self, client, channel_id: str) -> tuple[str, bool] | None:
         """Resolve an invited channel while respecting the operator stop switch."""
@@ -245,14 +281,18 @@ class ShadowCollector:
         # 여기서부터가 **이 메시지를 우리가 맡았다**는 뜻이다. 앞의 skip 들은
         # 범위 밖이라 상태를 남기지 않는다 — 남기면 「받았는데 안 됐다」 가
         # 쌓여서 진짜 미완료를 덮는다.
+        destination = self._destination(channel_id)
+        if destination is None:
+            return "refused"
+        root, written_to, archive_store = destination
         message_ts = str(event["ts"])
-        self._ack(channel_id, message_ts, IngestState.RECEIVED)
+        self._ack(channel_id, message_ts, IngestState.RECEIVED, written_to=written_to)
 
         from .archive.files import attachment_storage
 
-        channel_archive = self._channel_archive(channel_id, channel)
+        channel_archive = self._channel_archive(channel_id, channel, root)
         storage = attachment_storage(
-            self.root, self.cfg.key, channel_id,
+            root, self.cfg.key, channel_id,
             channel_root=channel_archive.parent if channel_archive else None,
         )
         staged: list = []
@@ -265,10 +305,11 @@ class ShadowCollector:
             separate_attachments=self.cfg.separate_attachments,
         )
         if not messages:
-            self._ack(channel_id, message_ts, IngestState.FAILED, error_code="no-message")
+            self._ack(channel_id, message_ts, IngestState.FAILED,
+                      written_to=written_to, error_code="no-message")
             return "skipped-empty"
         result = writer.ingest(
-            self.root,
+            root,
             workspace=self.cfg.key,
             channel=channel,
             channel_id=channel_id,
@@ -284,18 +325,25 @@ class ShadowCollector:
         raw_confirmed = bool(result.written) or (
             not result.refused and result.path.is_file()
         )
+        if not raw_confirmed and not result.refused:
+            self._ack(
+                channel_id, message_ts, IngestState.PARTIAL,
+                written_to=written_to, error_code="raw-unconfirmed",
+            )
+            return "partial"
         if raw_confirmed:
             self._ack(
                 channel_id, message_ts, IngestState.RAW_WRITTEN,
                 attachment_total=len(staged), attachment_ready=0,
-                doc_path=self._relative_doc_path(result.path),
+                doc_path=self._relative_doc_path(result.path, root),
+                written_to=written_to,
             )
         canonical_docs = []
         if staged and raw_confirmed:
             # A canonical attachment without its raw Slack reference has no
             # verifiable provenance. Publish it only after raw is confirmed.
             canonical_docs = write_attachment_docs(
-                self.root,
+                root,
                 staged,
                 workspace=self.cfg.key,
                 channel_id=channel_id,
@@ -309,10 +357,11 @@ class ShadowCollector:
             self._ack(
                 channel_id, message_ts, IngestState.ATTACHMENT_PENDING,
                 attachment_total=len(staged), attachment_ready=0,
+                written_to=written_to,
             )
             try:
                 archive_states = confirm_archived(
-                    self._store,
+                    archive_store,
                     staged,
                     workspace=self.cfg.key,
                     channel_id=channel_id,
@@ -327,7 +376,7 @@ class ShadowCollector:
                 log.exception("[%s] attachment archive confirmation failed", self.cfg.key)
                 self._ack(
                     channel_id, message_ts, IngestState.PARTIAL,
-                    error_code="attachment-unconfirmed",
+                    error_code="attachment-unconfirmed", written_to=written_to,
                 )
                 return "metadata-unconfirmed"
             canonical_ready = {
@@ -349,7 +398,7 @@ class ShadowCollector:
             self._ack(
                 channel_id, message_ts,
                 IngestState.PARTIAL if result.written else IngestState.REFUSED,
-                error_code="screened",
+                error_code="screened", written_to=written_to,
             )
             return "partial" if result.written else "refused"
         if (
@@ -360,12 +409,12 @@ class ShadowCollector:
                 kind="create",
                 body=str(event.get("text") or "").strip(),
                 author_id=str(event.get("user") or ""),
-                doc_path=self._relative_doc_path(result.path),
+                doc_path=self._relative_doc_path(result.path, root),
             )
         ):
             self._ack(
                 channel_id, message_ts, IngestState.PARTIAL,
-                error_code="revision-unconfirmed",
+                error_code="revision-unconfirmed", written_to=written_to,
             )
             return "metadata-unconfirmed"
         # **여기가 마지막이다.** 첨부 확인·거부 판정·revision 기록을 전부 지난
@@ -382,7 +431,9 @@ class ShadowCollector:
             final_state,
             attachment_total=len(staged),
             attachment_ready=attachment_ready,
+            doc_path=self._relative_doc_path(result.path, root) if raw_confirmed else "",
             error_code="" if final_state == IngestState.READY else "attachment-not-searchable",
+            written_to=written_to,
         )
         if final_state != IngestState.READY:
             return "partial"
@@ -402,6 +453,10 @@ class ShadowCollector:
         return self._names[user_id]
 
     def _ingest_revision(self, client, event: dict, channel: str, channel_id: str) -> str:
+        destination = self._destination(channel_id)
+        if destination is None:
+            return "refused"
+        root, written_to, _ = destination
         subtype = str(event.get("subtype") or "")
         current = event.get("message") or {}
         previous = event.get("previous_message") or {}
@@ -416,7 +471,7 @@ class ShadowCollector:
         # revision reader 가 붙기 전에는 검색이 `[수정 전]`·`[삭제 전]` 줄을
         # 그대로 집는다. 「검색 가능」 이라고 말하면 지워진 문장을 찾아 주겠다고
         # 약속하는 셈이다.
-        self._ack(channel_id, message_ts, IngestState.RECEIVED)
+        self._ack(channel_id, message_ts, IngestState.RECEIVED, written_to=written_to)
         event_ts = str(event.get("event_ts") or event.get("ts") or message_ts)
         when = datetime.fromtimestamp(float(event_ts), tz=UTC)
         speaker = self._speaker(client, user_id)
@@ -459,19 +514,19 @@ class ShadowCollector:
             edited_ts = event_ts
 
         result = writer.ingest(
-            self.root,
+            root,
             workspace=self.cfg.key,
             channel=channel,
             channel_id=channel_id,
             messages=messages,
             acl=[channel],
-            channel_directory=self._channel_archive(channel_id, channel),
+            channel_directory=self._channel_archive(channel_id, channel, root),
         )
         if result.refused:
             self._ack(
                 channel_id, message_ts,
                 IngestState.PARTIAL if result.written else IngestState.REFUSED,
-                error_code="screened",
+                error_code="screened", written_to=written_to,
             )
             return "partial" if result.written else "refused"
         if not self._record_revision(
@@ -481,12 +536,12 @@ class ShadowCollector:
             body=body,
             edited_ts=edited_ts,
             author_id=user_id,
-            doc_path=self._relative_doc_path(result.path),
+            doc_path=self._relative_doc_path(result.path, root),
             previous_body=old_body,
         ):
             self._ack(
                 channel_id, message_ts, IngestState.PARTIAL,
-                error_code="revision-unconfirmed",
+                error_code="revision-unconfirmed", written_to=written_to,
             )
             return "metadata-unconfirmed"
         # 원문에는 들어갔다. **여기서 멈춘다** — `raw_written` 까지다.
@@ -494,7 +549,8 @@ class ShadowCollector:
         # 된 뒤에나 말할 수 있다.
         self._ack(
             channel_id, message_ts, IngestState.RAW_WRITTEN,
-            doc_path=self._relative_doc_path(result.path),
+            doc_path=self._relative_doc_path(result.path, root),
+            written_to=written_to,
         )
         return "revision-written" if result.written else "revision-duplicate"
 
@@ -517,7 +573,7 @@ class ShadowCollector:
                 channel_id=channel_id,
                 message_ts=message_ts,
                 target=target,
-                written_to=ingest_ack.SHADOW,
+                written_to=values.pop("written_to", ingest_ack.SHADOW),
                 **values,
             )
         except Exception:
@@ -525,10 +581,10 @@ class ShadowCollector:
             # 바뀌어도 수집은 계속 돌아야 한다 — 한쪽만 고치는 날이 오기 때문이다.
             log.exception("[%s] 수집 상태 기록 실패 ts=%s", self.cfg.key, message_ts)
 
-    def _relative_doc_path(self, path: Path | str) -> str:
+    def _relative_doc_path(self, path: Path | str, root: Path | None = None) -> str:
         candidate = Path(path)
         try:
-            return candidate.resolve().relative_to(self.root.resolve()).as_posix()
+            return candidate.resolve().relative_to((root or self.root).resolve()).as_posix()
         except ValueError:
             raise ArchiverConfigError("revision document escaped the archive root") from None
 
@@ -616,9 +672,24 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     validate_slack_identity(cfg, app.client.auth_test())
     repo = default_repo()
     channel_membership.sync(app.client, repo, cfg.key, actor="startup-membership-sync")
+    live_enabled = os.getenv("ARCHIVER_LIVE_WRITES_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    live_root = None
+    if live_enabled:
+        supplied = os.getenv("ARCHIVE_DIR", "")
+        if not supplied or not Path(supplied).is_absolute():
+            raise ArchiverConfigError("ARCHIVE_DIR must be absolute for live writes")
+        live_root = Path(supplied).resolve()
+        if not live_root.is_dir():
+            raise ArchiverConfigError("live archive root must already exist")
+        if (live_root / "workspaces").exists():
+            raise ArchiverConfigError("live archive root still contains legacy workspaces")
     collector = ShadowCollector(
         cfg, root, membership_repo=repo,
         layout=os.getenv("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower(),
+        live_root=live_root, live_enabled=live_enabled,
+        owner_lookup=OwnerLookup(cfg.key, cache_seconds=0) if live_enabled else None,
     )
     recovered = ingest_ack.drain_outbox(cfg.key)
     if recovered["applied"] or recovered["left"]:

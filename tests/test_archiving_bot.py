@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ def test_archiver_manifest_disables_messages_tab_and_dm_subscription():
     assert "im:history" not in manifest
 
 
-def test_shadow_unit_can_replay_ack_outbox_without_live_archive_write_access():
+def test_shadow_unit_can_write_live_archive_only_when_runtime_gates_allow_it():
     unit = (Path(__file__).resolve().parents[1] / "deploy" /
             "tybot-archiving-shadow@.service").read_text(encoding="utf-8")
     writable = next(
@@ -25,6 +26,7 @@ def test_shadow_unit_can_replay_ack_outbox_without_live_archive_write_access():
         "/var/lib/tybot/archiver-shadow",
         "/var/lib/tybot/state/ingest-ack-outbox",
         "-/var/lib/tybot/state/dm-handoff",
+        "-/var/lib/tybot/archive",
     }
 
 
@@ -290,6 +292,101 @@ def test_runtime_collector_respects_operator_hold(tmp_path):
         "text": "수집하면 안 됩니다.",
     }) == "skipped-membership"
     assert not (tmp_path / "shadow").exists()
+
+
+def test_active_channel_writes_only_live_root_when_all_gates_agree(tmp_path, monkeypatch):
+    cfg = replace(archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
+                  separate_attachments=True)
+    repo = FakeArchivingRepo()
+    repo.given_channel("tyit", "C12345678", "active", owner="archiver",
+                       membership="joined")
+    repo.channel_rows[("tyit", "C12345678")]["channel_name"] = "general"
+    repo.given_flag("archiver_writes_live", True)
+    from tybot.archive.archiving_state import WriterOwner
+    from tybot.archive.write_owner import decide, state_from_row
+
+    class Owner:
+        def archiver_may_write_live(self, channel_id, *, archiver_flag):
+            row = repo.channel_rows[("tyit", channel_id)]
+            return decide(state_from_row("tyit", channel_id, row),
+                          WriterOwner.ARCHIVER, archiver_flag=archiver_flag)
+
+    calls = []
+    monkeypatch.setattr(archiving_bot.ingest_ack, "advance", lambda **kw: calls.append(kw))
+    collector = archiving_bot.ShadowCollector(
+        cfg, tmp_path / "shadow", membership_repo=repo, layout="per-channel-v1",
+        live_root=tmp_path / "live", live_enabled=True, owner_lookup=Owner(),
+    )
+    event = {"channel_type": "channel", "channel": "C12345678", "user": "U12345678",
+             "ts": "1790070000.000001", "text": "운영 원문"}
+
+    assert collector.ingest_event(Client(), event) == "written"
+    assert list((tmp_path / "live").glob("tyit/C12345678__*/archive/raw/*.md"))
+    assert not (tmp_path / "shadow").exists()
+    assert {call["written_to"] for call in calls} == {"live"}
+
+    repo.channel_rows[("tyit", "C12345678")]["mode"] = "shadow"
+    repo.channel_rows[("tyit", "C12345678")]["writer_owner"] = "master"
+    assert collector.ingest_event(Client(), {**event, "ts": "1790070001.000001"}) == "written"
+    assert list((tmp_path / "shadow").glob("tyit/C12345678__*/archive/raw/*.md"))
+
+
+@pytest.mark.parametrize("reason", ["env", "flag", "owner", "membership"])
+def test_active_channel_denies_write_when_a_gate_is_missing(tmp_path, reason):
+    cfg = replace(archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
+                  separate_attachments=True)
+    repo = FakeArchivingRepo()
+    repo.given_channel("tyit", "C12345678", "active", owner="archiver",
+                       membership="joined")
+    repo.given_flag("archiver_writes_live", reason != "flag")
+    if reason == "membership":
+        repo.channel_rows[("tyit", "C12345678")]["operator_hold"] = True
+
+    class Owner:
+        def archiver_may_write_live(self, channel_id, *, archiver_flag):
+            return reason != "owner"
+
+    collector = archiving_bot.ShadowCollector(
+        cfg, tmp_path / "shadow", membership_repo=repo, layout="per-channel-v1",
+        live_root=tmp_path / "live", live_enabled=reason != "env", owner_lookup=Owner(),
+    )
+    event = {"channel_type": "channel", "channel": "C12345678", "user": "U12345678",
+             "ts": "1790070000.000001", "text": "운영 원문"}
+
+    assert collector.ingest_event(Client(), event) in {"refused", "skipped-membership"}
+    assert not (tmp_path / "shadow").exists()
+    assert not (tmp_path / "live").exists()
+
+
+def test_backfill_direct_ingest_cannot_bypass_active_gate(tmp_path):
+    cfg = replace(archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
+                  separate_attachments=True)
+    repo = FakeArchivingRepo()
+    repo.given_channel("tyit", "C12345678", "active", owner="archiver",
+                       membership="joined")
+    collector = archiving_bot.ShadowCollector(
+        cfg, tmp_path / "shadow", membership_repo=repo, layout="per-channel-v1",
+        live_root=tmp_path / "live", live_enabled=True,
+    )
+
+    result = collector.ingest_message(
+        Client(), {"ts": "1790070000.000001", "user": "U12345678", "text": "소급"},
+        channel="#general", channel_id="C12345678", is_private=False,
+    )
+
+    assert result == "refused"
+    assert not (tmp_path / "shadow").exists()
+    assert not (tmp_path / "live").exists()
+
+
+def test_live_writes_reject_overlapping_roots(tmp_path):
+    cfg = replace(archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
+                  separate_attachments=True)
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="disjoint"):
+        archiving_bot.ShadowCollector(
+            cfg, tmp_path / "archive", layout="per-channel-v1",
+            live_root=tmp_path / "archive" / "live", live_enabled=True,
+        )
 
 
 def test_periodic_membership_sync_keeps_running_after_one_failure(monkeypatch):

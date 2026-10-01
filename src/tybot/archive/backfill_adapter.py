@@ -18,10 +18,10 @@
 쓴다(지시 4). 소급만 분리하면 같은 채널에 두 모양이 섞이고, 나중에 정본 전환을
 할 때 어느 것이 어느 경로로 들어왔는지 알 수 없다.
 
-## shadow 만 쓴다
+## 목적지는 collector 가 고른다
 
-`ShadowCollector` 는 shadow root 로 만들어진다. 이 어댑터는 경로를 고르지 않으므로
-live 로 쓸 길이 없다 — 그건 collector 를 만드는 쪽의 결정이다.
+이 어댑터는 경로를 고르지 않는다. collector 가 채널 모드와 운영 쓰기 게이트를
+확인한 뒤 shadow 또는 live 루트를 고른다. 소급도 실시간과 같은 판정을 지난다.
 """
 
 from __future__ import annotations

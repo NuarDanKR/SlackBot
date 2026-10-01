@@ -180,6 +180,25 @@ def test_without_a_database_the_master_keeps_collecting():
     assert verdict.degraded is True
 
 
+def test_operator_stop_survives_database_failure(monkeypatch):
+    monkeypatch.setenv("TYBOT_MASTER_CHANNEL_WRITES_ENABLED", "0")
+    lookup, cursor = _lookup(conn=False)
+
+    verdict = lookup.master_may_write(CH)
+
+    assert not verdict.allowed
+    assert "operator" in verdict.reason
+    assert cursor.queries == 0
+
+
+def test_operator_stop_is_checked_after_a_cached_allow(monkeypatch):
+    lookup, _ = _lookup({"mode": "shadow", "writer_owner": "master"})
+    assert lookup.master_may_write(CH).allowed
+
+    monkeypatch.setenv("TYBOT_MASTER_CHANNEL_WRITES_ENABLED", "off")
+    assert not lookup.master_may_write(CH).allowed
+
+
 def test_without_a_database_the_archiver_does_not_write_live():
     """둘 다 기본값으로 쓰면 장애 중에 두 봇이 같은 채널에 쓴다."""
     lookup, _ = _lookup(conn=False)
