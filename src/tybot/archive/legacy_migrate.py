@@ -60,8 +60,34 @@ ATTACHMENT_REFERENCE = re.compile(r"\[첨부:")
 #: 이 줄들은 **파생 자료**다. 원본 바이트가 `objects/` 에 있으면 다시 만들 수 있다.
 ATTACHMENT_BODY = re.compile(r"\[첨부(?:추출|본문):")
 
+#: 수집기가 남긴 edit/delete 이력 줄. 사람이 그 자리에서 한 말과 같은 것으로
+#: 세지 않는다 — 같은 내용이 여러 판으로 남아 있는 것이다.
+REVISION_LINE = re.compile(r"\[(?:수정 전|수정 후|삭제 전|삭제됨)\]")
+
+#: 사람이 아닌 화자. `writer.IncomingMessage(speaker=...)` 가 쓰는 값이다.
+SYNTHETIC_SPEAKERS = frozenset({"캔버스", "캔버스 첨부"})
+
 #: 이 줄과 첨부 정본을 잇는 유일한 좌표. 옛 줄에는 없다.
 ATTACHMENT_ID = re.compile(r"·\s*id:([A-Za-z0-9_-]+)")
+
+
+def line_kind(line) -> str:
+    """줄 하나의 종류. **「나머지」 를 사람 대화라고 단정하지 않는다.**
+
+    전에는 「알려진 첨부 표시가 아니면 사람 대화」 였다. 그러면 모르는 형식이
+    사람 대화 수에 섞이고, 섞인 줄은 아무 표시도 남기지 않는다. 알아보는 종류를
+    먼저 빼고 남는 것을 `residual` 로 부른다 — 이름이 「모른다」 를 담는다.
+    """
+    text = line.text
+    if ATTACHMENT_REFERENCE.search(text):
+        return "attachment_reference"
+    if ATTACHMENT_BODY.search(text):
+        return "attachment_body"
+    if REVISION_LINE.search(text):
+        return "revision"
+    if line.speaker in SYNTHETIC_SPEAKERS:
+        return "canvas"
+    return "residual"
 
 
 class MigrationRefused(RuntimeError):
@@ -90,14 +116,18 @@ class SourceDoc:
     coordinated: int
     #: 좌표가 없는 줄 수. **어느 것과도 짝짓지 않는다.**
     uncoordinated: int
-    #: 사람이 주고받은 줄. **이것이 보존해야 할 원문이다.**
-    human_lines: int
-    #: 그중 좌표가 있는 줄. 소급과 대조할 수 있는 실제 분량이다.
-    human_coordinated: int
+    #: 알아보는 종류를 뺀 **나머지** 줄. 사람 대화로 보이지만 단정하지 않는다.
+    residual_lines: int
+    #: 그중 좌표가 있는 줄.
+    residual_coordinated: int
     #: 첨부 참조 줄(파일 하나당 하나).
     attachment_reference_lines: int
-    #: 첨부에서 뽑아낸 본문 줄. **파생 자료이고, 새 구조의 raw 에는 들어갈 수 없다.**
+    #: 첨부에서 뽑아낸 본문 줄. **파생 자료다.**
     attachment_body_lines: int
+    #: edit/delete 이력 줄.
+    revision_lines: int
+    #: 캔버스 스냅샷 줄.
+    canvas_lines: int
     attachment_ids: frozenset[str]
 
 
@@ -109,11 +139,13 @@ class Placement:
     destination: Path | None
     verdict: str
     reason: str = ""
-    #: 소급이 이미 가져온 줄 수(좌표가 있는 줄만). raw 전체 기준이라 첨부 줄을
-    #: 포함한다 — 이관 가능량이 아니다.
+    #: 새 자료에 **같은 좌표의 메시지가 있는** 옛 줄 수. 좌표는 메시지 단위라
+    #: 어느 줄이 실제로 넘어왔는지는 말해 주지 않는다.
     duplicate_lines: int = 0
-    #: 그중 **사람 대화** 줄. 실제로 옮길 것에서 빼야 하는 수는 이쪽이다.
-    human_duplicate_lines: int = 0
+    #: 그중 나머지(사람 대화로 보이는) 줄.
+    residual_duplicate_lines: int = 0
+    #: 좌표가 맞은 **메시지** 수. 줄 수와 다르다 — 한 메시지가 여러 줄을 만든다.
+    matched_messages: int = 0
 
     @property
     def blocked(self) -> bool:
@@ -141,18 +173,23 @@ class Report:
         return [item for item in self.placements if item.blocked]
 
     def content(self) -> dict:
-        """**내용** — 무엇이 몇 줄이나 옮겨지나. **세 갈래로 나눠 센다.**
+        """**내용** — 무엇이 몇 줄이나 있나. 갈래로 나눠 센다.
 
         합쳐서 「원문 N줄」 로 말하면 오해를 부른다. 실측(2026-09-30 운영 아카이브)
-        에서 raw 23만 줄 중 사람 대화는 491줄이었고 나머지는 첨부에서 뽑아낸
-        본문이었다. 그 수를 「옮길 원문」 으로 읽으면 규모도 위험도 잘못 잡는다.
+        에서 raw 23만 줄 중 첨부에서 뽑아낸 본문이 23만 줄이었다. 그 수를 「옮길
+        원문」 으로 읽으면 규모도 위험도 잘못 잡는다.
         """
         lines = sum(item.doc.line_count for item in self.planned)
-        human = sum(item.doc.human_lines for item in self.planned)
+        residual = sum(item.doc.residual_lines for item in self.planned)
         reference = sum(item.doc.attachment_reference_lines for item in self.planned)
         body = sum(item.doc.attachment_body_lines for item in self.planned)
+        revision = sum(item.doc.revision_lines for item in self.planned)
+        canvas = sum(item.doc.canvas_lines for item in self.planned)
         duplicate = sum(item.duplicate_lines for item in self.planned)
-        human_duplicate = sum(item.human_duplicate_lines for item in self.planned)
+        residual_duplicate = sum(
+            item.residual_duplicate_lines for item in self.planned
+        )
+        matched = sum(item.matched_messages for item in self.planned)
         return {
             "documents": len(self.planned),
             "blockedDocuments": len(self.blocked),
@@ -160,26 +197,34 @@ class Report:
 
             # --- raw 전체. **이관 가능량이 아니다** -------------------------
             "rawLines": lines,
-            "rawDuplicateLines": duplicate,
 
-            # --- 갈래별 ----------------------------------------------------
-            "humanLines": human,
+            # --- 갈래별. 알아보는 것을 빼고 남는 것이 residual --------------
+            "residualLines": residual,
             "attachmentReferenceLines": reference,
             "attachmentBodyLines": body,
-            "unclassifiedLines": lines - human - reference - body,
+            "revisionLines": revision,
+            "canvasLines": canvas,
 
-            # --- 실제로 옮길 것 ---------------------------------------------
-            #
-            # 예전에는 `newLines = rawLines - duplicateLines` 를 냈다. 그 수는
-            # 첨부 본문을 포함해서 **이관 가능량처럼 보인다** — 실측에서 그 값이
-            # 23만이었고 실제로 옮길 사람 대화는 491 줄이었다.
-            "humanDuplicateLines": human_duplicate,
-            "humanNewLines": human - human_duplicate,
+            # --- 좌표 대조. **메시지 단위다** -------------------------------
+            "matchedMessages": matched,
+            "rawLinesInMatchedMessages": duplicate,
+            "residualLinesInMatchedMessages": residual_duplicate,
+
+            # --- 추정치 -----------------------------------------------------
+            "estimate": True,
+            "residualNewLinesEstimate": residual - residual_duplicate,
+            "estimateCaveat": (
+                "좌표(`message_ts`)는 **메시지 단위**입니다. writer 가 한 메시지의"
+                " 사람 발언과 첨부 줄에 같은 좌표를 붙이므로, 새 자료에 그 메시지의"
+                " 첨부 줄만 들어와 있어도 좌표는 맞습니다. 그래서"
+                " residualNewLinesEstimate 는 **줄 종류까지 대조한 값이 아니라"
+                " 좌표 기준 추정치**이고, 실제보다 작게 나올 수 있습니다."
+            ),
 
             "note": (
-                "이관 대상은 humanNewLines 입니다. rawLines 에는 첨부에서 뽑아낸"
-                " 본문(attachmentBodyLines)이 들어 있고 그것은 파생 자료라"
-                " 옮기는 대상이 아닙니다."
+                "residualLines 는 알아보는 종류(첨부 참조·첨부 본문·수정 이력·"
+                "캔버스)를 뺀 **나머지**입니다. 사람 대화로 보이지만 모르는 형식이"
+                " 섞여 있을 수 있어 그렇게 단정하지 않습니다."
                 " 새 채널별 구조(per-channel-v1)는 raw 파일의 내용을 검사하지"
                 " 않습니다 — 대신 shadow 루트에 workspaces/ 가 있으면 기동을"
                 " 거부하고(`requires a new shadow root without legacy workspaces`),"
@@ -206,17 +251,19 @@ class Report:
         """**출처** — 좌표가 있나. 없는 것은 합치지 않는다."""
         coordinated = sum(item.doc.coordinated for item in self.planned)
         uncoordinated = sum(item.doc.uncoordinated for item in self.planned)
-        human = sum(item.doc.human_lines for item in self.planned)
-        human_coordinated = sum(item.doc.human_coordinated for item in self.planned)
+        residual = sum(item.doc.residual_lines for item in self.planned)
+        residual_coordinated = sum(
+            item.doc.residual_coordinated for item in self.planned
+        )
         no_id = sum(1 for item in self.blocked if "채널 ID" in item.reason)
         return {
             "coordinatedLines": coordinated,
             "uncoordinatedLines": uncoordinated,
-            # 소급과 실제로 대조할 수 있는 분량. 첨부 본문을 뺀 수다 —
-            # 합쳐 세면 대조 가능성이 실제보다 높아 보인다.
-            "humanLines": human,
-            "humanCoordinatedLines": human_coordinated,
-            "humanUncoordinatedLines": human - human_coordinated,
+            # 나머지 줄 기준. 첨부 본문을 빼고 센다 — 합쳐 세면 대조 가능성이
+            # 실제보다 높아 보인다.
+            "residualLines": residual,
+            "residualCoordinatedLines": residual_coordinated,
+            "residualUncoordinatedLines": residual - residual_coordinated,
             "documentsWithoutChannelId": no_id,
             "schemaV1": sum(1 for item in self.planned if item.doc.schema_version == 1),
             "schemaV2": sum(1 for item in self.planned if item.doc.schema_version == 2),
@@ -302,10 +349,10 @@ def read_source(path: Path) -> SourceDoc:
         if match
     }
     coordinated = sum(1 for line in doc.raw_lines if line.message_ts)
-    human = [
-        line for line in doc.raw_lines
-        if not ATTACHMENT_REFERENCE.search(line.text)
-        and not ATTACHMENT_BODY.search(line.text)
+    kinds = [line_kind(line) for line in doc.raw_lines]
+    residual = [
+        line for line, kind in zip(doc.raw_lines, kinds, strict=True)
+        if kind == "residual"
     ]
     return SourceDoc(
         path=path,
@@ -320,14 +367,12 @@ def read_source(path: Path) -> SourceDoc:
         line_count=len(doc.raw_lines),
         coordinated=coordinated,
         uncoordinated=len(doc.raw_lines) - coordinated,
-        human_lines=len(human),
-        human_coordinated=sum(1 for line in human if line.message_ts),
-        attachment_reference_lines=sum(
-            1 for line in doc.raw_lines if ATTACHMENT_REFERENCE.search(line.text)
-        ),
-        attachment_body_lines=sum(
-            1 for line in doc.raw_lines if ATTACHMENT_BODY.search(line.text)
-        ),
+        residual_lines=len(residual),
+        residual_coordinated=sum(1 for line in residual if line.message_ts),
+        attachment_reference_lines=kinds.count("attachment_reference"),
+        attachment_body_lines=kinds.count("attachment_body"),
+        revision_lines=kinds.count("revision"),
+        canvas_lines=kinds.count("canvas"),
         attachment_ids=frozenset(ids),
     )
 
@@ -429,38 +474,55 @@ def plan(
             report.unreadable.append((str(path), f"{type(exc).__name__}: {exc}"))
             continue
         target, verdict, reason = _place(doc, dest)
-        duplicates = human_duplicates = 0
+        matched = Matched()
         if verdict == "plan" and index:
-            duplicates, human_duplicates = _count_duplicates(path, doc, index)
+            matched = _count_matched(path, doc, index)
         report.placements.append(Placement(
             doc=doc, destination=target, verdict=verdict, reason=reason,
-            duplicate_lines=duplicates, human_duplicate_lines=human_duplicates,
+            duplicate_lines=matched.raw_lines,
+            residual_duplicate_lines=matched.residual_lines,
+            matched_messages=matched.messages,
         ))
     return report
 
 
-def _count_duplicates(
+@dataclass(frozen=True)
+class Matched:
+    """좌표가 맞은 메시지와 그 메시지에 속한 줄 수.
+
+    **줄이 넘어왔다는 뜻이 아니다.** 좌표는 메시지 단위라, 새 자료에 그 메시지의
+    첨부 줄만 있어도 맞는다. 그래서 이름이 `duplicate` 가 아니라 `matched` 다.
+    """
+
+    messages: int = 0
+    raw_lines: int = 0
+    residual_lines: int = 0
+
+
+def _count_matched(
     path: Path, doc: SourceDoc, index: set[tuple[str, str, str]],
-) -> tuple[int, int]:
-    """소급이 이미 가져온 줄 수 `(raw 전체, 사람 대화)`. **좌표가 있는 줄만 센다.**
+) -> Matched:
+    """새 자료에 **같은 좌표의 메시지가 있는** 옛 줄을 센다.
 
     좌표가 없는 줄은 후보에도 올리지 않는다. 비슷해 보인다고 합치면 다른 메시지를
     지우거나 같은 메시지를 둘로 남기고, 둘 다 오류를 내지 않는다.
 
-    둘로 나눠 돌려주는 이유: raw 전체 기준 중복에는 첨부 줄이 섞여 있고, 그 수를
-    「옮길 것에서 뺄 수」 로 쓰면 실제로 옮길 사람 대화의 양이 어긋난다.
+    메시지 수와 줄 수를 **따로** 돌려준다. 한 메시지가 사람 발언 한 줄과 첨부 수십
+    줄을 만들기 때문에, 줄 수만 보면 「대부분 이미 있다」 로 읽힌다.
     """
     loaded = load_doc(path)
-    total = 0
-    human = 0
+    messages: set[str] = set()
+    raw_lines = 0
+    residual_lines = 0
     for line in loaded.raw_lines:
         if not line.message_ts:
             continue
         if (doc.workspace, doc.channel_id, line.message_ts) not in index:
             continue
-        total += 1
-        if not ATTACHMENT_REFERENCE.search(line.text) and not ATTACHMENT_BODY.search(
-            line.text
-        ):
-            human += 1
-    return total, human
+        messages.add(line.message_ts)
+        raw_lines += 1
+        if line_kind(line) == "residual":
+            residual_lines += 1
+    return Matched(
+        messages=len(messages), raw_lines=raw_lines, residual_lines=residual_lines,
+    )

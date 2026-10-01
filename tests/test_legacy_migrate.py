@@ -225,8 +225,10 @@ def test_a_coordinated_line_matches_the_backfill(tmp_path):
     (item,) = _plan(tmp_path, collected=index).placements
 
     assert item.duplicate_lines == 1
-    assert item.human_duplicate_lines == 1
-    assert _plan(tmp_path, collected=index).content()["humanNewLines"] == 0
+    assert item.residual_duplicate_lines == 1
+    assert item.matched_messages == 1
+    content = _plan(tmp_path, collected=index).content()
+    assert content["residualNewLinesEstimate"] == 0
 
 
 def test_a_line_without_a_coordinate_is_never_matched(tmp_path):
@@ -458,30 +460,36 @@ def test_attachment_body_is_not_counted_as_conversation(tmp_path):
     content = _mixed(tmp_path).content()
 
     assert content["rawLines"] == 3
-    assert content["humanLines"] == 1
+    assert content["residualLines"] == 1
     assert content["attachmentReferenceLines"] == 1
     assert content["attachmentBodyLines"] == 1
 
 
-def test_the_three_kinds_account_for_every_line(tmp_path):
-    """분류 안 된 줄이 남으면 어느 갈래가 새는지 모른다."""
+def test_every_line_lands_in_exactly_one_kind(tmp_path):
+    """갈래 합이 전체와 안 맞으면 어느 갈래가 새는지 모른다.
+
+    `residual` 이 나머지라서 합은 항상 맞는다. 그 사실을 적어 두는 이유는, 합이
+    맞는다고 **분류가 맞는 것은 아니기** 때문이다 — 모르는 형식은 residual 로 간다.
+    """
     content = _mixed(tmp_path).content()
 
-    assert content["unclassifiedLines"] == 0
     assert (
-        content["humanLines"]
+        content["residualLines"]
         + content["attachmentReferenceLines"]
         + content["attachmentBodyLines"]
+        + content["revisionLines"]
+        + content["canvasLines"]
         == content["rawLines"]
     )
 
 
-def test_the_note_names_the_real_target(tmp_path):
-    """보고서가 무엇이 이관 대상인지 한 이름으로 말해야 한다."""
+def test_the_note_explains_what_residual_means(tmp_path):
+    """「나머지」 가 무엇을 뺀 나머지인지 말하지 않으면 그냥 사람 대화로 읽힌다."""
     note = _mixed(tmp_path).content()["note"]
 
-    assert "humanNewLines" in note
-    assert "attachmentBodyLines" in note
+    assert "residualLines" in note
+    assert "나머지" in note
+    assert "단정하지 않습니다" in note
 
 
 def test_the_note_does_not_claim_the_runtime_inspects_raw(tmp_path):
@@ -531,9 +539,9 @@ def test_human_coordinates_exclude_attachment_lines(tmp_path):
     provenance = _mixed(tmp_path).provenance()
 
     assert provenance["coordinatedLines"] == 3
-    assert provenance["humanLines"] == 1
-    assert provenance["humanCoordinatedLines"] == 1
-    assert provenance["humanUncoordinatedLines"] == 0
+    assert provenance["residualLines"] == 1
+    assert provenance["residualCoordinatedLines"] == 1
+    assert provenance["residualUncoordinatedLines"] == 0
 
 
 def test_a_human_line_without_a_coordinate_is_counted_apart(tmp_path):
@@ -545,9 +553,9 @@ def test_a_human_line_without_a_coordinate_is_counted_apart(tmp_path):
 
     provenance = _plan(tmp_path).provenance()
 
-    assert provenance["humanLines"] == 1
-    assert provenance["humanCoordinatedLines"] == 0
-    assert provenance["humanUncoordinatedLines"] == 1
+    assert provenance["residualLines"] == 1
+    assert provenance["residualCoordinatedLines"] == 0
+    assert provenance["residualUncoordinatedLines"] == 1
 
 
 def test_attachment_body_lines_are_reported_in_the_attachment_section(tmp_path):
@@ -558,43 +566,157 @@ def test_attachment_body_lines_are_reported_in_the_attachment_section(tmp_path):
     assert files["identifiedFiles"] == 1
 
 
-def test_an_attachment_duplicate_does_not_reduce_the_human_target(tmp_path):
-    """**raw 겹침과 사람 대화 겹침은 다른 수다.**
+def test_a_matched_attachment_message_does_not_reduce_the_estimate(tmp_path):
+    """**좌표가 다른 메시지면** 나머지 줄은 영향받지 않는다.
 
-    소급이 첨부 줄을 이미 가져왔다고 해서 옮길 사람 대화가 주는 것이 아니다.
-    하나로 세면 「옮길 것이 거의 없다」 고 잘못 읽는다 — 실측에서 raw 겹침은
+    하나로 세면 「옮길 것이 거의 없다」 고 잘못 읽는다 — 실측에서 좌표가 맞은 줄은
     첨부 줄이 대부분이었다.
     """
     source, _, _ = _roots(tmp_path)
     _write(source, lines="\n".join([HUMAN_LINE, BODY_LINE]))
-    # 소급이 첨부 본문 줄만 이미 가져왔다.
+    # 소급이 첨부 본문 줄만 이미 가져왔다. **그 줄의 좌표는 사람 줄과 다르다.**
     index = {(WS, CID, "1759100001.000100")}
 
     content = _plan(tmp_path, collected=index).content()
 
-    assert content["rawDuplicateLines"] == 1
-    assert content["humanDuplicateLines"] == 0
-    assert content["humanNewLines"] == 1
+    assert content["matchedMessages"] == 1
+    assert content["rawLinesInMatchedMessages"] == 1
+    assert content["residualLinesInMatchedMessages"] == 0
+    assert content["residualNewLinesEstimate"] == 1
 
 
-def test_a_human_duplicate_does_reduce_the_target(tmp_path):
-    """반대로 사람 대화가 겹치면 그만큼 줄어야 한다. 안 줄면 두 벌로 남는다."""
+def test_a_matched_conversation_message_reduces_the_estimate(tmp_path):
+    """반대로 나머지 줄의 좌표가 맞으면 추정치가 그만큼 줄어야 한다."""
     source, _, _ = _roots(tmp_path)
     _write(source, lines="\n".join([HUMAN_LINE, BODY_LINE]))
     index = {(WS, CID, "1759099999.000100")}
 
     content = _plan(tmp_path, collected=index).content()
 
-    assert content["rawDuplicateLines"] == 1
-    assert content["humanDuplicateLines"] == 1
-    assert content["humanNewLines"] == 0
+    assert content["matchedMessages"] == 1
+    assert content["residualLinesInMatchedMessages"] == 1
+    assert content["residualNewLinesEstimate"] == 0
 
 
-def test_the_misleading_key_is_gone(tmp_path):
-    """`newLines = rawLines - duplicateLines` 는 첨부 본문을 포함해 이관 가능량처럼
-    보였다. 이름을 남겨 두면 누군가 다시 그 수를 쓴다."""
+def test_the_misleading_keys_are_gone(tmp_path):
+    """옛 이름을 남겨 두면 누군가 다시 그 수를 쓴다.
+
+    - `newLines` 는 첨부 본문을 포함해 이관 가능량처럼 보였다
+    - `humanNewLines` 는 좌표만 보고 확정한 것처럼 보였다
+    - `duplicateLines` 는 줄이 넘어왔다는 뜻으로 읽혔다(좌표는 메시지 단위다)
+    """
     content = _mixed(tmp_path).content()
 
-    assert "newLines" not in content
-    assert "duplicateLines" not in content
-    assert {"rawDuplicateLines", "humanDuplicateLines", "humanNewLines"} <= set(content)
+    for gone in ("newLines", "duplicateLines", "humanNewLines",
+                 "humanDuplicateLines", "humanLines", "unclassifiedLines"):
+        assert gone not in content, gone
+    assert {
+        "matchedMessages", "rawLinesInMatchedMessages",
+        "residualLinesInMatchedMessages", "residualNewLinesEstimate",
+        "estimate", "estimateCaveat",
+    } <= set(content)
+
+
+# --- 좌표는 메시지 단위다 ---------------------------------------------------------
+#
+# 2026-10-01 지적. `(workspace, channel_id, message_ts)` 는 **메시지 하나**를 가리킨다.
+# writer 는 한 메시지의 사람 발언과 첨부 줄에 **같은 ts** 를 붙인다
+# (`pilot._messages_from`: "메시지 하나를 여는 좌표. 첨부에서 뽑은 줄에도 같은 값을
+# 남긴다"). 그래서 좌표만으로는 **어느 줄이** 새 자료에 있는지 알 수 없다.
+#
+# 앞선 시험은 사람 줄과 첨부 줄에 서로 다른 ts 를 줘서 이 경우를 통째로 놓쳤다.
+
+SAME_TS = "1759100000.000100"
+SAME_TS_HUMAN = f"> [2026-09-01 10:00|{SAME_TS}] 김현장: 착공계 올립니다."
+SAME_TS_REFERENCE = (
+    f"> [2026-09-01 10:00|{SAME_TS}] 김현장:"
+    " [첨부:변환] 착공계.pdf (pdf, 120KB) · id:F123"
+)
+SAME_TS_BODY = (
+    f"> [2026-09-01 10:00|{SAME_TS}] 김현장:"
+    " [첨부추출:착공계.pdf] 공사기간은 2026년 3월까지"
+)
+
+
+def test_one_message_can_hold_a_human_line_and_attachment_lines(tmp_path):
+    """세 줄이 같은 좌표를 쓴다. 이 사실이 아래 시험들의 전제다."""
+    source, _, _ = _roots(tmp_path)
+    _write(source, lines="\n".join(
+        [SAME_TS_HUMAN, SAME_TS_REFERENCE, SAME_TS_BODY]
+    ))
+
+    content = _plan(tmp_path).content()
+
+    assert content["rawLines"] == 3
+    assert content["attachmentReferenceLines"] == 1
+    assert content["attachmentBodyLines"] == 1
+
+
+def test_a_matched_coordinate_cannot_say_which_line_arrived(tmp_path):
+    """**이 시험이 정정의 핵심이다.**
+
+    새 자료에 그 메시지의 **첨부 줄만** 있어도 좌표는 맞는다. 그때 옛 사람 발언까지
+    「이미 있다」 로 세면 옮길 양을 과소평가하고, 그 차이는 옮긴 뒤에야 드러난다.
+
+    좌표만으로는 판정할 수 없으므로 보고서는 **추정치**라고 말해야 한다.
+    """
+    source, _, _ = _roots(tmp_path)
+    _write(source, lines="\n".join(
+        [SAME_TS_HUMAN, SAME_TS_REFERENCE, SAME_TS_BODY]
+    ))
+    # 새 자료에는 첨부 본문 줄만 들어왔다. 좌표는 같다.
+    index = {(WS, CID, SAME_TS)}
+
+    content = _plan(tmp_path, collected=index).content()
+
+    assert content["matchedMessages"] == 1
+    assert content["estimate"] is True
+    assert "메시지 단위" in content["estimateCaveat"]
+
+
+def test_the_report_does_not_promise_a_migration_target(tmp_path):
+    """확정적인 「이관 대상」 이라는 이름을 쓰지 않는다."""
+    content = _mixed(tmp_path).content()
+
+    assert "humanNewLines" not in content
+    assert "residualNewLinesEstimate" in content
+
+
+# --- 사람 대화는 **나머지**다 -----------------------------------------------------
+#
+# 2026-10-01 지적. 분류가 「알려진 첨부 표시가 아니면 사람 대화」 였다. 그래서
+# `unclassifiedLines` 는 구조상 항상 0 이었고, 모르는 형식이 사람 대화에 섞였다.
+
+CANVAS_LINE = f"> [2026-09-01 10:05|{SAME_TS}] 캔버스: 회의실 예약 현황"
+REVISION_LINE = "> [2026-09-01 10:06|1759100006.000100] 김현장: [수정 전] 3월까지"
+
+
+def test_a_canvas_line_is_not_counted_as_conversation(tmp_path):
+    """캔버스 스냅샷은 사람이 그 자리에서 한 말이 아니다."""
+    source, _, _ = _roots(tmp_path)
+    _write(source, lines="\n".join([SAME_TS_HUMAN, CANVAS_LINE]))
+
+    content = _plan(tmp_path).content()
+
+    assert content["canvasLines"] == 1
+    assert content["residualLines"] == 1
+
+
+def test_a_revision_line_is_counted_apart(tmp_path):
+    """수정·삭제 이력은 보존 대상이지만 대화 한 줄과 같은 것으로 세지 않는다."""
+    source, _, _ = _roots(tmp_path)
+    _write(source, lines="\n".join([SAME_TS_HUMAN, REVISION_LINE]))
+
+    content = _plan(tmp_path).content()
+
+    assert content["revisionLines"] == 1
+    assert content["residualLines"] == 1
+
+
+def test_the_residual_is_named_as_a_residual(tmp_path):
+    """「사람 대화」 라고 단정하면 모르는 형식이 그 수에 숨는다."""
+    content = _mixed(tmp_path).content()
+
+    assert "humanLines" not in content
+    assert "residualLines" in content
+    assert "나머지" in content["note"]

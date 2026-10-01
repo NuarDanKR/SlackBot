@@ -44,16 +44,20 @@ def _human(report: legacy_migrate.Report) -> str:
         f"  옮길 문서 {content['documents']}건 · 막힌 문서 {content['blockedDocuments']}건"
         f" · 못 읽은 문서 {content['unreadable']}건",
         f"  raw 전체 {content['rawLines']}줄 (이관 가능량 아님) — 갈래별:",
-        f"    사람 대화      {content['humanLines']}줄",
-        f"    첨부 참조      {content['attachmentReferenceLines']}줄",
-        f"    첨부 추출 본문 {content['attachmentBodyLines']}줄  ← 파생 자료",
-        f"    분류 안 됨     {content['unclassifiedLines']}줄",
+        f"    나머지(사람 대화로 추정) {content['residualLines']}줄",
+        f"    첨부 참조                {content['attachmentReferenceLines']}줄",
+        f"    첨부 추출 본문           {content['attachmentBodyLines']}줄  ← 파생 자료",
+        f"    수정·삭제 이력           {content['revisionLines']}줄",
+        f"    캔버스                   {content['canvasLines']}줄",
         "",
-        f"  >> 이관 대상(사람 대화) {content['humanNewLines']}줄"
-        f" = 사람 대화 {content['humanLines']}"
-        f" - 소급과 겹침 {content['humanDuplicateLines']}",
-        f"     (raw 전체 기준 겹침은 {content['rawDuplicateLines']}줄이고"
-        f" 첨부 줄을 포함합니다)",
+        f"  좌표가 맞은 메시지 {content['matchedMessages']}건"
+        f" — 그 메시지에 속한 옛 줄 {content['rawLinesInMatchedMessages']}"
+        f"(그중 나머지 {content['residualLinesInMatchedMessages']})",
+        "",
+        f"  ~ 옮길 나머지 **추정치** {content['residualNewLinesEstimate']}줄"
+        f" = 나머지 {content['residualLines']}"
+        f" - 좌표가 맞은 나머지 {content['residualLinesInMatchedMessages']}",
+        f"    {content['estimateCaveat']}",
         "",
         f"  {content['note']}",
         "",
@@ -64,9 +68,9 @@ def _human(report: legacy_migrate.Report) -> str:
         "",
         "## 출처",
         f"  좌표 있는 줄 {source['coordinatedLines']} · 좌표 없는 줄 {source['uncoordinatedLines']}",
-        f"  그중 사람 대화 {source['humanLines']}줄"
-        f" = 좌표 있음 {source['humanCoordinatedLines']}"
-        f" + 좌표 없음 {source['humanUncoordinatedLines']}",
+        f"  그중 나머지 {source['residualLines']}줄"
+        f" = 좌표 있음 {source['residualCoordinatedLines']}"
+        f" + 좌표 없음 {source['residualUncoordinatedLines']}",
         f"  채널 ID 가 없어 막힌 문서 {source['documentsWithoutChannelId']}건",
         f"  schema v1 {source['schemaV1']}건 · v2 {source['schemaV2']}건",
         f"  {source['note']}",
