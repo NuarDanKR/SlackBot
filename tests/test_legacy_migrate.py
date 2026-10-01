@@ -720,3 +720,78 @@ def test_the_residual_is_named_as_a_residual(tmp_path):
     assert "humanLines" not in content
     assert "residualLines" in content
     assert "나머지" in content["note"]
+
+
+# --- 한 메시지가 여러 날짜 파일에 걸친다 -------------------------------------------
+#
+# 2026-10-01 지적. `_ingest_revision` 은 **수정 시각**으로 날짜 파일을 고르고
+# **원문 메시지의 좌표**를 그대로 남긴다(`source_ts=message_ts`). 그래서 9월 1일
+# 메시지를 9월 5일에 고치면 같은 `(workspace, channel_id, ts)` 가 두 파일에 있다.
+#
+# 문서별로 센 메시지 수를 더하면 한 메시지가 두 건이 된다.
+
+CROSS_TS = "1759100000.000100"
+ORIGINAL_LINE = f"> [2026-09-01 10:00|{CROSS_TS}] 김현장: 공사기간은 2월까지"
+EDIT_BEFORE = f"> [2026-09-05 09:00|{CROSS_TS}] 김현장: [수정 전] 공사기간은 2월까지"
+EDIT_AFTER = f"> [2026-09-05 09:00|{CROSS_TS}] 김현장: [수정 후] 공사기간은 3월까지"
+
+
+def _across_two_days(tmp_path):
+    source, _, _ = _roots(tmp_path)
+    _write(source, "2026-09-01.md", lines=ORIGINAL_LINE)
+    _write(source, "2026-09-05.md", lines="\n".join([EDIT_BEFORE, EDIT_AFTER]))
+    return source
+
+
+def test_one_message_spread_over_two_files_counts_once(tmp_path):
+    """**이 시험이 정정의 핵심이다.**
+
+    문서별 메시지 수를 더하면 한 메시지가 두 건이 된다. 그 수가 커지면 「이미
+    대부분 넘어왔다」 로 읽히고, 그 오해는 옮긴 뒤에야 드러난다.
+    """
+    _across_two_days(tmp_path)
+    index = {(WS, CID, CROSS_TS)}
+
+    content = _plan(tmp_path, collected=index).content()
+
+    assert content["documents"] == 2
+    assert content["matchedMessages"] == 1
+    # 줄은 파일마다 따로 있으므로 더하는 것이 맞다 — 원문 1줄 + 이력 2줄.
+    assert content["rawLinesInMatchedMessages"] == 3
+
+
+def test_the_same_ts_in_two_channels_counts_twice(tmp_path):
+    """채널이 다르면 다른 메시지다. ts 만으로 합치면 남의 채널과 겹친다(원칙 4)."""
+    source, _, _ = _roots(tmp_path)
+    _write(source, "2026-09-01.md", lines=ORIGINAL_LINE)
+    other = source / "workspaces" / WS / "channels" / "C0OTHER99__다른방" / "raw"
+    other.mkdir(parents=True, exist_ok=True)
+    (other / "2026-09-01.md").write_text(
+        _doc(channel_id="C0OTHER99", lines=ORIGINAL_LINE), encoding="utf-8",
+    )
+    index = {(WS, CID, CROSS_TS), (WS, "C0OTHER99", CROSS_TS)}
+
+    content = _plan(tmp_path, collected=index).content()
+
+    assert content["matchedMessages"] == 2
+
+
+def test_the_document_count_is_not_called_a_migration_target(tmp_path):
+    """경로를 배정할 수 있다는 것과 안전하게 옮길 수 있다는 것은 다르다.
+
+    첨부 본문이 든 옛 raw 도 경로는 배정된다. 「옮길 문서」 라고 부르면 그 수가
+    안전한 이관 가능량으로 읽힌다.
+    """
+    content = _mixed(tmp_path).content()
+
+    assert "pathAssignableDocuments" in content
+    assert content["pathAssignableDocuments"] == content["documents"]
+
+
+def test_the_cli_does_not_say_the_documents_are_movable():
+    """화면 문구도 같은 오해를 만든다."""
+    source = (Path(__file__).resolve().parent.parent / "scripts"
+              / "plan_legacy_migration.py").read_text(encoding="utf-8")
+
+    assert "옮길 문서" not in source
+    assert "경로 배정 가능 문서" in source

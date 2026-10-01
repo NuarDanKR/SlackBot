@@ -41,8 +41,10 @@ def _human(report: legacy_migrate.Report) -> str:
         f"목적지    {data['destination']}",
         "",
         "## 내용",
-        f"  옮길 문서 {content['documents']}건 · 막힌 문서 {content['blockedDocuments']}건"
+        f"  경로 배정 가능 문서 {content['pathAssignableDocuments']}건"
+        f" · 막힌 문서 {content['blockedDocuments']}건"
         f" · 못 읽은 문서 {content['unreadable']}건",
+        "    (경로를 정할 수 있다는 뜻입니다. 안전하게 옮길 수 있는 수가 아닙니다)",
         f"  raw 전체 {content['rawLines']}줄 (이관 가능량 아님) — 갈래별:",
         f"    나머지(사람 대화로 추정) {content['residualLines']}줄",
         f"    첨부 참조                {content['attachmentReferenceLines']}줄",

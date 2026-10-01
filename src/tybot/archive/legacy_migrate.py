@@ -144,8 +144,17 @@ class Placement:
     duplicate_lines: int = 0
     #: 그중 나머지(사람 대화로 보이는) 줄.
     residual_duplicate_lines: int = 0
-    #: 좌표가 맞은 **메시지** 수. 줄 수와 다르다 — 한 메시지가 여러 줄을 만든다.
-    matched_messages: int = 0
+    #: 좌표가 맞은 **메시지들**. 수가 아니라 집합인 이유가 있다 — 한 메시지가
+    #: 여러 날짜 파일에 걸친다. 수집기는 **수정 시각**으로 날짜 파일을 고르면서
+    #: **원문 메시지의 좌표**를 그대로 남기므로(`_ingest_revision` 의
+    #: `source_ts=message_ts`), 9월 1일 메시지를 9월 5일에 고치면 같은 좌표가 두
+    #: 파일에 있다. 문서별 수를 더하면 한 메시지가 두 건이 된다.
+    matched_keys: frozenset[tuple[str, str, str]] = frozenset()
+
+    @property
+    def matched_messages(self) -> int:
+        """이 문서 하나가 본 메시지 수. 보고서 합계는 집합을 합쳐 센다."""
+        return len(self.matched_keys)
 
     @property
     def blocked(self) -> bool:
@@ -189,8 +198,14 @@ class Report:
         residual_duplicate = sum(
             item.residual_duplicate_lines for item in self.planned
         )
-        matched = sum(item.matched_messages for item in self.planned)
+        # 문서별 수를 더하지 않는다. 한 메시지가 여러 날짜 파일에 걸치기 때문이다.
+        matched_keys: set[tuple[str, str, str]] = set()
+        for item in self.planned:
+            matched_keys |= item.matched_keys
         return {
+            # **경로를 배정할 수 있는** 문서 수다. 안전하게 옮길 수 있다는 뜻이
+            # 아니다 — 첨부 본문이 든 옛 raw 도 경로는 배정된다.
+            "pathAssignableDocuments": len(self.planned),
             "documents": len(self.planned),
             "blockedDocuments": len(self.blocked),
             "unreadable": len(self.unreadable),
@@ -206,7 +221,7 @@ class Report:
             "canvasLines": canvas,
 
             # --- 좌표 대조. **메시지 단위다** -------------------------------
-            "matchedMessages": matched,
+            "matchedMessages": len(matched_keys),
             "rawLinesInMatchedMessages": duplicate,
             "residualLinesInMatchedMessages": residual_duplicate,
 
@@ -481,7 +496,7 @@ def plan(
             doc=doc, destination=target, verdict=verdict, reason=reason,
             duplicate_lines=matched.raw_lines,
             residual_duplicate_lines=matched.residual_lines,
-            matched_messages=matched.messages,
+            matched_keys=matched.keys,
         ))
     return report
 
@@ -494,7 +509,7 @@ class Matched:
     첨부 줄만 있어도 맞는다. 그래서 이름이 `duplicate` 가 아니라 `matched` 다.
     """
 
-    messages: int = 0
+    keys: frozenset[tuple[str, str, str]] = frozenset()
     raw_lines: int = 0
     residual_lines: int = 0
 
@@ -511,18 +526,21 @@ def _count_matched(
     줄을 만들기 때문에, 줄 수만 보면 「대부분 이미 있다」 로 읽힌다.
     """
     loaded = load_doc(path)
-    messages: set[str] = set()
+    keys: set[tuple[str, str, str]] = set()
     raw_lines = 0
     residual_lines = 0
     for line in loaded.raw_lines:
         if not line.message_ts:
             continue
-        if (doc.workspace, doc.channel_id, line.message_ts) not in index:
+        key = (doc.workspace, doc.channel_id, line.message_ts)
+        if key not in index:
             continue
-        messages.add(line.message_ts)
+        # 좌표를 **그대로** 든다. 워크스페이스·채널을 떼면 다른 채널의 같은 시각이
+        # 같은 메시지로 합쳐진다(절대 원칙 4).
+        keys.add(key)
         raw_lines += 1
         if line_kind(line) == "residual":
             residual_lines += 1
     return Matched(
-        messages=len(messages), raw_lines=raw_lines, residual_lines=residual_lines,
+        keys=frozenset(keys), raw_lines=raw_lines, residual_lines=residual_lines,
     )
