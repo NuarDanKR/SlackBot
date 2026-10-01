@@ -196,12 +196,40 @@ def format_line(msg: IncomingMessage) -> str:
     return f"> [{stamp}] {msg.speaker}: {text}"
 
 
-def dedupe_line(line: str) -> str:
-    """중복 판정용 키. **Slack ts 표기는 떼고 본다.**
+def _has_coordinate(line: str) -> bool:
+    """Slack 좌표를 달고 있는 줄인가. 좌표가 없으면 신원이 시각·화자·본문뿐이다."""
+    m = RAW_LINE_RE.match((line or "").strip())
+    return bool(m and split_stamp(m.group("ts"))[1])
 
-    좌표를 남기기 시작한 날, 이미 아카이브에 있는 줄에는 좌표가 없다. 표기까지
-    비교하면 같은 메시지가 좌표만 다른 두 줄로 다시 쌓이고, 그 중복은 오류로
-    보이지 않는다 — 사람이 같은 말을 두 번 한 것처럼 읽힌다.
+
+def dedupe_line(line: str) -> str:
+    """중복 판정용 키. **좌표가 있으면 좌표가 그 메시지의 신원이다.**
+
+    좌표를 떼고 보면 같은 분·같은 사람·같은 글자인 **두 메시지가 한 줄로 합쳐진다.**
+    짧은 말일수록 흔하다 — 「네」, 「확인했습니다」 는 한 회의에서 몇 번이고 나온다.
+    합쳐진 쪽은 오류를 내지 않는다. 사람이 두 번 말한 것이 한 번으로 남을 뿐이고,
+    그 차이는 원문을 직접 세기 전에는 안 보인다(절대 원칙 1).
+
+    좌표가 없는 줄은 **옛 키 모양 그대로** 돌려준다. 좌표를 남기기 전에 쌓인 줄이
+    있고, 그 줄의 키가 바뀌면 이미 있는 원문이 전부 다시 들어온다. 좌표 있는 줄과
+    없는 줄을 잇는 다리는 `legacy_dedupe_line()` 이 따로 놓는다.
+    """
+    m = RAW_LINE_RE.match((line or "").strip())
+    if not m:
+        return (line or "").strip()
+    stamp, message_ts = split_stamp(m.group("ts"))
+    speaker = m.group("speaker").strip()
+    text = m.group("text").strip()
+    if message_ts:
+        return f"> [{stamp}|{message_ts}] {speaker}: {text}"
+    return f"> [{stamp}] {speaker}: {text}"
+
+
+def legacy_dedupe_line(line: str) -> str:
+    """좌표를 **뗀** 키. 좌표 있는 줄과 없는 줄을 잇는 다리다.
+
+    같은 메시지가 좌표 있는 것과 없는 것으로 두 번 쌓이는 것을 막는다. 이 다리는
+    옛 줄이 사라지는 날 저절로 걷힌다.
     """
     m = RAW_LINE_RE.match((line or "").strip())
     if not m:
@@ -316,7 +344,12 @@ def _ingest_locked(
         path: path.read_text(encoding="utf-8") for path in sorted(raw_dir.glob("*.md"))
     }
     all_existing = "\n".join(existing_texts.values())
-    seen = {dedupe_line(ln) for ln in all_existing.splitlines()}
+    existing_lines = all_existing.splitlines()
+    #: 좌표까지 포함한 키. 좌표가 있는 줄은 이것으로만 가린다.
+    seen = {dedupe_line(ln) for ln in existing_lines}
+    #: 좌표를 뗀 키. **좌표가 없는 줄**을 가릴 때만 쓴다 — 그 줄에는 자기를
+    #: 가리킬 좌표가 없으므로 시각·화자·본문이 유일한 신원이다.
+    seen_plain = {legacy_dedupe_line(ln) for ln in existing_lines}
     existing_dedupe_keys = {
         m.dedupe_key
         for m in messages
@@ -338,9 +371,19 @@ def _ingest_locked(
             continue
         line = format_line(message)
         key = dedupe_line(line)
-        if key in seen:
+        plain = legacy_dedupe_line(line)
+        # 좌표가 있으면 좌표가 신원이다. 좌표를 떼고 비교하면 같은 분의 다른
+        # 메시지가 한 줄로 합쳐진다.
+        #
+        # 좌표가 없으면 가릴 근거가 시각·화자·본문뿐이다. 그래서 좌표 있는 줄과도
+        # 견준다 — 소급이 좌표 없이 같은 줄을 다시 보낼 수 있고, 그때 이미 좌표를
+        # 달고 들어와 있는 줄과 두 벌이 되면 안 된다.
+        if (key if _has_coordinate(line) else plain) in (
+            seen if _has_coordinate(line) else seen_plain
+        ):
             continue
         seen.add(key)
+        seen_plain.add(plain)
         grouped.setdefault(message.ts.astimezone(KST).date(), []).append(line)
 
     fallback_day = messages[0].ts.astimezone(KST).date() if messages else datetime.now(KST).date()

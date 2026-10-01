@@ -275,8 +275,16 @@ def test_lines_collected_before_the_coordinate_existed_still_parse(tmp_path):
     assert line.text == "첫날 회의"
 
 
-def test_a_message_archived_before_the_coordinate_is_not_written_twice(tmp_path):
-    """좌표만 다른 같은 줄이 다시 쌓이면 사람이 같은 말을 두 번 한 것처럼 보인다."""
+def test_a_message_archived_before_the_coordinate_reads_as_one_line(tmp_path):
+    """좌표만 다른 같은 줄이 **읽을 때** 두 줄로 보이면 안 된다.
+
+    2026-10-01 에 writer 의 중복 판정이 바뀌었다. 좌표가 있으면 좌표가 신원이다 —
+    좌표 없는 옛 줄 하나로는 그 분의 서로 다른 메시지를 구분할 수 없고, 그 줄로
+    새 줄을 흡수하면 두 번째 메시지가 영영 안 들어온다.
+
+    그래서 좌표가 붙은 쪽을 **한 번** 더 쓰고, 합치는 일은 `_merge()` 가 한다.
+    사람에게 보이는 보장은 그대로다 — 한 줄로 읽히고, 남는 쪽은 좌표 있는 줄이다.
+    """
     kw = {
         "workspace": "pilot",
         "channel": "#팀-전산_ABB110-회의",
@@ -294,8 +302,13 @@ def test_a_message_archived_before_the_coordinate_is_not_written_twice(tmp_path)
         ),
     ], **kw)
 
-    assert again.written == 0
-    assert len(ArchiveStore(tmp_path).source_docs()[0].raw_lines) == 1
+    # writer 는 좌표가 붙은 쪽을 쓴다. 파일에는 두 줄이 있다.
+    assert again.written == 1
+    assert len(ArchiveStore(tmp_path).source_docs()[0].raw_lines) == 2
+    # 답변이 보는 것은 병합한 쪽이다. 한 줄이고, 좌표를 들고 있는 쪽이 남는다.
+    merged = ArchiveStore(tmp_path).docs()[0].raw_lines
+    assert len(merged) == 1
+    assert merged[0].message_ts == "1758012345.123456"
 
 
 def test_a_made_up_coordinate_is_not_written(tmp_path):
