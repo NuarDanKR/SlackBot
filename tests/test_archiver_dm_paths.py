@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import pathlib
 from datetime import UTC, datetime
 
 import pytest
@@ -287,7 +288,7 @@ def test_a_document_cannot_be_both_a_channel_and_a_dm(tmp_path):
 
 
 def test_a_dm_directory_outside_the_root_is_refused(tmp_path):
-    with pytest.raises(ValueError, match="inside the archive root"):
+    with pytest.raises(ValueError, match="must be exactly"):
         writer.ingest(
             tmp_path / "root", workspace=WS, channel="DM:x", channel_id=DM_CHANNEL,
             messages=[_message()], acl=[], dm_user=ME,
@@ -327,3 +328,130 @@ def test_an_unscoped_read_opens_nothing_even_for_a_directory_named_unnamed(tmp_p
 
     assert ArchiveStore(tmp_path).docs() == []
     assert ArchiveStore(tmp_path).source_docs() == []
+
+
+# --- 8. writer 는 **정확히 그 경로만** 받는다 --------------------------------------
+#
+# 2026-10-01 지적. 「루트 안」 조건만으로는 부족하다. 그 조건은 채널 디렉터리도
+# 통과시키고, 그러면 개인 문서가 채널을 훑는 글롭 아래에 쌓인다.
+
+def test_a_channel_directory_cannot_be_passed_as_a_dm_directory(tmp_path):
+    """**이 시험이 이 정정의 핵심이다.**
+
+    채널 디렉터리는 루트 안에 있다. 그것만 보면 통과하고, 그 순간 개인 기록이
+    `<ws>/<channel-id>__<이름>/archive/raw/` 에 생긴다 — 채널 글롭이 잡는 자리다.
+    그 뒤로는 아무도 그 문서가 개인 것이라는 사실을 모른다.
+    """
+    from tybot.archive.shadow_paths import archive_dir as channel_archive_dir
+
+    channel = channel_archive_dir(tmp_path, WS, "C0FUND123", "팀-전산_ABB110-회의")
+
+    with pytest.raises(ValueError, match="must be exactly"):
+        writer.ingest(
+            tmp_path, workspace=WS, channel=writer.dm_channel(ME),
+            channel_id=DM_CHANNEL, messages=[_message()], acl=[], dm_user=ME,
+            dm_directory=channel,
+        )
+    assert not channel.exists()
+
+
+def test_another_persons_dm_directory_is_refused(tmp_path):
+    """`dm_user` 와 경로가 어긋나면 남의 공간에 내 이름표가 붙은 문서가 생긴다."""
+    theirs = dm_archive_dir(tmp_path, WS, SOMEONE_ELSE, DM_CHANNEL)
+
+    with pytest.raises(ValueError, match="must be exactly"):
+        writer.ingest(
+            tmp_path, workspace=WS, channel=writer.dm_channel(ME),
+            channel_id=DM_CHANNEL, messages=[_message()], acl=[], dm_user=ME,
+            dm_directory=theirs,
+        )
+    assert not theirs.exists()
+
+
+def test_another_workspaces_dm_directory_is_refused(tmp_path):
+    other = dm_archive_dir(tmp_path, "mgmt", ME, DM_CHANNEL)
+
+    with pytest.raises(ValueError, match="must be exactly"):
+        writer.ingest(
+            tmp_path, workspace=WS, channel=writer.dm_channel(ME),
+            channel_id=DM_CHANNEL, messages=[_message()], acl=[], dm_user=ME,
+            dm_directory=other,
+        )
+    assert not other.exists()
+
+
+def test_a_directory_beside_the_archive_one_is_refused(tmp_path):
+    """`archive` 가 아니라 `objects`·`staging` 에 원문을 쓰면 reader 가 못 본다."""
+    beside = dm_root(tmp_path, WS, ME, DM_CHANNEL) / "objects"
+
+    with pytest.raises(ValueError, match="must be exactly"):
+        writer.ingest(
+            tmp_path, workspace=WS, channel=writer.dm_channel(ME),
+            channel_id=DM_CHANNEL, messages=[_message()], acl=[], dm_user=ME,
+            dm_directory=beside,
+        )
+
+
+@pytest.mark.parametrize("channel_id", ["G0GROUP12", "C0CHAN123", "", None])
+def test_the_writer_requires_a_one_to_one_dm_channel_id(tmp_path, channel_id):
+    """다자 DM·채널 ID 로는 개인 경로를 만들 수 없으니 쓸 수도 없다."""
+    with pytest.raises(ValueError, match="not a private DM path"):
+        writer.ingest(
+            tmp_path, workspace=WS, channel=writer.dm_channel(ME),
+            channel_id=channel_id, messages=[_message()], acl=[], dm_user=ME,
+            dm_directory=dm_archive_dir(tmp_path, WS, ME, DM_CHANNEL),
+        )
+
+
+def test_the_expected_path_is_accepted(tmp_path):
+    """막기만 하면 쓸 수 없다. 맞는 경로는 그대로 통과해야 한다."""
+    result = _write_dm(tmp_path)
+
+    assert result.written == 1
+    assert result.path.parent.parent == dm_archive_dir(tmp_path, WS, ME, DM_CHANNEL)
+
+
+# --- 9. 중간 경로의 심볼릭 링크 ----------------------------------------------------
+#
+# 마지막 칸만 보면 `<workspace>` 나 `dm` 이 다른 곳을 가리킬 때 통과한다. 경로
+# 문자열은 개인 공간처럼 보이고 실제 파일은 남의 자리에 쌓인다.
+
+def _link_or_skip(link: pathlib.Path, target: pathlib.Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("이 환경에서는 심볼릭 링크를 만들 수 없습니다")
+
+
+@pytest.mark.parametrize("where", ["workspace", "dm", "user", "archive"])
+def test_a_symlink_anywhere_in_the_dm_path_is_refused(tmp_path, where):
+    link = {
+        "workspace": tmp_path / WS,
+        "dm": tmp_path / WS / "dm",
+        "user": tmp_path / WS / "dm" / ME,
+        "archive": tmp_path / WS / "dm" / ME / "archive",
+    }[where]
+    _link_or_skip(link, tmp_path / "밖" / where)
+
+    with pytest.raises(ShadowPathError, match="symlink"):
+        dm_archive_dir(tmp_path, WS, ME, DM_CHANNEL)
+
+
+@pytest.mark.parametrize("where", ["workspace", "dm", "user"])
+def test_the_writer_refuses_a_symlinked_dm_path(tmp_path, where):
+    """경로 판정이 writer 입구에서도 같은 답을 내야 한다."""
+    link = {
+        "workspace": tmp_path / WS,
+        "dm": tmp_path / WS / "dm",
+        "user": tmp_path / WS / "dm" / ME,
+    }[where]
+    _link_or_skip(link, tmp_path / "밖" / where)
+
+    with pytest.raises(ValueError, match="not a private DM path"):
+        writer.ingest(
+            tmp_path, workspace=WS, channel=writer.dm_channel(ME),
+            channel_id=DM_CHANNEL, messages=[_message()], acl=[], dm_user=ME,
+            dm_directory=tmp_path / WS / "dm" / ME / "archive",
+        )

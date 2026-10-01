@@ -80,12 +80,31 @@ def dm_root(
     base = Path(root) / workspace / "dm" / user_id
     if not base.resolve().is_relative_to(Path(root).resolve()):
         raise ShadowPathError("shadow DM directory escaped its root")
-    if base.is_symlink():
-        raise ShadowPathError("shadow DM directory is a symlink")
+    refuse_symlinked_chain(root, base)
     return base
+
+
+def refuse_symlinked_chain(root: Path | str, target: Path) -> None:
+    """`root` 아래 `target` 까지 내려가는 **모든 칸**이 링크가 아니어야 한다.
+
+    마지막 칸만 보면 `<workspace>` 나 `dm` 이 다른 곳을 가리킬 때 통과한다. 그때
+    경로 문자열은 개인 공간처럼 보이고 실제 파일은 남의 자리에 쌓인다 — 오류가
+    나지 않는 종류의 사고다.
+
+    `root` 자신은 보지 않는다. 아카이브 뿌리를 링크로 두는 것은 운영자의 선택이고,
+    그 선택은 이 모듈이 판정할 자리가 아니다.
+    """
+    base = Path(root)
+    current = base
+    for part in Path(target).relative_to(base).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ShadowPathError(f"shadow DM path contains a symlink: {part}")
 
 
 def dm_archive_dir(
     root: Path | str, workspace: str, user_id: str, dm_channel_id: str
 ) -> Path:
-    return dm_root(root, workspace, user_id, dm_channel_id) / "archive"
+    archive = dm_root(root, workspace, user_id, dm_channel_id) / "archive"
+    refuse_symlinked_chain(root, archive)
+    return archive

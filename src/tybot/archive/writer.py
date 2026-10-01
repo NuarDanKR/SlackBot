@@ -259,8 +259,20 @@ def ingest(
         # 문서처럼 판정된다(`can_access` 의 DM 분기가 그 값을 본다).
         if not dm_user:
             raise ValueError("dm directory requires dm_user")
-        if not Path(dm_directory).resolve().is_relative_to(Path(root).resolve()):
-            raise ValueError("dm directory must be inside the archive root")
+        # **「루트 안」 으로는 부족하다.** 그 조건만 보면 채널 디렉터리를 넘겨도
+        # 통과하고, 그러면 개인 문서가 채널을 훑는 글롭 아래에 쌓인다. 경로를
+        # 여기서 다시 만들어 **똑같은지** 본다 — 부르는 쪽이 어떻게 만들었든
+        # 규칙은 `shadow_paths` 하나다.
+        from .shadow_paths import ShadowPathError, dm_archive_dir
+
+        try:
+            expected = dm_archive_dir(root, workspace, dm_user, channel_id or "")
+        except ShadowPathError as exc:
+            raise ValueError(f"dm directory is not a private DM path: {exc}") from exc
+        if Path(dm_directory) != expected:
+            raise ValueError(
+                "dm directory must be exactly <root>/<workspace>/dm/<dm_user>/archive"
+            )
     with archive_write_lock(root):
         return _ingest_locked(
             root,
