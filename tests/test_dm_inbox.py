@@ -98,6 +98,24 @@ def test_workspace_boundary_and_tampering_fail_closed(tmp_path):
     assert path.exists()
 
 
+def test_trailing_bytes_are_rejected_even_if_decrypt_ignores_them(tmp_path, monkeypatch):
+    inbox = DmInbox(tmp_path, Fernet(Fernet.generate_key()))
+    key = inbox.enqueue(_handoff())
+    path = tmp_path / "tyit" / "pending" / f"{key}.bin"
+    path.write_bytes(path.read_bytes() + b"tampered")
+    original_decrypt = inbox.cipher.decrypt
+    calls = []
+
+    def permissive_decrypt(token):
+        calls.append(token)
+        return original_decrypt(token.removesuffix(b"tampered"))
+
+    monkeypatch.setattr(inbox.cipher, "decrypt", permissive_decrypt)
+    with pytest.raises(ValueError, match="cannot be read"):
+        inbox.read("tyit", key)
+    assert calls == []
+
+
 def test_invalid_identity_cannot_escape_inbox(tmp_path):
     inbox = DmInbox(tmp_path, Fernet(Fernet.generate_key()))
     with pytest.raises(ValueError, match="workspace"):

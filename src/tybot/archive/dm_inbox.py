@@ -6,6 +6,8 @@ producer must verify the conversation with the Master app before enqueueing.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -154,8 +156,12 @@ class DmInbox:
             raise ValueError("invalid DM inbox key")
         path = self._directory(workspace) / f"{key}.bin"
         try:
-            data = self.cipher.decrypt(path.read_bytes())
-        except (InvalidToken, FileNotFoundError) as exc:
+            token = path.read_bytes()
+            decoded = base64.b64decode(token, altchars=b"-_", validate=True)
+            if base64.urlsafe_b64encode(decoded) != token:
+                raise ValueError("non-canonical DM inbox token")
+            data = self.cipher.decrypt(token)
+        except (InvalidToken, FileNotFoundError, binascii.Error, ValueError) as exc:
             raise ValueError("DM inbox entry cannot be read") from exc
         if len(data) > _MAX_ENVELOPE_BYTES:
             raise ValueError("DM inbox entry is too large")
