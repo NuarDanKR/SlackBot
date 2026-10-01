@@ -42,3 +42,50 @@ def existing_channel_root(root: Path | str, workspace: str, channel_id: str) -> 
 
 def archive_dir(root: Path | str, workspace: str, channel_id: str, name: str) -> Path:
     return channel_root(root, workspace, channel_id, name) / "archive"
+
+
+# --- Private per-user DM namespace (B-68) -----------------------------------
+#
+# A DM lives outside channel enumeration so that "excluded by default" is a
+# property of the path, not of a filter someone has to remember. Channel
+# consumers glob `<workspace>/<channel-id>__<name>/`; none of them reach
+# `<workspace>/dm/<user-id>/`.
+
+#: Slack IM conversation. `mpim` and channels fail closed: a group DM is not a
+#: 1:1 DM, and this layout keys on one person.
+DM_CHANNEL_ID = re.compile(r"D[A-Z0-9]{7,}")
+
+#: Slack user. `U` is a member, `W` an Enterprise Grid member.
+DM_USER_ID = re.compile(r"[UW][A-Z0-9]{7,}")
+
+
+def dm_root(
+    root: Path | str, workspace: str, user_id: str, dm_channel_id: str
+) -> Path:
+    """Resolve one person's DM directory, refusing anything that is not a 1:1 DM.
+
+    The channel ID is checked even though it is not part of the path. A `D`
+    prefix is the only evidence this layout can carry that the conversation was
+    an IM; without the check a group DM would land in one member's private
+    namespace and the other members would never appear.
+    """
+    if not DM_USER_ID.fullmatch(user_id):
+        raise ShadowPathError("invalid Slack user ID for the DM layout")
+    if not DM_CHANNEL_ID.fullmatch(dm_channel_id):
+        raise ShadowPathError(
+            "not a 1:1 DM conversation; group DMs and channels are not stored here"
+        )
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", workspace):
+        raise ShadowPathError("invalid workspace key for shadow layout")
+    base = Path(root) / workspace / "dm" / user_id
+    if not base.resolve().is_relative_to(Path(root).resolve()):
+        raise ShadowPathError("shadow DM directory escaped its root")
+    if base.is_symlink():
+        raise ShadowPathError("shadow DM directory is a symlink")
+    return base
+
+
+def dm_archive_dir(
+    root: Path | str, workspace: str, user_id: str, dm_channel_id: str
+) -> Path:
+    return dm_root(root, workspace, user_id, dm_channel_id) / "archive"

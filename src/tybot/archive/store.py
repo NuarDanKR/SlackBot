@@ -329,11 +329,17 @@ class ArchiveStore:
         # 구조를 고르기 전에 두 배치를 같은 눈으로 읽을 수 있어야 한다.
         if v2.is_dir():
             files.extend(sorted(v2.glob("*/channels/*.md")))
-        if dm_scope and v2.is_dir():
+        if dm_scope:
             from .writer import _slugify
 
             who = "*" if dm_scope == "*" else _slugify(dm_scope)
-            files.extend(sorted(v2.glob(f"*/dm/{who}/raw/*.md")))
+            if v2.is_dir():
+                files.extend(sorted(v2.glob(f"*/dm/{who}/raw/*.md")))
+            # Archiver 개인별 경로(B-68, `shadow_paths.dm_archive_dir`).
+            # **`dm_scope` 안에서만 읽는다.** 위의 채널 글롭은
+            # `<ws>/<id>__<이름>/archive/...` 라 이 경로를 잡지 못한다 — 개인 기록이
+            # 채널 목록에 섞이지 않는 것이 필터가 아니라 경로의 성질이어야 한다.
+            files.extend(sorted(self.root.glob(f"*/dm/{who}/archive/raw/*.md")))
         if legacy.is_dir():
             legacy_files = sorted(legacy.glob("*/*.md"))
             files.extend(legacy_files)

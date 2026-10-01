@@ -232,17 +232,35 @@ def ingest(
     imported_from: str | None = None,
     dm_user: str | None = None,
     channel_directory: Path | None = None,
+    dm_directory: Path | None = None,
 ) -> IngestResult:
     """원문을 KST 날짜별 파일에 추가한다. 검증 실패 시 어떤 파일도 쓰지 않는다.
 
     `dm_user` 를 주면 **그 사람의 DM 작업공간**에 쌓는다(B-57). 경로·권한이
     채널과 다르고, 그 외 검사(PII·중복·형식)는 전부 같은 것을 지난다 — 새 입구를
     만들면서 검사를 새로 짜면 그 입구만 헐거워진다.
+
+    `dm_directory` 는 Archiver 의 개인별 경로다(B-68, `shadow_paths.dm_archive_dir`).
+    `channel_directory` 와 **같은 칸을 쓰지 않는다** — 하나로 두면 채널 경로에
+    `dm_user` 를 얹거나 그 반대가 되는 호출이 생기고, 그때 개인 기록이 채널을 훑는
+    글롭에 걸린다. 그 사고는 오류를 내지 않는다.
     """
+    # **이 판정이 먼저다.** 뒤에 두면 둘 다 준 호출이 「경로가 루트 밖」 이라는
+    # 엉뚱한 사유로 막히고, 부른 사람은 경로를 고치려 든다.
+    if channel_directory is not None and dm_directory is not None:
+        raise ValueError("a document is either a channel or a DM, not both")
     if channel_directory is not None and (
         dm_user or not Path(channel_directory).resolve().is_relative_to(Path(root).resolve())
     ):
         raise ValueError("channel directory must be inside the archive root")
+    if dm_directory is not None:
+        # DM 디렉터리는 **그 사람이 특정될 때만** 쓴다. `dm_user` 가 없으면 문서에
+        # `dm_user:` 가 안 들어가고, 그 문서는 경로만 개인 공간이고 권한은 채널
+        # 문서처럼 판정된다(`can_access` 의 DM 분기가 그 값을 본다).
+        if not dm_user:
+            raise ValueError("dm directory requires dm_user")
+        if not Path(dm_directory).resolve().is_relative_to(Path(root).resolve()):
+            raise ValueError("dm directory must be inside the archive root")
     with archive_write_lock(root):
         return _ingest_locked(
             root,
@@ -256,6 +274,7 @@ def ingest(
             imported_from=imported_from,
             dm_user=dm_user,
             channel_directory=channel_directory,
+            dm_directory=dm_directory,
         )
 
 
@@ -272,9 +291,10 @@ def _ingest_locked(
     imported_from: str | None,
     dm_user: str | None = None,
     channel_directory: Path | None = None,
+    dm_directory: Path | None = None,
 ) -> IngestResult:
     stable_id = _stable_channel_id(channel, channel_id)
-    directory = channel_directory or (
+    directory = channel_directory or dm_directory or (
         dm_dir(root, workspace, dm_user)
         if dm_user
         else channel_dir(root, workspace, channel, stable_id)
