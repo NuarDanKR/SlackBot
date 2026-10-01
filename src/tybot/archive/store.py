@@ -494,20 +494,44 @@ class ArchiveStore:
         for doc in parts[1:]:
             share_with.intersection_update(doc.share_with)
 
+        # **좌표가 있으면 좌표가 그 메시지의 신원이다.**
+        #
+        # 전에는 `(표시시각, 화자, 본문)` 으로만 합쳤다. 그러면 같은 분에 같은
+        # 사람이 같은 말을 두 번 한 것이 한 줄로 보인다 — 「네」, 「확인했습니다」 는
+        # 한 회의에서 몇 번이고 나온다. 사람이 두 번 말한 것이 한 번으로 보이고,
+        # 그 차이는 파일을 직접 열기 전에는 안 드러난다(절대 원칙 1).
         lines: list[RawLine] = []
-        seen: dict[tuple[str, str, str], int] = {}
+        seen: dict[tuple[str, str, str, str], int] = {}
+        #: 좌표 없는 줄이 들어간 자리. 같은 말의 좌표 있는 줄이 나타나면 뺀다.
+        uncoordinated_at: dict[tuple[str, str, str], int] = {}
+        #: 그 말에 좌표 있는 줄이 하나라도 있었나.
+        coordinated_plain: set[tuple[str, str, str]] = set()
         for doc in parts:
             for line in doc.raw_lines:
-                key = (line.ts, line.speaker, line.text)
-                at = seen.get(key)
-                if at is None:
-                    seen[key] = len(lines)
-                    lines.append(line)
-                elif line.message_ts and not lines[at].message_ts:
-                    # 같은 줄이 좌표 있는 것과 없는 것으로 두 번 들어올 수 있다
-                    # (좌표를 남기기 전에 수집한 파일). **좌표 있는 쪽을 남긴다** —
-                    # 없는 쪽을 남기면 출처가 조용히 채널 링크로 내려앉는다.
-                    lines[at] = line
+                plain = (line.ts, line.speaker, line.text)
+                key = (*plain, line.message_ts)
+                if key in seen:
+                    # 같은 좌표의 재수집. 좌표가 없는 줄끼리도 여기서 걸린다 —
+                    # 그때는 시각·화자·본문이 유일한 신원이기 때문이다.
+                    continue
+                seen[key] = len(lines)
+                lines.append(line)
+                if line.message_ts:
+                    coordinated_plain.add(plain)
+                else:
+                    uncoordinated_at[plain] = len(lines) - 1
+
+        # 좌표 없는 옛 줄과 좌표 있는 줄이 같은 말로 함께 있으면 **좌표 있는 쪽을
+        # 남긴다.** 없는 쪽을 남기면 출처가 조용히 채널 링크로 내려앉는다.
+        #
+        # 빼는 것은 **좌표 없는 줄 하나**뿐이다. 그 줄을 근거로 좌표 있는 줄들을
+        # 합치지 않는다 — 옛 줄 하나로는 서로 다른 두 메시지를 구분할 수 없고,
+        # 합치면 사람이 한 말이 사라진다.
+        dropped = {
+            at for plain, at in uncoordinated_at.items() if plain in coordinated_plain
+        }
+        if dropped:
+            lines = [line for at, line in enumerate(lines) if at not in dropped]
         lines.sort(key=lambda line: (line.ts, str(line.source_path), line.lineno))
         return ArchiveDoc(
             path=newest.path,
