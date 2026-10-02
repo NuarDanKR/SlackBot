@@ -34,8 +34,8 @@ shadow 경로로 수집을 검증한다. 콘솔의 systemd 시작/중지 UI는 �
 - Master 연결과 전문 봇 라우팅 reader는 아직 옛 정본을 읽는다. 따라서 콘솔은
   `Archiver 연결만 다음 기동에 적용`된다고 구분해서 표시한다.
 - `deploy/tybot-archiving-shadow@.service`는
-  `/etc/tybot/archiver-%i.env`가 있어야 시작하며, 그 파일에서 DB 연결과 암호화 키를
-  읽는다. unit은 `[Install]`이 없는 수동 시작 전용이다.
+  공통 `/etc/tybot/archiver.env`가 있어야 시작하며, 그 파일에서 DB 연결과 암호화 키를
+  읽는다. 워크스페이스는 unit의 `%i`로 고른다. unit은 `[Install]`이 없는 수동 시작 전용이다.
 - `src/tybot/archiving_bot.py`는 지정된 채널 ID의 Slack `message` 이벤트를 받는
   Socket Mode collector다. 서비스 시작은 과거 메시지를 자동 백필하거나 모든 첨부 변환이
   끝났다는 뜻이 아니다.
@@ -44,7 +44,7 @@ shadow 경로로 수집을 검증한다. 콘솔의 systemd 시작/중지 UI는 �
   Archiver 앱을 초대한 채널이면 Master의 채널 네이밍 규칙에 맞지 않아도 대상이 될 수 있다.
 
 따라서 현재는 **콘솔 연결 저장 → systemd 시작**만으로 완료되지 않는다. reader 전환이
-포함된 서버 배포, per-workspace env bootstrap, 채널 shadow allowlist가 준비돼야 한다.
+포함된 서버 배포, 공통 Archiver env bootstrap, 채널 shadow allowlist가 준비돼야 한다.
 
 ## 3. 운영·개발 경계
 
@@ -194,9 +194,10 @@ UI에서 임의 경로, unit 이름, shell command, 환경변수, 로그 경로�
 
 ### 6.3 서버 bootstrap
 
-현재 systemd unit은 `/etc/tybot/archiver-<workspace>.env`를 요구한다. 이 파일에는 Slack
-토큰이 아니라 Archiver 전용 DB 연결 및 `WORKSPACE_SECRET_KEY` 등 런타임 bootstrap 값만
-있어야 한다.
+현재 systemd unit은 공통 `/etc/tybot/archiver.env`를 요구한다. 이 파일에는 Slack
+토큰이나 `ARCHIVER_WORKSPACE`가 아니라 Archiver 전용 DB 연결 및
+`WORKSPACE_SECRET_KEY` 등 공통 bootstrap 값만 있어야 한다. 워크스페이스는 unit의
+`ARCHIVER_WORKSPACE=%i`로 선택한다.
 
 - 이 bootstrap 비밀은 기존 승인된 서버 secret provisioning 절차로 설치한다. 브라우저,
   API request, 콘솔 DB, 감사 로그, process argv로 전달하지 않는다.

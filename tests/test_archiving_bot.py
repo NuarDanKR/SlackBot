@@ -30,6 +30,16 @@ def test_shadow_unit_can_write_live_archive_only_when_runtime_gates_allow_it():
     }
 
 
+def test_shadow_unit_uses_shared_bootstrap_but_isolates_workspace_runtime():
+    unit = (Path(__file__).resolve().parents[1] / "deploy" /
+            "tybot-archiving-shadow@.service").read_text(encoding="utf-8")
+    assert "ConditionPathExists=/etc/tybot/archiver.env\n" in unit
+    assert "Environment=TYBOT_ENV_FILE=/etc/tybot/archiver.env\n" in unit
+    assert "Environment=ARCHIVER_WORKSPACE=%i\n" in unit
+    assert "Environment=LOCK_DIR=/var/lib/tybot/archiver-shadow/%i/.locks\n" in unit
+    assert "archiver-%i.env" not in unit
+
+
 def _env(tmp_path: Path) -> dict[str, str]:
     return {
         "ARCHIVER_CONFIG_SOURCE": "env",

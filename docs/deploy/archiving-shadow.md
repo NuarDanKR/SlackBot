@@ -37,8 +37,8 @@ Slack 계약: [Socket Mode](https://docs.slack.dev/tools/bolt-python/concepts/so
   `auth.test` 결과의 team ID가 설정과 다르거나 user ID가 TYBot과
   같으면 기동을 거절한다.
 - Slack 토큰은 콘솔 DB에서 관리하고, 수집 채널은 **Archiving Bot 초대 여부**로
-  자동 발견한다. 독립 env 파일에는 Archiver
-  전용 DB 접속 정보와 `WORKSPACE_SECRET_KEY`만 두고, TYBot 마스터 토큰이나 LLM
+  자동 발견한다. 공통 Archiver 전용 env 파일에는 DB 접속 정보·암호화 키·공통 경로와
+  수집 옵션만 두고, `ARCHIVER_WORKSPACE`나 TYBot 마스터 토큰·LLM
   키는 넣지 않는다. DB 역할은 `archiver_connection_config()` 실행과 Archiving 상태
   표 권한만 가진다. 운영 ArchiveStore 경로와 그림자 경로는 서로 달라야 한다.
 
@@ -46,16 +46,23 @@ Slack 계약: [Socket Mode](https://docs.slack.dev/tools/bolt-python/concepts/so
 `봇 관리 > 워크스페이스 연결 > Archiver`에 저장하고 신원확인을 통과시킨다.
 
 ```text
-# /etc/tybot/archiver-tyit.env (root:tybot, 0640)
+# /etc/tybot/archiver.env (root:tybot, 0640)
 ARCHIVER_CONFIG_SOURCE=db
-ARCHIVER_WORKSPACE=tyit
 DATABASE_URL=<archiver-runtime-postgresql-dsn>
 WORKSPACE_SECRET_KEY=<same-fernet-key-used-by-console>
 ARCHIVE_DIR=/var/lib/tybot/archive
-ARCHIVER_SHADOW_DIR=/var/lib/tybot/archiver-shadow/tyit/archive
+ARCHIVER_SHADOW_DIR=/var/lib/tybot/archiver-shadow/v2
+ARCHIVER_SHADOW_LAYOUT=per-channel-v1
 ```
 
-다음 명령은 이미 유효한 `/etc/tybot/archiver-tyit.env`가 있고 DB 연결, 암호화 키,
+`ARCHIVER_WORKSPACE`는 파일에 두지 않는다. systemd 인스턴스 이름(`%i`)이
+워크스페이스를 고르고, DB가 그 워크스페이스의 Slack 토큰을 고른다. 기존
+`archiver-<workspace>.env`를 공통 파일로 그대로 복사하지 말고 변수 이름과
+워크스페이스별 경로·옵션을 검토한다. 공통 파일을 먼저 설치하고 권한을 확인한 뒤
+새 unit 설치·`daemon-reload`·서비스별 재시작 순으로 전환한다. 모든 인스턴스가
+정상인지 확인할 때까지 기존 파일은 남겨 둔다.
+
+다음 명령은 이미 유효한 `/etc/tybot/archiver.env`가 있고 DB 연결, 암호화 키,
 토큰 신원, 디렉터리 권한이 준비된 경우에만 프로세스를 시작한다.
 env 파일이 없으면 unit의 `ConditionPathExists`로 서비스가 시작되지 않는다. 시작돼도
 과거 메시지를 백필하거나 전체 archive/첨부 변환을 완료하지 않는다. Slack event 수신과

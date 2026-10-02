@@ -2,7 +2,7 @@
 Description=TYBot Archiving Bot collector for %i
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/etc/tybot/archiver-%i.env
+ConditionPathExists=/etc/tybot/archiver.env
 
 [Service]
 Type=simple
@@ -11,7 +11,7 @@ Group=tybot
 WorkingDirectory=/opt/tybot
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=C.UTF-8
-Environment=TYBOT_ENV_FILE=/etc/tybot/archiver-%i.env
+Environment=TYBOT_ENV_FILE=/etc/tybot/archiver.env
 Environment=ARCHIVER_CONFIG_SOURCE=db
 Environment=ARCHIVER_WORKSPACE=%i
 Environment=LOCK_DIR=/var/lib/tybot/archiver-shadow/%i/.locks
