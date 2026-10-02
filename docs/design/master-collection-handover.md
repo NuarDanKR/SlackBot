@@ -349,15 +349,41 @@ PY
 남아 있을 수 있다. 따로 센다.
 
 ```bash
-cd /tmp && sudo -u tybot bash -c '
-cd /tmp
-A=/var/lib/tybot
-echo "옛 objects  : $(find $A/objects -type f 2>/dev/null | wc -l) 개 · $(du -sh $A/objects 2>/dev/null | cut -f1)"
-echo "옛 staging  : $(find $A/staging -type f 2>/dev/null | wc -l) 개 · $(du -sh $A/staging 2>/dev/null | cut -f1)"
-echo "새 objects  : $(find $A/archive -path "*/archive/../objects/*" -type f 2>/dev/null | wc -l) 개"
-echo "루트 안 새 구조 채널: $(find $A/archive -mindepth 2 -maxdepth 2 -type d -name "*__*" 2>/dev/null | wc -l) 개"
-'
+cd /tmp && sudo -u tybot /opt/tybot/.venv/bin/python - <<'PY'
+from pathlib import Path
+
+from tybot.envfile import load_env_file
+from tybot.paths import archive_dir
+
+load_env_file()
+root = Path(archive_dir()).resolve()
+
+
+def summarise(label: str, paths: list[Path]) -> None:
+    files = [p for p in paths if p.is_file()]
+    size = sum(p.stat().st_size for p in files)
+    print(f"  {label:22s} {len(files):6d} 개 · {size / 1024 / 1024:8.1f} MB")
+
+
+print(f"운영 루트: {root}")
+# 옛 구조 — `attachment_storage()` 가 `channel_root` 없이 불리면 archive 의
+# **형제**로 떨어진다. 그래서 운영 루트 **밖**이고 legacy_files() 가 못 본다.
+for name in ("objects", "staging"):
+    summarise(f"옛 {name} (루트 밖)", list((root.parent / name).rglob("*")))
+# 새 구조 — 채널 디렉터리 **안**이다.
+for name in ("objects", "staging"):
+    summarise(f"새 {name} (채널 안)", list(root.glob(f"*/*__*/{name}/**/*")))
+channels = [p for p in root.glob("*/*__*") if p.is_dir()]
+print(f"  새 구조 채널 디렉터리 {len(channels)} 개")
+PY
 ```
+
+> 손으로 쓴 `find -path` 를 쓰지 않는다. 처음에는
+> `-path "*/archive/../objects/*"` 로 적었는데, `find` 는 걷는 중 `/../` 가 든
+> 경로를 **만들지 않으므로** 그 조건은 파일이 있어도 **항상 0** 이었다. 0 을 보고
+> 「새 구조에는 첨부가 없다」 고 읽는다 — 이 점검표가 막으려는 바로 그 모양이다.
+> 경로 규칙은 `files.attachment_storage()` 가 쥐고 있고, 위 블록은 그 규칙을
+> 그대로 따라간다.
 
 **통과 조건: 옛 `objects`·`staging` 이 0 이거나, 0 이 아니면 §8.4 의 백업이 끝나
 있을 것.** 지우지 않는다 — 첨부 정본을 다시 만들 수 있는 유일한 원본이다.
