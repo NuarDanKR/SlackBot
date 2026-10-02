@@ -1,13 +1,17 @@
 # Master 수집 기능 분리 — 채널별 writer 인수 준비
 
-작성: 2026-09-30
+작성: 2026-09-30 · 갱신: 2026-10-02
 대상: TYBot 운영자, Claude Code / Codex 구현 담당
-상태: **준비 코드만 구현됨.** 인수는 한 채널도 하지 않았다
+상태: **배포 완료, 운영 전환 전.** 인수한 채널은 아직 없다
 
-> `handover.plan()`은 아직 호출부가 없는 순수 계획 함수다. 현재 Archiver 런타임은
-> shadow root만 열며 `active` 채널을 운영 archive에 쓰지 않는다. 이 상태에서
-> 채널을 `active`로 바꾸면 Master가 쓰기를 멈춘 뒤 운영 원문에 공백이 생길 수
-> 있다. Archiver의 운영 writer 연결과 서버 검증 전에는 인수하지 않는다.
+> **2026-10-02 정정.** Archiver 런타임이 운영 writer 에 연결됐다
+> (`0a4628e`·`aacb356`). `ShadowCollector._destination()` 이 채널 모드를 보고
+> 루트를 고른다 — `shadow` 면 shadow root, `active` 면 전역 스위치와
+> `write_owner.archiver_may_write_live()` 를 둘 다 통과할 때만 운영 root 다.
+> 그래서 「active 로 바꾸면 운영 원문에 공백이 생긴다」 는 더 이상 맞지 않다.
+>
+> 아직 남은 것은 **전환 자체**다. `archiver_writes_live` 는 꺼져 있고 `active`
+> 채널은 0 개다. 전환 전에 §8 의 읽기 전용 점검표를 통과시킨다.
 
 관련: [Archiver Shadow 콘솔 운영](archiver-shadow-console-operations-2026-09-28.md) ·
 [단일 Supervisor·소급 수집](archiver-supervisor-backfill-console-2026-09-29.md) ·
@@ -68,8 +72,11 @@ Master 가 손을 뗀다.
 
 ### 2.3 소유권 밖
 
-- `archiving_bot.py` — Archiver 는 자기 root(shadow)에 쓴다. 운영 경로를 열 때는
-  `write_owner.archiver_may_write_live()` 를 지나야 한다(**아직 안 열렸다**)
+- `archiving_bot.py` — Archiver 는 `_destination()` 이 고른 root 에 쓴다. 채널 모드가
+  `shadow` 면 shadow root, `active` 면 전역 스위치(`archiver_writes_live`)와
+  `write_owner.archiver_may_write_live()` 를 **둘 다** 통과할 때만 운영 root 다.
+  하나라도 막히면 그 메시지는 `refused` 이고 **아무 데도 안 쓴다** — 조용히 shadow
+  로 떨어뜨리지 않는다. 지금은 스위치가 꺼져 있어 운영 쓰기가 일어나지 않는다
 - `archive/migrate.py` — v1 → v2 이행. 채널이 아니라 아카이브 전체를 옮긴다
 - `scripts/archive_layout_bench.py` — 실측. 임시 경로에만 쓴다
 - `slack/pilot.py` `_ingest_dm` — DM 은 그 사람 한 명의 기록이고 Archiver 가 손대는
@@ -254,13 +261,12 @@ active ──(좌표 불필요)──▶ paused ──(새 좌표 필요)──�
 
 ## 7. 남은 것
 
-- **Archiver 쪽 호출부.** `write_owner.archiver_may_write_live()` 는 있지만 아직
-  Archiving Bot 이 부르지 않는다. 지금은 shadow 경로에만 쓰므로 필요 없고, 운영
-  경로를 열 때 이 함수를 지나게 해야 한다
+- ~~**Archiver 쪽 호출부.**~~ 2026-10-02 연결됐다
+  (`archiving_bot._destination()` → `archiver_may_write_live()`). 남은 것은 전환뿐이다
 - **인수 전후 대조 도구.** `cutover_ts` 를 기준으로 두 경로의 같은 구간을 비교해
   중복·누락을 세는 스크립트. 콘솔에서 부를 수 있어야 한다
 - **계획 함수를 부르는 곳.** `handover.plan()` 은 다음에 할 일을 값으로 돌려주지만
-  아직 콘솔이 부르지 않는다. 콘솔 분리 작업이 끝난 뒤 그 화면이 이 값을 읽어
+  2026-10-02 현재 콘솔이 부르지 않는다. 콘솔 분리 작업이 끝난 뒤 그 화면이 이 값을 읽어
   버튼을 만들면 된다. 표는 안 바꿔도 된다 — 단계는 모드 하나에서 읽는다
 - **화자 문자열 대조.** `Preconditions.speaker_parity` 는 지금 **사람이 확인해 값으로
   넘기는** 항목이다. 두 토큰으로 같은 사용자 몇 명을 조회해 비교하는 진단 스크립트가
@@ -272,6 +278,216 @@ active ──(좌표 불필요)──▶ paused ──(새 좌표 필요)──�
   반영 지연은 그대로이기 때문이다
 
 ---
+
+## 8. 운영 전환 사전 점검표 (읽기 전용)
+
+작성: 2026-10-02. **여기 있는 명령은 전부 읽기만 한다.** 파일을 옮기거나 지우지
+않고, DB 모드를 바꾸지 않고, `archiver_writes_live` 를 켜지 않는다. 각 항목이
+통과한 것을 보고 나서 사람이 별도로 전환한다.
+
+`sudo -u tybot` 앞에는 **항상 `cd /tmp`** 를 붙인다. `/root` 를 물려받으면 `find`
+가 조용히 빈 결과를 내고, 그 0 을 「없다」 로 읽게 된다(2026-09-30 실제 발생).
+
+### 8.1 먼저 정할 것 — shadow 자료를 복사할 것인가, 소급할 것인가
+
+**코드가 지원하는 것은 소급이다.** 복사하는 도구는 없다.
+
+`ShadowCollector.ingest_message()` 는 쓰기 전에 `_destination(channel_id)` 로 루트를
+고른다. 실시간과 소급이 **같은 메서드**를 지나므로, 채널이 `active` 이고 스위치가
+켜져 있으면 **소급 결과도 운영 root 로 들어간다**. 새 도구가 필요 없다.
+
+| 길 | 현재 코드 | 비고 |
+|---|---|---|
+| **소급(권장)** | 지원함 | 채널을 `active` 로 올린 뒤 전체 소급. `backfill.run` → `ingest_message` → `_destination` → 운영 root |
+| 복사 | **도구 없음** | `shadow_root.py` 는 shadow 루트끼리만 모으고, 목적지가 운영 archive 와 겹치면 **거부**한다 |
+
+소급을 고르면 따라오는 사실 둘.
+
+- **Slack 에 남아 있는 것만 들어온다.** 수정 전 본문과 이미 삭제된 메시지는 못
+  되찾는다. shadow 에 그 흔적이 있어도 운영 root 로 오지 않는다
+- **rate limit 이 든다.** 신규 앱은 `conversations.history` 가 분당 1요청·요청당
+  15건이다. 채널 수만큼 분이 든다
+
+복사를 택한다면 **도구부터 만들어야 한다.** 채널 디렉터리를 통째로 옮기면
+`archive/`·`objects/`·`staging/` 이 함께 가지만(새 구조는 셋이 채널 디렉터리
+안이다), ACK 상태는 파일이 아니라 DB 행이고 `written_to` 가 `shadow` 로 남는다.
+그 행을 손대지 않으면 운영 검색 반영 여부 판정이 어긋난다(`ingest_ack.LIVE`).
+
+### 8.2 운영 루트에 남은 옛 자료 — `.md`
+
+```bash
+cd /tmp && sudo -u tybot /opt/tybot/.venv/bin/python - <<'PY'
+from tybot.envfile import load_env_file
+from tybot.paths import archive_dir
+from tybot.archive.store import ArchiveStore
+load_env_file()
+found = ArchiveStore(archive_dir()).legacy_files()
+print("legacy_files:", len(found))
+for path in found[:20]:
+    print(" ", path)
+PY
+```
+
+**통과 조건: `legacy_files: 0`.**
+
+이 함수가 세는 것은 네 갈래다 — `workspaces/*/channels/*/raw/*.md`,
+`workspaces/*/channels/*.md`, `workspaces/*/dm/*/raw/*.md`,
+`workspaces/*/channels/*/attachments/*/*.md`, 그리고 `channels/*/*.md`.
+**경로만 세고 파일을 열지 않는다.**
+
+### 8.3 첨부 **원본**과 staging — `legacy_files()` 가 못 본다
+
+옛 구조의 첨부 원본은 운영 루트 **밖**에 있다. `attachment_storage()` 가
+`channel_root` 없이 불리면 `archive.parent` 아래로 떨어지기 때문이다.
+
+| 구조 | 원문 | 첨부 정본 | 원본 바이트·staging |
+|---|---|---|---|
+| 옛 | `<root>/workspaces/<ws>/channels/<id>__<이름>/raw/` | `<root>/workspaces/<ws>/channels/<id>/attachments/` | **`<root>/../objects/`, `<root>/../staging/`** |
+| 새 | `<root>/<ws>/<id>__<이름>/archive/raw/` | 같은 채널 `archive/attachments/` | 같은 채널 `objects/`, `staging/` |
+
+`legacy_files()` 는 루트 **안**의 `.md` 만 센다. 그래서 `0` 이어도 첨부 원본은
+남아 있을 수 있다. 따로 센다.
+
+```bash
+cd /tmp && sudo -u tybot bash -c '
+cd /tmp
+A=/var/lib/tybot
+echo "옛 objects  : $(find $A/objects -type f 2>/dev/null | wc -l) 개 · $(du -sh $A/objects 2>/dev/null | cut -f1)"
+echo "옛 staging  : $(find $A/staging -type f 2>/dev/null | wc -l) 개 · $(du -sh $A/staging 2>/dev/null | cut -f1)"
+echo "새 objects  : $(find $A/archive -path "*/archive/../objects/*" -type f 2>/dev/null | wc -l) 개"
+echo "루트 안 새 구조 채널: $(find $A/archive -mindepth 2 -maxdepth 2 -type d -name "*__*" 2>/dev/null | wc -l) 개"
+'
+```
+
+**통과 조건: 옛 `objects`·`staging` 이 0 이거나, 0 이 아니면 §8.4 의 백업이 끝나
+있을 것.** 지우지 않는다 — 첨부 정본을 다시 만들 수 있는 유일한 원본이다.
+
+### 8.4 백업은 운영 루트 **밖**에 둔다
+
+옛 자료는 **삭제하지 않고 옮긴다.** 옮긴 자리가 운영 루트 안이면 글롭에 다시
+걸려 아무것도 바뀌지 않는다.
+
+```bash
+cd /tmp && sudo -u tybot bash -c '
+cd /tmp
+B=/var/lib/tybot/backup-2026-10
+echo "백업 위치   : $B"
+echo "운영 루트   : /var/lib/tybot/archive"
+echo "루트 안인가 : $(case "$B" in /var/lib/tybot/archive/*) echo 예 — 다시 고르세요;; *) echo 아니오 ;; esac)"
+ls -la "$B" 2>/dev/null | head -5 || echo "(아직 없음)"
+'
+```
+
+**통과 조건 셋.**
+
+1. 백업 경로가 `/var/lib/tybot/archive/` **아래가 아니다**
+2. 옮기기 전과 후의 파일 수·SHA-256 이 같다(`scripts/migrate_shadow_root.py` 와
+   같은 방식 — 계획·복사·검증을 나누고 원본을 지우지 않는다)
+3. 검증 기간 동안 백업을 **읽기 전용**으로 둔다
+
+### 8.5 검색 재색인
+
+`raw_line` 에는 **루트 칼럼이 없다.** 경로를 루트 기준 상대경로로 저장하므로,
+자료를 옮기면 옛 행이 어느 파일과도 안 맞는 후보로 남는다. 답이 비지는 않는다 —
+`search()` 가 파일 스캔으로 보완한다 — 그러나 색인은 쓸모없는 행을 들고 있게 된다.
+
+```bash
+cd /tmp && sudo -u tybot /opt/tybot/.venv/bin/python - <<'PY'
+import os, psycopg
+from dotenv import load_dotenv
+load_dotenv("/etc/tybot/tybot.env", override=False)
+with psycopg.connect(os.environ["DATABASE_URL"], row_factory=psycopg.rows.dict_row) as c, c.cursor() as cur:
+    cur.execute("""
+        SELECT CASE
+                 WHEN doc_path LIKE 'workspaces/%' THEN '옛 구조'
+                 WHEN doc_path LIKE 'channels/%'   THEN 'v1'
+                 ELSE '새 구조'
+               END AS layout, count(*)
+          FROM raw_line GROUP BY 1 ORDER BY 2 DESC
+    """)
+    for row in cur.fetchall():
+        print(f"  {row['layout']:8s} : {row['count']}행")
+PY
+```
+
+**통과 조건: 전환 후 재색인을 돌릴 계획이 있을 것.** 전환 **전에는** 돌리지
+않는다 — 지금 돌리면 옛 경로가 다시 들어온다.
+
+```bash
+# 백업·전환이 끝난 뒤에 실행한다. 지금은 아니다.
+# sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.search_index
+```
+
+### 8.6 한 채널 인수 — 전제조건
+
+`handover.Preconditions` 다섯이 전부 참이어야 한다. 아직 콘솔이 이 함수를 부르지
+않으므로 사람이 확인한다.
+
+| 항목 | 확인 방법 |
+|---|---|
+| `shadow_compared` | 같은 기간 shadow 수집본과 운영 원문 대조 |
+| **`speaker_parity`** | 두 앱이 **같은 화자 문자열**을 만드는가. Archiver 앱에 `users:read` 가 없으면 이름 대신 `U…` 가 들어가고, 그 줄은 중복으로 안 잡혀 두 벌이 된다 |
+| `live_switch` | `archiver_writes_live` — **전환 시점에 켠다. 지금은 꺼 둔다** |
+| `archiver_joined` | Archiver 가 그 채널에 실제로 참여 |
+| `schema_gate_open` | release gate 통과 |
+
+채널은 **조용한 것 하나**를 고른다. 인수 중 60초 비는 구간이 생기고 그 구간을
+소급으로 메우므로, 대화가 많으면 검증이 복잡해진다.
+
+```bash
+cd /tmp && sudo -u tybot /opt/tybot/.venv/bin/python - <<'PY'
+import os, psycopg
+from dotenv import load_dotenv
+load_dotenv("/etc/tybot/tybot.env", override=False)
+WS = "tyit"
+with psycopg.connect(os.environ["DATABASE_URL"], row_factory=psycopg.rows.dict_row) as c, c.cursor() as cur:
+    cur.execute("""
+        SELECT mode, membership, operator_hold, count(*)
+          FROM archive_channel_mode WHERE workspace = %s
+         GROUP BY 1,2,3 ORDER BY 4 DESC
+    """, (WS,))
+    for r in cur.fetchall():
+        print(f"  {r['mode']:7s} {r['membership']:8s} hold={r['operator_hold']} : {r['count']}")
+    cur.execute("SELECT name, enabled FROM archive_feature_flag WHERE scope='global'")
+    for r in cur.fetchall():
+        print(f"  flag {r['name']:26s} = {r['enabled']}")
+PY
+```
+
+**통과 조건: `active` 가 0 이고 `archiver_writes_live` 가 `false`.** 전환 전의
+정상 상태다.
+
+### 8.7 롤백 조건 — 미리 정해 둔다
+
+되돌리는 길은 **두 단계**다(`_MODE_EDGES` 에 `active → shadow` 가 없다).
+
+```text
+active ──(좌표 불필요)──▶ paused ──(새 좌표 필요)──▶ shadow
+```
+
+| 무엇을 보면 되돌리나 | 판정 |
+|---|---|
+| 같은 메시지가 두 줄로 남음 | `speaker_parity` 가 틀렸다. 즉시 `paused` |
+| 운영 원문에 그 채널 줄이 안 들어옴 | `_destination` 이 `refused` 를 낸다. 로그 확인 후 `paused` |
+| 첨부가 엉뚱한 메시지에 붙음 | 파일 ID 없는 옛 줄 문제. `paused` 후 사람 판단 |
+| 답변 출처가 채널 링크로 내려앉음 | 좌표 유실. `paused` |
+
+**되돌려도 안 되돌아가는 것**: 인수된 동안 Archiver 가 운영 원문에 쓴 줄은 남는다.
+지우는 것은 사람 결정이고, `cutover_ts` 가 그 범위를 가리킨다.
+
+### 8.8 점검표 요약
+
+| # | 항목 | 통과 조건 |
+|---|---|---|
+| 1 | 복사 / 소급 결정 | **소급**으로 간다(코드가 지원하는 유일한 길) |
+| 2 | `legacy_files()` | `0` |
+| 3 | 옛 `objects`·`staging` | 0 이거나 백업 완료 |
+| 4 | 백업 위치 | 운영 루트 **밖**, 해시 검증, 읽기 전용 |
+| 5 | 색인 | 전환 후 재색인 계획 있음 |
+| 6 | 인수 전제조건 다섯 | 전부 참, 특히 `speaker_parity` |
+| 7 | 현재 상태 | `active` 0 개, `archiver_writes_live` false |
+| 8 | 롤백 | 두 단계 경로와 판정 기준을 사람이 알고 있음 |
+
 
 # 부록. 첨부 경로와 raw 경로의 이름이 다른 건 (이행안, 미실행)
 
