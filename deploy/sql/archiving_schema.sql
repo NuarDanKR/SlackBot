@@ -363,7 +363,12 @@ INSERT INTO archive_retention_policy (name, description) VALUES
     ('bot_conversation_audit',
      'TYBot·Hermes 와 사용자의 대화 감사 기록. archive 밖이고 답변 근거가 아니다'),
     ('bot_dm_attachment',
-     '봇 DM 첨부. 명시적 아카이브 등록 요청이 없으면 그 요청에서만 쓴다')
+     '봇 DM 첨부. 명시적 아카이브 등록 요청이 없으면 그 요청에서만 쓴다'),
+    -- 봇↔사람 1:1 DM 원문(B-57·B-68). 첨부와 **따로** 든다 — 본문과 원본
+    -- 바이트는 지우는 자리도 다르고, 기간을 따로 정할 수 있어야 한다.
+    -- 사람끼리의 DM 은 수집 대상이 아니므로 여기 없다.
+    ('bot_dm_message',
+     '봇과 사람의 1:1 DM 원문. 그 사람 본인이 DM 에서 물을 때만 근거가 된다')
 ON CONFLICT (name) DO NOTHING;
 
 

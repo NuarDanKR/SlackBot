@@ -40,6 +40,7 @@ from ..archive.archiving_state import (
     plan_mode_change,
     production_blockers,
 )
+from ..retention import enforcement_status as retention_enforcement_status
 from .archiving_repo import ArchivingRepo, default_repo
 from .release_gate import GateClosed, gate_status, require_verified_schema
 from .workspace_store import WorkspaceStoreError
@@ -120,9 +121,12 @@ def workspace_detail(workspace: str, repo: ArchivingRepo | None = None) -> dict:
         # 「지금 무엇이 막혀 있나」 를 화면이 직접 답한다. 안 보여 주면 누군가
         # 막힌 이유를 찾으러 서버에 들어간다.
         "schemaGate": gate.as_json(),
+        # 집행 상태까지 묻는다. 값이 있다는 사실을 「90일 집행 완료」 로 읽으면
+        # 아무것도 안 지워진 채로 운영에 간다(B-70).
         "blockers": production_blockers(
             {str(row["name"]): row["retention_days"] for row in retention},
             flags=_flag_map(flags),
+            enforcement=retention_enforcement_status(),
         ),
         # 화면이 버튼을 회색으로 만들 근거. 눌러 보고 거절당하는 것보다 낫다.
         "gatedModes": sorted(str(mode) for mode in GATED_MODES),

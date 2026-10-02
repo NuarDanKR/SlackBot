@@ -115,8 +115,10 @@ def test_unset_retention_shows_up_as_a_blocker(client, repo):
 
     body = client.get(BASE, headers=headers).json()
 
-    retention = [item for item in body["blockers"] if "보존 기간" in item]
-    assert len(retention) == 2
+    retention = [item for item in body["blockers"] if "정해지지 않았습니다" in item]
+    assert len(retention) == 3
+    # 값이 없는 것과 **집행이 안 도는 것**은 다른 차단 사유다(B-70).
+    assert any("집행되지 않고 있습니다" in item for item in body["blockers"])
 
 
 def test_service_tokens_are_saved_but_never_returned(client, repo, monkeypatch):
@@ -364,9 +366,10 @@ def test_setting_retention_clears_that_blocker(client, repo):
         headers=headers,
     ).json()
 
-    retention = [item for item in body["blockers"] if "보존 기간" in item]
-    assert len(retention) == 1
-    assert "bot_dm_attachment" in retention[0]
+    retention = [item for item in body["blockers"] if "정해지지 않았습니다" in item]
+    assert len(retention) == 2  # bot_dm_message · bot_dm_attachment 가 남는다
+    assert not any("bot_conversation_audit" in item for item in retention)
+    assert any("bot_dm_attachment" in item for item in retention)
 
 
 def test_a_write_without_the_csrf_header_is_rejected(client, repo):

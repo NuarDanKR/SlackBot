@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -57,6 +58,7 @@ def gate_closed(monkeypatch, tmp_path):
 
 def _ready_for_active(repo: FakeArchivingRepo) -> None:
     repo.given_retention("bot_conversation_audit", 90)
+    repo.given_retention("bot_dm_message", 90)
     repo.given_retention("bot_dm_attachment", 30)
     for name in (
         "archiver_writes_live",
@@ -68,6 +70,26 @@ def _ready_for_active(repo: FakeArchivingRepo) -> None:
 
 
 # --- 사람과 사유 없이는 못 바꾼다 --------------------------------------------
+
+
+def _given_enforcement(state_dir, *, applied: bool = True) -> None:
+    """보존 집행이 최근에 돌았다고 적어 둔다.
+
+    `production_blockers` 가 정책값뿐 아니라 **집행 기록**까지 보기 때문이다.
+    값만 넣고 통과시키면 아무것도 안 지워진 채로 운영에 간다(B-70).
+    """
+    from datetime import UTC, datetime
+
+    path = Path(state_dir) / "state" / "retention-run.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "by": "dan", "applied": applied,
+        }),
+        encoding="utf-8",
+    )
+
 
 def test_an_actor_without_a_name_is_refused():
     with pytest.raises(admin.AdminRefused, match="바꾼 사람"):
@@ -413,6 +435,7 @@ def test_clearing_a_policy_is_also_recorded(repo, gate_closed):
 def test_setting_retention_unblocks_production(repo, gate_closed):
     """게이트가 실제로 열리는지 본다 — 안 열리면 목록이 장식이다."""
     repo.given_retention("bot_conversation_audit", 90)
+    repo.given_retention("bot_dm_message", 90)
     repo.given_retention("bot_dm_attachment", 30)
     for name in (
         "archiver_writes_live",
@@ -421,6 +444,8 @@ def test_setting_retention_unblocks_production(repo, gate_closed):
         "revision_reader_ready",
     ):
         repo.given_flag(name, True)
+    # 값이 있다는 사실은 집행이 아니다 — 실제로 돌린 기록이 있어야 열린다(B-70).
+    _given_enforcement(gate_closed)
 
     assert admin.workspace_detail("tyit", repo=repo)["blockers"] == []
 

@@ -465,7 +465,11 @@ def config_digest(config: dict) -> str:
 # ---------------------------------------------------------------------------
 
 #: 운영값이 정해져 있어야 하는 정책들. 스키마 §4 의 행 이름과 같다.
-REQUIRED_RETENTION: tuple[str, ...] = ("bot_conversation_audit", "bot_dm_attachment")
+REQUIRED_RETENTION: tuple[str, ...] = (
+    "bot_conversation_audit",
+    "bot_dm_message",
+    "bot_dm_attachment",
+)
 REQUIRED_PRODUCTION_FLAGS: tuple[str, ...] = (
     "archiver_writes_live",
     "require_attachment_ack",
@@ -493,13 +497,23 @@ UNENFORCED_FLAGS: dict[str, str] = {
 
 
 def production_blockers(
-    retention: dict[str, int | None], *, flags: dict[str, bool] | None = None
+    retention: dict[str, int | None],
+    *,
+    flags: dict[str, bool] | None = None,
+    enforcement: tuple[bool, str] | None = None,
 ) -> list[str]:
     """production 전환을 막는 것들. 비어 있으면 가도 된다.
 
     보존 기간이 **안 정해진 채로** 넘어가면 기본값이 「영구 보관」 이 된다.
     개인 대화를 영구 보관하는 것은 아무도 결정한 적이 없는데 그냥 그렇게 된다 —
     그래서 「값이 없음」 을 0 과 구분해 다룬다(스키마의 `NULL`).
+
+    **값이 있다는 사실은 집행이 아니다.** 2026-10-02 까지 정확히 그랬다 — 90일이
+    들어 있었고, 그 값을 읽어 지우는 코드는 없었다. 체크리스트는 통과하는데
+    아무것도 만료되지 않았고, 사람은 체크된 것을 보증으로 읽었다. 그래서
+    `enforcement` 로 **집행이 실제로 돌았는지**까지 받는다
+    (`retention.enforcement_status`). 안 주면 묻지 않는다 — 집행 기록을 볼 수
+    없는 호출부가 「돌고 있다」 를 지어내지 않게 한다.
     """
     blockers = [
         f"보존 기간이 정해지지 않았습니다: {name}"
@@ -517,6 +531,8 @@ def production_blockers(
         for name in REQUIRED_PRODUCTION_FLAGS
         if not flags.get(name, False)
     )
+    if enforcement is not None and not enforcement[0]:
+        blockers.append(f"보존 기간이 집행되지 않고 있습니다: {enforcement[1]}")
     if flags.get("separate_attachments") and not flags.get("attachment_reader_ready", False):
         # 읽는 쪽이 없는데 분리를 켜면 그 본문이 조용히 답변에서 빠진다.
         blockers.append(

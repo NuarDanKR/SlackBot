@@ -392,7 +392,9 @@ def test_missing_retention_blocks_production():
 
     개인 대화를 영구 보관하는 것은 아무도 결정한 적이 없는데 그냥 그렇게 된다.
     """
-    blockers = production_blockers({"bot_conversation_audit": 90, "bot_dm_attachment": None})
+    blockers = production_blockers(
+        {"bot_conversation_audit": 90, "bot_dm_message": 90, "bot_dm_attachment": None}
+    )
 
     retention = [item for item in blockers if "보존 기간" in item]
     assert len(retention) == 1
@@ -402,17 +404,17 @@ def test_missing_retention_blocks_production():
 def test_zero_is_not_a_valid_retention_period():
     """DB와 마찬가지로 0일은 운영 정책으로 인정하지 않는다."""
     blockers = production_blockers(
-        {"bot_conversation_audit": 0, "bot_dm_attachment": 0}
+        {"bot_conversation_audit": 0, "bot_dm_message": 0, "bot_dm_attachment": 0}
     )
 
-    retention = [item for item in blockers if "보존 기간" in item]
-    assert len(retention) == 2
+    retention = [item for item in blockers if "1일 이상" in item]
+    assert len(retention) == 3
     assert all("1일 이상" in blocker for blocker in retention)
 
 
 def test_all_set_clears_the_gate():
     assert production_blockers(
-        {"bot_conversation_audit": 90, "bot_dm_attachment": 30},
+        {"bot_conversation_audit": 90, "bot_dm_message": 90, "bot_dm_attachment": 30},
         flags={
             "archiver_writes_live": True,
             "preserve_edit_delete": True,
@@ -425,7 +427,7 @@ def test_all_set_clears_the_gate():
 def test_attachment_separation_without_a_reader_is_blocked():
     """읽는 쪽이 없는데 분리를 켜면 그 본문이 조용히 답변에서 빠진다."""
     blockers = production_blockers(
-        {"bot_conversation_audit": 90, "bot_dm_attachment": 30},
+        {"bot_conversation_audit": 90, "bot_dm_message": 90, "bot_dm_attachment": 30},
         flags={"separate_attachments": True, "attachment_reader_ready": False},
     )
 
@@ -434,7 +436,7 @@ def test_attachment_separation_without_a_reader_is_blocked():
 
 def test_missing_reader_flag_is_fail_closed():
     blockers = production_blockers(
-        {"bot_conversation_audit": 90, "bot_dm_attachment": 30},
+        {"bot_conversation_audit": 90, "bot_dm_message": 90, "bot_dm_attachment": 30},
         flags={"separate_attachments": True},
     )
 

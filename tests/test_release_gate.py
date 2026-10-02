@@ -343,30 +343,37 @@ def test_a_lone_carriage_return_is_normalised_too(tmp_path):
 
 
 def test_the_repository_fingerprint_matches_the_committed_bytes():
-    """작업 복사본의 줄바꿈과 무관하게 **커밋된 내용**의 지문이 나와야 한다.
+    """작업 복사본의 줄바꿈과 무관하게 **git 이 담은 내용**의 지문이 나와야 한다.
 
     서버는 git 이 체크아웃한 LF 파일을 본다. 두 값이 다르면 개발 PC 에서 만든
     artifact 를 서버가 영영 못 받는다.
+
+    견주는 쪽은 `HEAD` 가 아니라 **인덱스**다. 스키마를 고치는 커밋에서는 HEAD
+    가 아직 옛 내용이라, HEAD 와 견주면 그 커밋이 **자기 자신 때문에** 막힌다.
+    실제로 그랬다(2026-10-02, `bot_dm_message` 정책 추가). 인덱스는 지금
+    커밋하려는 내용이므로 「커밋된 바이트」 의 뜻에 맞다.
     """
     import subprocess
+    import tempfile
 
     from tybot.console.release_gate import GATED_SQL, schema_fingerprint
 
-    blobs = tmp_from_git = {}
+    root = Path(__file__).resolve().parent.parent
+    blobs: dict[str, bytes] = {}
     for name in sorted(GATED_SQL):
-        result = subprocess.run(
-            ["git", "show", f"HEAD:deploy/sql/{name}"],
-            capture_output=True, cwd=str(Path(__file__).resolve().parent.parent),
-        )
-        if result.returncode != 0:
-            pytest.skip("git 에서 커밋된 스키마를 읽지 못했습니다")
-        blobs[name] = result.stdout
-
-    import tempfile
+        for source in (f":deploy/sql/{name}", f"HEAD:deploy/sql/{name}"):
+            result = subprocess.run(
+                ["git", "show", source], capture_output=True, cwd=str(root)
+            )
+            if result.returncode == 0:
+                blobs[name] = result.stdout
+                break
+        else:
+            pytest.skip("git 에서 스키마를 읽지 못했습니다")
 
     with tempfile.TemporaryDirectory() as tmp:
         committed = Path(tmp)
-        for name, body in tmp_from_git.items():
+        for name, body in blobs.items():
             (committed / name).write_bytes(body)
 
         assert schema_fingerprint() == schema_fingerprint(committed)
