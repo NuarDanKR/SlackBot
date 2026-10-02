@@ -1,0 +1,91 @@
+# 코드 담당자 (CODEOWNERS)
+#
+# PR 이 아래 경로를 건드리면 해당 담당자에게 자동으로 검토 요청이 간다.
+# **나중에 적힌 줄이 이긴다.** 그래서 기본값을 맨 위에, 예외를 아래에 둔다.
+# 담당 구분의 이유와 파일별 근거: docs/ownership/console.md
+#
+# 담당
+#   @NuarDanKR      봇 본체, 배포, 공유 데이터 저장소
+#   @choisy5570-bot  콘솔(화면은 별도 저장소 choisy5570-bot/console-web), 콘솔 API
+
+# ── 기본: 봇 본체 ──────────────────────────────────────────────
+*                                   @NuarDanKR
+
+# ── 콘솔 API: 콘솔 전용 (봇 프로세스가 읽지 않는 파일) ───────────
+/src/tybot/console/account_store.py                 @choisy5570-bot
+/src/tybot/console/answer_records.py                @choisy5570-bot
+/src/tybot/console/app.py                           @choisy5570-bot
+/src/tybot/console/archiving_admin.py               @choisy5570-bot
+/src/tybot/console/bot_admin.py                     @choisy5570-bot
+/src/tybot/console/bot_identity.py                  @choisy5570-bot
+/src/tybot/console/bot_manifest.py                  @choisy5570-bot
+/src/tybot/console/bot_migration_compare.py         @choisy5570-bot
+/src/tybot/console/bot_repo.py                      @choisy5570-bot
+/src/tybot/console/bot_routes.py                    @choisy5570-bot
+/src/tybot/console/channel_admin.py                 @choisy5570-bot
+/src/tybot/console/health.py                        @choisy5570-bot
+/src/tybot/console/license_routes.py                @choisy5570-bot
+/src/tybot/console/license_store.py                 @choisy5570-bot
+/src/tybot/console/reader.py                        @choisy5570-bot
+/src/tybot/console/review_jobs.py                   @choisy5570-bot
+/src/tybot/console/rule_test.py                     @choisy5570-bot
+/src/tybot/console/service_logs.py                  @choisy5570-bot
+/src/tybot/console/specialist_runtime_store.py      @choisy5570-bot
+/src/tybot/console/specialist_source.py             @choisy5570-bot
+/src/tybot/console/specialist_zip.py                @choisy5570-bot
+/src/tybot/console/summary_review_store.py          @choisy5570-bot
+/src/tybot/console/supervisor_admin.py              @choisy5570-bot
+/src/tybot/console/workspace_service_identity.py    @choisy5570-bot
+
+# ── 콘솔 전용 코드지만 봇 운영을 직접 조작한다 → 둘 다 검토 ─────────
+/src/tybot/console/env_settings.py                  @choisy5570-bot @NuarDanKR
+/src/tybot/console/timer_manager.py                 @choisy5570-bot @NuarDanKR
+/src/tybot/console/release_gate.py                  @choisy5570-bot @NuarDanKR
+/src/tybot/console/collection_jobs.py               @choisy5570-bot @NuarDanKR
+
+# ── 콘솔 폴더 안의 공유 저장소: 봇도 읽는다 → 둘 다 검토 ──────────
+# 여기를 바꾸면 봇 동작이 바뀔 수 있다. 콘솔 쪽 요구로 고치더라도 봇 담당 검토를 받는다.
+/src/tybot/console/archiving_repo.py                @choisy5570-bot @NuarDanKR
+/src/tybot/console/audit_store.py                   @choisy5570-bot @NuarDanKR
+/src/tybot/console/auth.py                          @choisy5570-bot @NuarDanKR
+/src/tybot/console/deploy_approval_store.py         @choisy5570-bot @NuarDanKR
+/src/tybot/console/llm_secret_store.py              @choisy5570-bot @NuarDanKR
+/src/tybot/console/specialist_git.py                @choisy5570-bot @NuarDanKR
+/src/tybot/console/specialist_store.py              @choisy5570-bot @NuarDanKR
+/src/tybot/console/supervisor_repo.py               @choisy5570-bot @NuarDanKR
+/src/tybot/console/workspace_service_store.py       @choisy5570-bot @NuarDanKR
+/src/tybot/console/workspace_store.py               @choisy5570-bot @NuarDanKR
+/src/tybot/console/__init__.py                      @choisy5570-bot @NuarDanKR
+
+# ── 콘솔 전용 테스트 ────────────────────────────────────────────
+/tests/test_archiving_admin.py                      @choisy5570-bot
+/tests/test_bot_admin.py                            @choisy5570-bot
+/tests/test_bot_migration_compare.py                @choisy5570-bot
+/tests/test_channel_admin.py                        @choisy5570-bot
+/tests/test_collection_jobs.py                      @choisy5570-bot
+/tests/test_console_archiving_routes.py             @choisy5570-bot
+/tests/test_console_bot_api.py                      @choisy5570-bot
+/tests/test_console_health.py                       @choisy5570-bot
+/tests/test_console_licenses.py                     @choisy5570-bot
+/tests/test_console_service_logs.py                 @choisy5570-bot
+/tests/test_console_timers.py                       @choisy5570-bot
+/tests/test_release_gate.py                         @choisy5570-bot
+/tests/test_review_jobs.py                          @choisy5570-bot
+/tests/test_specialist_runtime_store.py             @choisy5570-bot
+/tests/test_specialist_source.py                    @choisy5570-bot
+/tests/test_specialist_zip.py                       @choisy5570-bot
+/tests/test_summary_review_console.py               @choisy5570-bot
+/tests/test_supervisor_admin.py                     @choisy5570-bot
+/tests/test_workspace_service_identity.py           @choisy5570-bot
+
+# ── 콘솔 문서 ───────────────────────────────────────────────────
+/docs/design/console*.md                            @choisy5570-bot
+/docs/ownership/                                    @choisy5570-bot @NuarDanKR
+
+# ── 서버 설정·DB 스키마: 운영에 바로 닿는다 → 둘 다 검토 ──────────
+/deploy/tybot-console.service                       @choisy5570-bot @NuarDanKR
+/deploy/nginx/tybot-console.conf                    @choisy5570-bot @NuarDanKR
+/deploy/sql/console_schema.sql                      @choisy5570-bot @NuarDanKR
+
+# ── 이 파일 자체 ────────────────────────────────────────────────
+/.github/CODEOWNERS                                 @choisy5570-bot @NuarDanKR
