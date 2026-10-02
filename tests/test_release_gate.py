@@ -285,3 +285,88 @@ def test_the_status_is_json_ready():
     assert payload["verified"] is True
     assert len(payload["currentFingerprint"]) == 12
     assert json.dumps(payload)
+
+
+# --- 지문은 줄바꿈에 흔들리지 않는다 ------------------------------------------------
+#
+# 2026-10-02 실측. 같은 커밋인데 개발 PC(Windows, CRLF)와 서버(LF)의 지문이 달랐다.
+#
+#   작업 복사본 그대로 : b0cf919d42c9
+#   LF 정규화 = git blob = 서버 : badb00353677
+#
+# `schema_fingerprint()` 가 `read_bytes()` 를 해시하기 때문이다. 그래서 개발 PC 에서
+# 만든 artifact 를 서버가 거부하고, 거부 사유는 「스키마가 바뀌었다」 로 보인다 —
+# 아무것도 안 바뀌었는데. 문서가 약속하는 「자기 PC에서 검증 → 서버 반입」 이
+# Windows 에서는 성립하지 않았다.
+
+def test_the_fingerprint_ignores_line_endings(tmp_path):
+    """**이 시험이 이 수정의 이유다.** 같은 내용이면 같은 지문이어야 한다."""
+    from tybot.console.release_gate import GATED_SQL, schema_fingerprint
+
+    body = "CREATE TABLE IF NOT EXISTS a (\n    id bigserial\n);\n"
+    lf_dir = tmp_path / "lf"
+    crlf_dir = tmp_path / "crlf"
+    for directory, text in ((lf_dir, body), (crlf_dir, body.replace("\n", "\r\n"))):
+        directory.mkdir()
+        for name in GATED_SQL:
+            (directory / name).write_bytes(text.encode("utf-8"))
+
+    assert schema_fingerprint(lf_dir) == schema_fingerprint(crlf_dir)
+
+
+def test_the_fingerprint_still_separates_different_content(tmp_path):
+    """줄바꿈만 무시한다. 내용이 다르면 여전히 다른 지문이어야 한다."""
+    from tybot.console.release_gate import GATED_SQL, schema_fingerprint
+
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    for directory, text in ((first, "SELECT 1;\n"), (second, "SELECT 2;\n")):
+        directory.mkdir()
+        for name in GATED_SQL:
+            (directory / name).write_text(text, encoding="utf-8")
+
+    assert schema_fingerprint(first) != schema_fingerprint(second)
+
+
+def test_a_lone_carriage_return_is_normalised_too(tmp_path):
+    """옛 Mac 줄바꿈. 섞여 들어와도 같은 내용으로 봐야 한다."""
+    from tybot.console.release_gate import GATED_SQL, schema_fingerprint
+
+    lf_dir = tmp_path / "lf"
+    cr_dir = tmp_path / "cr"
+    for directory, text in ((lf_dir, "a\nb\n"), (cr_dir, "a\rb\r")):
+        directory.mkdir()
+        for name in GATED_SQL:
+            (directory / name).write_bytes(text.encode("utf-8"))
+
+    assert schema_fingerprint(lf_dir) == schema_fingerprint(cr_dir)
+
+
+def test_the_repository_fingerprint_matches_the_committed_bytes():
+    """작업 복사본의 줄바꿈과 무관하게 **커밋된 내용**의 지문이 나와야 한다.
+
+    서버는 git 이 체크아웃한 LF 파일을 본다. 두 값이 다르면 개발 PC 에서 만든
+    artifact 를 서버가 영영 못 받는다.
+    """
+    import subprocess
+
+    from tybot.console.release_gate import GATED_SQL, schema_fingerprint
+
+    blobs = tmp_from_git = {}
+    for name in sorted(GATED_SQL):
+        result = subprocess.run(
+            ["git", "show", f"HEAD:deploy/sql/{name}"],
+            capture_output=True, cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        if result.returncode != 0:
+            pytest.skip("git 에서 커밋된 스키마를 읽지 못했습니다")
+        blobs[name] = result.stdout
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        committed = Path(tmp)
+        for name, body in tmp_from_git.items():
+            (committed / name).write_bytes(body)
+
+        assert schema_fingerprint() == schema_fingerprint(committed)

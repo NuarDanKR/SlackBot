@@ -68,6 +68,16 @@ def schema_fingerprint(sql_dir: Path | None = None) -> str:
 
     파일이 없으면 그 사실도 지문에 넣는다. 조용히 건너뛰면 **파일이 사라진 것과
     검증된 것이 구분되지 않는다.**
+
+    줄바꿈은 **지문에 넣지 않는다.** 전에는 바이트를 그대로 해시했는데, 그러면 같은
+    커밋이 개발 PC(Windows·CRLF)와 서버(LF)에서 다른 지문을 낸다 — 2026-10-02 실측
+    `b0cf919d42c9` 대 `badb00353677`. 그 상태에서는 개발 PC 에서 만든 artifact 를
+    서버가 거부하고, **거부 사유가 「스키마가 바뀌었다」 로 보인다.** 아무것도 안
+    바뀌었는데도 그렇다. 문서가 약속하는 「자기 PC 에서 검증 → 서버 반입」 이 아예
+    성립하지 않았다.
+
+    정규화해도 **서버 쪽 값은 그대로다**(서버는 이미 LF 다). 바뀌는 것은 Windows
+    뿐이고, 바뀐 뒤에 둘이 같아진다.
     """
     base = sql_dir or SQL_DIR
     digest = hashlib.sha256()
@@ -76,9 +86,18 @@ def schema_fingerprint(sql_dir: Path | None = None) -> str:
         digest.update(f"{len(raw)}:".encode("ascii"))
         digest.update(raw)
         path = base / name
-        body = path.read_bytes() if path.is_file() else b"<missing>"
+        body = _normalised(path.read_bytes()) if path.is_file() else b"<missing>"
         digest.update(hashlib.sha256(body).hexdigest().encode("ascii"))
     return digest.hexdigest()
+
+
+def _normalised(body: bytes) -> bytes:
+    """줄바꿈만 LF 로 맞춘다. **다른 바이트는 손대지 않는다.**
+
+    내용이 다르면 여전히 다른 지문이어야 한다 — 정규화가 넓어지면 바뀐 스키마가
+    검증된 것으로 보인다.
+    """
+    return body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
 @dataclass(frozen=True)
