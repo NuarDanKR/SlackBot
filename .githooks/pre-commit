@@ -53,13 +53,28 @@ KEYWORD_ALLOWED=':(exclude).githooks/*
 :(exclude)scripts/*
 :(exclude)src/*
 :(exclude)tests/*
+:(exclude)subbots/hermes/src/archive-health/doc-filters.js
+:(exclude)subbots/hermes/scripts/check-shared-rules.js
+:(exclude)subbots/hermes/.claude/skills/doc-archive/SKILL.md
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/xlsx_to_blocks.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/test_xlsx_to_blocks.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/test_screen_personal.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/test_review_batch.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/test_prune_cache.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/test_fetch_filters.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/apply_approvals.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/decide.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/screen_personal.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/review_batch.py
 :(exclude)vendor/hermes/*.py
 :(exclude).env.example'
 
 # 주민번호 '형식'은 실제 값일 가능성이 높아 거의 모든 곳에서 막는다.
-# 예외는 tests/ 뿐이다 — PII 탐지기가 실제로 잡는지 확인하려면 형식이 필요하다.
+# 예외는 TYBot 테스트와 Hermes의 마스킹 회귀시험 두 파일뿐이다.
 # 대신 조용히 넘기지 않고 경고로 보여준다(진짜 값이 섞이면 사람이 알아채야 한다).
-RRN_ALLOWED=':(exclude)tests/*'
+RRN_ALLOWED=':(exclude)tests/*
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/test_review_batch.py
+:(exclude)subbots/hermes/.claude/skills/doc-archive/scripts/test_xlsx_to_blocks.py'
 
 rrn='[0-9]{6}\s*-\s*[1-4][0-9]{6}'
 # shellcheck disable=SC2086
@@ -72,9 +87,9 @@ if [[ -n "$rrn_hits" ]]; then
 fi
 
 # shellcheck disable=SC2086
-rrn_in_tests=$(git diff --cached -U0 -- 'tests/*' | grep -cE "^\+.*($rrn)" || true)
+rrn_in_tests=$(git diff --cached -U0 -- 'tests/*' 'subbots/hermes/.claude/skills/doc-archive/scripts/test_review_batch.py' 'subbots/hermes/.claude/skills/doc-archive/scripts/test_xlsx_to_blocks.py' | grep -cE "^\+.*($rrn)" || true)
 if [[ "${rrn_in_tests:-0}" -gt 0 ]]; then
-  echo "[pre-commit] 주의: tests/ 에 주민번호 형식 ${rrn_in_tests}건 — 가짜 값인지 확인" >&2
+  echo "[pre-commit] 주의: 테스트에 주민번호 형식 ${rrn_in_tests}건 — 가짜 값인지 확인" >&2
 fi
 
 pii_kw='주민등록번호|주민번호|등기부\s*등본|계약자\s*명단'
@@ -88,8 +103,8 @@ if [[ -n "$kw_hits" ]]; then
 fi
 
 # 4) 아카이브 원문·감사기록은 코드 저장소에 커밋하지 않는다
-if echo "$staged" | grep -qE '^(archive|qa-log)/'; then
-  block "archive/ · qa-log/ 는 사내 대화 원문·감사기록이다. 코드 저장소 금지"
+if echo "$staged" | grep -qE '^(archive|qa-log|subbots/hermes/(archive|qa-log|documents|slack-export|state|logs))/'; then
+  block "아카이브·감사기록·Hermes 운영 자료는 코드 저장소 금지"
 fi
 
 # 5) 테스트 (tests/ 가 있고 pytest 가 설치돼 있을 때만)
