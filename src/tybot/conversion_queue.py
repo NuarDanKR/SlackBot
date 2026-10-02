@@ -261,17 +261,17 @@ def enqueue(
             VALUES (%s, %s, %s, %s, %s, 'queued', %s, %s, %s, %s)
             ON CONFLICT (workspace, channel_id, file_id, original_sha256, pipeline_version)
             DO UPDATE SET
-                -- 이미 끝난 작업은 되살리지 않는다. 성공한 파일을 다시 큐에
-                -- 넣으면 멀쩡한 산출물을 다시 덮어쓸 위험이 생긴다.
-                state = CASE WHEN conversion_job.state IN ('succeeded')
-                             THEN conversion_job.state ELSE 'queued' END,
+                -- 성공한 작업과 자동 재시도 상한에 닿은 작업은 되살리지 않는다.
+                state = 'queued',
                 error_code = EXCLUDED.error_code,
                 updated_at = now()
+            WHERE conversion_job.state <> 'succeeded'
+              AND (%s OR conversion_job.attempt_count < %s)
             RETURNING id
             """,
             (
                 workspace, channel_id, file_id, original_sha256, pipeline_version,
-                error_code, converter, converter_version, now,
+                error_code, converter, converter_version, now, force, MAX_ATTEMPTS,
             ),
         )
         row = cur.fetchone()

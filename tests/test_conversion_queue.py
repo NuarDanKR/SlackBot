@@ -913,6 +913,36 @@ def _fake_db(monkeypatch, script):
     return conns
 
 
+def test_automatic_enqueue_does_not_revive_an_exhausted_job(monkeypatch):
+    """Nightly scanning may see the same failed staging metadata every day."""
+    conns = _fake_db(monkeypatch, [[]])
+
+    job_id = queue.enqueue(
+        workspace="mgmt", channel_id="C1", file_id="F1",
+        original_sha256="abc", error_code="converter_timeout",
+        retryable=True,
+    )
+
+    sql, params = conns[0].cursors[0].executed[0]
+    assert job_id is None
+    assert "conversion_job.state <> 'succeeded'" in sql
+    assert "conversion_job.attempt_count < %s" in sql
+    assert params[-2:] == (False, queue.MAX_ATTEMPTS)
+
+
+def test_explicit_enqueue_can_retry_after_the_automatic_cap(monkeypatch):
+    conns = _fake_db(monkeypatch, [[{"id": 26}]])
+
+    job_id = queue.enqueue(
+        workspace="mgmt", channel_id="C1", file_id="F1",
+        original_sha256="abc", error_code="converter_timeout",
+        retryable=True, force=True,
+    )
+
+    assert job_id == 26
+    assert conns[0].cursors[0].executed[0][1][-2:] == (True, queue.MAX_ATTEMPTS)
+
+
 def test_an_open_breaker_stops_the_worker_from_claiming_its_jobs(monkeypatch):
     """**기록만 하고 안 읽으면 아무 일도 하지 않는다.**
 
