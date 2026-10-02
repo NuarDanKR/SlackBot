@@ -1,6 +1,6 @@
 """`/수집상태` — 왜 수집이 안 되는지 그 자리에서 답한다.
 
-수집 여부는 채널 **이름**이 정하고(`channels.should_collect`), 비공개 채널은 봇이 스스로
+레거시 TYBot 수집 여부는 채널 **이름**이 정하고(`channels.should_collect`), 비공개 채널은 봇이 스스로
 들어갈 수 없다. 두 조건이 겹쳐 "왜 우리 채널은 수집이 안 되지?" 가 가장 흔한 질문이 된다.
 여기 테스트는 상태별 판정과 **조치 안내가 빠지지 않는 것**을 고정한다.
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from tybot.archive.collection_probe import ArchiverChannel
 from tybot.collection_status import (
     AUTOJOIN_OFF,
     COLLECTING,
@@ -112,3 +113,57 @@ def test_write_problem_is_surfaced_here_too():
 def test_realtime_off_is_warned():
     text = report(ChannelFacts(channel=GOOD, is_member=True, raw_lines=1, realtime_enabled=False))
     assert "실시간 수집이 꺼져" in text
+
+
+def _archiver(**overrides):
+    values = dict(
+        mode="shadow", membership="joined", writer_owner="master",
+        operator_hold=False, live_enabled=False, last_ack_state="ready",
+        last_ack_target="shadow", last_ack_at="2026-10-02T09:00:00+09:00",
+    )
+    values.update(overrides)
+    return ArchiverChannel(**values)
+
+
+def test_shadow_collection_uses_invitation_not_channel_name_or_tybot_flag():
+    text = report(ChannelFacts(
+        channel="#점심메뉴", is_member=False, realtime_enabled=False,
+        archiver=_archiver(),
+    ))
+    assert "그림자 수집 대상" in text
+    assert "TYBot 참여(답변): 아니오" in text
+    assert "REALTIME_INGEST" not in text
+    assert "이름이 표준 규칙과 다릅니다" not in text
+
+
+def test_active_collection_needs_live_flag_and_live_ack():
+    row = _archiver(mode="active", writer_owner="archiver", last_ack_target="shadow")
+    disabled = report(ChannelFacts(channel=GOOD, archiver=row))
+    assert "스위치가 꺼져" in disabled
+    missing = report(ChannelFacts(channel=GOOD, archiver=_archiver(
+        mode="active", writer_owner="archiver", live_enabled=True,
+        last_ack_target="shadow",
+    )))
+    assert "운영 수집 대상" in missing
+    assert "ACK는 아직" in missing
+    ready = report(ChannelFacts(channel=GOOD, archiver=_archiver(
+        mode="active", writer_owner="archiver", live_enabled=True,
+        last_ack_target="live", attachment_issues=2,
+    )))
+    assert "최근 ACK ready" in ready
+    assert "첨부 미완료 메시지 2건" in ready
+
+
+@pytest.mark.parametrize("row", [
+    _archiver(mode="paused"),
+    _archiver(membership="left"),
+    _archiver(operator_hold=True),
+])
+def test_archiver_paused_left_or_held_is_not_reported_as_collecting(row):
+    assert "🔴" in report(ChannelFacts(channel=GOOD, archiver=row))
+
+
+def test_archiver_lookup_failure_is_not_treated_as_unregistered():
+    text = report(ChannelFacts(channel=GOOD, is_member=True, archiver_checked=False))
+    assert "확인하지 못했습니다" in text
+    assert "수집 중입니다" not in text

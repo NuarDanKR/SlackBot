@@ -130,7 +130,11 @@ def test_last_answer_lookup_returns_the_most_recent(tmp_path):
     assert row["record_id"] == second.record_id
 
 
-def test_collection_status_uses_channel_info(tmp_path):
+def test_collection_status_uses_channel_info(tmp_path, monkeypatch):
+    from tybot.archive.collection_probe import Probe
+    from tybot.slack import pilot
+
+    monkeypatch.setattr(pilot, "load_archiver_channel", lambda _ws, _ch: Probe(checked=True))
     bot = _bot(tmp_path)
     bot.store = Mock(docs=lambda: [])
     bot.autojoin = True
@@ -146,8 +150,53 @@ def test_collection_status_uses_channel_info(tmp_path):
     assert "스스로 들어갈 수 없습니다" in text
 
 
-def test_collection_status_survives_api_failure(tmp_path):
+def test_collection_status_uses_archiver_for_the_requested_channel(tmp_path, monkeypatch):
+    from tybot.archive.collection_probe import ArchiverChannel, Probe
+    from tybot.slack import pilot
+
+    requested = []
+
+    def probe(workspace, channel_id):
+        requested.append((workspace, channel_id))
+        return Probe(
+            checked=True,
+            channel=ArchiverChannel(
+                mode="shadow",
+                membership="joined",
+                writer_owner="master",
+                operator_hold=False,
+                live_enabled=False,
+                last_ack_state="ready",
+                last_ack_target="shadow",
+                last_ack_at="2026-10-02T09:00:00+09:00",
+            ),
+        )
+
+    monkeypatch.setattr(pilot, "load_archiver_channel", probe)
+    bot = _bot(tmp_path)
+    bot.store = Mock(docs=lambda: [])
+    bot.autojoin = False
+    bot.realtime = False
+    bot.path_problems = {}
+    bot._channel_name = lambda client, cid: "nonstandard-channel"
+
+    client = Mock()
+    client.conversations_info.return_value = {"channel": {"is_private": True, "is_member": False}}
+
+    text = bot._collection_status(client, "C1")
+
+    assert requested == [("pilot", "C1")]
+    assert "그림자 수집 대상" in text
+    assert "TYBot" in text
+    assert "2026-10-02" in text
+
+
+def test_collection_status_survives_api_failure(tmp_path, monkeypatch):
     """조회에 실패해도 이름만으로 답할 수 있어야 한다."""
+    from tybot.archive.collection_probe import Probe
+    from tybot.slack import pilot
+
+    monkeypatch.setattr(pilot, "load_archiver_channel", lambda _ws, _ch: Probe(checked=True))
     bot = _bot(tmp_path)
     bot.store = Mock(docs=lambda: [])
     bot.autojoin = True

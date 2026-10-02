@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from tybot import channel_health as ch
+from tybot.archive.collection_probe import ArchiverChannel
 from tybot.channel_management import (
     ChannelNameError,
     edit_from_view,
@@ -45,6 +46,30 @@ def _find(facts, label: str) -> ch.Check:
 def test_a_healthy_channel_says_so():
     assert all(c.healthy for c in ch.checks(_facts()))
     assert "모두 정상" in ch.report(_facts())
+
+
+def test_archiver_shadow_ignores_tybot_write_and_name_rules():
+    row = ArchiverChannel(
+        mode="shadow", membership="joined", writer_owner="master",
+        operator_hold=False, live_enabled=False, last_ack_state="ready",
+        last_ack_target="shadow", last_ack_at="2026-10-02T09:00:00+09:00",
+        attachment_issues=2,
+    )
+    facts = _facts(
+        channel="#잡담방", archiver=row, is_member=False,
+        realtime_enabled=False, write_problems={"아카이브": "TYBot 읽기 전용"},
+    )
+    assert _find(facts, "이름 규칙").mark == ch.WARN
+    assert _find(facts, "TYBot 참여").mark == ch.WARN
+    assert "그림자 수집 대상" in _find(facts, "수집").detail
+    assert "TYBot 읽기 전용" not in _find(facts, "수집").detail
+    assert _find(facts, "첨부").mark == ch.WARN
+
+
+def test_archiver_lookup_failure_does_not_claim_collection_is_healthy():
+    facts = _facts(archiver_checked=False)
+    assert _find(facts, "수집").mark == ch.UNKNOWN
+    assert "모두 정상" not in ch.report(facts)
 
 
 def test_a_nonstandard_name_is_reported_as_blocking():

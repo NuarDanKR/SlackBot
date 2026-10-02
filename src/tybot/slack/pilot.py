@@ -44,6 +44,7 @@ from ..archive.attachment_writer import write_docs as write_attachment_docs
 from ..archive.canvas import canvas_lines
 from ..archive.channel_files import ChannelFileScan, referenced_files
 from ..archive.channel_files import collect as collect_channel_files
+from ..archive.collection_probe import load as load_archiver_channel
 from ..archive.files import (
     AttachmentOrigin,
     attachment_storage,
@@ -1605,7 +1606,15 @@ class WorkspaceBot:
         except Exception as e:
             log.warning("[%s] 채널 정보 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
 
-        doc = next((d for d in self.store.docs() if d.channel == channel), None)
+        probe = load_archiver_channel(self.workspace, channel_id)
+        doc = next(
+            (
+                d for d in self.store.docs()
+                if d.workspace == self.workspace
+                and (d.channel_id == channel_id or (not d.channel_id and d.channel == channel))
+            ),
+            None,
+        )
         return collection_report(
             ChannelFacts(
                 channel=channel,
@@ -1618,6 +1627,8 @@ class WorkspaceBot:
                 raw_lines=len(doc.raw_lines) if doc else 0,
                 last_ingested=doc.last_ingested if doc else None,
                 write_problems=dict(self.path_problems),
+                archiver_checked=probe.checked,
+                archiver=probe.channel,
             )
         )
 
@@ -2161,7 +2172,15 @@ class WorkspaceBot:
         except Exception as e:
             log.warning("[%s] 채널 정보 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
 
-        doc = next((d for d in self.store.docs() if d.channel == channel), None)
+        probe = load_archiver_channel(self.workspace, channel_id)
+        doc = next(
+            (
+                d for d in self.store.docs()
+                if d.workspace == self.workspace
+                and (d.channel_id == channel_id or (not d.channel_id and d.channel == channel))
+            ),
+            None,
+        )
 
         found = None
         send_at = ""
@@ -2212,15 +2231,16 @@ class WorkspaceBot:
                 )
 
         waiting = None
-        try:
-            waiting = len(daily_review.blocked(
-                self.archive_dir,
-                workspace=self.workspace,
-                channel_id=channel_id,
-                extracted=self._extracted_names(channel_id),
-            ))
-        except Exception as e:
-            log.warning("[%s] 첨부 대기 집계 실패 ch=%s: %s", self.workspace, channel_id, e)
+        if probe.channel is None:
+            try:
+                waiting = len(daily_review.blocked(
+                    self.archive_dir,
+                    workspace=self.workspace,
+                    channel_id=channel_id,
+                    extracted=self._extracted_names(channel_id),
+                ))
+            except Exception as e:
+                log.warning("[%s] 첨부 대기 집계 실패 ch=%s: %s", self.workspace, channel_id, e)
 
         return HealthFacts(
             channel=channel,
@@ -2234,6 +2254,8 @@ class WorkspaceBot:
             raw_lines=len(doc.raw_lines) if doc else 0,
             last_ingested=doc.last_ingested if doc else None,
             write_problems=dict(self.path_problems),
+            archiver_checked=probe.checked,
+            archiver=probe.channel,
             reviewers=found,
             send_at=send_at,
             last_digest=last_digest,

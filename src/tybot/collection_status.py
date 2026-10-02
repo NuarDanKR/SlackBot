@@ -1,7 +1,7 @@
 """`/수집상태` — 이 채널이 수집되는지, 아니면 왜 안 되는지 그 자리에서 답한다.
 
 ## 왜 필요한가
-수집 여부는 **채널 이름**이 정하고(`channels.should_collect`), 비공개 채널은 봇이 스스로
+legacy Master 수집 여부는 **채널 이름**이 정하고(`channels.should_collect`), 비공개 채널은 봇이 스스로
 들어갈 수 없다. 두 조건이 겹쳐서 "왜 우리 채널은 수집이 안 되지?" 가 가장 흔한 질문이 된다.
 지금은 그 답을 알려면 서버 로그를 봐야 한다.
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .archive.collection_probe import ArchiverChannel
 from .channels import parse
 
 # 수집이 되는 상태 / 안 되는 이유
@@ -40,6 +41,46 @@ class ChannelFacts:
     raw_lines: int = 0
     last_ingested: str | None = None
     write_problems: dict[str, str] = field(default_factory=dict)
+    # Runtime callers always provide the probe result. False means DB unavailable,
+    # not "Archiver has no row".
+    archiver_checked: bool = True
+    archiver: ArchiverChannel | None = None
+
+
+@dataclass(frozen=True)
+class CollectionView:
+    mark: str
+    detail: str
+    fix: str = ""
+
+
+def archiver_view(f: ChannelFacts) -> CollectionView | None:
+    """Describe the Archiver contract without claiming that a service is alive."""
+    if not f.archiver_checked:
+        return CollectionView("⚪", "Archiver 등록·운영 상태를 확인하지 못했습니다.")
+    a = f.archiver
+    if a is None:
+        return None  # No takeover row: the legacy Master rules still apply.
+    if a.operator_hold:
+        return CollectionView("🔴", "운영자가 이 채널 수집을 중지했습니다.")
+    if a.membership != "joined":
+        return CollectionView("🔴", "Archiver가 채널에 참여 중이지 않습니다.", "Archiver 초대와 채널 동기화 상태를 확인하세요.")
+    if a.mode in {"off", "paused"}:
+        return CollectionView("🔴", f"Archiver 채널 모드가 {a.mode}입니다.")
+    if a.mode == "shadow" and a.writer_owner == "master":
+        target, label, mark = "shadow", "그림자 수집 대상 · 운영 원문 writer는 TYBot", "🟡"
+    elif a.mode == "active" and a.writer_owner == "archiver":
+        if not a.live_enabled:
+            return CollectionView("🔴", "운영 인수 상태지만 Archiver 운영 쓰기 스위치가 꺼져 있습니다.")
+        target, label, mark = "live", "Archiver 운영 수집 대상", "🟢"
+    else:
+        return CollectionView("⚪", "채널 모드와 writer 소유권이 일치하지 않아 수집 상태를 확인할 수 없습니다.")
+    if not a.last_ack_at or a.last_ack_target != target:
+        return CollectionView("🟡", f"{label} · 이 경로의 수집 ACK는 아직 확인되지 않았습니다.")
+    return CollectionView(
+        mark,
+        f"{label} · 최근 ACK {a.last_ack_state} ({a.last_ack_at})",
+    )
 
 
 def diagnose(f: ChannelFacts) -> str:
@@ -67,6 +108,17 @@ def report(f: ChannelFacts) -> str:
             "여기는 DM 이라 수집 대상이 아닙니다. "
             "업무 채널에서 `/수집상태` 를 실행하면 그 채널의 수집 여부를 알려 드립니다."
         )
+
+    archiver = archiver_view(f)
+    if archiver is not None:
+        lines = [f"{archiver.mark} *{f.channel} — {archiver.detail}*"]
+        if f.archiver is not None:
+            lines.append(f"TYBot 참여(답변): {'예' if f.is_member else '아니오'}")
+            if f.archiver.attachment_issues:
+                lines.append(f"첨부 미완료 메시지 {f.archiver.attachment_issues}건")
+        if archiver.fix:
+            lines.append(f"조치: {archiver.fix}")
+        return "\n".join(lines)
 
     if state == NAME_MISMATCH:
         return "\n".join([

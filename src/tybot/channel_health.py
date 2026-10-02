@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from .archive.collection_probe import ArchiverChannel
 from .channels import parse
 from .collection_status import (
     AUTOJOIN_OFF,
@@ -33,6 +34,7 @@ from .collection_status import (
     NAME_MISMATCH,
     NOT_MEMBER_PRIVATE,
     ChannelFacts,
+    archiver_view,
     diagnose,
 )
 
@@ -78,6 +80,8 @@ class HealthFacts:
     raw_lines: int = 0
     last_ingested: str | None = None
     write_problems: dict[str, str] = field(default_factory=dict)
+    archiver_checked: bool = True
+    archiver: ArchiverChannel | None = None
     # 검토자. `None` 은 **모른다**(DB 를 못 읽었다) — 「없음」 과 다르다.
     reviewers: list[str] | None = None
     send_at: str = ""
@@ -122,11 +126,20 @@ def _collection_facts(f: HealthFacts) -> ChannelFacts:
         raw_lines=f.raw_lines,
         last_ingested=f.last_ingested,
         write_problems=f.write_problems,
+        archiver_checked=f.archiver_checked,
+        archiver=f.archiver,
     )
 
 
 def check_name(f: HealthFacts) -> Check:
-    """이름이 수집 여부를 정한다. 규칙 밖이면 **아무 일도 일어나지 않는다.**"""
+    """이름 규칙은 legacy Master에만 수집 조건이다."""
+    if f.archiver is not None:
+        spec = parse(f.channel)
+        if spec:
+            return Check(OK, "이름 규칙", spec.label())
+        return Check(WARN, "이름 규칙", "표준 형식은 아니지만 Archiver는 초대된 채널을 수집합니다.")
+    if not f.archiver_checked:
+        return Check(UNKNOWN, "이름 규칙", "Archiver 등록 상태를 확인하지 못했습니다.")
     spec = parse(f.channel)
     if spec:
         return Check(OK, "이름 규칙", spec.label())
@@ -141,6 +154,14 @@ def check_name(f: HealthFacts) -> Check:
 
 def check_membership(f: HealthFacts) -> Check:
     """봇이 채널에 있는가. 비공개 채널에는 **봇이 스스로 못 들어간다**(Slack 제약)."""
+    if not f.archiver_checked:
+        mark = OK if f.is_member else WARN
+        detail = "TYBot이 답변을 위해 참여 중입니다." if f.is_member else "TYBot이 없어 이 채널에서 답변할 수 없습니다."
+        return Check(mark, "TYBot 참여", detail)
+    if f.archiver is not None:
+        if f.is_member:
+            return Check(OK, "TYBot 참여", f"@{f.bot_name}이 답변을 위해 참여 중입니다.")
+        return Check(WARN, "TYBot 참여", "TYBot이 없어 이 채널에서 답변할 수 없습니다.")
     state = diagnose(_collection_facts(f))
     if f.is_member:
         return Check(OK, "봇 참여", f"@{f.bot_name} 이 이 채널에 있습니다.")
@@ -171,6 +192,9 @@ def check_membership(f: HealthFacts) -> Check:
 
 def check_collection(f: HealthFacts) -> Check:
     """쌓이고 있는가. 이름·참여가 맞아도 **쓰기가 막히면 저장되지 않는다.**"""
+    archiver = archiver_view(_collection_facts(f))
+    if archiver is not None:
+        return Check(archiver.mark, "수집", archiver.detail, archiver.fix)
     state = diagnose(_collection_facts(f))
     if state != COLLECTING:
         return Check(
@@ -280,6 +304,14 @@ def check_review_canvas(f: HealthFacts) -> Check:
 
 def check_attachments(f: HealthFacts) -> Check:
     """자동 변환에 실패했거나 지원하지 않아 운영 확인이 필요한 첨부."""
+    if not f.archiver_checked:
+        return Check(UNKNOWN, "첨부", "Archiver 첨부 상태를 확인하지 못했습니다.")
+    if f.archiver is not None:
+        if not f.archiver.last_ack_at:
+            return Check(UNKNOWN, "첨부", "Archiver 첨부 ACK가 아직 없습니다.")
+        if f.archiver.attachment_issues:
+            return Check(WARN, "첨부", f"Archiver ACK 기준 미완료 메시지 {f.archiver.attachment_issues}건")
+        return Check(OK, "첨부", "Archiver ACK 기준 미완료 메시지가 없습니다.")
     if f.waiting_attachments is None:
         return Check(UNKNOWN, "첨부", "확인하지 못했습니다.")
     if not f.waiting_attachments:
