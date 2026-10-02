@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..archive.archiving_state import (
+    UNENFORCED_FLAGS,
     ChannelMode,
     ChannelState,
     TransitionRefused,
@@ -126,6 +127,9 @@ def workspace_detail(workspace: str, repo: ArchivingRepo | None = None) -> dict:
         # 화면이 버튼을 회색으로 만들 근거. 눌러 보고 거절당하는 것보다 낫다.
         "gatedModes": sorted(str(mode) for mode in GATED_MODES),
         "gatedFlags": sorted(GATED_FLAGS),
+        # **아무것도 안 하는 스위치**와 그 이유. 화면에 안 내보내면 사람은 이걸
+        # 켜고 「준비됐다」 고 읽는다 — 2026-10-02 까지 실제로 그랬다.
+        "unenforcedFlags": dict(UNENFORCED_FLAGS),
     }
 
 

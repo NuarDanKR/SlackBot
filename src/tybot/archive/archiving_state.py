@@ -219,11 +219,41 @@ _INGEST_EDGES: dict[IngestState, frozenset[IngestState]] = {
 }
 
 
+#: 첨부가 왜 검색에 안 잡히는가. **사람이 할 일이 다르면 다른 코드다.**
+#:
+#: 하나로 묶으면 안 되는 이유는 「기다리면 되는 것」 과 「기다려도 안 되는 것」 과
+#: 「원본을 잃어 다시 올려야 하는 것」 이 같은 문장으로 나가기 때문이다. 셋 중
+#: 마지막은 되돌릴 수 없다 — 사람이 「기록했습니다」 를 읽고 Slack 원본을 지우면
+#: 그걸로 끝이다.
+ATTACHMENT_PENDING_CODE = "attachment-pending"
+ATTACHMENT_PARTIAL_CODE = "attachment-partial"
+ATTACHMENT_UNSUPPORTED_CODE = "attachment-unsupported"
+ATTACHMENT_SCREENED_CODE = "attachment-screened"
+ATTACHMENT_ORIGINAL_MISSING_CODE = "attachment-original-missing"
+
+#: 기다려도 안 바뀌는 사유. **다시 볼 필요가 없다**는 뜻이지 「다 됐다」 가 아니다.
+#: 그래서 이 코드가 붙어도 `ready` 로 올리지 않는다 — `ready` 는 「전부 검색된다」 는
+#: 뜻이고, 변환 못 한 첨부는 검색되지 않는다.
+ATTACHMENT_SETTLED_CODES: frozenset[str] = frozenset({
+    ATTACHMENT_UNSUPPORTED_CODE,
+    ATTACHMENT_SCREENED_CODE,
+})
+
+#: 사람이 **다시 올려야** 하는 사유. 자동으로 고쳐지지 않는다.
+ATTACHMENT_LOST_CODES: frozenset[str] = frozenset({
+    ATTACHMENT_ORIGINAL_MISSING_CODE,
+})
+
+
 @dataclass(frozen=True)
 class IngestProgress:
     state: IngestState
     attachment_total: int = 0
     attachment_ready: int = 0
+    #: 왜 이 상태인가. 비어 있으면 **사유를 모른다** 다 — 「문제없다」 가 아니다.
+    #: 표에는 처음부터 있던 칸인데 읽는 쪽이 안 가져왔다. 그래서 문장을 만드는
+    #: 자리까지 오지 못했고, 다른 결말들이 한 문장으로 나갔다.
+    error_code: str = ""
 
     @property
     def attachments_done(self) -> bool:
@@ -256,7 +286,9 @@ def plan_ingest_change(current: IngestProgress, target: IngestState) -> IngestPr
             f"첨부 {current.attachment_ready}/{current.attachment_total} 이라 "
             "ready 가 아닙니다. 검색 가능하다고 말하지 않습니다"
         )
-    return IngestProgress(target, current.attachment_total, current.attachment_ready)
+    return IngestProgress(
+        target, current.attachment_total, current.attachment_ready, current.error_code
+    )
 
 
 def searchable_claim(progress: IngestProgress, *, require_ack: bool) -> str:
@@ -265,24 +297,67 @@ def searchable_claim(progress: IngestProgress, *, require_ack: bool) -> str:
     문장을 여기서 만드는 이유: 호출부마다 문구를 쓰면 한 군데가 「올렸습니다」 를
     「검색됩니다」 로 적고, 그 경로만 거짓말한다. 그리고 그게 제일 안 들킨다.
     """
-    if not require_ack:
-        # 스위치가 꺼져 있어도 **없는 사실을 만들지는 않는다.** 원문이 들어갔다는
-        # 것까지만 말한다.
-        return "원문은 기록했습니다" if progress.state != IngestState.RECEIVED else "받았습니다"
+    # **실패는 스위치와 무관하게 실패로 말한다.** 전에는 `require_ack` 이 꺼져
+    # 있으면 `received` 가 아닌 모든 상태를 「원문은 기록했습니다」 로 덮었다 —
+    # `refused` 도 `failed` 도 그렇게 나갔다. 스위치의 뜻은 「첨부까지 확인해서
+    # 말할지」 이지 「실패를 성공으로 말해도 되는지」 가 아니다.
     match progress.state:
-        case IngestState.READY:
-            return "기록했고 검색할 수 있습니다"
-        case IngestState.ATTACHMENT_PENDING | IngestState.PARTIAL:
-            done, total = progress.attachment_ready, progress.attachment_total
-            return f"원문은 기록했습니다. 첨부 변환 {done}/{total} — 아직 검색에는 안 잡힙니다"
-        case IngestState.RAW_WRITTEN:
-            return "원문은 기록했습니다"
         case IngestState.REFUSED:
             return "수집 규칙에 걸려 기록하지 않았습니다"
         case IngestState.FAILED:
             return "기록하지 못했습니다"
-        case _:
+        case IngestState.RECEIVED:
             return "받았습니다. 아직 기록 전입니다"
+    if progress.error_code in ATTACHMENT_LOST_CODES:
+        # 이것도 스위치 밖이다. 원본을 잃은 것은 **기다려서 해결되지 않고**,
+        # 사람이 Slack 원본을 지우면 영영 못 되살린다.
+        return "원문은 기록했지만 **첨부 원본을 보관하지 못했습니다.** 다시 올려 주세요"
+    if not require_ack:
+        # 스위치가 꺼져 있으면 첨부까지 확인해서 말하지 않는다. 그래도
+        # **없는 사실을 만들지는 않는다** — 원문이 들어갔다는 것까지만.
+        return "원문은 기록했습니다"
+    match progress.state:
+        case IngestState.READY:
+            return "기록했고 검색할 수 있습니다"
+        case IngestState.ATTACHMENT_PENDING | IngestState.PARTIAL:
+            return _attachment_claim(progress)
+        case _:
+            return "원문은 기록했습니다"
+
+
+def _attachment_claim(progress: IngestProgress) -> str:
+    """첨부가 남은 상태를 **사람이 할 일로** 바꿔 말한다.
+
+    「아직」 이라는 말은 기다리면 된다는 약속이다. 기다려도 안 되는 것에 그 말을
+    쓰면 사람은 내일 다시 와서 또 「아직」 을 본다. 그래서 끝난 것은 끝났다고
+    말하고, 대신 **원본은 보관돼 있다**는 사실을 같이 준다.
+    """
+    done, total = progress.attachment_ready, progress.attachment_total
+    match progress.error_code:
+        case code if code == ATTACHMENT_UNSUPPORTED_CODE:
+            return (
+                f"원문과 첨부 원본은 보관했습니다. 첨부 {done}/{total} — "
+                "변환할 수 없는 형식이라 본문 검색에는 안 잡힙니다"
+            )
+        case code if code == ATTACHMENT_SCREENED_CODE:
+            return (
+                f"원문은 기록했습니다. 첨부 {done}/{total} — "
+                "수집 규칙에 걸려 본문은 기록하지 않았습니다"
+            )
+        case code if code == ATTACHMENT_PARTIAL_CODE:
+            return (
+                f"원문은 기록했습니다. 첨부 {done}/{total} — "
+                "일부만 변환돼 그만큼만 검색에 잡힙니다"
+            )
+        case "attachment-conversion-failed":
+            # 미지원과 다르다 — 읽을 수 있어야 하는데 못 읽었다. 「형식 때문」 이라고
+            # 하면 사람이 고칠 수 있는 문제를 고치지 않고 넘어간다.
+            return (
+                f"원문과 첨부 원본은 보관했습니다. 첨부 {done}/{total} — "
+                "변환에 실패해 본문 검색에는 안 잡힙니다"
+            )
+        case _:
+            return f"원문은 기록했습니다. 첨부 변환 {done}/{total} — 아직 검색에는 안 잡힙니다"
 
 
 # ---------------------------------------------------------------------------
@@ -393,10 +468,28 @@ def config_digest(config: dict) -> str:
 REQUIRED_RETENTION: tuple[str, ...] = ("bot_conversation_audit", "bot_dm_attachment")
 REQUIRED_PRODUCTION_FLAGS: tuple[str, ...] = (
     "archiver_writes_live",
-    "preserve_edit_delete",
     "require_attachment_ack",
-    "revision_reader_ready",
 )
+
+#: 전에 필수로 요구했지만 **끌 수 있는 쪽이 없어** 스위치가 아니었던 것들.
+#: 2026-10-02 조사(`tests/test_production_flag_gates.py`) · 오너 결정.
+#:
+#: 둘 다 「준비되면 켠다」 처럼 보였지만, 실제로는 꺼도 되는 상태가 존재하지
+#: 않는다. 수정·삭제를 안 쌓는 것은 사람이 고친 문장을 잃는 것이고(원칙 1),
+#: revision reader 를 안 돌리는 것은 지워진 문장을 근거로 내보내는 것이다.
+#: 둘 다 어떤 상황에서도 허용되지 않으므로 **선택지가 아니라 불변식**이다.
+#:
+#: 필수 목록에 남겨 두는 쪽이 더 나빴다. 체크가 보증으로 읽히는데 보증하는
+#: 코드는 없었고, 그 사이 진짜 불변식은 아무도 시험하지 않았다. 지금은
+#: `tests/test_archive_invariants.py` 가 동작 자체를 지킨다.
+UNENFORCED_FLAGS: dict[str, str] = {
+    "preserve_edit_delete": (
+        "수정·삭제 보존은 스위치가 아니라 불변식입니다. 항상 쌓습니다."
+    ),
+    "revision_reader_ready": (
+        "revision reader 는 항상 돌고, 기록을 못 보면 감춥니다(fail-closed)."
+    ),
+}
 
 
 def production_blockers(

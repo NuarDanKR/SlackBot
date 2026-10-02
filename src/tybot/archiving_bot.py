@@ -11,9 +11,8 @@ from pathlib import Path
 
 from slack_sdk.errors import SlackApiError
 
-from .archive import channel_membership, ingest_ack, shadow_paths, writer
+from .archive import attachment_ack, channel_membership, ingest_ack, shadow_paths, writer
 from .archive.archiving_state import IngestState
-from .archive.attachment_doc import CONVERTED
 from .archive.attachment_writer import raw_lines_for
 from .archive.attachment_writer import write_docs as write_attachment_docs
 from .archive.revision_store import record_revision
@@ -376,18 +375,21 @@ class ShadowCollector:
                     error_code="attachment-unconfirmed", written_to=written_to,
                 )
                 return "metadata-unconfirmed"
-            canonical_ready = {
-                doc.file_id
-                for doc in canonical_docs
-                if doc.conversion_state == CONVERTED and doc.text.strip()
-            }
-            attachment_ready = sum(
-                1
-                for item in staged
-                if archive_states.get(item.file_id) == ARCHIVE_DONE
-                and item.file_id in canonical_ready
+            # 결말 판정은 `attachment_ack.classify` 한 곳이 한다. 변환 완료 뒤
+            # 갱신하는 경로(`ack_reconcile`)도 같은 함수를 쓴다 — 규칙이 두 벌이면
+            # 들어온 길에 따라 다른 말이 나간다.
+            outcome = attachment_ack.classify(
+                [item.file_id for item in staged],
+                stored={
+                    item.file_id: archive_states.get(item.file_id) == ARCHIVE_DONE
+                    for item in staged
+                },
+                conversion={doc.file_id: doc.conversion_state for doc in canonical_docs},
+                has_text={doc.file_id: bool(doc.text.strip()) for doc in canonical_docs},
             )
+            attachment_ready = outcome.ready
         else:
+            outcome = attachment_ack.Outcome(0, 0, "")
             attachment_ready = 0
         if result.refused:
             # 일부만 들어갔으면 partial, 하나도 못 들어갔으면 refused 다.
@@ -417,10 +419,12 @@ class ShadowCollector:
         # **여기가 마지막이다.** 첨부 확인·거부 판정·revision 기록을 전부 지난
         # 뒤에만 ready 다. 앞에서 찍으면 그 뒤 단계가 실패해도 이미 「됐다」 고
         # 적힌 상태로 남고, 그 상태는 되돌리지 않는다(terminal).
+        # **`ready` 는 「전부 검색된다」 는 뜻이다.** 변환할 수 없는 형식처럼
+        # 더 할 일이 없는 경우도 검색은 안 되므로 `ready` 로 올리지 않는다 —
+        # 올리면 그 상태의 뜻이 조용히 바뀌고 `is_searchable()` 을 믿는 경로가
+        # 함께 틀린다. 끝났다는 것은 상태가 아니라 **문장**으로 말한다.
         final_state = (
-            IngestState.READY
-            if not staged or attachment_ready == len(staged)
-            else IngestState.PARTIAL
+            IngestState.READY if outcome.all_ready else IngestState.PARTIAL
         )
         self._ack(
             channel_id,
@@ -429,7 +433,7 @@ class ShadowCollector:
             attachment_total=len(staged),
             attachment_ready=attachment_ready,
             doc_path=self._relative_doc_path(result.path, root) if raw_confirmed else "",
-            error_code="" if final_state == IngestState.READY else "attachment-not-searchable",
+            error_code=outcome.error_code,
             written_to=written_to,
         )
         if final_state != IngestState.READY:

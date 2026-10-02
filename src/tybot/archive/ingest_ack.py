@@ -50,12 +50,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from ..lock import AlreadyRunning, FileLock, LockUnavailable
 from .archiving_state import (
+    ATTACHMENT_LOST_CODES,
     IngestProgress,
     IngestState,
     TransitionRefused,
@@ -70,6 +72,14 @@ SHADOW = "shadow"
 
 #: 상태를 못 봤을 때 하는 말. **검색 가능 여부를 말하지 않는다.**
 UNKNOWN_CLAIM = "수집 상태를 확인하지 못했습니다. 검색 가능 여부는 말씀드릴 수 없습니다."
+
+
+class AckUnavailable(RuntimeError):
+    """상태를 못 봤다. **「남은 것이 없다」 와 구분해야 한다.**
+
+    빈 목록으로 돌려주면 부르는 쪽이 「갱신할 것이 없다」 로 읽고, 그대로
+    끝났다고 보고한다. 못 본 것과 없는 것은 다르다.
+    """
 
 #: 그림자에만 있는 것. 「기록됐다」 와 「검색된다」 를 한 문장에서 갈라 준다.
 SHADOW_CLAIM = "그림자 수집에는 기록됐지만 운영 검색에는 아직 반영되지 않았습니다"
@@ -218,7 +228,8 @@ def read(workspace: str, channel_id: str, message_ts: str) -> AckStatus | None:
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT state, attachment_total, attachment_ready, written_to
+                SELECT state, attachment_total, attachment_ready, written_to,
+                       error_code
                   FROM archive_ingest_state
                  WHERE workspace = %s AND channel_id = %s AND message_ts = %s
                 """,
@@ -235,6 +246,7 @@ def read(workspace: str, channel_id: str, message_ts: str) -> AckStatus | None:
             IngestState(str(row["state"])),
             attachment_total=int(row["attachment_total"] or 0),
             attachment_ready=int(row["attachment_ready"] or 0),
+            error_code=str(row["error_code"] or ""),
         ),
         written_to=str(row["written_to"] or ""),
     )
@@ -317,7 +329,8 @@ def _write(payload: dict) -> IngestState | None:
             )
             cur.execute(
                 """
-                SELECT state, attachment_total, attachment_ready, written_to
+                SELECT state, attachment_total, attachment_ready, written_to,
+                       error_code
                   FROM archive_ingest_state
                  WHERE workspace = %s AND channel_id = %s AND message_ts = %s
                  FOR UPDATE
@@ -331,6 +344,7 @@ def _write(payload: dict) -> IngestState | None:
                         IngestState(str(row["state"])),
                         int(row["attachment_total"] or 0),
                         int(row["attachment_ready"] or 0),
+                        str(row["error_code"] or ""),
                     ),
                     str(row["written_to"] or ""),
                 )
@@ -342,6 +356,7 @@ def _write(payload: dict) -> IngestState | None:
                 IngestState(str(payload["target"])),
                 payload.get("attachment_total"),
                 payload.get("attachment_ready"),
+                str(payload.get("error_code") or ""),
             )
             if (
                 plan is None and current is not None
@@ -410,19 +425,27 @@ def _next(
     target: IngestState,
     attachment_total: int | None,
     attachment_ready: int | None,
+    error_code: str = "",
 ) -> IngestProgress | None:
     """다음 상태. **갈 수 없으면 `None`** (재전달이므로 조용히 둔다).
 
     첨부 수는 「준 것만」 바꾼다. 안 주면 지금 값을 유지한다 — 본문 경로가 첨부
     수를 0 으로 덮으면, 첨부가 아직인데 `ready` 로 갈 수 있게 된다.
+
+    **사유도 비교에 넣는다.** 변환이 끝나면 같은 `partial` 안에서 사유만 바뀐다
+    (`attachment-pending` → `attachment-unsupported`). 사유를 비교에서 빼면 그
+    변화가 재전달로 보여 조용히 버려지고, 사람은 끝난 일을 계속 「아직」 으로
+    듣는다.
     """
     base = current.progress if current else IngestProgress(IngestState.RECEIVED)
     total = base.attachment_total if attachment_total is None else attachment_total
     ready = base.attachment_ready if attachment_ready is None else attachment_ready
-    counted = IngestProgress(base.state, total, max(0, min(ready, total)))
+    counted = IngestProgress(base.state, total, max(0, min(ready, total)), error_code)
 
     if current is None:
-        return IngestProgress(target, counted.attachment_total, counted.attachment_ready)
+        return IngestProgress(
+            target, counted.attachment_total, counted.attachment_ready, error_code
+        )
     if target == counted.state:
         # 같은 상태로 다시 왔다. 첨부 수만 늘 수 있다(변환이 하나 더 끝난 경우).
         return counted if counted != current.progress else None
@@ -439,29 +462,122 @@ def _next(
 # ---------------------------------------------------------------------------
 
 
+#: `require_attachment_ack` 을 매 문장마다 조회하지 않기 위한 짧은 캐시.
+#: 짧게 두는 이유: 운영 중 스위치를 내렸을 때 그 효과가 **분 단위로** 와야 한다.
+_FLAG_TTL_SECONDS = 30.0
+_flag_cache: tuple[float, bool] | None = None
+
+
+def require_ack_flag(*, now: float | None = None) -> bool:
+    """`require_attachment_ack` 전역 스위치. **못 읽으면 `True`.**
+
+    실패 방향이 반대인 스위치다. 다른 게이트는 「모르면 막는다」 가 안전하지만,
+    여기서 막는 대상은 동작이 아니라 **말**이다. 켜져 있을 때 하는 말이 첨부까지
+    확인한 사실이고, 꺼져 있을 때 하는 말은 그보다 적게 안다. 그러니 모를 때
+    골라야 할 쪽은 **더 많이 확인해서 말하는 쪽**이다 — 반대로 두면 DB 가 흔들린
+    동안 「원문은 기록했습니다」 만 나가고, 첨부가 검색 안 된다는 사실이 사라진다.
+    """
+    global _flag_cache
+    stamp = now if now is not None else time.monotonic()
+    if _flag_cache is not None and stamp - _flag_cache[0] < _FLAG_TTL_SECONDS:
+        return _flag_cache[1]
+    value = True
+    if enabled():
+        try:
+            with _connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT enabled FROM archive_feature_flag
+                     WHERE name = %s AND scope = 'global' AND scope_key = ''
+                    """,
+                    ("require_attachment_ack",),
+                )
+                row = cur.fetchone()
+            # 행이 없으면 **아직 정하지 않은 것**이다. 끈 것으로 읽지 않는다.
+            value = True if row is None else bool(row["enabled"] is True)
+        except Exception as exc:  # noqa: BLE001 - 못 읽으면 더 많이 말하는 쪽으로
+            log.warning("require_attachment_ack 스위치를 읽지 못했다: %s", exc)
+            value = True
+    _flag_cache = (stamp, value)
+    return value
+
+
+def reset_flag_cache() -> None:
+    """시험과 재기동용. 운영 경로에서는 TTL 이 알아서 만료된다."""
+    global _flag_cache
+    _flag_cache = None
+
+
 def claim(
-    workspace: str, channel_id: str, message_ts: str, *, require_ack: bool = True
+    workspace: str, channel_id: str, message_ts: str, *, require_ack: bool | None = None
 ) -> str:
     """사람에게 할 말. **여기를 거치지 않고 「검색 가능」 을 말하지 않는다.**
 
     문구를 한 자리에서 만드는 이유: 호출부마다 쓰면 한 군데가 「올렸습니다」 를
     「검색됩니다」 로 적고, 그게 제일 안 들킨다.
+
+    `require_ack` 을 안 주면 **전역 스위치**를 읽는다. 전에는 인자 기본값이
+    `True` 였고 호출부는 인자를 안 줬다 — 그래서 `require_attachment_ack` 은
+    표에만 있고 아무것도 정하지 않았다.
     """
-    return claim_for(read(workspace, channel_id, message_ts), require_ack=require_ack)
+    settled = require_ack_flag() if require_ack is None else require_ack
+    return claim_for(read(workspace, channel_id, message_ts), require_ack=settled)
 
 
-def claim_for(status: AckStatus | None, *, require_ack: bool = True) -> str:
+def claim_for(status: AckStatus | None, *, require_ack: bool | None = None) -> str:
     """상태 하나를 문장으로. 읽기와 갈라 두어 시험이 DB 없이 전부 본다."""
     if status is None:
         return UNKNOWN_CLAIM
-    if status.written_to != LIVE:
+    settled = require_ack_flag() if require_ack is None else require_ack
+    if status.written_to != LIVE and not _is_failure(status.progress):
         # ready 전 단계도 그림자 기록이다. 일반 진행 문구만 내면 운영 아카이브에
         # 원문이 들어간 것으로 오해할 수 있으므로 목적지를 먼저 밝힌다.
+        #
+        # **실패는 예외다.** 그림자든 운영이든 못 쓴 것은 못 썼다고 해야 한다 —
+        # 「그림자에는 기록됐다」 고 하면 사람은 자료가 어딘가 남았다고 읽는다.
         return SHADOW_CLAIM
-    return searchable_claim(status.progress, require_ack=require_ack)
+    return searchable_claim(status.progress, require_ack=settled)
+
+
+def _is_failure(progress: IngestProgress) -> bool:
+    """「못 썼다」 인가. 목적지 안내보다 **먼저** 말해야 하는 것들."""
+    return (
+        progress.state in (IngestState.REFUSED, IngestState.FAILED)
+        or progress.error_code in ATTACHMENT_LOST_CODES
+    )
 
 
 def is_searchable(workspace: str, channel_id: str, message_ts: str) -> bool:
     """운영 검색이 찾는다고 단언해도 되는가. **모르면 `False`.**"""
     status = read(workspace, channel_id, message_ts)
     return status is not None and status.searchable
+
+
+def unfinished(workspace: str, *, limit: int = 500) -> list[dict]:
+    """아직 끝나지 않은 수집 상태들. **끝난 것은 안 돌려준다.**
+
+    `archive_ingest_state_unfinished` 색인이 이 질의를 위해 있다. 변환이 끝난
+    뒤 ACK 를 갱신하려면 「무엇이 남았나」 를 물어야 하는데, 지금까지 그걸 묻는
+    코드가 없어서 **첨부가 있는 메시지는 영원히 `partial`** 이었다.
+    """
+    if not enabled():
+        return []
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT workspace, channel_id, message_ts, state,
+                       attachment_total, attachment_ready, written_to, error_code
+                  FROM archive_ingest_state
+                 WHERE workspace = %s
+                   AND state IN ('received', 'raw_written',
+                                 'attachment_pending', 'partial')
+                 ORDER BY updated_at
+                 LIMIT %s
+                """,
+                (workspace, int(limit)),
+            )
+            return [dict(row) for row in cur.fetchall()]
+    except Exception as exc:
+        log.warning("미완료 수집 상태를 읽지 못했다 ws=%s: %s", workspace, exc)
+        raise AckUnavailable(str(exc)) from exc

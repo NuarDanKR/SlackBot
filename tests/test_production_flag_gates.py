@@ -22,7 +22,13 @@ from pathlib import Path
 import pytest
 
 from tybot.archive.archiving_state import (
+    ATTACHMENT_ORIGINAL_MISSING_CODE,
+    ATTACHMENT_PARTIAL_CODE,
+    ATTACHMENT_PENDING_CODE,
+    ATTACHMENT_SCREENED_CODE,
+    ATTACHMENT_UNSUPPORTED_CODE,
     REQUIRED_PRODUCTION_FLAGS,
+    UNENFORCED_FLAGS,
     IngestProgress,
     IngestState,
     searchable_claim,
@@ -78,28 +84,7 @@ def _runtime_reads(flag: str) -> list[str]:
     return found
 
 
-#: 2026-10-02 조사에서 **읽는 자리가 없던** 필수 스위치들. 오너 결정 전까지
-#: `xfail(strict)` 로 둔다 — 고치면 XPASS 가 나면서 이 목록을 지우라고 알려 준다.
-#: 그냥 지우면 구멍이 기록에서 사라지고, 사라진 구멍은 다시 생긴다.
-UNWIRED = {
-    "preserve_edit_delete": "수정·삭제 줄을 운영 원문에 쓰는 동작이 스위치를 안 본다",
-    "require_attachment_ack": "첨부 ACK 요구가 스위치가 아니라 인자 기본값이다",
-    "revision_reader_ready": "revision reader 가 스위치와 무관하게 늘 돈다",
-}
-
-
-@pytest.mark.parametrize(
-    "flag",
-    [
-        pytest.param(
-            name,
-            marks=pytest.mark.xfail(strict=True, reason=UNWIRED[name])
-            if name in UNWIRED
-            else (),
-        )
-        for name in REQUIRED_PRODUCTION_FLAGS
-    ],
-)
+@pytest.mark.parametrize("flag", REQUIRED_PRODUCTION_FLAGS)
 def test_every_required_production_flag_is_read_by_runtime_code(flag: str) -> None:
     """필수 조건이면 **꺼져 있을 때 달라지는 것**이 있어야 한다.
 
@@ -161,10 +146,17 @@ def test_a_call_argument_counts_as_a_reader() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="세 결말이 PARTIAL 하나로 모이고 사유는 문장까지 오지 못한다",
-)
+def test_unenforced_flags_are_not_required_again() -> None:
+    """불변식으로 옮긴 것은 **필수 스위치로 돌아오지 않는다.**
+
+    돌아오면 같은 일이 반복된다 — 체크가 보증으로 읽히는데 보증하는 코드는 없고,
+    그 사이 진짜 불변식은 아무도 시험하지 않는다. 동작은
+    `tests/test_archive_invariants.py` 가 지킨다.
+    """
+    assert set(UNENFORCED_FLAGS) == {"preserve_edit_delete", "revision_reader_ready"}
+    assert not set(UNENFORCED_FLAGS) & set(REQUIRED_PRODUCTION_FLAGS)
+
+
 def test_attachment_outcomes_are_told_apart() -> None:
     """「변환 중」·「변환 불가」·「원본 저장 실패」 는 **다른 말**이어야 한다.
 
@@ -182,31 +174,42 @@ def test_attachment_outcomes_are_told_apart() -> None:
     `ingest_ack.read()` 의 SELECT 에 그 열이 아예 없어서 문장을 만드는 쪽까지
     오지 못한다. 그래서 세 문장이 글자 하나까지 같다.
     """
-    # `archiving_bot.ingest_message` 가 세 경우에 실제로 남기는 것. 사유는
-    # `error_code` 로 표에 들어가지만 **상태와 숫자는 똑같다.**
     recorded = {
-        "attachment-not-searchable": IngestProgress(IngestState.PARTIAL, 1, 0),
-        "attachment-unsupported": IngestProgress(IngestState.PARTIAL, 1, 0),
-        "attachment-original-missing": IngestProgress(IngestState.PARTIAL, 1, 0),
+        code: IngestProgress(IngestState.PARTIAL, 1, 0, code)
+        for code in (
+            ATTACHMENT_PENDING_CODE,
+            ATTACHMENT_PARTIAL_CODE,
+            ATTACHMENT_UNSUPPORTED_CODE,
+            ATTACHMENT_SCREENED_CODE,
+            ATTACHMENT_ORIGINAL_MISSING_CODE,
+        )
     }
     claims = {
         cause: searchable_claim(progress, require_ack=True)
         for cause, progress in recorded.items()
     }
 
-    assert len(set(claims.values())) == 3, (
-        "첨부 결말 세 가지가 같은 문장으로 나옵니다: "
+    assert len(set(claims.values())) == len(recorded), (
+        "첨부 결말이 같은 문장으로 나옵니다: "
         f"{sorted(set(claims.values()))}. 사유는 {sorted(claims)} 로 나뉘는데 "
-        "문장은 하나입니다 — 기다리면 되는 것과 기다려도 안 되는 것과 원본을 "
+        "문장이 모자랍니다 — 기다리면 되는 것과 기다려도 안 되는 것과 원본을 "
         "잃은 것이 구분되지 않습니다."
     )
+    # 「아직」 은 기다리면 된다는 약속이다. 끝난 것에는 쓰지 않는다.
+    assert "아직" not in claims[ATTACHMENT_UNSUPPORTED_CODE]
+    assert "아직" not in claims[ATTACHMENT_SCREENED_CODE]
+    assert "다시 올려" in claims[ATTACHMENT_ORIGINAL_MISSING_CODE]
 
 
-def test_the_claim_cannot_see_why_it_is_partial() -> None:
-    """위 시험이 왜 실패하는지를 못 박는다.
+def test_the_claim_can_see_why_it_is_partial() -> None:
+    """문장을 만드는 입력이 **사유를 들고 있어야** 한다.
 
-    문장을 만드는 입력(`IngestProgress`)에 사유가 **없다.** 호출부에서 고칠 수
-    있는 문제가 아니라 자료 구조의 문제다 — 사유를 실어 나르지 않으면 어느
-    호출부도 구분해 말할 수 없다.
+    호출부에서 고칠 수 있는 문제가 아니었다 — 자료 구조에 자리가 없으면 어느
+    호출부도 구분해 말할 수 없다. 이 칸이 사라지면 결말들이 다시 한 문장으로
+    모인다.
     """
-    assert not hasattr(IngestProgress(IngestState.PARTIAL), "error_code")
+    assert IngestProgress(IngestState.PARTIAL).error_code == ""
+    assert (
+        IngestProgress(IngestState.PARTIAL, 1, 0, ATTACHMENT_UNSUPPORTED_CODE).error_code
+        == ATTACHMENT_UNSUPPORTED_CODE
+    )

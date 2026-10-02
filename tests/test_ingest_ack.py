@@ -82,6 +82,9 @@ def _row(state: str, total: int = 0, ready: int = 0, written_to: str = "shadow")
         "attachment_total": total,
         "attachment_ready": ready,
         "written_to": written_to,
+        # 표에 처음부터 있던 칸. `read`·`_write` 가 2026-10-02 부터 함께 읽는다 —
+        # 사유가 없으면 첨부 결말을 구분해 말할 수 없다.
+        "error_code": "",
     }
 
 
@@ -170,6 +173,35 @@ def test_the_same_state_with_more_attachments_does_write(db):
     )
 
     assert cur.saved[0]["ready"] == 2
+
+
+def test_the_same_state_with_a_new_reason_does_write(db):
+    """변환이 끝나면 같은 `partial` 안에서 **사유만** 바뀐다.
+
+    `attachment-pending` → `attachment-unsupported` 는 상태도 숫자도 그대로다.
+    사유를 비교에서 빼면 이 변화가 재전달로 보여 조용히 버려지고, 사람은 끝난
+    일을 계속 「아직」 으로 듣는다.
+    """
+    cur = db([_row("partial", 1, 0) | {"error_code": "attachment-pending"}])
+
+    _advance(
+        target=IngestState.PARTIAL, attachment_total=1, attachment_ready=0,
+        error_code="attachment-unsupported",
+    )
+
+    assert cur.saved[0]["error_code"] == "attachment-unsupported"
+
+
+def test_the_same_state_with_the_same_reason_stays_quiet(db):
+    """재전달은 오류가 아니다. 같은 사실이면 아무것도 쓰지 않는다."""
+    cur = db([_row("partial", 1, 0) | {"error_code": "attachment-pending"}])
+
+    _advance(
+        target=IngestState.PARTIAL, attachment_total=1, attachment_ready=0,
+        error_code="attachment-pending",
+    )
+
+    assert cur.saved == []
 
 
 def test_ready_is_refused_while_attachments_are_pending(db):
