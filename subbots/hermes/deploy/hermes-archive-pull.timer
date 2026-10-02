@@ -1,0 +1,13 @@
+[Unit]
+Description=Hermes 자료 저장소 동기화 타이머 (15분마다)
+
+[Timer]
+# 부팅 후 5분 뒤 첫 실행, 그 뒤 15분 간격.
+OnBootSec=5min
+OnUnitActiveSec=15min
+# VM 이 꺼져 있던 동안 놓친 실행은 켜지자마자 한 번 보충한다.
+Persistent=true
+Unit=hermes-archive-pull.service
+
+[Install]
+WantedBy=timers.target

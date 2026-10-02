@@ -1,0 +1,82 @@
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Claude Code local settings (per-user)
+.claude/settings.local.json
+
+# Node / scripts
+node_modules/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.python-version
+
+# Secrets — 토큰/키는 저장소 안에 두지 않는다 (보관 위치: ~/.claude/.env.notion 등)
+.env
+.env.*
+.env.local
+# 경로가 어긋나 만들어진 사본까지 잡는다 (예: srchermes.env).
+# `.env` 규칙은 정확히 그 이름만 막아서, 이런 파일은 그대로 커밋될 뻔했다.
+*.env
+*.key
+*.pem
+*.token
+secrets/
+
+# 단, 값이 비어 있는 예시 파일은 커밋한다 (.env.* 규칙의 예외)
+!**/.env.example
+
+# Hermes 실행 로그 (슬랙 대화 내용이 섞일 수 있음 — 커밋 금지)
+logs/
+
+# 자동 반영 임시 파일. 지금은 저장소 밖(os.tmpdir())에 쓰지만, 예전 자리에 남아 있는
+# 조각이 커밋되지 않게 막아 둔다 — 한 조각만 남아도 다음 날 syncBeforeWork 가 멈춘다.
+.ingest-tmp/
+
+# 원자적 쓰기의 중간 파일(`*.tmp`)과 07:00 결정 기록·archive-run 잠금은
+# **자료 저장소**에 쓰인다. 그쪽 .gitignore 가 막는다 — 여기서 막을 것이 없다.
+
+# 07:00 할 일을 「이 PC 에서 사람이 보고 정했다」는 기록 (archive-inbox 의 decide_work.py).
+# 저장소에 넣지 않는다 — VM·다른 PC 의 기록과 섞이면 「여기서 사람이 봤다」는 뜻이 사라진다
+# (문서 쪽 `.review-stamp.json` 과 같은 이유). 「빼·나중에」는 판단이라 저장소에 남고
+# (`.sync-state.json`), 이 파일에는 승인과 편집 뒤 해시만 있다.
+
+# 「지금 이 PC 에서 archive-run 한 바퀴가 돌고 있다」는 표시 (archive-run 의 board.py).
+# 저장소에 넣지 않는다 — 잠금은 이 기계에서 동시에 두 세션이 도는 것을 막으려는 것이고,
+# push 되면 다른 PC·VM 이 남의 pid 를 보고 「돌고 있다」고 읽는다. 반대로 여기서 푼 잠금이
+# 저장소를 통해 되살아나기도 한다. `.decision-stamp.json` 과 같은 이유다.
+
+# Temp / work
+.playwright-mcp/
+
+# Skill cache
+.cache/
+
+
+# gmail-triage 작업 산출물 (메일 메타데이터 포함 — 커밋 금지)
+tmp-triage/
+tmp-triage-*/
+.claude/skills/*/scripts/__pycache__/
+
+# 문서 아카이브의 바이너리 화이트리스트도 **자료 저장소**에 있다.
+# 두 저장소의 규칙이 맞는지는 `scripts/check-gitignore.js` 가 함께 본다
+# (`npm run check` 의 [1/6] 에 붙어 있어 손보는 사람이 자동으로 돌린다).
+
+# 격리 작업공간 — 저장소에 담지 않는다.
+# .claude/worktrees/ 는 하네스가 만드는 워크트리(같은 저장소의 다른 체크아웃)이고,
+# .superpowers/ 는 작업 진행 원장·검토 꾸러미라 둘 다 산출물이 아니다.
+.claude/worktrees/
+.superpowers/
+
+# 설치 마법사 진행 상황 (Task 7)
+.hermes-install.json

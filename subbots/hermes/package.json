@@ -1,0 +1,35 @@
+{
+  "name": "hermes",
+  "version": "1.0.0",
+  "description": "팀 Slack 에이전트 — 아카이브 기반 Q&A + 일일/주간 요약",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node scripts/check-setup.js",
+    "doctor": "node --no-deprecation scripts/check-prereqs.js",
+    "deployed": "node scripts/check-deployed.js",
+    "init-archive": "node scripts/init-archive.js",
+    "ask": "node scripts/run-ask.js",
+    "backfill": "node scripts/run-backfill.js",
+    "digest:daily": "node scripts/run-digest.js daily",
+    "digest:weekly": "node scripts/run-digest.js weekly",
+    "health": "node scripts/run-health.js",
+    "ingest": "node scripts/run-ingest.js",
+    "log:render": "node scripts/run-log-render.js",
+    "log:measure": "node scripts/run-log-measure.js",
+    "check:offline": "node scripts/check-setup.js --offline",
+    "check:archive": "node scripts/check-setup.js --archive",
+    "check:live": "node scripts/check-setup.js --live"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@slack/bolt": "^5.0.0",
+    "@slack/web-api": "^8.0.0",
+    "dotenv": "^17.4.2",
+    "node-cron": "^4.6.0"
+  }
+}

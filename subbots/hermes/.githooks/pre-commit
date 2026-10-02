@@ -1,0 +1,479 @@
+#!/bin/sh
+# 관문 셋 — 서로 **별개**다.
+#
+#   doc-archive 7.5   : 커밋에 담긴 문서 md 가 건별 점검표를 거쳤나
+#   archive-inbox     : 커밋에 담긴 채널 md 의 요약 자리가 화면에 보인 내용으로 도장을 찍었나
+#   slack-sync 계약   : 커밋에 담긴 채널 md 가 봇이 파싱할 수 있는 모양인가
+#
+# 셋째는 2026-08-12 에 붙였다. 그전까지 **대화 md 의 파싱 계약에는 강제 지점이 없었다** —
+# 문서 md 는 VM 반영 관문·7.5 표·이 훅 셋이 보는데, 대화 md 는 09:00 위생 점검이
+# 「보고」만 했다. 그래서 insert_messages·apply_edits·sync_index 로 고치다 헤더 모양을
+# 깨면 아무것도 안 막았고, 증상은 **에러 없이 검색 0건**이라 빨라야 다음 날 아침에 드러났다.
+# (VM 의 대화 자동 반영 관문에는 넣지 않았다 — WHK 결정. 대화 반영이 통째로 롤백되는
+# 자리를 늘리지 않는다.)
+#
+# 기록·집행·판정이 따로이고, 여기서만 한 파일을 공유한다 (git 이 pre-commit 을 하나만
+# 읽어서). `exec` 를 쓰지 않는다 — 그러면 뒤 검사가 아예 안 돌고, 그 고장은 에러 없이
+# 「커밋이 통과한다」는 모양으로만 드러난다. 둘 다 돌려서 실패를 모아 알린다.
+#
+# ── 이 파일은 저장소에 들어간다 (2026-08-12 부터) ──
+#
+# 전에는 `.git/hooks/pre-commit` 에만 있었다. git 은 훅을 복제하지 않으므로 새 PC 에서
+# 클론하면 사라졌고, 그런데도 문서 네 곳이 「점검을 건너뛰면 커밋이 막힌다」고 적고
+# 있었다 — 받는 사람에게 그 문장은 거짓이었다. 켜는 것은 한 줄인데, **거는 값은 아래
+# 「훅은 코드 저장소에 있고」 절을 따른다** — 상대경로 `.githooks` 는 코드 저장소에서만
+# 맞고, 자료 저장소에 그렇게 걸면 아무 훅도 안 켜지면서 돌던 관문까지 꺼진다.
+#
+# **거는 것은 사람이다.** 기계마다 절대경로라 저장소에 안 실리고, 새 PC 에서는 다시 건다
+# (`archive-run` 상황판이 걸 값을 `켜기:` 줄로 낸다). **VM 은 걸지 않는다** — 대화 자동 반영
+# 커밋은 이 검사와 무관해야 한다(의도한 것). 끄려면 `git config --unset core.hooksPath`.
+#
+# ── 훅은 코드 저장소에 있고, 커밋은 자료 저장소에서 일어난다 (2026-08-31 부터) ──
+#
+# 자료 저장소에서 이렇게 걸어 둔다:
+#
+#     git -C <자료저장소> config core.hooksPath <코드저장소>/.githooks
+#
+# 그래서 자리가 둘로 갈린다 — **관문 스크립트는 이 파일 옆(코드 저장소)에서 찾고,
+# git 은 커밋되는 저장소(자료)에서 돌린다.** 전에는 둘 다 `git rev-parse --show-toplevel`
+# 뒤의 상대경로였는데, 그러면 자료 저장소에는 `.claude/skills/` 가 없어서 아래 `-f` 검사가
+# 전부 어긋나고 **훅이 조용히 통과한다** — 걸려 있는데 아무것도 안 막는 상태다.
+#
+# `cd` 하기 **전에** 이 파일의 위치를 잡는다. hooksPath 가 상대경로(`.githooks`)면
+# git 이 저장소 뿌리에서 부르므로 그때의 `$0` 이 기준이다.
+#
+# ── 관문 스크립트가 없으면 그 관문은 안 돈다 ──
+#
+# 스킬을 일부만 가져간 저장소에서 훅이 남의 커밋을 전부 막지 않게 하려는 것이다.
+#
+# **임포트 사슬 끝까지 확인한다.** 하나라도 없으면 ImportError 로 죽고, 그 종료코드 1 은
+# 「관문 위반」과 구별되지 않는다 — 그 저장소의 **모든** 커밋이 파이썬 트레이스백과 함께
+# 막힌다. 2026-08-12 까지 이 목록은 한 겹 얕았다(직계만 봤다):
+#
+#   review_batch.py  → _shared/paths · fetch_slack_files · verify_format
+#   review_work.py   → _shared/paths · sync_index → insert_messages · fetch_slack_files
+#   verify_archive.py → _shared/paths · sync_index → insert_messages
+#
+# `_shared/paths.py` 는 2026-08-31(과제 4)에 붙었다 — 위 셋이 전부 임포트하므로 공통이다.
+#
+# 되살리려면:
+#   python <코드저장소>/.claude/skills/doc-archive/scripts/review_batch.py
+#   python <코드저장소>/.claude/skills/archive-inbox/scripts/review_work.py
+
+HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+CODE_ROOT=$(CDPATH= cd -- "$HOOK_DIR/.." && pwd) || exit 1
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+SK="$CODE_ROOT/.claude/skills"
+DOC="$SK/doc-archive/scripts/review_batch.py"
+INBOX="$SK/archive-inbox/scripts/review_work.py"
+ARCHIVE="$SK/slack-sync/scripts/verify_archive.py"
+DEP_PATHS="$SK/_shared/paths.py"
+DEP_SYNC="$SK/slack-sync/scripts/sync_index.py"
+DEP_INSERT="$SK/slack-sync/scripts/insert_messages.py"
+DEP_FETCH="$SK/doc-archive/scripts/fetch_slack_files.py"
+DEP_VERIFY="$SK/doc-archive/scripts/verify_format.py"
+GATE_TEST="$HOOK_DIR/test-push-gate.sh"
+
+# `set -u` 를 안 쓰는 파일이지만, 이 변수는 **없을 때가 정상**이라 빈 값으로 못 박아 둔다.
+# 아래에서 `[ -z "$HERMES_GATE_TEST_RUNNING" ]` 로 재귀를 막는데, 셸에 따라 안 정해진
+# 변수의 비교가 어긋나면 그 방어가 조용히 사라진다.
+HERMES_GATE_TEST_RUNNING="${HERMES_GATE_TEST_RUNNING:-}"
+
+fail=0
+
+run_doc=0
+run_inbox=0
+run_archive=0
+if [ -f "$DEP_PATHS" ]; then
+  [ -f "$DOC" ] && [ -f "$DEP_FETCH" ] && [ -f "$DEP_VERIFY" ] && run_doc=1
+  [ -f "$INBOX" ] && [ -f "$DEP_SYNC" ] && [ -f "$DEP_INSERT" ] && [ -f "$DEP_FETCH" ] && run_inbox=1
+  [ -f "$ARCHIVE" ] && [ -f "$DEP_SYNC" ] && [ -f "$DEP_INSERT" ] && run_archive=1
+fi
+
+# 다섯째 관문의 방아쇠도 파일 존재가 아니라 **커밋 내용**이다 (2026-09-01, Task 5 fix
+# round 1) — deploy/setup.sh 나 deploy/test-setup-guard.sh 가 이 커밋에 담겼을 때만
+# 돈다. 평소 커밋은 이 검사를 거치지 않으므로 0초다.
+run_setup=0
+if [ -n "$(git -c core.quotepath=false diff --cached --name-only -- \
+    'deploy/setup.sh' 'deploy/test-setup-guard.sh')" ]; then
+  run_setup=1
+fi
+
+# ── 여섯째: 다른 저장소가 워크스페이스를 가리키나 (2026-09-05, WHK 「무조건 막아야 함」) ──
+#
+# 이 저장소들은 팀이 나눠 쓴다. 워크스페이스 경로는 팀이 못 열고, 자료 저장소의
+# `slack-export/index.md` 는 **봇 시스템 프롬프트에 전문이 실린다**(src/archive.js 의 buildArchiveBrief).
+#
+# **`npm run check` 에만 두면 「무조건」이 아니다** — 사람이 쳐야 돈다. 그래서 여기 건다.
+# 방아쇠는 커밋 내용이다: md 가 담긴 커밋만 돈다. 평소 소스 커밋은 0초다.
+#
+# **이 훅은 두 저장소에서 돈다** — 자료 저장소의 core.hooksPath 가 이 폴더를 가리킨다.
+# 검사는 어느 쪽에서 불려도 **두 저장소를 다 본다.** 그래서 자료 저장소 커밋이 코드
+# 저장소의 위반 때문에 막힐 수 있다 — 시끄럽지만 맞다. 둘 다 같은 사람이 고친다.
+#
+# **검사는 작업 트리를 본다.** 스테이징 판과 갈리는 좁은 틈이 있다 — 막힌 사람이 파일을
+# 고치고 git add 를 잊은 채 다시 커밋하면, 검사는 깨끗한 디스크를 보고 통과시키지만
+# 커밋에는 위반 판이 그대로 들어간다. 채널 md 관문이 `--from-index` 로 옮겨간 것과 같은
+# 함정이며(198행 근처 주석 참조), 여기는 옮기지 않고 차단 메시지로 안내한다.
+run_stale=0
+if [ -n "$(git -c core.quotepath=false diff --cached --name-only -- '*.md')" ]; then
+  run_stale=1
+fi
+
+# ── 일곱째: 색인 계기판 (2026-09-10) — 막지 않는다. documents/ 를 건드린 커밋에서
+# 바닥과 접힌 시리즈를 보여, 시리즈가 색인에서 사라지기 시작하는 것이 조용히 지나가지
+# 않게 한다. 방아쇠를 여기서 미리 재는 이유는 run_stale 과 같다 — 「이 저장소에는 관문이
+# 없다」 이른 종료 목록(아래)에 안 넣으면, documents/ 만 담기고 다른 관문은 하나도 안
+# 걸리는 저장소의 커밋이 그 목록에서 빠져나가 계기판이 한 번도 안 돈다 (2026-09-06 커밋
+# 9494156 이 run_stale 에 대해 같은 유형을 고친 전례).
+run_gauge=0
+if [ -n "$(git -c core.quotepath=false diff --cached --name-only -- 'documents/')" ]; then
+  run_gauge=1
+fi
+
+# 넷째 관문의 방아쇠는 파일이 아니라 **커밋 내용**이다 — 아래 「push 관문 시험」 절 참조.
+# 여기서 미리 재는 이유는 하나다: 이 저장소에 파이썬 관문이 하나도 없어도
+# 셸 관문 시험만은 돌아야 하는데, 그러려면 아래 「막을 것도 없다」 앞에서 알아야 한다.
+#
+# **디스크에 파일이 있나로 방아쇠를 걸면 안 된다.** 처음에 `[ -f "$GATE_TEST" ]` 를 앞에
+# 뒀더니 `git rm .githooks/test-push-gate.sh` 한 커밋이 그냥 통과했다 — 지우면 파일이
+# 사라지니 방아쇠도 함께 꺼진다. 즉 **관문을 없애는 커밋만 검사를 안 받는다.**
+# 그래서 보는 자리를 디스크에서 인덱스·HEAD 로 옮겼다.
+run_gate=0
+gate_gone=0
+if [ -z "$HERMES_GATE_TEST_RUNNING" ]; then
+  # `--diff-filter` 를 안 건다 — **지우는 것도 방아쇠다.** 기본 필터(ACMR)를 쓰면
+  # 관문이 사라지는 커밋만 조용히 빠진다.
+  # **`commit-msg` 도 방아쇠다** (2026-09-03 부터). 시험은 임시 저장소에서 `git commit` 을
+  # 쌓아 관문을 재는데, 그 커밋마다 `commit-msg` 가 함께 돈다 — 즉 그 파일이 깨지면 시험이
+  # 통째로 무너진다. 그런데 방아쇠에 없어서 `c6b4c27`(`commit-msg` 한 파일만 고침)은 이
+  # 시험을 **한 번도 안 돌렸고**, 그 커밋이 넣은 「훅이 사는 곳이 저장소가 아니면 막는다」가
+  # 시험 안의 모든 커밋을 막아 12/20 으로 무너뜨렸다. 다음 커밋에서야 드러났다.
+  # **`pre-commit`(이 파일)도 방아쇠다** (2026-09-06 추가 — 워크스페이스 `3077f98` 과 맞춤).
+  # 그 시험을 부르는 자리가 **여기**라, 호출부를 깨도 방아쇠가 안 걸리면 조용하다.
+  # 위 `commit-msg` 와 같은 부류인데 한 겹 더 나쁘다 — `commit-msg` 가 깨지면 시험이
+  # 무너져 시끄럽지만, 호출부가 깨지면 **시험이 아예 안 돌고 그것도 조용하다.**
+  # 다만 **방아쇠만 더하면 아무것도 안 잡힌다** — 잡는 것은 `test-push-gate.sh` 의
+  # 자기수정 판정(15·15.5·16번)이고, 그 15.5 가 정확히 이 한 줄을 지킨다.
+  if [ -n "$(git -c core.quotepath=false diff --cached --name-only -- \
+      '.githooks/pre-commit' '.githooks/pre-push' '.githooks/push-approve' \
+      '.githooks/test-push-gate.sh' '.githooks/commit-msg')" ]; then
+    if git ls-files --error-unmatch -- '.githooks/test-push-gate.sh' >/dev/null 2>&1; then
+      run_gate=1
+    elif git cat-file -e 'HEAD:.githooks/test-push-gate.sh' 2>/dev/null; then
+      # 있던 것이 이 커밋에서 사라진다.
+      gate_gone=1
+    fi
+    # 셋째 갈래: HEAD 에도 인덱스에도 없다 = 이 저장소는 시험을 애초에 안 가져갔다.
+    # 스킬을 일부만 가져간 곳에서 남의 커밋을 막지 않는다는 위 원칙 그대로 통과시킨다.
+  fi
+fi
+
+# 이 저장소에는 관문이 없다 — 막을 것도 없다.
+if [ "$run_doc" = 0 ] && [ "$run_inbox" = 0 ] && [ "$run_archive" = 0 ] \
+   && [ "$run_gate" = 0 ] && [ "$gate_gone" = 0 ] && [ "$run_setup" = 0 ] \
+   && [ "$run_stale" = 0 ] && [ "$run_gauge" = 0 ]; then
+  exit 0
+fi
+
+# 파이썬은 **파이썬 관문이 돌 때만** 필요하다. 셸 관문 시험만 걸린 커밋을 python 없다고
+# 막으면, 막는 이유와 막힌 대상이 서로 무관해진다.
+PY=
+if [ "$run_doc" = 1 ] || [ "$run_inbox" = 1 ] || [ "$run_archive" = 1 ]; then
+  PY=$(command -v python || command -v python3)
+  if [ -z "$PY" ]; then
+    # 조용히 통과시키지 않는다 — 관문이 꺼진 줄 모르고 커밋하는 것이 이 훅이 막으려던 것이다.
+    echo "pre-commit: python 을 찾지 못해 관문을 돌리지 못했습니다." >&2
+    echo "  PATH 를 고치거나, 이 검사를 뺄 것이면 git config --unset core.hooksPath 하세요." >&2
+    exit 1
+  fi
+fi
+
+if [ "$run_doc" = 1 ]; then
+  "$PY" "$DOC" --gate || fail=1
+fi
+if [ "$run_inbox" = 1 ]; then
+  "$PY" "$INBOX" --gate || fail=1
+fi
+
+# 채널 md 의 파싱 계약. **스테이징된 채널 md 가 있을 때만** 돈다.
+#
+# `index.md` 는 대상이 아니다 — 그 총계는 VM 의 `derive.js` 가 회차마다 다시 쓰므로,
+# 사람 커밋을 그걸로 막으면 둘이 서로 싸운다. 그래서 `--all` 이 아니라 경로를 준다.
+#
+# 헤더 건수·기간이 낡은 것도 이 검사가 낸다. 그건 파싱 계약 위반은 아니지만 **봇
+# 프롬프트에 그대로 실리는 값**이고 고치는 명령이 한 줄이라, 막는 쪽으로 뒀다.
+#
+# **채널 md 가 저장소 어디에 있는지는 `_shared/paths.py` 한 곳이 정한다.** 여기 문자열로
+# 박아 두면 자료 배치가 바뀌는 날 조용히 갈린다 — 실제로 그랬다. 2026-08-31 이사 전 경로
+# (`50-resources/slack-export/channels/*.md`)가 그대로 남아, 자료 저장소에서는 스테이징된
+# 채널 md 가 **하나도 안 걸렸고** 훅은 종료코드 0 으로 통과했다. 에러도 경고도 없었다.
+#
+# **`core.quotepath=false` 를 빠뜨리면 안 된다.** 없으면 git 이 한글 경로를
+# `"slack-export\channels\355\205\214..."` 로 감싸 내보내고, 그 문자열을
+# 그대로 넘기면 검사가 「파일 없음」을 내며 **채널 md 가 든 커밋을 전부 막는다.**
+# 이 아카이브는 파일명이 거의 다 한글이라 사실상 모든 커밋이 막힌다
+# (2026-08-12 에 별개 저장소에서 재현해 잡았다. `doc-archive` SKILL.md 11단계가 같은 함정을 적어 두었다).
+#
+# **`--from-index` 로 부른다** (2026-08-13 부터). 그 전에는 검사가 디스크(작업 트리)를 읽어서,
+# 깨진 판을 `git add` 한 뒤 작업 트리에서만 고치면 그대로 통과했다 — 커밋에는 깨진 것이
+# 들어간다. 반대로 멀쩡한 판을 담고 작업 트리를 더 고치면 잘못이 없는데 막혔다.
+# 위 두 관문은 같은 이유로 처음부터 인덱스를 본다.
+#
+# **`xargs` 를 쓰지 않는다.** xargs 는 명령이 1~125 로 끝나면 자기 종료코드를 123 으로
+# 바꿔 버려서, 「결함(1)」과 「못 읽음(2)」을 구별할 수 없다. 못 읽은 것을 결함으로 적으면
+# 사람이 엉뚱한 곳을 고치러 간다. 파일 목록은 줄바꿈으로만 갈라 한 번에 넘긴다
+# (`IFS` 를 줄바꿈으로 두면 이름에 든 공백이 안 쪼개지고, `set -f` 로 이름 속 `*` 가
+# 파일 이름으로 부풀지 않는다).
+if [ "$run_archive" = 1 ]; then
+  CH_REL=$("$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); import paths; print(paths.CHANNELS.relative_to(paths.DATA_ROOT).as_posix())" "$SK/_shared" 2>&1)
+  ch_rc=$?
+  if [ "$ch_rc" != 0 ] || [ -z "$CH_REL" ]; then
+    echo "" >&2
+    echo "커밋을 멈춥니다 — 채널 md 의 자리를 _shared/paths.py 에서 읽지 못했습니다." >&2
+    echo "  $CH_REL" >&2
+    echo "  검사를 못 한 것은 「이상 없음」이 아닙니다." >&2
+    echo "  이 검사를 뺄 것이면 git config --unset core.hooksPath 하세요." >&2
+    fail=1
+    STAGED_CH=
+  else
+    STAGED_CH=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=ACMR \
+      -- "$CH_REL/*.md")
+  fi
+  if [ -n "$STAGED_CH" ]; then
+    OLDIFS=$IFS
+    IFS='
+'
+    set -f
+    # shellcheck disable=SC2086
+    "$PY" "$ARCHIVE" --from-index $STAGED_CH
+    rc=$?
+    set +f
+    IFS=$OLDIFS
+    if [ "$rc" = 2 ]; then
+      echo "" >&2
+      echo "커밋을 멈춥니다 — 관문이 스테이징된 채널 md 를 읽지 못했습니다." >&2
+      echo "  검사를 못 한 것은 「이상 없음」이 아닙니다. 위 사유를 보고 고치세요." >&2
+      echo "  이 검사를 뺄 것이면 git config --unset core.hooksPath 하세요." >&2
+      fail=1
+    elif [ "$rc" != 0 ]; then
+      echo "" >&2
+      echo "커밋을 멈춥니다 — 채널 md 가 봇이 읽는 모양이 아닙니다." >&2
+      echo "  계약이 깨져도 에러는 안 납니다. 검색이 조용히 0건이 되고 봇은 「아카이브에 없습니다」라고 답합니다." >&2
+      echo "  검사는 **스테이징된 내용**을 봅니다 — 작업 트리에서 고쳤으면 git add 를 다시 하세요." >&2
+      echo "" >&2
+      echo "  파생값(건수·기간)이 낡은 것이면: python $DEP_SYNC --all" >&2
+      # 「수집 실패 표식」은 저 명령으로 안 지워진다 — 사람이 md 본문을 고쳐야 한다.
+      # 전에는 안내가 저 한 줄뿐이라, 돌려도 안 풀리는 것을 두고 헤매게 돼 있었다.
+      echo "  「수집 실패 표식」이면 그 구간을 채우고 md 하단의 메모 줄을 지우세요 (sync_index 로는 안 지워집니다)." >&2
+      echo "  오래 남길 기록이면 채널 md 가 아니라 slack-export/index.md 에 적으세요." >&2
+      fail=1
+    fi
+  fi
+fi
+
+# ── 넷째: push 관문 시험 (2026-08-31 부터) ────────────────────────────────
+#
+# `test-push-gate.sh` 는 2026-08-29 에 만들어졌지만 **아무 데서도 부르지 않았다** —
+# `pre-push` 안의 주석 한 줄이 부르는 법의 전부였다. 지키는 대상(승인 없이 나가는 것을
+# 막는 마지막 장치)이 조용히 고장 나면, 드러나는 자리는 **이미 팀 앞에 나간 뒤**다.
+#
+# **`npm run check` 의 `[1/6]` 에는 안 붙였다.** 그 목록은 「네트워크 없이 순식간에 끝나는
+# 것들」만 모으기로 정해져 있고(`check-setup.js` 주석), 이 시험은 임시 저장소를 12개
+# 만든다. `[1/6]` 에 붙이면 **제자리에서** 돌게 되는데 그 값이 2026-08-31 실측 **81·88초**
+# 였다(두 번 잼 · 19구간). 지금 27개가 약 65초이니 명령 하나가 2분 반이 되고, 그러면
+# 안 치게 된다 — 그게 이 항목이 막으려던 바로 그 고장이다. 그래서 방아쇠를 시간이 아니라
+# **「누가 관문을 손댔다」**로 뒀다. 평소 커밋은 0초다.
+# (`pre-commit` 자신은 방아쇠가 아니다 — 이 시험이 보는 것은 push 쪽 셋뿐이다.)
+#
+# **여기서 도는 값은 그보다 짧다 — 실측 59초.** 아래처럼 인덱스 사본을 꺼내 돌리면
+# 그 사본 옆에 `.claude/skills/` 가 없어서, 시험이 만드는 임시 저장소 안에서 이 훅이
+# 곧장 통과한다(파이썬 관문 셋이 12번 더 도는 것이 제자리 값과의 차이다).
+# **두 값을 갈라 적는 이유는 하나다** — 「81초」만 적어 두면 다음 사람이 커밋이 59초
+# 만에 끝나는 것을 보고 **시험이 안 돌았다고 읽는다.**
+#
+# ── 인덱스를 시험한다, 작업 트리가 아니라 ──
+#
+# 시험이 `$0` 옆에서 관문을 찾으므로 그냥 부르면 **디스크에 있는 판**을 재게 된다.
+# 그러면 깨진 판을 `git add` 한 뒤 작업 트리에서만 고쳐도 통과하고, 커밋에는 깨진 것이
+# 들어간다 — 위 채널 md 관문이 `--from-index` 로 옮겨 간 것과 같은 함정이다.
+# 그래서 `.githooks/` 를 **인덱스에서 통째로 꺼내** 그 사본을 돌린다. 사본을 통째로 꺼내는
+# 이유는 시험이 `pre-push`·`push-approve` 를 자기 옆에서 찾기 때문이다.
+#
+# ── 재귀를 막는다 ──
+#
+# 시험은 임시 저장소에 `core.hooksPath` 를 걸고 커밋을 쌓는다. 즉 **이 훅이 그 안에서
+# 다시 돈다.** 거기서 스테이징되는 것은 `f.txt`·`vm.txt` 뿐이라 방아쇠가 안 당겨지지만,
+# 그건 시험 파일의 사정에 기대는 것이라 언제든 바뀔 수 있다. 환경변수로 못 박는다.
+if [ "$gate_gone" = 1 ]; then
+  echo "" >&2
+  echo "커밋을 멈춥니다 — 이 커밋 뒤에는 .githooks/test-push-gate.sh 가 없습니다." >&2
+  echo "  push 관문을 고치면서 그것을 지키는 시험을 함께 지우는 커밋입니다." >&2
+  echo "  정말 걷어내는 것이면 그렇게 정한 뒤에 하세요 (git config --unset core.hooksPath)." >&2
+  fail=1
+fi
+
+if [ "$run_gate" = 1 ]; then
+  echo "push 관문을 고쳤습니다 — 시험을 돌립니다 (약 1분, 임시 저장소에서만 돕니다)."
+  GATE_TMP="${TMPDIR:-/tmp}/pre-commit-gate.$$"
+  rm -rf "$GATE_TMP"
+  mkdir -p "$GATE_TMP" || exit 1
+  # `checkout-index` 는 디렉터리 경로를 못 받는다 — `.githooks/` 를 그대로 주면
+  # `is not in the cache` 로 죽는다. 파일 목록을 `ls-files` 로 만들어 넘긴다.
+  # `-z` 로 묶어야 이름에 든 공백·한글이 안 쪼개진다.
+  git ls-files -z -- '.githooks' \
+    | git checkout-index -f -z --stdin --prefix="$GATE_TMP/" 2>&1
+  ci_rc=$?
+  # **꺼낸 폴더를 git 저장소로 만든다.** 안 만들면 그 안의 `.githooks` 는 「저장소 밖에 사는
+  # 훅」이 되고, `commit-msg` 가 그 상태를 「재지 못함」으로 보아 **막는다**(`c6b4c27` 이
+  # 일부러 그렇게 정했다). 그러면 시험이 임시 저장소에 커밋을 못 쌓아 12/20 으로 무너진다 —
+  # 관문이 고장난 것이 아닌데 고장났다고 말하는, 가장 나쁜 모양의 거짓 실패다.
+  # 저장소로 만들어 두면 「훅이 사는 저장소 ≠ 커밋하는 저장소」가 되어 그 검사는 해당 없음이
+  # 되고, 재려던 push 관문만 남는다 (2026-09-03, 12/20 → 19/19 로 실측).
+  git init -q "$GATE_TMP" 2>/dev/null
+  if [ "$ci_rc" != 0 ] || [ ! -f "$GATE_TMP/.githooks/test-push-gate.sh" ]; then
+    echo "" >&2
+    echo "커밋을 멈춥니다 — 인덱스에서 .githooks/ 를 꺼내지 못했습니다." >&2
+    echo "  검사를 못 한 것은 「이상 없음」이 아닙니다." >&2
+    fail=1
+  else
+    HERMES_GATE_TEST_RUNNING=1 sh "$GATE_TMP/.githooks/test-push-gate.sh" || {
+      echo "" >&2
+      echo "커밋을 멈춥니다 — push 관문 시험이 실패했습니다." >&2
+      echo "  이 관문이 막는 것은 「승인 안 받은 커밋이 함께 나가는 것」입니다." >&2
+      echo "  고장나도 에러가 안 납니다 — push 가 그냥 통과하고, 드러나는 자리는 나간 뒤입니다." >&2
+      echo "  시험은 **스테이징된 판**을 봅니다 — 작업 트리에서 고쳤으면 git add 를 다시 하세요." >&2
+      echo "  손으로 돌리려면: sh .githooks/test-push-gate.sh" >&2
+      fail=1
+    }
+  fi
+  rm -rf "$GATE_TMP"
+fi
+
+# ── 다섯째: setup.sh 빈-자료-저장소 가드 시험 (2026-09-01, Task 5 fix round 1) ──
+#
+# deploy/setup.sh 또는 deploy/test-setup-guard.sh 가 이 커밋에 담겼을 때만 돈다.
+# 위 채널 md·push 관문 시험과 같은 이유로 작업 트리가 아니라 **인덱스**에서 deploy/ 를
+# 통째로 꺼내 그 사본을 돌린다 — 시험이 setup.sh 를 자기 옆(같은 폴더)에서 찾으므로
+# 함께 꺼내야 한다. 깨진 판을 git add 한 뒤 작업 트리에서만 고치면 통과해 버리는 함정을
+# 피한다.
+if [ "$run_setup" = 1 ]; then
+  SETUP_TMP="${TMPDIR:-/tmp}/pre-commit-setup.$$"
+  rm -rf "$SETUP_TMP"
+  mkdir -p "$SETUP_TMP" || exit 1
+  git ls-files -z -- 'deploy' \
+    | git checkout-index -f -z --stdin --prefix="$SETUP_TMP/" 2>&1
+  ci_rc=$?
+  if [ "$ci_rc" != 0 ] || [ ! -f "$SETUP_TMP/deploy/test-setup-guard.sh" ]; then
+    echo "" >&2
+    echo "커밋을 멈춥니다 — 인덱스에서 deploy/ 를 꺼내지 못했습니다." >&2
+    echo "  검사를 못 한 것은 「이상 없음」이 아닙니다." >&2
+    fail=1
+  else
+    sh "$SETUP_TMP/deploy/test-setup-guard.sh" || {
+      echo "" >&2
+      echo "커밋을 멈춥니다 — setup.sh 의 빈-자료-저장소 가드 시험이 실패했습니다." >&2
+      echo "  check_data_ready() 가 없거나, setup.sh 가 자료 복제 뒤 그것을 부르지 않습니다." >&2
+      echo "  시험은 **스테이징된 판**을 봅니다 — 작업 트리에서 고쳤으면 git add 를 다시 하세요." >&2
+      echo "  손으로 돌리려면: sh deploy/test-setup-guard.sh" >&2
+      fail=1
+    }
+  fi
+  rm -rf "$SETUP_TMP"
+fi
+
+if [ "$run_stale" = 1 ]; then
+  NODE=$(command -v node || command -v node.exe)
+  if [ -z "$NODE" ]; then
+    echo "" >&2
+    echo "커밋을 멈춥니다 — node 를 찾지 못해 경로 검사를 못 돌렸습니다." >&2
+    echo "  검사를 못 한 것은 「이상 없음」이 아닙니다." >&2
+    echo "  손으로 돌리려면: node \"$CODE_ROOT/scripts/check-stale-paths.js\"" >&2
+    echo "  PATH 를 고치거나, 이 검사를 뺄 것이면 git config --unset core.hooksPath 하세요." >&2
+    fail=1
+  else
+    STALE_OUT="${TMPDIR:-/tmp}/stale-paths.$$"
+    if "$NODE" "$CODE_ROOT/scripts/check-stale-paths.js" >"$STALE_OUT" 2>&1; then
+      :
+    else
+      echo "" >&2
+      # 종료코드 1 이 나는 사유가 갈린다 — 위반이 있어서인지, 검사 자체를 못 돌려서인지
+      # (스킬 폴더를 못 읽음·자료 저장소를 못 찾음 등). 하나로 뭉쳐 「워크스페이스를
+      # 가리킵니다」라고만 하면 후자인 사람이 위반을 찾으러 간다. `check-stale-paths.js`
+      # 는 위반이 있을 때만 마지막 줄에 "낡았습니다" 를 찍는다 — 그 표식으로 가른다.
+      # (처음엔 준비 실패도 그 배너를 찍어 오분류됐다 — 2026-09-06 에 검사 쪽을 갈라
+      # 찍게 고쳐 참이 됐다. `found` 카운터가 실제 위반 적중에서만 올라간다.)
+      # **`LC_ALL=C` 를 빠뜨리면 이 grep 이 한글에 거짓 0건을 낸다** — 실제 위반도
+      # 「돌리지 못했습니다」로 잘못 분류된다.
+      if LC_ALL=C grep -q "낡았습니다" "$STALE_OUT"; then
+        echo "커밋을 멈춥니다 — 이 저장소가 워크스페이스를 가리킵니다." >&2
+        cat "$STALE_OUT" >&2
+        echo "" >&2
+        echo "  이 저장소들은 팀이 나눠 씁니다. 팀은 그 경로를 못 열고," >&2
+        echo "  slack-export/index.md 는 봇 시스템 프롬프트에 전문이 실립니다." >&2
+        echo "  경로 문자열 대신 말로 적으세요 (예: 「워크스페이스 할 일 파일」)." >&2
+        echo "  이 검사는 디스크의 판을 봅니다 — 고친 뒤 git add 를 다시 해야 커밋에 담깁니다." >&2
+      else
+        echo "커밋을 멈춥니다 — 경로 검사를 돌리지 못했습니다." >&2
+        cat "$STALE_OUT" >&2
+        echo "" >&2
+        echo "  검사를 못 한 것은 「이상 없음」이 아닙니다. 위 출력이 원인을 말합니다." >&2
+        echo "  손으로 돌리려면: node \"$CODE_ROOT/scripts/check-stale-paths.js\"" >&2
+      fi
+      fail=1
+    fi
+    rm -f "$STALE_OUT"
+  fi
+fi
+
+# 색인 계기판 실행 (방아쇠 run_gauge 는 위에서 미리 쟀다). node 나 스크립트가 없으면
+# 안 돈다 (다른 관문과 같은 규약 — 남의 저장소 커밋을 안 막는다).
+if [ "$run_gauge" = 1 ] && [ -f "$CODE_ROOT/scripts/floor-gauge.js" ]; then
+  NODE_G=$(command -v node || command -v node.exe)
+  if [ -n "$NODE_G" ]; then
+    echo "── 색인 계기판 ──"
+    "$NODE_G" "$CODE_ROOT/scripts/floor-gauge.js" || echo "  (계기판 실행 실패 — 커밋은 막지 않습니다. npm run check 로 확인하세요)"
+  fi
+fi
+
+# ── 여섯째: 스테이징된 **파일 본문**에 사업장·비공개 채널 이름이 들었나 (2026-09-06) ──
+#
+# `check-business-names.js` 의 파일 훑기는 **`npm run check` 에서만 돌았다.** 커밋 관문은
+# `commit-msg` 가 **메시지만** 봤다. 그래서 파일 본문에 이름을 쓴 커밋은 아무것도 안 막았다.
+#
+# 2026-09-06 에 실제로 뚫렸다 — 스킬 문서 본문에 비공개 채널 이름을 적었는데, 잡아 준 것은
+# 이 검사가 아니라 **커밋 메시지 쪽에 같은 이름이 우연히 함께 들어간 것**뿐이었다.
+# 메시지에만 안 썼으면 그대로 커밋되고 push 됐다.
+#
+# 대는 것은 **인덱스**다 (위 셋째·넷째·다섯째와 같은 규칙). 그리고 `commit-msg` 와 같은
+# 이유로 **훅이 사는 저장소와 커밋하는 저장소가 같을 때만** 잰다 — 자료 저장소는 배포용이
+# 아니고 사업장 이름이 자료 그 자체라, 그대로 두면 정당한 커밋이 전부 막힌다.
+HOOK_REPO_N="$(git -C "$CODE_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+COMMITTING_IN_N="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$HOOK_REPO_N" ]; then
+  echo "" >&2
+  echo "커밋을 멈춥니다 — 훅이 사는 곳이 git 저장소가 아니라 이름 검사를 **재지 못했습니다** ($CODE_ROOT)" >&2
+  fail=1
+elif [ -n "$COMMITTING_IN_N" ] && [ "$COMMITTING_IN_N" != "$HOOK_REPO_N" ]; then
+  echo "  - 파일 본문 이름 검사: 이 저장소는 배포용이 아니라 해당 없습니다 (훅은 $HOOK_REPO_N 것)"
+else
+  NODE_N=$(command -v node || command -v node.exe)
+  CHECK_N="$CODE_ROOT/scripts/check-business-names.js"
+  if [ ! -f "$CHECK_N" ]; then
+    # 관문 스크립트가 없는 저장소에서는 아무것도 안 하고 통과한다 — 스킬을 일부만 가져간
+    # 곳에서 남의 커밋을 전부 막지 않으려는 것이다 (위 관문들과 같은 규칙).
+    :
+  elif [ -z "$NODE_N" ]; then
+    echo "" >&2
+    echo "커밋을 멈춥니다 — node 를 찾지 못해 파일 본문 이름 검사를 못 돌렸습니다." >&2
+    echo "  재지 못한 것은 「이름이 없다」가 아닙니다." >&2
+    echo "  손으로 돌리려면: node \"$CHECK_N\" --스테이징" >&2
+    fail=1
+  else
+    "$NODE_N" "$CHECK_N" --스테이징 || fail=1
+  fi
+fi
+
+exit $fail
