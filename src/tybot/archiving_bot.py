@@ -378,10 +378,21 @@ class ShadowCollector:
             # 결말 판정은 `attachment_ack.classify` 한 곳이 한다. 변환 완료 뒤
             # 갱신하는 경로(`ack_reconcile`)도 같은 함수를 쓴다 — 규칙이 두 벌이면
             # 들어온 길에 따라 다른 말이 나간다.
+            # **둘 다 참이어야 보관이다.**
+            #
+            # `ARCHIVE_DONE` 은 「첨부 참조 줄이 원문에 들어갔나」 다. 들어갔다고
+            # 원본 바이트가 남은 것은 아니다 — digest 는 쓰기 **전에** 계산되므로
+            # 원본 쓰기가 실패해도 참조 줄과 정본은 나온다. 둘을 같은 것으로 보면
+            # 없는 원본을 있다고 세고, 그 메시지가 `ready` 가 된다.
             outcome = attachment_ack.classify(
                 [item.file_id for item in staged],
                 stored={
-                    item.file_id: archive_states.get(item.file_id) == ARCHIVE_DONE
+                    item.file_id: (
+                        archive_states.get(item.file_id) == ARCHIVE_DONE
+                        and attachment_ack.retained_from_metadata(
+                            getattr(item, "metadata_path", None)
+                        ) is True
+                    )
                     for item in staged
                 },
                 conversion={doc.file_id: doc.conversion_state for doc in canonical_docs},

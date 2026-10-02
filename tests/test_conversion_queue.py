@@ -15,6 +15,7 @@ import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -494,46 +495,47 @@ def test_separated_reconversion_writes_only_the_canonical_document(tmp_path, mon
 def test_successful_retries_reconcile_the_message_ack_from_canonical_files(
     tmp_path, monkeypatch
 ):
-    from types import SimpleNamespace
+    """판정은 `ack_reconcile` 이 한다. 여기서 셈을 다시 쓰지 않는다.
+
+    전에는 이 자리가 **정본 개수만** 세었다. 그래서 미지원·변환 실패 정본도
+    「준비됨」 으로 세어졌고, 원본 바이트가 보관됐는지는 아예 보지 않았다.
+    """
+    import json
 
     import drain_conversion_queue as drain
 
-    from tybot.archive import attachment_reader, ingest_ack
+    from tybot.archive import ack_reconcile, ingest_ack
     from tybot.archive.archiving_state import IngestProgress, IngestState
 
-    docs = {
-        tmp_path / "F1.md": SimpleNamespace(
-            workspace="pilot",
-            channel_id="C1",
-            message_ts="1.0001",
-            conversion_state="succeeded",
-            text="첫 문서",
-        ),
-        tmp_path / "F2.md": SimpleNamespace(
-            workspace="pilot",
-            channel_id="C1",
-            message_ts="1.0001",
-            conversion_state="succeeded",
-            text="둘째 문서",
-        ),
-        tmp_path / "other.md": SimpleNamespace(
-            workspace="other",
-            channel_id="C1",
-            message_ts="1.0001",
-            conversion_state="succeeded",
-            text="다른 워크스페이스",
-        ),
-    }
-    monkeypatch.setattr(attachment_reader, "source_files", lambda root: list(docs))
+    # 이 잡이 돌린 아카이브가 **어느 쪽인지** 환경이 말해 준다. 모르면 다시
+    # 세지 않는다(`--archive` 로 임의 경로를 받을 수 있기 때문이다).
+    monkeypatch.setenv("ARCHIVER_SHADOW_DIR", str(tmp_path))
+    monkeypatch.delenv("ARCHIVE_DIR", raising=False)
+
+    channel = tmp_path / "pilot" / "C1__팀-전산-공지"
+    docs = {}
+    for file_id in ("F1", "F2"):
+        canonical = channel / "attachments" / file_id / "r1.md"
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_text("정본", encoding="utf-8")
+        meta = channel / "staging" / file_id / "metadata.json"
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text(json.dumps({"original_state": "retained"}), encoding="utf-8")
+        docs[file_id] = SimpleNamespace(
+            workspace="pilot", channel_id="C1", message_ts="1.0001", file_id=file_id,
+            conversion_state="succeeded", text=f"{file_id} 본문", source_path=canonical,
+        )
+
     monkeypatch.setattr(
-        attachment_reader, "load_checked", lambda path, root: docs[path]
+        ack_reconcile, "docs_by_message",
+        lambda root: {("pilot", "C1", "1.0001"): list(docs.values())},
     )
-    monkeypatch.setattr(attachment_reader, "current_by_file", lambda loaded: loaded)
     monkeypatch.setattr(
         ingest_ack,
         "read",
         lambda *_: ingest_ack.AckStatus(
-            IngestProgress(IngestState.PARTIAL, attachment_total=2, attachment_ready=1),
+            IngestProgress(IngestState.PARTIAL, attachment_total=2, attachment_ready=1,
+                           error_code="attachment-pending"),
             written_to="shadow",
         ),
     )
@@ -557,6 +559,30 @@ def test_successful_retries_reconcile_the_message_ack_from_canonical_files(
     assert calls[0]["attachment_ready"] == 2
     assert calls[0]["written_to"] == "shadow"
     assert calls[0]["error_code"] == ""
+
+
+def test_a_retry_does_not_reconcile_an_archive_it_cannot_place(tmp_path, monkeypatch):
+    """어느 루트인지 모르면 **짐작하지 않는다.**
+
+    그림자 행을 운영 루트의 정본으로 세면 남의 자료로 남의 메시지를 `ready` 로
+    올린다. `--archive` 는 임의 경로를 받을 수 있으므로 여기서 확인해야 한다.
+    """
+    import drain_conversion_queue as drain
+
+    from tybot.archive import ingest_ack
+
+    monkeypatch.delenv("ARCHIVE_DIR", raising=False)
+    monkeypatch.delenv("ARCHIVER_SHADOW_DIR", raising=False)
+    calls = []
+    monkeypatch.setattr(ingest_ack, "advance", lambda **kwargs: calls.append(kwargs))
+    job = queue.Job(
+        id=1, workspace="pilot", channel_id="C1", file_id="F2", original_sha256="",
+        pipeline_version="1", state="leased", attempt_count=1,
+    )
+
+    drain._reconcile_ingest_ack(tmp_path, job, "1.0001")
+
+    assert calls == []
 
 
 # =============================================================================

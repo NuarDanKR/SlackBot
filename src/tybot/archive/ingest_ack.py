@@ -553,29 +553,46 @@ def is_searchable(workspace: str, channel_id: str, message_ts: str) -> bool:
     return status is not None and status.searchable
 
 
-def unfinished(workspace: str, *, limit: int = 500) -> list[dict]:
+def unfinished(
+    workspace: str, *, limit: int = 500, after: tuple | None = None
+) -> list[dict]:
     """아직 끝나지 않은 수집 상태들. **끝난 것은 안 돌려준다.**
 
     `archive_ingest_state_unfinished` 색인이 이 질의를 위해 있다. 변환이 끝난
     뒤 ACK 를 갱신하려면 「무엇이 남았나」 를 물어야 하는데, 지금까지 그걸 묻는
     코드가 없어서 **첨부가 있는 메시지는 영원히 `partial`** 이었다.
+
+    `after` 는 이어 읽을 자리다 — `(updated_at, channel_id, message_ts)`.
+
+    **왜 이어 읽어야 하나.** 바뀌지 않는 행은 `updated_at` 도 안 바뀐다. 정렬이
+    `updated_at` 이므로 그런 행은 **영원히 앞 500 칸을 차지한다.** 변환이 끝난
+    뒤의 행은 뒤에 있는데 그 자리까지 가지 못하고, 그래서 한 번 막히면 그 뒤로는
+    아무것도 갱신되지 않는다. 그 고장은 조용하다 — 잡은 매번 정상 종료한다.
     """
     if not enabled():
         return []
+    where = [
+        "workspace = %s",
+        "state IN ('received', 'raw_written', 'attachment_pending', 'partial')",
+    ]
+    params: list = [workspace]
+    if after is not None:
+        where.append("(updated_at, channel_id, message_ts) > (%s, %s, %s)")
+        params.extend(after)
+    params.append(int(limit))
     try:
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT workspace, channel_id, message_ts, state,
-                       attachment_total, attachment_ready, written_to, error_code
+                       attachment_total, attachment_ready, written_to, error_code,
+                       updated_at
                   FROM archive_ingest_state
-                 WHERE workspace = %s
-                   AND state IN ('received', 'raw_written',
-                                 'attachment_pending', 'partial')
-                 ORDER BY updated_at
+                 WHERE {' AND '.join(where)}
+                 ORDER BY updated_at, channel_id, message_ts
                  LIMIT %s
                 """,
-                (workspace, int(limit)),
+                tuple(params),
             )
             return [dict(row) for row in cur.fetchall()]
     except Exception as exc:

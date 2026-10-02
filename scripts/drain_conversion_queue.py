@@ -403,50 +403,40 @@ def _reconcile_ingest_ack(
     job: queue.Job,
     message_ts: str,
 ) -> None:
-    """Advance a separated attachment message after a successful retry.
+    """변환이 끝난 메시지의 수집 ACK 를 다시 센다.
 
-    The canonical files, rather than the retry that happened to finish, decide
-    the ready count. This keeps concurrent retries and redelivery idempotent.
+    판정은 `ack_reconcile` 이 한다. 여기서 규칙을 다시 쓰지 않는다 — 전에는
+    여기서 세었고, 그 셈은 **정본 개수만** 봤다. 그래서 변환에 실패한 정본과
+    미지원 정본이 「준비됨」 으로 세어졌고, 사유는 늘 `attachment-not-searchable`
+    하나였다.
+
+    루트도 여기서 고르지 않는다. 이 잡은 자기가 돌린 아카이브만 알고, 그
+    아카이브가 그 행의 목적지라는 보장이 없다 — 그림자 행을 운영 루트에서 찾으면
+    정본을 못 찾고, 못 찾은 것이 「아직」 으로 읽힌다.
     """
     if not message_ts:
         return
 
-    from tybot.archive import attachment_reader, ingest_ack
-    from tybot.archive.archiving_state import IngestState
-    from tybot.archive.attachment_doc import CONVERTED
+    from tybot.archive import ack_reconcile
 
-    status = ingest_ack.read(job.workspace, job.channel_id, message_ts)
-    if status is None or status.state not in {
-        IngestState.ATTACHMENT_PENDING,
-        IngestState.PARTIAL,
-    }:
+    roots = ack_reconcile.roots_from_env()
+    # 이 실행이 가리킨 아카이브가 어느 쪽인지 **확인**한다. 모르면 다시 세지
+    # 않는다 — `--archive` 로 임의 경로를 받을 수 있기 때문이다.
+    label = ack_reconcile.label_for(roots, archive_root)
+    if not label:
+        print(f"아카이브 루트를 알 수 없어 ACK 를 다시 세지 않습니다: {archive_root}",
+              file=sys.stderr)
         return
-    total = status.progress.attachment_total
-    if total <= 0:
-        return
-
-    loaded = [
-        doc
-        for path in attachment_reader.source_files(archive_root)
-        if (doc := attachment_reader.load_checked(path, archive_root)) is not None
-        and doc.workspace == job.workspace
-        and doc.channel_id == job.channel_id
-        and doc.message_ts == message_ts
-        and doc.conversion_state == CONVERTED
-        and doc.text.strip()
-    ]
-    ready = min(total, len(attachment_reader.current_by_file(loaded)))
-    target = IngestState.READY if ready >= total else IngestState.PARTIAL
-    ingest_ack.advance(
-        workspace=job.workspace,
-        channel_id=job.channel_id,
-        message_ts=message_ts,
-        target=target,
-        attachment_total=total,
-        attachment_ready=ready,
-        written_to=status.written_to,
-        error_code="" if target == IngestState.READY else "attachment-not-searchable",
-    )
+    try:
+        ack_reconcile.refresh_one(
+            job.workspace, job.channel_id, message_ts,
+            roots={label: archive_root}, apply=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - 사본 때문에 진실을 버리지 않는다
+        # ACK 갱신 실패가 변환 결과를 되돌리지 않는다. 원문·정본이 진실이고
+        # ACK 는 그 사본이다.
+        print(f"ACK 재계산 실패 ws={job.workspace} ts={message_ts}: {exc}",
+              file=sys.stderr)
 
 
 def backfill(archive_dir: str, *, apply: bool) -> int:

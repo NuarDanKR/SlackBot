@@ -31,7 +31,10 @@ Slack·DB·파일을 안 본다. 받은 것만 보고 판정한다 — 그래야
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from .archiving_state import (
     ATTACHMENT_ORIGINAL_MISSING_CODE,
@@ -41,6 +44,8 @@ from .archiving_state import (
     ATTACHMENT_UNSUPPORTED_CODE,
 )
 from .attachment_doc import BLOCKED, CONVERTED, FAILED, PARTIAL, UNSUPPORTED
+
+log = logging.getLogger("tybot.archive.attachment_ack")
 
 #: 변환이 실패한 것. 미지원(처음부터 못 읽는 형식)과 **다르다** — 이쪽은 읽을 수
 #: 있어야 하는데 못 읽은 것이라 사람이 볼 이유가 있다.
@@ -71,6 +76,31 @@ _BY_CONVERSION: dict[str, str] = {
     FAILED: ATTACHMENT_CONVERSION_FAILED_CODE,
     PARTIAL: ATTACHMENT_PARTIAL_CODE,
 }
+
+
+def retained_from_metadata(metadata_path) -> bool | None:
+    """staging metadata 가 말하는 **원본 보관 여부.** 모르면 `None`.
+
+    원본은 내려받자마자 쓰고, 그 쓰기의 성패를 같은 자리에서 `original_state` 로
+    적는다(`files.stage_attachments`). 그러니 이 값이 보관 여부의 **유일한 1차
+    근거**다.
+
+    `attachment_trace.ARCHIVE_DONE` 과 **다른 것을 본다.** 그쪽은 「첨부 참조
+    줄이 원문에 들어갔나」 이고, 들어갔다고 원본 바이트가 남은 것은 아니다.
+    digest 는 쓰기 **전에** 계산되므로 원본 쓰기가 실패해도 정본은 나온다.
+    둘을 같은 것으로 보면 없는 원본을 있다고 세고, 그 메시지가 `ready` 가 된다.
+    """
+    if metadata_path is None:
+        return None
+    try:
+        meta = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        log.warning("staging metadata 를 읽지 못했다: %s", metadata_path)
+        return None
+    state = str(meta.get("original_state") or "")
+    if state in ("retained", "missing"):
+        return state == "retained"
+    return None
 
 
 @dataclass(frozen=True)
