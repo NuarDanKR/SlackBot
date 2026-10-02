@@ -90,10 +90,20 @@ _FEEDBACK_JSONL = re.compile(r"feedback-\d{4}-\d{2}\.jsonl\Z")
 _DAILY_MD = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})\.md\Z")
 
 STATE_FILE = "retention-run.json"
+#: 미리보기 전용. 집행 기록과 **같은 파일을 쓰지 않는다.**
+PREVIEW_FILE = "retention-preview.json"
 
 
 class RetentionRefused(RuntimeError):
     """집행할 수 없다. **사유를 사람 말로 들고 있다.**"""
+
+
+class Deferred(RuntimeError):
+    """이번엔 못 했다. **실패도 성공도 아니다 — 다음 실행에서 다시 본다.**
+
+    0 건 지웠다고 적으면 그 실행이 집행으로 인정되고, 미뤄진 파일은 아무도
+    다시 보지 않는다. 그래서 따로 센다.
+    """
 
 
 @dataclass(frozen=True)
@@ -464,6 +474,10 @@ def plan(
             result.skipped.append(f"{policy}: 보존 기간이 미결정이라 지우지 않습니다")
 
     covered: list[str] = []
+    #: 보긴 봤는데 **일부를 못 본** 정책. 설정이 없거나 봉인을 열 수단이 없으면
+    #: 그 자료는 세지도 못했다. `covered` 에 넣으면 게이트가 「전부 집행」 으로
+    #: 읽고, 그 자료는 아무도 안 지운 채로 운영에 간다.
+    partial: set[str] = set()
 
     def active(policy: str) -> datetime | None:
         if policy not in policies or days.get(policy) is None:
@@ -495,6 +509,7 @@ def plan(
             result.skipped.append(
                 "인계 중인 사본: 봉인을 열 수단이 없어 보지 않았습니다"
             )
+            partial.add(POLICY_DM_MESSAGE)
         else:
             spool, spool_unresolved = scan_dm_spool(
                 handoff_dir, limit=message_limit, reader=spool_reader
@@ -505,6 +520,7 @@ def plan(
             result.skipped.append(
                 "인계 중인 사본: ARCHIVER_DM_HANDOFF_DIR 이 없어 보지 않았습니다"
             )
+            partial.add(POLICY_DM_MESSAGE)
 
     attachment_limit = active(POLICY_DM_ATTACHMENT)
     if attachment_limit is not None:
@@ -513,7 +529,7 @@ def plan(
         )
         result.targets.extend(objects)
         result.unresolved.extend(object_unresolved)
-    result.covered = tuple(covered)
+    result.covered = tuple(name for name in covered if name not in partial)
     return result
 
 
@@ -527,18 +543,26 @@ _ORDER = (POLICY_DM_ATTACHMENT, POLICY_DM_MESSAGE, POLICY_BOT_AUDIT)
 
 
 def apply(ready: Plan) -> dict:
-    """계획대로 지운다. **계획에 없는 것은 건드리지 않는다.**"""
+    """계획대로 지운다. **계획에 없는 것은 건드리지 않는다.**
+
+    돌려주는 값에 `deferred` 가 있다. 미룬 것을 성공과 섞으면 그 실행이 집행으로
+    인정되고, 미뤄진 파일은 아무도 다시 보지 않는다.
+    """
     done = dict.fromkeys(POLICIES, 0)
     failed: list[str] = []
+    deferred: list[str] = []
     for policy in _ORDER:
         for target in [t for t in ready.targets if t.policy == policy]:
             try:
                 removed = _remove(target)
+            except Deferred as exc:
+                deferred.append(str(exc))
+                continue
             except OSError as exc:
                 failed.append(f"{target.path}: {exc.strerror}")
                 continue
             done[policy] = done.get(policy, 0) + removed
-    return {"removed": done, "failed": failed}
+    return {"removed": done, "failed": failed, "deferred": deferred}
 
 
 def _remove(target: Target) -> int:
@@ -563,7 +587,7 @@ def _filter_jsonl(target: Target) -> int:
     대신 **크기를 견준다** — append 만 하는 파일은 크기가 그대로면 아무것도
     덧붙지 않았다는 뜻이다. 달라졌으면 이번엔 두고 다음 실행에서 한다.
     """
-    from .audit import append_lock
+    from .audit import append_lock, drain_spill
     from .lock import AlreadyRunning, LockUnavailable
 
     path = target.path
@@ -573,9 +597,11 @@ def _filter_jsonl(target: Target) -> int:
     except (AlreadyRunning, LockUnavailable, OSError) as exc:
         # 덧붙이는 쪽이 쥐고 있다. **이번엔 두고 간다** — 기다리다 끼어들면
         # 그 사이의 기록을 잃는다. 다음 실행에서 다시 본다.
-        log.info("감사 기록 락을 못 잡아 이번에는 두고 간다: %s (%s)", path, exc)
-        return 0
+        raise Deferred(f"{path}: 감사 기록 락을 못 잡았습니다({exc})") from exc
     try:
+        # 락을 쥔 **지금** 합친다. 옆에 쌓인 줄이 있으면 계획이 센 줄 번호보다
+        # 뒤에 붙으므로 번호는 그대로 맞고, 그 줄은 만료 대상이 아니다.
+        drain_spill(path)
         return _swap_filtered(target)
     finally:
         lock.release()
@@ -596,8 +622,9 @@ def _swap_filtered(target: Target) -> int:
     temporary.write_text(body, encoding="utf-8")
     try:
         if _size_of(path) != before:
-            log.info("집행 중 덧붙은 파일이라 이번에는 두고 간다: %s", path)
-            return 0
+            # 락을 쥔 채로도 커졌다. 락을 안 잡고 쓰는 옛 프로세스가 배포 중에
+            # 있을 수 있다 — 그때도 **잃는 쪽이 아니라 미루는 쪽**이다.
+            raise Deferred(f"{path}: 집행 중 파일이 커졌습니다")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -609,11 +636,17 @@ def _swap_filtered(target: Target) -> int:
 # ---------------------------------------------------------------------------
 
 
-def state_path(state_dir: Path | str | None = None) -> Path:
+def state_path(state_dir: Path | str | None = None, *, applied: bool = True) -> Path:
+    """집행 기록의 자리. **미리보기는 다른 파일에 쓴다.**
+
+    한 파일에 쓰면 미리보기가 어제 실제로 돌린 사실을 덮는다. 그 순간 게이트가
+    「미리보기로만 실행됐습니다」 로 닫히고, 운영자는 멀쩡히 돌고 있는 집행을
+    다시 돌리러 간다. 그리고 미리보기는 사람이 아무 때나 누른다.
+    """
     base = Path(state_dir) if state_dir else Path(
         os.getenv("STATE_DIR", "").strip() or "/var/lib/tybot"
     )
-    return base / "state" / STATE_FILE
+    return base / "state" / (STATE_FILE if applied else PREVIEW_FILE)
 
 
 def record_run(
@@ -621,7 +654,7 @@ def record_run(
     state_dir: Path | str | None = None, now: datetime | None = None,
 ) -> Path:
     """언제 누가 무엇을 지웠나. **미리보기도 남긴다**(안 지운 것도 사실이다)."""
-    path = state_path(state_dir)
+    path = state_path(state_dir, applied=applied)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "at": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
@@ -634,6 +667,7 @@ def record_run(
         "unresolved": len(ready.unresolved),
         "skipped": list(ready.skipped),
         "covered": list(ready.covered),
+        "deferred": list(result.get("deferred", [])),
     }
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(
@@ -696,6 +730,12 @@ def enforcement_status(
     failed = list(record.get("failed") or ())
     if failed:
         return False, f"마지막 집행에서 {len(failed)}건을 지우지 못했습니다"
+
+    # **미룬 것도 안 지운 것이다.** 락을 못 잡아 건너뛴 파일을 성공으로 세면
+    # 그 파일은 아무도 다시 보지 않는다.
+    deferred = list(record.get("deferred") or ())
+    if deferred:
+        return False, f"마지막 집행에서 {len(deferred)}건을 미뤘습니다"
     return True, ""
 
 
@@ -799,7 +839,10 @@ def main(argv: list[str] | None = None) -> int:
     _report(ready)
     if not args.apply:
         print("\n실제로 지우려면 `--apply --by <이름>` 을 붙이세요.")
-        record_run(ready, {"removed": {}, "failed": []}, actor="preview", applied=False)
+        record_run(
+            ready, {"removed": {}, "failed": [], "deferred": []},
+            actor="preview", applied=False,
+        )
         return 0
 
     result = apply(ready)
@@ -809,7 +852,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {policy:24s} {result['removed'].get(policy, 0):6d} 건")
     for note in result["failed"]:
         print(f"  실패 — {note}")
-    return 1 if result["failed"] else 0
+    for note in result["deferred"]:
+        print(f"  미룸 — {note}")
+    return 1 if result["failed"] or result["deferred"] else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

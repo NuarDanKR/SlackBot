@@ -42,8 +42,13 @@ LEGACY_ANSWER_CHARS = 600
 #: 한 줄이 덧붙고, 사본으로 바꿔 끼우는 순간 그 줄이 사라진다. 사라진 감사
 #: 기록은 **사라진 줄 모른다.**
 #:
-#: 덧붙이는 쪽은 락을 못 잡아도 **그냥 쓴다.** 기록을 잃는 것보다 나쁘지 않은
-#: 선택이 없기 때문이다. 대신 거르는 쪽이 크기를 견주어 그때는 미룬다.
+#: 전에는 락을 못 잡아도 **살아 있는 파일에 그대로 덧붙였다.** 그러면 이 순서가
+#: 생긴다 — 집행이 락을 잡고 → writer 가 타임아웃되고 → 집행이 크기를 확인하고
+#: → writer 가 덧붙이고 → 집행이 `os.replace` 한다. 마지막 줄은 교체되는 사본에
+#: 없으므로 사라진다. 크기 대조는 **확인한 뒤**의 덧붙임을 못 본다.
+#:
+#: 그래서 **락 없이는 살아 있는 파일을 건드리지 않는다.** 대신 옆에 쌓는다
+#: (`spill_path`). 잃는 것은 없고, 다음 락 잡는 사람이 합친다.
 APPEND_LOCK_TIMEOUT = 5.0
 
 
@@ -54,9 +59,48 @@ def append_lock(path: Path):
     return FileLock(path.with_name(path.name + ".lock"), label=f"audit append {path.name}")
 
 
+def spill_path(path: Path) -> Path:
+    """락을 못 잡았을 때 대신 쌓는 자리.
+
+    확장자를 `.jsonl` 로 끝내지 **않는다.** 끝내면 `qa-*.jsonl` 글롭에 걸려
+    같은 기록이 두 번 읽힌다. 합쳐지기 전까지 잠깐 안 보이는 쪽을 고른다 —
+    두 번 세는 것보다 낫고, 합치는 것은 다음 쓰기에서 바로 일어난다.
+    """
+    return path.with_name(path.name + ".spill")
+
+
+def drain_spill(path: Path) -> int:
+    """옆에 쌓인 것을 살아 있는 파일로 합친다. **락을 쥔 채로만 부른다.**
+
+    돌려주는 값은 합친 줄 수다. 합칠 것이 없으면 0.
+    """
+    spill = spill_path(path)
+    if not spill.is_file():
+        return 0
+    try:
+        body = spill.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("감사 기록 보조 파일을 읽지 못했다: %s", exc)
+        return 0
+    if not body.strip():
+        spill.unlink(missing_ok=True)
+        return 0
+    if not body.endswith("\n"):
+        body += "\n"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(body)
+    spill.unlink(missing_ok=True)
+    return len([line for line in body.splitlines() if line.strip()])
+
+
 @contextlib.contextmanager
 def appending(path: Path):
-    """락을 잡고 덧붙인다. 못 잡으면 **그래도 덧붙인다**(기록을 잃지 않는다)."""
+    """덧붙일 **자리**를 내준다. 락을 못 잡으면 옆자리(`spill_path`)다.
+
+    부르는 쪽은 `with appending(p) as target:` 로 받아 **그 경로에** 쓴다.
+    살아 있는 파일을 직접 쓰지 않는 이유가 이 함수의 전부다 — 락 없는 덧붙임이
+    집행의 크기 확인과 교체 사이에 끼면 그 줄이 사라진다.
+    """
     from .lock import AlreadyRunning, LockUnavailable
 
     lock = None
@@ -68,9 +112,18 @@ def appending(path: Path):
         lock.acquire(timeout=APPEND_LOCK_TIMEOUT)
         held = True
     except (AlreadyRunning, LockUnavailable, OSError) as exc:
-        logger.warning("감사 기록 락을 못 잡았다(그래도 기록한다): %s", exc)
+        logger.warning("감사 기록 락을 못 잡았다(옆에 쌓는다): %s", exc)
     try:
-        yield
+        if not held:
+            yield spill_path(path)
+            return
+        # 락을 잡았으면 **먼저 합친다.** 그래야 옆에 쌓인 것이 오래 안 보이지
+        # 않는다 — 보통 다음 기록이 밀리초 뒤에 온다.
+        with contextlib.suppress(OSError):
+            merged = drain_spill(path)
+            if merged:
+                logger.info("락 없이 쌓였던 감사 기록 %d줄을 합쳤다: %s", merged, path.name)
+        yield path
     finally:
         if held and lock is not None:
             lock.release()
@@ -194,8 +247,9 @@ class QALog:
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             path = self._jsonl_path(rec.ts)
-            # 보존 집행이 이 파일을 거르는 중일 수 있다(`retention`).
-            with appending(path), path.open("a", encoding="utf-8") as f:
+            # 보존 집행이 이 파일을 거르는 중일 수 있다(`retention`). 그때는
+            # `target` 이 옆자리다 — 살아 있는 파일을 락 없이 건드리지 않는다.
+            with appending(path) as target, target.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(rec), ensure_ascii=False) + "\n")
             if self.write_md:
                 self._append_md(rec)

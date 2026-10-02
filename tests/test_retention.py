@@ -106,6 +106,17 @@ def _plan(tmp_path: Path, *, days=None, **over) -> retention.Plan:
     )
 
 
+
+def _whole(tmp_path: Path, **over) -> retention.Plan:
+    """**전부 본** 계획. 인계 경로와 reader 가 둘 다 있어야 complete 가 된다."""
+    (tmp_path / "handoff").mkdir(exist_ok=True)
+    return _plan(
+        tmp_path,
+        handoff_dir=tmp_path / "handoff",
+        spool_reader=lambda *_a: _epoch(1),
+        **over,
+    )
+
 # ---------------------------------------------------------------------------
 # 0. 경로는 쓰는 코드에서 얻는다
 # ---------------------------------------------------------------------------
@@ -480,6 +491,9 @@ def test_a_jsonl_that_grows_mid_swap_is_left_for_next_time(monkeypatch, tmp_path
     result = retention.apply(ready)
 
     assert result["removed"][retention.POLICY_BOT_AUDIT] == 0
+    # **0건은 성공이 아니다.** 미뤘다고 적지 않으면 그 실행이 집행으로 인정되고
+    # 이 파일은 아무도 다시 보지 않는다.
+    assert result["deferred"], "커진 파일을 미뤘다는 사실이 결과에 없습니다"
     assert path.read_text(encoding="utf-8") == body
     assert not list(qa.glob(".*tmp*"))
 
@@ -565,7 +579,7 @@ def test_a_policy_outside_the_scope_is_skipped(tmp_path):
 
 
 def test_a_full_run_is_marked_complete(tmp_path):
-    assert _plan(tmp_path).complete
+    assert _whole(tmp_path).complete
 
 
 def test_planning_alone_never_deletes(tmp_path):
@@ -581,7 +595,7 @@ def test_planning_alone_never_deletes(tmp_path):
 
 
 def test_a_run_is_recorded_even_when_it_only_previewed(tmp_path):
-    ready = _plan(tmp_path)
+    ready = _whole(tmp_path)
     path = retention.record_run(
         ready, {"removed": {}, "failed": []}, actor="dan", applied=False,
         state_dir=tmp_path, now=NOW,
@@ -696,3 +710,266 @@ def test_the_report_separates_undecided_from_zero(capsys, tmp_path):
     printed = capsys.readouterr().out
 
     assert "미결정" in printed
+
+
+# ---------------------------------------------------------------------------
+# 락을 못 잡은 writer 와 교체 사이의 경쟁
+# ---------------------------------------------------------------------------
+
+
+def test_an_append_during_the_swap_is_not_lost(tmp_path):
+    """**이 순서**를 재현한다.
+
+    1. 집행자가 락을 잡는다
+    2. writer 가 타임아웃된다 (집행자가 쥐고 있으므로)
+    3. 집행자가 크기를 확인한다
+    4. writer 가 덧붙인다  ← 여기
+    5. 집행자가 `os.replace` 한다
+
+    4번 줄은 교체되는 사본에 없다. 그래서 **사라진다.** 오류는 안 난다 —
+    사라진 감사 기록은 사라진 줄 모른다.
+
+    고치는 방향은 「writer 를 막는다」 가 아니다. 기록을 잃는 것보다 나쁜 선택이
+    없으므로 writer 는 언제나 써야 하고, **집행이 미뤄져야** 한다.
+    """
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text(
+        json.dumps({"ts": _kst_iso(200), "question": "옛 질문"}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    ready = _plan(tmp_path)
+    assert ready.targets
+
+    # 집행자가 락을 잡은 **그 상태로** writer 가 들어온다. 크기 확인과 교체
+    # 사이(3~5번)에 끼어들게 둔다.
+    audit_calls: list[str] = []
+    real_size = retention._size_of
+    seen = 0
+
+    def size_then_append(target_path):
+        nonlocal seen
+        seen += 1
+        value = real_size(target_path)
+        if seen == 2:
+            # 크기를 이미 확인한 뒤다. writer 가 타임아웃되고 그냥 쓴다.
+            with audit.appending(path) as writable, writable.open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write(
+                    json.dumps({"ts": _kst_iso(0), "question": "방금 질문"},
+                               ensure_ascii=False) + "\n"
+                )
+                audit_calls.append("appended")
+        return value
+
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(retention, "_size_of", size_then_append)
+    monkeypatched.setattr(retention, "LOCK_TIMEOUT", 0.0)
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        retention.apply(ready)
+    finally:
+        monkeypatched.undo()
+
+    assert audit_calls == ["appended"], "경쟁을 재현하지 못했습니다"
+
+    # **잃지 않았다.** 락을 못 잡은 writer 는 살아 있는 파일을 건드리지 않고
+    # 옆자리에 쌓았으므로, 교체가 그 줄을 지나쳐도 줄은 그대로 있다.
+    spill = audit.spill_path(path)
+    assert spill.is_file(), "방금 쓴 감사 줄이 사라졌습니다"
+    assert "방금 질문" in spill.read_text(encoding="utf-8")
+
+    # **그리고 다시 보인다.** 다음에 락을 잡는 사람이 합친다 — 보통 다음 기록이
+    # 밀리초 뒤에 온다. 합쳐지기 전까지 잠깐 안 보이는 쪽을 고른 이유는, 글롭에
+    # 걸리게 두면 합친 뒤 같은 기록이 두 번 읽히기 때문이다.
+    with audit.appending(path) as target, target.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"ts": _kst_iso(0), "question": "다음 질문"}, ensure_ascii=False)
+            + "\n"
+        )
+
+    assert not spill.exists()
+    assert _questions(qa) == ["방금 질문", "다음 질문"]
+
+
+def _questions(qa: Path) -> list[str]:
+    """그 달의 감사 기록 **전부**. 읽는 쪽이 보는 것과 같은 글롭을 쓴다."""
+    found: list[str] = []
+    for path in sorted(qa.glob("qa-*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                found.append(json.loads(line).get("question", ""))
+    return found
+
+
+def test_the_spill_is_invisible_to_readers_until_it_is_merged():
+    """옆자리는 `qa-*.jsonl` 글롭에 **걸리면 안 된다.**
+
+    걸리면 합친 뒤 같은 기록이 두 번 읽힌다. 감사 기록이 두 번 세어지는 것은
+    사라지는 것만큼 나쁘지는 않지만, 둘 다 거짓이다.
+    """
+    import fnmatch
+
+    from tybot import audit
+
+    spill = audit.spill_path(Path("qa-2026-07.jsonl"))
+    assert not fnmatch.fnmatch(spill.name, "qa-*.jsonl")
+    assert not fnmatch.fnmatch(spill.name, "feedback-*.jsonl")
+
+
+def test_the_purge_merges_the_spill_before_filtering(tmp_path):
+    """집행도 락을 쥐면 **먼저 합친다.** 안 합치면 옆자리가 영원히 남는다."""
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text(
+        json.dumps({"ts": _kst_iso(200), "question": "옛 질문"}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    audit.spill_path(path).write_text(
+        json.dumps({"ts": _kst_iso(0), "question": "옆자리 질문"}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    ready = _whole(tmp_path)
+    assert ready.targets
+
+    retention.apply(ready)
+
+    assert not audit.spill_path(path).exists()
+    assert _questions(qa) == ["옆자리 질문"]
+def test_a_deferred_purge_is_not_recorded_as_a_success(tmp_path):
+    """락을 못 잡아 미룬 것은 **성공이 아니다.**
+
+    0건 지웠다고 적으면 그 실행이 집행으로 인정되고, 미뤄진 파일은 아무도
+    다시 보지 않는다.
+    """
+    from tybot.audit import append_lock
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text(json.dumps({"ts": _kst_iso(200)}) + "\n", encoding="utf-8")
+    ready = _whole(tmp_path)
+    assert ready.targets
+
+    held = append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(retention, "LOCK_TIMEOUT", 0.0)
+    try:
+        result = retention.apply(ready)
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    assert result["deferred"], "미뤘다는 사실이 결과에 없습니다"
+    record = json.loads(
+        retention.record_run(
+            ready, result, actor="dan", applied=True, state_dir=tmp_path, now=NOW
+        ).read_text(encoding="utf-8")
+    )
+    assert record["deferred"], "미뤘다는 사실이 집행 기록에 없습니다"
+    running, why = retention.enforcement_status(tmp_path, now=NOW)
+    assert running is False
+    assert "미뤘" in why or "미룬" in why
+
+
+# ---------------------------------------------------------------------------
+# 못 본 정책을 「봤다」 로 세지 않는다
+# ---------------------------------------------------------------------------
+
+
+def test_a_missing_handoff_directory_leaves_the_dm_policy_uncovered(tmp_path):
+    """건너뛴 것을 `covered` 에 넣으면 게이트가 **전부 집행** 으로 읽는다."""
+    ready = _plan(tmp_path)
+
+    assert any("ARCHIVER_DM_HANDOFF_DIR" in note for note in ready.skipped)
+    assert retention.POLICY_DM_MESSAGE not in ready.covered
+    assert not ready.complete
+
+
+def test_a_spool_reader_failure_leaves_the_dm_policy_uncovered(tmp_path):
+    spool = tmp_path / "handoff" / WS / "pending"
+    spool.mkdir(parents=True)
+    (spool / f"{'f' * 64}.bin").write_bytes(b"sealed")
+
+    ready = _plan(tmp_path, handoff_dir=tmp_path / "handoff")
+
+    assert any("봉인을 열 수단이 없어" in note for note in ready.skipped)
+    assert retention.POLICY_DM_MESSAGE not in ready.covered
+    assert not ready.complete
+
+
+@pytest.mark.parametrize(
+    "broken",
+    ["handoff-missing", "reader-missing", "delete-failed", "partial-policies"],
+)
+def test_an_incomplete_run_never_opens_the_production_gate(tmp_path, broken):
+    """네 가지 모두 **게이트를 통과하면 안 된다.**
+
+    통과하면 그 자료는 아무도 안 지운 채로 운영에 간다. 그리고 화면은
+    「집행 중」 이라고 말한다.
+    """
+    if broken == "handoff-missing":
+        ready = _plan(tmp_path)
+        result = {"removed": {}, "failed": [], "deferred": []}
+    elif broken == "reader-missing":
+        spool = tmp_path / "handoff" / WS / "pending"
+        spool.mkdir(parents=True)
+        (spool / f"{'a' * 64}.bin").write_bytes(b"sealed")
+        ready = _plan(tmp_path, handoff_dir=tmp_path / "handoff")
+        result = {"removed": {}, "failed": [], "deferred": []}
+    elif broken == "delete-failed":
+        ready = _plan(
+            tmp_path, handoff_dir=tmp_path / "handoff",
+            spool_reader=lambda *_a: _epoch(1),
+        )
+        result = {"removed": {}, "failed": ["/x.md: 권한 없음"], "deferred": []}
+    else:
+        ready = _plan(tmp_path, policies=(retention.POLICY_BOT_AUDIT,))
+        result = {"removed": {}, "failed": [], "deferred": []}
+
+    retention.record_run(
+        ready, result, actor="dan", applied=True, state_dir=tmp_path, now=NOW
+    )
+    running, why = retention.enforcement_status(tmp_path, now=NOW)
+
+    assert running is False, f"{broken} 인데 집행 중으로 판정했습니다"
+    assert why
+
+
+# ---------------------------------------------------------------------------
+# 미리보기가 마지막 집행 기록을 덮지 않는다
+# ---------------------------------------------------------------------------
+
+
+def test_a_preview_does_not_overwrite_the_last_applied_run(tmp_path):
+    """미리보기는 집행이 아니다. 덮으면 **어제 실제로 돌린 사실**이 사라진다.
+
+    그 순간 게이트가 「미리보기로만 실행됐습니다」 로 닫히고, 운영자는 멀쩡히
+    돌고 있는 집행을 다시 돌리러 간다.
+    """
+    ready = _plan(tmp_path, handoff_dir=tmp_path / "handoff",
+                  spool_reader=lambda *_a: _epoch(1))
+    retention.record_run(
+        ready, {"removed": {}, "failed": [], "deferred": []},
+        actor="dan", applied=True, state_dir=tmp_path, now=NOW,
+    )
+    assert retention.enforcement_status(tmp_path, now=NOW)[0] is True
+
+    retention.record_run(
+        ready, {"removed": {}, "failed": [], "deferred": []},
+        actor="preview", applied=False, state_dir=tmp_path, now=NOW,
+    )
+
+    running, why = retention.enforcement_status(tmp_path, now=NOW)
+    assert running is True, f"미리보기가 집행 기록을 덮었습니다: {why}"

@@ -99,8 +99,9 @@ class FeedbackLog:
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             path = self._path(at)
-            # 보존 집행이 이 파일을 거르는 중일 수 있다(`retention`).
-            with appending(path), path.open("a", encoding="utf-8") as handle:
+            # 보존 집행이 이 파일을 거르는 중일 수 있다(`retention`). 그때는
+            # `target` 이 옆자리다 — 살아 있는 파일을 락 없이 건드리지 않는다.
+            with appending(path) as target, target.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
         except OSError as e:
             logger.error("답변 피드백 기록 실패: %s", e)
