@@ -80,12 +80,17 @@ def _given_enforcement(state_dir, *, applied: bool = True) -> None:
     """
     from datetime import UTC, datetime
 
+    from tybot import retention
+
     path = Path(state_dir) / "state" / "retention-run.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps({
             "at": datetime.now(UTC).isoformat(timespec="seconds"),
             "by": "dan", "applied": applied,
+            # **전부 돌았고 실패가 없어야** 집행으로 인정된다. 한 정책만 돈
+            # 실행이나 실패가 있는 실행은 게이트를 열지 않는다(B-70).
+            "covered": list(retention.POLICIES), "failed": [],
         }),
         encoding="utf-8",
     )

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import uuid
@@ -32,6 +33,48 @@ THREAD_TURNS = 10
 DM_CONTEXT_MINUTES = 720
 # 참조가 없는 **구형 레코드**에서만 싣는 답변 조각. 지칭어 해석 전용이다.
 LEGACY_ANSWER_CHARS = 600
+
+
+#: 감사 JSONL 한 줄을 덧붙이는 동안 잡는 락. **보존 집행이 같은 락을 쓴다**
+#: (`retention._filter_jsonl`).
+#:
+#: 없으면 이렇게 깨진다 — 집행이 파일을 읽어 만료된 줄을 뺀 사본을 만드는 사이에
+#: 한 줄이 덧붙고, 사본으로 바꿔 끼우는 순간 그 줄이 사라진다. 사라진 감사
+#: 기록은 **사라진 줄 모른다.**
+#:
+#: 덧붙이는 쪽은 락을 못 잡아도 **그냥 쓴다.** 기록을 잃는 것보다 나쁘지 않은
+#: 선택이 없기 때문이다. 대신 거르는 쪽이 크기를 견주어 그때는 미룬다.
+APPEND_LOCK_TIMEOUT = 5.0
+
+
+def append_lock(path: Path):
+    """그 JSONL 의 덧붙이기 락. 경로는 **쓰는 쪽과 지우는 쪽이 같아야 한다.**"""
+    from .lock import FileLock
+
+    return FileLock(path.with_name(path.name + ".lock"), label=f"audit append {path.name}")
+
+
+@contextlib.contextmanager
+def appending(path: Path):
+    """락을 잡고 덧붙인다. 못 잡으면 **그래도 덧붙인다**(기록을 잃지 않는다)."""
+    from .lock import AlreadyRunning, LockUnavailable
+
+    lock = None
+    held = False
+    try:
+        # **락을 만드는 것부터** try 안이다. 밖에 두면 락 경로를 못 만드는 날
+        # 감사 기록 자체가 예외로 날아간다 — 보호하려던 것을 보호가 죽인다.
+        lock = append_lock(path)
+        lock.acquire(timeout=APPEND_LOCK_TIMEOUT)
+        held = True
+    except (AlreadyRunning, LockUnavailable, OSError) as exc:
+        logger.warning("감사 기록 락을 못 잡았다(그래도 기록한다): %s", exc)
+    try:
+        yield
+    finally:
+        if held and lock is not None:
+            lock.release()
+
 
 MD_HEADER = """# 질의응답 기록 {date}
 
@@ -150,7 +193,9 @@ class QALog:
         """기록 실패가 답변을 막아서는 안 된다 — 예외는 로그만 남기고 삼킨다."""
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-            with self._jsonl_path(rec.ts).open("a", encoding="utf-8") as f:
+            path = self._jsonl_path(rec.ts)
+            # 보존 집행이 이 파일을 거르는 중일 수 있다(`retention`).
+            with appending(path), path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(rec), ensure_ascii=False) + "\n")
             if self.write_md:
                 self._append_md(rec)

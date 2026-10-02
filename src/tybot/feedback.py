@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .audit import appending
+
 logger = logging.getLogger("tybot.feedback")
 KST = timezone(timedelta(hours=9))
 MAX_CORRECTION = 2000
@@ -96,7 +98,9 @@ class FeedbackLog:
         )
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-            with self._path(at).open("a", encoding="utf-8") as handle:
+            path = self._path(at)
+            # 보존 집행이 이 파일을 거르는 중일 수 있다(`retention`).
+            with appending(path), path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
         except OSError as e:
             logger.error("답변 피드백 기록 실패: %s", e)

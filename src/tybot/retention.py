@@ -128,6 +128,15 @@ class Plan:
     targets: list[Target] = field(default_factory=list)
     unresolved: list[Unresolved] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    #: 이번 실행이 **실제로 본** 정책들. 범위 밖이거나 기간이 미결정이면 빠진다.
+    #: 「돌았다」 와 「전부 돌았다」 를 가르는 값이다 — 한 정책만 돌린 실행을
+    #: 집행으로 인정하면 나머지 자료는 영원히 안 지워진 채로 통과한다.
+    covered: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """모든 정책을 봤나. **하나라도 빠지면 집행이 아니다.**"""
+        return set(self.covered) == set(POLICIES)
 
     def counts(self) -> dict[str, int]:
         out = dict.fromkeys(POLICIES, 0)
@@ -264,12 +273,23 @@ def _expired_jsonl_lines(path: Path, limit: datetime) -> tuple[Target | None, li
     )
 
 
+#: DM 원문 파일의 실제 자리. `shadow_paths.dm_archive_dir()` 이 주는
+#: `<root>/<ws>/dm/<user>/archive` 아래에 **`writer` 가 `raw/` 를 하나 더 만든다**
+#: (`writer._ingest_locked`: `directory / "raw" / f"{day}.md"`).
+#:
+#: 처음엔 `archive/*.md` 로 적었다. 그러면 아무것도 안 걸리고, 걸린 것이 없으니
+#: 「만료 대상 0건」 이 나온다. 오류는 없다 — **집행했는데 아무것도 안 지워진다.**
+#: 그리고 첨부 좌표도 원문 줄에서 나오므로, 그 순간 모든 첨부가 「가리키는 줄이
+#: 없음」 이 되어 함께 멈춘다.
+DM_RAW_GLOB = "*/dm/*/archive/raw/*.md"
+
+
 def dm_archive_files(archive_root: Path | str) -> list[Path]:
-    """`<root>/<ws>/dm/<user>/archive/*.md`. 사람끼리의 DM 은 여기 없다."""
+    """`<root>/<ws>/dm/<user>/archive/raw/*.md`. 사람끼리의 DM 은 여기 없다."""
     root = Path(archive_root)
     if not root.is_dir():
         return []
-    return sorted(root.glob("*/dm/*/archive/*.md"))
+    return sorted(root.glob(DM_RAW_GLOB))
 
 
 def scan_dm_messages(
@@ -370,20 +390,26 @@ def scan_dm_objects(
 
 
 def scan_dm_spool(
-    state_dir: Path | str, *, limit: datetime, reader=None
+    handoff_dir: Path | str | None, *, limit: datetime, reader=None
 ) -> tuple[list, list]:
     """아직 Archiver 로 넘어가지 않은 **인계 중인 사본**.
 
     큐지만 사본은 사본이다. 소비가 막히면 여기 그대로 남고, 보존 기간은
     그것을 모른다.
 
+    경로는 `ARCHIVER_DM_HANDOFF_DIR` 이 정한다(`archiving_bot` 과 같은 값).
+    `STATE_DIR` 아래라고 짐작하지 않는다 — 짐작한 경로는 **언제나 비어 있고**,
+    비어 있으면 「지울 것이 없다」 로 보인다.
+
     좌표는 봉인 안에 있다. `reader(workspace, key)` 가 `message_ts` 를 돌려주고,
     못 읽으면 **안 지운다** — 큐 파일의 mtime 으로 세면 소급 수집한 옛 대화가
     오늘 받은 것으로 보인다.
     """
-    root = Path(state_dir) / "dm-handoff"
     targets: list[Target] = []
     unresolved: list[Unresolved] = []
+    if not handoff_dir:
+        return targets, unresolved
+    root = Path(handoff_dir)
     if not root.is_dir():
         return targets, unresolved
 
@@ -417,7 +443,7 @@ def plan(
     days: dict[str, int | None],
     qa_dir: Path | str,
     archive_root: Path | str,
-    state_dir: Path | str,
+    handoff_dir: Path | str | None = None,
     now: datetime | None = None,
     policies: tuple[str, ...] = POLICIES,
     spool_reader=None,
@@ -437,9 +463,12 @@ def plan(
         elif days.get(policy) is None:
             result.skipped.append(f"{policy}: 보존 기간이 미결정이라 지우지 않습니다")
 
+    covered: list[str] = []
+
     def active(policy: str) -> datetime | None:
         if policy not in policies or days.get(policy) is None:
             return None
+        covered.append(policy)
         return cutoff(stamp, int(days[policy]))
 
     audit_limit = active(POLICY_BOT_AUDIT)
@@ -460,11 +489,22 @@ def plan(
     if message_limit is not None:
         result.targets.extend(messages)
         result.unresolved.extend(message_unresolved)
-        spool, spool_unresolved = scan_dm_spool(
-            state_dir, limit=message_limit, reader=spool_reader
-        )
-        result.targets.extend(spool)
-        result.unresolved.extend(spool_unresolved)
+        if handoff_dir and spool_reader is None:
+            # 읽을 수단이 없으면 **봤다고 하지 않는다.** 0 건으로 보고하면
+            # 인계 중인 사본이 영원히 남은 채로 「집행 완료」 가 된다.
+            result.skipped.append(
+                "인계 중인 사본: 봉인을 열 수단이 없어 보지 않았습니다"
+            )
+        else:
+            spool, spool_unresolved = scan_dm_spool(
+                handoff_dir, limit=message_limit, reader=spool_reader
+            )
+            result.targets.extend(spool)
+            result.unresolved.extend(spool_unresolved)
+        if not handoff_dir:
+            result.skipped.append(
+                "인계 중인 사본: ARCHIVER_DM_HANDOFF_DIR 이 없어 보지 않았습니다"
+            )
 
     attachment_limit = active(POLICY_DM_ATTACHMENT)
     if attachment_limit is not None:
@@ -473,6 +513,7 @@ def plan(
         )
         result.targets.extend(objects)
         result.unresolved.extend(object_unresolved)
+    result.covered = tuple(covered)
     return result
 
 
@@ -522,6 +563,29 @@ def _filter_jsonl(target: Target) -> int:
     대신 **크기를 견준다** — append 만 하는 파일은 크기가 그대로면 아무것도
     덧붙지 않았다는 뜻이다. 달라졌으면 이번엔 두고 다음 실행에서 한다.
     """
+    from .audit import append_lock
+    from .lock import AlreadyRunning, LockUnavailable
+
+    path = target.path
+    lock = append_lock(path)
+    try:
+        lock.acquire(timeout=LOCK_TIMEOUT)
+    except (AlreadyRunning, LockUnavailable, OSError) as exc:
+        # 덧붙이는 쪽이 쥐고 있다. **이번엔 두고 간다** — 기다리다 끼어들면
+        # 그 사이의 기록을 잃는다. 다음 실행에서 다시 본다.
+        log.info("감사 기록 락을 못 잡아 이번에는 두고 간다: %s (%s)", path, exc)
+        return 0
+    try:
+        return _swap_filtered(target)
+    finally:
+        lock.release()
+
+
+#: 덧붙이기가 끝나기를 기다리는 시간. 한 줄 쓰기는 밀리초라 넉넉하다.
+LOCK_TIMEOUT = 5.0
+
+
+def _swap_filtered(target: Target) -> int:
     path = target.path
     before = _size_of(path)
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -569,6 +633,7 @@ def record_run(
         "failed": result.get("failed", []),
         "unresolved": len(ready.unresolved),
         "skipped": list(ready.skipped),
+        "covered": list(ready.covered),
     }
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(
@@ -618,6 +683,19 @@ def enforcement_status(
     age = (now or datetime.now(UTC)) - when
     if age > timedelta(days=ENFORCEMENT_FRESH_DAYS):
         return False, f"마지막 보존 집행이 {age.days}일 전입니다"
+
+    # **돌았다 ≠ 전부 돌았다.** 한 정책만 돌린 실행을 집행으로 인정하면 나머지
+    # 자료는 영원히 안 지워진 채로 게이트를 통과한다. `covered` 가 없는 옛
+    # 기록도 통과시키지 않는다 — 모르는 것을 「전부 돌았다」 로 읽지 않는다.
+    missing = sorted(set(POLICIES) - set(record.get("covered") or ()))
+    if missing:
+        return False, f"마지막 집행이 보지 않은 정책이 있습니다: {', '.join(missing)}"
+
+    # **실패가 있으면 집행이 아니다.** 지우려 했는데 못 지운 자료가 남아 있고,
+    # 그걸 성공으로 세면 다음 실행까지 아무도 모른다.
+    failed = list(record.get("failed") or ())
+    if failed:
+        return False, f"마지막 집행에서 {len(failed)}건을 지우지 못했습니다"
     return True, ""
 
 
@@ -646,6 +724,33 @@ def _report(ready: Plan) -> None:
     print("이 정책이 지우지 않는 사본:")
     for name, why in UNMANAGED_COPIES:
         print(f"  {name:24s} {why}")
+
+
+def spool_reader(handoff_dir: str | Path | None):
+    """인계 사본의 **좌표만** 꺼내는 함수. 못 만들면 `None`.
+
+    `DmInbox` 가 봉인을 연다 — 키는 `archiving_bot` 이 쓰는 것과 **같은 것**이다
+    (`console.workspace_store._fernet`). 두 벌이면 하나는 열지 못하고, 못 연
+    것은 「만료 안 됨」 으로 남아 영원히 쌓인다.
+
+    돌려주는 것은 `message_ts` 하나다. 본문·파일명은 꺼내지 않는다 — 지우려고
+    남의 DM 을 읽을 이유가 없다.
+    """
+    if not handoff_dir:
+        return None
+    try:
+        from .archive.dm_inbox import DmInbox
+        from .console.workspace_store import _fernet
+
+        inbox = DmInbox(Path(handoff_dir), _fernet())
+    except Exception as exc:  # noqa: BLE001 - 못 만들면 그 사본은 안 본다
+        log.warning("인계 사본을 열 수단을 만들지 못했다: %s", exc)
+        return None
+
+    def read(workspace: str, key: str) -> str:
+        return inbox.read(workspace, key).message_ts
+
+    return read
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -682,11 +787,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"정책 항목이 없습니다: {', '.join(missing)}. 스키마를 먼저 적용하세요.")
         return 2
 
+    handoff_dir = os.getenv("ARCHIVER_DM_HANDOFF_DIR", "").strip()
     ready = plan(
         days=days,
         qa_dir=os.getenv("QA_LOG_DIR", "./qa-log"),
         archive_root=archive_dir(),
-        state_dir=os.getenv("STATE_DIR", "").strip() or "/var/lib/tybot",
+        handoff_dir=handoff_dir,
+        spool_reader=spool_reader(handoff_dir),
         policies=tuple(args.policy) if args.policy else POLICIES,
     )
     _report(ready)

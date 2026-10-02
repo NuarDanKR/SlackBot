@@ -6,12 +6,24 @@
 있었지만 그 값을 읽어 지우는 코드가 없었다. 체크리스트는 통과하는데 아무것도
 만료되지 않았고, 사람은 체크된 것을 보증으로 읽었다.
 
-여기 시험이 지키는 것은 넷이다.
+여기 시험이 지키는 것은 다섯이다.
 
-1. 만료 기준은 **원래 좌표**다 — 파일 mtime 이 아니다
-2. 좌표를 모르면 **안 지운다**
-3. 아카이브 원문은 **재작성하지 않는다**
-4. 설정값이 아니라 **실행**이 집행의 근거다
+1. 경로를 **쓰는 코드에서 얻는다** — 손으로 적은 경로는 조용히 어긋난다
+2. 만료 기준은 **원래 좌표**다 — 파일 mtime 이 아니다
+3. 좌표를 모르면 **안 지운다**
+4. 아카이브 원문은 **재작성하지 않는다**
+5. 설정값이 아니라 **실행**이 집행의 근거다
+
+## 왜 진짜 `writer` 로 쓰는가
+
+처음에는 DM 원문을 손으로 깔았다(`archive/<날짜>.md`). 실제 경로는
+`archive/raw/<날짜>.md` 다 — `writer._ingest_locked` 이 `raw/` 를 하나 더 만든다.
+그래서 글롭이 **아무것도 못 찾았고**, 못 찾았으니 「만료 대상 0건」 이 나왔다.
+오류는 없다. 집행했는데 아무것도 안 지워진다. 게다가 첨부 좌표는 원문 줄에서
+나오므로 모든 첨부가 함께 멈춘다.
+
+그래서 이 파일은 경로를 쓰지 않는다. `shadow_paths` 와 `writer` 에게 **쓰게
+하고**, 그 결과를 본다.
 """
 
 from __future__ import annotations
@@ -24,9 +36,12 @@ from pathlib import Path
 import pytest
 
 from tybot import retention
+from tybot.archive import shadow_paths, writer
 from tybot.archive.archiving_state import production_blockers
 
 NOW = datetime(2026, 10, 2, 9, 0, tzinfo=UTC)
+WS = "tyit"
+DM_CHANNEL = "D12345678"
 DAYS = {
     retention.POLICY_BOT_AUDIT: 90,
     retention.POLICY_DM_MESSAGE: 90,
@@ -44,21 +59,37 @@ def _kst_iso(days_ago: float) -> str:
     )
 
 
-def _dm_doc(root: Path, user: str, name: str, lines: list[str]) -> Path:
-    path = root / "tyit" / "dm" / user / "archive" / f"{name}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = ["---", "schema_version: 2", "---", "", "## 원문", ""]
-    body.extend(lines)
-    path.write_text("\n".join(body) + "\n", encoding="utf-8")
-    return path
-
-
-def _raw(message_ts: str, text: str, *, speaker: str = "김태영") -> str:
-    return f"> [2026-09-16 14:23|{message_ts}] {speaker}: {text}"
+def _dm_doc(root: Path, user: str, entries: list[tuple[str, str]]) -> Path:
+    """**진짜 writer** 로 그 사람의 DM 원문을 쓴다. 경로는 writer 가 정한다."""
+    root.mkdir(parents=True, exist_ok=True)
+    directory = shadow_paths.dm_archive_dir(root, WS, user, DM_CHANNEL)
+    messages = [
+        writer.IncomingMessage(
+            ts=datetime.fromtimestamp(float(message_ts), tz=UTC).astimezone(writer.KST),
+            speaker="김태영",
+            text=text,
+            source_ts=message_ts,
+        )
+        for message_ts, text in entries
+    ]
+    result = writer.ingest(
+        root,
+        workspace=WS,
+        channel=DM_CHANNEL,
+        channel_id=DM_CHANNEL,
+        messages=messages,
+        acl=[user],
+        dm_user=user,
+        dm_directory=directory,
+    )
+    assert result.path.is_file(), "writer 가 원문을 쓰지 못했습니다"
+    return result.path
 
 
 def _object(root: Path, user: str, key: str) -> Path:
-    path = root / "tyit" / "dm" / user / "objects" / "tyit" / "files" / f"{key}.bin"
+    """첨부 원본의 자리도 **경로 규칙에서** 얻는다(`dm_consumer` 와 같은 식)."""
+    private = shadow_paths.dm_root(root, WS, user, DM_CHANNEL)
+    path = private / "objects" / WS / "files" / f"{key}.bin"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"sealed")
     return path
@@ -69,10 +100,38 @@ def _plan(tmp_path: Path, *, days=None, **over) -> retention.Plan:
         days=days if days is not None else DAYS,
         qa_dir=over.pop("qa_dir", tmp_path / "qa-log"),
         archive_root=over.pop("archive_root", tmp_path / "archive"),
-        state_dir=over.pop("state_dir", tmp_path / "state"),
+        handoff_dir=over.pop("handoff_dir", None),
         now=NOW,
         **over,
     )
+
+
+# ---------------------------------------------------------------------------
+# 0. 경로는 쓰는 코드에서 얻는다
+# ---------------------------------------------------------------------------
+
+
+def test_the_scanner_finds_what_the_writer_actually_wrote(tmp_path):
+    """손으로 적은 글롭이 어긋나면 **0건이 나오고 오류는 없다.**
+
+    `archive/*.md` 로 적었을 때 실제로 그랬다. 실제 경로는
+    `archive/raw/<날짜>.md` 다.
+    """
+    archive = tmp_path / "archive"
+    written = _dm_doc(archive, "U12345678", [(_epoch(700), "옛 이야기")])
+
+    assert retention.dm_archive_files(archive) == [written]
+    assert "raw" in written.parts, "writer 가 raw/ 를 쓴다는 전제가 깨졌습니다"
+
+
+def test_the_glob_tracks_the_path_helper(tmp_path):
+    """글롭과 경로 helper 가 갈리면 조용히 0건이 된다."""
+    archive = tmp_path / "archive"
+    directory = shadow_paths.dm_archive_dir(archive, WS, "U12345678", DM_CHANNEL)
+    relative = directory.relative_to(archive)
+
+    assert f"*/dm/*/{relative.name}/raw/*.md" == retention.DM_RAW_GLOB
+    assert relative.parts[:2] == (WS, "dm")
 
 
 # ---------------------------------------------------------------------------
@@ -87,19 +146,16 @@ def test_a_backfilled_file_expires_on_its_slack_coordinate(tmp_path):
     보관하게 되고, 그건 아무도 정한 적 없는 기간이다.
     """
     archive = tmp_path / "archive"
-    old = _dm_doc(archive, "U1", "2024-05-01", [_raw(_epoch(700), "2년 전 이야기")])
-    # 파일 자체는 방금 쓰였다(소급 수집).
+    old = _dm_doc(archive, "U12345678", [(_epoch(700), "2년 전 이야기")])
     os.utime(old, (NOW.timestamp(), NOW.timestamp()))
 
-    ready = _plan(tmp_path)
-
-    assert [t.path for t in ready.targets] == [old]
+    assert [t.path for t in _plan(tmp_path).targets] == [old]
 
 
 def test_a_fresh_coordinate_in_an_old_file_is_kept(tmp_path):
     """반대쪽도 본다 — 파일이 오래됐다고 내용이 만료된 것이 아니다."""
     archive = tmp_path / "archive"
-    path = _dm_doc(archive, "U1", "2026-09-30", [_raw(_epoch(3), "어제 이야기")])
+    path = _dm_doc(archive, "U12345678", [(_epoch(3), "어제 이야기")])
     stale = (NOW - timedelta(days=400)).timestamp()
     os.utime(path, (stale, stale))
 
@@ -114,10 +170,10 @@ def test_a_fresh_coordinate_in_an_old_file_is_kept(tmp_path):
 def test_a_line_without_a_coordinate_keeps_the_whole_file(tmp_path):
     """좌표 없는 옛 줄은 **모르는 것**이지 오래된 것이 아니다."""
     archive = tmp_path / "archive"
-    _dm_doc(archive, "U1", "2024-05-01", [
-        _raw(_epoch(700), "좌표 있는 옛 줄"),
-        "> [2024-05-01 10:00] 김태영: 좌표 없는 옛 줄",
-    ])
+    path = _dm_doc(archive, "U12345678", [(_epoch(700), "좌표 있는 옛 줄")])
+    # 좌표가 없던 시절의 줄을 그대로 끼워 넣는다(옛 자료가 실제로 이렇다).
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("> [2024-05-01 10:00] 김태영: 좌표 없는 옛 줄\n")
 
     ready = _plan(tmp_path)
 
@@ -126,13 +182,9 @@ def test_a_line_without_a_coordinate_keeps_the_whole_file(tmp_path):
 
 
 def test_an_object_without_a_referring_line_is_not_removed(tmp_path):
-    """가리키는 줄이 없는 원본은 **좌표를 모르는 것**이다.
-
-    지우면 되돌릴 수 없고, 안 지우면 다음 실행에서 다시 본다. 두 선택의 값이
-    다르다.
-    """
+    """가리키는 줄이 없는 원본은 **좌표를 모르는 것**이다."""
     archive = tmp_path / "archive"
-    orphan = _object(archive, "U1", "a" * 64)
+    orphan = _object(archive, "U12345678", "a" * 64)
 
     ready = _plan(tmp_path)
 
@@ -142,25 +194,64 @@ def test_an_object_without_a_referring_line_is_not_removed(tmp_path):
 
 def test_a_spool_entry_whose_seal_cannot_be_read_is_kept(tmp_path):
     """봉인을 못 열면 좌표를 모른다. 큐 파일의 mtime 으로 세지 않는다."""
-    spool = tmp_path / "state" / "dm-handoff" / "tyit" / "pending"
+    spool = tmp_path / "handoff" / WS / "pending"
     spool.mkdir(parents=True)
     (spool / f"{'b' * 64}.bin").write_bytes(b"sealed")
 
-    ready = _plan(tmp_path, spool_reader=lambda *_a: (_ for _ in ()).throw(ValueError))
+    ready = _plan(
+        tmp_path,
+        handoff_dir=tmp_path / "handoff",
+        spool_reader=lambda *_a: (_ for _ in ()).throw(ValueError),
+    )
 
     assert ready.targets == []
     assert any("봉인 안의 좌표" in u.reason for u in ready.unresolved)
 
 
 def test_a_spool_entry_expires_on_the_coordinate_inside_the_seal(tmp_path):
-    spool = tmp_path / "state" / "dm-handoff" / "tyit" / "pending"
+    spool = tmp_path / "handoff" / WS / "pending"
     spool.mkdir(parents=True)
     entry = spool / f"{'b' * 64}.bin"
     entry.write_bytes(b"sealed")
 
-    ready = _plan(tmp_path, spool_reader=lambda *_a: _epoch(200))
+    ready = _plan(
+        tmp_path, handoff_dir=tmp_path / "handoff", spool_reader=lambda *_a: _epoch(200)
+    )
 
     assert [t.path for t in ready.targets] == [entry]
+
+
+def test_a_spool_without_a_reader_is_reported_not_counted_as_clean(tmp_path):
+    """열 수단이 없으면 **봤다고 하지 않는다.**
+
+    0건으로 보고하면 인계 중인 사본이 영원히 남은 채로 「집행 완료」 가 된다.
+    """
+    spool = tmp_path / "handoff" / WS / "pending"
+    spool.mkdir(parents=True)
+    (spool / f"{'c' * 64}.bin").write_bytes(b"sealed")
+
+    ready = _plan(tmp_path, handoff_dir=tmp_path / "handoff")
+
+    assert ready.targets == []
+    assert any("봉인을 열 수단이 없어" in note for note in ready.skipped)
+
+
+def test_a_missing_handoff_directory_is_reported(tmp_path):
+    ready = _plan(tmp_path)
+
+    assert any("ARCHIVER_DM_HANDOFF_DIR" in note for note in ready.skipped)
+
+
+def test_the_spool_reader_uses_the_same_vault_as_the_collector():
+    """키가 두 벌이면 하나는 못 열고, 못 연 사본은 영원히 쌓인다."""
+    import inspect
+
+    source = inspect.getsource(retention.spool_reader)
+    assert "DmInbox" in source
+    assert "_fernet" in source
+    # 좌표만 꺼낸다 — 지우려고 남의 DM 본문을 읽지 않는다.
+    assert "message_ts" in source
+    assert retention.spool_reader("") is None
 
 
 # ---------------------------------------------------------------------------
@@ -175,18 +266,18 @@ def test_one_live_line_keeps_the_whole_dm_file(tmp_path):
     어긋나 기존 출처가 다른 문장을 가리킨다.
     """
     archive = tmp_path / "archive"
-    _dm_doc(archive, "U1", "2026-06-01", [
-        _raw(_epoch(200), "만료된 줄"),
-        _raw(_epoch(3), "아직 살아 있는 줄"),
-    ])
+    _dm_doc(archive, "U12345678", [(_epoch(200), "만료된 줄")])
+    _dm_doc(archive, "U12345678", [(_epoch(3), "아직 살아 있는 줄")])
 
-    assert _plan(tmp_path).targets == []
+    live = [t for t in _plan(tmp_path).targets if "아직" in t.path.read_text("utf-8")]
+    assert live == []
 
 
 def test_a_dm_file_is_only_ever_removed_whole(tmp_path):
     archive = tmp_path / "archive"
-    path = _dm_doc(archive, "U1", "2024-05-01", [
-        _raw(_epoch(700), "하나"), _raw(_epoch(650), "둘"),
+    # **같은 날**의 두 줄이라 writer 가 한 파일에 쌓는다.
+    path = _dm_doc(archive, "U12345678", [
+        (_epoch(700), "하나"), (_epoch(700.1), "둘"),
     ])
 
     ready = _plan(tmp_path)
@@ -199,8 +290,8 @@ def test_a_dm_file_is_only_ever_removed_whole(tmp_path):
 def test_another_users_dm_is_untouched(tmp_path):
     """만료되지 않은 **다른 사람** 자료는 건드리지 않는다."""
     archive = tmp_path / "archive"
-    mine = _dm_doc(archive, "U1", "2024-05-01", [_raw(_epoch(700), "옛 이야기")])
-    yours = _dm_doc(archive, "U2", "2026-09-30", [_raw(_epoch(3), "어제 이야기")])
+    mine = _dm_doc(archive, "U11111111", [(_epoch(700), "옛 이야기")])
+    yours = _dm_doc(archive, "U22222222", [(_epoch(3), "어제 이야기")])
 
     retention.apply(_plan(tmp_path))
 
@@ -242,9 +333,7 @@ def test_a_feedback_log_uses_its_own_timestamp_field(tmp_path):
         json.dumps({"at": _kst_iso(200), "kind": "correction"}) + "\n", encoding="utf-8"
     )
 
-    ready = _plan(tmp_path)
-
-    assert [t.path for t in ready.targets] == [path]
+    assert [t.path for t in _plan(tmp_path).targets] == [path]
 
 
 def test_an_unreadable_qa_line_is_kept(tmp_path):
@@ -270,16 +359,87 @@ def test_a_daily_markdown_is_kept_until_its_day_is_fully_past(tmp_path):
     (qa / f"{edge}.md").write_text("경계", encoding="utf-8")
     (qa / f"{old}.md").write_text("옛날", encoding="utf-8")
 
-    ready = _plan(tmp_path)
+    assert [t.path.name for t in _plan(tmp_path).targets] == [f"{old}.md"]
 
-    assert [t.path.name for t in ready.targets] == [f"{old}.md"]
+
+# ---------------------------------------------------------------------------
+# 감사 로그 동시 쓰기
+# ---------------------------------------------------------------------------
+
+
+def test_the_writer_and_the_purge_share_one_lock(tmp_path):
+    """같은 파일이면 **같은 락**이어야 한다. 다르면 둘 다 잡아도 소용없다."""
+    from tybot.audit import append_lock
+
+    path = tmp_path / "qa-2026-07.jsonl"
+    assert append_lock(path).path == append_lock(Path(str(path))).path
+    assert append_lock(path).path != append_lock(tmp_path / "other.jsonl").path
+
+
+def test_the_purge_defers_while_a_writer_holds_the_lock(tmp_path):
+    """덧붙이는 쪽이 쥐고 있으면 **이번엔 두고 간다.**
+
+    기다리다 끼어들면 그 사이의 기록을 잃는다. 사라진 감사 기록은 사라진 줄
+    모른다 — 그래서 잃는 쪽보다 미루는 쪽이다.
+    """
+    from tybot.audit import append_lock
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    body = json.dumps({"ts": _kst_iso(200)}) + "\n"
+    path.write_text(body, encoding="utf-8")
+    ready = _plan(tmp_path)
+    assert ready.targets
+
+    held = append_lock(path)
+    held.acquire()
+    try:
+        import tybot.retention as module
+
+        monkey = module.LOCK_TIMEOUT
+        module.LOCK_TIMEOUT = 0.0
+        try:
+            result = retention.apply(ready)
+        finally:
+            module.LOCK_TIMEOUT = monkey
+    finally:
+        held.release()
+
+    assert result["removed"][retention.POLICY_BOT_AUDIT] == 0
+    assert path.read_text(encoding="utf-8") == body
+
+
+def test_the_audit_writer_takes_the_lock_before_appending():
+    """쓰는 쪽이 락을 안 잡으면 거르는 쪽이 혼자 잡아도 아무 보호가 없다."""
+    import inspect
+
+    from tybot.audit import QALog
+    from tybot.feedback import FeedbackLog
+
+    assert "appending(" in inspect.getsource(QALog.write)
+    assert "appending(" in inspect.getsource(FeedbackLog.write)
+
+
+def test_an_append_still_happens_when_the_lock_cannot_be_taken(tmp_path, monkeypatch):
+    """락을 못 잡아도 **기록은 남긴다.** 기록을 잃는 쪽이 더 나쁘다."""
+    from tybot import audit
+
+    def refuse(_path):
+        raise OSError("no lock here")
+
+    monkeypatch.setattr(audit, "append_lock", refuse)
+    path = tmp_path / "qa-2026-07.jsonl"
+    with audit.appending(path), path.open("a", encoding="utf-8") as handle:
+        handle.write("기록\n")
+
+    assert path.read_text(encoding="utf-8") == "기록\n"
 
 
 def test_a_line_appended_after_planning_is_not_lost(tmp_path):
     """계획과 적용 사이에 덧붙은 줄은 **끝에** 붙는다.
 
-    그래서 계획이 센 줄 번호는 그대로 맞고, 새 줄은 남는다. 이게 깨지면 방금
-    기록한 감사 줄이 조용히 사라진다.
+    그래서 계획이 센 줄 번호는 그대로 맞고, 새 줄은 남는다.
     """
     qa = tmp_path / "qa-log"
     qa.mkdir()
@@ -305,14 +465,7 @@ def test_a_line_appended_after_planning_is_not_lost(tmp_path):
 
 
 def test_a_jsonl_that_grows_mid_swap_is_left_for_next_time(monkeypatch, tmp_path):
-    """읽은 뒤 바꿔 끼우는 **사이**에 덧붙으면 그 줄은 사라진다.
-
-    쓰는 쪽은 잠그지 않으므로(`audit.QALog.write`) 여기서 잠가도 소용없다.
-    대신 크기를 견준다 — append 만 하는 파일은 크기가 그대로면 아무것도 덧붙지
-    않았다는 뜻이다. 달라졌으면 이번엔 두고 다음 실행에서 한다.
-
-    사라진 감사 기록은 **사라진 줄 모른다.** 그래서 잃는 쪽보다 미루는 쪽이다.
-    """
+    """락을 쥔 채로도 크기를 견준다 — 락을 못 잡고 쓴 프로세스가 있을 수 있다."""
     qa = tmp_path / "qa-log"
     qa.mkdir()
     path = qa / "qa-2026-07.jsonl"
@@ -337,27 +490,24 @@ def test_a_jsonl_that_grows_mid_swap_is_left_for_next_time(monkeypatch, tmp_path
 
 
 def _with_attachment(archive: Path, *, days_ago: float, key: str):
-    path = _dm_doc(archive, "U1", "2024-05-01", [
-        _raw(days_ago and _epoch(days_ago),
-             f"[DM attachment original retained: F1; object={key}; extraction pending]"),
+    stamp = _epoch(days_ago)
+    doc = _dm_doc(archive, "U12345678", [
+        (stamp, f"[DM attachment original retained: F1; object={key}; extraction pending]"),
     ])
-    return path, _object(archive, "U1", key)
+    return doc, _object(archive, "U12345678", key)
 
 
 def test_an_attachment_expires_on_the_coordinate_of_its_line(tmp_path):
     archive = tmp_path / "archive"
     doc, blob = _with_attachment(archive, days_ago=700, key="c" * 64)
 
-    ready = _plan(tmp_path)
-
-    assert {t.path for t in ready.targets} == {doc, blob}
+    assert {t.path for t in _plan(tmp_path).targets} == {doc, blob}
 
 
 def test_attachments_are_removed_before_the_lines_that_locate_them(tmp_path):
     """원본의 좌표는 원문 줄에서 나온다.
 
     원문을 먼저 지우면 중간에 멈췄을 때 남은 원본의 만료 여부를 **영영 모른다.**
-    이 순서면 멈춰도 다음 실행이 이어서 한다.
     """
     archive = tmp_path / "archive"
     doc, blob = _with_attachment(archive, days_ago=700, key="d" * 64)
@@ -393,28 +543,35 @@ def test_an_attachment_whose_line_is_still_live_is_kept(tmp_path):
 def test_an_undecided_policy_removes_nothing(tmp_path):
     """`NULL` 은 「영구」 가 아니라 **「건드리지 않음」** 이다."""
     archive = tmp_path / "archive"
-    path = _dm_doc(archive, "U1", "2024-05-01", [_raw(_epoch(700), "옛 이야기")])
+    path = _dm_doc(archive, "U12345678", [(_epoch(700), "옛 이야기")])
 
     ready = _plan(tmp_path, days=dict(DAYS, bot_dm_message=None))
 
     assert path not in [t.path for t in ready.targets]
     assert any("미결정" in note for note in ready.skipped)
+    assert not ready.complete
 
 
 def test_a_policy_outside_the_scope_is_skipped(tmp_path):
     archive = tmp_path / "archive"
-    _dm_doc(archive, "U1", "2024-05-01", [_raw(_epoch(700), "옛 이야기")])
+    _dm_doc(archive, "U12345678", [(_epoch(700), "옛 이야기")])
 
     ready = _plan(tmp_path, policies=(retention.POLICY_BOT_AUDIT,))
 
     assert ready.targets == []
     assert any(retention.POLICY_DM_MESSAGE in note for note in ready.skipped)
+    assert ready.covered == (retention.POLICY_BOT_AUDIT,)
+    assert not ready.complete
+
+
+def test_a_full_run_is_marked_complete(tmp_path):
+    assert _plan(tmp_path).complete
 
 
 def test_planning_alone_never_deletes(tmp_path):
     """기본은 **읽기 전용 미리보기**다."""
     archive = tmp_path / "archive"
-    path = _dm_doc(archive, "U1", "2024-05-01", [_raw(_epoch(700), "옛 이야기")])
+    path = _dm_doc(archive, "U12345678", [(_epoch(700), "옛 이야기")])
 
     ready = _plan(tmp_path)
 
@@ -434,19 +591,40 @@ def test_a_run_is_recorded_even_when_it_only_previewed(tmp_path):
     assert saved["applied"] is False
     assert saved["by"] == "dan"
     assert saved["days"] == DAYS
+    assert sorted(saved["covered"]) == sorted(retention.POLICIES)
+
+
+def _fresh(**over) -> dict:
+    record = {
+        "at": (NOW - timedelta(days=1)).isoformat(),
+        "applied": True,
+        "covered": list(retention.POLICIES),
+        "failed": [],
+    }
+    record.update(over)
+    return record
 
 
 @pytest.mark.parametrize(
     ("record", "expected"),
     [
         (None, "한 번도 실행되지 않았습니다"),
-        ({"at": NOW.isoformat(), "applied": False}, "미리보기로만"),
-        ({"at": (NOW - timedelta(days=30)).isoformat(), "applied": True}, "30일 전"),
-        ({"at": "언제인지모름", "applied": True}, "시각을 읽을 수 없습니다"),
+        (_fresh(applied=False), "미리보기로만"),
+        (_fresh(at=(NOW - timedelta(days=30)).isoformat()), "30일 전"),
+        (_fresh(at="언제인지모름"), "시각을 읽을 수 없습니다"),
+        (_fresh(covered=["bot_conversation_audit"]), "보지 않은 정책이 있습니다"),
+        (_fresh(covered=None), "보지 않은 정책이 있습니다"),
+        (_fresh(failed=["/var/lib/tybot/archive/x.md: 권한 없음"]), "지우지 못했습니다"),
     ],
 )
-def test_enforcement_is_not_claimed_without_a_recent_run(tmp_path, record, expected):
-    """**값이 있다는 사실은 집행이 아니다.** 2026-10-02 까지 정확히 그랬다."""
+def test_enforcement_is_not_claimed_without_a_complete_recent_run(
+    tmp_path, record, expected
+):
+    """**값이 있다는 사실은 집행이 아니다.** 2026-10-02 까지 정확히 그랬다.
+
+    「돌았다」 와 「전부 돌았다」 도 다르다. 한 정책만 돌린 실행이나 실패가 있는
+    실행을 집행으로 인정하면, 나머지 자료는 영원히 안 지워진 채로 통과한다.
+    """
     if record is not None:
         path = tmp_path / "state" / retention.STATE_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -458,13 +636,10 @@ def test_enforcement_is_not_claimed_without_a_recent_run(tmp_path, record, expec
     assert expected in why
 
 
-def test_a_recent_applied_run_counts_as_enforcement(tmp_path):
+def test_a_recent_complete_run_counts_as_enforcement(tmp_path):
     path = tmp_path / "state" / retention.STATE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"at": (NOW - timedelta(days=1)).isoformat(), "applied": True}),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(_fresh()), encoding="utf-8")
 
     assert retention.enforcement_status(tmp_path, now=NOW) == (True, "")
 
