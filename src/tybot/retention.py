@@ -601,7 +601,12 @@ def _filter_jsonl(target: Target) -> int:
     try:
         # 락을 쥔 **지금** 합친다. 옆에 쌓인 줄이 있으면 계획이 센 줄 번호보다
         # 뒤에 붙으므로 번호는 그대로 맞고, 그 줄은 만료 대상이 아니다.
-        drain_spill(path)
+        try:
+            drain_spill(path)
+        except OSError as exc:
+            # 옆자리를 못 읽었다. 그 줄이 본 파일에 들어가기 전에 거르면,
+            # 거르는 동안 들어온 줄이 어디에도 없게 된다. **미룬다.**
+            raise Deferred(f"{path}: 옆자리를 합치지 못했습니다({exc})") from exc
         return _swap_filtered(target)
     finally:
         lock.release()

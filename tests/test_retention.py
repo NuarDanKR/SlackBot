@@ -117,6 +117,16 @@ def _whole(tmp_path: Path, **over) -> retention.Plan:
         **over,
     )
 
+def _write_unlocked(path: Path, question: str) -> None:
+    """락을 못 잡은 writer 가 하는 일. **쓰는 자리는 `appending` 이 정한다.**"""
+    from tybot import audit
+
+    with audit.appending(path) as target, target.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"ts": _kst_iso(0), "question": question}, ensure_ascii=False)
+            + "\n"
+        )
+
 # ---------------------------------------------------------------------------
 # 0. 경로는 쓰는 코드에서 얻는다
 # ---------------------------------------------------------------------------
@@ -779,10 +789,10 @@ def test_an_append_during_the_swap_is_not_lost(tmp_path):
     assert audit_calls == ["appended"], "경쟁을 재현하지 못했습니다"
 
     # **잃지 않았다.** 락을 못 잡은 writer 는 살아 있는 파일을 건드리지 않고
-    # 옆자리에 쌓았으므로, 교체가 그 줄을 지나쳐도 줄은 그대로 있다.
-    spill = audit.spill_path(path)
-    assert spill.is_file(), "방금 쓴 감사 줄이 사라졌습니다"
-    assert "방금 질문" in spill.read_text(encoding="utf-8")
+    # 옆자리에 **새 항목**으로 쌓았으므로, 교체가 그 줄을 지나쳐도 줄은 그대로다.
+    entries = audit.spill_entries(path)
+    assert entries, "방금 쓴 감사 줄이 사라졌습니다"
+    assert "방금 질문" in entries[0].read_text(encoding="utf-8")
 
     # **그리고 다시 보인다.** 다음에 락을 잡는 사람이 합친다 — 보통 다음 기록이
     # 밀리초 뒤에 온다. 합쳐지기 전까지 잠깐 안 보이는 쪽을 고른 이유는, 글롭에
@@ -793,7 +803,7 @@ def test_an_append_during_the_swap_is_not_lost(tmp_path):
             + "\n"
         )
 
-    assert not spill.exists()
+    assert audit.spill_entries(path) == []
     assert _questions(qa) == ["방금 질문", "다음 질문"]
 
 
@@ -807,19 +817,36 @@ def _questions(qa: Path) -> list[str]:
     return found
 
 
-def test_the_spill_is_invisible_to_readers_until_it_is_merged():
+def test_the_spill_is_invisible_to_readers_until_it_is_merged(tmp_path):
     """옆자리는 `qa-*.jsonl` 글롭에 **걸리면 안 된다.**
 
     걸리면 합친 뒤 같은 기록이 두 번 읽힌다. 감사 기록이 두 번 세어지는 것은
     사라지는 것만큼 나쁘지는 않지만, 둘 다 거짓이다.
+
+    디렉터리라 글롭이 한 겹만 보는 것만으로도 안 걸리지만, 이름까지 못 박는다 —
+    나중에 누가 `.jsonl` 로 끝내고 싶어질 수 있다.
     """
     import fnmatch
 
     from tybot import audit
 
-    spill = audit.spill_path(Path("qa-2026-07.jsonl"))
-    assert not fnmatch.fnmatch(spill.name, "qa-*.jsonl")
-    assert not fnmatch.fnmatch(spill.name, "feedback-*.jsonl")
+    path = tmp_path / "qa-2026-07.jsonl"
+    path.write_text("", encoding="utf-8")
+    directory = audit.spill_dir(path)
+    assert not fnmatch.fnmatch(directory.name, "qa-*.jsonl")
+
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        _write_unlocked(path, "옆자리")
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    assert audit.spill_entries(path)
+    assert list(tmp_path.glob("qa-*.jsonl")) == [path]
 
 
 def test_the_purge_merges_the_spill_before_filtering(tmp_path):
@@ -834,17 +861,21 @@ def test_the_purge_merges_the_spill_before_filtering(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    audit.spill_path(path).write_text(
-        json.dumps({"ts": _kst_iso(0), "question": "옆자리 질문"}, ensure_ascii=False)
-        + "\n",
-        encoding="utf-8",
-    )
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        _write_unlocked(path, "옆자리 질문")
+    finally:
+        monkeypatched.undo()
+        held.release()
     ready = _whole(tmp_path)
     assert ready.targets
 
     retention.apply(ready)
 
-    assert not audit.spill_path(path).exists()
+    assert audit.spill_entries(path) == []
     assert _questions(qa) == ["옆자리 질문"]
 def test_a_deferred_purge_is_not_recorded_as_a_success(tmp_path):
     """락을 못 잡아 미룬 것은 **성공이 아니다.**
@@ -973,3 +1004,348 @@ def test_a_preview_does_not_overwrite_the_last_applied_run(tmp_path):
 
     running, why = retention.enforcement_status(tmp_path, now=NOW)
     assert running is True, f"미리보기가 집행 기록을 덮었습니다: {why}"
+
+
+# ---------------------------------------------------------------------------
+# 옆자리(spill) 자체의 경합
+# ---------------------------------------------------------------------------
+
+
+def test_an_append_to_the_spill_during_the_drain_is_not_lost(tmp_path):
+    """합치는 **중에** 들어온 줄이 사라지면 안 된다.
+
+    1. 집행자(또는 다음 writer)가 락을 잡고 옆자리를 읽는다
+    2. 락을 못 잡은 writer 가 **같은 옆자리에** 덧붙인다
+    3. 합친 쪽이 옆자리를 지운다  ← 2번 줄이 여기서 사라진다
+
+    옆자리를 **한 파일**로 두면 이 순서를 막을 수 없다. 읽기와 지우기 사이는
+    언제나 벌어져 있고, 그 사이에 쓰는 쪽은 락이 없다.
+    """
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text(
+        json.dumps({"ts": _kst_iso(1), "question": "본 파일"}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        _write_unlocked(path, "옆자리 먼저")
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    # 합치는 중에 끼어든다. 지우기 **직전**이 가장 나쁜 자리다.
+    intruded: list[str] = []
+    original = Path.unlink
+
+    def unlink_but_first_append(self, missing_ok=False):
+        if not intruded and "spill" in str(self):
+            intruded.append(str(self))
+            patch = pytest.MonkeyPatch()
+            patch.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+            try:
+                _write_unlocked(path, "합치는 중에 들어옴")
+            finally:
+                patch.undo()
+        original(self, missing_ok=missing_ok)
+
+    second = audit.append_lock(path)
+    second.acquire()
+    Path.unlink = unlink_but_first_append
+    try:
+        audit.drain_spill(path)
+    finally:
+        Path.unlink = original
+        second.release()
+
+    assert intruded, "합치는 중 끼어들기를 재현하지 못했습니다"
+
+    # 아직 본 파일에 없어도 된다 — 다음 합치기에서 들어오면 된다.
+    # **사라지지만 않으면 된다.**
+    with audit.appending(path) as target, target.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"ts": _kst_iso(0), "question": "마지막"}, ensure_ascii=False)
+            + "\n"
+        )
+    assert _questions(qa) == ["본 파일", "옆자리 먼저", "합치는 중에 들어옴", "마지막"]
+
+
+def test_a_crash_between_merging_and_cleanup_does_not_duplicate(tmp_path):
+    """합친 뒤 지우기 전에 죽으면, 다음 합치기가 **같은 줄을 또** 넣으면 안 된다.
+
+    감사 기록이 두 번 세어지는 것은 사라지는 것만큼 나쁘지는 않지만 둘 다
+    거짓이다. 특히 같은 질문이 두 번 있었던 것처럼 보인다.
+    """
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text(
+        json.dumps({"ts": _kst_iso(1), "question": "본 파일"}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        _write_unlocked(path, "옆자리")
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    # 합치는 도중 죽는다 — 본 파일에는 들어갔는데 옆자리는 안 지워졌다.
+    original = Path.unlink
+    Path.unlink = lambda self, missing_ok=False: None
+    try:
+        audit.drain_spill(path)
+    finally:
+        Path.unlink = original
+
+    assert _questions(qa) == ["본 파일", "옆자리"]
+
+    # 다시 살아나서 한 번 더 합친다.
+    audit.drain_spill(path)
+
+    assert _questions(qa) == ["본 파일", "옆자리"], "같은 줄이 두 번 합쳐졌습니다"
+
+
+def test_a_spill_without_a_live_file_is_merged(tmp_path):
+    """본 파일이 아직 없을 수 있다. 그때도 **잃지 않는다.**"""
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        _write_unlocked(path, "본 파일 없이 들어온 줄")
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    assert not path.exists()
+
+    audit.drain_spill(path)
+
+    assert _questions(qa) == ["본 파일 없이 들어온 줄"]
+
+
+def test_an_unreadable_spill_defers_the_purge(tmp_path):
+    """옆자리를 못 읽었으면 **집행 성공이 아니다.**
+
+    0건 성공으로 적으면 그 실행이 집행으로 인정되고, 못 읽은 줄은 아무도 다시
+    보지 않는다.
+    """
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text(
+        json.dumps({"ts": _kst_iso(200), "question": "옛 질문"}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        _write_unlocked(path, "옆자리")
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    ready = _whole(tmp_path)
+    assert ready.targets
+
+    broken = pytest.MonkeyPatch()
+    broken.setattr(
+        audit, "drain_spill",
+        lambda _path: (_ for _ in ()).throw(OSError("옆자리를 못 읽었다")),
+    )
+    try:
+        result = retention.apply(ready)
+    finally:
+        broken.undo()
+
+    assert result["deferred"], "못 읽은 옆자리를 미뤘다고 적지 않았습니다"
+    assert result["removed"][retention.POLICY_BOT_AUDIT] == 0
+    assert "옛 질문" in _questions(qa), "미뤘는데 원본을 건드렸습니다"
+
+
+def test_a_drain_reports_what_it_could_not_read(tmp_path):
+    """합치지 못한 것이 있으면 **숫자가 아니라 사실로** 돌려준다."""
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text("", encoding="utf-8")
+
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        _write_unlocked(path, "옆자리")
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    original = Path.read_bytes
+
+    def refuse(self):
+        if "spill" in str(self):
+            raise OSError("못 읽는다")
+        return original(self)
+
+    Path.read_bytes = refuse
+    try:
+        with pytest.raises(OSError):
+            audit.drain_spill(path)
+    finally:
+        Path.read_bytes = original
+
+
+def test_a_half_written_entry_is_never_merged(tmp_path):
+    """쓰는 중인 파일을 합치면 **반쯤 쓰인 줄**이 감사 기록에 들어간다.
+
+    그건 사라진 줄보다 나쁘다 — 사라진 줄은 없는 것으로 보이지만, 잘린 줄은
+    있는 것처럼 보이고 JSON 으로도 안 읽힌다.
+    """
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text("", encoding="utf-8")
+
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        with audit.appending(path) as target:
+            # 아직 다 안 썼다. **이 순간** 합치는 쪽이 들어온다.
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write('{"ts": "2026-10-02T09:00:00", "ques')
+                handle.flush()
+            assert audit.spill_entries(path) == [], "쓰는 중인 파일이 합칠 대상입니다"
+            assert audit.drain_spill(path) == 0
+            assert path.read_text(encoding="utf-8") == ""
+            # 마저 쓴다.
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write('tion": "끝까지 쓴 줄"}\n')
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    # 다 쓰고 나서야 합칠 대상이 된다.
+    assert len(audit.spill_entries(path)) == 1
+    audit.drain_spill(path)
+    assert _questions(qa) == ["끝까지 쓴 줄"]
+
+
+def test_entries_are_merged_in_the_order_they_were_written(tmp_path):
+    """합치는 순서가 섞이면 감사 기록의 **시간순**이 깨진다.
+
+    스레드 문맥은 이 순서를 그대로 읽는다(`audit.context_for_thread`).
+    """
+    from tybot import audit
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    path = qa / "qa-2026-07.jsonl"
+    path.write_text("", encoding="utf-8")
+
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        for order in ("첫째", "둘째", "셋째"):
+            _write_unlocked(path, order)
+    finally:
+        monkeypatched.undo()
+        held.release()
+
+    assert len(audit.spill_entries(path)) == 3
+    audit.drain_spill(path)
+
+    assert _questions(qa) == ["첫째", "둘째", "셋째"]
+
+
+def test_failed_spill_write_is_not_published_as_a_complete_entry(tmp_path, monkeypatch):
+    from tybot import audit
+
+    path = tmp_path / "qa-2026-07.jsonl"
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatch.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        with pytest.raises(OSError, match="interrupted"):
+            with audit.appending(path) as target:
+                target.write_text('{"question": "unfinished', encoding="utf-8")
+                raise OSError("interrupted")
+    finally:
+        held.release()
+
+    assert audit.spill_entries(path) == []
+
+
+def test_identical_spilled_feedback_events_are_not_collapsed(tmp_path, monkeypatch):
+    from tybot import audit
+
+    path = tmp_path / "feedback-2026-07.jsonl"
+    record = '{"at":"2026-07-01T00:00:00+09:00","kind":"positive"}\n'
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatch.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        for _ in range(2):
+            with audit.appending(path) as target:
+                target.write_text(record, encoding="utf-8")
+    finally:
+        held.release()
+
+    assert audit.drain_spill(path) == 2
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_drain_finishes_a_partially_appended_entry_after_a_crash(tmp_path, monkeypatch):
+    from tybot import audit
+
+    path = tmp_path / "qa-2026-07.jsonl"
+    held = audit.append_lock(path)
+    held.acquire()
+    monkeypatch.setattr(audit, "APPEND_LOCK_TIMEOUT", 0.0)
+    try:
+        with audit.appending(path) as target:
+            target.write_text('{"question":"one"}\n', encoding="utf-8")
+    finally:
+        held.release()
+
+    entry = audit.spill_entries(path)[0]
+    data = audit._spill_data(entry)
+    path.write_bytes(data[:12])
+    assert audit.drain_spill(path) == 1
+    assert json.loads(path.read_text(encoding="utf-8"))["question"] == "one"
+    assert audit.spill_entries(path) == []

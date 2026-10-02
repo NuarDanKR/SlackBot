@@ -12,6 +12,8 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -59,38 +61,109 @@ def append_lock(path: Path):
     return FileLock(path.with_name(path.name + ".lock"), label=f"audit append {path.name}")
 
 
-def spill_path(path: Path) -> Path:
-    """락을 못 잡았을 때 대신 쌓는 자리.
+def spill_dir(path: Path) -> Path:
+    """락을 못 잡았을 때 대신 쌓는 **디렉터리**.
 
-    확장자를 `.jsonl` 로 끝내지 **않는다.** 끝내면 `qa-*.jsonl` 글롭에 걸려
-    같은 기록이 두 번 읽힌다. 합쳐지기 전까지 잠깐 안 보이는 쪽을 고른다 —
-    두 번 세는 것보다 낫고, 합치는 것은 다음 쓰기에서 바로 일어난다.
+    한 파일이 아니라 디렉터리인 이유가 이 함수의 전부다.
+
+    한 파일에 덧붙이면 합치는 쪽과 쓰는 쪽이 **같은 파일**을 만진다. 합치는 쪽은
+    읽고 → 본 파일에 붙이고 → 지운다. 읽기와 지우기 사이에 쓰는 쪽이 끼어들면
+    그 줄은 읽히지도 않고 지워진다. 쓰는 쪽에는 락이 없으므로 그 틈을 좁힐 수는
+    있어도 없앨 수는 없다.
+
+    디렉터리면 그런 틈이 아예 없다. 항목 하나는 **만들어진 뒤 바뀌지 않고**,
+    합치는 중에 들어온 기록은 **새 항목**이 된다. 합치는 쪽은 자기가 본 항목만
+    지운다.
+
+    디렉터리는 `qa-*.jsonl` 글롭에 안 걸린다(글롭은 한 겹만 본다). 그래서 합치기
+    전에 두 번 읽히는 일도 없다.
     """
     return path.with_name(path.name + ".spill")
 
 
-def drain_spill(path: Path) -> int:
-    """옆에 쌓인 것을 살아 있는 파일로 합친다. **락을 쥔 채로만 부른다.**
+#: 합칠 항목. 쓰다 만 임시 파일(`.tmp-*`)과 **이름으로** 갈라야 한다 — 반쯤
+#: 쓰인 줄을 감사 기록에 합치면 그게 더 나쁘다.
+SPILL_ENTRY_GLOB = "*.part"
 
-    돌려주는 값은 합친 줄 수다. 합칠 것이 없으면 0.
-    """
-    spill = spill_path(path)
-    if not spill.is_file():
-        return 0
+
+def spill_entries(path: Path) -> list[Path]:
+    """합칠 항목들을 **만들어진 순서로.** 순서가 섞이면 기록의 시간순이 깨진다."""
+    directory = spill_dir(path)
+    if not directory.is_dir():
+        return []
+    return sorted(directory.glob(SPILL_ENTRY_GLOB))
+
+
+def _spill_data(entry: Path) -> bytes:
+    """Give each fallback record a stable identity across drain retries."""
+    raw = entry.read_bytes()
+    if not raw.strip():
+        return b""
     try:
-        body = spill.read_text(encoding="utf-8")
-    except OSError as exc:
-        logger.warning("감사 기록 보조 파일을 읽지 못했다: %s", exc)
-        return 0
-    if not body.strip():
-        spill.unlink(missing_ok=True)
-        return 0
-    if not body.endswith("\n"):
-        body += "\n"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(body)
-    spill.unlink(missing_ok=True)
-    return len([line for line in body.splitlines() if line.strip()])
+        rows = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
+        if not all(isinstance(row, dict) for row in rows):
+            raise ValueError("a spill entry must contain JSON objects")
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise OSError(f"incomplete audit spill entry: {entry}") from exc
+    for index, row in enumerate(rows):
+        row["_audit_spill_id"] = f"{entry.stem}:{index}"
+    return ("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n").encode("utf-8")
+
+
+def _ends_with(path: Path, data: bytes) -> bool:
+    """본 파일이 이미 **그 바이트로 끝나는가.**
+
+    합친 뒤 지우기 전에 죽으면 같은 항목이 다시 보인다. 그때 무턱대고 또 붙이면
+    같은 질문이 두 번 있었던 것처럼 보인다. 꼬리를 보고 이미 붙었으면 건너뛴다.
+
+    본 파일에 붙이는 것은 **락을 쥔 쪽뿐**이고, 락을 쥐는 쪽은 언제나 합치기부터
+    한다. 그래서 죽은 뒤 다음 합치기까지 꼬리는 그대로다.
+
+    별개 항목에 같은 내용이 들어올 수 있으므로 `_audit_spill_id` 가 포함된
+    바이트만 비교한다. 항목 이름이 같을 때만 재시도로 취급한다.
+    """
+    if not data or not path.is_file():
+        return False
+    try:
+        size = path.stat().st_size
+        if size < len(data):
+            return False
+        with path.open("rb") as handle:
+            handle.seek(size - len(data))
+            return handle.read() == data
+    except OSError:
+        return False
+
+
+def drain_spill(path: Path) -> int:
+    """옆에 쌓인 항목을 본 파일로 합친다. **락을 쥔 채로만 부른다.**
+
+    돌려주는 값은 합친 줄 수다. 읽지 못한 항목이 있으면 `OSError` 를 던진다 —
+    조용히 0 을 돌려주면 부르는 쪽이 「합칠 것이 없었다」 로 읽고, 그 기록은
+    아무도 다시 보지 않는다.
+    """
+    merged = 0
+    for entry in spill_entries(path):
+        data = _spill_data(entry)  # 못 읽거나 잘린 JSON 이면 그대로 올린다(OSError)
+        if data.strip() and not _ends_with(path, data):
+            # 본 파일은 없을 수 있다(`"ab"` 가 만든다). 그 **디렉터리**는 반드시
+            # 있다 — 옆자리가 그 아래에 있어야 여기까지 온다.
+            if path.is_file():
+                with path.open("rb") as current:
+                    current.seek(max(0, current.seek(0, os.SEEK_END) - len(data)))
+                    tail = current.read()
+                if tail and not tail.endswith(b"\n"):
+                    fragment = tail.rsplit(b"\n", 1)[-1]
+                    if not data.startswith(fragment):
+                        raise OSError(f"audit tail does not match spill entry: {path}")
+                    data = data[len(fragment):]
+            with path.open("ab") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            merged += len([line for line in data.splitlines() if line.strip()])
+        entry.unlink(missing_ok=True)
+    return merged
 
 
 @contextlib.contextmanager
@@ -115,7 +188,7 @@ def appending(path: Path):
         logger.warning("감사 기록 락을 못 잡았다(옆에 쌓는다): %s", exc)
     try:
         if not held:
-            yield spill_path(path)
+            yield from _spilling(path)
             return
         # 락을 잡았으면 **먼저 합친다.** 그래야 옆에 쌓인 것이 오래 안 보이지
         # 않는다 — 보통 다음 기록이 밀리초 뒤에 온다.
@@ -127,6 +200,29 @@ def appending(path: Path):
     finally:
         if held and lock is not None:
             lock.release()
+
+
+def _spilling(path: Path):
+    """옆자리에 **항목 하나**를 만든다. 다 쓴 뒤에야 합칠 대상이 된다.
+
+    쓰는 중인 파일을 바로 `*.part` 로 두면, 그 사이에 합치는 쪽이 반쯤 쓰인 줄을
+    가져간다. 그래서 임시 이름으로 쓰고 **끝난 뒤 한 번에** 이름을 바꾼다.
+    """
+    directory = spill_dir(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = f"{time.time_ns():020d}-{uuid.uuid4().hex}"
+    temporary = directory / f".tmp-{stamp}"
+    try:
+        yield temporary
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    if temporary.is_file() and temporary.stat().st_size:
+        with temporary.open("rb+") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, directory / f"{stamp}.part")
+    else:
+        temporary.unlink(missing_ok=True)
 
 
 MD_HEADER = """# 질의응답 기록 {date}
