@@ -515,12 +515,18 @@ def test_successful_retries_reconcile_the_message_ack_from_canonical_files(
     channel = tmp_path / "pilot" / "C1__팀-전산-공지"
     docs = {}
     for file_id in ("F1", "F2"):
-        canonical = channel / "attachments" / file_id / "r1.md"
+        canonical = channel / "archive" / "attachments" / file_id / "r1.md"
         canonical.parent.mkdir(parents=True, exist_ok=True)
         canonical.write_text("정본", encoding="utf-8")
+        original = channel / "objects" / file_id / "report.bin"
+        original.parent.mkdir(parents=True, exist_ok=True)
+        original.write_bytes(b"original bytes")
         meta = channel / "staging" / file_id / "metadata.json"
         meta.parent.mkdir(parents=True, exist_ok=True)
-        meta.write_text(json.dumps({"original_state": "retained"}), encoding="utf-8")
+        meta.write_text(
+            json.dumps({"original_state": "retained", "name": "report.bin"}),
+            encoding="utf-8",
+        )
         docs[file_id] = SimpleNamespace(
             workspace="pilot", channel_id="C1", message_ts="1.0001", file_id=file_id,
             conversion_state="succeeded", text=f"{file_id} 본문", source_path=canonical,

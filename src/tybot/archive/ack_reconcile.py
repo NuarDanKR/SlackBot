@@ -38,6 +38,7 @@ sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.archive.ack_reconcile --dry-r
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,9 +108,9 @@ def original_retained(root: Path | str, doc) -> bool | None:
     `ready` 는 「전부 검색된다」 이고, 사람은 그걸 「내 파일이 안전하다」 로
     읽는다. 그 상태에서 Slack 원본을 지우면 되살릴 자료가 어디에도 없다.
 
-    보는 것은 staging metadata 의 `original_state` 다 — 원본을 쓴 그 자리에서
-    같이 적은 값이다. 못 읽으면 objects 아래 파일이 있는지로 내려가고, 그것도
-    못 보면 **`None`**(모른다)이다. `False` 로 만들지 않는다 — 「없다」 와
+    staging metadata 의 `original_state` 와 현재 objects 의 실물을 함께 본다.
+    metadata 가 없으면 objects 아래 파일이 있는지로 내려가고, 그것도 못 보면
+    **`None`**(모른다)이다. `False` 로 만들지 않는다 — 「없다」 와
     「모른다」 는 사람이 할 일이 다르다.
     """
     storage = _storage_for(root, doc)
@@ -117,14 +118,34 @@ def original_retained(root: Path | str, doc) -> bool | None:
         return None
     file_id = _safe(str(getattr(doc, "file_id", "") or ""))
     meta_path = storage.staging_dir / file_id / "metadata.json"
-    if meta_path.is_file():
-        return attachment_ack.retained_from_metadata(meta_path)
     objects = storage.objects_dir / file_id
+    if meta_path.is_file():
+        retained = attachment_ack.retained_from_metadata(meta_path)
+        if retained is not True:
+            return retained
+        try:
+            from .files import _safe_component
+
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            name = str(metadata.get("name") or "")
+            if not name:
+                return None
+            original = objects / _safe_component(name)
+            return (
+                original.is_file()
+                and not original.is_symlink()
+                and original.stat().st_size > 0
+            )
+        except (OSError, ValueError, TypeError):
+            return None
     if not objects.is_dir():
         # staging 도 objects 도 없다. 오래된 자료일 수도, 지워졌을 수도 있다 —
         # 구분할 근거가 없으므로 모른다고 한다.
         return None
-    return any(c.is_file() and c.stat().st_size > 0 for c in objects.iterdir())
+    return any(
+        c.is_file() and not c.is_symlink() and c.stat().st_size > 0
+        for c in objects.iterdir()
+    )
 
 
 def _storage_for(root: Path | str, doc):
@@ -143,9 +164,9 @@ def _storage_for(root: Path | str, doc):
     try:
         path = Path(source).resolve()
         # 옛 배치: <root>/workspaces/<ws>/channels/<id>/attachments/<file>/<rev>.md
-        # 새 배치: <root>/<ws>/<id>__<이름>/attachments/<file>/<rev>.md
+        # 새 배치: <root>/<ws>/<id>__<이름>/archive/attachments/<file>/<rev>.md
         legacy = path.is_relative_to((base / "workspaces").resolve())
-        channel_root = None if legacy else path.parents[2]
+        channel_root = None if legacy else path.parents[3]
         return attachment_storage(
             base, doc.workspace, doc.channel_id, channel_root=channel_root
         )

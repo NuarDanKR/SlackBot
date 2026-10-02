@@ -278,14 +278,21 @@ def _on_disk(root: Path, file_id, state, *, retained, channel_id="C1", **kw) -> 
     `retained` 는 `True`(보관) · `False`(실패) · `None`(metadata 자체가 없음).
     """
     channel = root / "tyit" / f"{channel_id}__팀-전산-공지"
-    canonical = channel / "attachments" / file_id / "r1.md"
+    canonical = channel / "archive" / "attachments" / file_id / "r1.md"
     canonical.parent.mkdir(parents=True, exist_ok=True)
     canonical.write_text("정본", encoding="utf-8")
     if retained is not None:
+        if retained:
+            original = channel / "objects" / file_id / "report.bin"
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(b"original bytes")
         meta = channel / "staging" / file_id / "metadata.json"
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text(
-            json.dumps({"original_state": "retained" if retained else "missing"}),
+            json.dumps({
+                "original_state": "retained" if retained else "missing",
+                "name": "report.bin",
+            }),
             encoding="utf-8",
         )
     return _Doc(file_id, state, source_path=canonical, channel_id=channel_id, **kw)
@@ -409,6 +416,49 @@ def test_an_empty_object_file_is_not_a_stored_original(tmp_path):
 
     changes = _plan([_row("partial", 1, 0, ATTACHMENT_PENDING_CODE)], _docs(doc), tmp_path)
     assert changes[0].outcome.error_code == ATTACHMENT_ORIGINAL_MISSING_CODE
+
+
+def test_a_retained_marker_without_the_original_does_not_make_ack_ready(tmp_path):
+    doc = _on_disk(tmp_path, "F1", CONVERTED, retained=True)
+    original = tmp_path / "tyit" / "C1__팀-전산-공지" / "objects" / "F1" / "report.bin"
+    original.unlink()
+
+    changes = _plan([_row("partial", 1, 0, ATTACHMENT_PENDING_CODE)], _docs(doc), tmp_path)
+    assert len(changes) == 1
+    assert changes[0].after == "partial"
+    assert changes[0].outcome.error_code == ATTACHMENT_ORIGINAL_MISSING_CODE
+
+
+def test_a_different_object_does_not_satisfy_retained_metadata(tmp_path):
+    doc = _on_disk(tmp_path, "F1", CONVERTED, retained=True)
+    objects = tmp_path / "tyit" / "C1__팀-전산-공지" / "objects" / "F1"
+    (objects / "report.bin").unlink()
+    (objects / "unrelated.bin").write_bytes(b"unrelated bytes")
+
+    changes = _plan([_row("partial", 1, 0, ATTACHMENT_PENDING_CODE)], _docs(doc), tmp_path)
+    assert changes[0].after == "partial"
+    assert changes[0].outcome.error_code == ATTACHMENT_ORIGINAL_MISSING_CODE
+
+
+def test_legacy_attachment_storage_remains_readable(tmp_path):
+    root = tmp_path / "archive"
+    suffix = Path("workspaces/tyit/channels/C1/attachments/F1")
+    canonical = root / suffix / "r1.md"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("정본", encoding="utf-8")
+    metadata = tmp_path / "staging" / suffix / "metadata.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(
+        json.dumps({"original_state": "retained", "name": "report.bin"}),
+        encoding="utf-8",
+    )
+    original = tmp_path / "objects" / suffix / "report.bin"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"original bytes")
+    doc = _Doc("F1", CONVERTED, source_path=canonical)
+
+    changes = _plan([_row("partial", 1, 0, ATTACHMENT_PENDING_CODE)], _docs(doc), root)
+    assert changes[0].after == "ready"
 
 
 def test_a_document_without_a_source_path_is_not_assumed_stored(tmp_path):
