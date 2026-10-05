@@ -55,6 +55,9 @@ md 에는 기록 당시 이름이 박혀 있어서, 이름으로 맞추면 정�
 종료코드: 0 성공 / 1 실패
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "_shared"))
 import argparse
 import json
 import re
@@ -1073,6 +1076,10 @@ def update_header(path: Path, period_end: str | None, count: int | None, dry: bo
 
 
 def main():
+    # 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다 —
+    # 인자 해석이나 Slack 호출이 먼저 돌면 막기 전에 밖으로 나간다.
+    from mode import exit_if_blocked
+    exit_if_blocked("원문 메시지 삽입(insert_messages)")
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", required=True, help="채널 md 경로")
     ap.add_argument("--month", help="삽입할 월 (YYYY-MM)")

@@ -22,6 +22,7 @@ import {
 } from '../slack-live.js';
 import { permalink } from '../convo-log.js';
 import { SKILL_SCRIPTS, runScript, writeTemp, readJson, writeJson, activeDeferred } from './util.js';
+import { assertMayWriteArchive } from '../mode.js';
 
 const STATE_FILE = path.join(ARCHIVE_DIR, '.sync-state.json');
 /** 슬랙에서 고쳐지거나 지워졌는데 아직 md 에 반영 안 된 것 (사람이 지시하면 반영한다) */
@@ -636,6 +637,7 @@ export async function ingestChannel(client, ch, state, { userMap, selfId, tz, dr
  *   그러면 곧 안 읽게 된다. 아침 회차가 담당한다.
  */
 export async function ingestConversations(client, { dry = false, scanEdits } = {}) {
+  assertMayWriteArchive('대화 수집(ingestConversations)');
   const editsEnabled = scanEdits ?? config.digest.ingest?.reportEdits !== false;
   const tz = config.timezone;
   const state = readJson(STATE_FILE);

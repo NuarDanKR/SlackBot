@@ -68,7 +68,50 @@ Claude Code 스킬까지.
 | `src/ingest/git.js` · `verify.js` | `execFile` (git) |
 | `src/ingest/slack-archive.js` · `pending-work.js` | `unlinkSync` |
 
-## 3. TYBot 연동 모드 — 쓰기는 **구조적으로** 닫혀 있다
+## 3. TYBot 연동 모드 — 스위치 하나로 막는다 (2026-10-06 구현)
+
+```bash
+HERMES_MODE=tybot    # 연동. 원문 쓰기를 전부 막는다
+                     # (미설정·그 외) PF 직접 실행 — 지금까지와 똑같다
+```
+
+판정은 **두 곳에서만** 읽는다 — 봇 쪽 [`src/mode.js`](../../subbots/hermes/src/mode.js),
+스킬 쪽 [`.claude/skills/_shared/mode.py`](../../subbots/hermes/.claude/skills/_shared/mode.py).
+여기저기서 읽으면 판정이 갈리고, 갈리면 오류가 아니라 **한쪽만 막힌 상태**로
+나타난다 — 봇은 멈췄는데 스킬은 쓰고 있는 식이다.
+
+### 막는 자리 — 네 축 전부
+
+| 축 | 어떻게 | 어디 |
+|---|---|---|
+| 스케줄러 | 쓰는 작업을 **예약하지 않는다** | `src/scheduler.js` |
+| CLI | 종료 코드 **2** 로 멈춘다(실패 1과 구별) | `run-ingest` · `run-backfill` · `init-archive` |
+| 스킬 | `main()` **첫 줄**에서 종료 코드 2 | 쓰기 스킬 10개 |
+| 직접 모듈 호출 | `ArchiveWriteBlocked` 를 던진다 | `runIngest` · `ingestConversations` · `writeMonth` · `commitAndPush` |
+
+관문은 **맨 앞**에 둔다. `runIngest` 는 아래에서 git sync 를 도는데, 관문이 그 뒤면
+트리를 건드린 뒤에 막는 꼴이라 「막혔는데 작업 트리는 더러워진」 상태가 남는다.
+스킬도 같다 — 인자 해석이나 Slack 호출이 먼저 돌면 막기 전에 네트워크로 나가고,
+그건 되돌릴 수 없다.
+
+`commitAndPush` 는 자료 저장소에 **실제로 쓰는 유일한 자리**다. 위 관문을 전부
+우회해도 여기서 막힌다.
+
+### 기본값이 PF 인 이유
+
+켜는 쪽을 기본값으로 두면 환경변수를 안 넘긴 PF 운영이 어느 날 조용히 멈춘다.
+**막는 쪽이 기본값**(원칙 3)과 반대로 보이지만 대상이 다르다 — 원칙 3 은 「자료
+열람」의 기본값이고, 여기는 「이미 돌고 있는 운영」의 기본값이다. 운영을 끄는 결정은
+명시적이어야 한다. 모르는 값(오타)도 PF 로 본다.
+
+### 회귀 시험
+
+[`tests/test_hermes_tybot_mode.py`](../../tests/test_hermes_tybot_mode.py) 가 **우회
+진입점별로** 본다. `node_modules` 가 있으면 실제로 실행해 막히는지 보고, 없으면
+정적으로 관문의 존재와 위치를 본다 — 둘 다 없으면 「설치 안 돼서 통과」 가 되고
+그게 가장 나쁜 초록불이다.
+
+## 3.1 왜 이것만으로 충분한가 — 연동의 원래 구조
 
 연동 선언(`subbots/hermes/tybot-specialist.toml`)이 이미 이렇게 정한다.
 
@@ -86,8 +129,10 @@ prompt = "contract/prompt.md"
   경로가 없다.
 - 배포도 같다 — `deploy/install.sh` 는 `subbots/*/contract/prompt.md` 만 설치한다.
 
-> **그래서 「연동 모드에서 원문 쓰기를 막는다」 는 새로 만들 기능이 아니라
-> 이미 참인 사실이다.** 할 일은 그것이 **계속 참이게** 못 박는 것이다 — §5.
+> 그래서 **TYBot 이 Hermes 를 부르는 경로로는** 원문이 써질 수 없었다. 그런데
+> 그것은 「아무도 안 부른다」 이지 「부를 수 없다」 가 아니다 — `npm run ingest`
+> 한 줄이면 돌고, 스킬은 에이전트가 집어서 돌릴 수도 있다. §3 의 스위치가 그
+> 차이를 메운다.
 
 ## 4. PF 직접 호출은 건드리지 않는다
 
@@ -106,6 +151,16 @@ PF 는 자기 배포에서 Hermes 를 직접 돌린다. 질문·DM·요약이 �
 
 ## 5. 시험이 고정하는 것
 
+두 파일이 **서로 다른 질문**을 본다. 하나만 있으면 반쪽이다 — 목록이 맞아도 관문이
+안 걸려 있으면 아무것도 막히지 않고, 관문이 있어도 새 진입점이 생기면 그리로 샌다.
+
+| 파일 | 보는 것 |
+|---|---|
+| `test_hermes_write_boundary.py` | 진입점이 **늘지 않는가** |
+| `test_hermes_tybot_mode.py` | 각 진입점이 **실제로 막히는가** |
+
+### 5.1 진입점이 늘지 않는다
+
 [`tests/test_hermes_write_boundary.py`](../../tests/test_hermes_write_boundary.py)
 
 1. **진입점 인벤토리가 늘지 않는다** — npm 스크립트·스킬 쓰기 스크립트·`src` 쓰기
@@ -117,3 +172,13 @@ PF 는 자기 배포에서 Hermes 를 직접 돌린다. 질문·DM·요약이 �
 
 시험이 깨졌을 때 할 일은 「시험을 고치는 것」이 아니라 **왜 쓰기 경로가 늘었는지
 확인하는 것**이다. 늘려야 할 이유가 있으면 이 문서에 적고 시험을 같이 고친다.
+
+### 5.2 각 진입점이 실제로 막힌다
+
+[`tests/test_hermes_tybot_mode.py`](../../tests/test_hermes_tybot_mode.py)
+
+- 네 축(스케줄러·CLI·스킬·직접 모듈 호출)을 **진입점마다 하나씩** 본다
+- 관문이 **앞머리에** 있는지도 본다 — 뒤에 있으면 막기 전에 부작용이 나간다
+- `HERMES_MODE` 를 읽는 곳이 `src/mode.js` · `_shared/mode.py` **둘뿐**인지 본다
+- **PF 모드에서는 막히지 않는 것**도 같이 본다. 차단을 넣으면서 PF 운영을 조용히
+  멈추는 것이 가장 나쁜 실패다

@@ -80,6 +80,10 @@ def paged(token, method, key="channels", **params):
 
 
 def main():
+    # 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다 —
+    # 인자 해석이나 Slack 호출이 먼저 돌면 막기 전에 밖으로 나간다.
+    from mode import exit_if_blocked
+    exit_if_blocked("채널 참여(join_channels)")
     ap = argparse.ArgumentParser()
     ap.add_argument("--env-file", default=str(DEFAULT_ENV))
     ap.add_argument("--confirm", action="store_true", help="실제로 참여한다 (없으면 목록만)")

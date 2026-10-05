@@ -26,6 +26,9 @@ slack-sync 의 insert_messages.py 와 하는 일이 비슷하지만 **일부러 
 종료코드: 0 성공 / 2 이미 있음(건너뜀) / 1 실패
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "_shared"))
 import argparse
 import re
 import sys
@@ -296,6 +299,10 @@ def refresh_meta(path: Path):
 
 
 def main():
+    # 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다 —
+    # 인자 해석이나 Slack 호출이 먼저 돌면 막기 전에 밖으로 나간다.
+    from mode import exit_if_blocked
+    exit_if_blocked("아카이브 삽입(insert_entry)")
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", required=True, help="문서 md 경로")
     ap.add_argument("--date", help="회차 날짜 (YYYY-MM-DD)")

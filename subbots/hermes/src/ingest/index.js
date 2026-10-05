@@ -24,6 +24,7 @@ import { head, syncBeforeWork, hasChanges, commitAndPush, rollback } from './git
 import { compose, send } from './report.js';
 import { clearTemp, DATA_ROOT } from './util.js';
 import path from 'node:path';
+import { assertMayWriteArchive } from '../mode.js';
 
 /* 실패한 회차가 어디까지 갔나.
  *
@@ -196,6 +197,9 @@ export function buildCommitMessage({
 }
 
 export async function runIngest(client, { dry = false, skipSummary = false, scanEdits } = {}) {
+  // 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다 — 아래에서
+  // git sync 가 먼저 돌면 트리를 건드린 뒤에 막는 꼴이 된다.
+  assertMayWriteArchive('아카이브 자동 반영(ingest)');
   const started = Date.now();
   const paths = targetPaths();
   console.log('\n[ingest] 아카이브 자동 반영…');

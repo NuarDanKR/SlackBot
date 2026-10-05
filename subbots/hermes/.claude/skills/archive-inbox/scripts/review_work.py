@@ -899,6 +899,9 @@ def gate() -> int:
 
 
 def main(argv=None) -> int:
+    # 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다.
+    from mode import exit_if_blocked
+    exit_if_blocked("수집 작업 기록(review_work)")
     ap = argparse.ArgumentParser(description="07:00 자동 반영이 남긴 할 일을 건별로 보인다")
     ap.add_argument("--json", action="store_true", help="기계용 출력")
     ap.add_argument("--gate", action="store_true", help="목록 없이 검사만 (훅 자리)")

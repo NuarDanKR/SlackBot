@@ -14,6 +14,7 @@ import { keepMessage, stamp } from '../slack-live.js';
 import { fetchReplies, renderMessage, monthOf } from './slack-archive.js';
 import { config, ARCHIVE_DIR, canonicalChannel, currentChannelNames } from '../config.js';
 import { SKILL_SCRIPTS, runScript, writeTemp, readJson, writeJson } from './util.js';
+import { assertMayWriteArchive } from '../mode.js';
 
 /**
  * 백필이 실제로 훑을 채널.
@@ -356,6 +357,7 @@ export function stripMissingMarks(md) {
  *   화면에 그대로 올린다). `added` 가 실제로 늘어난 헤더 수다.
  */
 export async function writeMonth(mdPath, month, blocks) {
+  assertMayWriteArchive('소급 수집(writeMonth)');
   /* **블록 사이는 빈 줄 하나다.** 자동 반영이 같은 자리를 `'\n\n'` 으로 잇는다
    * (`slack-archive.js`). `'\n'` 으로 이으면 파싱은 안 깨지지만 — `splitMessages` 는
    * 헤더 줄 전체 일치로 자르므로 — **백필한 구간만 빽빽해져** 기존 구간과 눈에 띄게

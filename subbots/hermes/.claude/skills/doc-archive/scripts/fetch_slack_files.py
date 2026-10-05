@@ -657,6 +657,10 @@ def autoprune(state_path, out_dir, *, dry_run):
 
 
 def main():
+    # 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다 —
+    # 인자 해석이나 Slack 호출이 먼저 돌면 막기 전에 밖으로 나간다.
+    from mode import exit_if_blocked
+    exit_if_blocked("Slack 첨부 내려받기(fetch_slack_files)")
     ap = argparse.ArgumentParser()
     ap.add_argument("--env-file", default=str(DEFAULT_ENV))
     ap.add_argument("--state", default=str(DEFAULT_STATE))

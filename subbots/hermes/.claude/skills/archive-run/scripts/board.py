@@ -831,6 +831,9 @@ def probe_git(fetch=True) -> dict:
 # ─────────────────────────────────────────────────────────── CLI
 
 def main(argv=None) -> int:
+    # 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다.
+    from mode import exit_if_blocked
+    exit_if_blocked("진행판 기록(board)")
     ap = argparse.ArgumentParser(description="아카이브 한 바퀴 — 남은 일을 한 표로 보인다")
     ap.add_argument("--fast", action="store_true", help="슬랙을 안 훑는다 (그 두 줄은 「안 셈」)")
     ap.add_argument("--json", action="store_true", help="기계용 출력")

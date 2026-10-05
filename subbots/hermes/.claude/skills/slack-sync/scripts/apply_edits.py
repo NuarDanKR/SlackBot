@@ -36,6 +36,9 @@
 이 스크립트는 **사람이 대화형으로만** 부른다. VM 은 부르지 않는다 — 반영할지는 판단이다.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "_shared"))
 import argparse
 import json
 import subprocess
@@ -327,6 +330,10 @@ def show_deferred():
 # ── main ────────────────────────────────────────────────────────────────
 
 def main():
+    # 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다 —
+    # 인자 해석이나 Slack 호출이 먼저 돌면 막기 전에 밖으로 나간다.
+    from mode import exit_if_blocked
+    exit_if_blocked("편집 반영(apply_edits)")
     ap = argparse.ArgumentParser(description="슬랙 수정·삭제를 아카이브에 반영")
     ap.add_argument("--only", action="append", metavar="번호|조각",
                     help="이것만. `--only 2,4` 또는 채널명·날짜 조각")

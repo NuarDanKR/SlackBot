@@ -502,6 +502,9 @@ def show_edits() -> int:
 # ── 입구 ────────────────────────────────────────────────────────────────
 
 def main(argv=None) -> int:
+    # 연동 모드에서는 원문을 쓰지 않는다. **맨 앞이어야** 한다.
+    from mode import exit_if_blocked
+    exit_if_blocked("수집 작업 판정(decide_work)")
     ap = argparse.ArgumentParser(description="07:00 할 일을 건별로 정한다")
     ap.add_argument("--only", action="append", default=[], help="번호 또는 채널명 조각 (쉼표 가능)")
     ap.add_argument("--apply", action="store_true", help="반영하기로 정함")

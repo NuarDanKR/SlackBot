@@ -6,6 +6,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DATA_ROOT } from './util.js';
+import { assertMayWriteArchive } from '../mode.js';
 
 const execFileP = promisify(execFile);
 
@@ -66,6 +67,9 @@ export async function hasChanges(paths) {
  * 두 번째도 실패하면 **자동으로 풀지 않고** 그대로 알린다 — 무인으로 히스토리를 손대지 않는다.
  */
 export async function commitAndPush(message, paths) {
+  // 자료 저장소에 **실제로 쓰는 유일한 자리**. 위쪽 관문을 전부 우회해
+  // 여기까지 와도 여기서 막힌다.
+  assertMayWriteArchive('아카이브 커밋·push(commitAndPush)');
   await git(['add', '--', ...paths]);
 
   const staged = (await git(['diff', '--cached', '--name-only'])).stdout.trim();

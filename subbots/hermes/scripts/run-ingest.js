@@ -11,6 +11,16 @@ import { WebClient } from '@slack/web-api';
 import { requireEnv } from '../src/config.js';
 import { runIngest } from '../src/ingest/index.js';
 
+// --- TYBot 연동 모드 관문 -----------------------------------------------------
+// CLI 는 사람이 직접 치는 자리다. 깊은 곳에서 던지면 스택만 보이고 무엇을 해야
+// 하는지 안 보이므로, **여기서 먼저** 사람 말로 멈춘다.
+import { isTybotMode, ArchiveWriteBlocked } from '../src/mode.js';
+if (isTybotMode()) {
+  const blocked = new ArchiveWriteBlocked('npm run ingest');
+  console.error(blocked.message);
+  process.exit(2);
+}
+
 /* **`process.exit()` 을 안 쓴다** (2026-09-03). 윈도우에서 슬랙 호출을 한 뒤
  * `process.exit(n)` 을 부르면 `@slack/web-api` 가 열어 둔 비동기 핸들 위로 이벤트 루프가
  * 즉시 끊겨 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 으로 죽고,
