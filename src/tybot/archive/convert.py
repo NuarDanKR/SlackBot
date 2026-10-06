@@ -106,7 +106,7 @@ CONVERTIBLE = {"xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp
 #: 이 값이 정본 revision 에 들어간다(`attachment_doc.revision_for`). 안 올리면
 #: 더 나은 변환기로 다시 읽어도 **같은 경로에 덮어쓰게** 되고, 그 변환본을 인용한
 #: 답변의 출처를 눌렀을 때 인용된 문장이 없다.
-CONVERTER_VERSION = "1"
+CONVERTER_VERSION = "2"
 
 
 def config_snapshot() -> dict:
@@ -170,6 +170,130 @@ def _clip(s: object) -> str:
         return t
     _record("", flag=CELL_TRUNCATED)
     return t[:MAX_CELL] + "…"
+
+
+def _markdown_cell(value: object) -> str:
+    """Markdown 표 한 칸. 열 구분 문자는 본문으로 보존한다."""
+    return _clip(value).replace("|", r"\|")
+
+
+def _markdown_table(rows: list[list[str]]) -> list[str]:
+    """구조가 확인된 행을 유효한 Markdown 표로 만든다."""
+    if not rows:
+        return []
+    width = max(len(row) for row in rows)
+    if width < 2:
+        return [_markdown_cell(row[0]) for row in rows if row]
+
+    def line(row: list[str]) -> str:
+        padded = [*row, *([""] * (width - len(row)))]
+        return "| " + " | ".join(_markdown_cell(value) for value in padded) + " |"
+
+    return [line(rows[0]), line(["---"] * width), *(line(row) for row in rows[1:])]
+
+
+def _layout_cells(line: str) -> list[tuple[int, str]] | None:
+    """PDF 위치 보존 텍스트에서 열 간격이 분명한 행만 고른다."""
+    if not line.strip() or line.lstrip().startswith("|"):
+        return None
+    cells = [
+        (match.start(), match.group(0).strip())
+        for match in re.finditer(r"\S(?:.*?\S)?(?=\s{2,}|$)", line.rstrip())
+    ]
+    if len(cells) < 2:
+        return None
+    return cells
+
+
+def _layout_table(block: list[tuple[str, list[tuple[int, str]]]]) -> list[str]:
+    """좌표가 비슷한 셀을 같은 열에 놓고 빈 중간 열을 보존한다."""
+    anchors = [start for start, _text in max((cells for _raw, cells in block), key=len)]
+    rows: list[list[str]] = []
+    for _raw, cells in block:
+        row = [""] * len(anchors)
+        for start, text in cells:
+            available = [i for i, value in enumerate(row) if not value]
+            if not available:
+                row.append(text)
+                continue
+            index = min(available, key=lambda i: abs(anchors[i] - start))
+            row[index] = text
+        rows.append(row)
+    return _markdown_table(rows)
+
+
+def _layout_markdown_lines(text: str) -> list[str]:
+    """연속된 PDF 표 행만 Markdown 표로 바꾼다.
+
+    후보가 한 행뿐이면 일반 문장일 수 있으므로 원문을 그대로 둔다.
+    """
+    out: list[str] = []
+    block: list[tuple[str, list[tuple[int, str]]]] = []
+
+    def flush() -> None:
+        if len(block) >= 2:
+            out.extend(_layout_table(block))
+        else:
+            out.extend(raw.strip() for raw, _cells in block if raw.strip())
+        block.clear()
+
+    for raw in text.splitlines():
+        cells = _layout_cells(raw)
+        if cells is not None:
+            block.append((raw, cells))
+            continue
+        flush()
+        if raw.strip():
+            out.append(raw.strip())
+    flush()
+    return out
+
+
+def _html_tables_to_markdown(lines: list[str]) -> list[str]:
+    """정밀 XLSX 변환기의 HTML 표를 Markdown 표로 바꾼다."""
+    from html.parser import HTMLParser
+
+    class TableParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rows: list[list[str]] = []
+            self.row: list[str] = []
+            self.cell: list[str] | None = None
+
+        def handle_starttag(self, tag: str, _attrs) -> None:
+            if tag in {"td", "th"}:
+                self.cell = []
+
+        def handle_data(self, data: str) -> None:
+            if self.cell is not None:
+                self.cell.append(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag in {"td", "th"} and self.cell is not None:
+                self.row.append("".join(self.cell).strip())
+                self.cell = None
+            elif tag == "tr" and self.row:
+                self.rows.append(self.row)
+                self.row = []
+
+    out: list[str] = []
+    table: list[str] = []
+    for line in lines:
+        if line.strip() == "<table>":
+            table = [line]
+            continue
+        if table:
+            table.append(line)
+            if line.strip() == "</table>":
+                parser = TableParser()
+                parser.feed("\n".join(table))
+                out.extend(_markdown_table(parser.rows))
+                table = []
+            continue
+        out.append(line)
+    # 닫히지 않은 표를 조용히 버리지 않는다. 변환기 출력 그대로 남겨 조사한다.
+    out.extend(table)
+    return out
 
 
 def _finish(lines: list[str]) -> list[str]:
@@ -297,9 +421,12 @@ def _xlsx_basic(data: bytes) -> list[str]:
         source = dict(formulas.get(title, ([], 0))[0])
         shown = 0
         previous = -1
+        table_rows: list[list[str]] = []
         for index, row in rows:
             if FOLD_HEAD and previous >= 0 and index > previous + 1 and shown >= FOLD_HEAD:
                 # 가운데를 접었다는 사실을 그 자리에 남긴다. 뒤에 오는 것이 꼬리다.
+                out.extend(_markdown_table(table_rows))
+                table_rows.clear()
                 out.append(f"…(가운데 {total - len(rows)}줄 생략, 총 {total}줄)")
             previous = index
             shown += 1
@@ -313,8 +440,13 @@ def _xlsx_basic(data: bytes) -> list[str]:
                 # 수식만 채운다. 원래 빈 칸은 그대로 비워 둔다.
                 if raw.startswith("="):
                     cells.append(raw)
+                else:
+                    cells.append("")
+            while cells and not cells[-1]:
+                cells.pop()
             if cells:
-                out.append(" | ".join(cells))
+                table_rows.append(cells)
+        out.extend(_markdown_table(table_rows))
     if has_macro:
         # **매크로 코드는 넣지 않는다.** 코드는 사실이 아니고, 근거로 쓰이면
         # 「그렇게 계산하기로 되어 있다」 를 「그렇게 계산됐다」 로 읽게 된다.
@@ -326,7 +458,7 @@ def _xlsx_basic(data: bytes) -> list[str]:
 def _xlsx(data: bytes) -> list[str]:
     """Use the Hermes-derived renderer; retain the old parser as an explicit fallback."""
     try:
-        return _finish(xlsx_lines(data))
+        return _finish(_html_tables_to_markdown(xlsx_lines(data)))
     except (ExternalConverterUnavailable, ExternalConversionError) as exc:
         logger.warning("Excel 정밀 변환기를 쓰지 못해 기본 변환으로 전환: %s", exc)
         return [f"[변환 안내] 정밀 표 변환 미사용: {exc}", *_xlsx_basic(data)]
@@ -341,10 +473,8 @@ def _docx_basic(data: bytes) -> list[str]:
     out = [_clip(p.text) for p in d.paragraphs if p.text.strip()]
     for ti, table in enumerate(d.tables, 1):
         out.append(f"[표 {ti}]")
-        for row in table.rows:
-            cells = [_clip(c.text) for c in row.cells if c.text.strip()]
-            if cells:
-                out.append(" | ".join(cells))
+        rows = [[_clip(c.text) for c in row.cells] for row in table.rows]
+        out.extend(_markdown_table([row for row in rows if any(row)]))
     return _finish(out)
 
 
@@ -368,10 +498,8 @@ def _pptx_basic(data: bytes) -> list[str]:
                     if txt:
                         out.append(_clip(txt))
             if getattr(shape, "has_table", False):
-                for row in shape.table.rows:
-                    cells = [_clip(c.text) for c in row.cells if c.text.strip()]
-                    if cells:
-                        out.append(" | ".join(cells))
+                rows = [[_clip(c.text) for c in row.cells] for row in shape.table.rows]
+                out.extend(_markdown_table([row for row in rows if any(row)]))
         if len(out) == before + 1:
             # 머리줄만 남았다 = 글자를 하나도 못 읽었다. **그림만 있는
             # 슬라이드는 읽은 것으로 세지 않는다** — 그 그림이 표일 수 있다.
@@ -422,11 +550,16 @@ def _pdf(data: bytes) -> list[str]:
     missing_pages: list[int] = []
     for i, page in enumerate(reader.pages, 1):
         try:
-            text = page.extract_text() or ""
+            try:
+                text = page.extract_text(extraction_mode="layout") or ""
+            except TypeError:
+                # 구형 pypdf 에서는 위치 보존 모드가 없다. 기존 텍스트 추출로
+                # 내리되, 없는 열 위치를 추측해 만들지는 않는다.
+                text = page.extract_text() or ""
         except Exception:  # noqa: BLE001 - 한 페이지 실패가 전체를 막지 않는다
             missing_pages.append(i)
             continue
-        lines = [_clip(ln) for ln in text.splitlines() if ln.strip()]
+        lines = _layout_markdown_lines(text)
         if lines:
             out.append(f"[{i}쪽]")
             out.extend(lines)

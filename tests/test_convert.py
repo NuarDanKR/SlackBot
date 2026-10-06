@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import io
+import sys
+import types
 import zipfile
 
 import pytest
@@ -36,8 +38,9 @@ def test_xlsx_keeps_sheet_and_row_structure():
 
     lines = convert("xlsx", buf.getvalue())
     assert "[시트] 기성내역" in lines
-    assert any("현장" in line and "금액" in line and "비고" in line for line in lines)
-    assert any("김해외동" in line and "3억 2천만원" in line for line in lines)
+    assert "| 현장 | 금액 | 비고 |" in lines
+    assert "| --- | --- | --- |" in lines
+    assert "| 김해외동 | 3억 2천만원 |  |" in lines
     assert "[시트] 요약" in lines  # 시트가 여러 개면 모두 나온다
 
 
@@ -57,7 +60,59 @@ def test_docx_paragraphs_and_tables(without_external_converters):
     lines = convert("docx", buf.getvalue())
     assert "착공일은 2026-03-01 이다" in lines
     assert "[표 1]" in lines
-    assert "기성금 | 3억" in lines
+    assert "| 항목 | 값 |" in lines
+    assert "| --- | --- |" in lines
+    assert "| 기성금 | 3억 |" in lines
+
+
+def test_pdf_layout_rows_become_a_markdown_table_but_prose_does_not():
+    text = """태영건설 연도별 실적 추이
+
+구 분        '25년        '26년(e)
+매 출 액     19,012       13,810
+영업 이익                  329
+
+이 문장은  두 칸이 있어도 표의 연속 행이 아닙니다.
+"""
+
+    lines = cv._layout_markdown_lines(text)
+
+    assert "태영건설 연도별 실적 추이" in lines
+    assert "| 구 분 | '25년 | '26년(e) |" in lines
+    assert "| --- | --- | --- |" in lines
+    assert "| 매 출 액 | 19,012 | 13,810 |" in lines
+    assert "| 영업 이익 |  | 329 |" in lines
+    assert "이 문장은  두 칸이 있어도 표의 연속 행이 아닙니다." in lines
+
+
+def test_markdown_table_escapes_pipes_and_keeps_empty_columns():
+    assert cv._markdown_table([["항목", "", "비고"], ["A|B", "3", ""]]) == [
+        "| 항목 |  | 비고 |",
+        "| --- | --- | --- |",
+        "| A\\|B | 3 |  |",
+    ]
+
+
+def test_pdf_requests_layout_preserving_text(monkeypatch):
+    seen = []
+
+    class Page:
+        def extract_text(self, *, extraction_mode=None):
+            seen.append(extraction_mode)
+            return ("항목        금액\n매출        13,810\n" * 10)
+
+    class Reader:
+        is_encrypted = False
+
+        def __init__(self, _stream):
+            self.pages = [Page()]
+
+    monkeypatch.setitem(sys.modules, "pypdf", types.SimpleNamespace(PdfReader=Reader))
+
+    lines = convert("pdf", b"pdf")
+
+    assert seen == ["layout"]
+    assert "| 항목 | 금액 |" in lines
 
 
 def test_pptx_slides(without_external_converters):

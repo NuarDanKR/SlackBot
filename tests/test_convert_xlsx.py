@@ -44,7 +44,7 @@ def test_a_formula_cell_is_not_dropped():
 
     lines = convert.convert("xlsx", data)
 
-    total_row = next(line for line in lines if line.startswith("합계"))
+    total_row = next(line for line in lines if line.startswith("| 합계 |"))
     assert "=SUM(B2:B2)" in total_row, f"수식이 사라졌다: {total_row}"
     assert "=AVERAGE(C2:C2)" in total_row
 
@@ -65,8 +65,8 @@ def test_an_empty_cell_stays_empty():
 
     lines = convert.convert("xlsx", data)
 
-    row = next(line for line in lines if line.startswith("<tr>"))
-    assert row == "<tr><th>가</th><th></th><th>다</th></tr>"
+    row = next(line for line in lines if line.startswith("| 가 |"))
+    assert row == "| 가 |  | 다 |"
 
 
 def test_the_high_fidelity_renderer_is_called_once(monkeypatch):
@@ -110,7 +110,7 @@ def test_the_fold_note_reports_the_real_total(monkeypatch):
     lines = convert.convert("xlsx", _book([[f"행{i}", i] for i in range(50)]))
 
     note = next(line for line in lines if "생략" in line)
-    assert "총 53줄" in note, note  # 시트 머리와 table 시작·끝도 검색 가능한 구조 줄이다
+    assert "총 52줄" in note, note  # 시트 머리와 Markdown 헤더 구분선도 구조 줄이다
 
 
 def test_conversion_does_not_truncate_by_default():

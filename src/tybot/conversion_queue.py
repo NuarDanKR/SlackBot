@@ -39,7 +39,7 @@ log = logging.getLogger("tybot.conversion_queue")
 
 # 이 코드로 만든 산출물이 어느 파이프라인의 것인가. 변환기나 추출 규칙이 바뀌면
 # 올린다 — **키의 일부라서**, 올리면 과거에 실패한 파일이 새 작업으로 다시 들어온다.
-PIPELINE_VERSION = "1"
+PIPELINE_VERSION = "2"
 
 # 상태. `held` 는 「사람이 볼 때까지 멈춘다」 이고 `failed` 와 다르다 —
 # 하나는 환경을 고쳐야 하고 하나는 그 파일을 포기한 것이다.

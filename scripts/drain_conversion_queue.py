@@ -41,6 +41,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
 from tybot import conversion_queue as queue
+from tybot.archive.convert import CONVERTER_VERSION
 from tybot.envfile import load_env_file
 
 EXIT_OK = 0
@@ -595,6 +596,84 @@ def nightly_backfill(archive_dir: str, *, apply: bool) -> int:
     return EXIT_OK
 
 
+def outdated_backfill(archive_dir: str, *, apply: bool) -> int:
+    """현재 변환기보다 오래된 성공 첨부를 새 revision 으로 다시 읽는다.
+
+    기존 정본이나 Slack raw 를 덮지 않는다. 큐 pipeline 판이 키에 들어가므로
+    과거 성공 작업과 별개 행으로 처리되고, publish 단계가 새 정본을 나란히 쓴다.
+    """
+    from tybot.attachment_review import APPROVED, CONVERTED, scan
+
+    converted = [
+        item for item in scan(archive_dir)
+        if item.status in {APPROVED, CONVERTED}
+        and item.conversion_state in {"succeeded", "partial"}
+    ]
+    candidates = []
+    original_missing = []
+    for item in converted:
+        try:
+            meta = json.loads(item.meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(meta.get("converter_version") or "") == CONVERTER_VERSION:
+            continue
+        if item.object_path is None or not item.object_path.is_file():
+            original_missing.append(item)
+            continue
+        candidates.append(item)
+
+    print(
+        f"구버전 성공 첨부 {len(candidates)}건 · "
+        f"원본 없음 {len(original_missing)}건 · "
+        f"현재판 {len(converted) - len(candidates) - len(original_missing)}건"
+    )
+    if not candidates:
+        return EXIT_OK
+    if not apply:
+        for item in candidates[:20]:
+            print(f"  {item.workspace}/{item.channel_id}/{item.file_id} {item.name}")
+        if len(candidates) > 20:
+            print(f"  … 외 {len(candidates) - 20}건")
+        print("\n실제로 새 revision 을 만들려면 `--outdated --apply` 를 사용하세요.")
+        return EXIT_OK
+
+    added = 0
+    for item in candidates:
+        digest = item.sha256
+        if not digest:
+            try:
+                digest = hashlib.sha256(item.object_path.read_bytes()).hexdigest()
+            except OSError:
+                print(
+                    f"  건너뜀(원본 소실): "
+                    f"{item.workspace}/{item.channel_id}/{item.file_id}"
+                )
+                continue
+        try:
+            job_id = queue.enqueue(
+                workspace=item.workspace,
+                channel_id=item.channel_id,
+                file_id=item.file_id,
+                original_sha256=digest,
+                error_code="converter_outdated",
+                retryable=True,
+                converter_version=CONVERTER_VERSION,
+                pipeline_version=queue.PIPELINE_VERSION,
+                force=True,
+            )
+        except queue.QueueUnavailable as exc:
+            print(f"큐를 쓸 수 없습니다: {exc}", file=sys.stderr)
+            return EXIT_INPUT
+        if job_id:
+            added += 1
+    print(
+        f"새 변환판 큐 등록 {added}건. `drain_conversion_queue.py --apply`를 "
+        "실행하거나 변환 타이머를 기다리세요."
+    )
+    return EXIT_OK
+
+
 def show_status() -> int:
     reclaimed = queue.reclaim_expired()
     counts = queue.summary()
@@ -625,6 +704,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="재시도 가능한 실패 첨부를 큐에 올리고 즉시 처리한다(야간 배치)",
     )
+    ap.add_argument(
+        "--outdated",
+        action="store_true",
+        help="현재 변환기보다 오래된 성공 첨부를 새 revision 으로 재변환한다",
+    )
     ap.add_argument("--limit", type=int, default=20, help="한 번에 처리할 작업 수")
     ap.add_argument("--archive", default="")
     args = ap.parse_args(argv)
@@ -641,8 +725,9 @@ def main(argv: list[str] | None = None) -> int:
     archive = args.archive or os.getenv("ARCHIVE_DIR", "./archive")
 
     try:
-        if args.backfill and args.nightly:
-            ap.error("--backfill 과 --nightly 는 함께 사용할 수 없습니다")
+        selected = sum((args.backfill, args.nightly, args.outdated))
+        if selected > 1:
+            ap.error("--backfill, --nightly, --outdated 는 함께 사용할 수 없습니다")
         if args.status:
             return show_status()
         if args.backfill:
@@ -651,6 +736,8 @@ def main(argv: list[str] | None = None) -> int:
             result = nightly_backfill(archive, apply=args.apply)
             if result != EXIT_OK or not args.apply:
                 return result
+        if args.outdated:
+            return outdated_backfill(archive, apply=args.apply)
 
         queue.reclaim_expired()
         if not args.apply:

@@ -803,6 +803,56 @@ def test_nightly_backfill_is_a_dry_run_without_apply(tmp_path, monkeypatch, caps
     assert "--nightly --apply" in capsys.readouterr().out
 
 
+def test_outdated_backfill_queues_only_old_successful_conversions(
+    tmp_path, monkeypatch, capsys
+):
+    import drain_conversion_queue as drain
+
+    _staged_review(
+        tmp_path,
+        "F1",
+        status="converted",
+        conversion_state="succeeded",
+        converter_version="1",
+    )
+    _staged_review(
+        tmp_path,
+        "F2",
+        status="converted",
+        conversion_state="succeeded",
+        converter_version=drain.CONVERTER_VERSION,
+    )
+    added = []
+    monkeypatch.setattr(queue, "enqueue", lambda **kw: added.append(kw) or 1)
+
+    assert drain.outdated_backfill(str(tmp_path / "archive"), apply=True) == 0
+
+    assert [item["file_id"] for item in added] == ["F1"]
+    assert added[0]["pipeline_version"] == queue.PIPELINE_VERSION
+    assert added[0]["force"] is True
+    assert "구버전 성공 첨부 1건" in capsys.readouterr().out
+
+
+def test_outdated_backfill_is_a_dry_run(tmp_path, monkeypatch, capsys):
+    import drain_conversion_queue as drain
+
+    _staged_review(
+        tmp_path,
+        "F1",
+        status="converted",
+        conversion_state="succeeded",
+        converter_version="1",
+    )
+    monkeypatch.setattr(
+        queue,
+        "enqueue",
+        lambda **_kw: pytest.fail("dry run must not enqueue"),
+    )
+
+    assert drain.outdated_backfill(str(tmp_path / "archive"), apply=False) == 0
+    assert "--outdated --apply" in capsys.readouterr().out
+
+
 def test_nightly_unit_requeues_and_can_publish_to_the_archive():
     root = Path(__file__).resolve().parent.parent
     service = (root / "deploy" / "tybot-convert-nightly.service").read_text(
@@ -827,6 +877,8 @@ def _staged_review(
     channel_id="C1",
     original=True,
     retryable=False,
+    conversion_state="failed",
+    converter_version="",
 ) -> None:
     """`attachment_review.scan()` 이 읽는 모양으로 하나 만든다."""
     d = (
@@ -841,6 +893,8 @@ def _staged_review(
         json.dumps({
             "name": f"{file_id}.pdf", "filetype": "pdf", "status": status,
             "error_code": error_code, "retryable": retryable, "sha256": "abc123",
+            "conversion_state": conversion_state,
+            "converter_version": converter_version,
             "object_path": str(object_path),
         }, ensure_ascii=False),
         encoding="utf-8",

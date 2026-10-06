@@ -37,6 +37,27 @@ def test_kordoc_marks_ocr_output(monkeypatch, tmp_path):
     assert "금액 3억 원" in lines
 
 
+def test_kordoc_preserves_a_markdown_table(monkeypatch, tmp_path):
+    monkeypatch.setattr(ext, "_binary", lambda *_args: "/usr/bin/kordoc")
+
+    def fake_run(_command, *, cwd, home):
+        assert home == tmp_path
+        (cwd / "out" / "source.md").write_text(
+            "| 항목 | 금액 |\n| --- | --- |\n| 매출 | 13,810 |\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(ext, "_run", fake_run)
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+
+    assert ext.kordoc_lines(b"pdf", "pdf") == [
+        "| 항목 | 금액 |",
+        "| --- | --- |",
+        "| 매출 | 13,810 |",
+    ]
+
+
 def test_converter_binary_is_not_downloaded_at_runtime(monkeypatch):
     monkeypatch.delenv("KORDOC_BIN", raising=False)
     monkeypatch.setattr(ext.shutil, "which", lambda _name: None)
