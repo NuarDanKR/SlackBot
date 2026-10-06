@@ -13,6 +13,7 @@ from tybot import channel_health as ch
 from tybot.archive.collection_probe import ArchiverChannel
 from tybot.channel_management import (
     ChannelNameError,
+    create_modal,
     edit_from_view,
     edit_modal,
 )
@@ -258,6 +259,33 @@ def test_channel_managers_are_only_shown_to_people_who_can_delegate():
     assert not any(b.get("block_id") == "channel_managers" for b in hidden["blocks"])
     block = next(b for b in shown["blocks"] if b.get("block_id") == "channel_managers")
     assert block["element"]["initial_users"] == ["U2", "U3"]
+
+
+def test_edit_fields_use_clear_names_and_follow_the_task_flow():
+    """관리 권한과 검토 설정을 이름 아래에서 순서대로 훑을 수 있어야 한다."""
+    modal = edit_modal(
+        "{}", spec=parse(GOOD), reviewers=("U1",), managers=("U2",)
+    )
+    inputs = [block for block in modal["blocks"] if block["type"] == "input"]
+    ids = [block["block_id"] for block in inputs]
+    labels = {block["block_id"]: block["label"]["text"] for block in inputs}
+
+    assert ids.index("task") < ids.index("channel_managers")
+    assert ids.index("send_at") < ids.index("reviewers")
+    assert labels["channel_managers"] == "채널 관리자"
+    assert labels["send_at"] == "검토 시각"
+    assert labels["reviewers"] == "검토 승인자"
+
+
+def test_create_review_fields_follow_the_same_flow_as_edit():
+    modal = create_modal("{}", default_reviewer="U1")
+    inputs = [block for block in modal["blocks"] if block["type"] == "input"]
+    ids = [block["block_id"] for block in inputs]
+    labels = {block["block_id"]: block["label"]["text"] for block in inputs}
+
+    assert ids.index("schedule_kind") < ids.index("send_at") < ids.index("reviewers")
+    assert labels["send_at"] == "검토 시각"
+    assert labels["reviewers"] == "검토 승인자"
 
 
 # --- 제출 읽기 ---------------------------------------------------------------

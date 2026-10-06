@@ -2120,7 +2120,7 @@ class WorkspaceBot:
 
         if not self._can_manage_channel(channel_id, user_id):
             respond(
-                "이 채널의 최초 생성 요청자 또는 TYBot 채널 관리자만 검토자를 정할 수 있습니다.",
+                "이 채널의 최초 생성 요청자 또는 TYBot 채널 관리자만 검토 승인자를 정할 수 있습니다.",
                 response_type="ephemeral",
             )
             return
@@ -2168,7 +2168,7 @@ class WorkspaceBot:
             return
         if not rows:
             respond(
-                "이 채널에는 요약 검토자가 없습니다 — **요약을 반영하지 않습니다.**" + NEWLINE
+                "이 채널에는 검토 승인자가 없습니다 — **요약을 반영하지 않습니다.**" + NEWLINE
                 + "정하기: `/채널 검토자 @사람 매일 09:00`" + NEWLINE
                 + "주 1회: `/채널 검토자 @사람 매주 수요일 09:00`" + NEWLINE
                 + "여러 명도 됩니다. 해제: `/채널 검토자 없음`",
@@ -2204,7 +2204,7 @@ class WorkspaceBot:
         if args.strip() and not users and not clearing:
             respond(
                 "사용자를 식별하지 못했습니다. `/채널 수정`을 열어 "
-                "`채널 수정 담당자`에서 사용자를 선택해 주세요. "
+                "`채널 관리자`에서 사용자를 선택해 주세요. "
                 "예비 명령을 쓸 때는 Slack 자동완성 목록에서 사람을 선택해야 합니다.",
                 response_type="ephemeral",
             )
@@ -2214,9 +2214,9 @@ class WorkspaceBot:
             managers = self.channel_owners.managers_of(self.workspace, channel_id)
             lines = [f"개설자: <@{owner}>" if owner else "개설자 기록: 없음"]
             lines.append(
-                "TYBot 수정 담당자: " + " ".join(f"<@{uid}>" for uid in managers)
+                "채널 관리자: " + " ".join(f"<@{uid}>" for uid in managers)
                 if managers
-                else "TYBot 수정 담당자: 없음"
+                else "채널 관리자: 없음"
             )
             lines.append("변경: `/채널 수정` · 예비 명령: `/채널 담당자 @사람`")
             respond(NEWLINE.join(lines), response_type="ephemeral")
@@ -2713,14 +2713,14 @@ class WorkspaceBot:
         suffix = "\n일부 참여자 초대에 실패했습니다. 채널에서 직접 초대해 주세요." if invite_error else ""
         if reviewer_error:
             suffix += (
-                "\n⚠️ **요약 검토자를 저장하지 못했습니다** — " + reviewer_error
+                "\n⚠️ **검토 승인자를 저장하지 못했습니다** — " + reviewer_error
                 + " 지금은 요약 후보를 보내거나 반영하지 않습니다. "
                 "`/채널 수정` 으로 다시 지정해 주세요."
             )
         elif request.reviewers:
             who = " ".join(f"<@{u}>" for u in request.reviewers)
             suffix += (
-                f"\n요약 검토자 {who} · "
+                f"\n검토 승인자 {who} · "
                 + reviewers.schedule_label(
                     request.schedule_kind,
                     request.weekday,
@@ -2734,7 +2734,7 @@ class WorkspaceBot:
                 user_id,
                 f"{visibility} 업무 채널 <#{channel_id}>을 만들었습니다. "
                 f"이름이 수집 규칙에 맞아 **이 채널의 대화는 아카이브에 쌓입니다.**"
-                "\n`/채널 수정`으로 이름과 요약 검토자를 함께 고칠 수 있고, "
+                "\n`/채널 수정`으로 이름과 검토 승인자를 함께 고칠 수 있고, "
                 "`/채널 상태`로 수집·검토자·첨부가 제대로 물렸는지 봅니다. "
                 "규칙 밖 이름으로 바꾸면 그 시점부터 수집이 멈춥니다."
                 "\nSlack 기본 관리 권한이 필요하면 채널 정보 → 관리자로 지정에서 추가하세요."
@@ -2791,7 +2791,7 @@ class WorkspaceBot:
             if base.reviewers:
                 who = " ".join(f"<@{u}>" for u in base.reviewers)
                 lines.append(
-                    f"요약 검토자 {who} · "
+                    f"검토 승인자 {who} · "
                     + reviewers.schedule_label(
                         base.schedule_kind,
                         base.weekday,

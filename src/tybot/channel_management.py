@@ -251,7 +251,7 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
         )
         if not reviewers:
             raise ChannelNameError(
-                "요약 검토자를 한 명 이상 골라 주세요. 검토자가 없으면 요약이 "
+                "검토 승인자를 한 명 이상 골라 주세요. 승인자가 없으면 요약이 "
                 "반영되지 않습니다.",
                 REVIEWER_BLOCK,
             )
@@ -472,34 +472,38 @@ def create_modal(
                     "placeholder": {"type": "plain_text", "text": "나중에 초대해도 됩니다"},
                 },
             },
-            # 검토자는 **필수**다. 선택으로 두면 요약 후보가 아무에게도 가지 않고
+            *_schedule_blocks(schedule_kind, weekday),
+            {
+                "type": "input",
+                "block_id": SEND_AT_BLOCK,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "검토 시각"},
+                "element": {
+                    "type": "timepicker",
+                    "action_id": "send_at",
+                    "initial_time": "08:00",
+                },
+                "hint": {
+                    "type": "plain_text",
+                    "text": "요약 후보를 KST 기준 이 시각에 DM 으로 보냅니다.",
+                },
+            },
+            # 검토 승인자는 **필수**다. 선택으로 두면 요약 후보가 아무에게도 가지 않고
             # 반영되지 않는다. 기본값은 만든 사람 자신이다.
             {
                 "type": "input",
                 "block_id": REVIEWER_BLOCK,
-                "label": {"type": "plain_text", "text": "요약 검토자"},
+                "label": {"type": "plain_text", "text": "검토 승인자"},
                 "element": {
                     "type": "multi_users_select",
                     "action_id": "reviewers",
-                    "placeholder": {"type": "plain_text", "text": "검토자를 고르세요"},
+                    "placeholder": {"type": "plain_text", "text": "검토 승인자를 고르세요"},
                     **({"initial_users": initial_reviewers} if initial_reviewers else {}),
                 },
                 "hint": {
                     "type": "plain_text",
                     "text": "봇이 만든 요약 후보를 선택한 주기에 이 사람에게 DM 으로 보냅니다. "
                             "확인한 것만 반영됩니다.",
-                },
-            },
-            *_schedule_blocks(schedule_kind, weekday),
-            {
-                "type": "input",
-                "block_id": SEND_AT_BLOCK,
-                "optional": True,
-                "label": {"type": "plain_text", "text": "검토 DM 보낼 시각 (KST)"},
-                "element": {
-                    "type": "timepicker",
-                    "action_id": "send_at",
-                    "initial_time": "08:00",
                 },
             },
         ]
@@ -590,7 +594,7 @@ def edit_modal(
     where = current_name or (spec.raw if spec else "")
     head = (
         f"*{where}*" if where else "*채널 수정*"
-    ) + "\n이름은 바꿀 때만 채우세요. 검토자만 고쳐도 됩니다."
+    ) + "\n이름은 바꿀 때만 채우세요. 검토 승인자만 고쳐도 됩니다."
     if spec is None and where:
         head += (
             "\n\n🔴 지금 이름이 표준 형식이 아니어서 **이 채널은 수집되지 않습니다.** "
@@ -600,16 +604,15 @@ def edit_modal(
     manager_blocks: list[dict] = []
     if managers is not None:
         manager_blocks = [
-            {"type": "divider"},
             {
                 "type": "input",
                 "block_id": MANAGER_BLOCK,
                 "optional": True,
-                "label": {"type": "plain_text", "text": "채널 수정 담당자"},
+                "label": {"type": "plain_text", "text": "채널 관리자"},
                 "element": {
                     "type": "multi_users_select",
                     "action_id": "channel_managers",
-                    "placeholder": {"type": "plain_text", "text": "수정 담당자를 고르세요"},
+                    "placeholder": {"type": "plain_text", "text": "채널 관리자를 고르세요"},
                     **({"initial_users": list(managers)} if managers else {}),
                 },
                 "hint": {
@@ -631,30 +634,14 @@ def edit_modal(
             {"type": "section", "text": {"type": "mrkdwn", "text": head}},
             {"type": "divider"},
             *name_blocks,
+            *manager_blocks,
             {"type": "divider"},
-            {
-                "type": "input",
-                "block_id": REVIEWER_BLOCK,
-                "optional": True,
-                "label": {"type": "plain_text", "text": "요약 검토자"},
-                "element": {
-                    "type": "multi_users_select",
-                    "action_id": "reviewers",
-                    "placeholder": {"type": "plain_text", "text": "검토자를 고르세요"},
-                    **({"initial_users": list(reviewers)} if reviewers else {}),
-                },
-                "hint": {
-                    "type": "plain_text",
-                    "text": "검토자가 없으면 요약을 반영하지 않습니다. 첨부 변환 상세는 "
-                            "관리 콘솔에서 확인합니다. 비우고 저장하면 전부 해제됩니다.",
-                },
-            },
             *_schedule_blocks(schedule_kind, weekday),
             {
                 "type": "input",
                 "block_id": SEND_AT_BLOCK,
                 "optional": True,
-                "label": {"type": "plain_text", "text": "검토 DM 보낼 시각 (KST)"},
+                "label": {"type": "plain_text", "text": "검토 시각"},
                 "element": {
                     "type": "timepicker",
                     "action_id": "send_at",
@@ -662,10 +649,26 @@ def edit_modal(
                 },
                 "hint": {
                     "type": "plain_text",
-                    "text": "그날 요약 후보를 이 시각에 DM 으로 보냅니다.",
+                    "text": "그날 요약 후보를 KST 기준 이 시각에 DM 으로 보냅니다.",
                 },
             },
-            *manager_blocks,
+            {
+                "type": "input",
+                "block_id": REVIEWER_BLOCK,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "검토 승인자"},
+                "element": {
+                    "type": "multi_users_select",
+                    "action_id": "reviewers",
+                    "placeholder": {"type": "plain_text", "text": "검토 승인자를 고르세요"},
+                    **({"initial_users": list(reviewers)} if reviewers else {}),
+                },
+                "hint": {
+                    "type": "plain_text",
+                    "text": "검토 승인자가 없으면 요약을 반영하지 않습니다. 첨부 변환 상세는 "
+                            "관리 콘솔에서 확인합니다. 비우고 저장하면 전부 해제됩니다.",
+                },
+            },
         ],
     }
 
