@@ -253,6 +253,7 @@ __all__ = [
     "CONFLICT",
     "EVIDENCE_CHANGED",
     "EXPORTED_STATES",
+    "EXPORT_DIR_ENV",
     "EXPORT_SCHEMA",
     "FINAL_STATES",
     "NOT_FINAL",
@@ -260,12 +261,17 @@ __all__ = [
     "NO_MATCH",
     "RECORDS_UNREADABLE",
     "SKIP",
+    "SOURCE_HERMES_INBOX",
     "SOURCE_MISMATCH",
     "SOURCE_TYBOT_DM",
     "ConcurrentExportRefused",
     "ExternalDecision",
+    "UnsafeExportTarget",
     "build_export",
+    "counterpart_decisions",
     "decide",
+    "export_path",
+    "export_root",
     "filter_candidates",
     "load_decisions",
     "parse_decisions",
@@ -289,6 +295,89 @@ __all__ = [
 # 옮길 이유가 없다.
 EXPORT_SCHEMA = "summary-review-decisions/v1"
 SOURCE_TYBOT_DM = "tybot-dm"
+# Hermes 의 `archive-inbox` 스킬. PF 는 TYBot 없이 이 스킬만으로 검토를 끝낸다.
+SOURCE_HERMES_INBOX = "hermes-archive-inbox"
+
+#: 결정 파일이 쌓이는 뿌리. 안 정하면 내보내기는 **조용히 꺼진다** — 내보내기가
+#: 없어도 운영은 돌아야 하고(그때는 아무것도 생략되지 않을 뿐이다), 경로를 못 정한
+#: 설치에서 승인 버튼이 실패하면 사람은 이미 들어간 결정을 다시 누른다.
+EXPORT_DIR_ENV = "SUMMARY_DECISION_DIR"
+
+
+class UnsafeExportTarget(ValueError):
+    """결정 파일의 경로 조각이 **경로로 읽힐 수 있다.**
+
+    `workspace` 는 설정·DB 에서 오는 바깥 문자열이다. `..` 이나 구분자가 들어오면
+    저장소 밖에 쓰거나 남의 워크스페이스 파일을 덮는다 — 그리고 조용하다.
+    """
+
+
+def _safe_segment(value: str, *, what: str) -> str:
+    """경로 한 칸으로 써도 되는 이름인가. **의심스러우면 던진다.**
+
+    걸러내지 말고 던지는 이유는, 걸러서 만든 이름은 **다른 워크스페이스의 이름과
+    같아질 수 있기 때문**이다. `T1/x` 와 `T1x` 를 둘 다 `T1x` 로 만들면 두
+    워크스페이스가 같은 파일을 쓰고, 그건 원칙 4 를 조용히 어긴다.
+    """
+    name = str(value or "").strip()
+    if not name or name in {".", ".."}:
+        raise UnsafeExportTarget(f"{what} 이 비었거나 경로 자리표시자입니다: {value!r}")
+    if any(sep in name for sep in ("/", "\\", os.sep)) or "\x00" in name:
+        raise UnsafeExportTarget(f"{what} 에 경로 구분자가 있습니다: {value!r}")
+    return name
+
+
+def export_root(env: str | None = None) -> Path | None:
+    """설정된 뿌리. **안 정했으면 `None`** — 그 설치에서는 내보내기가 꺼진 것이다."""
+    raw = (env if env is not None else os.getenv(EXPORT_DIR_ENV, "")).strip()
+    return Path(raw) if raw else None
+
+
+def export_path(root: Path | str, *, source: str, workspace: str) -> Path:
+    """그 출처가 쓸 파일. `<root>/<workspace>/<source>.json`.
+
+    **출처마다 파일이 다르다**(§단일 writer). 그리고 **워크스페이스마다 디렉터리가
+    다르다** — 한 파일에 여러 워크스페이스의 채널 ID 를 담으면, 그 파일을 읽는 쪽이
+    자기가 권한 없는 워크스페이스에 어떤 채널이 있는지 알게 된다(원칙 4). 대조에
+    필요한 것은 자기 워크스페이스뿐이다.
+    """
+    return (
+        Path(root)
+        / _safe_segment(workspace, what="워크스페이스")
+        / f"{_safe_segment(source, what='출처')}.json"
+    )
+
+
+def counterpart_decisions(
+    root: Path | str, *, source: str, workspace: str
+) -> list[ExternalDecision] | None:
+    """**상대편**이 끝낸 결정 전부. 하나라도 못 읽으면 `None`.
+
+    자기가 쓴 파일(`source`)은 뺀다. 안 빼면 DM 이 자기 결정으로 자기를 막아,
+    같은 회차가 두 번 갱신될 때 두 번째부터 후보가 통째로 사라진다.
+
+    **못 읽은 파일이 하나라도 있으면 전부 `None` 이다.** 읽은 것만으로 판정하면,
+    상대편의 「거절」 기록이 깨진 날 그 건이 「결정 없음」 으로 보이고, 생략 판정이
+    다른 파일의 승인으로 넘어갈 수 있다 — 거절된 것을 승인으로 읽고 생략하는 것이
+    이 장치가 막아야 하는 최악이다.
+
+    디렉터리가 아예 없는 것은 **「아무도 아직 안 썼다」** 이고 읽은 것이다. 그걸
+    「못 읽음」 으로 보면 처음 돌리는 설치에서 생략이 영영 안 켜진다.
+    """
+    mine = export_path(root, source=source, workspace=workspace)
+    folder = mine.parent
+    if not folder.is_dir():
+        return []
+    out: list[ExternalDecision] = []
+    for path in sorted(folder.glob("*.json")):
+        if path.name == mine.name:
+            continue
+        rows = load_decisions(path)
+        if rows is None:
+            logger.warning("상대편 결정 기록을 못 읽어 생략을 멈춥니다: %s", path)
+            return None
+        out.extend(rows)
+    return out
 
 # 내보낼 상태. **확정과 보류만** 보낸다.
 #

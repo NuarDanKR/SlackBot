@@ -33,6 +33,7 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -202,34 +203,44 @@ def md_path(item: dict) -> Path:
     return CHANNELS / f"{name}.md"
 
 
-def context_for(md: Path, evidence: str, span: int = 10) -> str:
-    """근거 인용이 든 메시지 블록을 헤더째 돌려준다.
+@dataclass(frozen=True)
+class EvidenceBlock:
+    """근거 인용이 든 **메시지 블록 한 개**. 못 찾았으면 `note` 가 사람 문장이다.
 
-    **못 찾으면 빈 문자열이 아니라 못 찾았다고 적는다.** 빈 값은 「원문에 없다」와
-    「검색이 어긋났다」를 화면에서 같은 모양으로 만든다 — 사람은 근거가 없는 줄 모르고
-    DM 문구만 보고 정하게 된다.
+    `context_for`(화면)와 `decision_export`(결정 기록의 좌표)가 **같은 블록**을 봐야
+    한다. 한쪽이 자기 규칙으로 다시 찾으면 화면이 보여 준 원문과 기록에 적힌 좌표가
+    다른 메시지를 가리킬 수 있고, 그건 조용히 틀린다 — 사람이 승인한 것과 기록이
+    가리키는 것이 다르면 대조의 전제가 무너진다.
+    """
 
-    **인용이 걸린 줄은 반드시 화면에 넣는다.** 전에는 창을 메시지 헤더에 고정하고
-    `span` 줄에서 잘랐는데, 긴 메시지에서는 **정작 근거 문장이 창 밖으로 밀려났다**
-    (2026-08-12 실사용: 22줄짜리 메시지에서 근거 2건이 둘 다 안 보였다). 화면에는 같은
-    메시지의 앞부분이 멀쩡히 보여서 사람은 그게 전부인 줄 알고 후보 문구만 보고 정하게
-    된다 — 이 도구가 하려는 일과 정반대다. 그래서 `span` 은 이제 「길이 상한」이 아니라
-    **「생략 없이 통째로 보여주는 길이」**이고, 넘으면 인용 줄만 남기고 **생략한 줄 수를
-    적는다.** 잘렸다는 표시가 없는 것이 잘린 것보다 나쁘다.
+    lines: list
+    start: int = -1          # 메시지 헤더 줄 (0-based)
+    end: int = -1            # 블록 끝, 제외
+    hits: tuple = ()
+    spans: tuple = ()
+    missing: tuple = ()
+    note: str = ""           # 비어 있지 않으면 **못 찾은 것**이다
 
-    **인용이 여럿이면 전부 찾는다.** 처음 걸린 것에서 멈추면 안 된다 — 모델은 대개
-    메시지 제목을 먼저 인용하고 실제 근거를 뒤에 붙여서, 앞엣것만 보면 늘 제목만 보인다.
+    @property
+    def found(self) -> bool:
+        return not self.note and self.start >= 0
 
-    **찾는 것은 줄 단위가 아니라 이어 붙인 본문에서다.** 슬랙 원문은 한 문장이 여러 줄에
-    걸치는 일이 흔하고 모델은 그것을 이어 한 문장으로 인용한다. 줄 하나씩 보면 그런 인용이
-    어느 줄에도 통째로 없어 「못 찾음」이 된다 — 아래 본문의 주석이 그 경위다. 그렇게 찾은
-    인용은 **걸친 줄을 전부** 화면에 넣는다. 시작 줄만 넣으면 뒷줄이 「생략」 안으로 접혀,
-    바로 위 문단의 사고가 원인만 바꿔 되살아난다."""
+
+def _NoBlock(note: str) -> EvidenceBlock:
+    return EvidenceBlock(lines=[], note=note)
+
+
+def evidence_block(md: Path, evidence: str) -> EvidenceBlock:
+    """근거 인용이 든 메시지 블록을 찾는다. **찾기만 하고 그리지 않는다.**
+
+    `context_for` 에서 뽑아낸 것이다 — 화면과 결정 기록이 같은 판정을 쓰게 하려고
+    한 자리에 뒀다. 주석은 그 자리의 경위를 그대로 들고 왔다.
+    """
     quotes = QUOTE_RE.findall(evidence or "")
     if not quotes:
-        return f"(근거에 원문 인용이 없습니다 — 적힌 것: {evidence or '없음'})"
+        return _NoBlock(f"(근거에 원문 인용이 없습니다 — 적힌 것: {evidence or '없음'})")
     if not md.exists():
-        return f"(채널 md 를 찾지 못했습니다: {md.name})"
+        return _NoBlock(f"(채널 md 를 찾지 못했습니다: {md.name})")
 
     lines = md.read_text(encoding="utf-8").split("\n")
     folded = [_fold(x) for x in lines]
@@ -315,7 +326,7 @@ def context_for(md: Path, evidence: str, span: int = 10) -> str:
             if not seen and needle not in missing:
                 missing.append(needle)
     if not hits:
-        return f"(원문에서 찾지 못했습니다 — 근거: {quotes[0][:40]}…)"
+        return _NoBlock(f"(원문에서 찾지 못했습니다 — 근거: {quotes[0][:40]}…)")
 
     # 블록 = 첫 인용이 든 메시지의 헤더부터 다음 헤더 앞까지.
     # 헤더까지 거슬러 올라간다 — 언제·누가가 있어야 원문으로 쓸 수 있다.
@@ -324,13 +335,48 @@ def context_for(md: Path, evidence: str, span: int = 10) -> str:
     if start is None:
         # 위로 올라가도 메시지 헤더가 없다 = 첫 메시지보다 앞이다. 언제·누가가 없는 토막을
         # 「원문」이라며 보여주면 사람은 그것을 근거로 삼는다. 못 찾은 것으로 둔다.
-        return f"(원문에서 찾지 못했습니다 — 근거: {quotes[0][:40]}…)"
+        return _NoBlock(f"(원문에서 찾지 못했습니다 — 근거: {quotes[0][:40]}…)")
     end = start + 1
     while end < len(lines) and not HEADER_RE.match(lines[end]):
         end += 1
     # 메시지 사이 구분선까지 딸려 오면 원문이 어디서 끝나는지가 흐려진다
     while end - 1 > start and lines[end - 1].strip() in ("", "---"):
         end -= 1
+    return EvidenceBlock(
+        lines=lines, start=start, end=end,
+        hits=tuple(hits), spans=tuple(spans), missing=tuple(missing),
+    )
+
+
+def context_for(md: Path, evidence: str, span: int = 10) -> str:
+    """근거 인용이 든 메시지 블록을 헤더째 돌려준다.
+
+    **못 찾으면 빈 문자열이 아니라 못 찾았다고 적는다.** 빈 값은 「원문에 없다」와
+    「검색이 어긋났다」를 화면에서 같은 모양으로 만든다 — 사람은 근거가 없는 줄 모르고
+    DM 문구만 보고 정하게 된다.
+
+    **인용이 걸린 줄은 반드시 화면에 넣는다.** 전에는 창을 메시지 헤더에 고정하고
+    `span` 줄에서 잘랐는데, 긴 메시지에서는 **정작 근거 문장이 창 밖으로 밀려났다**
+    (2026-08-12 실사용: 22줄짜리 메시지에서 근거 2건이 둘 다 안 보였다). 화면에는 같은
+    메시지의 앞부분이 멀쩡히 보여서 사람은 그게 전부인 줄 알고 후보 문구만 보고 정하게
+    된다 — 이 도구가 하려는 일과 정반대다. 그래서 `span` 은 이제 「길이 상한」이 아니라
+    **「생략 없이 통째로 보여주는 길이」**이고, 넘으면 인용 줄만 남기고 **생략한 줄 수를
+    적는다.** 잘렸다는 표시가 없는 것이 잘린 것보다 나쁘다.
+
+    **인용이 여럿이면 전부 찾는다.** 처음 걸린 것에서 멈추면 안 된다 — 모델은 대개
+    메시지 제목을 먼저 인용하고 실제 근거를 뒤에 붙여서, 앞엣것만 보면 늘 제목만 보인다.
+
+    **찾는 것은 줄 단위가 아니라 이어 붙인 본문에서다.** 슬랙 원문은 한 문장이 여러 줄에
+    걸치는 일이 흔하고 모델은 그것을 이어 한 문장으로 인용한다. 줄 하나씩 보면 그런 인용이
+    어느 줄에도 통째로 없어 「못 찾음」이 된다 — 아래 본문의 주석이 그 경위다. 그렇게 찾은
+    인용은 **걸친 줄을 전부** 화면에 넣는다. 시작 줄만 넣으면 뒷줄이 「생략」 안으로 접혀,
+    바로 위 문단의 사고가 원인만 바꿔 되살아난다."""
+    block = evidence_block(md, evidence)
+    if not block.found:
+        return block.note
+    lines = block.lines
+    start, end = block.start, block.end
+    hits, spans, missing = list(block.hits), list(block.spans), list(block.missing)
 
     inside = [i for i in hits if start <= i < end]
     if end - start <= span:
@@ -504,12 +550,60 @@ def confirmed_at(item: dict, generated: str) -> str:
     return (item or {}).get("lastSeen") or generated
 
 
-def load_items() -> list:
+def _settled_elsewhere(items: list) -> tuple:
+    """상대편에서 **이미 끝난** 항목 id 와, 안 뺀 사유별 건수.
+
+    여기서 던지지 않는다 — 대조 파일을 못 읽는 것이 **목록 자체를 막으면** 사람은
+    할 일을 볼 수가 없다. 못 읽으면 `records_unreadable` 로 세고 아무것도 안 뺀다.
+
+    import 를 함수 안에서 하는 이유는 `decision_export` 가 이 모듈을 import 하기
+    때문이다(맞물린 import).
+    """
+    try:
+        import decision_export as X
+    except ImportError:
+        return set(), {}
+
+    root = X.export_root()
+    if root is None:
+        return set(), {}
+    workspace = X.workspace_label()
+    if not workspace:
+        return set(), {"워크스페이스 미설정": 1}
+    try:
+        decisions = X.counterpart(root, workspace=workspace)
+    except (OSError, X.UnsafeExportTarget):
+        decisions = None
+
+    state = _read_json(STATE) or {}
+    ids = X.channel_ids(state)
+    settled, why = set(), {}
+    for it in items:
+        locator, digest, _ = X.coordinate_for(it)
+        channel_id = ids.get(str(it.get("file") or it.get("channel") or ""), "")
+        skip, reason = X.decide(
+            workspace=workspace, channel_id=channel_id,
+            locator=locator, digest=digest, decisions=decisions,
+        )
+        if skip:
+            settled.add(it.get("id"))
+        else:
+            why[reason] = why.get(reason, 0) + 1
+    return settled, why
+
+
+def load_items(counterpart_filter: bool = True) -> list:
     """할 일 목록. 사람이 이미 정한 것은 뺀다.
 
     VM 쪽(`pending-work.js` 의 `suppress`)도 같은 것을 거른다. 여기서 한 번 더 거르는
     이유는 사람이 정한 직후 다음 07:00 전까지의 구간 때문이다 — 그 사이에 목록을
-    다시 열면 방금 정한 것이 그대로 보인다."""
+    다시 열면 방금 정한 것이 그대로 보인다.
+
+    **상대편 인터페이스(TYBot DM 등)에서 끝낸 것도 뺀다** — 단, 「거기서 스킬이
+    돌았다」가 아니라 **같은 원문 좌표와 해시에 확정된 승인·거절이 있을 때만**이다.
+    판정은 `decision_export.decide()` 한 자리에 있다. `counterpart_filter=False` 는
+    내보내기 쪽이 쓴다 — 자기가 내보낼 기록을 자기 필터로 지우면 안 된다.
+    """
     data = read_pending_work()
     items = (data or {}).get("items", [])
     generated = (data or {}).get("generated", "")
@@ -520,6 +614,8 @@ def load_items() -> list:
     # 읽는다 (2026-09-07 부터. 그전에는 로컬 전용 `.decision-stamp.json` 이라 VM 이 못 봤다).
     approved = state.get("applied") or {}
 
+    settled, settled_why = _settled_elsewhere(items) if counterpart_filter else (set(), {})
+
     out = []
     for it in items:
         if it.get("id") in held:
@@ -529,7 +625,18 @@ def load_items() -> list:
             continue
         if applied_after(approved.get(it.get("id")), confirmed_at(it, generated)):
             continue
+        if it.get("id") in settled:
+            continue
         out.append(it)
+    if settled:
+        print(f"  - 다른 인터페이스에서 이미 끝난 {len(settled)}건을 뺐습니다"
+              f" (같은 원문 좌표·해시의 확정된 결정)")
+    if settled_why:
+        # **왜 안 뺐는지도 적는다.** 안 적으면 「대조가 되고 있나」를 화면에서 알 수 없고,
+        # 그 상태로는 좌표를 못 내고 있는 설치와 상대편이 아직 아무것도 안 한 설치가
+        # 똑같이 보인다.
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(settled_why.items()))
+        print(f"  - 대조했지만 안 뺀 사유: {detail}")
     # **번호의 원본은 이 목록의 순서다** — 화면(render)·`--only`(decide_work)·`--json`
     # 셋 다 여기서 받은 순서로 번호를 만든다. 파일 순서는 이월분(비요약)이 앞이라
     # (`mergeItems` 가 이월을 앞에 쌓는다), 그대로 주면 요약을 먼저 보이는 화면의 1번과

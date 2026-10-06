@@ -99,6 +99,77 @@ APPLIED_COMMENT = (
 
 # ── 파일 ────────────────────────────────────────────────────────────────
 
+def coords(it: dict, state: dict) -> dict:
+    """결정과 **함께 적어 둘 원문 좌표.** 못 내면 그 키를 안 넣는다.
+
+    ## 왜 결정하는 순간에 적나
+
+    나중에 다시 재면 **그 뒤에 바뀐 원문의 지문**이 나온다. 그러면 사람이 보고 정한
+    것이 아닌 것에 승인이 붙는다 — 대조의 전제가 바로 그 자리에서 무너진다.
+    (TYBot 쪽 `summary_review_reconcile` 의 `evidence_changed` 가 막으려는 것과 같은
+    사고를, 이쪽은 **적는 시점**으로 막는다.)
+
+    ## 못 내면 비워 둔다 — 지어내지 않는다
+
+    좌표가 없는 기록은 받는 쪽에서 `no_coordinate` 로 떨어져 **다시 묻는다.** 틀린
+    좌표를 적으면 사람이 승인하지 않은 것이 승인된 것으로 읽힌다. 둘 중 다시 묻는
+    쪽이 낫다. 왜 못 냈는지는 화면에 적는다 — 조용히 비면 「대조가 되는 줄」 안다.
+    """
+    import decision_export as X
+
+    out: dict = {}
+    workspace = X.workspace_label()
+    if workspace:
+        out["workspace"] = workspace
+    channel_id = X.channel_ids(state).get(str(it.get("file") or it.get("channel") or ""), "")
+    if channel_id:
+        out["channel_id"] = channel_id
+    locator, digest, why = X.coordinate_for(it)
+    if locator and digest:
+        out["evidence_locator"] = locator
+        out["evidence_hash"] = digest
+    else:
+        print(f"      원문 좌표를 못 냈습니다({why}) — 다른 인터페이스는 이 건을 다시 묻습니다.")
+    if not workspace:
+        print("      config.json 의 workspace 가 비어 있어 좌표가 상대편에 안 걸립니다.")
+    elif not channel_id:
+        print("      채널 ID 를 못 냈습니다(.sync-state.json) — 상대편에 안 걸립니다.")
+    out["kind"] = str(it.get("kind") or "")
+    return out
+
+
+def export_now() -> None:
+    """결정 뒤 **상대편이 읽을 파일**을 다시 쓴다. 실패해도 결정은 그대로다.
+
+    여기서 던지면 「정했다」가 실패로 보이는데 `.sync-state.json` 에는 이미 들어가
+    있다 — 사람은 다시 정하려 하고, 목록에서 이미 사라진 항목을 찾는다.
+    """
+    try:
+        import decision_export as X
+
+        root = X.export_root()
+        if root is None:
+            return
+        workspace = X.workspace_label()
+        if not workspace:
+            return
+        try:
+            items = R.load_items(counterpart_filter=False)
+        except R.PendingWorkUnreadable:
+            # 좌표가 이미 적힌 결정은 그대로 내보낸다. 못 읽은 것은 옛 기록을 지금
+            # 재어 보는 길뿐이고, 그건 어차피 하지 않는 쪽이 맞다.
+            items = []
+        rows, _ = X.records(
+            _read(STATE, {}) or {}, workspace=workspace,
+            items_by_id={it.get("id"): it for it in items},
+        )
+        path = X.export_path(root, workspace=workspace)
+        print(f"  결정 {X.write(path, rows)}건을 내보냈습니다: {path}")
+    except Exception as e:  # noqa: BLE001 - 내보내기 실패가 끝난 결정을 되돌리면 안 된다
+        print(f"  ! 결정 내보내기 실패({type(e).__name__}) — 결정은 그대로 남았습니다.",
+              file=sys.stderr)
+
+
 def _read(p: Path, fallback):
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -194,15 +265,18 @@ def approve(items: list) -> int:
     applied = state.get("applied") or {}
     for it in items:
         md = R.md_path(it)
+        print(f"  반영하기로: #{it.get('channel','')} {it.get('where','') or it.get('kind','')}")
         applied[it["id"]] = {
             "file": md.relative_to(ROOT).as_posix(),
             "channel": it.get("channel", ""),
             "at": now_iso(),
+            "state": "approved",
+            **coords(it, state),
         }
-        print(f"  반영하기로: #{it.get('channel','')} {it.get('where','') or it.get('kind','')}")
     state["applied"] = applied
     state["_applied_comment"] = APPLIED_COMMENT
     _write(STATE, state)
+    export_now()
     print("\n이제 채널 md 의 요약을 고치세요. 고친 뒤 `--show` 를 돌려야 커밋이 됩니다.")
     return 0
 
@@ -241,8 +315,11 @@ def drop(items: list, reason: str) -> int:
         h = None
         if it.get("kind") in R.SUMMARY_KINDS:
             h = R.summary_hash(it.get("file") or it.get("channel") or "")
-        dismissed[it["id"]] = {"reason": reason, "at": now_iso(), "summaryHash": h}
         print(f"  뺌: #{it.get('channel','')} {it.get('where','') or it.get('kind','')} — {reason}")
+        dismissed[it["id"]] = {
+            "reason": reason, "at": now_iso(), "summaryHash": h,
+            "state": "rejected", **coords(it, state),
+        }
         if it.get("kind") in R.SUMMARY_KINDS and not h:
             # 채널 md 가 없으면 해시가 빈 문자열로 나오고, suppress(JS)·_still_dismissed
             # (파이썬)는 「해시 없음 = 계속 뺌」으로 읽는다 — 요약이 바뀌어도 안 돌아온다.
@@ -253,6 +330,7 @@ def drop(items: list, reason: str) -> int:
     state["dismissed"] = dismissed
     state["_dismissed_comment"] = DISMISSED_COMMENT
     _write(STATE, state)
+    export_now()
     return 0
 
 
@@ -264,11 +342,17 @@ def later(items: list, days: int, reason: str) -> int:
         return 2
     deferred = state.get("deferred") or {}
     for it in items:
-        deferred[it["id"]] = {"until": until, "reason": reason, "at": now_iso()}
         print(f"  나중에({until}): #{it.get('channel','')} {it.get('where','') or it.get('kind','')}")
+        deferred[it["id"]] = {
+            "until": until, "reason": reason, "at": now_iso(),
+            # **보류는 확정이 아니다.** 내보내기는 하되(상대편이 「아직 안 끝났다」를 알아야
+            # 한다) 받는 쪽은 `not_final` 로 떨어뜨려 **다시 묻는다.**
+            "state": "deferred", **coords(it, state),
+        }
     state["deferred"] = deferred
     state["_deferred_comment"] = DEFERRED_COMMENT
     _write(STATE, state)
+    export_now()
     return 0
 
 
@@ -334,6 +418,10 @@ def clear(tokens: list) -> int:
 
     if state_hit:
         _write(STATE, state)
+        # **취소도 내보낸다.** 안 내보내면 풀린 결정이 상대편 파일에 그대로 남아,
+        # 그쪽은 이미 풀린 결정으로 후보를 생략한다 — 그러면 그 건은 어느 쪽에서도
+        # 사람 앞에 오지 않는다.
+        export_now()
     return 0
 
 

@@ -56,7 +56,13 @@ Claude Code 스킬까지.
 | `slack-sync` | `insert_messages.py` | 원문 메시지 **삽입** |
 | | `apply_edits.py` · `verify_archive.py` · `verify_backfill.py` | 편집 반영·검증 |
 | `archive-inbox` | `decide_work.py` · `review_work.py` | 작업 판정·기록 |
+| | `decision_export.py` (2026-10-06) | **검토 결정 기록만** 쓴다 — 원문·아카이브는 안 건드린다 |
 | `archive-run` | `board.py` | 진행판 기록 |
+
+`decision_export.py` 는 원문을 쓰지 않는다. 그래도 이 표에 있는 이유는 이 목록이
+「원문 쓰기」 목록이 아니라 **쓰기 성격의 진입점** 목록이기 때문이다 — 예외를 하나
+두면 다음 사람이 그 파일에 원문 쓰기를 더해도 관문(`test_hermes_write_boundary.py`)이
+안 걸린다.
 
 ### 2.4 쓰기 원시 함수 — `src/`
 
@@ -294,5 +300,42 @@ Hermes 의 결정 기록(`.sync-state.json` 의 `applied`·`dismissed`)은 **항
 }]}
 ```
 
-**이 변경은 하지 않았다.** 결정 기록 형식을 바꾸는 일은 Hermes 수집 경로를 맡은
-쪽과 겹친다. 형식만 정해 두고, 채워지기 전까지는 묻는 쪽으로 틀린다.
+### 6.5 좌표를 채웠다 — 그리고 사내·PF 사이는 여전히 안 맞는다 (2026-10-06, 2단계)
+
+위 §6.4 의 「하지 않았다」 를 **PF 경로에 한해** 채웠다. `decide_work.py` 가 결정하는
+순간 `workspace` · `channel_id` · `evidence_locator` · `evidence_hash` · `state` 를
+`.sync-state.json` 에 함께 적고, `decision_export.py` 가 그것을
+`summary-review-decisions/v1` 로 내보낸다. 자리와 형식은
+[`summary-approval-ports.md`](summary-approval-ports.md) §3.A·§3.B.
+
+| 무엇 | Hermes 쪽 값 |
+|---|---|
+| `workspace` | `config.json` 의 `workspace`. **비어 있으면 아무것도 내보내지 않는다** — 빈 값으로 적으면 받는 쪽에서 아무 결정에도 안 걸리고, 그 상태는 「상대편이 아직 안 했다」 와 화면에서 같다 |
+| `channel_id` | `.sync-state.json` 의 `channels[<id>]` 를 뒤집어 얻는다. **한 파일에 ID 가 둘이면 안 쓴다**(개명 이력) |
+| `evidence_locator` | `slack-export/channels/<파일>.md#L<첫줄>-L<끝줄>` — **메시지 블록** |
+| `evidence_hash` | 그 블록의 sha256(앞 32자). 줄끝은 지문에 안 넣는다 |
+
+**좌표는 결정하는 순간에 적는다.** 나중에 다시 재면 그 뒤 바뀐 원문의 지문이 나오고,
+그러면 사람이 보고 정한 것이 아닌 것에 승인이 붙는다.
+
+**좌표를 지어내지 않는다.** 아래 중 하나면 좌표를 비워 두고, 받는 쪽은
+`no_coordinate` 로 **다시 묻는다.**
+
+| 비우는 경우 | 왜 |
+|---|---|
+| 인용을 원문에서 못 찾았다 | 어느 메시지인지 모른다 |
+| 근거가 **여러 메시지**에 걸쳐 있다 | 블록 하나를 적으면 사람이 본 근거의 일부만 가리킨다 |
+| 원문에 없는 인용 조각이 섞여 있다 | 그 사실이 기록에서 사라진다 |
+| 요약 계열이 아니다(새 채널·개명·note·파생값) | 근거 인용이 아예 없다 |
+| 채널 ID 나 워크스페이스를 못 냈다 | 어느 자료인지 특정되지 않는다 |
+
+탐색은 **한 자리에서만** 한다. `review_work.evidence_block()` 을 화면(`context_for`)과
+좌표 도출이 함께 쓴다 — 따로 찾으면 사람이 본 원문과 기록의 좌표가 다른 메시지를
+가리킬 수 있고, 그때 승인과 기록이 어긋난다. 관문:
+`tests/test_archive_inbox_reconcile.py` ⑫.
+
+**사내↔PF 사이는 여전히 `no_match` 다.** 좌표계가 둘이기 때문이다(§6.4 위의 표,
+`summary-approval-ports.md` §3.2). 변환층은 **만들지 않았다** — 변환이 어긋난 날 다른
+메시지를 같은 것으로 보게 되고, 그건 조용히 틀린다. 지금 닫힌 고리는 **PF 안**
+(한 PC 에서 정한 것을 다른 PC·VM 이 읽는다)이고, 두 좌표계가 하나가 되는 것은
+아카이브가 Archiver 아래로 모일 때다.

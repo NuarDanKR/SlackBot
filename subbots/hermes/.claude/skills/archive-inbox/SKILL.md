@@ -291,18 +291,47 @@ push 전에 `git log --oneline origin/main..HEAD` 로 내 커밋만 나가는지
 | 파일 | 누가 쓰나 | 저장소 | 담는 것 |
 |---|---|---|---|
 | `slack-export/.pending-work.json` | VM (07:00) | 들어감 | 할 일 목록 |
-| `slack-export/.sync-state.json` 의 `applied`·`deferred`·`dismissed` | `decide_work.py` | 들어감 | 반영(정한 시각)·나중에(만기)·뺌(요약 해시) |
+| `slack-export/.sync-state.json` 의 `applied`·`deferred`·`dismissed` | `decide_work.py` | 들어감 | 반영(정한 시각)·나중에(만기)·뺌(요약 해시) **+ 원문 좌표** |
 | `slack-export/.decision-stamp.json` | `decide_work.py --show` | **안 들어감** | 화면에 보인 요약의 해시(도장) |
+| `$SUMMARY_DECISION_DIR/<워크스페이스>/hermes-archive-inbox.json` | `decision_export.py` | **저장소 밖** | 다른 승인 인터페이스가 읽을 결정 기록 |
 
 가르는 선은 **「결정이냐 목격이냐」**다. 결정 셋은 VM 이 다음 07:00 에 걸러야 하므로
 저장소에 들어가고, 도장은 「이 PC 에서 사람이 화면으로 봤다」는 사실이라 아카이브 자료가
 아니다(문서 쪽 `.review-stamp.json` 과 같다).
+
+## 다른 인터페이스와 겹치지 않기
+
+승인 인터페이스가 둘이다 — PF 는 이 스킬로, 사내는 TYBot DM 으로 끝낸다. 둘이 서로의
+결정을 못 보면 **같은 것을 두 번 묻는다.**
+
+- 정할 때(`--apply`·`--drop`·`--later`·`--clear`) **원문 좌표를 함께 적고**, 결정
+  기록을 `$SUMMARY_DECISION_DIR` 로 내보낸다. 환경변수가 없으면 내보내기는 조용히
+  꺼진다 — 결정 자체는 그대로 된다
+- 목록을 열 때 상대편 기록을 읽어, **같은 좌표·같은 해시에 확정된 승인·거절**이
+  있는 건만 뺀다. 보류·모순·해시 변경·좌표 없음·기록 못 읽음은 **안 뺀다**
+- 안 뺀 사유는 목록 머리에 건수로 찍힌다. 안 찍으면 「대조가 되고 있나」 를 화면에서
+  알 수 없고, 좌표를 못 내는 설치와 상대편이 아직 아무것도 안 한 설치가 같아 보인다
+
+```bash
+# 내보낼 것만 세어 본다 (쓰지 않는다)
+python .claude/skills/archive-inbox/scripts/decision_export.py --show
+```
+
+좌표를 못 내는 경우(인용을 원문에서 못 찾음·근거가 여러 메시지에 걸침·원문에 없는
+조각이 섞임·요약 계열이 아님)에는 **좌표를 비워 둔다.** 받는 쪽은 그 건을 다시
+묻는다 — 틀린 좌표를 적으면 사람이 승인하지 않은 것이 승인된 것으로 읽힌다.
+
+**사내 TYBot 과 PF 사이에서는 지금 아무것도 안 걸린다.** 좌표계가 둘이라서다
+(Hermes 는 채널 md 의 메시지 블록, TYBot 은 날짜 md 의 줄). 그건 결함이 아니라
+설계이고, 변환층은 만들지 않는다 — 자세한 것은
+`docs/design/hermes-write-entrypoints.md` §6.5.
 
 ## 시험
 
 ```bash
 python .claude/skills/archive-inbox/scripts/test_review_work.py
 python .claude/skills/archive-inbox/scripts/test_decide_work.py
+python .claude/skills/archive-inbox/scripts/test_decision_export.py
 node scripts/check-pending-work.js
 node scripts/check-shared-rules.js   # 두 언어에 나뉜 판정
 ```

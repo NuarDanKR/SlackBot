@@ -49,6 +49,11 @@ READONLY_NPM_SCRIPTS = frozenset({
 
 WRITING_SKILL_SCRIPTS = frozenset({
     ".claude/skills/archive-inbox/scripts/decide_work.py",
+    # 2026-10-06. **원문을 쓰지 않는다** — 검토 결정 기록(`summary-review-decisions/v1`)
+    # 만 쓴다. 그래도 목록에 넣는 이유는 이 목록이 「원문 쓰기」 목록이 아니라 **쓰기
+    # 성격의 진입점** 목록이기 때문이다. 예외를 하나 두면 다음 사람이 그 자리에
+    # 원문 쓰기를 더해도 관문이 안 걸린다.
+    ".claude/skills/archive-inbox/scripts/decision_export.py",
     ".claude/skills/archive-inbox/scripts/review_work.py",
     ".claude/skills/archive-run/scripts/board.py",
     ".claude/skills/doc-archive/scripts/apply_approvals.py",

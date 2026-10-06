@@ -161,6 +161,9 @@ class GenerateStats:
     accepted: int = 0
     # 이미 요약한 구간이라 LLM 을 부르지 않고 지나갔다.
     reused: bool = False
+    # 상대편 인터페이스(로컬 스킬 등)에서 **이미 끝난** 검토라 후보에서 뺐다.
+    # 「후보 0건」 과 「전부 저쪽에서 끝났다」 는 사람이 할 일이 다르다.
+    settled_elsewhere: int = 0
 
 
 def parse_proposals(raw: str, source: list[SourceLine],
@@ -815,6 +818,52 @@ class Store:
             else:
                 skipped += 1
         return approved, skipped
+
+    def decision_snapshot(self, workspace: str) -> list[dict]:
+        """그 워크스페이스에서 **사람이 끝낸 결정 전부.** 권위는 이 DB 다.
+
+        ## 왜 전체인가
+
+        내보내는 파일은 부분 갱신이 아니라 **한 출처의 전체 스냅샷**이다
+        (`summary_review_reconcile.write_export` §단일 writer). 증분으로 쓰면
+        `--clear` 로 취소된 결정이 파일에 남아, 상대편이 **이미 풀린 결정으로**
+        후보를 생략한다. 매번 통째로 다시 쓰면 취소가 그냥 사라진다.
+
+        ## 좌표 없는 행은 안 보낸다
+
+        받는 쪽에서 `no_coordinate` 로 떨어질 뿐이다. 보내면 파일만 커지고, 읽는
+        사람은 「결정이 많은데 왜 하나도 안 걸리나」 를 보게 된다.
+
+        ## `evidence_channel_id` 를 쓴다
+
+        후보의 `channel_id` 는 **회차를 돌린 채널**이고 `evidence_channel_id` 는
+        **근거가 실제로 온 채널**이다. 대조는 근거 좌표의 대조이므로 후자가 맞다.
+        B-61 이전 후보는 비어 있어 전자로 물러선다 — 그 행은 어차피 발송 전에
+        폐기되지만, 여기서 빈 채널을 보내면 받는 쪽이 `source_mismatch` 가 아니라
+        **아무 채널에도 안 걸리는 행**으로 읽는다.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, workspace,
+                       COALESCE(NULLIF(evidence_channel_id,''), channel_id) AS channel_id,
+                       kind, state, evidence_locator, evidence_hash, evidence_message_ts,
+                       decided_at, decided_by
+                  FROM summary_review_candidate
+                 WHERE workspace=%s AND state IN ('approved','rejected','deferred')
+                   AND evidence_locator <> '' AND evidence_hash <> ''
+                 ORDER BY decided_at NULLS LAST, id""",
+                (workspace,),
+            )
+            # 호출하는 쪽의 conn 이 `dict_row` 가 아닐 수 있다(콘솔·잡은 자기 conn 을
+            # 넘긴다). 열 이름을 여기 적어 두면 두 모양을 같은 결과로 만든다.
+            names = (
+                "id", "workspace", "channel_id", "kind", "state", "evidence_locator",
+                "evidence_hash", "evidence_message_ts", "decided_at", "decided_by",
+            )
+            return [
+                dict(row) if isinstance(row, dict) else dict(zip(names, row, strict=False))
+                for row in cur.fetchall()
+            ]
 
     def candidate_channel(self, candidate_id: str, workspace: str) -> str:
         try:
@@ -1504,6 +1553,64 @@ def backfill_channel(store: Store, archive, *, workspace: str, channel_id: str,
     return result
 
 
+def _counterpart_decisions(workspace: str):
+    """상대편(로컬 스킬 등)이 끝낸 결정. **못 읽으면 `None`.**
+
+    `None` 은 「확인하지 못했다」 이고, 그 값을 받은 `filter_candidates` 는 아무것도
+    생략하지 않는다. 여기서 예외를 올리지 않는 이유는 반대쪽과 같다 — 대조 파일을
+    못 읽는 것이 **요약 생성 자체를 멈추면** 자료가 낡기 시작하는데 오류는 「대조
+    실패」 로만 보인다.
+    """
+    from . import summary_review_reconcile as rec
+
+    root = rec.export_root()
+    if root is None:
+        return []
+    try:
+        return rec.counterpart_decisions(
+            root, source=rec.SOURCE_TYBOT_DM, workspace=workspace
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("상대편 결정 기록 조회 실패 ws=%s code=%s", workspace, type(exc).__name__)
+        return None
+
+
+def _without_settled(proposals: list[Proposal], decisions, *, workspace: str,
+                     channel_id: str, stats: GenerateStats | None = None) -> list[Proposal]:
+    """상대편에서 **이미 끝난** 후보를 뺀다. 판정은 `summary_review_reconcile` 이 한다.
+
+    `Proposal` 에는 워크스페이스·채널이 없다 — 회차가 들고 있는 값이다. 그대로
+    넘기면 대조는 늘 `source_mismatch` 로 떨어져 **생략이 영영 안 일어난다.** 그래서
+    여기서 회차의 좌표를 붙여 준다. 채널은 `evidence_channel_id` 를 먼저 쓴다 —
+    내보내는 쪽(`decision_snapshot`)과 같은 값이어야 대조가 성립한다.
+    """
+    from . import summary_review_reconcile as rec
+
+    if not proposals:
+        return proposals
+    views = [
+        {
+            "workspace": workspace,
+            "channel_id": proposal.evidence_channel_id or channel_id,
+            "evidence_locator": proposal.evidence_locator,
+            "evidence_hash": proposal.evidence_hash,
+        }
+        for proposal in proposals
+    ]
+    kept_views, reasons = rec.filter_candidates(views, decisions)
+    if not reasons.get(rec.SKIP):
+        return proposals
+    keep = {id(view) for view in kept_views}
+    out = [p for p, view in zip(proposals, views, strict=True) if id(view) in keep]
+    log.info(
+        "상대편이 끝낸 검토 %d건을 후보에서 뺀다 ws=%s ch=%s",
+        len(proposals) - len(out), workspace, channel_id,
+    )
+    if stats is not None:
+        stats.settled_elsewhere = reasons.get(rec.SKIP, 0)
+    return out
+
+
 def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
                      channel_name: str, complete, now: datetime,
                      force: bool = False,
@@ -1539,6 +1646,11 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
     # 버튼이 이전 실패 시각 때문에 아무 일도 하지 않으면 원인을 다시 숨긴다.
     if not force and not store.may_attempt(workspace, channel_id, digest, now):
         return 0
+    # **상대편 결정은 후보를 만들기 전에 읽는다.** 만든 뒤에 읽으면, 기록을 못 읽은
+    # 날에도 이미 모델을 불러 돈이 나갔고 DB 에는 생략 대상이 들어앉는다. 여기서
+    # 읽어 두면 `None`(못 읽음)이 그 회차 전체에 그대로 적용된다 — 아무것도 생략하지
+    # 않는 쪽으로.
+    external = _counterpart_decisions(workspace)
     try:
         approved = store.approved(workspace, channel_id)
         raw = complete(
@@ -1553,6 +1665,9 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
         with contextlib.suppress(Exception):
             store.mark_failed(workspace, channel_id, digest, now)
         raise
+    proposals = _without_settled(
+        proposals, external, workspace=workspace, channel_id=channel_id, stats=stats
+    )
     return store.save_run(
         workspace=workspace, channel_id=channel_id, channel_name=channel_name,
         watermark=watermark_after, digest=digest, proposals=proposals,
@@ -2093,6 +2208,43 @@ def last_round(conn, *, workspace: str, channel_id: str) -> tuple[str, str]:
             str((get("error_code") if get else row[1]) or ""))
 
 
+def export_decisions(store, workspace: str, *, root=None) -> int:
+    """끝난 결정을 **상대편이 읽을 파일**로 내보낸다. 내보낸 건수.
+
+    설계: `docs/design/summary-approval-ports.md` §3
+
+    ## 던지지 않는다
+
+    내보내기는 결정 **다음**에 오는 일이다. 여기서 예외가 올라가면 Slack 핸들러가
+    「처리 실패」 를 돌려주는데, 결정은 이미 DB 에 들어가 있다 — 사람은 성공한 일을
+    실패로 보고 다시 누르고, 두 번째는 「이미 다른 검토자가 처리했습니다」 가 뜬다.
+    그 조합이면 사람은 자기 결정이 반영됐는지 화면에서 알 수가 없다.
+
+    그래서 실패는 **로그로만** 남기고 0 을 돌려준다. 잃는 것은 「상대편이 이번 결정을
+    못 본다」 인데, 그쪽은 못 봐도 **다시 묻는 쪽으로** 틀린다(원칙: 막는 쪽이 기본값).
+
+    ## 경로를 안 정했으면 아무 일도 안 한다
+
+    `SUMMARY_DECISION_DIR` 이 없는 설치에서는 DB 조회조차 하지 않는다. 결정 버튼을
+    누를 때마다 전체 스냅샷을 읽는 비용을, 쓸 데가 없는데 내지 않는다.
+    """
+    from . import summary_review_reconcile as rec
+
+    target = Path(root) if root is not None else rec.export_root()
+    if target is None:
+        return 0
+    try:
+        rows = store.decision_snapshot(workspace)
+        return rec.write_export(
+            rec.export_path(target, source=rec.SOURCE_TYBOT_DM, workspace=workspace),
+            rows,
+            source=rec.SOURCE_TYBOT_DM,
+        )
+    except Exception as exc:  # noqa: BLE001 - 내보내기 실패가 끝난 결정을 되돌리면 안 된다
+        log.warning("검토 결정 내보내기 실패 ws=%s code=%s", workspace, type(exc).__name__)
+        return 0
+
+
 def _connect():
     import os
 
@@ -2179,6 +2331,10 @@ def register_slack_handlers(app, *, workspace: str, feedback_log) -> None:
             channel_id = store.candidate_channel(cid, workspace)
             if changed and artifact_id:
                 store.refresh_artifact_state(artifact_id)
+            if changed:
+                # **결정이 확정된 뒤**에 내보낸다. 앞에서 내보내면 조건부 UPDATE 가
+                # 0행이었던(= 다른 검토자가 먼저 누른) 경우에도 파일이 다시 쓰인다.
+                export_decisions(store, workspace)
         if not changed:
             return "이미 다른 검토자가 처리했습니다."
         if kind != "defer":
@@ -2224,6 +2380,9 @@ def register_slack_handlers(app, *, workspace: str, feedback_log) -> None:
             )
             store.refresh_artifact_state(artifact_id)
             channels = {str(r.get("channel_id") or "") for r in rows}
+            # 「전체 승인」 도 결정이다. 이 문에서 안 내보내면 한 번에 끝낸 회차가
+            # 상대편에 안 보이고, 그쪽은 같은 건을 다시 묻는다.
+            export_decisions(store, workspace)
         approved_set = set(approved_ids)
         for row in rows:
             if str(row.get("id") or "") in approved_set:

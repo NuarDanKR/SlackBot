@@ -59,6 +59,52 @@ PF 팀은 TYBot 을 쓰지 않고, 요약 확인을 **로컬 Claude Code 스킬*
 읽는 쪽과 쓰는 쪽 모두 [`summary_review_reconcile.py`](../../src/tybot/summary_review_reconcile.py)
 에 있다(`load_decisions` · `write_export`). 늘어나는 것은 **누가 쓰느냐**뿐이다.
 
+`source` 의 실제 값은 `tybot-dm` 과 `hermes-archive-inbox` 다.
+
+### 3.A 파일은 어디에 놓이나 (2026-10-06 구현)
+
+```text
+$SUMMARY_DECISION_DIR/<workspace>/<source>.json
+   예:  /var/lib/tybot/decisions/tyit/tybot-dm.json
+        /var/lib/tybot/decisions/tyit/hermes-archive-inbox.json
+```
+
+| 왜 그렇게 | 이유 |
+|---|---|
+| **출처마다 파일** | 담는 것이 한 출처의 **전체 스냅샷**이라 부분 병합이 성립하지 않는다. 한 파일을 둘이 쓰면 마지막 쓰기가 앞 결정을 통째로 덮고 **조용하다** |
+| **워크스페이스마다 디렉터리** | 한 파일에 여러 워크스페이스의 채널 ID 를 담으면 읽는 쪽이 권한 없는 워크스페이스의 채널 구조를 알게 된다(원칙 4) |
+| **환경변수 하나** | 양쪽이 같은 `SUMMARY_DECISION_DIR` 을 읽는다. 안 정한 설치에서는 내보내기가 **조용히 꺼진다** — 그때는 아무것도 생략되지 않을 뿐이고, 승인 버튼이 실패하지는 않는다 |
+
+쓰기는 고유 임시 파일 + 원자적 교체이고, TYBot 쪽은 그 위에 OS 락과
+`ConcurrentExportRefused` 로 **단일 writer 를 명시 거부**로 고정한다. 경로 조각이
+`..` 이나 구분자를 담으면 `UnsafeExportTarget` 으로 던진다 — 걸러서 만든 이름은 다른
+워크스페이스의 이름과 같아질 수 있다.
+
+### 3.B 실제 호출부 (2026-10-06)
+
+| 언제 | 어디 |
+|---|---|
+| TYBot DM 결정 1건 | `summary_review.register_slack_handlers.settle()` → `export_decisions()` |
+| TYBot DM 「전체 승인」 | 같은 모듈 `approve_all` 핸들러 → `export_decisions()` |
+| TYBot 후보 생성 **전** | `generate_channel()` → `_counterpart_decisions()`, 생성 후 `_without_settled()` |
+| Hermes 반영·빼·나중에·취소 | `decide_work.py` 의 `approve`·`drop`·`later`·`clear` → `export_now()` |
+| Hermes 목록 표시 | `review_work.load_items()` → `_settled_elsewhere()` |
+
+**취소(`clear`)도 내보낸다.** 안 내보내면 풀린 결정이 상대편 파일에 남아, 그쪽이
+이미 풀린 결정으로 후보를 생략한다 — 그 건은 어느 쪽에서도 사람 앞에 오지 않는다.
+
+내보내기 실패는 **던지지 않는다.** 결정은 이미 권위 DB·`.sync-state.json` 에 들어가
+있는데 버튼이 「실패」 를 돌려주면, 사람은 성공한 일을 다시 하려 하고 두 번째는
+「이미 다른 검토자가 처리했습니다」 를 본다. 그 조합이면 자기 결정이 반영됐는지
+화면에서 알 수가 없다.
+
+관문: [`tests/test_summary_decision_export.py`](../../tests/test_summary_decision_export.py)
+①~③ 이 **호출부가 없는 상태를 금지한다**. 2026-10-05 에 helper 만 들어가고 부르는
+곳이 없었는데, 그 상태에서도 단위 시험은 전부 통과했다.
+[`tests/test_archive_inbox_reconcile.py`](../../tests/test_archive_inbox_reconcile.py)
+는 양쪽 구현이 **같은 스키마·키·사유 코드·파일 자리**를 쓰는지 맞대어 본다 — 두 벌이
+갈려도 오류가 안 나고, 대조가 조용히 0건이 될 뿐이다.
+
 ### 3.0 본문을 싣지 않는다 (2026-10-06 수정)
 
 처음 설계에는 `proposed_text` 가 있었다. **뺐다.** 이 파일은 다른 쪽이 읽는 것이고,
