@@ -15,8 +15,9 @@ Slack 에서 파일을 내려받고, `insert_entry.py`·`insert_messages.py` 는
 
 ## 기본값
 
-`HERMES_MODE` 가 비었거나 모르는 값이면 **PF 직접 실행**이다. 운영을 끄는 결정은
-명시적이어야 한다 — 환경변수를 안 넘겼다고 돌던 수집이 조용히 멈추면 안 된다.
+`HERMES_MODE` 가 비었으면 **PF 직접 실행**이다. 알려진 값은 `pf`·`tybot` 둘뿐이고,
+그 밖의 값은 기동 오류다. 오타를 PF 로 받아 주면 TYBot 연동으로 띄운 줄 알았던
+스킬의 원문 쓰기가 열리기 때문이다.
 """
 import os
 import sys
@@ -25,10 +26,34 @@ TYBOT = "tybot"
 PF = "pf"
 
 
+class ModeConfigError(RuntimeError):
+    """설정값이 모드가 아니다. **기동을 막는다** — 고쳐야 하는 것은 설정이다."""
+
+    def __init__(self, raw: object) -> None:
+        super().__init__(
+            f"HERMES_MODE 값이 올바르지 않습니다: {raw!r}\n"
+            f'쓸 수 있는 값은 "{PF}" 와 "{TYBOT}" 뿐이고, 비우면 "{PF}" 입니다.'
+        )
+        self.raw = raw
+        self.code = "hermes_mode_invalid"
+
+
 def mode() -> str:
-    """지금 모드. 모르는 값은 PF 로 본다 — 오타가 운영을 멈추게 하지 않는다."""
+    """지금 모드. **모르는 값이면 던진다.**
+
+    봇 쪽(`src/mode.js`)과 **같은 판정이어야 한다.** 한쪽만 너그러우면 봇은 기동에
+    실패하는데 스킬은 PF 로 돌아 쓰기가 열린다 — 그 상태는 오류로 보이지 않는다.
+
+    처음에는 둘 다 「모르는 값은 PF」 였다. `HERMES_MODE=tybo` 로 띄우면 연동인 줄
+    아는 프로세스가 쓰기가 열린 채로 돈다. 멈추면 그 자리에서 알지만, 열린 채로
+    도는 것은 원문이 늘어난 뒤에야 안다.
+    """
     raw = (os.environ.get("HERMES_MODE") or "").strip().lower()
-    return TYBOT if raw == TYBOT else PF
+    if raw == "":
+        return PF
+    if raw in (PF, TYBOT):
+        return raw
+    raise ModeConfigError(os.environ.get("HERMES_MODE"))
 
 
 def is_tybot_mode() -> bool:

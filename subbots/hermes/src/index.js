@@ -17,8 +17,19 @@ import { fetchThreadContext, isBotMessage, SKIP_SUBTYPES, resolveChannelMentions
 import { toSlackMrkdwn, chunkForSlack } from './format.js';
 import { append as logConversation, permalink } from './convo-log.js';
 import { startScheduler } from './scheduler.js';
+import { assertOwnsRole, ROLES } from './mode.js';
 
 const { App } = pkg;
+
+// TYBot 연동은 이 Slack 프로세스를 띄우는 방식이 아니다. 계약 프롬프트를 TYBot의
+// 권한 도구로 호출한다. 여기까지 열어 두면 같은 질문에 두 봇이 답하고, 이 프로세스는
+// 자기 로컬 아카이브를 읽어 TYBot 권한 경계를 우회한다.
+try {
+  assertOwnsRole(ROLES.ANSWER, 'Hermes 독립 Slack 서비스(npm start)');
+} catch (err) {
+  console.error(err.message);
+  process.exit(2);
+}
 
 const env = requireEnv(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'ANTHROPIC_API_KEY']);
 assertArchive();

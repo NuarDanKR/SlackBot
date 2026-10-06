@@ -66,8 +66,11 @@ def test_pf_mode_keeps_every_role():
 
 @needs_node
 def test_tybot_mode_leaves_only_answering():
-    """연동 모드에서 **발송은 하나도 없다.** 요약도 위생 점검도 TYBot 이 맡는다."""
-    assert _roles("tybot") == ["answer"]
+    """연동 모드에서는 독립 Node 런타임을 띄우지 않는다.
+
+    답변 규칙의 주인은 Hermes 지만 실행은 TYBot 의 계약·권한 도구 경로다.
+    """
+    assert _roles("tybot") == []
 
 
 @needs_node
@@ -209,6 +212,15 @@ def test_unreadable_records_are_not_the_same_as_empty(tmp_path):
     assert rec.load_decisions(broken) is None     # 못 읽은 것은 다르다
 
 
+@pytest.mark.parametrize("payload", [[], {"decisions": []}, {"schema": "v2", "decisions": []}])
+def test_an_unknown_decision_schema_is_unreadable(tmp_path, payload):
+    """미래 형식을 구형 코드가 짐작해 읽으면 검토를 잘못 생략할 수 있다."""
+    path = tmp_path / "decisions.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert rec.load_decisions(path) is None
+
+
 def test_the_filter_reports_why_each_candidate_stayed():
     """「오늘 후보가 없다」 와 「전부 생략됐다」 는 사람이 할 일이 완전히 다르다."""
     rows = [_candidate(), _candidate(evidence_locator="2026-10-02.md:7")]
@@ -309,3 +321,173 @@ def test_the_export_is_written_atomically(tmp_path):
 
     assert not list(tmp_path.glob("*.tmp")), "임시 파일이 남았다"
     assert len(rec.load_decisions(path)) == 2
+
+
+# --- 경계 보강 1. 모르는 모드 값은 기동 실패 --------------------------------
+#
+# 처음에는 「모르는 값은 PF 로 본다 — 오타가 운영을 멈추게 하지 않는다」 였다.
+# **틀렸다.** `HERMES_MODE=tybo` 가 조용히 PF 가 되면 연동으로 띄운 줄 알았던
+# 프로세스가 **쓰기가 열린 채로** 돈다. 그건 운영이 멈추는 것보다 나쁘다 —
+# 멈추면 바로 알지만, 열린 채로 도는 것은 원문이 늘어난 뒤에야 안다.
+@needs_node
+@pytest.mark.parametrize("value", [None, "", "  ", "pf", "PF", " pf "])
+def test_unset_or_exact_pf_is_pf(value):
+    assert _roles(value) == ["answer", "digest-publish", "health", "ingest"]
+
+
+@needs_node
+@pytest.mark.parametrize("value", ["tybot", "TYBOT", " tybot "])
+def test_exact_tybot_is_tybot(value):
+    assert _roles(value) == []
+
+
+def test_tybot_mode_blocks_the_standalone_slack_and_local_ask_entrypoints():
+    """TYBot 연동은 Node Hermes를 같이 띄우는 구성이 아니다."""
+    index = (HERMES / "src" / "index.js").read_text(encoding="utf-8")
+    launcher = (HERMES / "scripts" / "run-server.js").read_text(encoding="utf-8")
+    package = json.loads((HERMES / "package.json").read_text(encoding="utf-8"))
+    ask = (HERMES / "scripts" / "run-ask.js").read_text(encoding="utf-8")
+    claude = (HERMES / "src" / "claude.js").read_text(encoding="utf-8")
+
+    assert index.index("assertOwnsRole(ROLES.ANSWER") < index.index("const env = requireEnv(")
+    assert package["scripts"]["start"] == "node scripts/run-server.js"
+    assert launcher.index("assertOwnsRole(ROLES.ANSWER") < launcher.index("import('../src/index.js')")
+    assert ask.split("async function main()", 1)[1].lstrip().startswith("{")
+    assert "assertOwnsRole(ROLES.ANSWER" in ask.split("async function main()", 1)[1][:500]
+    assert "assertOwnsRole(ROLES.ANSWER" in claude.split("function answerQuestion", 1)[1][:300]
+
+
+@needs_node
+def test_tybot_mode_refuses_npm_start_before_loading_config_or_slack():
+    """연동 호스트에 PF 설정·node_modules가 없어도 정확한 사유와 코드 2로 막힌다."""
+    got = subprocess.run(
+        [NODE, "scripts/run-server.js"],
+        cwd=HERMES,
+        env={**os.environ, "HERMES_MODE": "tybot"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert got.returncode == 2
+    assert "독립 Node 런타임을 실행하지 않습니다" in got.stderr
+    assert "config.json" not in got.stderr
+
+
+@needs_node
+@pytest.mark.parametrize("value", ["tybo", "tybot2", "ty bot", "master", "0", "false"])
+def test_any_other_value_fails_to_start(value):
+    """설정 오류는 **조용히 넘어가지 않는다.**"""
+    env = dict(os.environ)
+    env["HERMES_MODE"] = value
+    got = subprocess.run(
+        [NODE, "--input-type=module", "-e",
+         "import {mode} from './src/mode.js'; console.log(mode());"],
+        cwd=HERMES, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+
+    assert got.returncode != 0, f"{value!r} 가 조용히 통과했다: {got.stdout}"
+    assert "HERMES_MODE" in got.stderr
+    assert value in got.stderr
+
+
+@pytest.mark.parametrize("value", ["tybo", "master", "0"])
+def test_the_skill_side_fails_on_the_same_values(value):
+    """두 곳의 판정이 갈리면 봇은 막혔는데 스킬은 쓰는 상태가 된다."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_hermes_mode", HERMES / ".claude" / "skills" / "_shared" / "mode.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    os.environ["HERMES_MODE"] = value
+    try:
+        with pytest.raises(Exception) as caught:
+            module.mode()
+        assert "HERMES_MODE" in str(caught.value)
+    finally:
+        os.environ.pop("HERMES_MODE", None)
+
+
+# --- 경계 보강 2. 임시 파일은 고유해야 한다 ----------------------------------
+def test_two_writers_do_not_collide_on_the_same_temp(tmp_path):
+    """고정 `.tmp` 는 **동시에 쓰는 두 프로세스가 서로의 파일을 덮는다.**
+
+    한쪽이 `replace` 하는 사이 다른 쪽이 같은 이름에 쓰면, 남는 것은 둘 중
+    아무것도 아닌 섞인 파일이거나 사라진 파일이다. 둘 다 조용하다.
+    """
+    import threading
+
+    path = tmp_path / "decisions.json"
+    rows = [_candidate_row(), _candidate_row(state="deferred")]
+    errors: list = []
+
+    def run():
+        try:
+            for _ in range(12):
+                rec.write_export(path, rows)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"동시 쓰기에서 터졌다: {errors}"
+    assert len(rec.load_decisions(path)) == 2
+    assert not list(tmp_path.glob("*.tmp*")), "임시 파일이 남았다"
+
+
+def test_a_failed_write_leaves_no_leftover(tmp_path, monkeypatch):
+    """실패해도 찌꺼기를 남기지 않는다. 남으면 다음 사람이 그것을 기록으로 읽는다."""
+    path = tmp_path / "decisions.json"
+
+    def boom(*a, **kw):
+        raise OSError("디스크 가득 참")
+
+    monkeypatch.setattr(Path, "replace", boom)
+    with pytest.raises(OSError):
+        rec.write_export(path, [_candidate_row()])
+
+    assert not path.exists()
+    assert not list(tmp_path.glob("*.tmp*")), "실패 뒤 임시 파일이 남았다"
+
+
+# --- 경계 보강 3. 승인과 거절이 함께 있으면 생략하지 않는다 ------------------
+def test_approved_and_rejected_on_the_same_evidence_is_a_conflict():
+    """둘이 함께 있으면 **무엇이 확정인지 아무도 모른다.**
+
+    먼저 온 것을 쓰거나 나중 것을 쓰면 「생략했는데 왜 그렇게 정해졌는지」 를
+    사람이 설명할 수 없다. 묻는 쪽으로 틀린다.
+    """
+    decisions = [_decision(state="approved"), _decision(state="rejected")]
+
+    skip, reason = rec.decide(_candidate(), decisions)
+
+    assert skip is False
+    assert reason == rec.CONFLICT
+
+
+def test_the_same_state_twice_is_not_a_conflict():
+    """같은 결정이 두 번 기록된 것은 모순이 아니다 — 두 인터페이스가 같은 답을 냈다."""
+    decisions = [_decision(state="approved"), _decision(state="approved", decided_by="U2")]
+
+    assert rec.decide(_candidate(), decisions) == (True, rec.SKIP)
+
+
+def test_a_conflict_elsewhere_does_not_block_this_candidate():
+    """다른 좌표의 모순이 이 후보를 막으면, 한 건의 모순이 그날 전체를 멈춘다."""
+    decisions = [
+        _decision(state="approved"),
+        _decision(state="approved", evidence_locator="other.md:9"),
+        _decision(state="rejected", evidence_locator="other.md:9"),
+    ]
+
+    assert rec.decide(_candidate(), decisions) == (True, rec.SKIP)

@@ -101,11 +101,17 @@ def _node(script: str, mode: str | None) -> subprocess.CompletedProcess:
 @needs_node
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(None, "pf"), ("", "pf"), ("pf", "pf"), ("tybot", "tybot"),
-     ("TYBOT", "tybot"), (" tybot ", "tybot"), ("오타", "pf")],
+    [(None, "pf"), ("", "pf"), ("  ", "pf"), ("pf", "pf"), ("PF", "pf"),
+     ("tybot", "tybot"), ("TYBOT", "tybot"), (" tybot ", "tybot")],
 )
-def test_mode_defaults_to_pf_and_only_tybot_turns_it_on(value, expected):
-    """모르는 값은 PF 다 — **오타가 운영을 멈추게 하지 않는다.**"""
+def test_only_the_two_known_values_are_accepted(value, expected):
+    """비우면 PF, `pf`·`tybot` 만 그 모드다.
+
+    **모르는 값은 PF 로 떨어지지 않는다**(2026-10-06 정정). 처음에는 「오타가 운영을
+    멈추게 하지 않는다」 로 PF 로 봤는데, `HERMES_MODE=tybo` 로 띄우면 연동인 줄 아는
+    프로세스가 **쓰기가 열린 채로** 돈다. 그 경계는
+    `test_hermes_tybot_roles.py::test_any_other_value_fails_to_start` 가 본다.
+    """
     got = _node("import {mode} from './src/mode.js'; console.log(mode());", value)
 
     assert got.returncode == 0, got.stderr

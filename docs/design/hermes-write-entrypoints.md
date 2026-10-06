@@ -219,7 +219,13 @@ PF 는 자기 배포에서 Hermes 를 직접 돌린다. 질문·DM·요약이 �
 | `ingest` 수집·소급·첨부 | Hermes | 차단 | **Archiving Bot** (역할 자체가 사라짐) |
 | `digest-publish` **직접 게시** | Hermes | 차단 | 차단 유지 — 게시는 승인 뒤에만 |
 | `health` 위생 점검 발송 | Hermes | 차단 | Archiving Bot 자료 기준으로 재정의 |
-| `answer` 질문·DM 응답 | Hermes | **Hermes** | Hermes |
+| 독립 Node `answer` 질문·DM 응답 | Hermes | **차단** | TYBot이 Hermes 계약을 권한 도구로 호출 |
+
+`HERMES_MODE=tybot` 은 Node Hermes를 TYBot 옆에 하나 더 띄우는 모드가 아니다.
+TYBot 연동의 Hermes는 `tybot-specialist.toml`의 `execution_mode="tools"` 계약이다.
+따라서 독립 `npm start`·`npm run ask`·직접 `answerQuestion()`도 막힌다. `npm start`는
+의존성 없는 `scripts/run-server.js`가 설정·토큰·아카이브보다 먼저 판정한다. 읽기 전용이라도
+Hermes 로컬 아카이브를 열면 TYBot의 `RequestContext` 권한 판정을 우회하기 때문이다.
 
 이름이 `digest` 가 아니라 `digest-publish` 인 이유가 이 표다. 「요약을 안 맡는다」
 가 아니라 「직접 올리지 않는다」 다.

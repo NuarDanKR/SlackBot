@@ -1,8 +1,10 @@
 /**
  * 실행 모드 — Hermes 가 **누구 밑에서 도는가**.
  *
- *   HERMES_MODE=tybot   TYBot 연동. 원문 쓰기를 전부 막는다
- *   (미설정 또는 그 외)  PF 직접 실행. 지금까지와 똑같다
+ *   HERMES_MODE=tybot   TYBot 계약 연동. 독립 런타임과 원문 쓰기를 전부 막는다
+ *   HERMES_MODE=pf      PF 직접 실행. 지금까지와 똑같다
+ *   미설정               PF 직접 실행. 지금까지와 똑같다
+ *   그 외                설정 오류로 기동을 막는다
  *
  * ## 왜 필요한가
  *
@@ -30,10 +32,34 @@
 export const TYBOT = 'tybot';
 export const PF = 'pf';
 
-/** 지금 모드. 모르는 값은 PF 로 본다 — 오타가 운영을 멈추게 하지 않는다. */
+/** 설정값이 모드가 아니다. **기동을 막는다** — 고쳐야 하는 것은 설정이다. */
+export class ModeConfigError extends Error {
+  constructor(raw) {
+    super(
+      `HERMES_MODE 값이 올바르지 않습니다: ${JSON.stringify(raw)}\n` +
+        `쓸 수 있는 값은 "${PF}" 와 "${TYBOT}" 뿐이고, 비우면 "${PF}" 입니다.`
+    );
+    this.name = 'ModeConfigError';
+    this.code = 'hermes_mode_invalid';
+    this.raw = raw;
+  }
+}
+
+/**
+ * 지금 모드. **모르는 값이면 던진다.**
+ *
+ * 처음에는 「모르는 값은 PF 로 본다 — 오타가 운영을 멈추게 하지 않는다」 였다.
+ * 틀렸다. `HERMES_MODE=tybo` 로 띄우면 연동으로 띄운 줄 아는 프로세스가 **쓰기가
+ * 열린 채로** 돈다. 운영이 멈추면 그 자리에서 알지만, 열린 채로 도는 것은 **원문이
+ * 늘어난 뒤에야** 안다. 되돌릴 수 없는 쪽으로 틀리지 않는다.
+ *
+ * 비우는 것은 오타가 아니라 「연동이 아니다」 라는 뜻이라 그대로 PF 다.
+ */
 export function mode() {
-  const raw = String(process.env.HERMES_MODE || '').trim().toLowerCase();
-  return raw === TYBOT ? TYBOT : PF;
+  const raw = String(process.env.HERMES_MODE ?? '').trim().toLowerCase();
+  if (raw === '') return PF;
+  if (raw === PF || raw === TYBOT) return raw;
+  throw new ModeConfigError(process.env.HERMES_MODE);
 }
 
 export function isTybotMode() {
@@ -101,7 +127,7 @@ export const ROLES = {
   DIGEST_PUBLISH: 'digest-publish',
   /** 위생 점검 발송. 연동 모드의 점검 대상은 Archiving Bot 이 쌓는 자료다 */
   HEALTH: 'health',
-  /** 질문 응답(슬랙 질문·DM). 어느 모드에서도 Hermes 가 맡는다 */
+  /** 이 Node 런타임이 Slack 질문·DM 에 직접 답하는 것 */
   ANSWER: 'answer',
 };
 
@@ -109,12 +135,14 @@ export const ROLES = {
 const PF_ROLES = new Set([ROLES.INGEST, ROLES.DIGEST_PUBLISH, ROLES.HEALTH, ROLES.ANSWER]);
 
 /**
- * TYBot 연동이 Hermes 에게 남기는 역할.
+ * TYBot 연동에서 이 **독립 Node 런타임**에 남기는 역할.
  *
- * `answer` 하나지만 **요약을 안 한다는 뜻이 아니다.** 요약은 TYBot 이 전문 봇으로
- * 부를 때 Hermes 의 규칙으로 만들어진다 — 그건 스케줄이 아니라 호출이라 여기 없다.
+ * 비어 있다. TYBot 은 이 소스를 실행하지 않고 `tybot-specialist.toml` 이 선언한
+ * `contract/prompt.md` 를 권한 도구와 함께 호출한다. 따라서 "답변은 Hermes 책임"과
+ * "이 Node Slack 봇을 같이 띄운다"는 같은 말이 아니다. 후자를 열면 TYBot과 중복
+ * 답변하고 Hermes 로컬 아카이브를 TYBot 권한 밖에서 읽는다.
  */
-const TYBOT_ROLES = new Set([ROLES.ANSWER]);
+const TYBOT_ROLES = new Set();
 
 export function rolesFor(current = mode()) {
   return current === TYBOT ? TYBOT_ROLES : PF_ROLES;
@@ -130,8 +158,8 @@ export class RoleNotOwned extends Error {
   constructor(role, action) {
     super(
       `[TYBot 연동 모드] ${action} 은(는) 이 프로세스의 역할이 아닙니다(${role}).\n` +
-        '연동 모드에서 요약·위생 점검 발송은 TYBot 이 맡습니다 — 여기서 또 보내면 ' +
-        '같은 날 같은 내용이 두 번 나갑니다.\n' +
+        '연동 모드에서는 이 독립 Node 런타임을 실행하지 않습니다. TYBot 이 Hermes ' +
+        '계약을 권한 도구와 함께 호출합니다 — 여기서 또 실행하면 답변·발송이 중복됩니다.\n' +
         'PF 직접 실행이라면 HERMES_MODE 를 비우고 다시 실행하세요.'
     );
     this.name = 'RoleNotOwned';

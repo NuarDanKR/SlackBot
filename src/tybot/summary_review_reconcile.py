@@ -30,6 +30,7 @@ Hermes 쪽 스킬(`archive-inbox`·`archive-run`)에서 사람이 이미 「반�
 | `source_mismatch` | 워크스페이스·채널이 다르다. 같은 파일명이어도 다른 자료다 |
 | `evidence_changed` | 결정 이후 원문이 바뀌었다. 사람이 본 것과 지금 것이 다르다 |
 | `no_coordinate` | 기록에 좌표·해시가 없다 — 대조할 수가 없다 |
+| `conflict` | 같은 좌표에 승인과 거절이 함께 있다 |
 
 마지막 항목이 지금 현실이다. Hermes 의 결정 기록(`.sync-state.json` 의 `applied`·
 `dismissed`)은 **항목 id 와 요약 섹션 해시**만 담는다. 원문 줄 좌표도, 그 줄의
@@ -42,6 +43,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -66,6 +70,8 @@ NOT_FINAL = "not_final"
 SOURCE_MISMATCH = "source_mismatch"
 EVIDENCE_CHANGED = "evidence_changed"
 NO_COORDINATE = "no_coordinate"
+# 같은 좌표에 승인과 거절이 **함께** 있다. 무엇이 확정인지 아무도 모른다.
+CONFLICT = "conflict"
 
 
 @dataclass(frozen=True)
@@ -145,6 +151,15 @@ def load_decisions(path: Path | str) -> list[ExternalDecision] | None:
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("외부 검토 기록을 읽지 못했습니다 %s: %s", file, exc)
         return None
+    if not isinstance(payload, dict) or payload.get("schema") != EXPORT_SCHEMA:
+        # 미래 형식이나 우연히 같은 `decisions` 키를 가진 JSON 을 현재 계약으로 읽으면
+        # 검토를 잘못 생략한다. 지원하지 않는 형식은 "결정 없음"이 아니라 "못 읽음"이다.
+        logger.warning(
+            "외부 검토 기록 스키마를 지원하지 않습니다 %s: %r",
+            file,
+            payload.get("schema") if isinstance(payload, dict) else None,
+        )
+        return None
     return parse_decisions(payload, source=file.name)
 
 
@@ -193,6 +208,20 @@ def decide(candidate: Any, decisions: list[ExternalDecision] | None) -> tuple[bo
     if not final:
         return False, NOT_FINAL
 
+    # **승인과 거절이 함께 있으면 생략하지 않는다.**
+    #
+    # 먼저 온 것을 쓰거나 나중 것을 쓰면, 생략한 뒤에 「왜 그렇게 정해졌는지」 를
+    # 사람이 설명할 수 없다. 시각으로 가르는 것도 답이 아니다 — 두 인터페이스의
+    # 시계가 다를 수 있고, 애초에 둘이 다른 답을 냈다는 사실 자체가 사람이 봐야 할
+    # 신호다. 모순은 **덮지 말고 남긴다.**
+    states = {d.state for d in final}
+    if len(states) > 1:
+        logger.warning(
+            "같은 좌표에 상반된 결정 locator=%s states=%s — 생략하지 않는다",
+            locator, ",".join(sorted(states)),
+        )
+        return False, CONFLICT
+
     return True, SKIP
 
 
@@ -221,6 +250,7 @@ def filter_candidates(
 
 
 __all__ = [
+    "CONFLICT",
     "EVIDENCE_CHANGED",
     "EXPORTED_STATES",
     "EXPORT_SCHEMA",
@@ -302,6 +332,30 @@ def build_export(rows, *, source: str = SOURCE_TYBOT_DM) -> dict:
     return {"schema": EXPORT_SCHEMA, "source": source, "decisions": out}
 
 
+def _replace_with_retry(tmp: Path, file: Path, *, attempts: int = 20) -> None:
+    """`os.replace` 는 양쪽 플랫폼에서 원자적이다 — 그런데 **윈도우에서는 실패할 수 있다.**
+
+    POSIX `rename` 은 대상이 열려 있어도 조용히 바꾼다. 윈도우는 대상을 다른
+    프로세스가 열고 있거나 같은 순간 다른 쪽이 바꾸는 중이면 `PermissionError`
+    (공유 위반)로 거절한다. 원자성이 깨지는 것이 아니라 **그 시도가 안 되는** 것이라,
+    잠깐 뒤 다시 하면 된다.
+
+    시험이 이걸 잡았다(동시 writer 4개 × 12회에서 3건 실패). 재시도 없이 두면 운영에서
+    「가끔 내보내기가 터진다」 가 되고, 그건 재현이 어려워 원인을 찾는 데 오래 걸린다.
+
+    상한을 둔다. 끝내 안 되면 던진다 — **조용히 포기하면 읽는 쪽이 옛 파일을 최신으로
+    읽는다.**
+    """
+    for remaining in range(attempts, 0, -1):
+        try:
+            tmp.replace(file)
+            return
+        except PermissionError:
+            if remaining == 1:
+                raise
+            time.sleep(0.02)
+
+
 def write_export(path: Path | str, rows, *, source: str = SOURCE_TYBOT_DM) -> int:
     """원자적으로 쓴다. 읽는 쪽이 **반쯤 쓰인 파일**을 보면 안 된다 —
     그때 JSON 파싱이 깨지고, 깨짐은 「못 읽음」 이라 대조가 통째로 멈춘다.
@@ -309,10 +363,24 @@ def write_export(path: Path | str, rows, *, source: str = SOURCE_TYBOT_DM) -> in
     payload = build_export(rows, source=source)
     file = Path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = file.with_suffix(file.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+
+    # **임시 이름은 고유해야 한다.** 고정 `.tmp` 를 쓰면 두 writer 가 같은 파일에
+    # 동시에 쓰고, 한쪽이 `replace` 하는 사이 다른 쪽이 덮는다. 남는 것은 섞인
+    # 파일이거나 사라진 파일이고 **둘 다 조용하다** — 읽는 쪽에는 「깨진 JSON」
+    # 으로만 보이는데, 그건 「못 읽음」 이라 대조가 통째로 멈춘다.
+    fd, raw = tempfile.mkstemp(
+        dir=file.parent, prefix=f".{file.name}.", suffix=".tmp"
     )
-    tmp.replace(file)
+    tmp = Path(raw)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        _replace_with_retry(tmp, file)
+    except BaseException:
+        # 실패해도 찌꺼기를 남기지 않는다. 남으면 다음 사람이 그것을 기록으로 읽거나,
+        # 쌓인 임시 파일이 디렉터리를 채운다.
+        tmp.unlink(missing_ok=True)
+        raise
     logger.info("검토 결정 %d건을 %s 로 내보냈습니다", len(payload["decisions"]), file)
     return len(payload["decisions"])

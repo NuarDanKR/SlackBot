@@ -1,4 +1,5 @@
 import { createQuestionAnswerer } from './llm/qa.js';
+import { assertOwnsRole, ROLES } from './mode.js';
 /**
  * Claude 계층 — 툴 루프(Q&A)와 요약 생성.
  *
@@ -56,10 +57,19 @@ export const { autoNarrow, buildTools } = createToolBuilder({
 });
 
 // Keep the public facade and a single cross-question diagnostics owner.
-export const answerQuestion = createQuestionAnswerer({
+const answerWithLocalArchive = createQuestionAnswerer({
   config, toolSession, buildTools, systemBlocks, lastSyncedAt, privateQuoteLine,
   BOT_ANSWER_MARK, logUsage, estimateCost,
 });
+
+/**
+ * PF 독립 런타임의 Q&A. TYBot 연동은 이 함수를 실행하지 않고 계약 프롬프트와
+ * TYBot ToolBox 를 쓴다. 직접 모듈 호출도 그 경계를 우회하지 못하게 여기서 막는다.
+ */
+export async function answerQuestion(args) {
+  assertOwnsRole(ROLES.ANSWER, 'Hermes 독립 Q&A(answerQuestion)');
+  return answerWithLocalArchive(args);
+}
 
 /** 시도 이력·실패 집계 표에 적을 사유 짧은 이름. **판정은 여기 한 곳뿐이다** — scheduler.js 의
  * catch 도 이걸 쓴다(2026-08-28). 전에는 scheduler.js 가 `err?.type` 만 봐서, type 이 없는

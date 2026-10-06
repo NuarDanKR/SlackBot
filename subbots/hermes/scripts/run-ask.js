@@ -17,6 +17,7 @@ import { WebClient } from '@slack/web-api';
 import { requireEnv, PUBLIC_ACCESS, FULL_ACCESS, accessFor, accessLabel } from '../src/config.js';
 import { answerQuestion } from '../src/claude.js';
 import { toolLine } from '../src/convo-log.js';
+import { assertOwnsRole, ROLES } from '../src/mode.js';
 
 /* **`process.exit()` 을 안 쓴다** (2026-09-03). 윈도우에서 슬랙 호출을 한 뒤
  * `process.exit(n)` 을 부르면 `@slack/web-api` 가 열어 둔 비동기 핸들 위로 이벤트 루프가
@@ -33,6 +34,10 @@ import { toolLine } from '../src/convo-log.js';
  * 함수로 감싸는 것은 `process.exitCode` 로는 실행이 안 멈추기 때문이다. ESM 최상위에서는
  * `return` 이 문법 오류라 함수 몸통이 있어야 조기 종료가 된다. */
 async function main() {
+  // 로컬 ask 는 Hermes 자료 저장소를 직접 읽는다. TYBot 연동의 질문은 반드시
+  // TYBot ToolBox 를 지나야 하므로 읽기 전용이라는 이유로 허용하지 않는다.
+  assertOwnsRole(ROLES.ANSWER, 'Hermes 로컬 질문(npm run ask)');
+
   const argv = process.argv.slice(2);
   const words = [];
   let access = PUBLIC_ACCESS;
