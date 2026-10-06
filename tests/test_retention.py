@@ -110,10 +110,16 @@ def _plan(tmp_path: Path, *, days=None, **over) -> retention.Plan:
 def _whole(tmp_path: Path, **over) -> retention.Plan:
     """**전부 본** 계획. 인계 경로와 reader 가 둘 다 있어야 complete 가 된다."""
     (tmp_path / "handoff").mkdir(exist_ok=True)
+    Path(over.get("archive_root", tmp_path / "archive")).mkdir(exist_ok=True)
+    shadow = over.pop("shadow_root", None)
+    if shadow is None:
+        shadow = tmp_path / "shadow"
+        shadow.mkdir(exist_ok=True)
     return _plan(
         tmp_path,
         handoff_dir=tmp_path / "handoff",
         spool_reader=lambda *_a: _epoch(1),
+        shadow_root=shadow,
         **over,
     )
 
@@ -153,6 +159,115 @@ def test_the_glob_tracks_the_path_helper(tmp_path):
 
     assert f"*/dm/*/{relative.name}/raw/*.md" == retention.DM_RAW_GLOB
     assert relative.parts[:2] == (WS, "dm")
+
+
+def test_shadow_dm_messages_and_objects_are_in_the_retention_plan(tmp_path):
+    live = tmp_path / "archive"
+    shadow = tmp_path / "shadow"
+    old = _dm_doc(shadow, "U12345678", [
+        (_epoch(200), f"[DM attachment original retained: F123; object={'a' * 64}; extraction pending]"),
+    ])
+    original = _object(shadow, "U12345678", "a" * 64)
+    live.mkdir()
+
+    ready = _whole(tmp_path, archive_root=live, shadow_root=shadow)
+
+    assert {target.path for target in ready.targets} == {old, original}
+    assert ready.complete
+    retention.apply(ready)
+    assert not old.exists()
+    assert not original.exists()
+
+
+def test_shadow_object_cannot_borrow_a_coordinate_from_the_live_root(tmp_path):
+    live = tmp_path / "archive"
+    shadow = tmp_path / "shadow"
+    _dm_doc(live, "U12345678", [
+        (_epoch(200), f"[DM attachment original retained: F123; object={'a' * 64}; extraction pending]"),
+    ])
+    shadow.mkdir()
+    orphan = _object(shadow, "U12345678", "a" * 64)
+
+    ready = _whole(tmp_path, archive_root=live, shadow_root=shadow)
+
+    assert orphan not in {target.path for target in ready.targets}
+    assert any(item.path == orphan for item in ready.unresolved)
+
+
+@pytest.mark.parametrize("shadow", ["missing", "same-root"])
+def test_an_unscanned_shadow_root_cannot_claim_dm_coverage(tmp_path, shadow):
+    live = tmp_path / "archive"
+    live.mkdir()
+    candidate = tmp_path / "missing" if shadow == "missing" else live
+
+    ready = _whole(
+        tmp_path, archive_root=live, shadow_root=candidate,
+        strict_roots=True,
+    )
+
+    assert retention.POLICY_DM_MESSAGE not in ready.covered
+    assert retention.POLICY_DM_ATTACHMENT not in ready.covered
+    assert any("shadow" in note for note in ready.skipped)
+
+
+def test_missing_shadow_configuration_cannot_claim_dm_coverage(tmp_path):
+    handoff = tmp_path / "handoff"
+    handoff.mkdir()
+    ready = _plan(
+        tmp_path, handoff_dir=handoff, spool_reader=lambda *_a: _epoch(1),
+        strict_roots=True,
+    )
+
+    assert not ready.complete
+    assert retention.POLICY_DM_MESSAGE not in ready.covered
+    assert retention.POLICY_DM_ATTACHMENT not in ready.covered
+
+
+def test_missing_qa_and_handoff_directories_do_not_count_as_covered(tmp_path):
+    live = tmp_path / "archive"
+    shadow = tmp_path / "shadow"
+    live.mkdir()
+    shadow.mkdir()
+    ready = _plan(
+        tmp_path, archive_root=live, shadow_root=shadow,
+        handoff_dir=tmp_path / "missing-handoff",
+        spool_reader=lambda *_a: _epoch(1), strict_roots=True,
+    )
+
+    assert retention.POLICY_BOT_AUDIT not in ready.covered
+    assert retention.POLICY_DM_MESSAGE not in ready.covered
+    assert retention.POLICY_DM_ATTACHMENT in ready.covered
+
+
+def test_cli_requires_shadow_root_before_apply(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from tybot import envfile
+    from tybot.console import archiving_repo
+
+    for name in ("archive", "shadow", "qa-log", "handoff"):
+        (tmp_path / name).mkdir()
+    monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path / "archive"))
+    monkeypatch.setenv("QA_LOG_DIR", str(tmp_path / "qa-log"))
+    monkeypatch.setenv("ARCHIVER_DM_HANDOFF_DIR", str(tmp_path / "handoff"))
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("ARCHIVER_SHADOW_DIR", raising=False)
+    monkeypatch.setattr(envfile, "load_env_file", lambda: "")
+    monkeypatch.setattr(archiving_repo, "default_repo", lambda: SimpleNamespace(
+        retention=lambda: [
+            {"name": name, "retention_days": days} for name, days in DAYS.items()
+        ],
+    ))
+    monkeypatch.setattr(retention, "spool_reader", lambda _path: lambda *_args: _epoch(1))
+
+    assert retention.main(["--apply", "--by", "test"]) == 2
+    assert not retention.state_path(tmp_path).exists()
+    assert "ARCHIVER_SHADOW_DIR" in capsys.readouterr().out
+
+    assert retention.main(["--shadow-root", str(tmp_path / "shadow")]) == 0
+    output = capsys.readouterr().out
+    assert str(tmp_path / "archive") in output
+    assert str(tmp_path / "shadow") in output
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +731,7 @@ def test_a_run_is_recorded_even_when_it_only_previewed(tmp_path):
     assert saved["by"] == "dan"
     assert saved["days"] == DAYS
     assert sorted(saved["covered"]) == sorted(retention.POLICIES)
+    assert len(saved["scanned_roots"]) == 2
 
 
 def _fresh(**over) -> dict:
@@ -623,6 +739,8 @@ def _fresh(**over) -> dict:
         "at": (NOW - timedelta(days=1)).isoformat(),
         "applied": True,
         "covered": list(retention.POLICIES),
+        "scanned_roots": ["/archive", "/shadow"],
+        "unresolved": 0,
         "failed": [],
     }
     record.update(over)
@@ -638,6 +756,10 @@ def _fresh(**over) -> dict:
         (_fresh(at="언제인지모름"), "시각을 읽을 수 없습니다"),
         (_fresh(covered=["bot_conversation_audit"]), "보지 않은 정책이 있습니다"),
         (_fresh(covered=None), "보지 않은 정책이 있습니다"),
+        (_fresh(scanned_roots=None), "운영·shadow 아카이브"),
+        (_fresh(scanned_roots=["/archive"]), "운영·shadow 아카이브"),
+        (_fresh(unresolved=None), "미확인 자료 건수"),
+        (_fresh(unresolved=1), "좌표를 확인하지 못한 자료"),
         (_fresh(failed=["/var/lib/tybot/archive/x.md: 권한 없음"]), "지우지 못했습니다"),
     ],
 )
@@ -989,8 +1111,7 @@ def test_a_preview_does_not_overwrite_the_last_applied_run(tmp_path):
     그 순간 게이트가 「미리보기로만 실행됐습니다」 로 닫히고, 운영자는 멀쩡히
     돌고 있는 집행을 다시 돌리러 간다.
     """
-    ready = _plan(tmp_path, handoff_dir=tmp_path / "handoff",
-                  spool_reader=lambda *_a: _epoch(1))
+    ready = _whole(tmp_path)
     retention.record_run(
         ready, {"removed": {}, "failed": [], "deferred": []},
         actor="dan", applied=True, state_dir=tmp_path, now=NOW,

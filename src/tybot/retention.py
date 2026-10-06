@@ -142,6 +142,7 @@ class Plan:
     #: 「돌았다」 와 「전부 돌았다」 를 가르는 값이다 — 한 정책만 돌린 실행을
     #: 집행으로 인정하면 나머지 자료는 영원히 안 지워진 채로 통과한다.
     covered: tuple[str, ...] = ()
+    scanned_roots: tuple[Path, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -453,10 +454,12 @@ def plan(
     days: dict[str, int | None],
     qa_dir: Path | str,
     archive_root: Path | str,
+    shadow_root: Path | str | None = None,
     handoff_dir: Path | str | None = None,
     now: datetime | None = None,
     policies: tuple[str, ...] = POLICIES,
     spool_reader=None,
+    strict_roots: bool = False,
 ) -> Plan:
     """무엇을 지울지 **세기만** 한다. 파일은 건드리지 않는다.
 
@@ -479,6 +482,26 @@ def plan(
     #: 읽고, 그 자료는 아무도 안 지운 채로 운영에 간다.
     partial: set[str] = set()
 
+    live_root = Path(archive_root)
+    archive_roots = [live_root]
+    if strict_roots and not Path(qa_dir).is_dir():
+        result.skipped.append(f"QA log directory is unavailable: {qa_dir}")
+        partial.add(POLICY_BOT_AUDIT)
+    if strict_roots and not live_root.is_dir():
+        result.skipped.append(f"live archive root is unavailable: {live_root}")
+        partial.update((POLICY_DM_MESSAGE, POLICY_DM_ATTACHMENT))
+    if shadow_root:
+        candidate = Path(shadow_root)
+        if not candidate.is_dir() or candidate.resolve() == live_root.resolve():
+            result.skipped.append(f"shadow archive root is unavailable or overlaps live: {candidate}")
+            partial.update((POLICY_DM_MESSAGE, POLICY_DM_ATTACHMENT))
+        else:
+            archive_roots.append(candidate)
+    elif strict_roots:
+        result.skipped.append("ARCHIVER_SHADOW_DIR is missing; shadow DMs were not scanned")
+        partial.update((POLICY_DM_MESSAGE, POLICY_DM_ATTACHMENT))
+    result.scanned_roots = tuple(root for root in archive_roots if root.is_dir())
+
     def active(policy: str) -> datetime | None:
         if policy not in policies or days.get(policy) is None:
             return None
@@ -497,12 +520,24 @@ def plan(
     # 정책이 꺼져 있으면 **아무것도 만료되지 않는** 경계로 훑는다. 좌표만
     # 거두고 지우지는 않는다 — 첨부 정책이 켜져 있을 수 있기 때문이다.
     scan_limit = message_limit or NOTHING_EXPIRES
-    messages, message_unresolved, coordinates = scan_dm_messages(
-        archive_root, limit=scan_limit
-    )
+    attachment_limit = active(POLICY_DM_ATTACHMENT)
+    for root in archive_roots:
+        messages, message_unresolved, coordinates = scan_dm_messages(
+            root, limit=scan_limit
+        )
+        if message_limit is not None:
+            result.targets.extend(messages)
+            result.unresolved.extend(message_unresolved)
+        if attachment_limit is not None:
+            objects, object_unresolved = scan_dm_objects(
+                root, limit=attachment_limit, coordinates=coordinates
+            )
+            result.targets.extend(objects)
+            result.unresolved.extend(object_unresolved)
     if message_limit is not None:
-        result.targets.extend(messages)
-        result.unresolved.extend(message_unresolved)
+        if handoff_dir and not Path(handoff_dir).is_dir():
+            result.skipped.append(f"DM handoff directory is unavailable: {handoff_dir}")
+            partial.add(POLICY_DM_MESSAGE)
         if handoff_dir and spool_reader is None:
             # 읽을 수단이 없으면 **봤다고 하지 않는다.** 0 건으로 보고하면
             # 인계 중인 사본이 영원히 남은 채로 「집행 완료」 가 된다.
@@ -522,13 +557,6 @@ def plan(
             )
             partial.add(POLICY_DM_MESSAGE)
 
-    attachment_limit = active(POLICY_DM_ATTACHMENT)
-    if attachment_limit is not None:
-        objects, object_unresolved = scan_dm_objects(
-            archive_root, limit=attachment_limit, coordinates=coordinates
-        )
-        result.targets.extend(objects)
-        result.unresolved.extend(object_unresolved)
     result.covered = tuple(name for name in covered if name not in partial)
     return result
 
@@ -672,6 +700,7 @@ def record_run(
         "unresolved": len(ready.unresolved),
         "skipped": list(ready.skipped),
         "covered": list(ready.covered),
+        "scanned_roots": [str(root.resolve()) for root in ready.scanned_roots],
         "deferred": list(result.get("deferred", [])),
     }
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -729,6 +758,16 @@ def enforcement_status(
     missing = sorted(set(POLICIES) - set(record.get("covered") or ()))
     if missing:
         return False, f"마지막 집행이 보지 않은 정책이 있습니다: {', '.join(missing)}"
+    roots = record.get("scanned_roots")
+    if (not isinstance(roots, list) or len(roots) != 2
+            or any(not isinstance(root, str) or not root for root in roots)
+            or roots[0] == roots[1]):
+        return False, "마지막 집행이 운영·shadow 아카이브를 모두 확인하지 않았습니다"
+    unresolved = record.get("unresolved")
+    if not isinstance(unresolved, int) or unresolved < 0:
+        return False, "마지막 집행의 미확인 자료 건수를 읽을 수 없습니다"
+    if unresolved:
+        return False, f"마지막 집행에 좌표를 확인하지 못한 자료가 {unresolved}건 있습니다"
 
     # **실패가 있으면 집행이 아니다.** 지우려 했는데 못 지운 자료가 남아 있고,
     # 그걸 성공으로 세면 다음 실행까지 아무도 모른다.
@@ -751,6 +790,9 @@ def enforcement_status(
 
 def _report(ready: Plan) -> None:
     counts = ready.counts()
+    print("확인한 DM 아카이브 루트:")
+    for root in ready.scanned_roots:
+        print(f"  {root}")
     print("보존 기간:")
     for policy in POLICIES:
         value = ready.days.get(policy)
@@ -806,6 +848,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="보존 기간을 실제 자료에 적용한다")
     parser.add_argument("--apply", action="store_true", help="실제로 지운다(기본은 미리보기)")
     parser.add_argument("--by", default="", help="실행한 사람. --apply 에 필요하다")
+    parser.add_argument("--shadow-root", default="", help="그림자 DM 아카이브 루트")
     parser.add_argument(
         "--policy", action="append", choices=POLICIES,
         help="이 정책만. 여러 번 줄 수 있다(기본: 전부)",
@@ -837,9 +880,11 @@ def main(argv: list[str] | None = None) -> int:
         days=days,
         qa_dir=os.getenv("QA_LOG_DIR", "./qa-log"),
         archive_root=archive_dir(),
+        shadow_root=args.shadow_root or os.getenv("ARCHIVER_SHADOW_DIR", "").strip(),
         handoff_dir=handoff_dir,
         spool_reader=spool_reader(handoff_dir),
         policies=tuple(args.policy) if args.policy else POLICIES,
+        strict_roots=True,
     )
     _report(ready)
     if not args.apply:
@@ -849,6 +894,11 @@ def main(argv: list[str] | None = None) -> int:
             actor="preview", applied=False,
         )
         return 0
+
+    requested = set(args.policy or POLICIES)
+    if not requested.issubset(ready.covered):
+        print("검사하지 못한 보존 정책이 있어 삭제를 거부합니다.")
+        return 2
 
     result = apply(ready)
     record_run(ready, result, actor=args.by, applied=True)

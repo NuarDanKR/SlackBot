@@ -352,6 +352,7 @@ def _production_blockers(
     return production_blockers(
         {str(row["name"]): row["retention_days"] for row in retention},
         flags=_flag_map(flags),
+        enforcement=retention_enforcement_status(),
     )
 
 

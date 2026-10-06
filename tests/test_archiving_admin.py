@@ -47,6 +47,7 @@ def gate_open(monkeypatch, tmp_path):
     """검증을 통과한 상태를 만든다. **지문까지 맞춘다.**"""
     monkeypatch.setenv("STATE_DIR", str(tmp_path))
     release_gate.record_pass(by="dba", dsn_label="tybot_schema_test")
+    _given_enforcement(tmp_path)
     return tmp_path
 
 
@@ -91,6 +92,7 @@ def _given_enforcement(state_dir, *, applied: bool = True) -> None:
             # **전부 돌았고 실패가 없어야** 집행으로 인정된다. 한 정책만 돈
             # 실행이나 실패가 있는 실행은 게이트를 열지 않는다(B-70).
             "covered": list(retention.POLICIES), "failed": [],
+            "scanned_roots": ["/archive", "/shadow"], "unresolved": 0,
         }),
         encoding="utf-8",
     )
@@ -316,6 +318,20 @@ def test_active_is_blocked_while_production_policy_is_incomplete(repo, gate_open
     repo.given_channel("tyit", "C1", "shadow")
 
     with pytest.raises(admin.AdminRefused, match="운영 전환 조건"):
+        admin.set_channel_mode(
+            "tyit", "C1", ChannelMode.ACTIVE,
+            admin.Actor("dan", "인수"), cutover_ts="1700000000.0001", repo=repo,
+        )
+
+    assert repo.channel_rows[("tyit", "C1")]["mode"] == "shadow"
+
+
+def test_active_is_blocked_without_retention_enforcement(repo, gate_open):
+    repo.given_channel("tyit", "C1", "shadow")
+    _ready_for_active(repo)
+    (gate_open / "state" / "retention-run.json").unlink()
+
+    with pytest.raises(admin.AdminRefused, match="보존 기간이 집행되지 않고 있습니다"):
         admin.set_channel_mode(
             "tyit", "C1", ChannelMode.ACTIVE,
             admin.Actor("dan", "인수"), cutover_ts="1700000000.0001", repo=repo,
