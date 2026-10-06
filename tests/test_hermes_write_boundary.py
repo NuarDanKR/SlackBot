@@ -136,9 +136,13 @@ def test_src_write_modules_match_the_inventory():
 
 def test_scheduled_jobs_match_the_inventory():
     """기동만으로 예약되는 작업. 여기 늘면 **아무도 안 눌러도** 쓰기가 는다."""
-    jobs = set(
-        re.findall(r"schedule\(client,\s*'([^']+)'\)", _read(HERMES / "src" / "scheduler.js"))
-    )
+    text = _read(HERMES / "src" / "scheduler.js")
+    # 예약은 두 모양으로 적힌다 — 직접 `schedule(client, 'x')` 와 역할 묶음
+    # `take(ROLES.X, 'a', 'b')`. **둘 다 봐야 한다.** 한쪽만 보면 구조를 바꾼 날
+    # 목록이 조용히 비고, 빈 목록은 늘 통과한다.
+    jobs = set(re.findall(r"schedule\(client,\s*'([^']+)'\)", text))
+    for group in re.findall(r"take\(\s*ROLES\.[A-Z]+\s*,([^)]*)\)", text):
+        jobs.update(re.findall(r"'([^']+)'", group))
 
     assert jobs == SCHEDULED_JOBS
 

@@ -66,3 +66,65 @@ export function assertMayWriteArchive(action) {
     throw new ArchiveWriteBlocked(action);
   }
 }
+
+/* ── 실행 역할 ────────────────────────────────────────────────────────────
+ *
+ * 모드가 「누구 밑에서 도는가」 라면, 역할은 「무엇을 내가 맡는가」 다. 둘을 같은
+ * 값으로 묶으면 다음에 역할 하나만 옮길 때 모드 전체를 흔들어야 한다.
+ *
+ * TYBot 연동에서 **발송은 TYBot 이 전부 맡는다.** 요약 후보는 TYBot 의 권한 있는
+ * 근거로 만들어지고, 검증·DM/Canvas 승인·발송은 `summary_review` 가 한다. Hermes 가
+ * 같은 시각에 자기 요약을 또 보내면 사람은 **같은 날 요약을 두 번** 받고, 둘의
+ * 숫자가 다르면 어느 쪽이 맞는지 알 방법이 없다.
+ *
+ * 위생 점검(health)도 같다. 연동 모드의 Hermes 는 자기 아카이브에 쓰지 않으므로
+ * 점검할 자기 자료가 없다 — 점검 대상은 TYBot 의 아카이브이고 그건 TYBot 콘솔이 본다.
+ */
+export const ROLES = {
+  /** 원문 수집·소급·첨부 저장 */
+  INGEST: 'ingest',
+  /** 일일·주간 요약 **발송** */
+  DIGEST: 'digest',
+  /** 위생 점검 발송 */
+  HEALTH: 'health',
+  /** 질문 응답(슬랙 질문·DM). 어느 모드에서도 Hermes 가 맡는다 */
+  ANSWER: 'answer',
+};
+
+/** PF 직접 실행이 맡는 역할 — 지금까지와 같다. */
+const PF_ROLES = new Set([ROLES.INGEST, ROLES.DIGEST, ROLES.HEALTH, ROLES.ANSWER]);
+
+/** TYBot 연동이 Hermes 에게 남기는 역할. **발송은 하나도 없다.** */
+const TYBOT_ROLES = new Set([ROLES.ANSWER]);
+
+export function rolesFor(current = mode()) {
+  return current === TYBOT ? TYBOT_ROLES : PF_ROLES;
+}
+
+/** 이 역할을 지금 내가 맡는가. 스케줄 등록·발송 직전에 묻는다. */
+export function ownsRole(role) {
+  return rolesFor().has(role);
+}
+
+/** 역할이 없는데 하려 할 때. 쓰기 금지(`ArchiveWriteBlocked`)와 **다른 사유**다. */
+export class RoleNotOwned extends Error {
+  constructor(role, action) {
+    super(
+      `[TYBot 연동 모드] ${action} 은(는) 이 프로세스의 역할이 아닙니다(${role}).\n` +
+        '연동 모드에서 요약·위생 점검 발송은 TYBot 이 맡습니다 — 여기서 또 보내면 ' +
+        '같은 날 같은 내용이 두 번 나갑니다.\n' +
+        'PF 직접 실행이라면 HERMES_MODE 를 비우고 다시 실행하세요.'
+    );
+    this.name = 'RoleNotOwned';
+    this.code = 'tybot_mode_role_not_owned';
+    this.role = role;
+    this.action = action;
+  }
+}
+
+/** 발송 직전에 부른다. 통과하거나 던지거나 둘뿐이다. */
+export function assertOwnsRole(role, action) {
+  if (!ownsRole(role)) {
+    throw new RoleNotOwned(role, action);
+  }
+}

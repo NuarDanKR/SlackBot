@@ -19,6 +19,7 @@ import { unconvertedAmong } from './archive-health.js';
 import { generateDigest } from './claude.js';
 import { toSlackMrkdwn, chunkForSlack } from './format.js';
 import { append as logConversation } from './convo-log.js';
+import { assertOwnsRole, ROLES } from './mode.js';
 
 function summarize(entries) {
   let messages = 0;
@@ -52,6 +53,9 @@ async function deliveryTarget(client) {
  * @param {{dry?:boolean}} opts  dry=true 면 슬랙에 보내지 않고 콘솔에만 출력
  */
 export async function runDigest(client, kind, { dry = false } = {}) {
+  // 연동 모드에서 요약 발송은 TYBot 이 맡는다. **맨 앞이어야** 한다 —
+  // 아래에서 모델을 부르면 막기 전에 비용이 나간다.
+  if (!dry) assertOwnsRole(ROLES.DIGEST, '일일·주간 요약 발송(runDigest)');
   const w = kind === 'daily' ? dailyWindow() : weeklyWindow();
   const started = Date.now();
   console.log(`\n[${kind}] ${w.label} 수집 시작…`);

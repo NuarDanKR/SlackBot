@@ -14,7 +14,7 @@ import { runHealth } from './archive-health.js';
 import { runIngest } from './ingest/index.js';
 import { append as logConversation } from './convo-log.js';
 import { errLabel } from './claude.js';
-import { isTybotMode } from './mode.js';
+import { ownsRole, ROLES } from './mode.js';
 
 /* 전 채널 스캔이 하루 세 번 도는 것에 대하여 — **합치지 않기로 했다** (2026-08-06).
  *
@@ -197,19 +197,26 @@ export function schedule(client, kind) {
 
 export function startScheduler(client) {
   console.log('예약 작업');
-  // 연동 모드에서는 **쓰는 작업을 아예 예약하지 않는다.** 예약해 두고 실행할 때
-  // 막으면, 매 회차 실패가 쌓여 위생 점검이 「고장」 으로 보인다. 안 하는 것과
-  // 못 하는 것은 화면에서 구별돼야 한다.
-  const writesBlocked = isTybotMode();
-  schedule(client, 'daily');
-  schedule(client, 'weekly');
-  schedule(client, 'health');
-  schedule(client, 'healthPre');
-  if (writesBlocked) {
-    console.log('  자동 반영(ingest) — TYBot 연동 모드라 예약하지 않음');
-  } else {
-    schedule(client, 'ingest');
-    schedule(client, 'ingestPre');
+  // **역할이 없으면 예약하지 않는다.** 예약해 두고 실행할 때 막으면 매 회차
+  // 실패가 쌓여 위생 점검이 「고장」 으로 보인다. 안 하는 것과 못 하는 것은
+  // 화면에서 구별돼야 한다.
+  //
+  // 연동 모드에서 발송은 TYBot 이 전부 맡는다. 여기서 같이 보내면 사람은 같은 날
+  // 요약을 **두 번** 받고, 둘의 숫자가 다르면 어느 쪽이 맞는지 알 방법이 없다.
+  const skipped = [];
+  const take = (role, ...jobs) => {
+    if (ownsRole(role)) {
+      jobs.forEach((job) => schedule(client, job));
+    } else {
+      skipped.push(`${role}(${jobs.join('·')})`);
+    }
+  };
+  take(ROLES.DIGEST, 'daily', 'weekly');
+  take(ROLES.HEALTH, 'health', 'healthPre');
+  take(ROLES.INGEST, 'ingest', 'ingestPre');
+  if (skipped.length) {
+    console.log(`  TYBot 연동 모드 — 예약하지 않음: ${skipped.join(', ')}`);
+    console.log('  (요약·위생 점검 발송과 수집은 TYBot 이 맡습니다)');
   }
   const to = config.digest.deliverTo === 'channel' ? `채널 ${config.digest.channelId}` : `${config.owner.name} 에게 DM`;
   // 위생 점검은 내부 운영 상태라 deliverTo 와 무관하게 항상 본인 DM 이다.

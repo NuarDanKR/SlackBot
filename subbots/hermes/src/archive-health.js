@@ -42,6 +42,7 @@ import { SKILL_SCRIPTS, runScript, activeDeferred } from './ingest/util.js';
 // 07:00 회차와 **같은 판정**으로 「빼·나중에」를 거른다 (아래 `stalePendingWork`).
 import { suppress } from './ingest/pending-work.js';
 import { syncForRead } from './ingest/git.js';
+import { assertOwnsRole, ROLES } from './mode.js';
 
 // doc-archive 가 다루는 확장자. **같은 목록이 세 자리에 있다** — 여기,
 // `.claude/skills/doc-archive/scripts/fetch_slack_files.py` 의 `DOC_EXTS`,
@@ -283,6 +284,7 @@ async function healthBody(client, { dry = false, preDigest = false, sync = false
  * 「못 쟀다」를 같은 글자로 만든다(convo-log.js 가 값이 없으면 줄을 안 쓴다).
  */
 export async function runHealth(client, opts = {}) {
+  assertOwnsRole(ROLES.HEALTH, '위생 점검 발송(runHealth)');
   const reached = [];
   try {
     return await healthBody(client, opts, reached);

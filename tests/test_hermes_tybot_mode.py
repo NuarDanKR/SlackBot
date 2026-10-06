@@ -205,10 +205,9 @@ def test_the_scheduler_does_not_even_register_write_jobs():
     text = (HERMES / "src" / "scheduler.js").read_text(encoding="utf-8")
     start = text.split("export function startScheduler", 1)[1]
 
-    assert "isTybotMode()" in start
-    # ingest 예약이 조건 안에 있어야 한다.
-    before_ingest = start.split("schedule(client, 'ingest')", 1)[0]
-    assert "if (writesBlocked)" in before_ingest or "isTybotMode" in before_ingest
+    # 예약은 역할로 걸린다(`ownsRole`). 역할이 없으면 `take()` 가 건너뛴다.
+    assert "ownsRole(" in start
+    assert "take(ROLES.INGEST" in start, "수집 예약이 역할 기준이 아니다"
 
 
 # --- 근거는 TYBot 도구로만 ----------------------------------------------------

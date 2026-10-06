@@ -182,3 +182,86 @@ PF 는 자기 배포에서 Hermes 를 직접 돌린다. 질문·DM·요약이 �
 - `HERMES_MODE` 를 읽는 곳이 `src/mode.js` · `_shared/mode.py` **둘뿐**인지 본다
 - **PF 모드에서는 막히지 않는 것**도 같이 본다. 차단을 넣으면서 PF 운영을 조용히
   멈추는 것이 가장 나쁜 실패다
+
+## 6. 실행 역할과 검토 대조 (2026-10-06 구현)
+
+### 6.1 발송은 한 쪽만 맡는다
+
+모드가 「누구 밑에서 도는가」 라면 역할은 「무엇을 내가 맡는가」 다
+([`src/mode.js`](../../subbots/hermes/src/mode.js) 의 `ROLES`).
+
+| 역할 | PF 직접 실행 | TYBot 연동 |
+|---|---|---|
+| `ingest` 수집·소급·첨부 | Hermes | — (TYBot) |
+| `digest` 일일·주간 요약 **발송** | Hermes | — (TYBot `summary_review`) |
+| `health` 위생 점검 발송 | Hermes | — (TYBot 콘솔) |
+| `answer` 질문·DM 응답 | Hermes | **Hermes** |
+
+연동 모드에서 Hermes 가 같은 시각에 자기 요약을 또 보내면 사람은 **같은 날 요약을
+두 번** 받고, 둘의 숫자가 다르면 어느 쪽이 맞는지 알 방법이 없다. 위생 점검도
+같다 — 연동 모드의 Hermes 는 자기 아카이브에 쓰지 않으므로 점검할 자기 자료가 없다.
+
+막는 자리는 셋이다. **스케줄 등록**(역할이 없으면 예약하지 않는다) · **발송
+함수**(`runDigest`·`runHealth` 앞머리) · **CLI**(`run-digest`·`run-health`, 종료
+코드 2). 스케줄만 막으면 손으로 돌리는 길이 남고, 그게 중복 발송의 실제 경로다.
+
+### 6.2 요약 후보 계약 — 이미 이어져 있다
+
+연동에서 요약은 이렇게 갈린다.
+
+```text
+TYBot: 근거 수집(권한 검사된 아카이브)  ─┐
+Hermes: 후보 생성 규칙(contract/summary-review.md) ─┤─▶ TYBot summary_review
+TYBot: 검증·DM/Canvas 승인·발송         ─┘    (parse_proposals → Canvas → DM)
+```
+
+`summary_review.contract_prompt()` 가 `subbots/hermes/contract/summary-review.md` 를
+읽고, 근거(`_source_rows`)는 TYBot 아카이브에서 나오며, 검증(`parse_proposals`)·
+승인·발송은 전부 TYBot 이 한다. **Hermes 는 규칙만 댄다** — 소스도 자기 아카이브도
+쓰이지 않는다.
+
+그래서 §6.1 이 중요하다. Hermes 가 자기 요약을 또 보내지 않아야 이 그림에 발송
+주체가 하나뿐이다.
+
+### 6.3 이미 끝낸 검토를 생략하는 조건
+
+구현: [`src/tybot/summary_review_reconcile.py`](../../src/tybot/summary_review_reconcile.py)
+
+**「로컬 스킬이 돌았다」 는 생략의 근거가 아니다.** 그것은 어떤 항목을 어떤 원문으로
+끝냈는지 아무것도 말해 주지 않는다. 보는 것은 둘이다 — **같은 원문 좌표**인가,
+**그 좌표의 해시가 그대로**인가. 그 위에 **확정된 결정**(승인·거절)만 쓴다.
+
+아래 중 하나라도 걸리면 생략하지 않는다.
+
+| 사유 코드 | 뜻 |
+|---|---|
+| `records_unreadable` | 기록을 못 읽었다 (없는 것과 다르다) |
+| `no_match` | 그 좌표에 대한 결정이 없다 |
+| `not_final` | 보류 — 아직 끝난 것이 아니다 |
+| `source_mismatch` | 워크스페이스·채널이 다르다 |
+| `evidence_changed` | 결정 이후 원문이 바뀌었다 |
+| `no_coordinate` | 좌표·해시가 없어 대조할 수 없다 |
+
+묻는 쪽으로 틀리면 사람이 한 번 더 볼 뿐이지만, **생략하는 쪽으로 틀리면 아무도
+모른다.**
+
+### 6.4 지금은 아무것도 생략되지 않는다 — 그리고 그게 맞다
+
+Hermes 의 결정 기록(`.sync-state.json` 의 `applied`·`dismissed`)은 **항목 id 와 요약
+섹션 해시**만 담는다. 원문 줄 좌표도, 그 줄의 해시도 없다. §6.3 의 조건을 채울 수
+없으므로 대조는 늘 `no_match`·`source_mismatch` 로 끝난다.
+
+생략하려면 Hermes 가 결정 시점에 아래를 함께 적어야 한다.
+
+```json
+{"decisions": [{
+  "workspace": "tyit", "channel_id": "C0BQ…",
+  "evidence_locator": "2026-10-02.md:42",
+  "evidence_hash": "<그 줄의 content hash>",
+  "state": "approved",
+  "decided_at": "2026-10-02T09:00:00+09:00", "decided_by": "…"
+}]}
+```
+
+**이 변경은 하지 않았다.** 결정 기록 형식을 바꾸는 일은 Hermes 수집 경로를 맡은
+쪽과 겹친다. 형식만 정해 두고, 채워지기 전까지는 묻는 쪽으로 틀린다.
