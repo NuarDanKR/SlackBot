@@ -52,3 +52,18 @@ def test_schedule_status_converts_utc_to_kst():
 
     assert got["due"] == 1
     assert got["waiting"] == 0
+
+
+def test_schedule_status_understands_weekly_channels():
+    rows = [
+        {"send_at": time(9, 0), "schedule_kind": "weekly", "weekday": 2},
+        {"send_at": time(9, 0), "schedule_kind": "weekly", "weekday": 3},
+    ]
+
+    got = store._schedule_status(
+        rows, now=datetime(2026, 10, 7, 9, 30, tzinfo=KST)
+    )
+
+    assert got["due"] == 1
+    assert got["waiting"] == 1
+    assert got["nextSendAt"] == "목요일 09:00"

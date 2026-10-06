@@ -56,6 +56,27 @@ def test_a_bad_time_is_refused_not_defaulted(raw):
         reviewers.parse_send_at(raw)
 
 
+def test_review_schedule_labels_daily_and_weekly():
+    assert reviewers.schedule_label("daily", None, time(9, 0)) == "매일 09:00"
+    assert reviewers.schedule_label("weekly", 2, time(9, 0)) == "매주 수요일 09:00"
+
+
+def test_review_schedule_command_parses_weekly_without_guessing_from_other_words():
+    assert reviewers.parse_schedule("<@U1> 매주 수요일 09:00") == ("weekly", 2)
+    assert reviewers.parse_schedule("<@U1> 매일 09:00") == ("daily", None)
+    with pytest.raises(reviewers.ReviewerError):
+        reviewers.parse_schedule("<@U1> 매주 금액 검토 09:00")
+
+
+@pytest.mark.parametrize(
+    ("kind", "weekday"),
+    [("monthly", None), ("weekly", None), ("weekly", -1), ("weekly", 7)],
+)
+def test_invalid_review_schedules_are_refused(kind, weekday):
+    with pytest.raises(reviewers.ReviewerError):
+        reviewers.validate_schedule(kind, weekday)
+
+
 # --- 반영 가능 여부 ----------------------------------------------------------
 def test_reading_failure_counts_as_no_reviewer(monkeypatch):
     """막는 쪽이 기본값이다.

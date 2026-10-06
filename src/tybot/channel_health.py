@@ -85,6 +85,7 @@ class HealthFacts:
     # 검토자. `None` 은 **모른다**(DB 를 못 읽었다) — 「없음」 과 다르다.
     reviewers: list[str] | None = None
     send_at: str = ""
+    review_schedule: str = ""
     # 사람이 봐야 원본을 읽는 첨부. `None` 이면 세지 못했다.
     waiting_attachments: int | None = None
     # 이 채널로 검토 DM 이 **실제로** 나간 마지막 날. `None` 이면 세지 못했다.
@@ -239,7 +240,11 @@ def check_reviewer(f: HealthFacts) -> Check:
             "`/채널 수정` 에서 검토자와 보낼 시각을 정하세요.",
         )
     who = " ".join(f"<@{u}>" for u in f.reviewers)
-    return Check(OK, "검토자", f"{who} · 매일 {f.send_at or '08:00'}")
+    return Check(
+        OK,
+        "검토자",
+        f"{who} · {f.review_schedule or ('매일 ' + (f.send_at or '08:00'))}",
+    )
 
 
 def check_digest(f: HealthFacts) -> Check:

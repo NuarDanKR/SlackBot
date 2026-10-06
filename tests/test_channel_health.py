@@ -182,6 +182,21 @@ def test_current_reviewers_are_prefilled():
     assert blocks["send_at"]["element"]["initial_time"] == "10:30"
 
 
+def test_weekly_schedule_is_prefilled():
+    modal = edit_modal(
+        "{}",
+        spec=parse(GOOD),
+        reviewers=("U1",),
+        send_at="10:30",
+        schedule_kind="weekly",
+        weekday=4,
+    )
+
+    blocks = {b["block_id"]: b for b in modal["blocks"] if b["type"] == "input"}
+    assert blocks["schedule_kind"]["element"]["initial_option"]["value"] == "weekly"
+    assert blocks["schedule_weekday"]["element"]["initial_option"]["value"] == "4"
+
+
 def test_channel_managers_are_only_shown_to_people_who_can_delegate():
     hidden = edit_modal("{}", spec=parse(GOOD))
     shown = edit_modal("{}", spec=parse(GOOD), managers=("U2", "U3"))
@@ -193,7 +208,8 @@ def test_channel_managers_are_only_shown_to_people_who_can_delegate():
 
 # --- 제출 읽기 ---------------------------------------------------------------
 def _view(
-    *, org="", task="", reviewers=None, send_at="", with_reviewer_block=True,
+    *, org="", task="", reviewers=None, send_at="", schedule_kind="daily",
+    weekday="0", with_reviewer_block=True,
     managers=None, with_manager_block=False,
 ):
     from tybot.orgsearch import OrgHit, option
@@ -210,6 +226,12 @@ def _view(
         state["reviewers"] = {"reviewers": {"selected_users": list(reviewers or [])}}
     if send_at:
         state["send_at"] = {"send_at": {"selected_time": send_at}}
+    state["schedule_kind"] = {
+        "schedule_kind": {"selected_option": {"value": schedule_kind}}
+    }
+    state["schedule_weekday"] = {
+        "schedule_weekday": {"selected_option": {"value": weekday}}
+    }
     if with_manager_block:
         state["channel_managers"] = {
             "channel_managers": {"selected_users": list(managers or [])}
@@ -223,6 +245,17 @@ def test_only_reviewers_changed_means_no_rename():
     assert not edit.renames
     assert edit.reviewers == ("U1",)
     assert edit.send_at == "09:00"
+    assert edit.schedule_kind == "daily"
+    assert edit.weekday is None
+
+
+def test_weekly_review_schedule_is_read_from_the_edit_modal():
+    edit = edit_from_view(
+        _view(reviewers=["U1"], send_at="09:00", schedule_kind="weekly", weekday="4")
+    )
+
+    assert edit.schedule_kind == "weekly"
+    assert edit.weekday == 4
 
 
 def test_a_full_name_is_assembled():
@@ -511,7 +544,10 @@ def test_our_own_record_wins_over_slack():
 # `/채널 생성` 에 검토자 칸이 없어서, 만들어진 채널은 모두 검토자 없는 상태로
 # 시작했다. 그 채널은 요약이 반영되지 않고 읽지 못한 첨부도 아무에게도 가지
 # 않는다 — 둘 다 오류 없이 조용하다.
-def _create_view(*, reviewers=("U1",), send_at="09:00", with_block=True):
+def _create_view(
+    *, reviewers=("U1",), send_at="09:00", schedule_kind="daily",
+    weekday="0", with_block=True,
+):
     from tybot.orgsearch import OrgHit, option
 
     state = {
@@ -524,6 +560,12 @@ def _create_view(*, reviewers=("U1",), send_at="09:00", with_block=True):
     if with_block:
         state["reviewers"] = {"reviewers": {"selected_users": list(reviewers)}}
         state["send_at"] = {"send_at": {"selected_time": send_at}}
+        state["schedule_kind"] = {
+            "schedule_kind": {"selected_option": {"value": schedule_kind}}
+        }
+        state["schedule_weekday"] = {
+            "schedule_weekday": {"selected_option": {"value": weekday}}
+        }
     return {"state": {"values": state}}
 
 
@@ -563,6 +605,17 @@ def test_the_reviewer_rides_along_to_every_channel():
     for request in made:
         assert request.reviewers == ("U1", "U2")
         assert request.send_at == "09:00"
+
+
+def test_weekly_schedule_rides_along_to_every_created_channel():
+    from tybot.channel_management import requests_from_view
+
+    made = requests_from_view(
+        _create_view(schedule_kind="weekly", weekday="1")
+    )
+
+    assert made[0].schedule_kind == "weekly"
+    assert made[0].weekday == 1
 
 
 def test_the_rename_path_does_not_break_on_the_new_fields():

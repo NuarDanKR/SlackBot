@@ -2016,7 +2016,7 @@ class WorkspaceBot:
         return creator
 
     def _handle_reviewer_command(self, command: dict, args: str, respond) -> None:
-        """`/채널 검토자 @사람 [@사람2] [09:00]` — 이 채널의 요약 검토자를 정한다.
+        """`/채널 검토자 @사람 [@사람2] [매일|매주 수요일] [09:00]`.
 
         요약은 봇이 후보만 만들고 이 사람이 확정한다.
         설계: docs/design/summary-review.md
@@ -2044,12 +2044,15 @@ class WorkspaceBot:
 
         try:
             send_at = reviewers.parse_send_at(_time_token(args))
+            schedule_kind, weekday = reviewers.parse_schedule(args)
             rows = reviewers.set_reviewers(
                 workspace=self.workspace,
                 channel_id=channel_id,
                 channel_name=str(command.get("channel_name") or ""),
                 reviewer_users=users,
                 send_at=send_at,
+                schedule_kind=schedule_kind,
+                weekday=weekday,
                 set_by=user_id,
             )
         except reviewers.ReviewerError as e:
@@ -2067,7 +2070,8 @@ class WorkspaceBot:
         names = ", ".join(f"<@{r.reviewer_user}>" for r in rows)
         respond(
             f"검토자: {names}" + NEWLINE
-            + f"매일 {send_at.strftime('%H:%M')} 에 요약 후보를 DM 으로 보냅니다." + NEWLINE
+            + reviewers.schedule_label(schedule_kind, weekday, send_at)
+            + "에 요약 후보를 DM 으로 보냅니다." + NEWLINE
             + "검토자가 확인한 것만 요약에 반영됩니다.",
             response_type="ephemeral",
         )
@@ -2082,15 +2086,20 @@ class WorkspaceBot:
         if not rows:
             respond(
                 "이 채널에는 요약 검토자가 없습니다 — **요약을 반영하지 않습니다.**" + NEWLINE
-                + "정하기: `/채널 검토자 @사람 09:00`" + NEWLINE
+                + "정하기: `/채널 검토자 @사람 매일 09:00`" + NEWLINE
+                + "주 1회: `/채널 검토자 @사람 매주 수요일 09:00`" + NEWLINE
                 + "여러 명도 됩니다. 해제: `/채널 검토자 없음`",
                 response_type="ephemeral",
             )
             return
         names = ", ".join(f"<@{r.reviewer_user}>" for r in rows)
         respond(
-            f"검토자: {names} (매일 {rows[0].send_at.strftime('%H:%M')})" + NEWLINE
-            + "바꾸기: `/채널 검토자 @사람 09:00`",
+            f"검토자: {names} ("
+            + reviewers.schedule_label(
+                rows[0].schedule_kind, rows[0].weekday, rows[0].send_at
+            )
+            + ")" + NEWLINE
+            + "바꾸기: `/채널 검토자 @사람 매일 09:00` 또는 `매주 수요일 09:00`",
             response_type="ephemeral",
         )
 
@@ -2184,11 +2193,15 @@ class WorkspaceBot:
 
         found = None
         send_at = ""
+        review_schedule = ""
         try:
             rows = reviewers.reviewers_for(self.workspace, channel_id)
             found = [r.reviewer_user for r in rows]
             if rows:
                 send_at = rows[0].send_at.strftime("%H:%M")
+                review_schedule = reviewers.schedule_label(
+                    rows[0].schedule_kind, rows[0].weekday, rows[0].send_at
+                )
         except reviewers.ReviewerError as e:
             log.warning("[%s] 검토자 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
 
@@ -2258,6 +2271,7 @@ class WorkspaceBot:
             archiver=probe.channel,
             reviewers=found,
             send_at=send_at,
+            review_schedule=review_schedule,
             last_digest=last_digest,
             reviewer_since=reviewer_since,
             review_canvas=review_canvas,
@@ -2409,11 +2423,15 @@ class WorkspaceBot:
         spec = parse(name)
         current: tuple[str, ...] = ()
         send_at = "08:00"
+        schedule_kind = "daily"
+        weekday = None
         try:
             rows = reviewers.reviewers_for(self.workspace, channel_id)
             current = tuple(r.reviewer_user for r in rows)
             if rows:
                 send_at = rows[0].send_at.strftime("%H:%M")
+                schedule_kind = rows[0].schedule_kind
+                weekday = rows[0].weekday
         except reviewers.ReviewerError as e:
             # 검토자를 못 읽었다고 이름 수정까지 막지 않는다. 다만 그 상태로
             # 저장하면 기존 검토자를 지울 수 있으므로 화면에서 말한다.
@@ -2427,6 +2445,8 @@ class WorkspaceBot:
                     current_name=name,
                     reviewers=current,
                     send_at=send_at,
+                    schedule_kind=schedule_kind,
+                    weekday=weekday,
                     managers=(
                         self.channel_owners.managers_of(self.workspace, channel_id)
                         if self._can_delegate_channel_manager(channel_id, user_id)
@@ -2475,11 +2495,18 @@ class WorkspaceBot:
                     channel_name=self._channel_name(client, channel_id),
                     reviewer_users=list(edit.reviewers),
                     send_at=reviewers.parse_send_at(edit.send_at),
+                    schedule_kind=edit.schedule_kind,
+                    weekday=edit.weekday,
                     set_by=user_id,
                 )
                 if rows:
                     who = " ".join(f"<@{r.reviewer_user}>" for r in rows)
-                    done.append(f"검토자 → {who} · 매일 {rows[0].send_at:%H:%M}")
+                    done.append(
+                        f"검토자 → {who} · "
+                        + reviewers.schedule_label(
+                            rows[0].schedule_kind, rows[0].weekday, rows[0].send_at
+                        )
+                    )
                 else:
                     done.append(
                         "검토자 → 전부 해제. **이 채널은 요약 후보를 보내거나 "
@@ -2580,6 +2607,8 @@ class WorkspaceBot:
                     channel_name="#" + actual_name,
                     reviewer_users=list(request.reviewers),
                     send_at=reviewers.parse_send_at(request.send_at),
+                    schedule_kind=request.schedule_kind,
+                    weekday=request.weekday,
                     set_by=user_id,
                 )
             except reviewers.ReviewerError as e:
@@ -2607,7 +2636,15 @@ class WorkspaceBot:
             )
         elif request.reviewers:
             who = " ".join(f"<@{u}>" for u in request.reviewers)
-            suffix += f"\n요약 검토자 {who} · 매일 {request.send_at} DM."
+            suffix += (
+                f"\n요약 검토자 {who} · "
+                + reviewers.schedule_label(
+                    request.schedule_kind,
+                    request.weekday,
+                    reviewers.parse_send_at(request.send_at),
+                )
+                + " DM."
+            )
         if notify:
             self._notify_user(
                 client,
@@ -2670,7 +2707,15 @@ class WorkspaceBot:
             )
             if base.reviewers:
                 who = " ".join(f"<@{u}>" for u in base.reviewers)
-                lines.append(f"요약 검토자 {who} · 매일 {base.send_at} DM.")
+                lines.append(
+                    f"요약 검토자 {who} · "
+                    + reviewers.schedule_label(
+                        base.schedule_kind,
+                        base.weekday,
+                        reviewers.parse_send_at(base.send_at),
+                    )
+                    + " DM."
+                )
             # 검토자 저장은 채널마다 따로 실패할 수 있다. 한 통으로 알릴 때는
             # 확인 경로만 준다 - 어느 채널이 빠졌는지는 상태가 답한다.
             lines.append("검토자가 제대로 물렸는지: 각 채널에서 `/채널 상태`")

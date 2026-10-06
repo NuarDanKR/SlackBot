@@ -22,12 +22,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import time
 
 log = logging.getLogger("tybot.reviewers")
 
 DEFAULT_SEND_AT = time(8, 0)
+DAILY = "daily"
+WEEKLY = "weekly"
+WEEKDAY_LABELS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
 
 
 class ReviewerError(Exception):
@@ -41,7 +45,39 @@ class Reviewer:
     channel_name: str
     reviewer_user: str
     send_at: time
+    schedule_kind: str
+    weekday: int | None
     enabled: bool
+
+
+def validate_schedule(schedule_kind: str, weekday: int | None) -> tuple[str, int | None]:
+    kind = (schedule_kind or DAILY).strip().lower()
+    if kind == DAILY:
+        return DAILY, None
+    if kind != WEEKLY:
+        raise ReviewerError(f"지원하지 않는 검토 주기입니다: {schedule_kind!r}")
+    if weekday is None or not 0 <= weekday <= 6:
+        raise ReviewerError("주 1회 검토는 요일을 골라야 합니다.")
+    return WEEKLY, weekday
+
+
+def schedule_label(schedule_kind: str, weekday: int | None, send_at: time) -> str:
+    kind, day = validate_schedule(schedule_kind, weekday)
+    if kind == DAILY:
+        return f"매일 {send_at:%H:%M}"
+    return f"매주 {WEEKDAY_LABELS[day]} {send_at:%H:%M}"
+
+
+def parse_schedule(raw: str) -> tuple[str, int | None]:
+    text = (raw or "").strip()
+    if "매주" not in text and "주 1회" not in text and "주1회" not in text:
+        return DAILY, None
+    match = re.search(
+        r"(?:매주|주\s*1회)\s*([월화수목금토일])(?:요일)?(?=\s|$)", text
+    )
+    if match:
+        return WEEKLY, "월화수목금토일".index(match.group(1))
+    raise ReviewerError("주 1회 검토는 요일을 함께 적어 주세요. 예: 매주 수요일 09:00")
 
 
 def parse_send_at(raw: str) -> time:
@@ -87,6 +123,8 @@ def _row(row: dict) -> Reviewer:
         channel_name=str(row.get("channel_name") or ""),
         reviewer_user=str(row["reviewer_user"]),
         send_at=row["send_at"],
+        schedule_kind=str(row.get("schedule_kind") or DAILY),
+        weekday=(int(row["weekday"]) if row.get("weekday") is not None else None),
         enabled=bool(row["enabled"]),
     )
 
@@ -98,6 +136,8 @@ def set_reviewers(
     channel_name: str,
     reviewer_users: list[str],
     send_at: time,
+    schedule_kind: str = DAILY,
+    weekday: int | None = None,
     set_by: str,
 ) -> list[Reviewer]:
     """이 채널의 검토자를 **주어진 목록으로 맞춘다.**
@@ -107,6 +147,7 @@ def set_reviewers(
     """
     if not channel_id:
         raise ReviewerError("채널 ID 가 없습니다.")
+    schedule_kind, weekday = validate_schedule(schedule_kind, weekday)
     users = [u.strip() for u in reviewer_users if u and u.strip()]
     if len(set(users)) != len(users):
         raise ReviewerError("같은 사람이 두 번 들어 있습니다.")
@@ -127,11 +168,14 @@ def set_reviewers(
                     """
                     INSERT INTO channel_reviewer
                            (workspace, channel_id, channel_name, reviewer_user,
-                            send_at, enabled, set_by)
-                    VALUES (%(ws)s, %(ch)s, %(name)s, %(user)s, %(at)s, true, %(by)s)
+                            send_at, schedule_kind, weekday, enabled, set_by)
+                    VALUES (%(ws)s, %(ch)s, %(name)s, %(user)s, %(at)s,
+                            %(kind)s, %(weekday)s, true, %(by)s)
                     ON CONFLICT (workspace, channel_id, reviewer_user) DO UPDATE
                        SET channel_name = excluded.channel_name,
                            send_at      = excluded.send_at,
+                           schedule_kind = excluded.schedule_kind,
+                           weekday      = excluded.weekday,
                            enabled      = true,
                            set_by       = excluded.set_by,
                            set_at       = now()
@@ -142,6 +186,8 @@ def set_reviewers(
                         "name": channel_name,
                         "user": user,
                         "at": send_at,
+                        "kind": schedule_kind,
+                        "weekday": weekday,
                         "by": set_by,
                     },
                 )
@@ -260,7 +306,8 @@ def all_enabled() -> list[dict]:
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT workspace, channel_id, channel_name, reviewer_user, send_at, enabled
+            SELECT workspace, channel_id, channel_name, reviewer_user, send_at,
+                   schedule_kind, weekday, enabled
               FROM channel_reviewer
              WHERE enabled
              ORDER BY workspace, channel_id, reviewer_user
@@ -273,6 +320,8 @@ def all_enabled() -> list[dict]:
                 "channel_name": str(r.get("channel_name") or ""),
                 "reviewer_user": str(r["reviewer_user"]),
                 "send_at": r["send_at"].strftime("%H:%M") if r.get("send_at") else "",
+                "schedule_kind": str(r.get("schedule_kind") or DAILY),
+                "weekday": int(r["weekday"]) if r.get("weekday") is not None else None,
             }
             for r in cur.fetchall()
         ]

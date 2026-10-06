@@ -902,7 +902,7 @@ def candidate_blocks(channel_name: str, rows: list[dict]) -> list[dict]:
         str(row.get("kind") or "") == "number_or_schedule" for row in rows
     )
     heading = (
-        f"*{channel_name} - 오늘 수집 내용 요약 검토 {len(rows)}건*\n"
+        f"*{channel_name} - 새 수집 내용 요약 검토 {len(rows)}건*\n"
         f"숫자·금액·비율·날짜 포함 {numeric_count}건 · 일반 핵심 내용 "
         f"{len(rows) - numeric_count}건\n"
         "특히 숫자는 후보와 근거 원문이 한 자리까지 같은지 확인해 주세요."
@@ -1085,12 +1085,12 @@ def canvas_markdown(
     ordered = ordered_rows(rows)
     numeric = sum(str(row.get("kind") or "") == "number_or_schedule" for row in ordered)
     parts = [
-        f"## {channel_label} · {review_date} 일일 요약 검토",
+        f"## {channel_label} · {review_date} 요약 검토",
         f"요약 항목 {len(ordered)}건 — 숫자·일정 포함 {numeric}건 · 일반 핵심 내용 {len(ordered) - numeric}건",
         "",
-        "## 오늘 수집 내용 요약 (검토 전)",
+        "## 새 수집 내용 요약 (검토 전)",
         "",
-        "> 오늘 수집된 사람의 채팅과 변환 완료 첨부에서 뽑은 핵심 내용입니다. 아직"
+        "> 이전 검토 이후 수집된 사람의 채팅과 변환 완료 첨부에서 뽑은 핵심 내용입니다. 아직"
         " 승인된 문서가 아니며, DM에서 승인한 항목만 파생 요약에 반영됩니다.",
         "",
     ]
@@ -1170,7 +1170,7 @@ def canvas_review_blocks(
     ordered = ordered_rows(rows)
     numeric = sum(str(row.get("kind") or "") == "number_or_schedule" for row in ordered)
     head = (
-        f"*{channel_label} · {review_date} 오늘 수집 내용 요약 {len(ordered)}건*\n"
+        f"*{channel_label} · {review_date} 새 수집 내용 요약 {len(ordered)}건*\n"
         f"숫자 포함 {numeric}건 · 일반 핵심 내용 {len(ordered) - numeric}건\n"
         "Canvas에서 요약과 출처를 읽고 항목별로 확인해 주세요."
     )
@@ -1901,14 +1901,17 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
     않으므로(B-59) 나중에 검토자가 지정되면 그대로 나간다.
     """
     del owners
-    from .daily_review import due
+    from .daily_review import due, schedule_parts
 
     now = now or datetime.now(KST)
     on = now.astimezone(KST).date()
     db = Store(conn)
     result = RunResult()
-    for workspace, channel_id, channel_name, send_at in channels:
-        if not due(send_at, now):
+    for channel in channels:
+        workspace, channel_id, channel_name, send_at, schedule_kind, weekday = (
+            schedule_parts(channel)
+        )
+        if not due(send_at, now, schedule_kind, weekday):
             continue
         outcome = ChannelOutcome(
             workspace=workspace, channel_id=channel_id, channel_name=channel_name,

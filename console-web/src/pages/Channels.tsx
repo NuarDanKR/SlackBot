@@ -34,6 +34,9 @@ interface ChannelRow {
   managers: string[]
   reviewers: string[]
   sendAt: string
+  scheduleKind: string
+  weekday: number | null
+  scheduleLabel: string
   documents: number
   lines: number
   attachmentLines: number
@@ -955,7 +958,7 @@ export function Channels({ onToast }: { onToast: (message: string) => void }) {
                       ) : (
                         <>
                           {row.reviewers.map((r) => personLabel(r, people)).join(', ')}
-                          {row.sendAt && <span className="dim"> · {row.sendAt}</span>}
+                          {row.scheduleLabel && <span className="dim"> · {row.scheduleLabel}</span>}
                         </>
                       )}
                     </td>

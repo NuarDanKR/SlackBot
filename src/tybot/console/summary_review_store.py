@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 # 한 화면에 실을 회차 수. 더 필요하면 기간으로 좁힌다.
 MAX_ROWS = 100
@@ -110,7 +110,9 @@ def schedule(
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT workspace, channel_id, min(send_at) AS send_at
+            SELECT workspace, channel_id, min(send_at) AS send_at,
+                   min(schedule_kind) AS schedule_kind,
+                   min(weekday) AS weekday
               FROM channel_reviewer
              WHERE enabled
               {where}
@@ -127,13 +129,29 @@ def _schedule_status(rows: list[dict], *, now: datetime | None = None) -> dict:
     if current.tzinfo is None:
         current = current.replace(tzinfo=KST)
     local = current.astimezone(KST)
-    current_minutes = local.hour * 60 + local.minute
-    send_times = [row.get("send_at") for row in rows if row.get("send_at") is not None]
-    due = sum(1 for value in send_times if value.hour * 60 + value.minute <= current_minutes)
-    future = [
-        value for value in send_times if value.hour * 60 + value.minute > current_minutes
-    ]
-    next_send = min(future).strftime("%H:%M") if future else ""
+    from ..daily_review import due as is_due
+    from ..reviewers import WEEKDAY_LABELS
+
+    waiting: list[tuple[int, time, str]] = []
+    due = 0
+    for row in rows:
+        send_at = row.get("send_at")
+        if send_at is None:
+            continue
+        kind = str(row.get("schedule_kind") or "daily")
+        weekday = row.get("weekday")
+        weekday = int(weekday) if weekday is not None else None
+        if is_due(send_at, local, kind, weekday):
+            due += 1
+            continue
+        if kind == "weekly" and weekday is not None:
+            days = (weekday - local.weekday()) % 7
+            if days == 0 and local.time() >= send_at:
+                days = 7
+            waiting.append((days, send_at, f"{WEEKDAY_LABELS[weekday]} {send_at:%H:%M}"))
+        else:
+            waiting.append((0, send_at, send_at.strftime("%H:%M")))
+    next_send = min(waiting, default=(0, time.min, ""))[2]
     return {
         "channels": len(rows),
         "due": due,

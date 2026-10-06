@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS channel_reviewer (
     reviewer_user text NOT NULL,
     -- 보낼 시각(KST). 채널 개설자가 정한다.
     send_at       time NOT NULL DEFAULT '08:00',
+    -- 기존 행은 매일로 유지한다. weekly 는 Python weekday(월=0 .. 일=6)를 쓴다.
+    schedule_kind text NOT NULL DEFAULT 'daily',
+    weekday       smallint,
     -- 사용 중지. 삭제 대신 끈다 — 지우면 언제부터 검토가 멈췄는지 알 수 없다.
     enabled       boolean NOT NULL DEFAULT true,
     set_by        text NOT NULL,
@@ -27,12 +30,30 @@ CREATE TABLE IF NOT EXISTS channel_reviewer (
     PRIMARY KEY (workspace, channel_id, reviewer_user)
 );
 
+ALTER TABLE channel_reviewer
+    ADD COLUMN IF NOT EXISTS schedule_kind text NOT NULL DEFAULT 'daily',
+    ADD COLUMN IF NOT EXISTS weekday smallint;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'channel_reviewer_schedule_valid'
+    ) THEN
+        ALTER TABLE channel_reviewer ADD CONSTRAINT channel_reviewer_schedule_valid
+        CHECK (
+            (schedule_kind = 'daily' AND weekday IS NULL)
+            OR (schedule_kind = 'weekly' AND weekday BETWEEN 0 AND 6)
+        );
+    END IF;
+END
+$$;
+
 COMMENT ON TABLE channel_reviewer IS
     '채널별 요약 검토자. 검토자가 없으면 요약을 반영하지 않는다(자동 반영으로 물러서지 않는다).';
 
 -- 발송 시각 훑기. 1분마다 도는 타이머가 "지금 보낼 것" 을 찾는 경로다.
-CREATE INDEX IF NOT EXISTS channel_reviewer_due
-    ON channel_reviewer (send_at) WHERE enabled;
+CREATE INDEX IF NOT EXISTS channel_reviewer_schedule_due
+    ON channel_reviewer (schedule_kind, weekday, send_at) WHERE enabled;
 
 -- 검토자별 담당 채널. 사람이 그만두면 무엇이 비는지 바로 나온다.
 CREATE INDEX IF NOT EXISTS channel_reviewer_person

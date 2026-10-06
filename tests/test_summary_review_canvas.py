@@ -117,7 +117,7 @@ def test_canvas_marks_the_projection_as_not_yet_approved():
         channel_label="#전산팀장보고", review_date=date(2026, 9, 16),
         rows=[_row()], approved=["기존 문장"],
     )
-    assert "오늘 수집 내용 요약 (검토 전)" in body
+    assert "새 수집 내용 요약 (검토 전)" in body
     assert "아직 승인된" in body
 
 

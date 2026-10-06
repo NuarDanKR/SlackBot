@@ -30,24 +30,39 @@ def test_operational_entrypoint_only_sends_summary_reviews():
 
 def test_force_target_selects_the_named_channels_and_bypasses_only_their_schedule():
     channels = [
-        ("tyit", "C1", "전산팀장보고", time(16, 0)),
-        ("tyit", "C2", "공지", time(17, 0)),
-        ("mgmt", "C1", "경영보고", time(15, 0)),
+        ("tyit", "C1", "전산팀장보고", time(16, 0), "daily", None),
+        ("tyit", "C2", "공지", time(17, 0), "weekly", 2),
+        ("mgmt", "C1", "경영보고", time(15, 0), "daily", None),
     ]
 
     assert dr._force_target(channels, [("tyit", "C1")]) == [
-        ("tyit", "C1", "전산팀장보고", time.min)
+        ("tyit", "C1", "전산팀장보고", time.min, "daily", None)
     ]
     assert dr._force_target(channels, [("tyit", "C2"), ("mgmt", "C1")]) == [
-        ("tyit", "C2", "공지", time.min),
-        ("mgmt", "C1", "경영보고", time.min),
+        ("tyit", "C2", "공지", time.min, "daily", None),
+        ("mgmt", "C1", "경영보고", time.min, "daily", None),
     ]
 
 
 def test_force_target_refuses_to_widen_when_channel_is_unknown():
-    channels = [("tyit", "C1", "전산팀장보고", time(16, 0))]
+    channels = [("tyit", "C1", "전산팀장보고", time(16, 0), "daily", None)]
 
     assert dr._force_target(channels, [("tyit", "C9")]) == []
+
+
+def test_daily_schedule_is_due_after_its_time():
+    now = datetime(2026, 10, 7, 9, 30, tzinfo=KST)
+
+    assert dr.due(time(9, 0), now, "daily", None)
+    assert not dr.due(time(10, 0), now, "daily", None)
+
+
+def test_weekly_schedule_is_due_only_on_its_weekday_after_its_time():
+    wednesday = datetime(2026, 10, 7, 9, 30, tzinfo=KST)
+
+    assert dr.due(time(9, 0), wednesday, "weekly", 2)
+    assert not dr.due(time(10, 0), wednesday, "weekly", 2)
+    assert not dr.due(time(9, 0), wednesday, "weekly", 3)
 
 
 def test_a_run_result_says_which_channel_got_nothing_and_why(tmp_path):
@@ -642,8 +657,14 @@ def test_generate_only_lists_every_channel_in_the_archive():
 
     got = dr._archive_channels(SimpleNamespace(docs=lambda: docs))
 
-    assert [(ws, ch) for ws, ch, _n, _t in got] == [("tyit", "C1"), ("tyit", "C2")]
-    assert all(send_at == time.min for _ws, _ch, _n, send_at in got)
+    assert [(ws, ch) for ws, ch, _n, _t, _kind, _day in got] == [
+        ("tyit", "C1"),
+        ("tyit", "C2"),
+    ]
+    assert all(
+        send_at == time.min
+        for _ws, _ch, _n, send_at, _kind, _day in got
+    )
 
 
 def test_generate_only_and_deliver_only_cannot_be_asked_for_at_once(capsys):

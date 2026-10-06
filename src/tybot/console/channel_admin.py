@@ -43,6 +43,9 @@ class ChannelRow:
     managers: list[str] = field(default_factory=list)
     reviewers: list[str] = field(default_factory=list)
     send_at: str = ""
+    schedule_kind: str = "daily"
+    weekday: int | None = None
+    schedule_label: str = ""
     documents: int = 0
     lines: int = 0
     attachment_lines: int = 0
@@ -85,6 +88,9 @@ class ChannelRow:
             "managers": list(self.managers),
             "reviewers": list(self.reviewers),
             "sendAt": self.send_at,
+            "scheduleKind": self.schedule_kind,
+            "weekday": self.weekday,
+            "scheduleLabel": self.schedule_label,
             "documents": self.documents,
             "lines": self.lines,
             "attachmentLines": self.attachment_lines,
@@ -165,6 +171,14 @@ def build_rows(
         row.reviewers = [str(r.get("reviewer_user") or "") for r in people if r.get("reviewer_user")]
         if people:
             row.send_at = str(people[0].get("send_at") or "")
+            row.schedule_kind = str(people[0].get("schedule_kind") or "daily")
+            raw_weekday = people[0].get("weekday")
+            row.weekday = int(raw_weekday) if raw_weekday is not None else None
+            from ..reviewers import parse_send_at, schedule_label
+
+            row.schedule_label = schedule_label(
+                row.schedule_kind, row.weekday, parse_send_at(row.send_at)
+            )
 
         count, last = answers.get(key, (0, ""))
         row.answers = count

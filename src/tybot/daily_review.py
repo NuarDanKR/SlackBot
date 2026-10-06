@@ -245,13 +245,32 @@ def recipients(
     return list(dict.fromkeys([*found, *(user for user in responsible if user)]))
 
 
-def due(send_at: time, now: datetime) -> bool:
+def due(
+    send_at: time,
+    now: datetime,
+    schedule_kind: str = "daily",
+    weekday: int | None = None,
+) -> bool:
     """지금 보낼 시각인가. **그날 안이면 늦어도 보낸다.**
 
     지난 회의 알림과 다르다 — 어제 올라온 스캔본은 오늘 오후에 확인해도 쓸모가 있다.
     다만 날이 바뀌면 그날 몫은 버린다(다음 날 몫에 밀린 건수로 잡힌다).
     """
-    return now.astimezone(KST).time() >= send_at
+    local = now.astimezone(KST)
+    if schedule_kind == "weekly" and local.weekday() != weekday:
+        return False
+    if schedule_kind != "daily" and schedule_kind != "weekly":
+        return False
+    return local.time() >= send_at
+
+
+def schedule_parts(channel) -> tuple[str, str, str, time, str, int | None]:
+    """Read current six-field rows and legacy four-field test/caller rows."""
+    if len(channel) == 4:
+        workspace, channel_id, channel_name, send_at = channel
+        return workspace, channel_id, channel_name, send_at, "daily", None
+    workspace, channel_id, channel_name, send_at, schedule_kind, weekday = channel
+    return workspace, channel_id, channel_name, send_at, schedule_kind, weekday
 
 
 # --- 하루에 한 번 -------------------------------------------------------------
@@ -408,8 +427,11 @@ def run(
     owners = owners or {}
     result = RunResult()
 
-    for workspace, channel_id, channel_name, send_at in channels:
-        if not due(send_at, now):
+    for channel in channels:
+        workspace, channel_id, channel_name, send_at, schedule_kind, weekday = (
+            schedule_parts(channel)
+        )
+        if not due(send_at, now, schedule_kind, weekday):
             continue
         people = recipients(
             workspace, channel_id, owner=owners.get((workspace, channel_id), "")
@@ -493,27 +515,36 @@ def run(
 
 
 # --- 실행 --------------------------------------------------------------------
-def _channels(conn) -> list[tuple[str, str, str, time]]:
+ReviewChannel = tuple[str, str, str, time, str, int | None]
+
+
+def _channels(conn) -> list[ReviewChannel]:
     """검토자가 지정된 채널과 그 발송 시각. 채널마다 한 줄."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT workspace, channel_id,
                    max(channel_name) AS channel_name,
-                   min(send_at)      AS send_at
+                   min(send_at)      AS send_at,
+                   min(schedule_kind) AS schedule_kind,
+                   min(weekday)       AS weekday
               FROM channel_reviewer
              WHERE enabled
              GROUP BY workspace, channel_id
             """
         )
         return [
-            (str(r["workspace"]), str(r["channel_id"]),
-             str(r["channel_name"] or ""), r["send_at"])
+            (
+                str(r["workspace"]), str(r["channel_id"]),
+                str(r["channel_name"] or ""), r["send_at"],
+                str(r.get("schedule_kind") or "daily"),
+                int(r["weekday"]) if r.get("weekday") is not None else None,
+            )
             for r in cur.fetchall()
         ]
 
 
-def _archive_channels(archive) -> list[tuple[str, str, str, time]]:
+def _archive_channels(archive) -> list[ReviewChannel]:
     """아카이브에 원문이 있는 **모든** 채널. 검토자 유무를 묻지 않는다(B-62).
 
     평소 채널 목록은 `channel_reviewer` 가 안다 — 보낼 사람이 있는 채널만 도는 것이
@@ -530,15 +561,15 @@ def _archive_channels(archive) -> list[tuple[str, str, str, time]]:
             continue
         seen.setdefault((doc.workspace, channel_id), doc.channel or "")
     return [
-        (workspace, channel_id, name, time.min)
+        (workspace, channel_id, name, time.min, "daily", None)
         for (workspace, channel_id), name in sorted(seen.items())
     ]
 
 
 def _force_target(
-    channels: list[tuple[str, str, str, time]],
+    channels: list[ReviewChannel],
     targets: list[tuple[str, str]],
-) -> list[tuple[str, str, str, time]]:
+) -> list[ReviewChannel]:
     """즉시 실행할 채널만 남기고 예약 시각을 자정으로 바꾼다.
 
     대상은 여러 개일 수 있다. 콘솔에서 채널을 여러 개 고르면 한 번의 실행으로
@@ -546,8 +577,8 @@ def _force_target(
     """
     wanted = set(targets)
     return [
-        (ws, channel, name, time.min)
-        for ws, channel, name, _send_at in channels
+        (ws, channel, name, time.min, "daily", None)
+        for ws, channel, name, _send_at, _kind, _weekday in channels
         if (ws, channel) in wanted
     ]
 
@@ -619,7 +650,7 @@ def _report_estimate(archive, channels, *, since: str, result_path: str | None) 
     from . import summary_review
 
     rows = []
-    for workspace, channel_id, channel_name, _send_at in channels:
+    for workspace, channel_id, channel_name, _send_at, _kind, _weekday in channels:
         found = summary_review.backfill_estimate(
             archive, workspace=workspace, channel_id=channel_id, since=since,
         )
@@ -666,7 +697,7 @@ def _run_backfill(summary_review, conn, archive, channels, *, complete, now,
     실행하면 멈춘 지점부터 이어 간다.
     """
     store = summary_review.Store(conn)
-    for workspace, channel_id, channel_name, _send_at in channels:
+    for workspace, channel_id, channel_name, _send_at, _kind, _weekday in channels:
         try:
             done = summary_review.backfill_channel(
                 store, archive, workspace=workspace, channel_id=channel_id,
@@ -835,7 +866,10 @@ def main(argv: list[str] | None = None) -> int:
         unconfigured: list[tuple[str, str]] = []
         if targets:
             channels = _force_target(channels, targets)
-            found = {(ws, channel) for ws, channel, _name, _at in channels}
+            found = {
+                (ws, channel)
+                for ws, channel, _name, _at, _kind, _weekday in channels
+            }
             unconfigured = [item for item in targets if item not in found]
             for workspace, channel_id in unconfigured:
                 logger.error(

@@ -176,7 +176,7 @@ function EmptyState({ schedule }: { schedule: Schedule }) {
     const next = schedule.nextSendAt ? ` 다음 예약 시각은 ${schedule.nextSendAt} KST입니다.` : ''
     return (
       <Empty
-        title="아직 설정 시각 전입니다."
+        title="아직 예약 시점 전입니다."
         note={`검토 채널 ${schedule.channels}개가 대기 중입니다.${next} 실행기는 5분 주기로 확인합니다.`}
       />
     )

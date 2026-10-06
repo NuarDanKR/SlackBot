@@ -42,7 +42,14 @@ _ORG_BLOCK_IDS = {
 # 갈리면 한쪽 제출이 조용히 「검토자 없음」 으로 읽힌다.
 REVIEWER_BLOCK = "reviewers"
 SEND_AT_BLOCK = "send_at"
+SCHEDULE_KIND_BLOCK = "schedule_kind"
+SCHEDULE_WEEKDAY_BLOCK = "schedule_weekday"
 MANAGER_BLOCK = "channel_managers"
+
+_WEEKDAYS = (
+    ("월요일", "0"), ("화요일", "1"), ("수요일", "2"), ("목요일", "3"),
+    ("금요일", "4"), ("토요일", "5"), ("일요일", "6"),
+)
 
 
 class ChannelNameError(ValueError):
@@ -65,6 +72,8 @@ class ChannelRequest:
     # 안 정한 채널이 쌓이면 요약 후보가 아무에게도 가지 않고 반영되지 않는다.
     reviewers: tuple[str, ...] = ()
     send_at: str = "08:00"
+    schedule_kind: str = "daily"
+    weekday: int | None = None
 
     @property
     def name(self) -> str:
@@ -149,6 +158,61 @@ def _selected_by_action(state: dict, action_id: str) -> tuple[str, dict]:
     return "", {}
 
 
+def _review_schedule(state: dict) -> tuple[str, int | None]:
+    kind = (
+        (_selected(state, SCHEDULE_KIND_BLOCK, "schedule_kind").get("selected_option") or {})
+        .get("value", "daily")
+    )
+    if kind == "daily":
+        return "daily", None
+    raw = (
+        (_selected(state, SCHEDULE_WEEKDAY_BLOCK, "schedule_weekday").get("selected_option") or {})
+        .get("value", "")
+    )
+    if kind != "weekly" or not raw.isdigit() or not 0 <= int(raw) <= 6:
+        raise ChannelNameError("주 1회 검토는 요일을 골라 주세요.", SCHEDULE_WEEKDAY_BLOCK)
+    return "weekly", int(raw)
+
+
+def _schedule_blocks(schedule_kind: str = "daily", weekday: int | None = None) -> list[dict]:
+    kind = "weekly" if schedule_kind == "weekly" else "daily"
+    day = weekday if weekday is not None and 0 <= weekday <= 6 else 0
+    kind_options = [
+        {"text": {"type": "plain_text", "text": "매일"}, "value": "daily"},
+        {"text": {"type": "plain_text", "text": "주 1회"}, "value": "weekly"},
+    ]
+    day_options = [
+        {"text": {"type": "plain_text", "text": label}, "value": value}
+        for label, value in _WEEKDAYS
+    ]
+    return [
+        {
+            "type": "input",
+            "block_id": SCHEDULE_KIND_BLOCK,
+            "label": {"type": "plain_text", "text": "요약 검토 주기"},
+            "element": {
+                "type": "static_select",
+                "action_id": "schedule_kind",
+                "options": kind_options,
+                "initial_option": next(o for o in kind_options if o["value"] == kind),
+            },
+        },
+        {
+            "type": "input",
+            "block_id": SCHEDULE_WEEKDAY_BLOCK,
+            "optional": True,
+            "label": {"type": "plain_text", "text": "주 1회 검토 요일"},
+            "element": {
+                "type": "static_select",
+                "action_id": "schedule_weekday",
+                "options": day_options,
+                "initial_option": day_options[day],
+            },
+            "hint": {"type": "plain_text", "text": "주 1회를 선택했을 때만 적용됩니다."},
+        },
+    ]
+
+
 def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRequest:
     """Slack view_submission을 채널 요청으로 바꾼다.
 
@@ -172,6 +236,8 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
     # 만들면 다른 화면의 제출에서 이름 조립이 UnboundLocalError 로 터진다.
     reviewers: tuple[str, ...] = ()
     send_at = "08:00"
+    schedule_kind = "daily"
+    weekday = None
     if include_channel_options:
         visibility = (
             _selected(state, "visibility", "visibility").get("selected_option") or {}
@@ -191,8 +257,10 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
         send_at = (
             _selected(state, SEND_AT_BLOCK, "send_at").get("selected_time") or "08:00"
         )
+        schedule_kind, weekday = _review_schedule(state)
     request = ChannelRequest(
-        prefix, org_name, org_code, task, visibility, members, reviewers, send_at
+        prefix, org_name, org_code, task, visibility, members, reviewers, send_at,
+        schedule_kind, weekday,
     )
     _ = request.name
     return request
@@ -211,7 +279,7 @@ def requests_from_view(view: dict) -> list[ChannelRequest]:
     out = [
         ChannelRequest(base.prefix, base.org_name, base.org_code, task,
                        base.visibility, base.members,
-                       base.reviewers, base.send_at)
+                       base.reviewers, base.send_at, base.schedule_kind, base.weekday)
         for task in tasks
     ]
     # 이름까지 조립해 봐야 규칙 위반이 여기서 드러난다. 만들다가 중간에 실패하면
@@ -417,6 +485,7 @@ def create_modal(
                             "확인한 것만 반영됩니다.",
                 },
             },
+            *_schedule_blocks(),
             {
                 "type": "input",
                 "block_id": SEND_AT_BLOCK,
@@ -469,6 +538,8 @@ class ChannelEdit:
     name: str = ""
     reviewers: tuple[str, ...] = ()
     send_at: str = ""
+    schedule_kind: str = "daily"
+    weekday: int | None = None
     # 검토자 칸을 비워서 제출했는가. 「그대로 두기」 와 「전부 해제」 를 가른다 —
     # 이 둘을 섞으면 실수로 검토가 멈추고 아무 표시도 안 난다.
     clear_reviewers: bool = False
@@ -489,6 +560,8 @@ def edit_modal(
     current_name: str = "",
     reviewers: tuple[str, ...] = (),
     send_at: str = "08:00",
+    schedule_kind: str = "daily",
+    weekday: int | None = None,
     managers: tuple[str, ...] | None = None,
     defaults: dict | None = None,
 ) -> dict:
@@ -571,6 +644,7 @@ def edit_modal(
                             "관리 콘솔에서 확인합니다. 비우고 저장하면 전부 해제됩니다.",
                 },
             },
+            *_schedule_blocks(schedule_kind, weekday),
             {
                 "type": "input",
                 "block_id": SEND_AT_BLOCK,
@@ -626,6 +700,7 @@ def edit_from_view(view: dict) -> ChannelEdit:
     send_at = (
         _selected(state, SEND_AT_BLOCK, "send_at").get("selected_time") or ""
     )
+    schedule_kind, weekday = _review_schedule(state)
     manager_action = _selected(state, MANAGER_BLOCK, "channel_managers")
     picked_managers = tuple(manager_action.get("selected_users") or ())
     had_manager_block = MANAGER_BLOCK in state
@@ -634,6 +709,8 @@ def edit_from_view(view: dict) -> ChannelEdit:
         name=name,
         reviewers=picked,
         send_at=send_at,
+        schedule_kind=schedule_kind,
+        weekday=weekday,
         clear_reviewers=had_block and not picked,
         managers=picked_managers,
         clear_managers=had_manager_block and not picked_managers,
