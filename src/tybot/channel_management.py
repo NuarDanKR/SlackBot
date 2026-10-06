@@ -185,10 +185,11 @@ def _schedule_blocks(schedule_kind: str = "daily", weekday: int | None = None) -
         {"text": {"type": "plain_text", "text": label}, "value": value}
         for label, value in _WEEKDAYS
     ]
-    return [
+    blocks = [
         {
             "type": "input",
             "block_id": SCHEDULE_KIND_BLOCK,
+            "dispatch_action": True,
             "label": {"type": "plain_text", "text": "요약 검토 주기"},
             "element": {
                 "type": "static_select",
@@ -196,11 +197,12 @@ def _schedule_blocks(schedule_kind: str = "daily", weekday: int | None = None) -
                 "options": kind_options,
                 "initial_option": next(o for o in kind_options if o["value"] == kind),
             },
-        },
-        {
+        }
+    ]
+    if kind == "weekly":
+        blocks.append({
             "type": "input",
             "block_id": SCHEDULE_WEEKDAY_BLOCK,
-            "optional": True,
             "label": {"type": "plain_text", "text": "주 1회 검토 요일"},
             "element": {
                 "type": "static_select",
@@ -208,9 +210,8 @@ def _schedule_blocks(schedule_kind: str = "daily", weekday: int | None = None) -
                 "options": day_options,
                 "initial_option": day_options[day],
             },
-            "hint": {"type": "plain_text", "text": "주 1회를 선택했을 때만 적용됩니다."},
-        },
-    ]
+        })
+    return blocks
 
 
 def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRequest:
@@ -418,6 +419,9 @@ def create_modal(
     defaults: dict | None = None,
     task: str = "",
     default_reviewer: str = "",
+    reviewers: tuple[str, ...] | None = None,
+    schedule_kind: str = "daily",
+    weekday: int | None = None,
 ) -> dict:
     """전역 바로가기와 `/채널 생성`이 공유하는 생성 모달.
 
@@ -425,6 +429,11 @@ def create_modal(
     업무명(`task`)을 인자로 받아 되살린다 — 다시 그렸다고 입력이 사라지면 안 된다.
     """
     blocks = _name_inputs(prefix=prefix, defaults=defaults, multi_task=True)
+    initial_reviewers = (
+        list(reviewers)
+        if reviewers is not None
+        else ([default_reviewer] if default_reviewer else [])
+    )
     if task:
         blocks[-1]["element"]["initial_value"] = task
     blocks.extend(
@@ -473,19 +482,15 @@ def create_modal(
                     "type": "multi_users_select",
                     "action_id": "reviewers",
                     "placeholder": {"type": "plain_text", "text": "검토자를 고르세요"},
-                    **(
-                        {"initial_users": [default_reviewer]}
-                        if default_reviewer
-                        else {}
-                    ),
+                    **({"initial_users": initial_reviewers} if initial_reviewers else {}),
                 },
                 "hint": {
                     "type": "plain_text",
-                    "text": "봇이 만든 요약 후보를 매일 이 사람에게 DM 으로 보냅니다. "
+                    "text": "봇이 만든 요약 후보를 선택한 주기에 이 사람에게 DM 으로 보냅니다. "
                             "확인한 것만 반영됩니다.",
                 },
             },
-            *_schedule_blocks(),
+            *_schedule_blocks(schedule_kind, weekday),
             {
                 "type": "input",
                 "block_id": SEND_AT_BLOCK,

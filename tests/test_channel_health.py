@@ -197,6 +197,60 @@ def test_weekly_schedule_is_prefilled():
     assert blocks["schedule_weekday"]["element"]["initial_option"]["value"] == "4"
 
 
+def test_daily_schedule_does_not_show_a_misleading_weekday_field():
+    modal = edit_modal("{}", spec=parse(GOOD), schedule_kind="daily")
+
+    block_ids = {block.get("block_id") for block in modal["blocks"]}
+    assert "schedule_kind" in block_ids
+    assert "schedule_weekday" not in block_ids
+
+
+def test_weekly_schedule_reveals_the_required_weekday_field():
+    modal = edit_modal("{}", spec=parse(GOOD), schedule_kind="weekly", weekday=1)
+
+    weekday = next(
+        block for block in modal["blocks"] if block.get("block_id") == "schedule_weekday"
+    )
+    assert not weekday.get("optional", False)
+
+
+def test_schedule_choice_updates_the_open_modal_and_reveals_only_weekly_fields():
+    from types import SimpleNamespace
+
+    from tybot.slack.pilot import WorkspaceBot
+
+    bot = WorkspaceBot.__new__(WorkspaceBot)
+    bot.workspace = "tyit"
+    bot._org_defaults = lambda *_args, **_kwargs: {}
+    updates = []
+    client = SimpleNamespace(views_update=lambda **kwargs: updates.append(kwargs))
+    body = {
+        "user": {"id": "U1"},
+        "actions": [{"selected_option": {"value": "weekly"}}],
+        "view": {
+            "id": "V1",
+            "hash": "H1",
+            "callback_id": "tybot_create_channel",
+            "private_metadata": "{}",
+            "state": {
+                "values": {
+                    "reviewers": {"reviewers": {"selected_users": ["U1"]}},
+                }
+            },
+        },
+    }
+
+    bot._update_review_schedule_modal(client, body)
+
+    blocks = {block.get("block_id") for block in updates[-1]["view"]["blocks"]}
+    assert "schedule_weekday" in blocks
+
+    body["actions"] = [{"selected_option": {"value": "daily"}}]
+    bot._update_review_schedule_modal(client, body)
+    blocks = {block.get("block_id") for block in updates[-1]["view"]["blocks"]}
+    assert "schedule_weekday" not in blocks
+
+
 def test_channel_managers_are_only_shown_to_people_who_can_delegate():
     hidden = edit_modal("{}", spec=parse(GOOD))
     shown = edit_modal("{}", spec=parse(GOOD), managers=("U2", "U3"))

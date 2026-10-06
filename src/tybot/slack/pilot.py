@@ -1026,6 +1026,15 @@ class WorkspaceBot:
             except Exception as e:
                 log.warning("[%s] 구분 변경 반영 실패: %s", self.workspace, e)
 
+        @self.app.action("schedule_kind")
+        def on_review_schedule_change(ack, body, client):
+            """매일에는 시간만, 주 1회에는 요일과 시간을 차례로 보여 준다."""
+            ack()
+            try:
+                self._update_review_schedule_modal(client, body)
+            except Exception as e:
+                log.warning("[%s] 검토 주기 화면 갱신 실패: %s", self.workspace, e)
+
         @self.app.view("tybot_create_channel")
         def on_create_submission(ack, body, client, view):
             user_id = (body.get("user") or {}).get("id", "")
@@ -1822,6 +1831,80 @@ class WorkspaceBot:
             )
         except Exception as e:
             log.warning("[%s] 채널 생성 모달 열기 실패: %s", self.workspace, e)
+
+    def _update_review_schedule_modal(self, client, body: dict) -> None:
+        """주기를 고른 뒤에만 주간 요일을 보여 준다.
+
+        Slack 모달은 입력값에 따라 다른 블록을 스스로 숨기지 못한다. 같은 block/action
+        ID로 화면을 갱신하면 기존 입력은 보존되므로, 주기와 요일만 단계적으로 바꾼다.
+        """
+        view = body.get("view") or {}
+        actions = body.get("actions") or []
+        selected = (actions[0].get("selected_option") or {}) if actions else {}
+        schedule_kind = str(selected.get("value") or "")
+        if schedule_kind not in {"daily", "weekly"}:
+            log.warning("[%s] 알 수 없는 검토 주기 선택: %r", self.workspace, schedule_kind)
+            return
+
+        state = (view.get("state") or {}).get("values") or {}
+
+        def users(block_id: str, action_id: str) -> tuple[str, ...]:
+            return tuple(
+                (state.get(block_id, {}).get(action_id, {}) or {}).get("selected_users")
+                or ()
+            )
+
+        weekday_action = state.get("schedule_weekday", {}).get(
+            "schedule_weekday", {}
+        )
+        weekday_option = weekday_action.get("selected_option") or {}
+        weekday_raw = str(weekday_option.get("value") or "")
+        weekday = int(weekday_raw) if weekday_raw.isdigit() else None
+        callback_id = str(view.get("callback_id") or "")
+        metadata = view.get("private_metadata") or "{}"
+        user_id = str((body.get("user") or {}).get("id") or "")
+
+        if callback_id == "tybot_create_channel":
+            next_view = create_modal(
+                metadata,
+                prefix=selected_prefix(view),
+                defaults=self._org_defaults(user_id, client=client),
+                task=typed_task(view),
+                reviewers=users("reviewers", "reviewers"),
+                schedule_kind=schedule_kind,
+                weekday=weekday,
+            )
+        elif callback_id == EDIT_CALLBACK:
+            channel_id = str(self._modal_metadata(view).get("channel_id") or "")
+            current_name = self._channel_name(client, channel_id)
+            manager_block = state.get("channel_managers")
+            send_at = str(
+                state.get("send_at", {}).get("send_at", {}).get("selected_time")
+                or "08:00"
+            )
+            next_view = edit_modal(
+                metadata,
+                spec=parse(current_name),
+                current_name=current_name,
+                reviewers=users("reviewers", "reviewers"),
+                send_at=send_at,
+                schedule_kind=schedule_kind,
+                weekday=weekday,
+                managers=(
+                    users("channel_managers", "channel_managers")
+                    if manager_block is not None
+                    else None
+                ),
+            )
+        else:
+            log.warning("[%s] 검토 주기 변경 대상 모달을 알 수 없다: %r", self.workspace, callback_id)
+            return
+
+        client.views_update(
+            view_id=view.get("id"),
+            hash=view.get("hash"),
+            view=next_view,
+        )
 
     # --- 투표 -------------------------------------------------------------
     def _ensure_poll_channel(self, client, channel_id: str) -> str:
