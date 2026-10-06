@@ -492,7 +492,13 @@ class ToolBox:
         rows: list[str] = []
         used = 0
         for doc in self.store.visible_docs(self.ctx):
-            matched = [line for line in doc.raw_lines if wanted in (line.text or "")]
+            # 첨부 정본은 파일명을 speaker에, 변환 본문을 text에 둔다. 본문에서만
+            # 이름을 찾으면 파일은 찾았어도 표·숫자는 읽지 못한 채 첨부 참조 줄만
+            # 반환한다.
+            matched = [
+                line for line in doc.raw_lines
+                if wanted in (line.text or "") or wanted in (line.speaker or "")
+            ]
             if matched:
                 section = f"# {doc.channel}\n" + "\n".join(
                     line.text for line in matched

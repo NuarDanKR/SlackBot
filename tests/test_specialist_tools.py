@@ -123,6 +123,29 @@ def test_read_document_cannot_reach_a_hidden_channel():
     assert "매각 검토" not in got
 
 
+def test_read_document_finds_an_attachment_name_stored_as_the_speaker():
+    attachment = FakeDoc(
+        channel="#팀-기획_abb110-실적회의관리",
+        channel_id="C2",
+        raw_lines=[
+            FakeLine(
+                "2026-10-06 11:18",
+                "00. 22~26년 매출손익 추이_부사장님 공유.pdf",
+                "26년 예상 매출액 13,810억원, 세전이익 △815억원",
+            ),
+        ],
+        workspace="tyit",
+    )
+    box = _box(FakeStore([attachment]))
+
+    got = box.run(
+        "read_document", {"name": "00. 22~26년 매출손익 추이_부사장님 공유.pdf"}
+    )
+
+    assert "매출액 13,810억원" in got
+    assert "세전이익 △815억원" in got
+
+
 def test_the_context_is_not_an_argument():
     """`ctx` 를 인자로 받으면 그 자리가 곧 권한 우회다."""
     import inspect
