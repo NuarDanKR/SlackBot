@@ -211,12 +211,13 @@ export function startScheduler(client) {
       skipped.push(`${role}(${jobs.join('·')})`);
     }
   };
-  take(ROLES.DIGEST, 'daily', 'weekly');
+  take(ROLES.DIGEST_PUBLISH, 'daily', 'weekly');
   take(ROLES.HEALTH, 'health', 'healthPre');
   take(ROLES.INGEST, 'ingest', 'ingestPre');
   if (skipped.length) {
     console.log(`  TYBot 연동 모드 — 예약하지 않음: ${skipped.join(', ')}`);
-    console.log('  (요약·위생 점검 발송과 수집은 TYBot 이 맡습니다)');
+    console.log('  수집: Archiving Bot · 요약 확인: TYBot DM/Canvas 승인');
+    console.log('  (요약 규칙은 그대로 Hermes 것입니다 — 직접 게시만 하지 않습니다)');
   }
   const to = config.digest.deliverTo === 'channel' ? `채널 ${config.digest.channelId}` : `${config.owner.name} 에게 DM`;
   // 위생 점검은 내부 운영 상태라 deliverTo 와 무관하게 항상 본인 DM 이다.

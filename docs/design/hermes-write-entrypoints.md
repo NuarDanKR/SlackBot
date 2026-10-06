@@ -185,43 +185,68 @@ PF 는 자기 배포에서 Hermes 를 직접 돌린다. 질문·DM·요약이 �
 
 ## 6. 실행 역할과 검토 대조 (2026-10-06 구현)
 
-### 6.1 발송은 한 쪽만 맡는다
+### 6.1 빠지는 것은 「요약」 이 아니라 「직접 게시」 다
 
-모드가 「누구 밑에서 도는가」 라면 역할은 「무엇을 내가 맡는가」 다
-([`src/mode.js`](../../subbots/hermes/src/mode.js) 의 `ROLES`).
+> **2026-10-06 정정.** 처음에 이 절을 「요약 발송은 TYBot 이 맡는다」 로 적었다.
+> 틀렸다 — 그렇게 읽으면 **요약의 주인이 TYBot** 이 되고, 목표 구조와 반대로 굳는다.
 
-| 역할 | PF 직접 실행 | TYBot 연동 |
-|---|---|---|
-| `ingest` 수집·소급·첨부 | Hermes | — (TYBot) |
-| `digest` 일일·주간 요약 **발송** | Hermes | — (TYBot `summary_review`) |
-| `health` 위생 점검 발송 | Hermes | — (TYBot 콘솔) |
-| `answer` 질문·DM 응답 | Hermes | **Hermes** |
+[`archiving-bot-separation-2026-09-23.md`](archiving-bot-separation-2026-09-23.md)
+가 정한 목표 소유자는 이렇다.
 
-연동 모드에서 Hermes 가 같은 시각에 자기 요약을 또 보내면 사람은 **같은 날 요약을
-두 번** 받고, 둘의 숫자가 다르면 어느 쪽이 맞는지 알 방법이 없다. 위생 점검도
-같다 — 연동 모드의 Hermes 는 자기 아카이브에 쓰지 않으므로 점검할 자기 자료가 없다.
+| 책임 | 목표 소유자 |
+|---|---|
+| 원문 수집·첨부 변환·provenance | **Archiving Bot** |
+| 검토 후보·정정·승인/만료, 정기 요약, 검색·Q&A | **Hermes** |
+| 신원·권한, 전문가 선택, 요청/응답 전달·감사 | **TYBot Master** |
 
-막는 자리는 셋이다. **스케줄 등록**(역할이 없으면 예약하지 않는다) · **발송
-함수**(`runDigest`·`runHealth` 앞머리) · **CLI**(`run-digest`·`run-health`, 종료
-코드 2). 스케줄만 막으면 손으로 돌리는 길이 남고, 그게 중복 발송의 실제 경로다.
-
-### 6.2 요약 후보 계약 — 이미 이어져 있다
-
-연동에서 요약은 이렇게 갈린다.
+그래서 연동에서 Hermes 가 내려놓는 것은 **자기 스케줄로 Slack 에 직접 올리는 경로**
+하나다. 요약을 만드는 규칙은 그대로 Hermes 것이고, TYBot 은 **승인 인터페이스**다.
 
 ```text
-TYBot: 근거 수집(권한 검사된 아카이브)  ─┐
-Hermes: 후보 생성 규칙(contract/summary-review.md) ─┤─▶ TYBot summary_review
-TYBot: 검증·DM/Canvas 승인·발송         ─┘    (parse_proposals → Canvas → DM)
+근거(권한 검사)  TYBot  ─┐
+요약 규칙·후보   Hermes ─┤─▶ 사람 확인(DM·Canvas)  TYBot  ─▶ 승인 반영
+재요약           Hermes ─┘
 ```
 
-`summary_review.contract_prompt()` 가 `subbots/hermes/contract/summary-review.md` 를
-읽고, 근거(`_source_rows`)는 TYBot 아카이브에서 나오며, 검증(`parse_proposals`)·
-승인·발송은 전부 TYBot 이 한다. **Hermes 는 규칙만 댄다** — 소스도 자기 아카이브도
-쓰이지 않는다.
+구조는 `archive-run` 과 같다. 상황판은 **무엇이 남았나·순서·마감**만 알고 절차는
+하위 스킬이 쥔다. 여기서는 TYBot 이 상황판, Hermes 가 절차다. 절차를 상황판에
+복사하지 않는 이유도 같다 — **복사하면 원본이 바뀔 때 에러 없이 낡는다.**
 
-그래서 §6.1 이 중요하다. Hermes 가 자기 요약을 또 보내지 않아야 이 그림에 발송
-주체가 하나뿐이다.
+### 6.1.1 역할표 — 현재와 목표
+
+| 역할 | PF 직접 실행 | TYBot 연동 (현재) | 목표 |
+|---|---|---|---|
+| `ingest` 수집·소급·첨부 | Hermes | 차단 | **Archiving Bot** (역할 자체가 사라짐) |
+| `digest-publish` **직접 게시** | Hermes | 차단 | 차단 유지 — 게시는 승인 뒤에만 |
+| `health` 위생 점검 발송 | Hermes | 차단 | Archiving Bot 자료 기준으로 재정의 |
+| `answer` 질문·DM 응답 | Hermes | **Hermes** | Hermes |
+
+이름이 `digest` 가 아니라 `digest-publish` 인 이유가 이 표다. 「요약을 안 맡는다」
+가 아니라 「직접 올리지 않는다」 다.
+
+막는 자리는 셋이다 — **스케줄 등록** · **발송 함수**(`runDigest`·`runHealth` 앞머리)
+· **CLI**. 스케줄만 막으면 손으로 돌리는 길이 남고, 그게 중복 게시의 실제 경로다.
+
+### 6.2 요약 후보 계약 — 이어져 있고, 한 군데가 비어 있다
+
+`summary_review.contract_prompt()` 가 `subbots/hermes/contract/summary-review.md` 를
+**런타임에** 읽는다. 규칙을 TYBot 안으로 복사하지 않는다 — 그 점은 §6.1 의 원칙대로다.
+
+| 단계 | 지금 | 목표 |
+|---|---|---|
+| 근거 수집 | TYBot `_source_rows` (권한 검사) | 그대로 |
+| 후보 생성 | TYBot 이 Hermes **규칙**으로 LLM 호출 | 그대로(규칙 주인은 Hermes) |
+| 후보 검증 | TYBot `parse_proposals` | 그대로 — 근거 대조는 근거 주인이 한다 |
+| 사람 확인 | TYBot Canvas·DM | 그대로 |
+| **재요약** | TYBot `projected_summary()` — **결정적 조합** | **Hermes** |
+
+마지막 줄이 비어 있는 자리다. 지금은 승인 항목을 코드가 문자열 치환으로 조합한다
+(`summary-review-canvas.md` §2.1 — 「LLM 을 다시 호출해 만들지 않는다」). 그건 모호한
+교체를 막으려는 **의도된 결정**이었고, 목표 구조(재요약은 Hermes)와 충돌한다.
+
+바꾸려면 CLAUDE.md 원칙 1 의 파생 요약 다섯 조건을 전부 지켜야 한다 — 사람 승인
+전제 · 원문 좌표 상속 · 묶음 상한 · 세대 상한 2 · 연쇄 stale·단일 채널.
+**그 전환은 이 변경에 포함하지 않았다.**
 
 ### 6.3 이미 끝낸 검토를 생략하는 조건
 

@@ -72,29 +72,48 @@ export function assertMayWriteArchive(action) {
  * 모드가 「누구 밑에서 도는가」 라면, 역할은 「무엇을 내가 맡는가」 다. 둘을 같은
  * 값으로 묶으면 다음에 역할 하나만 옮길 때 모드 전체를 흔들어야 한다.
  *
- * TYBot 연동에서 **발송은 TYBot 이 전부 맡는다.** 요약 후보는 TYBot 의 권한 있는
- * 근거로 만들어지고, 검증·DM/Canvas 승인·발송은 `summary_review` 가 한다. Hermes 가
- * 같은 시각에 자기 요약을 또 보내면 사람은 **같은 날 요약을 두 번** 받고, 둘의
- * 숫자가 다르면 어느 쪽이 맞는지 알 방법이 없다.
+ * ## 연동에서 빠지는 것은 「요약」 이 아니라 「직접 게시」 다
  *
- * 위생 점검(health)도 같다. 연동 모드의 Hermes 는 자기 아카이브에 쓰지 않으므로
- * 점검할 자기 자료가 없다 — 점검 대상은 TYBot 의 아카이브이고 그건 TYBot 콘솔이 본다.
+ * 흔한 오해라 이름부터 그렇게 지었다(`digest-publish`). 연동 모드에서도 **요약을
+ * 만드는 규칙은 Hermes 것**이다 — TYBot 은 `contract/summary-review.md` 를 런타임에
+ * 읽어 그 규칙으로 후보를 만들고, 사람 확인은 자기 DM·Canvas 로 받는다. 즉 TYBot 은
+ * **승인 인터페이스**이고, 요약과 재요약의 주인은 Hermes 다.
+ *
+ * 빠지는 것은 Hermes 가 **자기 스케줄로 Slack 에 직접 올리는 경로** 하나다. 그게
+ * 남아 있으면 사람은 같은 날 요약을 두 번 받고 — 하나는 승인을 거쳤고 하나는 안
+ * 거쳤는데 — 둘의 숫자가 다르면 어느 쪽이 맞는지 알 방법이 없다.
+ *
+ * 구조는 `archive-run` 과 같다. 상황판은 **무엇이 남았나·순서·마감**만 알고 절차는
+ * 하위 스킬이 쥔다. 여기서는 TYBot 이 상황판이고 Hermes 가 절차를 쥔다. 절차를
+ * 상황판에 복사하지 않는 이유도 같다 — 복사하면 원본이 바뀔 때 **에러 없이 낡는다.**
+ *
+ * ## 수집은 어느 쪽도 아니다
+ *
+ * 2026-09-23 분리 합의로 원문 수집·첨부 변환·provenance 는 **Archiving Bot** 이
+ * 맡는다(`docs/design/archiving-bot-separation-2026-09-23.md`). TYBot Master 도
+ * 수집에서 빠지는 중이다. 여기서 `ingest` 를 끄는 것은 그 이관의 한 걸음이고,
+ * 이관이 끝나면 이 역할 자체가 사라져야 한다.
  */
 export const ROLES = {
-  /** 원문 수집·소급·첨부 저장 */
+  /** 원문 수집·소급·첨부 저장. **목표 소유자는 Archiving Bot** — 이관되면 사라진다 */
   INGEST: 'ingest',
-  /** 일일·주간 요약 **발송** */
-  DIGEST: 'digest',
-  /** 위생 점검 발송 */
+  /** 일일·주간 요약을 **Slack 에 직접 올리는 것**. 요약 생성 자체가 아니다 */
+  DIGEST_PUBLISH: 'digest-publish',
+  /** 위생 점검 발송. 연동 모드의 점검 대상은 Archiving Bot 이 쌓는 자료다 */
   HEALTH: 'health',
   /** 질문 응답(슬랙 질문·DM). 어느 모드에서도 Hermes 가 맡는다 */
   ANSWER: 'answer',
 };
 
 /** PF 직접 실행이 맡는 역할 — 지금까지와 같다. */
-const PF_ROLES = new Set([ROLES.INGEST, ROLES.DIGEST, ROLES.HEALTH, ROLES.ANSWER]);
+const PF_ROLES = new Set([ROLES.INGEST, ROLES.DIGEST_PUBLISH, ROLES.HEALTH, ROLES.ANSWER]);
 
-/** TYBot 연동이 Hermes 에게 남기는 역할. **발송은 하나도 없다.** */
+/**
+ * TYBot 연동이 Hermes 에게 남기는 역할.
+ *
+ * `answer` 하나지만 **요약을 안 한다는 뜻이 아니다.** 요약은 TYBot 이 전문 봇으로
+ * 부를 때 Hermes 의 규칙으로 만들어진다 — 그건 스케줄이 아니라 호출이라 여기 없다.
+ */
 const TYBOT_ROLES = new Set([ROLES.ANSWER]);
 
 export function rolesFor(current = mode()) {

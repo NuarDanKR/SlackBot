@@ -141,7 +141,7 @@ def test_scheduled_jobs_match_the_inventory():
     # `take(ROLES.X, 'a', 'b')`. **둘 다 봐야 한다.** 한쪽만 보면 구조를 바꾼 날
     # 목록이 조용히 비고, 빈 목록은 늘 통과한다.
     jobs = set(re.findall(r"schedule\(client,\s*'([^']+)'\)", text))
-    for group in re.findall(r"take\(\s*ROLES\.[A-Z]+\s*,([^)]*)\)", text):
+    for group in re.findall(r"take\(\s*ROLES\.[A-Z_]+\s*,([^)]*)\)", text):
         jobs.update(re.findall(r"'([^']+)'", group))
 
     assert jobs == SCHEDULED_JOBS

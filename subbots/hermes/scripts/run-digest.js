@@ -16,8 +16,8 @@ import { errLabel } from '../src/claude.js';
 // 연동 모드에서 발송은 TYBot 이 맡는다. 여기서 또 보내면 같은 날 같은 내용이 두 번
 // 나가고, 둘의 숫자가 다르면 어느 쪽이 맞는지 알 방법이 없다.
 import { ownsRole, ROLES, RoleNotOwned } from '../src/mode.js';
-if (!ownsRole(ROLES.DIGEST)) {
-  console.error(new RoleNotOwned(ROLES.DIGEST, 'npm run digest').message);
+if (!ownsRole(ROLES.DIGEST_PUBLISH)) {
+  console.error(new RoleNotOwned(ROLES.DIGEST_PUBLISH, 'npm run digest').message);
   process.exit(2);
 }
 

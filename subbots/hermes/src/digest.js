@@ -55,7 +55,7 @@ async function deliveryTarget(client) {
 export async function runDigest(client, kind, { dry = false } = {}) {
   // 연동 모드에서 요약 발송은 TYBot 이 맡는다. **맨 앞이어야** 한다 —
   // 아래에서 모델을 부르면 막기 전에 비용이 나간다.
-  if (!dry) assertOwnsRole(ROLES.DIGEST, '일일·주간 요약 발송(runDigest)');
+  if (!dry) assertOwnsRole(ROLES.DIGEST_PUBLISH, '일일·주간 요약 직접 게시(runDigest)');
   const w = kind === 'daily' ? dailyWindow() : weeklyWindow();
   const started = Date.now();
   console.log(`\n[${kind}] ${w.label} 수집 시작…`);

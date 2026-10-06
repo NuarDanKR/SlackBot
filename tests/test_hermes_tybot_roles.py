@@ -61,7 +61,7 @@ def _roles(mode: str | None) -> list[str]:
 @needs_node
 def test_pf_mode_keeps_every_role():
     """PF 직접 실행은 **지금까지와 같다.** 질문·DM·요약·수집 전부 Hermes 몫이다."""
-    assert _roles(None) == ["answer", "digest", "health", "ingest"]
+    assert _roles(None) == ["answer", "digest-publish", "health", "ingest"]
 
 
 @needs_node
@@ -73,7 +73,7 @@ def test_tybot_mode_leaves_only_answering():
 @needs_node
 @needs_deps
 @pytest.mark.parametrize(
-    ("script", "role"), [("run-digest.js", "digest"), ("run-health.js", "health")]
+    ("script", "role"), [("run-digest.js", "digest-publish"), ("run-health.js", "health")]
 )
 def test_a_send_cli_refuses_in_tybot_mode(script, role):
     """스케줄만 막으면 손으로 돌리는 길이 남는다 — 그게 중복 발송의 실제 경로다."""
@@ -96,13 +96,13 @@ def test_the_scheduler_registers_jobs_by_role():
     start = text.split("export function startScheduler", 1)[1]
 
     assert "ownsRole" in start
-    for role in ("ROLES.DIGEST", "ROLES.HEALTH", "ROLES.INGEST"):
+    for role in ("ROLES.DIGEST_PUBLISH", "ROLES.HEALTH", "ROLES.INGEST"):
         assert role in start, f"{role} 이 역할 기준으로 걸리지 않았다"
 
 
 @pytest.mark.parametrize(
     ("module", "fn", "role"),
-    [("src/digest.js", "runDigest", "DIGEST"),
+    [("src/digest.js", "runDigest", "DIGEST_PUBLISH"),
      ("src/archive-health.js", "runHealth", "HEALTH")],
 )
 def test_every_send_function_guards_in_its_first_lines(module, fn, role):
