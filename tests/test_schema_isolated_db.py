@@ -963,3 +963,54 @@ def test_reset_is_never_called_before_preflight():
     assert "preflight" in names and "reset" in names
     assert names.index("preflight") < names.index("reset")
     assert "ensure_roles" not in body, "역할을 만들지 않는다 — 확인만 한다"
+
+
+# --- 검토 주기 (666d966) ------------------------------------------------------
+#
+# DSN 이 없으면 **실제 거부는 확인할 수 없다.** 그래도 「무엇을 확인할 것인가」 는
+# 여기 적혀 있어야 한다 — 목록이 코드에만 있으면 조용히 줄어든다.
+def test_the_schedule_cases_cover_every_boundary_the_check_declares():
+    """CHECK 가 가르는 자리를 **빠짐없이** 시험 목록에 적었나.
+
+    선언은 `(daily AND weekday IS NULL) OR (weekly AND weekday BETWEEN 0 AND 6)` 다.
+    경계는 넷 — daily 에 요일이 있는 경우, weekly 에 요일이 없는 경우, 그리고
+    범위의 양쪽 밖(-1, 7).
+    """
+    accepted = set(verify.SCHEDULE_ACCEPTED)
+    rejected = {(kind, weekday) for kind, weekday, _ in verify.SCHEDULE_REJECTED}
+
+    assert ("daily", None) in accepted
+    assert {("weekly", 0), ("weekly", 6)} <= accepted, "범위의 양 끝을 안 본다"
+    assert ("weekly", None) in rejected
+    assert any(kind == "daily" and weekday is not None for kind, weekday in rejected)
+    assert {("weekly", -1), ("weekly", 7)} <= rejected, "범위 밖 양쪽을 안 본다"
+
+
+def test_the_reviewer_schema_is_actually_applied_by_the_verifier():
+    """목록에 없으면 **아무리 검사를 적어도 돌지 않는다.**"""
+    assert "reviewer_schema.sql" in verify.TARGET_FILES
+
+
+def test_the_legacy_row_helper_does_not_create_the_new_columns():
+    """이전 전 모양을 흉내 내는 자리라, 새 열이 있으면 시험이 무의미해진다."""
+    import inspect
+
+    source = inspect.getsource(verify.legacy_reviewer_row)
+
+    assert "schedule_kind" not in source.split("CREATE TABLE", 1)[1].split(")", 1)[0]
+    assert "weekday" not in source.split("CREATE TABLE", 1)[1].split(")", 1)[0]
+
+
+@needs_db
+def test_an_existing_row_survives_as_daily_with_no_weekday(conn):
+    """이미 돌고 있는 DB 의 검토자가 **매일로 보존**되는가.
+
+    여기서 틀리면 전환 다음 날부터 검토 DM 이 안 간다 — 그 사실은 아무도 묻지
+    않으므로 며칠 뒤에야 드러난다.
+    """
+    verify.reset(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    verify.legacy_reviewer_row(conn)
+    verify.apply_files(conn, ("reviewer_schema.sql",))
+
+    assert verify.check_review_schedule(conn) == []

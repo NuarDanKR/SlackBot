@@ -44,6 +44,14 @@ GATED_SQL = (
     "bot_connection_schema.sql",
     "archiver_supervisor_schema.sql",
     "slack_license_schema.sql",
+    # 666d966 이 `schedule_kind`·`weekday` 와 CHECK 를 더했다. 검토 DM 발송 주기가
+    # 이 표에 걸려 있으므로 지문에 넣는다 — 빠져 있으면 이 파일만 고쳐도 게이트가
+    # 열린 채로 남는다.
+    #
+    # **지문이 바뀌면 기존 artifact 는 무효가 된다.** 그게 이 장치의 목적이다 —
+    # 검증 뒤에 스키마를 고치면 다시 닫혀야 한다. 다만 적용 시점은 전환 일정과
+    # 겹치지 않게 사람이 고른다.
+    "reviewer_schema.sql",
 )
 
 ROOT = Path(__file__).resolve().parents[3]

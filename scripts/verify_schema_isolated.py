@@ -89,7 +89,11 @@ TARGET_FILES = ("index_schema.sql", "console_schema.sql",
                 "archiving_schema.sql", "workspace_service_schema.sql",
                 "bot_connection_schema.sql",
                 "archiver_supervisor_schema.sql",
-                "slack_license_schema.sql")
+                "slack_license_schema.sql",
+                # 666d966 이 `schedule_kind`·`weekday` 와 CHECK 를 더했다. 이미
+                # 돌고 있는 DB 에 열이 붙고 기존 행이 보존되는지는 **진짜 DB 에서만**
+                # 확인된다 — 5번이 그것을 본다.
+                "reviewer_schema.sql")
 
 #: 역할에서 **없어야 하는** 권한. (역할, 표, 권한)
 #:
@@ -153,6 +157,12 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     ("tyslackai", "slack_license_manual", "INSERT"),
     ("tyslackai", "slack_license_manual", "UPDATE"),
     ("tyslackai", "slack_license_manual", "DELETE"),
+    # 검토자 표(666d966). 봇·타이머·콘솔이 함께 읽고 쓴다 — 하나라도 없으면 그 경로만
+    # 조용히 멈춘다. 권한 오류는 **그 기능을 쓸 때까지** 안 나므로 여기서 고정한다.
+    ("tyslackai", "channel_reviewer", "SELECT"),
+    ("tyslackai", "channel_reviewer", "INSERT"),
+    ("tyslackai", "channel_reviewer", "UPDATE"),
+    ("tyslackai", "channel_reviewer", "DELETE"),
 )
 
 REQUIRED_FUNCTIONS: tuple[tuple[str, str, str], ...] = (
@@ -425,6 +435,108 @@ def draft_shape(conn) -> None:
         )
 
 
+# --- 검토 주기 (666d966) -------------------------------------------------------
+#
+# `schedule_kind`·`weekday` 와 CHECK 가 붙었다. 선언을 읽어서는 셋을 알 수 없다 —
+# 이미 돌고 있는 DB 에 **열이 붙는가**, 기존 행이 **보존되는가**, CHECK 가 **실제로
+# 거부하는가**. 셋 다 진짜 DB 에서만 드러난다.
+#
+# 거부 사례를 하나씩 따로 넣는 이유: 한 트랜잭션에서 묶으면 **어느 것이 막혔는지**
+# 알 수 없고, 하나만 막혀도 전체가 실패해 통과처럼 보인다.
+SCHEDULE_ACCEPTED = (
+    ("daily", None),
+    ("weekly", 0),
+    ("weekly", 3),
+    ("weekly", 6),
+)
+SCHEDULE_REJECTED = (
+    ("daily", 0, "daily 인데 요일이 있다"),
+    ("daily", 6, "daily 인데 요일이 있다"),
+    ("weekly", None, "weekly 인데 요일이 없다"),
+    ("weekly", -1, "요일이 범위 밖(-1)"),
+    ("weekly", 7, "요일이 범위 밖(7)"),
+    ("weekly", 99, "요일이 범위 밖(99)"),
+)
+
+
+def legacy_reviewer_row(conn) -> None:
+    """666d966 **이전** 모양의 `channel_reviewer` 에 행 하나를 넣는다.
+
+    열이 붙기 전 DB 를 흉내 낸다. 커밋에서 SQL 을 꺼내 돌리지 않는 이유는
+    `draft_shape()` 와 같다 — 그러면 이 시험이 커밋 하나에 묶인다.
+    """
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS channel_reviewer CASCADE")
+        cur.execute(
+            """
+            CREATE TABLE channel_reviewer (
+                workspace     text NOT NULL,
+                channel_id    text NOT NULL,
+                channel_name  text NOT NULL DEFAULT '',
+                reviewer_user text NOT NULL,
+                send_at       time NOT NULL DEFAULT '08:00',
+                enabled       boolean NOT NULL DEFAULT true,
+                set_by        text NOT NULL,
+                set_at        timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (workspace, channel_id, reviewer_user)
+            )
+            """
+        )
+        cur.execute(
+            "INSERT INTO channel_reviewer (workspace, channel_id, reviewer_user, set_by)"
+            " VALUES ('tyit', 'C_LEGACY', 'U_LEGACY', 'migration-test')"
+        )
+
+
+def check_review_schedule(conn) -> list[str]:
+    """보존과 CHECK 를 본다. 돌려주는 것은 **사람이 읽는 실패 사유**다."""
+    problems: list[str] = []
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT schedule_kind, weekday FROM channel_reviewer"
+            " WHERE workspace='tyit' AND channel_id='C_LEGACY'"
+        )
+        row = cur.fetchone()
+    if row is None:
+        problems.append("기존 행이 사라졌다 — 이전이 행을 지웠다")
+    else:
+        kind, weekday = (row["schedule_kind"], row["weekday"]) if isinstance(row, dict) else row
+        if kind != "daily":
+            problems.append(f"기존 행의 schedule_kind 가 'daily' 가 아니다: {kind!r}")
+        if weekday is not None:
+            problems.append(f"기존 행의 weekday 가 NULL 이 아니다: {weekday!r}")
+
+    for kind, weekday in SCHEDULE_ACCEPTED:
+        try:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO channel_reviewer"
+                    " (workspace, channel_id, reviewer_user, set_by, schedule_kind, weekday)"
+                    " VALUES ('tyit', %s, 'U_OK', 'schedule-test', %s, %s)",
+                    (f"C_OK_{kind}_{weekday}", kind, weekday),
+                )
+        except Exception as exc:  # noqa: BLE001 - 사유를 사람 말로 모은다
+            problems.append(f"허용돼야 할 조합이 거부됐다 ({kind}, {weekday}): {exc}")
+
+    for kind, weekday, why in SCHEDULE_REJECTED:
+        rejected = False
+        try:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO channel_reviewer"
+                    " (workspace, channel_id, reviewer_user, set_by, schedule_kind, weekday)"
+                    " VALUES ('tyit', %s, 'U_BAD', 'schedule-test', %s, %s)",
+                    (f"C_BAD_{kind}_{weekday}", kind, weekday),
+                )
+        except Exception:  # noqa: BLE001 - 거부가 기대값이다
+            rejected = True
+        if not rejected:
+            problems.append(f"거부돼야 할 조합이 들어갔다 — {why} ({kind}, {weekday})")
+
+    return problems
+
+
 def check_privileges(conn) -> list[str]:
     problems = []
     for role, table, privilege in FORBIDDEN:
@@ -509,14 +621,20 @@ def main() -> int:
         print("3. 초안 DB 재적용 — 통과")
         failures += [f"[초안 재적용] {item}" for item in check_privileges(conn)]
 
+        # 4. 검토 주기(666d966) — 열이 붙고, 기존 행이 보존되고, CHECK 가 거부하나
+        legacy_reviewer_row(conn)
+        apply_files(conn, ("reviewer_schema.sql",))
+        print("4. 검토 주기 열 추가·기존 행 보존 — 통과")
+        failures += [f"[검토 주기] {item}" for item in check_review_schedule(conn)]
+
     if failures:
         print("\n■ 확인 실패")
         for item in failures:
             print(f"  ✗ {item}")
         return 1
-    print("\n4. 권한 회수·부여 — 통과")
+    print("5. 권한 회수·부여 — 통과")
     required_count = len(REQUIRED) + len(REQUIRED_FUNCTIONS)
-    print(f"\n네 가지 모두 통과했습니다 (금지 {len(FORBIDDEN)}건 · 필수 {required_count}건).")
+    print(f"\n다섯 가지 모두 통과했습니다 (금지 {len(FORBIDDEN)}건 · 필수 {required_count}건).")
 
     # 통과를 **지문과 함께** 남긴다. 콘솔의 release gate 가 이 파일을 본다.
     #

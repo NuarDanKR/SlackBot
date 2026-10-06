@@ -415,34 +415,75 @@ def test_the_skill_side_fails_on_the_same_values(value):
 
 
 # --- 경계 보강 2. 임시 파일은 고유해야 한다 ----------------------------------
-def test_two_writers_do_not_collide_on_the_same_temp(tmp_path):
-    """고정 `.tmp` 는 **동시에 쓰는 두 프로세스가 서로의 파일을 덮는다.**
+def test_concurrent_writers_are_refused_not_silently_merged(tmp_path):
+    """**서로 다른 스냅샷**을 동시에 쓰면 마지막 쓰기가 앞 결정을 통째로 덮는다.
 
-    한쪽이 `replace` 하는 사이 다른 쪽이 같은 이름에 쓰면, 남는 것은 둘 중
-    아무것도 아닌 섞인 파일이거나 사라진 파일이다. 둘 다 조용하다.
+    고유 임시 파일과 원자적 `replace` 는 **깨진 파일**만 막는다. 둘 다 온전한
+    파일이고 다만 하나만 남는다 — 그게 이 시험이 보는 유실이다.
+
+    같은 스냅샷을 여러 번 쓰면 이 문제가 **안 보인다.** 전에 그렇게 써 두어서
+    시험이 통과하고 있었다.
     """
     import threading
 
     path = tmp_path / "decisions.json"
-    rows = [_candidate_row(), _candidate_row(state="deferred")]
-    errors: list = []
+    # 스냅샷마다 좌표가 다르다. 섞이거나 덮이면 어느 쪽인지 바로 드러난다.
+    snapshots = {
+        f"only-{n}": [_candidate_row(evidence_locator=f"snap-{n}.md:{n}")]
+        for n in range(4)
+    }
+    refused: list[Exception] = []
+    other: list[Exception] = []
 
-    def run():
-        try:
-            for _ in range(12):
+    def run(rows):
+        for _ in range(8):
+            try:
                 rec.write_export(path, rows)
-        except Exception as exc:
-            errors.append(exc)
+            except rec.ConcurrentExportRefused as exc:
+                refused.append(exc)
+            except Exception as exc:
+                other.append(exc)
 
-    threads = [threading.Thread(target=run) for _ in range(4)]
+    threads = [threading.Thread(target=run, args=(rows,)) for rows in snapshots.values()]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
-    assert not errors, f"동시 쓰기에서 터졌다: {errors}"
-    assert len(rec.load_decisions(path)) == 2
+    assert not other, f"예상 못 한 실패: {other}"
+
+    # 남은 파일은 **어느 한 스냅샷의 온전한 한 벌**이어야 한다 — 섞이면 안 된다.
+    loaded = rec.load_decisions(path)
+    assert loaded is not None, "읽을 수 없는 파일이 남았다"
+    locators = {d.evidence_locator for d in loaded}
+    assert len(locators) == 1, f"두 스냅샷이 섞였다: {sorted(locators)}"
     assert not list(tmp_path.glob("*.tmp*")), "임시 파일이 남았다"
+
+
+def test_a_second_writer_is_told_why_it_was_refused(tmp_path):
+    """거부는 **사람이 읽을 수 있어야** 한다 — 「출처가 둘이면 파일을 따로」."""
+    from tybot.lock import FileLock
+
+    path = tmp_path / "decisions.json"
+    held = FileLock(path.with_name(f".{path.name}.writer.lock"), label="시험")
+    held.acquire()
+    try:
+        with pytest.raises(rec.ConcurrentExportRefused) as caught:
+            rec.write_export(path, [_candidate_row()], timeout=0.1)
+    finally:
+        held.release()
+
+    assert "한 출처의 스냅샷" in str(caught.value)
+    assert caught.value.code == "export_writer_conflict"
+
+
+def test_a_single_writer_still_writes_normally(tmp_path):
+    """계약을 좁혔다고 평범한 한 번 쓰기가 막히면 안 된다."""
+    path = tmp_path / "decisions.json"
+
+    assert rec.write_export(path, [_candidate_row()]) == 1
+    assert rec.write_export(path, [_candidate_row(state="deferred")]) == 1
+    assert len(rec.load_decisions(path)) == 1
 
 
 def test_a_failed_write_leaves_no_leftover(tmp_path, monkeypatch):

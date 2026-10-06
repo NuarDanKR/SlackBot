@@ -35,16 +35,46 @@ ALTER TABLE channel_reviewer
     ADD COLUMN IF NOT EXISTS weekday smallint;
 
 DO $$
+DECLARE
+    broken bigint;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'channel_reviewer_schedule_valid'
-    ) THEN
-        ALTER TABLE channel_reviewer ADD CONSTRAINT channel_reviewer_schedule_valid
-        CHECK (
-            (schedule_kind = 'daily' AND weekday IS NULL)
-            OR (schedule_kind = 'weekly' AND weekday BETWEEN 0 AND 6)
-        );
+    -- 「weekly 인데 요일이 없는」 행이 남아 있나. **고치지 않고 멈춘다.**
+    --
+    -- 아래 제약이 고쳐지기 전에는 이 조합이 들어갈 수 있었다(그 이유는 다음 주석).
+    -- 그 행은 **발송이 불가능한 상태**다 — 어느 요일인지 모르므로 타이머가 영영
+    -- 집지 않는다. 그런데 조용히 `daily` 로 돌리면 안 보내던 검토가 갑자기 매일
+    -- 가고, 사람은 왜 바뀌었는지 모른다. 무엇을 할지는 사람이 정한다.
+    SELECT count(*) INTO broken FROM channel_reviewer
+     WHERE schedule_kind = 'weekly' AND weekday IS NULL;
+    IF broken > 0 THEN
+        RAISE EXCEPTION
+            'channel_reviewer 에 weekly 인데 요일이 없는 행이 %건 있습니다. '
+            '이 행은 검토 DM 이 영영 가지 않는 상태입니다 — 요일을 넣거나 daily 로 '
+            '되돌린 뒤 다시 적용하세요.', broken;
     END IF;
+
+    -- **표까지 한정한다.** `conname` 만 보면 다른 표에 같은 이름의 제약이 있을 때
+    -- 「이미 있다」 로 읽고 이 표에는 안 붙는다 — 그러면 CHECK 없이 도는데 적용은
+    -- 성공으로 끝난다. 제약 이름은 스키마 전역에서 유일하지 않다.
+    --
+    -- **이름이 같아도 내용이 틀렸을 수 있어 지우고 다시 붙인다.** 처음 판은
+    -- `weekday BETWEEN 0 AND 6` 만 적어서 `weekly` + NULL 을 통과시켰다 —
+    -- SQL 의 CHECK 는 결과가 UNKNOWN(NULL) 이면 **위반으로 보지 않는다.**
+    --
+    --   (weekly = daily AND …)                     → FALSE
+    --   (weekly = weekly AND NULL BETWEEN 0 AND 6)  → TRUE AND NULL → NULL
+    --   FALSE OR NULL                               → NULL → 통과
+    --
+    -- 선언만 읽어서는 안 보이고 진짜 DB 에서만 드러난다(2026-10-06 격리 검증).
+    -- 그래서 `weekday IS NOT NULL` 을 **명시한다.**
+    ALTER TABLE channel_reviewer
+        DROP CONSTRAINT IF EXISTS channel_reviewer_schedule_valid;
+    ALTER TABLE channel_reviewer ADD CONSTRAINT channel_reviewer_schedule_valid
+    CHECK (
+        (schedule_kind = 'daily' AND weekday IS NULL)
+        OR (schedule_kind = 'weekly'
+            AND weekday IS NOT NULL AND weekday BETWEEN 0 AND 6)
+    );
 END
 $$;
 

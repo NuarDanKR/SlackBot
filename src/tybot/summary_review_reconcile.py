@@ -262,6 +262,7 @@ __all__ = [
     "SKIP",
     "SOURCE_MISMATCH",
     "SOURCE_TYBOT_DM",
+    "ConcurrentExportRefused",
     "ExternalDecision",
     "build_export",
     "decide",
@@ -356,13 +357,63 @@ def _replace_with_retry(tmp: Path, file: Path, *, attempts: int = 20) -> None:
             time.sleep(0.02)
 
 
-def write_export(path: Path | str, rows, *, source: str = SOURCE_TYBOT_DM) -> int:
-    """원자적으로 쓴다. 읽는 쪽이 **반쯤 쓰인 파일**을 보면 안 된다 —
-    그때 JSON 파싱이 깨지고, 깨짐은 「못 읽음」 이라 대조가 통째로 멈춘다.
+class ConcurrentExportRefused(RuntimeError):
+    """같은 파일을 둘이 쓰려 했다. **단일 writer 계약을 어긴 것이다.**"""
+
+    def __init__(self, file: Path) -> None:
+        super().__init__(
+            f"{file} 를 다른 쪽이 쓰는 중입니다. 이 파일은 **한 출처의 스냅샷**이라"
+            " writer 가 하나여야 합니다 — 출처가 둘이면 파일을 따로 쓰세요."
+        )
+        self.file = file
+        self.code = "export_writer_conflict"
+
+
+def write_export(
+    path: Path | str, rows, *, source: str = SOURCE_TYBOT_DM, timeout: float = 5.0
+) -> int:
+    """원자적으로, **한 번에 한 writer 만** 쓴다.
+
+    ## 왜 단일 writer 인가
+
+    내보내는 덩이는 `{"source": …, "decisions": [...]}` — **한 출처의 전체 스냅샷**
+    이다. 부분 갱신이 아니라 통째로 바꾼다. 그래서 둘이 같은 파일을 쓰면 마지막
+    쓰기가 앞 쓰기를 **통째로 덮고**, 앞 writer 가 기록한 결정이 사라진다.
+
+    고유 임시 파일과 원자적 `replace` 는 **깨진 파일**을 막을 뿐 이 유실을 막지
+    못한다. 둘 다 온전한 파일이고, 다만 둘 중 하나만 남는다 — 그리고 조용하다.
+
+    출처가 둘이면 **파일을 따로 쓰는 것이 맞다.** 한 파일에 둘을 섞으려면 병합
+    규칙과 세대(또는 CAS)가 필요한데, 그건 지금 형식이 약속하지 않는 것이다.
+    약속하지 않은 것을 조용히 하지 않는다 — 어기면 **거부한다.**
+
+    읽는 쪽은 락을 쓰지 않는다. `replace` 가 원자적이라 **항상 온전한 한 벌**을
+    본다.
     """
+    from .lock import AlreadyRunning, FileLock, LockUnavailable
+
     payload = build_export(rows, source=source)
     file = Path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
+
+    lock = FileLock(file.with_name(f".{file.name}.writer.lock"), label="검토 결정 내보내기")
+    try:
+        lock.acquire(timeout=timeout)
+    except AlreadyRunning as exc:
+        raise ConcurrentExportRefused(file) from exc
+    except LockUnavailable:
+        # 락 파일을 못 여는 환경(권한·경로)에서 내보내기를 막지는 않는다. 다만
+        # 그 사실을 남긴다 — 조용히 단일 writer 보장이 사라지면 안 된다.
+        logger.warning("내보내기 락을 잡지 못해 보호 없이 씁니다: %s", file)
+        lock = None  # type: ignore[assignment]
+    try:
+        return _write_export_locked(payload, file)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _write_export_locked(payload: dict, file: Path) -> int:
 
     # **임시 이름은 고유해야 한다.** 고정 `.tmp` 를 쓰면 두 writer 가 같은 파일에
     # 동시에 쓰고, 한쪽이 `replace` 하는 사이 다른 쪽이 덮는다. 남는 것은 섞인
