@@ -218,3 +218,94 @@ def test_the_filter_reports_why_each_candidate_stayed():
     assert len(kept) == 1
     assert reasons[rec.SKIP] == 1
     assert reasons[rec.NO_MATCH] == 1
+
+
+# --- 공통 결정 기록 왕복 (설계 summary-approval-ports.md §3) -------------------
+#
+# 읽는 쪽만 있으면 대조는 늘 「끝낸 것이 없다」 로 끝난다. 쓰는 쪽이 있어야 승인
+# 인터페이스를 갈아 끼워도(TYBot DM ↔ 로컬 스킬) 서로의 결정을 본다.
+def _candidate_row(**kw) -> dict:
+    base = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "workspace": "tyit",
+        "channel_id": "C1",
+        "evidence_locator": LOCATOR,
+        "evidence_hash": DIGEST,
+        "evidence_message_ts": "1759000000.000100",
+        "kind": "number_or_schedule",
+        "state": "approved",
+        "decided_at": "2026-10-06T09:00:00+09:00",
+        "decided_by": "U1",
+        "proposed_text": "공정률은 62.5%입니다",
+        "evidence_quote": "공정률은 62.5%입니다",
+    }
+    base.update(kw)
+    return base
+
+
+def test_an_exported_decision_reads_back_and_matches(tmp_path):
+    """내보낸 것을 그대로 읽어 **같은 후보에 대해 생략 판정**이 서야 한다."""
+    path = tmp_path / "decisions.json"
+
+    written = rec.write_export(path, [_candidate_row()])
+    loaded = rec.load_decisions(path)
+
+    assert written == 1
+    assert rec.decide(_candidate(), loaded) == (True, rec.SKIP)
+
+
+def test_the_export_never_carries_text(tmp_path):
+    """이 파일은 **다른 쪽이 읽는 것**이다. 사내 문장이 PF 로, PF 문장이 사내로
+    건너가면 크로스 워크스페이스 노출이다(원칙 4). 대조에 필요한 것은 좌표뿐이다.
+    """
+    path = tmp_path / "decisions.json"
+    rec.write_export(path, [_candidate_row()])
+
+    body = path.read_text(encoding="utf-8")
+
+    assert "공정률" not in body, "요약 본문이 기록에 실렸다"
+    assert "proposed_text" not in body
+    assert "evidence_quote" not in body
+    assert DIGEST in body and LOCATOR in body
+
+
+@pytest.mark.parametrize("state", ["pending", "expired", "superseded"])
+def test_states_that_are_not_a_human_decision_are_not_exported(tmp_path, state):
+    """미응답 폐기·대체됨은 **사람이 내린 판단이 아니다.**
+
+    보내면 받는 쪽이 「끝났다」 로 읽을 수 있다. 읽는 쪽이 조심하는 것보다 애초에
+    안 보내는 쪽이 안전하다.
+    """
+    path = tmp_path / "decisions.json"
+
+    assert rec.write_export(path, [_candidate_row(state=state)]) == 0
+    assert rec.load_decisions(path) == []
+
+
+def test_a_deferred_decision_is_exported_but_never_skips(tmp_path):
+    """보류는 보낸다 — 받는 쪽이 「아직 안 끝났다」 를 알아야 한다. 생략은 안 한다."""
+    path = tmp_path / "decisions.json"
+    rec.write_export(path, [_candidate_row(state="deferred")])
+
+    loaded = rec.load_decisions(path)
+
+    assert len(loaded) == 1
+    assert rec.decide(_candidate(), loaded) == (False, rec.NOT_FINAL)
+
+
+def test_a_candidate_without_coordinates_is_not_exported(tmp_path):
+    """좌표 없는 기록은 받는 쪽에서 버려질 뿐이라 보내지 않는다."""
+    path = tmp_path / "decisions.json"
+
+    assert rec.write_export(path, [_candidate_row(evidence_hash="")]) == 0
+
+
+def test_the_export_is_written_atomically(tmp_path):
+    """읽는 쪽이 반쯤 쓰인 파일을 보면 파싱이 깨지고, 깨짐은 「못 읽음」 이라
+    대조가 통째로 멈춘다."""
+    path = tmp_path / "decisions.json"
+    rec.write_export(path, [_candidate_row()])
+    rec.write_export(path, [_candidate_row(), _candidate_row(state="deferred")])
+
+    assert not list(tmp_path.glob("*.tmp")), "임시 파일이 남았다"
+    assert len(rec.load_decisions(path)) == 2

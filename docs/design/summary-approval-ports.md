@@ -1,0 +1,147 @@
+# 요약 승인 — 인터페이스를 갈아 끼울 수 있게
+
+> 상태: **설계. 승인 전 구현 금지**
+> 작성: 2026-10-06
+> 전제: [`archiving-bot-separation-2026-09-23.md`](archiving-bot-separation-2026-09-23.md)
+> 연결: [`hermes-write-entrypoints.md`](hermes-write-entrypoints.md) §6
+
+## 1. 왜 다시 설계하나
+
+오너 결정(2026-10-06): **TYBot 없이 Archiver + Hermes 만으로도 돌아야 한다.**
+PF 팀은 TYBot 을 쓰지 않고, 요약 확인을 **로컬 Claude Code 스킬**에서 한다.
+
+지금 구조는 승인 인터페이스가 TYBot 하나로 못 박혀 있다. `summary_review` 가 후보
+생성·검증·Canvas·DM·승인·발송을 전부 들고 있어서, TYBot 을 빼면 **요약 흐름 자체가
+사라진다.** 그래서 셋을 가른다.
+
+| 무엇 | 지금 | 앞으로 |
+|---|---|---|
+| 근거 소유(원문 + **좌표 도출**) | TYBot | Archiver(목표) · Hermes(PF) · TYBot(사내) |
+| 요약 생성·**재요약** | TYBot 이 Hermes 규칙으로 | **Hermes** |
+| 승인 인터페이스 | TYBot DM/Canvas | TYBot DM/Canvas **또는 로컬 스킬** |
+
+## 2. 세 구성이 전부 돌아야 한다
+
+| 구성 | 수집 | 요약·재요약 | 승인 | 게시 |
+|---|---|---|---|---|
+| 사내 현재 | TYBot | Hermes 규칙 + TYBot 실행 | TYBot DM/Canvas | TYBot |
+| 사내 목표 | Archiver | **Hermes** | TYBot DM/Canvas | TYBot |
+| **PF** | Archiver(또는 Hermes 현행) | **Hermes** | **로컬 스킬** | 승인 뒤에만 |
+
+가운데 열이 **어느 구성에서도 Hermes** 라는 것이 이 설계의 전부다. 승인 인터페이스는
+갈아 끼우는 부품이고, 요약은 부품이 아니다.
+
+## 3. 키스톤 — 공통 결정 기록
+
+셋을 잇는 것은 **파일 하나의 형식**이다. 이게 있어야 승인 인터페이스를 갈아 끼워도
+재요약과 중복 생략이 그대로 동작한다.
+
+```json
+{
+  "schema": "summary-review-decisions/v1",
+  "decisions": [{
+    "candidate_id": "…",
+    "workspace": "tyit",
+    "channel_id": "C0BQ…",
+    "evidence_locator": "2026-10-02.md:42",
+    "evidence_hash": "<그 줄의 content hash>",
+    "evidence_message_ts": "1759…",
+    "kind": "number_or_schedule",
+    "state": "approved",
+    "generation": 1,
+    "decided_at": "2026-10-02T09:00:00+09:00",
+    "decided_by": "U0BQ… | local-skill",
+    "source": "tybot-dm | archive-inbox"
+  }]
+}
+```
+
+읽는 쪽과 쓰는 쪽 모두 [`summary_review_reconcile.py`](../../src/tybot/summary_review_reconcile.py)
+에 있다(`load_decisions` · `write_export`). 늘어나는 것은 **누가 쓰느냐**뿐이다.
+
+### 3.0 본문을 싣지 않는다 (2026-10-06 수정)
+
+처음 설계에는 `proposed_text` 가 있었다. **뺐다.** 이 파일은 다른 쪽이 읽는 것이고,
+사내 요약 문장이 PF 로 또는 PF 문장이 사내로 건너가면 그건 크로스 워크스페이스
+노출이다(원칙 4). 대조에 필요한 것은 **좌표·해시·상태**뿐이고 본문은 각자 자기
+쪽에서 본다. 같은 이유로 `evidence_quote` 도 없다 — 해시가 「같은 줄인가」 를
+말해 주므로 인용문을 옮길 이유가 없다.
+
+내보내는 상태도 좁힌다. `approved`·`rejected`·`deferred` 만 보내고 `pending`·
+`expired`(미응답 폐기)·`superseded`(대체됨)는 보내지 않는다. 뒤 셋은 **사람이 내린
+판단이 아니라서**, 보내면 받는 쪽이 「끝났다」 로 읽을 수 있다.
+
+### 3.1 좌표는 **원문을 가진 쪽이** 도출한다
+
+Hermes 의 요약 스키마(`src/llm/summary-check.js`)는 `{type, where, was, now, evidence}`
+만 낸다 — **evidence 는 인용문이고 좌표가 아니다.** 지금 TYBot `parse_proposals` 가
+그 인용을 원문과 대조해 locator·hash·message_ts 를 **도출**한다.
+
+그 구조를 유지한다. 모델이 준 좌표를 믿으면 사람이 확인하러 간 자리에 그 문장이
+없을 수 있다(원칙 2). 그래서:
+
+| 구성 | 좌표를 도출하는 쪽 |
+|---|---|
+| 사내 | TYBot (`parse_proposals`) — 그대로 |
+| PF | **Hermes** (자기 아카이브에서 같은 대조) |
+| 목표 | Archiver provenance 를 받아 그대로 상속 |
+
+**모델은 어느 구성에서도 좌표를 만들지 않는다.**
+
+## 4. 재요약을 Hermes 로 — 다섯 조건 매핑
+
+CLAUDE.md 원칙 1 의 파생 요약 다섯 조건을 하나씩 어디에 박을지 적는다. 조건을
+못 지키는 설계면 하지 않는다.
+
+| 조건 | 어디에 |
+|---|---|
+| 1. 사람 승인이 전제 | 입력은 `state == "approved"` 인 기록만. 미승인은 읽지 않는다 |
+| 2. 원문 좌표 상속 | 파생 문장이 묶은 항목들의 `evidence_locator`·`evidence_hash`·`evidence_message_ts` **집합**을 그대로 들고 다닌다. 좌표를 잃은 파생은 만들지 않는다 |
+| 3. 묶음 상한 | `MAX_BUNDLE`(예: 8). 사람이 한 화면에서 확인할 수 없는 분량이면 승인이 형식이 되고 1번이 무의미해진다 |
+| 4. 세대 상한 2 | `generation` 컬럼 + **스키마 제약**. 2차의 입력은 항상 1차이며 다른 2차가 아니다. 코드 규칙이 아니라 DB 제약으로 박는다 |
+| 5. 연쇄 stale · 단일 채널 | 물고 있는 1차가 `stale_at` 이면 파생도 재검토. 한 채널 안에서만 묶는다(여러 채널을 묶으면 일부 원문에 권한 없는 사람이 파생 문장으로 내용을 안다 — 원칙 3) |
+
+### 4.1 지금 있는 것을 무엇으로 바꾸나
+
+`summary_review.projected_summary()` 는 승인 문장을 **결정적 치환**으로 조합한다.
+그건 「바뀌지 않을 문장이 바뀐다고 읽히는 것」(`AmbiguousProjection`)을 막으려던
+의도된 결정이었다(`summary-review-canvas.md` §2.1).
+
+그 안전장치를 버리지 않는다. 바뀌는 것은 **누가 만드느냐**이고, 모호할 때의 동작은
+그대로다 — 바꿀 문장을 못 찾거나 두 번 찾으면 **파생을 만들지 않고** 사람에게 묻는다.
+
+## 5. 승인 인터페이스 두 벌
+
+| | TYBot DM/Canvas | 로컬 스킬 |
+|---|---|---|
+| 누가 | 사내 사용자 | PF 담당자 |
+| 어디서 | Slack | Claude Code |
+| 쓰는 기록 | `approved_summary_item` + §3 형식으로 내보내기 | §3 형식을 직접 쓴다 |
+| 이미 있는 것 | `summary_review` 전부 | `archive-inbox` 의 반영/빼/나중에 |
+
+로컬 스킬 쪽은 **처음부터 만들지 않는다.** `archive-inbox` 가 이미 「건별로 원문과
+함께 보이고 반영/빼/나중에를 정한다」 를 한다. 모자란 것은 **그 결정에 좌표를 붙여
+§3 형식으로 쓰는 것** 하나다.
+
+## 6. 하지 않는 것
+
+- **PF 의 현재 동작을 끄지 않는다.** 기본값은 지금 그대로다
+- **모델에게 좌표를 만들게 하지 않는다**(§3.1)
+- **재요약을 모호할 때 강행하지 않는다**(§4.1)
+- **두 인터페이스가 같은 채널을 동시에 맡게 하지 않는다.** 한 채널의 승인 주체는
+  하나다 — 둘이 각자 승인하면 같은 원문에 두 개의 「확정」 이 생긴다
+
+## 7. 구현 순서와 관문
+
+각 단계는 **앞 단계의 시험이 서 있을 때만** 들어간다.
+
+1. **공통 기록 형식 고정** — 스키마 + 읽기(이미 있음) + 쓰기 양쪽의 왕복 시험
+2. **좌표 도출을 Hermes 에도** — PF 구성에서 Hermes 가 자기 아카이브로 대조.
+   사내 경로는 건드리지 않는다
+3. **`archive-inbox` 가 §3 형식으로 결정을 쓴다** — 그때부터 중복 생략이 실제로 동작
+4. **재요약을 Hermes 로** — 다섯 조건을 스키마 제약과 함께. DB 변경이 여기 들어온다
+5. **TYBot 쪽 전환** — `projected_summary()` 를 Hermes 호출로 바꾼다. 되돌릴 수 있게
+   환경변수 하나로 가르고, 양쪽 결과를 한동안 **비교만** 한다
+
+1~3 은 PF 가 TYBot 없이 도는 데 필요한 전부다. 4~5 는 사내 전환이고, 3 이 서기
+전에는 시작하지 않는다.

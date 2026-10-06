@@ -222,6 +222,8 @@ def filter_candidates(
 
 __all__ = [
     "EVIDENCE_CHANGED",
+    "EXPORTED_STATES",
+    "EXPORT_SCHEMA",
     "FINAL_STATES",
     "NOT_FINAL",
     "NO_COORDINATE",
@@ -229,9 +231,88 @@ __all__ = [
     "RECORDS_UNREADABLE",
     "SKIP",
     "SOURCE_MISMATCH",
+    "SOURCE_TYBOT_DM",
     "ExternalDecision",
+    "build_export",
     "decide",
     "filter_candidates",
     "load_decisions",
     "parse_decisions",
+    "to_record",
+    "write_export",
 ]
+
+
+# --- 내보내기 ----------------------------------------------------------------
+#
+# 읽는 쪽만 있으면 대조는 늘 「끝낸 것이 없다」 로 끝난다. 쓰는 쪽이 있어야
+# 승인 인터페이스를 갈아 끼워도(TYBot DM ↔ 로컬 스킬) 서로의 결정을 본다.
+#
+# ## 본문을 싣지 않는다
+#
+# 처음 설계에는 `proposed_text` 가 있었다. 뺐다 — 이 파일은 **다른 쪽이 읽는 것**이고,
+# 사내 요약 문장이 PF 로, PF 문장이 사내로 건너가면 그건 크로스 워크스페이스 노출이다
+# (원칙 4). 대조에 필요한 것은 좌표·해시·상태뿐이고, 본문은 각자 자기 쪽에서 본다.
+#
+# 같은 이유로 `evidence_quote` 도 없다. 해시가 「같은 줄인가」 를 말해 주므로 인용문을
+# 옮길 이유가 없다.
+EXPORT_SCHEMA = "summary-review-decisions/v1"
+SOURCE_TYBOT_DM = "tybot-dm"
+
+# 내보낼 상태. **확정과 보류만** 보낸다.
+#
+# `pending` 은 아직 아무 결정이 아니고, `expired`(미응답 폐기)·`superseded`(대체됨)는
+# 사람이 내린 판단이 아니다. 그것들을 보내면 받는 쪽이 「끝났다」 로 읽을 수 있다 —
+# 읽는 쪽이 조심하는 것보다 **애초에 안 보내는 쪽**이 안전하다.
+EXPORTED_STATES = frozenset({"approved", "rejected", "deferred"})
+
+
+def to_record(row: Any, *, source: str = SOURCE_TYBOT_DM, generation: int = 1) -> dict | None:
+    """후보 한 건 → 내보낼 기록. 좌표가 없으면 `None`.
+
+    좌표 없는 기록은 받는 쪽에서 `no_coordinate` 로 떨어질 뿐이라, 보내지 않는 편이
+    파일도 작고 읽는 쪽도 헷갈리지 않는다.
+    """
+    state = STATE_ALIASES.get(str(_candidate_field(row, "state")).strip().lower(), "")
+    if state not in EXPORTED_STATES:
+        return None
+    locator = _candidate_field(row, "evidence_locator")
+    digest = _candidate_field(row, "evidence_hash")
+    if not locator or not digest:
+        return None
+    return {
+        "candidate_id": _candidate_field(row, "id") or _candidate_field(row, "candidate_id"),
+        "workspace": _candidate_field(row, "workspace"),
+        "channel_id": _candidate_field(row, "channel_id"),
+        "evidence_locator": locator,
+        "evidence_hash": digest,
+        "evidence_message_ts": _candidate_field(row, "evidence_message_ts"),
+        "kind": _candidate_field(row, "kind"),
+        "state": state,
+        "generation": int(generation),
+        "decided_at": _candidate_field(row, "decided_at"),
+        "decided_by": _candidate_field(row, "decided_by"),
+        "source": source,
+    }
+
+
+def build_export(rows, *, source: str = SOURCE_TYBOT_DM) -> dict:
+    """후보 목록 → 내보낼 덩이. 좌표 없는 건은 조용히 빠진다."""
+    out = [r for r in (to_record(row, source=source) for row in rows or ()) if r]
+    return {"schema": EXPORT_SCHEMA, "source": source, "decisions": out}
+
+
+def write_export(path: Path | str, rows, *, source: str = SOURCE_TYBOT_DM) -> int:
+    """원자적으로 쓴다. 읽는 쪽이 **반쯤 쓰인 파일**을 보면 안 된다 —
+    그때 JSON 파싱이 깨지고, 깨짐은 「못 읽음」 이라 대조가 통째로 멈춘다.
+    """
+    payload = build_export(rows, source=source)
+    file = Path(path)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = file.with_suffix(file.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    tmp.replace(file)
+    logger.info("검토 결정 %d건을 %s 로 내보냈습니다", len(payload["decisions"]), file)
+    return len(payload["decisions"])
