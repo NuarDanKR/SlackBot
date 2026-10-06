@@ -8,10 +8,6 @@
  *
  * ANTHROPIC_API_KEY 는 필요 없다 — 모델을 쓰지 않고 파일과 슬랙 목록만 본다.
  */
-import { WebClient } from '@slack/web-api';
-import { requireEnv } from '../src/config.js';
-import { runHealth } from '../src/archive-health.js';
-
 // --- TYBot 연동 모드 역할 관문 -------------------------------------------------
 // 연동 모드에서 발송은 TYBot 이 맡는다. 여기서 또 보내면 같은 날 같은 내용이 두 번
 // 나가고, 둘의 숫자가 다르면 어느 쪽이 맞는지 알 방법이 없다.
@@ -20,6 +16,12 @@ if (!ownsRole(ROLES.HEALTH)) {
   console.error(new RoleNotOwned(ROLES.HEALTH, 'npm run health').message);
   process.exit(2);
 }
+
+const [{ WebClient }, { requireEnv }, { runHealth }] = await Promise.all([
+  import('@slack/web-api'),
+  import('../src/config.js'),
+  import('../src/archive-health.js'),
+]);
 
 /* **`process.exit()` 을 안 쓴다** (2026-09-03). 윈도우에서 슬랙 호출을 한 뒤
  * `process.exit(n)` 을 부르면 `@slack/web-api` 가 열어 둔 비동기 핸들 위로 이벤트 루프가

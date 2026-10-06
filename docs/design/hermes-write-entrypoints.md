@@ -77,8 +77,10 @@ Claude Code 스킬까지.
 ## 3. TYBot 연동 모드 — 스위치 하나로 막는다 (2026-10-06 구현)
 
 ```bash
-HERMES_MODE=tybot    # 연동. 원문 쓰기를 전부 막는다
-                     # (미설정·그 외) PF 직접 실행 — 지금까지와 똑같다
+HERMES_MODE=pf             # PF 직접 실행. 기존 writer까지 유지하는 롤백 모드
+HERMES_MODE=pf-archiver    # PF 질문·DM·요약 유지, 원문 쓰기만 전부 막는다
+HERMES_MODE=tybot          # TYBot 계약 연동. 독립 Node 런타임도 막는다
+                           # 미설정은 pf, 그 밖의 값은 기동 오류
 ```
 
 판정은 **두 곳에서만** 읽는다 — 봇 쪽 [`src/mode.js`](../../subbots/hermes/src/mode.js),
@@ -146,14 +148,15 @@ PF 는 자기 배포에서 Hermes 를 직접 돌린다. 질문·DM·요약이 �
 **이 저장소의 사본은 PF 운영에 쓰이지 않는다**(`subbots/pf-hermes-archive/` ·
 `subbots/pf-hermes-source/` 는 `.gitignore` 로 막혀 있다).
 
-따라서 이 문서의 어떤 항목도 PF 기능을 끄지 않는다. **PF 의 원문 writer 를 끄는
-전환은 하지 않는다** — 별도 게이트와 회귀 시험을 갖추기 전에는 실행 금지다(오너 지시,
-2026-10-02). 그 전환을 하려면 최소한 이것들이 먼저 있어야 한다.
+PF 기능을 유지하면서 원문 writer만 끄는 전환 모드는 `pf-archiver`다. 코드는 준비됐지만
+PF 운영 호스트에는 아직 적용하지 않는다. Archiving Bot 자료를 PF Hermes가 읽는 경로와
+검색 결과의 동등성을 확인한 뒤 전환한다.
 
-- [ ] 끄고 켜는 **단일 스위치**(환경변수 하나, 기본값 = 켜짐)
-- [ ] 꺼진 상태에서 질문·DM·요약이 **그대로 동작**하는 회귀 시험
-- [ ] 꺼진 상태에서 수집·소급·첨부 저장이 **전부 거부**되는 시험
-- [ ] 되돌리는 절차와, 되돌렸을 때 유실이 없다는 근거
+- [x] 끄고 켜는 **단일 스위치**: `HERMES_MODE` (기본값 `pf`)
+- [x] `pf-archiver`에서 질문·DM·요약 역할을 유지하는 회귀 시험
+- [x] `pf-archiver`에서 수집·소급·첨부 저장을 전부 거부하는 시험
+- [x] 즉시 롤백 절차: `HERMES_MODE=pf`로 되돌리고 프로세스를 재기동
+- [ ] PF Hermes가 Archiving Bot 정본을 읽는 어댑터와 검색 동등성 검증
 
 ## 5. 시험이 고정하는 것
 

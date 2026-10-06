@@ -27,8 +27,8 @@ import { fileURLToPath } from 'node:url';
 // --- TYBot 연동 모드 관문 -----------------------------------------------------
 // CLI 는 사람이 직접 치는 자리다. 깊은 곳에서 던지면 스택만 보이고 무엇을 해야
 // 하는지 안 보이므로, **여기서 먼저** 사람 말로 멈춘다.
-import { isTybotMode, ArchiveWriteBlocked } from '../src/mode.js';
-if (isTybotMode()) {
+import { archiveWritesBlocked, ArchiveWriteBlocked } from '../src/mode.js';
+if (archiveWritesBlocked()) {
   const blocked = new ArchiveWriteBlocked('npm run init-archive');
   console.error(blocked.message);
   process.exit(2);

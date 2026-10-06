@@ -65,6 +65,12 @@ def test_pf_mode_keeps_every_role():
 
 
 @needs_node
+def test_pf_archiver_mode_keeps_pf_features_but_drops_collection():
+    """PF 질문·DM·요약은 유지하고 원문 writer만 Archiving Bot에 넘긴다."""
+    assert _roles("pf-archiver") == ["answer", "digest-publish", "health"]
+
+
+@needs_node
 def test_tybot_mode_leaves_only_answering():
     """연동 모드에서는 독립 Node 런타임을 띄우지 않는다.
 
@@ -339,6 +345,12 @@ def test_unset_or_exact_pf_is_pf(value):
 @pytest.mark.parametrize("value", ["tybot", "TYBOT", " tybot "])
 def test_exact_tybot_is_tybot(value):
     assert _roles(value) == []
+
+
+@needs_node
+@pytest.mark.parametrize("value", ["pf-archiver", "PF-ARCHIVER", " pf-archiver "])
+def test_exact_pf_archiver_keeps_non_collection_roles(value):
+    assert _roles(value) == ["answer", "digest-publish", "health"]
 
 
 def test_tybot_mode_blocks_the_standalone_slack_and_local_ask_entrypoints():

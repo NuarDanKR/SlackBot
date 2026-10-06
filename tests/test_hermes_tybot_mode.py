@@ -89,10 +89,15 @@ def _env(mode: str | None) -> dict[str, str]:
     return env
 
 
-def _node(script: str, mode: str | None) -> subprocess.CompletedProcess:
+def _node(
+    script: str, mode: str | None, *, data_root: Path | None = None,
+) -> subprocess.CompletedProcess:
+    env = _env(mode)
+    if data_root is not None:
+        env["HERMES_DATA_ROOT"] = str(data_root)
     return subprocess.run(
         [NODE, "--input-type=module", "-e", script],
-        cwd=HERMES, env=_env(mode), capture_output=True, text=True, encoding="utf-8",
+        cwd=HERMES, env=env, capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=60,
     )
 
@@ -102,10 +107,11 @@ def _node(script: str, mode: str | None) -> subprocess.CompletedProcess:
 @pytest.mark.parametrize(
     ("value", "expected"),
     [(None, "pf"), ("", "pf"), ("  ", "pf"), ("pf", "pf"), ("PF", "pf"),
+     ("pf-archiver", "pf-archiver"), (" PF-ARCHIVER ", "pf-archiver"),
      ("tybot", "tybot"), ("TYBOT", "tybot"), (" tybot ", "tybot")],
 )
-def test_only_the_two_known_values_are_accepted(value, expected):
-    """비우면 PF, `pf`·`tybot` 만 그 모드다.
+def test_only_the_known_values_are_accepted(value, expected):
+    """비우면 PF, `pf`·`pf-archiver`·`tybot` 만 그 모드다.
 
     **모르는 값은 PF 로 떨어지지 않는다**(2026-10-06 정정). 처음에는 「오타가 운영을
     멈추게 하지 않는다」 로 PF 로 봤는데, `HERMES_MODE=tybo` 로 띄우면 연동인 줄 아는
@@ -121,8 +127,11 @@ def test_only_the_two_known_values_are_accepted(value, expected):
 # --- 축 1·4. 직접 모듈 호출 ---------------------------------------------------
 @needs_node
 @needs_deps
+@pytest.mark.parametrize("blocked_mode", ["tybot", "pf-archiver"])
 @pytest.mark.parametrize(("module", "fn"), BLOCKED_FUNCTIONS)
-def test_a_write_function_refuses_in_tybot_mode(module, fn):
+def test_a_write_function_refuses_when_archiver_owns_the_source(
+    tmp_path, blocked_mode, module, fn,
+):
     """위 관문을 전부 우회해 함수를 직접 불러도 여기서 막힌다."""
     script = (
         f"import {{ {fn} }} from './{module}';\n"
@@ -130,7 +139,8 @@ def test_a_write_function_refuses_in_tybot_mode(module, fn):
         "catch (e) { console.log(e.code === 'tybot_mode_write_blocked' "
         "? 'BLOCKED' : 'OTHER:' + (e.code || e.message)); }"
     )
-    got = _node(script, "tybot")
+    shutil.copyfile(HERMES / "config.example.json", tmp_path / "config.json")
+    got = _node(script, blocked_mode, data_root=tmp_path)
 
     assert "BLOCKED" in got.stdout, f"{fn} 이 막히지 않았다: {got.stdout}{got.stderr}"
 
@@ -158,35 +168,37 @@ def test_the_same_function_is_not_blocked_in_pf_mode(module, fn):
 # --- 축 2. CLI ----------------------------------------------------------------
 @needs_node
 @needs_deps
+@pytest.mark.parametrize("blocked_mode", ["tybot", "pf-archiver"])
 @pytest.mark.parametrize("script_name", BLOCKED_CLI)
-def test_a_write_cli_stops_before_doing_anything(script_name):
+def test_a_write_cli_stops_before_doing_anything(blocked_mode, script_name):
     """사람이 직접 치는 자리다. 스택이 아니라 **사람 말로** 멈춰야 한다."""
     got = subprocess.run(
         [NODE, f"scripts/{script_name}", "--dry"],
-        cwd=HERMES, env=_env("tybot"), capture_output=True, text=True, encoding="utf-8",
+        cwd=HERMES, env=_env(blocked_mode), capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=60,
     )
 
     assert got.returncode == 2, f"{script_name} 종료 코드 {got.returncode}"
-    assert "TYBot 연동 모드" in got.stderr
+    assert "원문" in got.stderr
     assert "HERMES_MODE" in got.stderr
 
 
 # --- 축 3. 스킬 ---------------------------------------------------------------
+@pytest.mark.parametrize("blocked_mode", ["tybot", "pf-archiver"])
 @pytest.mark.parametrize("rel", BLOCKED_SKILLS)
-def test_a_write_skill_stops_at_the_top_of_main(rel):
+def test_a_write_skill_stops_at_the_top_of_main(blocked_mode, rel):
     """**가장 위험한 축.** 사람이 명령을 치지 않아도 에이전트가 집어 실행한다."""
     path = SKILLS / rel
     assert path.is_file(), f"목록에 있는 스킬이 없다: {rel}"
 
     got = subprocess.run(
         [sys.executable, str(path), "--help"],
-        cwd=HERMES, env=_env("tybot"), capture_output=True, text=True, encoding="utf-8",
+        cwd=HERMES, env=_env(blocked_mode), capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=60,
     )
 
     assert got.returncode == 2, f"{rel} 종료 코드 {got.returncode}: {got.stdout}{got.stderr}"
-    assert "TYBot 연동 모드" in got.stderr
+    assert "원문" in got.stderr
 
 
 def test_a_write_skill_stops_without_python_on_path():
@@ -264,7 +276,7 @@ def test_every_write_cli_carries_the_guard(script_name):
     """CLI 는 종료 코드 2 로 멈춰야 한다 — 실패(1)와 금지(2)는 다르다."""
     text = (HERMES / "scripts" / script_name).read_text(encoding="utf-8")
 
-    assert "isTybotMode" in text, f"{script_name} 에 관문이 없다"
+    assert "archiveWritesBlocked" in text, f"{script_name} 에 관문이 없다"
     assert "process.exit(2)" in text
 
 

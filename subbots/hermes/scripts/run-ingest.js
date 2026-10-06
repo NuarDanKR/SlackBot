@@ -7,19 +7,21 @@
  *   npm run ingest -- --dry --skip-summary --no-edit-scan   수정·삭제 대조도 건너뛴다 (요약 전 17:00 회차와 같은 조합)
  *   npm run ingest                           실제 반영 + 커밋 + push + DM
  */
-import { WebClient } from '@slack/web-api';
-import { requireEnv } from '../src/config.js';
-import { runIngest } from '../src/ingest/index.js';
-
 // --- TYBot 연동 모드 관문 -----------------------------------------------------
 // CLI 는 사람이 직접 치는 자리다. 깊은 곳에서 던지면 스택만 보이고 무엇을 해야
 // 하는지 안 보이므로, **여기서 먼저** 사람 말로 멈춘다.
-import { isTybotMode, ArchiveWriteBlocked } from '../src/mode.js';
-if (isTybotMode()) {
+import { archiveWritesBlocked, ArchiveWriteBlocked } from '../src/mode.js';
+if (archiveWritesBlocked()) {
   const blocked = new ArchiveWriteBlocked('npm run ingest');
   console.error(blocked.message);
   process.exit(2);
 }
+
+const [{ WebClient }, { requireEnv }, { runIngest }] = await Promise.all([
+  import('@slack/web-api'),
+  import('../src/config.js'),
+  import('../src/ingest/index.js'),
+]);
 
 /* **`process.exit()` 을 안 쓴다** (2026-09-03). 윈도우에서 슬랙 호출을 한 뒤
  * `process.exit(n)` 을 부르면 `@slack/web-api` 가 열어 둔 비동기 핸들 위로 이벤트 루프가

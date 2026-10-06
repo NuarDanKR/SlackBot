@@ -31,26 +31,36 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { WebClient } from '@slack/web-api';
-import { config, CHANNELS_DIR, isPrivateChannel, normalizeChannel } from '../src/config.js';
-import { listBotChannels, getUserMap, getSelfId } from '../src/slack-live.js';
-import { listAllChannels } from '../src/archive.js';
-import {
-  monthChunks, writeMonth, channelSkeleton, stripMissingMarks,
-  loadBackfillState, saveBackfillState, advance, archiveFloor,
-  backfillTargets, mdFileFor,
-} from '../src/ingest/backfill.js';
-import { runDerive } from '../src/ingest/derive.js';
 
 // --- TYBot 연동 모드 관문 -----------------------------------------------------
 // CLI 는 사람이 직접 치는 자리다. 깊은 곳에서 던지면 스택만 보이고 무엇을 해야
 // 하는지 안 보이므로, **여기서 먼저** 사람 말로 멈춘다.
-import { isTybotMode, ArchiveWriteBlocked } from '../src/mode.js';
-if (isTybotMode()) {
+import { archiveWritesBlocked, ArchiveWriteBlocked } from '../src/mode.js';
+if (archiveWritesBlocked()) {
   const blocked = new ArchiveWriteBlocked('npm run backfill');
   console.error(blocked.message);
   process.exit(2);
 }
+
+const [
+  { WebClient },
+  { config, CHANNELS_DIR, isPrivateChannel, normalizeChannel },
+  { listBotChannels, getUserMap, getSelfId },
+  { listAllChannels },
+  {
+    monthChunks, writeMonth, channelSkeleton, stripMissingMarks,
+    loadBackfillState, saveBackfillState, advance, archiveFloor,
+    backfillTargets, mdFileFor,
+  },
+  { runDerive },
+] = await Promise.all([
+  import('@slack/web-api'),
+  import('../src/config.js'),
+  import('../src/slack-live.js'),
+  import('../src/archive.js'),
+  import('../src/ingest/backfill.js'),
+  import('../src/ingest/derive.js'),
+]);
 
 /* 이 아래는 함수로 감싼다 — 조기 종료를 `process.exit()` 이 아니라
  * `process.exitCode` + `return` 으로 하기 때문이다. 최상위(모듈 스코프)에서는

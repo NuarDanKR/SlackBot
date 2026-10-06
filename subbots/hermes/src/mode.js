@@ -1,9 +1,10 @@
 /**
  * 실행 모드 — Hermes 가 **누구 밑에서 도는가**.
  *
- *   HERMES_MODE=tybot   TYBot 계약 연동. 독립 런타임과 원문 쓰기를 전부 막는다
- *   HERMES_MODE=pf      PF 직접 실행. 지금까지와 똑같다
- *   미설정               PF 직접 실행. 지금까지와 똑같다
+ *   HERMES_MODE=tybot        TYBot 계약 연동. 독립 런타임과 원문 쓰기를 전부 막는다
+ *   HERMES_MODE=pf-archiver  PF 질문·DM·요약은 유지하고 원문 쓰기만 막는다
+ *   HERMES_MODE=pf           PF 직접 실행. 지금까지와 똑같다
+ *   미설정                    PF 직접 실행. 지금까지와 똑같다
  *   그 외                설정 오류로 기동을 막는다
  *
  * ## 왜 필요한가
@@ -31,13 +32,15 @@
 
 export const TYBOT = 'tybot';
 export const PF = 'pf';
+export const PF_ARCHIVER = 'pf-archiver';
 
 /** 설정값이 모드가 아니다. **기동을 막는다** — 고쳐야 하는 것은 설정이다. */
 export class ModeConfigError extends Error {
   constructor(raw) {
     super(
       `HERMES_MODE 값이 올바르지 않습니다: ${JSON.stringify(raw)}\n` +
-        `쓸 수 있는 값은 "${PF}" 와 "${TYBOT}" 뿐이고, 비우면 "${PF}" 입니다.`
+        `쓸 수 있는 값은 "${PF}", "${PF_ARCHIVER}", "${TYBOT}" 이고, ` +
+        `비우면 "${PF}" 입니다.`
     );
     this.name = 'ModeConfigError';
     this.code = 'hermes_mode_invalid';
@@ -58,7 +61,7 @@ export class ModeConfigError extends Error {
 export function mode() {
   const raw = String(process.env.HERMES_MODE ?? '').trim().toLowerCase();
   if (raw === '') return PF;
-  if (raw === PF || raw === TYBOT) return raw;
+  if (raw === PF || raw === PF_ARCHIVER || raw === TYBOT) return raw;
   throw new ModeConfigError(process.env.HERMES_MODE);
 }
 
@@ -66,14 +69,20 @@ export function isTybotMode() {
   return mode() === TYBOT;
 }
 
+/** Archiving Bot이 원문 정본을 소유해 Hermes의 원문 쓰기가 금지된 모드인가. */
+export function archiveWritesBlocked() {
+  return mode() !== PF;
+}
+
 /** 막힌 동작. 코드로 구별할 수 있어야 호출부가 「실패」 와 「금지」 를 가른다. */
 export class ArchiveWriteBlocked extends Error {
   constructor(action) {
+    const current = mode();
+    const label = current === TYBOT ? 'TYBot 연동 모드' : 'PF Archiver 모드';
     super(
-      `[TYBot 연동 모드] ${action} 은(는) 막혀 있습니다.\n` +
-        '연동 모드에서 Hermes 는 원문을 쓰지 않습니다 — 근거는 TYBot 의 권한 검사된 ' +
-        '도구로만 읽습니다.\n' +
-        'PF 직접 실행이라면 HERMES_MODE 를 비우고 다시 실행하세요.'
+      `[${label}] ${action} 은(는) 막혀 있습니다.\n` +
+        'Archiving Bot이 원문 수집·소급·첨부 저장을 맡으므로 Hermes는 원문을 쓰지 않습니다.\n' +
+        'Hermes의 기존 원문 writer를 되살릴 때만 HERMES_MODE=pf로 실행하세요.'
     );
     this.name = 'ArchiveWriteBlocked';
     this.code = 'tybot_mode_write_blocked';
@@ -88,7 +97,7 @@ export class ArchiveWriteBlocked extends Error {
  * 부르는 쪽이 확인을 잊어도 조용히 지나간다.
  */
 export function assertMayWriteArchive(action) {
-  if (isTybotMode()) {
+  if (archiveWritesBlocked()) {
     throw new ArchiveWriteBlocked(action);
   }
 }
@@ -134,6 +143,9 @@ export const ROLES = {
 /** PF 직접 실행이 맡는 역할 — 지금까지와 같다. */
 const PF_ROLES = new Set([ROLES.INGEST, ROLES.DIGEST_PUBLISH, ROLES.HEALTH, ROLES.ANSWER]);
 
+/** PF 직접 호출은 유지하되 원문 정본은 Archiving Bot만 쓰는 목표 운영 역할. */
+const PF_ARCHIVER_ROLES = new Set([ROLES.DIGEST_PUBLISH, ROLES.HEALTH, ROLES.ANSWER]);
+
 /**
  * TYBot 연동에서 이 **독립 Node 런타임**에 남기는 역할.
  *
@@ -145,7 +157,9 @@ const PF_ROLES = new Set([ROLES.INGEST, ROLES.DIGEST_PUBLISH, ROLES.HEALTH, ROLE
 const TYBOT_ROLES = new Set();
 
 export function rolesFor(current = mode()) {
-  return current === TYBOT ? TYBOT_ROLES : PF_ROLES;
+  if (current === TYBOT) return TYBOT_ROLES;
+  if (current === PF_ARCHIVER) return PF_ARCHIVER_ROLES;
+  return PF_ROLES;
 }
 
 /** 이 역할을 지금 내가 맡는가. 스케줄 등록·발송 직전에 묻는다. */
@@ -159,7 +173,7 @@ export class RoleNotOwned extends Error {
     super(
       `[TYBot 연동 모드] ${action} 은(는) 이 프로세스의 역할이 아닙니다(${role}).\n` +
         '연동 모드에서는 이 독립 Node 런타임을 실행하지 않습니다. TYBot 이 Hermes ' +
-        '계약을 권한 도구와 함께 호출합니다 — 여기서 또 실행하면 답변·발송이 중복됩니다.\n' +
+        '계약을 권한 도구와 함께 호출합니다 — 여기서 또 실행하면 같은 답변·발송이 두 번 나갑니다.\n' +
         'PF 직접 실행이라면 HERMES_MODE 를 비우고 다시 실행하세요.'
     );
     this.name = 'RoleNotOwned';

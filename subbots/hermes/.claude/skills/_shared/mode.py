@@ -15,7 +15,7 @@ Slack 에서 파일을 내려받고, `insert_entry.py`·`insert_messages.py` 는
 
 ## 기본값
 
-`HERMES_MODE` 가 비었으면 **PF 직접 실행**이다. 알려진 값은 `pf`·`tybot` 둘뿐이고,
+`HERMES_MODE` 가 비었으면 **PF 직접 실행**이다. 알려진 값은 `pf`·`pf-archiver`·`tybot`이고,
 그 밖의 값은 기동 오류다. 오타를 PF 로 받아 주면 TYBot 연동으로 띄운 줄 알았던
 스킬의 원문 쓰기가 열리기 때문이다.
 """
@@ -24,6 +24,7 @@ import sys
 
 TYBOT = "tybot"
 PF = "pf"
+PF_ARCHIVER = "pf-archiver"
 
 
 class ModeConfigError(RuntimeError):
@@ -32,7 +33,8 @@ class ModeConfigError(RuntimeError):
     def __init__(self, raw: object) -> None:
         super().__init__(
             f"HERMES_MODE 값이 올바르지 않습니다: {raw!r}\n"
-            f'쓸 수 있는 값은 "{PF}" 와 "{TYBOT}" 뿐이고, 비우면 "{PF}" 입니다.'
+            f'쓸 수 있는 값은 "{PF}", "{PF_ARCHIVER}", "{TYBOT}" 이고, '
+            f'비우면 "{PF}" 입니다.'
         )
         self.raw = raw
         self.code = "hermes_mode_invalid"
@@ -51,7 +53,7 @@ def mode() -> str:
     raw = (os.environ.get("HERMES_MODE") or "").strip().lower()
     if raw == "":
         return PF
-    if raw in (PF, TYBOT):
+    if raw in (PF, PF_ARCHIVER, TYBOT):
         return raw
     raise ModeConfigError(os.environ.get("HERMES_MODE"))
 
@@ -60,15 +62,22 @@ def is_tybot_mode() -> bool:
     return mode() == TYBOT
 
 
+def archive_writes_blocked() -> bool:
+    """Archiving Bot이 정본을 소유해 Hermes 원문 쓰기가 금지됐는지 반환한다."""
+    return mode() != PF
+
+
 class ArchiveWriteBlocked(RuntimeError):
     """막힌 동작. 「실패」 가 아니라 「금지」 라 호출부가 구별할 수 있어야 한다."""
 
     def __init__(self, action: str) -> None:
+        current = mode()
+        label = "TYBot 연동 모드" if current == TYBOT else "PF Archiver 모드"
         super().__init__(
-            f"[TYBot 연동 모드] {action} 은(는) 막혀 있습니다.\n"
-            "연동 모드에서 Hermes 는 원문을 쓰지 않습니다 — 근거는 TYBot 의 권한 "
-            "검사된 도구로만 읽습니다.\n"
-            "PF 직접 실행이라면 HERMES_MODE 를 비우고 다시 실행하세요."
+            f"[{label}] {action} 은(는) 막혀 있습니다.\n"
+            "Archiving Bot이 원문 수집·소급·첨부 저장을 맡으므로 Hermes는 원문을 "
+            "쓰지 않습니다.\n"
+            "Hermes의 기존 원문 writer를 되살릴 때만 HERMES_MODE=pf로 실행하세요."
         )
         self.action = action
         self.code = "tybot_mode_write_blocked"
@@ -80,7 +89,7 @@ def assert_may_write_archive(action: str) -> None:
     돌려주는 값이 없다 — 통과하거나 던지거나 둘뿐이다. 불리언을 돌려주면 부르는
     쪽이 확인을 잊어도 조용히 지나간다.
     """
-    if is_tybot_mode():
+    if archive_writes_blocked():
         raise ArchiveWriteBlocked(action)
 
 
@@ -90,6 +99,6 @@ def exit_if_blocked(action: str) -> None:
     스택을 보여 주는 대신 사람 말로 멈춘다. 스킬을 집어 든 쪽이 에이전트일 수도
     있어서, 왜 멈췄는지가 출력 첫 줄에 있어야 한다.
     """
-    if is_tybot_mode():
+    if archive_writes_blocked():
         print(ArchiveWriteBlocked(action), file=sys.stderr)
         raise SystemExit(2)
