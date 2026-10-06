@@ -26,6 +26,8 @@ B-27 은 원래 "실제 질문 30건" 을 고정하는 항목이었다. 그런�
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from tybot.access import RequestContext
@@ -497,7 +499,50 @@ def test_a_pending_attachment_is_named_not_silently_dropped(tmp_path):
     answer = engine.answer("가정산서 내용 알려줘", _ctx(MINE))
 
     assert "가정산서.pdf" in answer.to_slack()
-    assert "자동 변환 실패" in answer.to_slack(), "왜 원본을 안 읽었는지 말해야 한다"
+    assert "현재 처리 상태를 정확히 확인하지 못함" in answer.to_slack()
+    assert "자동 변환 실패" not in answer.to_slack(), "모르는 상태를 실패로 단정했다"
+
+
+def test_a_converted_staging_file_is_reported_as_a_search_gap(tmp_path):
+    """변환 성공과 답변 근거 반영은 서로 다른 단계다.
+
+    staging 에 본문이 있는데 정본 문서가 근거로 선택되지 않은 상황을 「변환 실패」로
+    답하면 운영자는 변환기를 다시 돌린다. 실제로 확인할 것은 정본 게시·색인이다.
+    """
+    doc = DOC_MINE.replace(
+        "> [2026-08-12 09:15] 홍길동: 콘솔 배포 자동화를 끝냈습니다",
+        "> [2026-08-12 09:15] 홍길동: 콘솔 배포 자동화를 끝냈습니다\n"
+        "> [2026-08-12 09:16] 홍길동: [첨부:자동변환] 가정산서.pdf (pdf, 240KB)",
+    ).replace("acl:", "channel_id: C1\nacl:")
+    path = tmp_path / "channels" / "pilot" / "첨부.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(doc, encoding="utf-8")
+
+    staged = tmp_path / "pilot" / "C1__전산" / "staging" / "F1"
+    staged.mkdir(parents=True)
+    (staged / "metadata.json").write_text(
+        json.dumps(
+            {
+                "name": "가정산서.pdf",
+                "filetype": "pdf",
+                "status": "converted",
+                "conversion_state": "succeeded",
+                "extracted": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    hook = _Special("가정산서의 수치를 확인하지 못했습니다.")
+    engine = _engine_with(tmp_path, hook)
+    answer = engine.answer("가정산서 내용 알려줘", _ctx(MINE))
+
+    assert "변환은 완료됐지만 이번 검색 근거에 본문이 포함되지 않음" in answer.to_slack()
+    assert "검색 반영 확인 필요" in answer.to_slack()
+    assert "자동 변환 실패" not in answer.to_slack()
+    assert "<첨부확인상태>" in hook.seen[-1][1]
+    assert "제공되지 않은 숫자를 추측하지 마세요" in hook.seen[-1][1]
 
 
 def test_an_engine_without_a_specialist_layer_fails_closed(tmp_path):

@@ -156,6 +156,9 @@ class Answer:
     terms: list[str] = field(default_factory=list)
     # 근거에 언급됐지만 자동 변환하지 못한 첨부.
     withheld: list[str] = field(default_factory=list)
+    # 첨부 본문을 쓰지 못한 **현재 이유**. staging 은 변환 완료인데 검색 근거에
+    # 정본이 안 들어온 경우를 변환 실패라고 부르지 않기 위해 별도로 둔다.
+    attachment_notes: list[str] = field(default_factory=list)
     # 변환은 됐는데 **일부만** 읽은 첨부. `이름 (확인 3/10쪽)` 모양이다.
     # 실패(`withheld`)와 다르다 — 이쪽은 답이 나가므로 범위를 밝히지 않으면
     # 사람이 전부 본 줄 안다.
@@ -227,7 +230,23 @@ class Answer:
         if self.withheld:
             names = ", ".join(self.withheld[:3])
             more = f" 외 {len(self.withheld) - 3}건" if len(self.withheld) > 3 else ""
-            bits.append(f"자동 변환 실패로 내용을 읽지 못한 첨부: {names}{more}")
+            # 구형 호출부가 `withheld` 만 넘기면 그 값은 확정된 변환 실패다. 새 판정은
+            # `attachment_notes` 에 현재 상태를 함께 넣으므로, 그때는 실패로 뭉뚱그리지
+            # 않는다.
+            label = (
+                "본문을 근거로 사용하지 못한 첨부"
+                if self.attachment_notes
+                else "자동 변환 실패로 내용을 읽지 못한 첨부"
+            )
+            bits.append(f"{label}: {names}{more}")
+        if self.attachment_notes:
+            shown = "; ".join(self.attachment_notes[:3])
+            more = (
+                f" 외 {len(self.attachment_notes) - 3}건"
+                if len(self.attachment_notes) > 3
+                else ""
+            )
+            bits.append(f"첨부 확인: {shown}{more}")
         if self.partial_attachments:
             # **변환은 됐는데 다 읽지는 못한 첨부.** 실패와 다르다 — 본문이 있어서
             # 답이 나가고, 그 답에 우리 출처가 붙는다. 어디까지 읽었는지 안 밝히면
@@ -535,20 +554,91 @@ def _partial_attachments(root: Path, hits: list[SearchHit]) -> list[str]:
     return out
 
 
-def _withheld_attachments(hits: list[SearchHit]) -> list[str]:
-    """근거에 언급됐지만 자동 변환 텍스트가 없는 첨부 이름.
+def _selected_attachment_ids(hits: list[SearchHit]) -> set[str]:
+    """이번 모델 입력에 실제로 들어간 첨부 정본의 file ID."""
+    out: set[str] = set()
+    for hit in hits:
+        parts = (hit.line.source_path or hit.doc.path).parts
+        try:
+            index = parts.index("attachments")
+        except ValueError:
+            continue
+        if index + 1 < len(parts):
+            out.add(parts[index + 1])
+    return out
+
+
+def _withheld_attachments(
+    root: Path, hits: list[SearchHit]
+) -> tuple[list[str], list[str]]:
+    """근거에 언급됐지만 본문을 쓰지 못한 첨부와 **현재 이유**.
 
     원본은 외부 LLM에 보내지 않는다. 자동 변환이 실패한 사실과 파일명을 알려
     사용자가 Slack 원본 또는 콘솔 진단에서 확인할 수 있게 한다.
+
+    staging 의 변환 완료와 답변 근거 반영은 다른 단계다. 완료된 staging 만 보고
+    "읽었다"고 해도 안 되고, 근거에 본문이 없다는 이유로 "변환 실패"라고 해도
+    안 된다. 후자는 운영에서 실제로 변환된 PDF를 실패로 안내했다.
     """
     extracted = _extracted_names(hits)
-    out: list[str] = []
-    for _workspace, _channel_id, name in _attachment_names(hits):
+    selected_ids = _selected_attachment_ids(hits)
+    names = _attachment_names(hits)
+    if not names:
+        return [], []
+    from . import attachment_review
+
+    try:
+        staged = attachment_review.scan(root)
+    except Exception as exc:  # noqa: BLE001 - 안내 실패가 답변을 막지 않는다
+        logger.warning("첨부 현재 상태 조회 실패: %s", exc)
+        staged = []
+
+    withheld: list[str] = []
+    notes: list[str] = []
+    for workspace, channel_id, name in names:
         if name in extracted:
             continue
-        if name not in out:
-            out.append(name)
-    return out
+        matches = [
+            item
+            for item in staged
+            if (item.workspace, item.channel_id, item.name)
+            == (workspace, channel_id, name)
+        ]
+        if len(matches) == 1 and matches[0].file_id in selected_ids:
+            # 별도 정본 문서의 본문이 이번 근거에 실제로 들어갔다.
+            continue
+        if name not in withheld:
+            withheld.append(name)
+        if len(matches) != 1:
+            note = f"{name} — 현재 처리 상태를 정확히 확인하지 못함"
+        else:
+            item = matches[0]
+            if item.conversion_state == attachment_review.PARTIAL:
+                # 범위(쪽/시트)는 `_partial_attachments` 가 더 정확하게 표시한다.
+                continue
+            if item.extracted or item.conversion_state == "succeeded":
+                note = (
+                    f"{name} — 변환은 완료됐지만 이번 검색 근거에 본문이 포함되지 않음"
+                    "(검색 반영 확인 필요)"
+                )
+            else:
+                note = f"{name} — {attachment_review.status_label(item)}"
+        if note not in notes:
+            notes.append(note)
+    return withheld, notes
+
+
+def _attachment_note_block(notes: list[str]) -> str:
+    """모델도 변환 실패와 검색 반영 누락을 구분하도록 주는 비본문 상태."""
+    if not notes:
+        return ""
+    lines = "\n".join(f"- {note}" for note in notes)
+    return (
+        "<첨부확인상태>\n"
+        f"{lines}\n"
+        "이 상태는 파일 본문이 아니며, 제공되지 않은 숫자를 추측하지 마세요.\n"
+        "</첨부확인상태>"
+    )
 
 
 def _visual_originals(root: Path, hits: list[SearchHit]) -> documents.Attached:
@@ -1153,7 +1243,7 @@ class AnswerEngine:
 
         # 원본 바이트는 외부 LLM에 보내지 않는다. 수집 단계에서 자동 변환하고 PII
         # 검사를 통과한 텍스트만 근거가 된다.
-        withheld = _withheld_attachments(summary_hits)
+        withheld, attachment_notes = _withheld_attachments(self._store.root, summary_hits)
         citations.extend(_attachment_source_links(summary_hits))
 
         # **요약도 전문가에게 먼저 묻는다.** Hermes 의 본업이 회의록·업무 진행 요약인데
@@ -1186,6 +1276,9 @@ class AnswerEngine:
             # The adapter's final size guard must not silently cut a channel in half.
             # A tools specialist can retrieve further evidence within its budget.
             specialist_evidence = "\n\n".join(selected_blocks)
+            note_block = _attachment_note_block(attachment_notes)
+            if note_block:
+                specialist_evidence = f"{specialist_evidence}\n\n{note_block}"
             outcome = self._ask_specialist(
                 task,
                 question or f"최근 {days}일 진행 상황을 정리해 주세요.",
@@ -1216,6 +1309,7 @@ class AnswerEngine:
                     selected_lines,
                     "answered",
                     withheld=withheld,
+                    attachment_notes=attachment_notes,
                     specialist=special.specialist,
                     format_retry_count=int(getattr(special, "format_retry_count", 0) or 0),
                     guardrail_result=_guardrail_result(self._store.root, selected_hits),
@@ -1267,7 +1361,7 @@ class AnswerEngine:
         return Answer(
             _with_coverage(resp.text.strip(), coverage),
             citations, resp.model, resp.cost_usd, total,
-            "answered", withheld=withheld,
+            "answered", withheld=withheld, attachment_notes=attachment_notes,
             evidence_refs=refs_from_hits(summary_hits, self._store.root),
             attachment_refs=_attachment_refs(self._store.root, summary_hits),
             subject_terms=list(terms or []),
@@ -1859,10 +1953,16 @@ class AnswerEngine:
 
         # 기본 근거는 변환된 텍스트다. 이미지 원본은 아래에서 같은 채널의 정확한 파일로
         # 식별되고 OCR·PII 검사를 통과한 경우에만 시각 입력으로 추가한다.
-        withheld = _withheld_attachments(hits)
+        withheld, attachment_notes = _withheld_attachments(self._store.root, hits)
         partial = _partial_attachments(self._store.root, hits)
         visual = _visual_originals(self._store.root, hits)
         prompt = f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"
+        note_block = _attachment_note_block(attachment_notes)
+        if note_block:
+            prompt = f"{prompt}\n\n{note_block}"
+        specialist_evidence = _evidence_block(hits)
+        if note_block:
+            specialist_evidence = f"{specialist_evidence}\n\n{note_block}"
         # 전문가에게 먼저 묻는다. **근거는 이미 권한을 통과한 것뿐**이고(위 검색이
         # `visible_docs` 로 걸렀다), 출처는 아래에서 우리가 붙인다 — 전문가는
         # 문장만 돌려준다(원칙 2·3).
@@ -1874,7 +1974,7 @@ class AnswerEngine:
             # 이미지를 직접 읽고 답했고, 이미지 PDF 가 많은 업무에서는 그 길이
             # 「업무 답변은 전문 봇만」 규칙의 가장 큰 구멍이었다(설계 §6.5).
             outcome = self._ask_specialist(
-                task, q, ctx, _evidence_block(hits), visual=visual.blocks
+                task, q, ctx, specialist_evidence, visual=visual.blocks
             )
             special = outcome.answer if outcome is not None and outcome.ok else None
             if special is not None and not _specialist_documents_ok(
@@ -1904,6 +2004,7 @@ class AnswerEngine:
                     format_retry_count=int(getattr(special, "format_retry_count", 0) or 0),
                     guardrail_result=_guardrail_result(self._store.root, hits),
                     withheld=withheld,
+                    attachment_notes=attachment_notes,
                     partial_attachments=partial,
                     required_capability=str(getattr(task, "required_capability", "") or ""),
                     attempted_specialists=list(outcome.attempted),
@@ -1962,6 +2063,7 @@ class AnswerEngine:
         return Answer(
             resp.text.strip(), citations, resp.model, resp.cost_usd, len(hits),
             "answered", terms=list(terms or []), withheld=withheld,
+            attachment_notes=attachment_notes,
             partial_attachments=partial,
             evidence_refs=refs_from_hits(hits, self._store.root),
             attachment_refs=_attachment_refs(self._store.root, hits),
