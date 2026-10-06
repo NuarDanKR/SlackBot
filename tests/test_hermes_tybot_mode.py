@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -173,12 +174,25 @@ def test_a_write_skill_stops_at_the_top_of_main(rel):
     assert path.is_file(), f"목록에 있는 스킬이 없다: {rel}"
 
     got = subprocess.run(
-        ["python", str(path), "--help"],
+        [sys.executable, str(path), "--help"],
         cwd=HERMES, env=_env("tybot"), capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=60,
     )
 
     assert got.returncode == 2, f"{rel} 종료 코드 {got.returncode}: {got.stdout}{got.stderr}"
+    assert "TYBot 연동 모드" in got.stderr
+
+
+def test_a_write_skill_stops_without_python_on_path():
+    env = _env("tybot")
+    env["PATH"] = ""
+    got = subprocess.run(
+        [sys.executable, str(SKILLS / BLOCKED_SKILLS[0]), "--help"],
+        cwd=HERMES, env=env, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=60,
+    )
+
+    assert got.returncode == 2, got.stderr
     assert "TYBot 연동 모드" in got.stderr
 
 
