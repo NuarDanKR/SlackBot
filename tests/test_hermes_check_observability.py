@@ -337,3 +337,140 @@ def test_brief_split_reports_its_own_duration_and_combination_count(pf_dataroot)
     assert any(ch.isdigit() for ch in joined), joined
     # 비공개 둘 → 공개 전용 + 멤버 2 + DM 2개 + 전체 = 5 조합
     assert "5" in joined, joined
+
+
+# --- ⑥ 실패·중단해도 「못 쟀다」 는 안 묻힌다 ---------------------------------
+
+@needs_node
+def test_markers_survive_a_failing_child(tmp_path):
+    """⑪ **실패한 검사의 `[못잼]` 도 올라온다.**
+
+    전에는 실패하면 `visible` 을 비우고 출력 전문만 찍었다. 전문 속에 섞인 그 줄은
+    사유 줄들 사이에 묻힌다 — 그런데 「한 항목도 못 쟀다」 는 **실패와 별개의 사실**
+    이다. 검사가 왜 떨어졌는지와, 그 검사가 애초에 무엇을 못 쟀는지는 다른 조치로 이어진다.
+    """
+    child = _child(tmp_path, "fail-tagged.js",
+                   "console.log('[못잼] 질의 파일이 없어 절반은 못 쟀습니다');\n"
+                   "console.error('그리고 이 단정이 깨졌습니다');\n"
+                   "process.exit(1);\n")
+    got = _run_helper(child, "반쯤 못 잰 검사")
+
+    assert got["ok_"] is False
+    assert any("절반은 못 쟀" in line for line in got["visible"]), got["visible"]
+    # 전문도 그대로 보인다 — 하나를 얻으려고 다른 하나를 잃지 않는다.
+    assert "그리고 이 단정이 깨졌습니다" in got["output"]
+
+
+@needs_node
+def test_markers_survive_a_timed_out_child(tmp_path):
+    """⑫ 중단된 검사가 죽기 전에 적은 표시도 올라온다."""
+    child = _child(tmp_path, "tagged-hang.js",
+                   "console.log('[보임] 여기까지 42건 대봤습니다');\n"
+                   "setInterval(()=>{}, 1000);\n")
+    got = _run_helper(child, "표시 뒤 멈춘 검사", limit_ms=700)
+
+    assert got["timedOut"] is True
+    assert any("42건" in line for line in got["visible"]), got["visible"]
+
+
+# --- ⑦ 구간 예산 -------------------------------------------------------------
+
+_PHASE_PROBE = """
+const m = await import({helper});
+const log = [], bad = [];
+const okFlag = m.reportPhase({{
+  label: {label}, ms: {ms}, budgetMs: {budget},
+  children: {children},
+  log: (x) => log.push(String(x)), bad: (x) => bad.push(String(x)),
+}});
+process.stdout.write(JSON.stringify({{ log, bad, ok: okFlag }}));
+"""
+
+
+def _phase(label: str, ms: int, budget: int, children: list[dict]) -> dict:
+    code = _PHASE_PROBE.format(
+        helper=json.dumps(HELPER.as_uri()),
+        label=json.dumps(label, ensure_ascii=False),
+        ms=ms, budget=budget,
+        children=json.dumps(children, ensure_ascii=False),
+    )
+    done = _node(code)
+    assert done.returncode == 0, done.stdout + done.stderr
+    return json.loads(done.stdout)
+
+
+@needs_node
+def test_a_phase_within_budget_only_reports_its_total():
+    """⑬ 예산 안이면 합계만 적는다. 늘 빨개지는 관문은 사람이 끄는 법부터 배운다."""
+    got = _phase("코드 일관성", 5000, 60000,
+                 [{"label": "가", "ms": 3000}, {"label": "나", "ms": 2000}])
+
+    assert got["ok"] is True
+    assert not got["bad"], got["bad"]
+    joined = " ".join(got["log"])
+    assert "[보임]" in joined and "코드 일관성" in joined, joined
+    assert "2" in joined, joined          # 자식 수
+
+
+@needs_node
+def test_a_phase_over_budget_fails_and_names_the_slowest():
+    """⑭ 구간이 예산을 넘기면 **구간 이름과 가장 느린 자식**을 적고 실패한다.
+
+    자식 상한으로는 못 잡는 종류가 있다 — 자식 하나하나는 상한 안인데 **수가 늘어**
+    구간이 느려지는 경우다. 그때 「어느 검사가」 가 없으면 다음 사람은 전체를 다시
+    재는 것 말고 할 수 있는 일이 없다.
+    """
+    got = _phase("코드 일관성", 90000, 60000, [
+        {"label": "느린 검사", "ms": 40000},
+        {"label": "둘째", "ms": 30000},
+        {"label": "셋째", "ms": 15000},
+        {"label": "빠른 검사", "ms": 5000},
+    ])
+
+    assert got["ok"] is False
+    joined = " ".join(got["bad"])
+    assert "코드 일관성" in joined, joined
+    assert "예산" in joined, joined
+    assert "느린 검사" in joined, joined
+    assert "둘째" in joined, joined
+    # 빠른 것까지 다 적으면 느린 것이 묻힌다.
+    assert "빠른 검사" not in joined, joined
+
+
+@needs_node
+def test_the_phase_budget_can_be_turned_off_and_comes_from_the_environment():
+    """⑮ 예산은 환경변수로 조정하고 `0` 으로 끈다.
+
+    끌 수 있어야 한다 — 느린 서버에서 못 끄면 사람이 관문 자체를 지운다.
+    """
+    code = (
+        f"const m = await import({json.dumps(HELPER.as_uri())});"
+        "process.stdout.write(JSON.stringify({"
+        " d: m.DEFAULT_PHASE_BUDGET_MS,"
+        " env: m.phaseBudgetMs({ HERMES_CHECK_PHASE_BUDGET_MS: '1234' }),"
+        " off: m.phaseBudgetMs({ HERMES_CHECK_PHASE_BUDGET_MS: '0' }),"
+        " bad: m.phaseBudgetMs({ HERMES_CHECK_PHASE_BUDGET_MS: '아니오' }) }));"
+    )
+    got = json.loads(_node(code).stdout)
+    assert got["d"] > 0
+    assert got["env"] == 1234
+    assert got["off"] == 0
+    # 읽을 수 없는 값은 **기본값**이다 — 0 으로 읽으면 예산이 조용히 꺼진다.
+    assert got["bad"] == got["d"]
+
+
+@needs_node
+def test_a_disabled_budget_never_fails():
+    """⑯ 꺼 두면 아무리 느려도 실패하지 않는다. 합계는 그대로 적는다."""
+    got = _phase("코드 일관성", 10_000_000, 0, [{"label": "가", "ms": 10_000_000}])
+    assert got["ok"] is True
+    assert not got["bad"]
+    assert any("[보임]" in line for line in got["log"])
+
+
+@needs_node
+def test_check_setup_uses_the_phase_budget():
+    """⑰ 구간 예산을 `check-setup` 이 실제로 쓴다 — 안 부르면 helper 만 있는 것이다."""
+    body = SETUP.read_text(encoding="utf-8")
+    assert "reportPhase(" in body, "구간 예산을 안 쓴다"
+    assert "phaseBudgetMs(" in body

@@ -167,6 +167,8 @@ async function execute(text,args=[],options={}){
    return {ok:r.status===0,timedOut:false,ms:0,output:r.stdout||'',visible:[]};
   },
   childLimitMs:()=>120000,formatDuration:ms=>`${ms}ms`,
+  phaseBudgetMs:()=>600000,
+  reportPhase:({label,ms,children,log})=>{log?.(`  [보임] ${label} ${children?.length??0}개 · ${ms}ms`);return true;},
   load,process:processStub,console:{log:(...x)=>lines.push(x.join(' '))},
   fetch:async()=>{calls.push(['scopes']);return {headers:{get:()=> 'channels:history'}};}};
  const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;

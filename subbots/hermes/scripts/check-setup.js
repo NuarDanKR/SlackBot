@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { runCheck, childLimitMs, formatDuration } from './_child-run.js';
+import { runCheck, childLimitMs, formatDuration, reportPhase, phaseBudgetMs } from './_child-run.js';
 import { CHECKS, LIVE_CHECKS } from './check-catalog.js';
 import { parseMode, selectChecks, discoverTests, validateCatalog, discoverNodeChecks, validateNodeChecks, runOffline } from './check-runner.js';
 
@@ -157,10 +157,16 @@ const CROSS_CHECKS = selectChecks(CHECKS, mode).filter(c => c.runtime === 'node'
  * 침묵은 「빠르다」 와 화면에서 같다(2026-10-07 TYIT). 느린 서버에서 관문을 통째로
  * 끄게 만들지 않으려고 환경변수로 연다. */
 const CHILD_LIMIT_MS = childLimitMs();
+/* 구간 합계의 예산. 자식 하나하나는 상한 안인데 **수가 늘어** 구간이 느려지는 종류는
+ * 자식 상한으로 못 잡는다 — 그 변화는 에러가 아니라 「아무도 안 돌리게 되는」 습관으로
+ * 나타난다. `HERMES_CHECK_PHASE_BUDGET_MS=0` 으로 끌 수 있다. */
+const PHASE_BUDGET_MS = phaseBudgetMs();
 
 if (mode !== 'live') {
-console.log(`\n[1/6] 코드 일관성  (검사 ${CROSS_CHECKS.length}개 · 개별 상한 ${formatDuration(CHILD_LIMIT_MS)})`);
+console.log(`\n[1/6] 코드 일관성  (검사 ${CROSS_CHECKS.length}개 · 개별 상한 ${formatDuration(CHILD_LIMIT_MS)}`
+  + `${PHASE_BUDGET_MS ? ` · 구간 예산 ${formatDuration(PHASE_BUDGET_MS)}` : ' · 구간 예산 끔'})`);
 const crossStarted = Date.now();
+const crossTimes = [];
 for (const [file, what] of CROSS_CHECKS) {
   const script = path.join(ROOT, 'scripts', file);
   if (!fs.existsSync(script)) {
@@ -180,9 +186,15 @@ for (const [file, what] of CROSS_CHECKS) {
   /* 통과·실패 화면과 `[보임]`·`[못잼]` 판독은 러너가 들고 있다 — 그 경위와 전례는
    * `_child-run.js` 의 `visibleLines` 주석에 있다. 여기서는 집계만 한다. */
   if (!r.ok) failed = true;
+  crossTimes.push({ label: what, ms: r.ms });
 }
-// 구간 합계. PF 인계 문서가 요구하는 「전체 소요 시간」의 재료다.
-console.log(`  [보임] 코드 일관성 ${CROSS_CHECKS.length}개 · ${formatDuration(Date.now() - crossStarted)}`);
+/* 구간 합계와 예산. PF 인계 문서가 요구하는 「전체 소요 시간」의 재료이기도 하다.
+ * 예산을 넘겨도 **여기까지 와서** 알린다 — 중간에 끊으면 나머지 검사의 상태를 모르는데
+ * 그 모름이 「이상 없음」 으로 읽힌다. */
+if (!reportPhase({
+  label: '코드 일관성', ms: Date.now() - crossStarted, children: crossTimes,
+  budgetMs: PHASE_BUDGET_MS, log: console.log, bad,
+})) failed = true;
 
 /* **파이썬 시험도 관문이 돌린다.** 안 그러면 사람이 손으로 돌릴 때만 도는데,
  * 이 저장소는 이미 같은 일을 겪었다 (`.githooks/pre-commit:234` 참조 — `test-push-gate.sh`

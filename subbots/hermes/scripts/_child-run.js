@@ -139,17 +139,30 @@ export function runCheck({
   // 둘 다 본다 — 플랫폼에 따라 한쪽만 채워지는 경우가 있다.
   const timedOut = r.error?.code === 'ETIMEDOUT' || (r.status === null && r.signal != null);
 
+  /* 표시 줄은 **어느 길에서나** 뽑는다 (2026-10-07 후속).
+   *
+   * 전에는 통과한 경우에만 뽑았다. 그런데 「한 항목도 못 쟀다」 는 **실패와 별개의
+   * 사실**이다 — 검사가 왜 떨어졌는지와, 그 검사가 애초에 무엇을 못 쟀는지는 다른
+   * 조치로 이어진다. 실패 전문 속에 섞여 들어가면 사유 줄들 사이에 묻힌다. */
+  const visible = visibleLines(output);
+  /** 전문을 찍은 **뒤에** 표시 줄을 다시 모아 준다. 순서를 안 바꾸고 찾기만 쉽게 한다. */
+  const restate = () => {
+    if (!visible.length) return;
+    log(`${indent}— 이 검사가 스스로 지목한 줄 ${visible.length}개:`);
+    for (const line of visible) log(`${indent}  ${line}`);
+  };
+
   if (timedOut) {
     bad(`${label} — ${formatDuration(limitMs)} 상한을 넘겨 중단했습니다 (node scripts/${name})`);
     // **그때까지의 출력을 보인다.** 안 보이면 어디까지 갔는지조차 모른 채 다시 돌려야 한다.
     const seen = output.trim();
     if (seen) for (const line of seen.split('\n')) log(`${indent}${line}`);
     else log(`${indent}(이 검사는 중단될 때까지 한 줄도 적지 않았습니다)`);
-    return { ok: false, timedOut: true, ms, output, visible: [] };
+    restate();
+    return { ok: false, timedOut: true, ms, output, visible };
   }
 
   if (r.status === 0) {
-    const visible = visibleLines(output);
     ok(`${label}  (${formatDuration(ms)})`);
     for (const line of visible) log(`${indent}${line}`);
     return { ok: true, timedOut: false, ms, output, visible };
@@ -160,5 +173,53 @@ export function runCheck({
   for (const line of output.trim().split('\n')) {
     if (line.trim()) log(`${indent}${line}`);
   }
-  return { ok: false, timedOut: false, ms, output, visible: [] };
+  restate();
+  return { ok: false, timedOut: false, ms, output, visible };
+}
+
+/* ── 구간 예산 ───────────────────────────────────────────────────────────
+ *
+ * 자식 상한으로는 **못 잡는 종류**가 있다. 자식 하나하나는 상한 안인데 **수가 늘어**
+ * 구간이 느려지는 경우다 — 검사를 더할 때마다 조금씩 느려지고, 어느 날 아무도
+ * `npm run check` 를 안 돌리게 된다. 그 변화는 에러가 아니라 **습관**으로 나타난다.
+ *
+ * 그래서 구간 합계에도 예산을 둔다. 다만 **중간에 끊지 않는다** — 끊으면 나머지
+ * 검사의 상태를 모르는데, 그 모름이 「이상 없음」 으로 읽힌다(이 파일이 지키는
+ * 「실패해도 끝까지 돈다」 와 같은 이유). 다 돌린 뒤에 넘겼다고 적고, **누가
+ * 느렸는지**를 함께 적는다. 이름이 없으면 다음 사람은 전체를 다시 재는 것 말고
+ * 할 수 있는 일이 없다.
+ */
+
+/** 구간 하나의 기본 예산. 2026-10-07 TYIT 사고(검사 하나가 12분)를 잡는 자리에 둔다. */
+export const DEFAULT_PHASE_BUDGET_MS = 600_000;
+
+/** `0` 이면 끈다. **읽을 수 없는 값은 기본값**이다 — 0 으로 읽으면 예산이 조용히 꺼진다. */
+export function phaseBudgetMs(env = process.env) {
+  const raw = env?.HERMES_CHECK_PHASE_BUDGET_MS;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return DEFAULT_PHASE_BUDGET_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_PHASE_BUDGET_MS;
+  return n;
+}
+
+/** 구간 합계를 적고, 예산을 넘겼으면 **느린 쪽을 지목해** 실패시킨다. 통과면 `true`. */
+export function reportPhase({
+  label, ms, children = [], budgetMs = phaseBudgetMs(),
+  log = console.log, bad = console.error, top = 3,
+}) {
+  log(`  [보임] ${label} ${children.length}개 · ${formatDuration(ms)}`);
+  if (!budgetMs || ms <= budgetMs) return true;
+
+  // 느린 순으로 몇 개만. 전부 적으면 느린 것이 그 안에 묻힌다.
+  const slowest = [...children]
+    .sort((a, b) => b.ms - a.ms)
+    .slice(0, top)
+    .map((c) => `${c.label} (${formatDuration(c.ms)})`);
+  bad(
+    `${label} — 구간 예산 ${formatDuration(budgetMs)} 를 넘겼습니다 (${formatDuration(ms)})` +
+      `\n      가장 느린 ${slowest.length}개: ${slowest.join(' · ')}` +
+      '\n      검사 하나가 느린 것인지 수가 는 것인지 위 목록으로 가릅니다.' +
+      ' 느린 서버라면 HERMES_CHECK_PHASE_BUDGET_MS 를 올리고 그 값과 이유를 함께 남기세요.',
+  );
+  return false;
 }
