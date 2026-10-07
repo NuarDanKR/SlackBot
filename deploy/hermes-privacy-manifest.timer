@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the PF Hermes privacy manifest every 12 hours
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=12h
+RandomizedDelaySec=1min
+Unit=hermes-privacy-manifest.service
+
+[Install]
+WantedBy=timers.target

@@ -52,6 +52,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..envfile import load_env_file
+
 #: 형식 이름. 받는 쪽(`subbots/hermes/scripts/check-archiver-privacy.js`)이 이 값을
 #: 확인하고, 다르면 **「공개 여부를 모른다」** 로 다룬다 — 짐작해 읽지 않는다.
 SCHEMA = "channel-privacy-manifest/v1"
@@ -160,10 +162,22 @@ def main(argv=None) -> int:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--out", required=True, help="내보낼 JSON 경로")
     args = parser.parse_args(argv)
+    workspace = str(args.workspace or "").strip()
+    if not workspace:
+        print("workspace가 비어 있습니다. 기존 manifest를 바꾸지 않습니다.", file=sys.stderr)
+        return 2
 
     try:
+        load_env_file()
         with _connect() as conn:
-            count = export(conn, args.workspace, args.out)
+            channels = fetch(conn, workspace)
+            if not channels:
+                print(
+                    "확인된 채널이 0개입니다. 기존 manifest를 바꾸지 않습니다.",
+                    file=sys.stderr,
+                )
+                return 2
+            count = write(args.out, build(workspace, channels))
     except KeyError:
         # **DSN 을 화면에 적지 않는다.** 오류 문구는 로그로 복사되고, 복사된 로그는
         # 저장소·메신저로 건너간다.

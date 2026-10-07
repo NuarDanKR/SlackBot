@@ -5,6 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 UNIT = ROOT / "deploy" / "hermes-pf-archiver.service"
 RUNBOOK = ROOT / "docs" / "deploy" / "hermes-pf-archiver.md"
+MANIFEST_SERVICE = ROOT / "deploy" / "hermes-privacy-manifest.service"
+MANIFEST_TIMER = ROOT / "deploy" / "hermes-privacy-manifest.timer"
 
 
 def _directives() -> list[str]:
@@ -36,7 +38,8 @@ def test_pf_archiver_unit_never_opens_the_canonical_archive_for_writing():
     readonly = next(line for line in lines if line.startswith("ReadOnlyPaths="))
 
     assert "/var/lib/tybot/archive" in readonly.split("=", 1)[1].split()
-    assert "/etc/hermes-pf/privacy-manifest.json" in readonly.split("=", 1)[1].split()
+    assert "/etc/hermes-pf" in readonly.split("=", 1)[1].split()
+    assert "/etc/hermes-pf/privacy-manifest.json" not in readonly.split("=", 1)[1].split()
     assert "/var/lib/tybot/archive" not in writable.split("=", 1)[1].split()
     assert set(writable.split("=", 1)[1].split()) == {
         "/var/lib/hermes-pf",
@@ -93,3 +96,33 @@ def test_runbook_requires_a_two_week_internal_pilot_before_pf_rollout():
     assert "권한 밖 채널 노출 0건" in text
     assert "중복 검토 DM 0건" in text
     assert "원문 쓰기 및 Git 아카이브 쓰기 0건" in text
+
+
+def test_privacy_manifest_refresh_runs_as_tybot_and_installs_atomically():
+    text = MANIFEST_SERVICE.read_text(encoding="utf-8")
+
+    assert "User=tybot" in text
+    assert "Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env" in text
+    assert "Environment=LANG=C.UTF-8" in text
+    assert "EnvironmentFile=/etc/hermes-pf/privacy.env" in text
+    assert "--workspace ${HERMES_PRIVACY_WORKSPACE}" in text
+    assert "/etc/hermes-pf/.privacy-manifest.json.new" in text
+    assert "ExecStartPost=+/usr/bin/mv -f" in text
+    assert "-o root -g hermes -m 0640" in text
+
+
+def test_privacy_manifest_refreshes_before_the_default_expiry():
+    text = MANIFEST_TIMER.read_text(encoding="utf-8")
+
+    assert "OnUnitActiveSec=12h" in text
+    assert "OnBootSec=1min" in text
+    assert "RandomizedDelaySec=1min" in text
+    assert "Unit=hermes-privacy-manifest.service" in text
+    assert "hermes-privacy-manifest.timer" in RUNBOOK.read_text(encoding="utf-8")
+
+
+def test_hermes_waits_for_a_fresh_manifest_before_starting():
+    lines = _directives()
+
+    assert "Wants=hermes-privacy-manifest.service" in lines
+    assert "After=hermes-privacy-manifest.service" in lines

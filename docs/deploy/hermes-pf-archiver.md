@@ -40,6 +40,8 @@ sudo install -d -o hermes -g hermes -m 0700 /opt/tybot/subbots/hermes/logs
 sudo install -d -o root -g hermes -m 0750 /etc/hermes-pf
 sudo install -o root -g hermes -m 0640 /dev/null /etc/hermes-pf/hermes.env
 sudoedit /etc/hermes-pf/hermes.env
+sudo install -o root -g hermes -m 0640 /dev/null /etc/hermes-pf/privacy.env
+sudoedit /etc/hermes-pf/privacy.env
 ```
 
 값은 다음 네 개만 둔다. 실제 값은 문서나 셸 이력에 남기지 않는다.
@@ -49,6 +51,13 @@ SLACK_BOT_TOKEN=<secret>
 SLACK_APP_TOKEN=<secret>
 ANTHROPIC_API_KEY=<secret>
 HERMES_ARCHIVER_WORKSPACE=invest
+```
+
+`privacy.env`에는 비밀값 없이 같은 workspace 키만 둔다. manifest exporter는 Hermes의
+Slack·LLM 토큰을 읽지 않는다.
+
+```dotenv
+HERMES_PRIVACY_WORKSPACE=invest
 ```
 
 `HERMES_MODE`, `HERMES_DATA_ROOT`, `HERMES_ARCHIVER_ROOT`는 unit이 고정한다.
@@ -88,10 +97,26 @@ sudo install -o root -g hermes -m 0640 \
 sudo -u hermes test -r /etc/hermes-pf/privacy-manifest.json
 ```
 
+manifest 기본 유효기간은 26시간이다. 한 번만 만들면 다음 날 일반 사용자의 모든 접근이
+fail-closed로 닫히므로, 12시간 갱신 타이머를 함께 설치한다. DB 조회는 `tybot`으로 하고
+최종 파일 교체만 root 권한으로 수행한다.
+
+빈 workspace와 확인된 채널 0개는 발행 실패다. 마지막 정상 manifest를 빈 파일로
+덮어쓰지 않는다. Hermes 서비스는 갱신 oneshot이 끝난 뒤에만 기동한다.
+
 ```bash
 sudo install -m 0644 /opt/tybot/deploy/hermes-pf-archiver.service /etc/systemd/system/
+sudo install -m 0644 /opt/tybot/deploy/hermes-privacy-manifest.service /etc/systemd/system/
+sudo install -m 0644 /opt/tybot/deploy/hermes-privacy-manifest.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/hermes-pf-archiver.service
+sudo systemd-analyze verify /etc/systemd/system/hermes-privacy-manifest.service
+sudo systemd-analyze verify /etc/systemd/system/hermes-privacy-manifest.timer
+sudo systemctl start hermes-privacy-manifest.service
+sudo systemctl show hermes-privacy-manifest.service \
+  --property=Result --property=ExecMainStatus --no-pager
+sudo systemctl enable --now hermes-privacy-manifest.timer
+systemctl list-timers hermes-privacy-manifest.timer --no-pager
 sudo systemctl is-enabled hermes-pf-archiver.service
 ```
 
@@ -193,6 +218,7 @@ TYBot 서버에서 먼저 중지한다.
 
 ```bash
 sudo systemctl stop hermes-pf-archiver.service
+sudo systemctl disable --now hermes-privacy-manifest.timer
 systemctl is-active hermes-pf-archiver.service
 ```
 

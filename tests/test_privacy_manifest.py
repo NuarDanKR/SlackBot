@@ -68,6 +68,12 @@ class _FakeConn:
         self.cursors.append(cur)
         return cur
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
 
 ROWS = [
     {"channel_id": "C1000FUNDS", "channel_name": "팀_자금(ABB540)_주간보고",
@@ -196,3 +202,49 @@ def test_tuple_rows_work_like_dict_rows():
     rows = [("C1000FUNDS", "팀_자금(ABB540)_주간보고", False)]
     got = M.fetch(_FakeConn(rows), "tyit")
     assert got == [M.Channel("C1000FUNDS", "팀_자금(ABB540)_주간보고", False)]
+
+
+def test_cli_loads_the_configured_env_file_before_connecting(tmp_path, monkeypatch):
+    """`TYBOT_ENV_FILE`을 적는 것만으로 실제 DB 설정을 읽어야 한다."""
+    calls: list[str] = []
+
+    monkeypatch.setattr(M, "load_env_file", lambda: calls.append("env"))
+
+    def connect():
+        assert calls == ["env"]
+        calls.append("connect")
+        return _FakeConn(ROWS)
+
+    monkeypatch.setattr(M, "_connect", connect)
+    out = tmp_path / "privacy.json"
+
+    assert M.main(["--workspace", "tyit", "--out", str(out)]) == 0
+    assert calls == ["env", "connect"]
+    assert out.is_file()
+
+
+@pytest.mark.parametrize("workspace", ["", "   "])
+def test_cli_refuses_an_empty_workspace_without_touching_the_database(
+    tmp_path, monkeypatch, workspace,
+):
+    monkeypatch.setattr(
+        M,
+        "_connect",
+        lambda: pytest.fail("빈 workspace로 DB에 연결하면 안 됩니다"),
+    )
+    out = tmp_path / "privacy.json"
+
+    assert M.main(["--workspace", workspace, "--out", str(out)]) == 2
+    assert not out.exists()
+
+
+def test_cli_refuses_zero_verified_channels_without_replacing_the_file(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(M, "load_env_file", lambda: "test")
+    monkeypatch.setattr(M, "_connect", lambda: _FakeConn([]))
+    out = tmp_path / "privacy.json"
+    out.write_text("keep the last known good manifest", encoding="utf-8")
+
+    assert M.main(["--workspace", "tyit", "--out", str(out)]) == 2
+    assert out.read_text(encoding="utf-8") == "keep the last known good manifest"
