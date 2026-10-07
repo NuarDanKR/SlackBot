@@ -3,6 +3,7 @@
 set -euo pipefail
 
 UNITS=(
+  hermes-privacy-manifest.timer
   tybot-collect.timer
   tybot-convert-alert.timer
   tybot-convert-nightly.timer
