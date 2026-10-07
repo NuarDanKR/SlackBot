@@ -49,13 +49,16 @@ DM_CHANNEL = "D9000PERSON"
 class FakeSlack:
     """채널별 메시지·첨부를 돌려주는 가짜 Slack. **수집 경로는 진짜다.**"""
 
-    def __init__(self, history: dict, names: dict):
+    def __init__(self, history: dict, names: dict, private: frozenset = frozenset()):
         self._history = history
         self._names = names
+        self._private = private
 
     def conversations_info(self, *, channel):
+        # `is_private` 는 **첨부 정본의 `visibility` 를 가르는 유일한 신호**다
+        # (`archiving_bot` 이 raw 에는 안 넘긴다 — 아래 주석 참조).
         return {"channel": {"id": channel, "name": self._names[channel].lstrip("#"),
-                            "is_member": True}}
+                            "is_member": True, "is_private": channel in self._private}}
 
     def conversations_history(self, *, channel, **_):
         return {"messages": self._history.get(channel, [])}
@@ -98,7 +101,12 @@ HISTORY = {
         _msg(TS["site_d1"], "U4", "김해외동 현장 타워크레인 설치 완료했습니다."),
     ],
     CH_PRIVATE[0]: [
-        _msg(TS["priv_d1"], "U5", "인사 평가 일정은 10월 둘째 주입니다."),
+        # 첨부를 둔다 — 첨부 정본의 `visibility` 가 **공개·비공개의 유일한 신호**라
+        # (`archiving_bot` 은 raw 에 그 값을 안 넘긴다) 첨부가 없으면 잴 것이 없다.
+        _msg(TS["priv_d1"], "U5", "인사 평가 일정은 10월 둘째 주입니다.", [{
+            "id": "F200HR", "name": "평가일정.txt", "filetype": "txt", "size": 20,
+            "url_private": "https://example.invalid/hr",
+        }]),
     ],
 }
 
@@ -107,13 +115,14 @@ NAMES = {
 }
 
 
-def _collect(root: Path, workspace: str, channels: list, history: dict, names: dict) -> None:
+def _collect(root: Path, workspace: str, channels: list, history: dict, names: dict,
+             private: frozenset = frozenset()) -> None:
     config = archiving_bot.ArchiverWorkspace(
         workspace, "archiver-bot", "archiver-app", "T12345678", "U_MASTER",
         frozenset(cid for cid, _ in channels), separate_attachments=True,
     )
     collector = archiving_bot.ShadowCollector(config, root, layout="per-channel-v1")
-    client = FakeSlack(history, names)
+    client = FakeSlack(history, names, private)
     targets = [backfill.Target(workspace, cid, name) for cid, name in channels]
     counts, state = backfill.run(
         client, targets, workspace=workspace,
@@ -136,8 +145,10 @@ def build(out: Path) -> dict:
     archiving_bot.ingest_ack.advance = lambda **_: None
     archiving_bot.record_revision = lambda **_: 1
 
-    _collect(out, WORKSPACE,
-             [CH_FUNDS, CH_SITE, CH_PRIVATE], HISTORY, NAMES)
+    # **비공개 채널 하나를 Slack 수준에서 비공개로 둔다.** 그래야 첨부 정본의
+    # `visibility` 에 진짜 신호가 실리고, 공개·비공개 대조를 잴 수 있다.
+    _collect(out, WORKSPACE, [CH_FUNDS, CH_SITE, CH_PRIVATE], HISTORY, NAMES,
+             private=frozenset({CH_PRIVATE[0]}))
 
     # **개명.** 디렉터리는 그대로여야 한다(채널 ID 가 정체성).
     before = shadow_paths.channel_root(out, WORKSPACE, CH_FUNDS[0], CH_FUNDS[1])

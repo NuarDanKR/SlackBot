@@ -379,6 +379,13 @@ export const CHECKS = [
     "reason": "Legacy check requires application config, local environment or archive; excluded from config-free execution."
   },
   {
+    "file": "scripts/check-archiver-privacy.js",
+    "what": "pf-archiver 전환 전 사전 점검 — 정본 visibility 와 config.privateChannels 전수 대조. 비공개 선언 누락이 있으면 1 로 끝낸다",
+    "runtime": "node",
+    "mode": "archive",
+    "reason": "Needs an Archiver canonical root and the data repository config; it is a switchover preflight, not a unit check."
+  },
+  {
     "file": "scripts/check-archiver-reader.js",
     "what": "HERMES_MODE=pf-archiver 에서 Archiver 정본 reader 가 기존 공개 API 로 돌고, 다른 워크스페이스·DM 이 안 새며, 좌표를 추정하지 않나",
     "runtime": "node",

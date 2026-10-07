@@ -206,6 +206,59 @@ function rawMessage(row) {
   };
 }
 
+/**
+ * 이 칸이 심볼릭 링크인가. **링크면 source 전체를 거부한다.**
+ *
+ * 건너뛰지 않는다. 링크 하나를 조용히 지나가면 「그 채널만 안 보인다」 가 되고, 그건
+ * 자료가 없는 것과 화면에서 같다. 더 나쁜 쪽은 링크가 **밖을 가리키는** 경우다 —
+ * 그때 우리가 읽는 본문은 Archiver 정본이 아니라 누군가 갈아 끼운 글자이고, 그 글자는
+ * 출처가 정본 경로로 찍힌다. 어느 쪽이든 읽은 뒤에는 되돌릴 수 없으므로 **읽기 전에**
+ * 멈춘다.
+ *
+ * 없는 칸은 링크가 아니다 — `false` 를 돌려주고 부르는 쪽이 「아직 없음」 으로 다룬다.
+ */
+function assertNoLink(target, what) {
+  let st;
+  try {
+    st = fs.lstatSync(target);
+  } catch {
+    return false;
+  }
+  if (st.isSymbolicLink()) {
+    throw new ArchiverSourceError(
+      `Archiver 정본 경로에 심볼릭 링크가 있습니다(${what}): ${target}\n`
+      + '링크는 정본을 저장소 밖으로 돌릴 수 있어 읽지 않습니다. 실제 디렉터리·파일로 '
+      + '두거나, 그 자리가 의도된 것이면 Archiver 쪽에서 정리하세요.',
+    );
+  }
+  return true;
+}
+
+/**
+ * 그 채널의 **공개·비공개 신호.** `'public'`·`'private'`·`''`(모름).
+ *
+ * ## raw 의 `visibility` 는 쓸 수 없다
+ *
+ * 수집기(`archiving_bot.ShadowCollector`)는 raw 를 쓸 때 `visibility` 를 **안 넘긴다** —
+ * `writer.ingest` 의 기본값 `private` 가 그대로 박힌다. 즉 정본 raw 의 그 줄은 모든
+ * 채널에서 똑같은 `private` 이고 **아무 정보도 없다.** 그것으로 대조하면 전 채널이
+ * 「비공개인데 선언이 없다」 로 나오고, 늘 빨개지는 관문은 사람이 끄는 법부터 배운다.
+ *
+ * 실제 Slack 의 `is_private` 가 실리는 곳은 **첨부 정본**뿐이다(같은 파일 347행:
+ * `visibility="private" if is_private else "public"`). 그래서 그 값을 본다.
+ *
+ * 첨부가 없는 채널은 **신호가 없다.** 그때 `''` 를 돌려주는 것이 중요하다 — `'public'`
+ * 으로 물러서면 「모른다」 가 「공개다」 로 바뀌고, 그건 막는 쪽이 아니다.
+ */
+function canonicalVisibility(channel) {
+  const seen = new Set();
+  for (const doc of channel.docs || []) {
+    if (doc.visibility) seen.add(doc.visibility);
+  }
+  if (seen.has('private')) return 'private';   // 하나라도 비공개면 비공개 쪽으로
+  return seen.has('public') ? 'public' : '';
+}
+
 function statKey(file) {
   try {
     const st = fs.statSync(file);
@@ -257,13 +310,19 @@ export function createReader({ root, workspace }) {
     for (const entry of entries) {
       // `dm` 은 디렉터리 모양 자체가 다르다 — `<id>__<이름>` 이 아니므로 여기서
       // 걸러진다. 그 「빠짐」이 필터가 아니라 **경로의 성질**이어야 한다(B-68).
-      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const split = entry.name.indexOf('__');
       if (split <= 0) continue;
       const channelId = entry.name.slice(0, split);
       if (!CHANNEL_ID.test(channelId)) continue;
-      const archive = path.join(workspaceDir, entry.name, 'archive');
+      // **이름이 채널 모양이면 그때부터 순회 대상이다.** 그래서 여기서부터 링크를
+      // 거부한다 — 이름이 다른 디렉터리(`dm` 등)는 애초에 안 열므로 보지 않는다.
+      const channelDir = path.join(workspaceDir, entry.name);
+      assertNoLink(channelDir, '채널 디렉터리');
+      if (!entry.isDirectory()) continue;
+      const archive = path.join(channelDir, 'archive');
+      assertNoLink(archive, 'archive');
       const rawDir = path.join(archive, 'raw');
+      assertNoLink(rawDir, 'raw');
       let rawFiles = [];
       try {
         rawFiles = fs.readdirSync(rawDir).filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).sort();
@@ -271,12 +330,17 @@ export function createReader({ root, workspace }) {
         continue;                   // raw 가 없는 채널 디렉터리는 아직 자료가 아니다
       }
       if (!rawFiles.length) continue;
+      // **첨부도 같은 회차에서 훑는다.** 지문에 넣어야 하기 때문이다 — raw 만 지문에
+      // 넣으면 raw 를 안 건드린 채 첨부가 새로 생기거나 재변환되거나 지워져도 캐시가
+      // 안 갈린다. 그 상태는 「문서가 안 바뀐다」 로만 드러나고 오류가 없다.
+      const docFiles = scanAttachmentFiles(archive, stamps);
       const messages = [];
       let name = '';
       let visibility = '';
       let acl = [];
       for (const file of rawFiles) {
         const full = path.join(rawDir, file);
+        assertNoLink(full, 'raw 파일');
         stamps.push(statKey(full));
         const text = fs.readFileSync(full, 'utf8').replace(/\r\n/g, '\n');
         const meta = frontmatter(text);
@@ -320,6 +384,7 @@ export function createReader({ root, workspace }) {
         visibility,
         acl,
         archiveDir: archive,
+        docFiles,
         messages,
       });
     }
@@ -327,27 +392,66 @@ export function createReader({ root, workspace }) {
     return { channels, stamp: stamps.sort().join('|') };
   }
 
-  function scanDocs(channel) {
-    const dir = path.join(channel.archiveDir, 'attachments');
+  /**
+   * 첨부 정본의 **구성과 상태를 지문에 넣고** 판 파일 목록을 돌려준다.
+   *
+   * 지문에 들어가는 것이 셋이다 — 디렉터리 목록(어떤 file-id 가 있나), 각 판 파일의
+   * mtime·크기, 그리고 디렉터리 자체의 stat. 셋이 다 있어야 **신규 생성 · 재변환 ·
+   * 삭제**가 전부 캐시를 가른다.
+   *
+   *   · 신규      → file-id 디렉터리가 늘어 목록이 바뀐다
+   *   · 재변환    → 새 판 파일이 생겨 목록이 바뀐다(판 이름이 결정적으로 달라진다)
+   *   · 같은 판 덮어씀 → mtime·크기가 바뀐다
+   *   · 삭제      → 목록에서 빠진다
+   *
+   * 목록 자체를 지문에 넣는 이유는 **빈 디렉터리**와 **사라진 디렉터리**를 가르기
+   * 위해서다. 파일 stat 만 모으면 마지막 판을 지운 것과 처음부터 없던 것이 같은
+   * 지문을 내고, 그때 지워진 문서가 캐시에 남는다.
+   */
+  function scanAttachmentFiles(archiveDir, stamps) {
+    const dir = path.join(archiveDir, 'attachments');
+    if (!assertNoLink(dir, 'attachments')) return [];
     let fileIds = [];
     try {
       fileIds = fs.readdirSync(dir, { withFileTypes: true })
-        .filter((d) => d.isDirectory() && !d.isSymbolicLink())
-        .map((d) => d.name);
+        .filter((d) => d.isDirectory() || d.isSymbolicLink())
+        .map((d) => d.name)
+        .sort();
     } catch {
       return [];
     }
+    stamps.push(`attachments:${path.relative(base, dir)}:${fileIds.join(',')}`);
     const out = [];
-    for (const fileId of fileIds.sort()) {
+    for (const fileId of fileIds) {
+      const fileDir = path.join(dir, fileId);
+      assertNoLink(fileDir, 'file-id 디렉터리');
       let revisions = [];
       try {
-        revisions = fs.readdirSync(path.join(dir, fileId)).filter((f) => f.endsWith('.md'));
+        revisions = fs.readdirSync(fileDir).filter((f) => f.endsWith('.md')).sort();
       } catch {
         continue;
       }
-      const docs = [];
+      stamps.push(`revisions:${fileId}:${revisions.join(',')}`);
       for (const file of revisions) {
-        const full = path.join(dir, fileId, file);
+        const full = path.join(fileDir, file);
+        assertNoLink(full, '판 파일');
+        stamps.push(statKey(full));
+        out.push({ fileId, file, full });
+      }
+    }
+    return out;
+  }
+
+  function scanDocs(channel) {
+    const byFileId = new Map();
+    for (const row of channel.docFiles || []) {
+      if (!byFileId.has(row.fileId)) byFileId.set(row.fileId, []);
+      byFileId.get(row.fileId).push(row);
+    }
+    const out = [];
+    for (const [fileId, revisions] of [...byFileId].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const docs = [];
+      for (const { file, full } of revisions) {
         const text = fs.readFileSync(full, 'utf8').replace(/\r\n/g, '\n');
         const meta = frontmatter(text);
         if (meta.workspace && meta.workspace !== key) continue;
@@ -512,6 +616,29 @@ export function createReader({ root, workspace }) {
     channelKeyOf(nameOrId) {
       const channel = channelOf(nameOrId);
       return channel ? channelKey(channel.channelId) : null;
+    },
+
+    /**
+     * 정본이 **비공개라고 적은** 채널 이름들. `config.privateChannels` 와 대본다.
+     *
+     * 이 값으로 권한을 판정하지 않는다 — Hermes 의 공개·비공개 권위는 `config.json`
+     * 이고, 그것을 옮기는 것은 별건 결정이다. 여기서 하는 것은 **두 기록이 엇갈리는지
+     * 세는 것**뿐이다.
+     */
+    privateByCanonical() {
+      const out = [];
+      for (const channel of state().byId.values()) {
+        const signal = canonicalVisibility(channel);
+        out.push({
+          name: channel.name,
+          rawVisibility: channel.visibility,
+          // 첨부 정본의 값. 없으면 `''` — **「공개」 가 아니라 「모른다」** 다.
+          visibility: signal,
+          private: signal === 'private',
+          signalled: Boolean(signal),
+        });
+      }
+      return out.sort((a, b) => a.name.localeCompare(b.name));
     },
 
     channelMeta(nameOrId) {

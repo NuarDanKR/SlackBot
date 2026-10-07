@@ -25,6 +25,7 @@ ShadowCollector` + `backfill.run`)를 그대로 돌려 fixture 를 만든다. Sl
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -465,7 +466,288 @@ def test_archive_writes_stay_blocked_in_pf_archiver():
     assert "ingest" not in got["roles"]
 
 
-# --- ⑤ fixture 가 실제 writer 에서 나왔는가 ----------------------------------
+# --- ⑥ 첨부가 바뀌면 같은 프로세스에서 바로 보인다 ----------------------------
+
+_DOC_PROBE = (
+    "const c = await import('./src/config.js');"
+    "const d = await import('./src/documents.js');"
+    "const snap = () => ({"
+    " docs: c.archiveSource.documents().map(x => x.fileId + '@' + x.revision).sort(),"
+    " text: c.archiveSource.documents().map(x => c.readCached(x.key)).join('\\n'),"
+    " titles: d.listDocuments().map(x => x.title).sort() });"
+)
+
+
+@needs_node
+@needs_deps
+def test_attachment_changes_are_seen_without_touching_raw(fixture_root, archiver_dataroot,
+                                                          tmp_path):
+    """⑨ **raw 를 안 건드린 채** 첨부가 생기고·다시 변환되고·지워지면 바로 보여야 한다.
+
+    캐시 지문에 raw 만 넣으면 그 셋이 전부 캐시를 안 가른다. 그 상태는 오류가 아니라
+    「문서가 안 바뀐다」 로만 드러나고, 사람은 변환이 실패한 줄 안다.
+
+    **한 프로세스 안에서** 잰다. 프로세스를 다시 띄우면 캐시가 어차피 비어 있어
+    지문이 틀려도 통과한다 — 그러면 이 시험은 아무것도 안 지킨다.
+    """
+    copy = tmp_path / "canonical"
+    shutil.copytree(fixture_root, copy)
+    root = tmp_path / "dataroot"
+    root.mkdir()
+    (root / "config.json").write_text(
+        json.dumps(_config({"root": str(copy), "workspace": "tyit"}),
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    attachments = next((copy / "tyit").glob("C1000FUNDS__*/archive/attachments"))
+    raw_dir = attachments.parent / "raw"
+    raw_before = {p.name: p.stat().st_mtime_ns for p in raw_dir.glob("*.md")}
+
+    existing = next(attachments.glob("*/*.md"))
+    created = attachments / "F900NEW" / "aaaaaaaaaaaa.md"
+    body = existing.read_text(encoding="utf-8")
+
+    def variant(revision: str, converted: str, title: str, text: str) -> str:
+        """정본 한 판을 **그 파일에서 읽은 값으로** 고쳐 쓴다.
+
+        판 번호·변환 시각을 시험에 적어 두면 fixture 가 바뀔 때 조용히 안 맞는다 —
+        그때 「캐시가 안 갈렸다」 와 「치환이 안 됐다」 가 같은 실패로 보인다.
+        """
+        out = re.sub(r"^revision: .*$", f"revision: {revision}", body, flags=re.M)
+        out = re.sub(r"^converted_at: .*$", f"converted_at: {converted}", out, flags=re.M)
+        out = re.sub(r"^staged_at: .*$", f"staged_at: {converted}", out, flags=re.M)
+        out = re.sub(r"^file_name: .*$", f'file_name: "{title}"', out, flags=re.M)
+        head, _, tail = out.partition("\n---\n")
+        rest = tail.split("\n", 2)
+        return f"{head}\n---\n{rest[0]}\n# {title}\n\n{text}\n"
+
+    script = (
+        _DOC_PROBE
+        + "const fs = await import('node:fs');"
+        + "const out = { before: snap() };"
+        # ① 신규 — 새 file-id 디렉터리가 생긴다
+        + f"fs.mkdirSync({str(created.parent)!r}, {{ recursive: true }});"
+        + f"fs.writeFileSync({str(created)!r}, {json.dumps(variant('aaaaaaaaaaaa', '2026-10-07T00:00:00+00:00', '신규첨부.txt', '신규 첨부 본문입니다.'))}, 'utf8');"
+        + "out.created = snap();"
+        # ② 재변환 — 같은 file-id 에 새 판 파일이 는다
+        + f"fs.writeFileSync({str(created.parent / 'bbbbbbbbbbbb.md')!r}, {json.dumps(variant('bbbbbbbbbbbb', '2026-10-08T00:00:00+00:00', '신규첨부.txt', '재변환한 본문입니다.'))}, 'utf8');"
+        + "out.reconverted = snap();"
+        # ③ 삭제 — 디렉터리째 사라진다
+        + f"fs.rmSync({str(created.parent)!r}, {{ recursive: true, force: true }});"
+        + "out.deleted = snap();"
+        + "process.stdout.write(JSON.stringify(out));"
+    )
+    done = _node(["--input-type=module", "-e", script], dataroot=root, mode="pf-archiver")
+    assert done.returncode == 0, done.stderr
+    got = json.loads(done.stdout)
+
+    assert "F900NEW@aaaaaaaaaaaa" not in got["before"]["docs"]
+    # ① 신규가 바로 보인다
+    assert "F900NEW@aaaaaaaaaaaa" in got["created"]["docs"], got["created"]["docs"]
+    assert "신규 첨부 본문입니다" in got["created"]["text"]
+    assert "신규첨부.txt" in got["created"]["titles"]
+    # ② 재변환이 **최신 판으로** 바뀐다. 두 판이 함께 나오면 안 된다.
+    assert "F900NEW@bbbbbbbbbbbb" in got["reconverted"]["docs"], got["reconverted"]["docs"]
+    assert "F900NEW@aaaaaaaaaaaa" not in got["reconverted"]["docs"]
+    assert "재변환한 본문입니다" in got["reconverted"]["text"]
+    assert "신규 첨부 본문입니다" not in got["reconverted"]["text"]
+    # ③ 삭제가 바로 빠진다 — 지워진 문서가 캐시에 남으면 안 된다
+    assert got["deleted"]["docs"] == got["before"]["docs"]
+    assert "재변환한 본문입니다" not in got["deleted"]["text"]
+    assert "신규첨부.txt" not in got["deleted"]["titles"]
+
+    # **raw 는 손대지 않았다.** 손댔다면 위 결과가 raw 지문 덕에 통과했을 수 있다.
+    assert {p.name: p.stat().st_mtime_ns for p in raw_dir.glob("*.md")} == raw_before
+
+
+# --- ⑦ 순회하는 모든 칸에서 심볼릭 링크를 거부한다 ----------------------------
+
+_LINK_SPOTS = [
+    ("channel-dir", "C1000FUNDS__*", None),
+    ("archive", "C1000FUNDS__*/archive", None),
+    ("raw-dir", "C1000FUNDS__*/archive/raw", None),
+    ("raw-file", "C1000FUNDS__*/archive/raw/2026-10-02.md", None),
+    ("attachments", "C1000FUNDS__*/archive/attachments", None),
+    ("file-id", "C1000FUNDS__*/archive/attachments/F100REPORT", None),
+    ("revision", "C1000FUNDS__*/archive/attachments/F100REPORT/*.md", None),
+]
+
+
+@needs_node
+@needs_deps
+@pytest.mark.parametrize("spot", [s[0] for s in _LINK_SPOTS])
+def test_a_symlink_anywhere_on_the_walk_refuses_the_whole_source(
+    fixture_root, tmp_path_factory, spot,
+):
+    """⑩ 순회하는 칸이 링크면 **source 전체를 거부한다.** 건너뛰지 않는다.
+
+    건너뛰면 「그 채널만 안 보인다」 가 되고, 그건 자료가 없는 것과 화면에서 같다.
+    더 나쁜 쪽은 링크가 **밖을 가리키는** 경우다 — 그때 읽는 본문은 정본이 아닌데
+    출처는 정본 경로로 찍힌다.
+
+    중간 칸(디렉터리)과 **파일 링크** 둘 다 본다. 파일만 보면 `archive` 를 통째로
+    돌려놓는 수법이 지나간다.
+    """
+    pattern = dict((s[0], s[1]) for s in _LINK_SPOTS)[spot]
+    base = tmp_path_factory.mktemp(f"link-{spot}")
+    copy = base / "canonical"
+    shutil.copytree(fixture_root, copy)
+    outside = base / "outside"
+    outside.mkdir()
+
+    target = next((copy / "tyit").glob(pattern))
+    is_dir = target.is_dir()
+    # 링크가 가리킬 자리에는 **읽히면 안 되는 문장**을 둔다. 거부가 아니라 조용한
+    # 통과였다면 이 문장이 답변 근거로 올라온다.
+    if is_dir:
+        shutil.copytree(target, outside / target.name)
+        planted = outside / target.name
+        for md in planted.rglob("*.md"):
+            md.write_text(md.read_text(encoding="utf-8") + "\n> 루트 밖 심어둔 문장\n",
+                          encoding="utf-8")
+        shutil.rmtree(target)
+    else:
+        planted = outside / target.name
+        planted.write_text(
+            target.read_text(encoding="utf-8") + "\n> 루트 밖 심어둔 문장\n", encoding="utf-8")
+        target.unlink()
+    try:
+        target.symlink_to(planted, target_is_directory=is_dir)
+    except (OSError, NotImplementedError):
+        pytest.skip("이 환경에서는 심볼릭 링크를 만들 수 없다(윈도우 권한)")
+
+    root = base / "dataroot"
+    root.mkdir()
+    (root / "config.json").write_text(
+        json.dumps(_config({"root": str(copy), "workspace": "tyit"}),
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    probe = (
+        "const a = await import('./src/archive.js');"
+        "const c = await import('./src/config.js');"
+        "try { a.assertArchive();"
+        " const t = a.listArchivedChannels().map(n =>"
+        "   c.readCached(c.archiveSource.channelKeyOf(n))).join('\\n');"
+        " process.stdout.write(JSON.stringify({ ok: true, text: t })); }"
+        "catch (e) { process.stdout.write(JSON.stringify({ ok: false, msg: e.message })); }"
+    )
+    done = _node(["--input-type=module", "-e", probe], dataroot=root, mode="pf-archiver")
+    assert done.returncode == 0, done.stderr
+    got = json.loads(done.stdout)
+
+    assert got["ok"] is False, f"{spot}: 링크를 거부하지 않았다"
+    assert "심볼릭 링크" in got["msg"], got["msg"]
+    assert "루트 밖 심어둔 문장" not in json.dumps(got, ensure_ascii=False)
+
+
+@needs_node
+@needs_deps
+def test_a_refused_source_is_not_read_as_an_empty_archive(fixture_root, tmp_path):
+    """⑪ 거부를 「비었다」 로 읽으면 **권한이 열린다.**
+
+    `config.archiveHasContent()` 가 거부를 삼키면 「신규 설치」 로 판정되고, 그 판정은
+    개명 지도를 살아 있는 것으로 본다 — 비공개 채널의 옛 이름이 공개로 판정되는
+    자리다(`deadOrFresh` 주석). 링크 하나로 권한이 열리는 길이라 여기서 막는다.
+    """
+    copy = tmp_path / "canonical"
+    shutil.copytree(fixture_root, copy)
+    target = next((copy / "tyit").glob("C1000FUNDS__*/archive/raw/2026-10-02.md"))
+    outside = tmp_path / "outside.md"
+    outside.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.unlink()
+    try:
+        target.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("이 환경에서는 심볼릭 링크를 만들 수 없다(윈도우 권한)")
+
+    root = tmp_path / "dataroot"
+    root.mkdir()
+    (root / "config.json").write_text(
+        json.dumps(_config({"root": str(copy), "workspace": "tyit"}),
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    probe = (
+        "const c = await import('./src/config.js');"
+        "try { c.currentChannelNames();"
+        " process.stdout.write(JSON.stringify({ ok: true, status: c.channelMapStatus() })); }"
+        "catch (e) { process.stdout.write(JSON.stringify({ ok: false, msg: e.message })); }"
+    )
+    done = _node(["--input-type=module", "-e", probe], dataroot=root, mode="pf-archiver")
+    assert done.returncode == 0, done.stderr
+    got = json.loads(done.stdout)
+    assert got["ok"] is False, f"거부가 「비었다」 로 삼켜졌다: {got}"
+    assert "심볼릭 링크" in got["msg"]
+
+
+# --- ⑧ 공개·비공개 대조 사전 점검 --------------------------------------------
+
+@needs_node
+@needs_deps
+def test_the_privacy_preflight_blocks_only_on_an_undeclared_private_channel(
+    fixture_root, tmp_path,
+):
+    """⑫ 정본이 비공개라고 적은 채널이 선언에 없으면 **전환을 거부한다.**
+
+    선언이 맞으면 통과한다. 늘 빨개지는 관문은 사람이 끄는 법부터 배우므로, 막는
+    조건은 **정말로 새는 한 가지**뿐이다.
+    """
+    def run(private_channels):
+        root = tmp_path / f"dr-{len(private_channels)}-{abs(hash(tuple(private_channels)))}"
+        root.mkdir()
+        cfg = _config({"root": str(fixture_root), "workspace": "tyit"})
+        cfg["privateChannels"] = list(private_channels)
+        (root / "config.json").write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        return _node(["scripts/check-archiver-privacy.js"], dataroot=root, mode="pf-archiver")
+
+    # 선언이 맞으면 통과.
+    ok = run(["팀_인사(HRA100)_비공개"])
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    # 비공개 선언을 빼면 거부.
+    blocked = run([])
+    assert blocked.returncode == 1, blocked.stdout + blocked.stderr
+    assert "전환 금지" in blocked.stderr
+    assert "팀_인사(HRA100)_비공개" in blocked.stderr
+
+    # **신호 없는 채널로는 막지 않는다.** 첨부 없는 채널 때문에 영영 전환 못 하면
+    # 이 관문은 꺼진다.
+    assert "신호가 없는 채널" in ok.stdout
+    assert "현장_김해외동(180182)_채팅방" in ok.stdout
+
+
+@needs_node
+@needs_deps
+def test_the_audit_says_raw_visibility_carries_no_signal(fixture_root, archiver_dataroot):
+    """⑬ raw 의 `visibility` 로 대조하지 않는다 — 거기엔 **정보가 없다.**
+
+    수집기(`archiving_bot.ShadowCollector`)는 raw 를 쓸 때 `visibility` 를 안 넘겨서
+    `writer.ingest` 의 기본값 `private` 가 전 채널에 똑같이 박힌다. 그것으로 대조하면
+    **모든 채널**이 「비공개인데 선언이 없다」 로 나오고, 늘 빨개지는 관문은 꺼진다.
+    """
+    probe = (
+        "const c = await import('./src/config.js');"
+        "process.stdout.write(JSON.stringify(c.archiverPrivacyAudit()));"
+    )
+    done = _node(["--input-type=module", "-e", probe],
+                 dataroot=archiver_dataroot, mode="pf-archiver")
+    assert done.returncode == 0, done.stderr
+    audit = json.loads(done.stdout)
+
+    assert audit["rawVisibilityInformative"] is False
+    assert audit["rawVisibilityValues"] == ["private"]
+    # 신호는 첨부에서만 온다.
+    signalled = {r["name"]: r["visibility"] for r in audit["rows"] if r["signalled"]}
+    assert signalled.get("팀_인사(HRA100)_비공개") == "private"
+    assert signalled.get("팀_자금(ABB540)_주간보고") == "public"
+    assert "현장_김해외동(180182)_채팅방" in audit["unverifiable"]
+    # 첨부가 공개라고 적은 채널을 비공개로 **바꾸지 않았다** — ACL 권위는 그대로다.
+    assert audit["missing"] == []
+
+
+# --- ⑨ fixture 가 실제 writer 에서 나왔는가 ----------------------------------
 
 def test_the_fixture_comes_from_the_real_writer():
     """⑧ fixture 생성기는 **운영 수집기**를 부른다.
