@@ -88,7 +88,9 @@ const r = runCheck({{
 }});
 process.stdout.write(JSON.stringify({{
   log, ok, bad,
-  ok_: r.ok, timedOut: r.timedOut, ms: r.ms, visible: r.visible, output: r.output,
+  ok_: r.ok, timedOut: r.timedOut,
+  killedBySignal: r.killedBySignal, signal: r.signal,
+  ms: r.ms, visible: r.visible, output: r.output,
 }}));
 """
 

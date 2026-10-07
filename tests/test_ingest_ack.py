@@ -149,6 +149,57 @@ def test_verified_live_reingest_promotes_shadow_ready_ack(db):
     assert cur.promotions[0][:2] == ("live", "tyit/C123__name/archive/raw/day.md")
 
 
+def test_matching_live_reingest_promotes_shadow_partial_ack(db):
+    """운영 원문도 같은 부분 상태라면 ACK 목적지는 live 로 넘어가야 한다.
+
+    상태가 같다는 이유로 목적지를 shadow 에 남기면 운영 소급은 매번 실패로 세고,
+    이후 재조정도 shadow 루트만 보게 된다.
+    """
+    cur = db([
+        _row("partial", 4, 2)
+        | {"error_code": "attachment-partial"}
+    ])
+
+    got = _advance(
+        target=IngestState.PARTIAL,
+        attachment_total=4,
+        attachment_ready=2,
+        written_to="live",
+        doc_path="tyit/C123__name/archive/raw/day.md",
+        error_code="attachment-partial",
+    )
+
+    assert got == IngestState.PARTIAL
+    assert len(cur.promotions) == 1
+    assert cur.promotions[0][:2] == (
+        "live", "tyit/C123__name/archive/raw/day.md"
+    )
+    assert cur.promotions[0][-1] == "partial"
+
+
+@pytest.mark.parametrize("change", [
+    {"attachment_ready": 1},
+    {"error_code": "attachment-original-missing"},
+])
+def test_a_different_partial_live_copy_is_not_promoted_as_the_same_ack(db, change):
+    cur = db([
+        _row("partial", 4, 2)
+        | {"error_code": "attachment-partial"}
+    ])
+    values = {
+        "target": IngestState.PARTIAL,
+        "attachment_total": 4,
+        "attachment_ready": 2,
+        "written_to": "live",
+        "doc_path": "verified.md",
+        "error_code": "attachment-partial",
+    }
+
+    _advance(**(values | change))
+
+    assert cur.promotions == []
+
+
 @pytest.mark.parametrize("change", [
     {"written_to": "shadow"},
     {"doc_path": ""},

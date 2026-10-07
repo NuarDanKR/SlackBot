@@ -358,24 +358,42 @@ def _write(payload: dict) -> IngestState | None:
                 payload.get("attachment_ready"),
                 str(payload.get("error_code") or ""),
             )
+            same_partial_live_copy = (
+                current is not None
+                and current.state == IngestState.PARTIAL
+                and payload["target"] == str(IngestState.PARTIAL)
+                and payload.get("attachment_total")
+                == current.progress.attachment_total
+                and payload.get("attachment_ready")
+                == current.progress.attachment_ready
+                and str(payload.get("error_code") or "")
+                == current.progress.error_code
+            )
             if (
                 plan is None and current is not None
-                and current.state == IngestState.READY
-                and payload["target"] == str(IngestState.READY)
                 and current.written_to == SHADOW
                 and payload.get("written_to") == LIVE
                 and payload.get("doc_path")
-                and payload.get("attachment_total") == payload.get("attachment_ready")
+                and (
+                    (
+                        current.state == IngestState.READY
+                        and payload["target"] == str(IngestState.READY)
+                        and payload.get("attachment_total")
+                        == payload.get("attachment_ready")
+                    )
+                    or same_partial_live_copy
+                )
             ):
                 cur.execute(
                     """
                     UPDATE archive_ingest_state
                        SET written_to = %s, doc_path = %s, updated_at = now()
                      WHERE workspace = %s AND channel_id = %s AND message_ts = %s
-                       AND state = 'ready' AND written_to = 'shadow'
+                       AND state = %s AND written_to = 'shadow'
                     """,
                     (LIVE, payload["doc_path"], payload["workspace"],
-                     payload["channel_id"], payload["message_ts"]),
+                     payload["channel_id"], payload["message_ts"],
+                     str(current.state)),
                 )
                 return current.state
             if plan is None:
