@@ -39,14 +39,12 @@
  * 「미확인」 을 통과시키지 않는 것이 이 관문의 핵심이다. 모르는 채널을 공개로 다루면
  * 오류가 아니라 **평범한 답변**으로 내용이 나가고, 내용을 아는 사람만 알아챈다.
  */
-import fs from 'node:fs';
 import path from 'node:path';
 import {
-  ARCHIVE_SOURCE, archiveSource, archiverConfigProblem, config, normalizeChannel,
+  ARCHIVE_SOURCE, PRIVACY_MANIFEST_PATH, archiveSource, archiverConfigProblem, config,
+  normalizeChannel,
 } from '../src/config.js';
-
-/** manifest 형식 이름. TYBot 쪽 `privacy_manifest.SCHEMA` 와 같아야 한다. */
-const SCHEMA = 'channel-privacy-manifest/v1';
+import { loadPrivacyManifest } from '../src/archive-reader/privacy-manifest.js';
 
 function refuseHard(message) {
   console.error(message);
@@ -59,54 +57,21 @@ if (ARCHIVE_SOURCE !== 'archiver') {
 const problem = archiverConfigProblem();
 if (problem) refuseHard(problem);
 
+// **검증은 런타임 ACL 과 같은 함수**가 한다(`src/archive-reader/privacy-manifest.js`).
+// 여기서 또 짜면 관문은 통과시키고 런타임은 닫는(또는 그 반대) 조합이 생기고, 그 상태는
+// 「전환했는데 봇이 아무것도 못 본다」 로만 드러난다.
 const manifestPath = process.argv[2]
-  || process.env.HERMES_PRIVACY_MANIFEST
-  || (config.archiver?.privacyManifest
-    ? path.resolve(config.archiver.privacyManifest)
-    : '');
-if (!manifestPath) {
-  refuseHard(
-    '공개 여부 manifest 경로가 없습니다.\n'
-    + '  config.json 의 archiver.privacyManifest 또는 HERMES_PRIVACY_MANIFEST 를 적으세요.\n'
-    + '  만드는 쪽(사내): python -m tybot.archive.privacy_manifest --workspace <ws> --out <경로>',
-  );
-}
+  ? path.resolve(process.argv[2])
+  : PRIVACY_MANIFEST_PATH;
+const loaded = loadPrivacyManifest({
+  path: manifestPath,
+  workspace: archiveSource.workspace,
+  maxAgeHours: Number(config.archiver?.privacyManifestMaxAgeHours),
+});
+if (!loaded.ok) refuseHard(loaded.message);
 
-let manifest;
-try {
-  manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-} catch (e) {
-  // **「없음」 을 「비공개 채널이 없음」 으로 읽지 않는다.** 그렇게 읽으면 파일이 사라진
-  // 날 전 채널이 공개로 판정된다.
-  refuseHard(`manifest 를 읽지 못했습니다: ${manifestPath}\n  ${e.message}`);
-}
-if (!manifest || manifest.schema !== SCHEMA) {
-  refuseHard(
-    `manifest 형식이 다릅니다: ${JSON.stringify(manifest?.schema)} (기대: ${SCHEMA})\n`
-    + '  모르는 형식을 짐작해 읽으면 공개 여부를 잘못 판정합니다.',
-  );
-}
-if (manifest.workspace !== archiveSource.workspace) {
-  refuseHard(
-    `manifest 의 workspace 가 다릅니다: ${manifest.workspace} (정본: ${archiveSource.workspace})\n`
-    + '  남의 워크스페이스 manifest 로 대조하면 이름이 겹치는 채널만 우연히 맞습니다.',
-  );
-}
-
-const rows = Array.isArray(manifest.channels) ? manifest.channels : null;
-if (!rows) refuseHard('manifest 에 channels 배열이 없습니다.');
-
-const byId = new Map();
-for (const row of rows) {
-  const id = String(row?.channel_id || '');
-  if (!id) continue;
-  if (typeof row.is_private !== 'boolean') {
-    // 값이 불리언이 아니면 **모르는 것**이다. 문자열 'false' 를 참으로 읽거나 그 반대로
-    // 읽는 쪽이 둘 다 조용히 틀린다.
-    refuseHard(`manifest 의 is_private 가 불리언이 아닙니다: ${id} = ${JSON.stringify(row.is_private)}`);
-  }
-  byId.set(id, { name: String(row.channel_name || ''), isPrivate: row.is_private });
-}
+const manifest = { generated_at: loaded.generatedAt };
+const byId = loaded.rows;
 
 let audit;
 try {

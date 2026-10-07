@@ -277,9 +277,16 @@ def test_a_non_boolean_is_private_refuses(fixture_root, tmp_path):
 
 @needs_node
 def test_both_sides_name_the_same_manifest_schema():
-    """⑪ 형식 이름이 갈리면 받는 쪽이 **늘 「형식이 다르다」** 로 막는다."""
+    """⑪ 형식 이름이 갈리면 받는 쪽이 **늘 「형식이 다르다」** 로 막는다.
+
+    Hermes 쪽 이름은 관문이 아니라 **공통 loader** 에 있다 — 관문과 런타임 ACL 이 같은
+    검증을 쓰기 때문이다. 관문이 자기 상수를 또 들면 그 자리가 갈린다.
+    """
+    loader = (HERMES / "src" / "archive-reader" / "privacy-manifest.js").read_text(
+        encoding="utf-8")
+    assert f"'{M.SCHEMA}'" in loader, M.SCHEMA
     gate = (HERMES / "scripts" / "check-archiver-privacy.js").read_text(encoding="utf-8")
-    assert f"'{M.SCHEMA}'" in gate, M.SCHEMA
+    assert M.SCHEMA not in gate, "관문이 형식 이름을 따로 들고 있다 — loader 하나여야 한다"
 
 
 @needs_node

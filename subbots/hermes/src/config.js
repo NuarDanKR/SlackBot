@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 // 그때 `config` 가 초기화 전 `undefined` 로 보여 「설정이 없다」 로 조용히 갈린다.
 import { archiveWritesBlocked, mode as hermesMode } from './mode.js';
 import { createReader as createArchiverReader, isKey as isArchiverKey } from './archive-reader/archiver.js';
+import { loadPrivacyManifest } from './archive-reader/privacy-manifest.js';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -159,6 +160,121 @@ export const archiveSource = ARCHIVE_SOURCE === 'archiver' ? lazyArchiverReader(
  * `null` 이면 이상 없음, 문자열이면 그 사유다. 참·거짓만 돌려주면 화면이 무엇을
  * 고쳐야 하는지 못 적고, 못 적으면 아무도 안 고친다.
  */
+/** manifest 파일 자리. 환경변수 > config 순. */
+export const PRIVACY_MANIFEST_PATH = process.env.HERMES_PRIVACY_MANIFEST
+  ? path.resolve(process.env.HERMES_PRIVACY_MANIFEST)
+  : (config.archiver?.privacyManifest
+    ? path.resolve(DATA_ROOT, config.archiver.privacyManifest)
+    : '');
+
+let privacyCache = null;   // { key, state }
+
+/**
+ * 지금 manifest 상태. **파일이 갈리면 그 자리에서 다시 읽는다.**
+ *
+ * 수정 시각·크기로 캐시한다(`readCached` 와 같은 신호). 운영에서 manifest 를 새로
+ * 내보내면 봇을 다시 띄우지 않아도 다음 판정부터 반영돼야 한다 — Slack 에서 공개
+ * 채널이 비공개로 바뀌는 일은 봇이 떠 있는 동안 일어난다.
+ *
+ * **오래됨 판정은 캐시하지 않는다.** 파일이 그대로여도 시간은 흐른다. 허용 기간을
+ * 넘기는 순간 닫혀야 하므로 `ageMs` 를 매번 다시 잰다.
+ */
+function privacyState() {
+  if (ARCHIVE_SOURCE !== 'archiver') return null;
+  let key = 'none';
+  try {
+    const st = fs.statSync(PRIVACY_MANIFEST_PATH);
+    key = `${st.mtimeMs}:${st.size}`;
+  } catch {
+    key = 'missing';
+  }
+  if (!privacyCache || privacyCache.key !== key) {
+    privacyCache = {
+      key,
+      state: loadPrivacyManifest({
+        path: PRIVACY_MANIFEST_PATH,
+        workspace: ARCHIVER_WORKSPACE,
+        maxAgeHours: Number(config.archiver?.privacyManifestMaxAgeHours),
+      }),
+    };
+  }
+  const state = privacyCache.state;
+  if (!state.ok) return state;
+  // 파일은 그대로인데 시간이 흘러 기간을 넘겼을 수 있다 — 매번 다시 잰다.
+  const fresh = loadPrivacyManifest({
+    path: PRIVACY_MANIFEST_PATH,
+    workspace: ARCHIVER_WORKSPACE,
+    maxAgeHours: Number(config.archiver?.privacyManifestMaxAgeHours),
+  });
+  privacyCache = { key, state: fresh };
+  return fresh;
+}
+
+/**
+ * manifest 가 비공개라고 한 채널들의 **지금 이름**(정규화).
+ *
+ * 이름이 아니라 **채널 ID** 로 받아 정본에서 지금 이름을 푼다 — manifest 의
+ * `channel_name` 은 내보낸 시점의 이름이라, 그 뒤 개명하면 안 맞는다. 정본이 그 ID 를
+ * 모르면 manifest 의 이름으로 물러선다(둘 다 없는 것보다 낫다).
+ */
+function privateNamesFromManifest(state) {
+  const privateNames = new Set();
+  const unverifiedNames = new Set();
+  if (!state || !state.ok) return { privateNames, unverifiedNames };
+  for (const id of state.privateIds) {
+    let name = state.rows.get(id)?.name || '';
+    try {
+      const meta = archiveSource.channelMeta(id);
+      if (meta?.name) name = meta.name;
+    } catch {
+      // 정본을 못 읽는 것은 여기서 판정할 일이 아니다 — `archiveHasContent` 가 던진다.
+    }
+    const n = normalizeChannel(name);
+    if (n) privateNames.add(n);
+  }
+  /* **정본에 있는데 manifest 에 없는 채널은 「모르는」 채널이다.**
+   *
+   * 전환 관문은 이 경우를 거부하지만(rc 1), 관문을 통과한 뒤에 새 채널이 수집되면
+   * 그 채널은 다음 manifest 가 나올 때까지 어디에도 없다. 그 사이를 공개로 다루면
+   * **새 비공개 채널이 생긴 날부터 다음 내보내기까지** 샌다.
+   *
+   * 판정 범위는 관문과 **같다** — 「정본이 아는 채널」 만 본다. 가상 이름(`_공통`)·
+   * 문서 폴더·설정에만 있는 이름은 `isOrphanWith` 가 이미 자기 규칙으로 다룬다. */
+  try {
+    for (const name of archiveSource.channelNames()) {
+      const meta = archiveSource.channelMeta(name);
+      if (!meta || state.rows.has(meta.channelId)) continue;
+      const n = normalizeChannel(name);
+      if (n) unverifiedNames.add(n);
+    }
+  } catch {
+    // 같은 이유 — 정본 읽기 실패는 여기서 삼키지 않고 저쪽에서 던진다.
+  }
+  return { privateNames, unverifiedNames };
+}
+
+/**
+ * 실행 중 ACL 에 얹을 manifest 판정. `{dead, reason, privateNames}`.
+ *
+ * `dead` 면 **전체 권한이 아닌 접근을 전부 닫는다** — 「공개로 후퇴」 가 아니다.
+ * 못 읽거나 오래된 manifest 를 공개로 읽으면 파일이 사라진 날 전 채널이 열린다.
+ */
+export function privacyManifestStatus() {
+  const state = privacyState();
+  if (!state) return null;
+  if (!state.ok) {
+    return {
+      dead: true, code: state.code, reason: state.message,
+      privateNames: new Set(), unverifiedNames: new Set(),
+    };
+  }
+  return {
+    dead: false, code: '', reason: '',
+    generatedAt: state.generatedAt,
+    ...privateNamesFromManifest(state),
+  };
+}
+
 export function archiverConfigProblem() {
   if (ARCHIVE_SOURCE !== 'archiver') return null;
   try {
@@ -481,11 +597,27 @@ export function currentChannelNames(known) {
    * 사이라, md 가 나중에 생기는 것을 stat 신호 없이도 봐야 한다. 파일이 있으면 예전처럼
    * 수정 시각으로만 무효화한다 (「같은 프로세스 안에서 개명을 본다」는 시험이 지킨다). */
   if (c && c.mtimeMs === mtimeMs && (mtimeMs !== null || Date.now() - c.at < 60 * 1000)) {
-    return c.map;
+    return withPrivacy(c.map);
   }
   const state = loadSyncState();
   const map = buildCurrentChannelNames(state.rows, state);
   currentChannelNamesCache = { mtimeMs, at: Date.now(), map };
+  return withPrivacy(map);
+}
+
+/**
+ * 지도에 **지금** manifest 판정을 얹는다. 캐시된 지도에도 매번 다시 얹는다.
+ *
+ * 지도 캐시는 `.sync-state.json` 의 수정 시각으로 도는데 `pf-archiver` 에는 그 파일이
+ * 없어 60초 캐시가 걸린다. manifest 판정을 그 캐시에 묻으면 **갈아 끼운 manifest 가
+ * 최대 60초 늦게** 반영되고, 그 60초는 공개 채널이 비공개로 바뀐 뒤의 60초다.
+ *
+ * 비용은 `privacyState()` 의 stat 한 번이고, 이 함수는 **줄마다가 아니라 공개 진입점
+ * 마다** 불린다(`isPrivateWith` 등은 지도를 인자로 받는다 — 위 주석 참조).
+ */
+function withPrivacy(map) {
+  const meta = map[MAP_META];
+  if (meta) meta.privacy = privacyManifestStatus();
   return map;
 }
 
@@ -518,6 +650,31 @@ function isPrivateWith(name, map) {
   const target = canonWith(name, map);
   if (!target) return false;
   if (config.privateChannels.some((c) => canonWith(c, map) === target)) return true;
+  /* 공개 여부 manifest — **닫는 쪽으로만 합친다.**
+   *
+   * manifest 가 비공개라고 하면 선언에 없어도 비공개다. 반대(manifest 가 공개라고 해서
+   * 선언된 비공개를 여는 것)는 **하지 않는다** — manifest 가 낡거나 틀렸을 때 여는
+   * 방향으로 틀리고, 여는 실수는 되돌릴 수 없다.
+   *
+   * 못 읽거나 오래됐으면(`dead`) 전부 비공개로 답한다. 「공개로 후퇴」 가 아니다 —
+   * 지도가 죽었을 때와 같은 자리, 같은 이유다. */
+  const privacy = map[MAP_META]?.privacy;
+  if (privacy?.dead) {
+    warnClosed('privacy-manifest-dead',
+      `공개 여부 manifest 를 쓸 수 없습니다(${privacy.code}) — 비공개 여부를 확정할 수 `
+      + '없어 전체 권한이 아닌 접근을 전부 닫습니다.');
+    return true;
+  }
+  if (privacy?.privateNames?.has(target)) return true;
+  /* 정본은 아는데 manifest 가 모르는 채널 — **공개 여부가 확정되지 않았다.**
+   * 수집이 새 채널에 닿은 뒤 다음 내보내기 전까지가 그 구간이고, 그때 새로 생긴
+   * 비공개 채널을 공개로 다루면 그 구간 내내 샌다. */
+  if (privacy?.unverifiedNames?.has(target)) {
+    warnClosed('privacy-manifest-unverified',
+      '공개 여부 manifest 에 없는 채널이 권한 판정에 들어왔습니다 — 비공개 여부를 '
+      + '확정할 수 없어 전체 권한이 아닌 접근을 닫습니다 (이름은 적지 않습니다).');
+    return true;
+  }
   /* 지도가 죽었으면 어느 이름이 비공개 채널의 옛 이름인지 **확정할 수 없다** —
    * 전부 비공개 취급한다 (아래 canSeePrivateWith 가 전체 권한 아닌 접근을 닫는다). */
   if (map[MAP_META]?.dead) {
@@ -533,6 +690,8 @@ function canSeePrivateWith(access, name, map) {
   if (access.full) return true;
   // 지도가 죽으면 전체 권한만 산다 — 멤버 권한도 이름 대조가 근거인데 그 근거가 없다.
   if (map[MAP_META]?.dead) return false;
+  // manifest 를 못 쓰는 것도 같다. 전체 권한은 살린다 — 점검·복구까지 막으면 고칠 수 없다.
+  if (map[MAP_META]?.privacy?.dead) return false;
   const target = canonWith(name, map);
   for (const c of access.channels) if (canonWith(c, map) === target) return true;
   return false;
