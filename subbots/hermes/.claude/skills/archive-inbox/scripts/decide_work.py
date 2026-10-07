@@ -118,6 +118,25 @@ def coords(it: dict, state: dict) -> dict:
     import decision_export as X
 
     out: dict = {}
+    if X.archiver_mode():
+        # 정본 모드에서는 **좌표·워크스페이스·채널 ID·message_ts 가 한 자리에서** 나온다.
+        # 따로 모으면 좌표는 A 채널 것이고 ID 는 B 채널 것인 조합이 생길 수 있고,
+        # 그 기록은 모양이 멀쩡해서 아무도 못 알아챈다.
+        locator, digest, workspace, channel_id, message_ts, why = X.archiver_coordinate(it)
+        if workspace:
+            out["workspace"] = workspace
+        if channel_id:
+            out["channel_id"] = channel_id
+        if message_ts:
+            out["evidence_message_ts"] = message_ts
+        if locator and digest:
+            out["evidence_locator"] = locator
+            out["evidence_hash"] = digest
+        else:
+            print(f"      원문 좌표를 못 냈습니다({why}) — 다른 인터페이스는 이 건을 다시 묻습니다.")
+        out["kind"] = str(it.get("kind") or "")
+        return out
+
     workspace = X.workspace_label()
     if workspace:
         out["workspace"] = workspace

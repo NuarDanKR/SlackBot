@@ -379,6 +379,13 @@ export const CHECKS = [
     "reason": "Legacy check requires application config, local environment or archive; excluded from config-free execution."
   },
   {
+    "file": "scripts/check-archiver-reader.js",
+    "what": "HERMES_MODE=pf-archiver 에서 Archiver 정본 reader 가 기존 공개 API 로 돌고, 다른 워크스페이스·DM 이 안 새며, 좌표를 추정하지 않나",
+    "runtime": "node",
+    "mode": "archive",
+    "reason": "Needs an Archiver fixture root and a data repository config; run from tests/test_hermes_archiver_reader.py which builds both with the real collector."
+  },
+  {
     "file": "scripts/check-archive-contract.js",
     "what": "봇이 쓰는 파서가 실물 아카이브 md 를 읽어내나 (월 헤딩·메시지 헤더·월 단위 읽기·관문 프로브)",
     "runtime": "node",
@@ -745,6 +752,13 @@ export const CHECKS = [
   {
     "file": ".claude/skills/archive-inbox/scripts/test_decide_work.py",
     "what": ".claude/skills/archive-inbox/scripts/test_decide_work.py",
+    "runtime": "python",
+    "mode": "archive",
+    "reason": "Local fixture/process suite; environment and script dependencies are not certified config-free. May create temporary files/repositories."
+  },
+  {
+    "file": ".claude/skills/archive-inbox/scripts/test_decision_export.py",
+    "what": ".claude/skills/archive-inbox/scripts/test_decision_export.py",
     "runtime": "python",
     "mode": "archive",
     "reason": "Local fixture/process suite; environment and script dependencies are not certified config-free. May create temporary files/repositories."

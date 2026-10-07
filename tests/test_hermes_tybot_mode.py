@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -280,18 +281,35 @@ def test_every_write_cli_carries_the_guard(script_name):
     assert "process.exit(2)" in text
 
 
+#: 환경변수를 **읽는** 모양. 이름이 주석에 적힌 것은 읽는 것이 아니다.
+#
+# 전에는 `HERMES_MODE` 라는 **글자**가 있으면 실패였다. 그 규칙은 설명을 적는 것까지
+# 막는다 — 모드가 왜 그 자리에 걸리는지 주석에 적을 수 없으면, 다음 사람은 그 자리가
+# 모드와 관계있다는 것을 모른다. 지키려는 것은 「두 곳만 **판정한다**」 이므로 읽는
+# 모양을 본다.
+_MODE_READS = re.compile(
+    r"""(?:process\.env(?:\.HERMES_MODE|\[\s*['"]HERMES_MODE['"]\s*\])"""
+    r"""|os\.environ(?:\.get\(\s*)?\[?\s*['"]HERMES_MODE['"]"""
+    r"""|getenv\(\s*['"]HERMES_MODE['"])"""
+)
+
+
 def test_the_mode_module_is_the_only_place_that_reads_the_switch():
-    """`HERMES_MODE` 를 여기저기서 읽으면 판정이 갈린다.
+    """`HERMES_MODE` 를 여기저기서 **읽으면** 판정이 갈린다.
 
     갈리면 오류가 아니라 **한쪽만 막힌 상태**로 나타난다 — 봇은 멈췄는데 스킬은
-    쓰고 있는 식이다. 읽는 곳은 `src/mode.js` 와 `_shared/mode.py` 둘뿐이다.
+    쓰고 있는 식이다. 판정하는 곳은 `src/mode.js` 와 `_shared/mode.py` 둘뿐이다.
+
+    **이름을 적은 것과 읽은 것을 가른다.** 주석·오류 문구·시험 환경 구성에는 그 이름이
+    나올 수밖에 없다. 그것까지 막으면 모드가 걸리는 자리에 이유를 못 적게 되고, 이유가
+    없는 관문은 다음 사람이 걷어낸다.
     """
     readers = sorted(
         path.relative_to(HERMES).as_posix()
         for path in HERMES.rglob("*.*")
         if path.suffix in {".js", ".py"}
         and "node_modules" not in path.parts
-        and "HERMES_MODE" in path.read_text(encoding="utf-8", errors="replace")
+        and _MODE_READS.search(path.read_text(encoding="utf-8", errors="replace"))
     )
 
     assert readers == ["\x2eclaude/skills/_shared/mode.py", "src/mode.js"], readers

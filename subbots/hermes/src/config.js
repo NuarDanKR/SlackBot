@@ -2,6 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+// 둘 다 **leaf** 다 — `config.js` 를 안 가져간다. 가져가면 맞물린 import 가 되고,
+// 그때 `config` 가 초기화 전 `undefined` 로 보여 「설정이 없다」 로 조용히 갈린다.
+import { archiveWritesBlocked, mode as hermesMode } from './mode.js';
+import { createReader as createArchiverReader, isKey as isArchiverKey } from './archive-reader/archiver.js';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -83,6 +87,87 @@ export const config = loadConfig();
 /** 아카이브 루트 (자료 저장소의 slack-export) 절대경로 */
 export const ARCHIVE_DIR = path.resolve(DATA_ROOT, config.archivePath);
 export const CHANNELS_DIR = path.join(ARCHIVE_DIR, 'channels');
+
+/* ── 근거를 어디서 읽나 (HERMES_MODE=pf-archiver) ──────────────────────────
+ *
+ * `pf` 는 지금까지와 같다 — `slack-export/channels/*.md`. `pf-archiver` 는 Archiving
+ * Bot 이 쌓는 정본만 읽는다. **둘을 동시에 읽지 않는다**(요구사항 9) — 같은 메시지가
+ * 두 번 걸리면 봇은 중복을 사실의 강도로 읽고, 사람은 왜 그렇게 답했는지 못 찾는다.
+ *
+ * 루트와 workspace 키는 **명시적으로** 받는다. `config.workspace` 는 사람이 읽는 이름
+ * 이고(그 줄의 주석이 「동작에 안 씁니다」 라고 적고 있다) 실제로 문장이 들어온다 —
+ * 그걸 경로 키로 추정하면 디렉터리를 못 찾아 **빈 아카이브로 보이고**, 빈 아카이브는
+ * 오류가 아니라 「자료가 없습니다」 로 나가서 아무도 못 알아챈다.
+ */
+export const ARCHIVER_ROOT = process.env.HERMES_ARCHIVER_ROOT
+  ? path.resolve(process.env.HERMES_ARCHIVER_ROOT)
+  : config.archiver?.root
+    ? path.resolve(DATA_ROOT, config.archiver.root)
+    : null;
+export const ARCHIVER_WORKSPACE =
+  process.env.HERMES_ARCHIVER_WORKSPACE || config.archiver?.workspace || '';
+
+/** 지금 근거의 출처. `'slack-export'` 또는 `'archiver'`. */
+export const ARCHIVE_SOURCE = archiveWritesBlocked() && hermesMode() !== 'tybot'
+  ? 'archiver'
+  : 'slack-export';
+
+/**
+ * 모드에 맞는 reader. `pf` 에서는 `null` 이고, 그때 읽는 자리는 지금까지와 똑같다.
+ *
+ * ## 설정이 없으면 — 읽을 때 던진다. import 때가 아니다
+ *
+ * `pf-archiver` 인데 설정이 없으면 **반드시 막아야 한다.** 조용히 slack-export 로
+ * 물러서면 Hermes writer 를 끈 상태의 **낡은 자료**를 최신으로 읽고, 날짜가 멈춘 것은
+ * 사람이 한참 뒤에 안다.
+ *
+ * 그런데 그 판정을 **import 시점**에 두면 안 된다. `config.js` 는 거의 모든 모듈이
+ * 가져가므로, 그때는 아카이브를 안 읽는 자리(`mode.js` 의 쓰기 차단 확인, `doctor`,
+ * 버전 출력)까지 전부 죽는다. 그러면 「쓰기가 막혔다」 는 정확한 사유가 「Archiver 루트가
+ * 없다」 로 덮이고, 사람은 엉뚱한 것을 고치러 간다 — 실제로 쓰기 차단 회귀시험 네 건이
+ * 그 모양으로 깨졌다(2026-10-07).
+ *
+ * 그래서 **처음 쓸 때** 만든다. `if (archiveSource)` 같은 참·거짓 판정은 만들지 않는다.
+ * 기동 자체를 막는 것은 봇 진입점의 `assertArchive()` 가 한다 — 그 자리는 아카이브를
+ * 실제로 읽어야 하는 자리다.
+ */
+function lazyArchiverReader() {
+  let real = null;
+  const build = () => {
+    if (!real) real = createArchiverReader({ root: ARCHIVER_ROOT, workspace: ARCHIVER_WORKSPACE });
+    return real;
+  };
+  // Proxy 로 감싼다 — 속성을 **읽을 때** 만들어야 `if (archiveSource)` 가 생성을
+  // 일으키지 않는다. 생성이 거기서 일어나면 위 문단의 사고가 그대로 돌아온다.
+  return new Proxy({}, {
+    get(_target, prop) {
+      const reader = build();
+      const value = reader[prop];
+      return typeof value === 'function' ? value.bind(reader) : value;
+    },
+    has(_target, prop) {
+      return prop in build();
+    },
+  });
+}
+
+export const archiveSource = ARCHIVE_SOURCE === 'archiver' ? lazyArchiverReader() : null;
+
+/**
+ * Archiver 설정이 갖춰졌나. **기동 점검용** — 문장을 들고 있다.
+ *
+ * `null` 이면 이상 없음, 문자열이면 그 사유다. 참·거짓만 돌려주면 화면이 무엇을
+ * 고쳐야 하는지 못 적고, 못 적으면 아무도 안 고친다.
+ */
+export function archiverConfigProblem() {
+  if (ARCHIVE_SOURCE !== 'archiver') return null;
+  try {
+    createArchiverReader({ root: ARCHIVER_ROOT, workspace: ARCHIVER_WORKSPACE });
+    return null;
+  } catch (e) {
+    return e.message;
+  }
+}
 
 /**
  * 문서 아카이브 루트 (자료 저장소의 documents). 슬랙 첨부를 md 로 변환해 둔 곳.
@@ -182,8 +267,20 @@ export function normalizeChannel(name) {
 
 const fileCache = new Map(); // abs path -> { mtimeMs, text }
 
-/** 파일 수정 시각이 그대로면 다시 안 읽는다. 줄 끝은 LF 로 맞춘다. */
+/** 파일 수정 시각이 그대로면 다시 안 읽는다. 줄 끝은 LF 로 맞춘다.
+ *
+ * **가상 키는 reader 가 답한다.** `pf-archiver` 에서 채널·첨부 본문은 디스크에 그
+ * 모양으로 있지 않고 투영된 것이다(`archive-reader/archiver.js`). 키를 여기서 받아
+ * 넘기면 부르는 자리(`metaBlock`·`channelBrief`·`readChannel`)를 안 고쳐도 된다 —
+ * 그 자리들은 문서 md 에도 쓰이므로 실제 경로는 **그대로 통과**해야 한다.
+ */
 export function readCached(absPath) {
+  if (isArchiverKey(absPath)) {
+    if (!archiveSource) {
+      throw new Error(`Archiver 키를 받았지만 Archiver reader 가 없습니다: ${absPath}`);
+    }
+    return archiveSource.readKey(absPath);
+  }
   const stat = fs.statSync(absPath);
   const hit = fileCache.get(absPath);
   if (hit && hit.mtimeMs === stat.mtimeMs) return hit.text;
@@ -227,6 +324,9 @@ function warnClosed(kind, message) {
  * 막혀 있는 것은 다르다** — 여기서 한 줄로 닫는다. */
 function archiveHasContent() {
   try {
+    // **출처가 하나다.** `pf-archiver` 에서 slack-export 를 함께 세면 같은 자료가 두 벌로
+    // 보이고, 그 상태에서 「비었나」 판정이 엇갈린다(요구사항 9).
+    if (archiveSource) return archiveSource.hasContent();
     if (fs.readdirSync(CHANNELS_DIR).some((f) => f.endsWith('.md'))) return true;
   } catch { /* channels/ 가 없으면 대화 쪽은 비어 있는 것이다 — 문서 쪽을 마저 본다 */ }
   if (!DOC_PROJECTS_DIR) return false; // 문서 기능 자체가 꺼진 설치
@@ -245,8 +345,22 @@ function deadOrFresh(reason) {
   return { rows: [], dead: false, fresh: true, reason };
 }
 
-/** `.sync-state.json` 을 상태와 함께 읽는다. dead 면 rows 는 늘 빈 배열이다. */
+/** `.sync-state.json` 을 상태와 함께 읽는다. dead 면 rows 는 늘 빈 배열이다.
+ *
+ * **`pf-archiver` 에는 그 파일이 없다.** 개명 지도의 근거가 정본 디렉터리 이름이기
+ * 때문이다 — 디렉터리에는 **처음 이름**이 박히고 정체성은 채널 ID 라, 개명해도 같은
+ * 디렉터리다(요구사항 4). 그래서 `{name: 지금 이름, file: 처음 이름}` 을 그대로 낸다.
+ *
+ * 그 모드에서 `.sync-state.json` 을 읽으면 **Hermes writer 시절의 낡은 지도**를 보고
+ * 지금 없는 채널을 되짚는다. 그 지도는 바뀌지 않으므로 오류도 안 난다.
+ */
 function loadSyncState() {
+  if (archiveSource) {
+    const rows = archiveSource.renameRows();
+    if (rows.length) return { rows, dead: false, fresh: false, reason: null };
+    // 자료가 아직 없는 것은 죽음이 아니다. 설정이 틀렸으면 `createReader` 가 이미 던졌다.
+    return { rows: [], dead: false, fresh: true, reason: null };
+  }
   const p = path.join(ARCHIVE_DIR, '.sync-state.json');
   if (!fs.existsSync(p)) {
     return archiveHasContent()

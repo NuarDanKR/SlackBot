@@ -55,6 +55,10 @@ WRITE_PATHS: dict[str, str] = {
     "src/tybot/archive/migrate.py": "out-of-scope",
     # 레이아웃 실측. 임시 경로에만 쓴다.
     "scripts/archive_layout_bench.py": "out-of-scope",
+    # 시험 fixture 생성기. **명령줄로 받은 디렉터리에만** 쓴다 — 운영 아카이브 경로를
+    # 모르고, 가짜 Slack 클라이언트에서만 메시지를 받는다. 운영 원문을 쓰는 코드를
+    # 그대로 부르는 것이 요점이라(손으로 적은 fixture 를 피한다) 이 목록에 걸린다.
+    "scripts/make_archiver_fixture.py": "out-of-scope",
 }
 
 #: 문지기를 지났다고 인정하는 호출. 이름이 바뀌면 여기도 바뀌어야 한다.

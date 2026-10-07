@@ -14,8 +14,9 @@ import path from 'node:path';
 import {
   DOCS_DIR, DOC_PROJECTS_DIR, config, canSeePrivateChannel, isPrivateChannel, normalizeChannel,
   redactPrivateMentions, matchesHiddenPrivate, BLOCKED_NOTE, PUBLIC_ACCESS, companyWideDocProjects,
-  TRUNC_PHRASE, truncMarker, currentChannelNames,
+  TRUNC_PHRASE, truncMarker, currentChannelNames, archiveSource,
 } from './config.js';
+import { docKey } from './archive-reader/archiver.js';
 import {
   readCached, fold, splitMessages, metaBlock, preambleOf, preambleOutline,
   pickSpread, spreadNote, byScoreThenDate,
@@ -66,8 +67,21 @@ const DOC_BRIEF_RECENT_MONTHS = limits.docBriefRecentMonths ?? 3;
 const SECTION_OUTLINE_MIN_COVER = 0.7;
 
 
+/* ── `pf-archiver` 의 「문서」는 Archiver 첨부 정본이다 ─────────────────────
+ *
+ * PF 의 `documents/` 는 사람이 변환해 커밋한 자리이고, Archiver 구성에서는 그 일을
+ * Archiving Bot 이 한다 — 결과가 `…/archive/attachments/<file-id>/<판>.md` 다. 그래서
+ * 이 모드에서 문서 = 첨부 정본이고, **사업장(project) 은 채널**, **문서는 첨부 파일**이다.
+ *
+ * `documents/store.js` 는 `fs.statSync(abs)` 로 캐시를 가른다. 가상 키에는 stat 이 없으니
+ * **그 자리만** 갈아 끼운다(아래 `sourceFs`). 통째로 새 store 를 쓰지 않는 이유는 메타
+ * 해석·공개 판정이 그 안에 있어서다 — 사본을 만들면 공개 판정이 두 벌이 된다.
+ */
+const DOC_SUFFIX = '.md';
+
 /** 문서 아카이브가 켜져 있고 실제로 존재하는지 */
 export function hasDocuments() {
+  if (archiveSource) return archiveSource.documents().length > 0;
   return Boolean(DOC_PROJECTS_DIR && fs.existsSync(DOC_PROJECTS_DIR));
 }
 
@@ -77,6 +91,12 @@ export function hasDocuments() {
  */
 export function listProjects() {
   if (!hasDocuments()) return [];
+  if (archiveSource) {
+    // 채널 하나가 사업장 하나다. 첨부가 없는 채널은 넣지 않는다 — 빈 사업장은 봇이
+    // 「자료가 있는 자리」 로 읽고 열어 보려 한다.
+    return [...new Set(archiveSource.documents().map((d) => d.channelName))]
+      .sort((a, b) => a.localeCompare(b, 'ko'));
+  }
   const out = [];
   for (const top of fs.readdirSync(DOC_PROJECTS_DIR, { withFileTypes: true })) {
     if (!top.isDirectory()) continue;
@@ -91,8 +111,37 @@ export function listProjects() {
 }
 
 function projectDir(project) {
+  if (archiveSource) {
+    const meta = archiveSource.channelMeta(project);
+    // 못 찾으면 **실제 디렉터리로 물러서지 않는다.** 물러서면 그 사업장만 조용히 다른
+    // 자료를 읽는다. 없는 키는 `readKey` 가 던지고, 던지는 자리를 store 가 broken 으로
+    // 받는다 — 닫히는 쪽이다.
+    return docKey(meta ? meta.channelId : '__missing__', '');
+  }
   return path.join(DOC_PROJECTS_DIR, ...project.split('/'));
 }
+
+/**
+ * store 가 캐시를 가르는 `statSync` 만 갈아 끼운다. 가상 키에는 stat 이 없다.
+ *
+ * `mtimeMs` 로는 **정본의 지문**을 쓴다. 0 같은 고정값을 주면 첨부가 새 판으로 바뀌어도
+ * 캐시가 영영 안 갈리고, 사람은 옛 변환본을 근거로 받는다 — 오류가 아니라 「내용이 안
+ * 바뀐다」 로만 드러난다.
+ */
+const sourceFs = archiveSource
+  ? {
+    ...fs,
+    statSync(target) {
+      if (typeof target === 'string' && target.startsWith('archiver:')) {
+        const text = archiveSource.readKey(target);   // 없으면 던진다 → store 가 닫는다
+        let hash = 0;
+        for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) | 0;
+        return { mtimeMs: hash };
+      }
+      return fs.statSync(target);
+    },
+  }
+  : fs;
 
 // Access construction is lazy: listDocuments may use the store initialized below.
 const { projectIsPrivate, projectPrivateChannel, maskProject, realProjects, documentsFor, canSeeDoc, visibleProjects, resolveProjectFor, resolveDocumentFor } = createDocumentAccess({
@@ -102,7 +151,7 @@ const { projectIsPrivate, projectPrivateChannel, maskProject, realProjects, docu
 // One parsed-document cache for this facade; creation performs no reads.
 // channelMap: 캐시 키에 개명 지도의 지금 판을 섞는다 — store.js 의 docCache 주석이 원본.
 const { loadDocument } = createDocumentStore({
-  fs, path, projectDir, projectPrivateChannel, projectIsPrivate, readCached, metaBlock, splitMessages, preambleOf, channelMap: currentChannelNames
+  fs: sourceFs, path, projectDir, projectPrivateChannel, projectIsPrivate, readCached, metaBlock, splitMessages, preambleOf, channelMap: currentChannelNames
 });
 
 /** 사업장(생략 시 전체)의 문서 목록 */
@@ -111,6 +160,14 @@ export function listDocuments(project) {
   const projects = project ? [project] : listProjects();
   const out = [];
   for (const p of projects) {
+    if (archiveSource) {
+      // 첨부 하나가 문서 하나다. **판은 파일 이름에 안 넣는다** — 넣으면 같은 첨부가
+      // 판마다 다른 문서로 검색에 걸리고, 사람은 어느 판을 보고 있는지 모른다.
+      for (const doc of archiveSource.documentsFor(p)) {
+        out.push(loadDocument(p, `${doc.fileId}${DOC_SUFFIX}`));
+      }
+      continue;
+    }
     const dir = projectDir(p);
     if (!fs.existsSync(dir)) continue;
     for (const f of fs.readdirSync(dir)) {

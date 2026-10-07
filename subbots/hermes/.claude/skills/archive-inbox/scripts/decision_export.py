@@ -123,6 +123,98 @@ def export_path(root: Path | str, *, workspace: str, source: str = SOURCE) -> Pa
     )
 
 
+# ── Archiver 정본 (HERMES_MODE=pf-archiver) ──────────────────────────────
+#
+# 그 모드에서 채널 본문은 디스크에 Hermes 모양으로 없고 정본에서 **투영**된 것이다
+# (`src/archive-reader/archiver.js`). 그래서 좌표도 그쪽에서 받는다.
+#
+# **파이썬에서 정본을 다시 파싱하지 않는다.** 그러면 투영이 두 벌이 되고, 두 벌은
+# 갈린다 — 갈리면 화면이 보여 준 원문과 기록의 좌표가 다른 메시지를 가리킬 수 있고
+# 그건 조용히 틀린다. `summary_hash` 가 node 를 부르는 것과 같은 자리다.
+#
+# 얻는 것이 하나 더 있다. 정본 좌표는 TYBot 의 `_source_rows` 와 **같은 모양**
+# (`<상대경로>:<줄번호>`)이고 해시도 같은 공식(`evidence_refs.content_hash`)이다.
+# 즉 이 모드에서는 PF 와 사내가 **같은 좌표로** 대조된다 — 좌표계가 둘이던 동안
+# 불가능했던 것이다(`docs/design/summary-approval-ports.md` §3.2).
+_PROJECTION: dict = {}
+
+
+def _node_json(args: list) -> dict | None:
+    """`scripts/archiver-channel.js` 를 불러 JSON 을 받는다. 못 받으면 `None`.
+
+    **좌표를 지어내지 않는다.** node 가 없거나 모드가 아니면 `None` 이고, 그러면
+    좌표 없이 기록되어 받는 쪽이 다시 묻는다.
+    """
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        return None
+    script = R.CODE_ROOT / "scripts" / "archiver-channel.js"
+    if not script.is_file():
+        return None
+    r = subprocess.run(
+        [node, str(script), *args], capture_output=True, text=True, encoding="utf-8",
+        cwd=str(R.CODE_ROOT),
+    )
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+def archiver_mode() -> bool:
+    try:
+        import mode as M
+
+        return M.mode() == M.PF_ARCHIVER
+    except Exception:  # noqa: BLE001 - 모드를 못 읽으면 그 모드가 아닌 것으로 본다
+        return False
+
+
+def projection(channel: str) -> dict | None:
+    """그 채널의 투영 본문과 좌표표. 프로세스 수명 동안 캐시한다."""
+    if channel in _PROJECTION:
+        return _PROJECTION[channel]
+    got = _node_json([channel])
+    _PROJECTION[channel] = got
+    return got
+
+
+def archiver_coordinate(item: dict) -> tuple:
+    """정본 기준 좌표. `(locator, hash, workspace, channel_id, message_ts, 사유)`.
+
+    인용을 찾는 것은 **투영 본문 위에서** `review_work.evidence_block()` 이 한다 —
+    `pf` 와 같은 함수다. 찾은 줄 범위를 reader 의 좌표표에 대본다.
+    """
+    name = str(item.get("file") or item.get("channel") or "")
+    got = projection(name)
+    if not got:
+        return "", "", "", "", "", "Archiver 투영을 받지 못했다(node·모드 확인)"
+    block = R.evidence_block(R.md_path(item), item.get("evidence") or "", text=got["text"])
+    if not block.found:
+        return "", "", "", "", "", block.note
+    if block.missing:
+        return "", "", "", "", "", f"원문에 없는 인용 조각이 있다({len(block.missing)}건)"
+    # `evidence_block` 의 `start`/`end` 는 0-based·끝 제외. 좌표표는 1-based·양끝 포함.
+    start, end = block.start + 1, block.end
+    hits = [c for c in got["coords"] if start <= c["endLine"] and end >= c["startLine"]]
+    if len(hits) != 1:
+        return "", "", "", "", "", f"근거가 메시지 {len(hits)}개에 걸쳐 있다"
+    hit = hits[0]
+    if start < hit["startLine"] or end > hit["endLine"]:
+        return "", "", "", "", "", "근거 범위가 메시지 블록과 어긋난다"
+    if not hit.get("messageTs"):
+        return "", "", "", "", "", "정본에 message_ts 가 없는 옛 줄이다"
+    return (
+        hit["locator"], hit["evidenceHash"], got["workspace"], got["channelId"],
+        hit["messageTs"], "",
+    )
+
+
 def workspace_label() -> str:
     """config.json 의 `workspace`. 못 읽으면 빈 문자열.
 
@@ -132,6 +224,12 @@ def workspace_label() -> str:
     쪽에서 `source_mismatch` 가 아니라 아무 데도 안 걸리는 행이 되어, 사람은 파일에
     결정이 쌓이는데 왜 하나도 안 맞는지를 알 수가 없다.
     """
+    # **`pf-archiver` 에서는 정본의 workspace 키를 쓴다.** 사람이 읽는 이름을 쓰면
+    # TYBot 이 쓰는 키와 달라서 같은 자료의 결정이 `source_mismatch` 로 떨어진다 —
+    # 좌표와 해시가 같은데 안 걸리고, 그 상태는 「상대편이 아무것도 안 했다」 로 보인다.
+    if archiver_mode():
+        listing = _node_json(["--list"])
+        return str((listing or {}).get("workspace") or "")
     try:
         data = json.loads(CONFIG.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -148,6 +246,17 @@ def channel_ids(state: dict) -> dict:
     같은 `file` 을 여러 ID 가 거쳐 갈 수 있는데, 그때 아무거나 고르면 **다른 채널의
     ID 로 결정을 적는다.** 애매하면 비우고 받는 쪽이 다시 묻게 한다.
     """
+    # `pf-archiver` 에는 `.sync-state.json` 이 없다 — 채널 ID 는 정본 디렉터리 이름에
+    # 박혀 있고 그것이 정체성이다(개명해도 같은 채널). 옛 지도를 읽으면 Hermes writer
+    # 시절의 ID 로 적게 되고, 그 지도는 안 바뀌므로 오류도 안 난다.
+    if archiver_mode():
+        listing = _node_json(["--list"]) or {}
+        out: dict = {}
+        for row in listing.get("channels") or []:
+            for alias in (row.get("firstName"), row.get("name")):
+                if alias:
+                    out.setdefault(str(alias), str(row.get("channelId") or ""))
+        return {k: v for k, v in out.items() if v}
     seen: dict = {}
     for cid, info in ((state or {}).get("channels") or {}).items():
         if not isinstance(info, dict):
@@ -183,6 +292,11 @@ def coordinate_for(item: dict) -> tuple:
     if item.get("kind") not in R.SUMMARY_KINDS:
         # 요약 계열이 아닌 것(새 채널·개명·note·파생값)에는 근거 인용이 없다.
         return "", "", "근거 인용이 없는 종류"
+    if archiver_mode():
+        # 정본 좌표는 TYBot 과 **같은 모양·같은 해시 공식**이다. 그래서 이 모드에서는
+        # 블록 지문이 아니라 **그 줄의 지문**을 쓴다 — 양쪽이 대조되려면 그래야 한다.
+        locator, digest, _ws, _cid, _ts, why = archiver_coordinate(item)
+        return locator, digest, why
     md = R.md_path(item)
     block = R.evidence_block(md, item.get("evidence") or "")
     if not block.found:

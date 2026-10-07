@@ -13,6 +13,10 @@
   },
 
   "archivePath": "slack-export",
+
+  "_archiver": "HERMES_MODE=pf-archiver 로 띄울 때만 쓴다. 근거를 Hermes 자기 slack-export 가 아니라 **Archiving Bot 이 쌓는 정본**에서 읽는다. root 는 자료 저장소 기준 상대경로(또는 HERMES_ARCHIVER_ROOT 로 절대경로), workspace 는 **경로에 쓰이는 키**다 — 위의 `workspace` 는 사람이 읽는 이름이라 경로가 아니다. 두 값은 추정하지 않는다: 틀리면 디렉터리를 못 찾아 **빈 아카이브**가 되고, 빈 아카이브는 오류가 아니라 「자료가 없습니다」로 나가서 아무도 못 알아챈다. 구조는 <root>/<workspace>/<channel-id>__<채널명>/archive/raw/*.md 이고 첨부 정본은 같은 자리의 archive/attachments/<file-id>/<판>.md 다. 이 줄과 archiver 를 지우면 pf 모드와 똑같이 slack-export 를 읽는다(롤백).",
+  "archiver": { "root": "", "workspace": "" },
+
   "_documentsPath": "이 줄과 documentsPath 를 지우면 문서 기능이 통째로 꺼진다 (킬 스위치).",
   "documentsPath": "documents",
 

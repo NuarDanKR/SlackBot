@@ -230,19 +230,25 @@ def _NoBlock(note: str) -> EvidenceBlock:
     return EvidenceBlock(lines=[], note=note)
 
 
-def evidence_block(md: Path, evidence: str) -> EvidenceBlock:
+def evidence_block(md: Path, evidence: str, text: str | None = None) -> EvidenceBlock:
     """근거 인용이 든 메시지 블록을 찾는다. **찾기만 하고 그리지 않는다.**
 
     `context_for` 에서 뽑아낸 것이다 — 화면과 결정 기록이 같은 판정을 쓰게 하려고
     한 자리에 뒀다. 주석은 그 자리의 경위를 그대로 들고 왔다.
+
+    `text` 를 주면 **파일을 안 읽고 그 글자에서 찾는다.** `HERMES_MODE=pf-archiver` 의
+    채널 본문은 디스크에 그 모양으로 없고 Archiver 정본에서 투영된 것이다
+    (`src/archive-reader/archiver.js`). 그 모드에서도 **찾는 규칙은 이 함수 하나**여야
+    한다 — 두 벌이 되면 같은 인용이 한쪽은 걸리고 한쪽은 안 걸리고, 그건 에러가
+    아니라 다른 결과로 나타난다. `md` 는 그때 화면 문구에만 쓰인다.
     """
     quotes = QUOTE_RE.findall(evidence or "")
     if not quotes:
         return _NoBlock(f"(근거에 원문 인용이 없습니다 — 적힌 것: {evidence or '없음'})")
-    if not md.exists():
+    if text is None and not md.exists():
         return _NoBlock(f"(채널 md 를 찾지 못했습니다: {md.name})")
 
-    lines = md.read_text(encoding="utf-8").split("\n")
+    lines = (text if text is not None else md.read_text(encoding="utf-8")).split("\n")
     folded = [_fold(x) for x in lines]
 
     # **요약 자리는 건너뛴다 — 거기 있는 문장은 원문이 아니다.** 「반영」은 원문 표현을

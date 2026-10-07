@@ -10,7 +10,9 @@ import {
   ARCHIVE_DIR, CHANNELS_DIR, config, canSee, isPrivateChannel, normalizeChannel, readCached,
   redactPrivateMentions, matchesHiddenPrivate, BLOCKED_NOTE, OUT_OF_SCOPE_NOTE, PUBLIC_ACCESS,
   BOT_ANSWER_MARK, TRUNC_PHRASE, canonicalChannel, currentChannelNames,
+  archiveSource, archiverConfigProblem,
 } from './config.js';
+import { KEY_PREFIX } from './archive-reader/archiver.js';
 import { splitTerms, scoreTerms, PARTIAL_MIN_TERMS, clipPartial } from './search-terms.js';
 
 // 개명 지도와 파일 캐시는 config.js 가 정본이다 — 권한 판정(config.js)이 같은 것을 써야
@@ -24,6 +26,26 @@ export { readCached, archiveChannelNames, archiveChannelOf } from './config.js';
  * 대개 「아직 안 만들었다」쪽이다. 그 사람은 멀쩡한 archivePath 를 고치러 간다.
  */
 export function assertArchive() {
+  if (archiveSource) {
+    // **설정 점검이 먼저다.** 뒤에 두면 설정이 빈 설치에서 「읽을 채널이 없다」 가 뜨고,
+    // 사람은 수집이 안 돌았다고 읽는다 — 고쳐야 하는 것은 설정이다.
+    const problem = archiverConfigProblem();
+    if (problem) throw new Error(problem);
+    // `pf-archiver` 에는 `slack-export/` 도 `index.md` 도 없다 — 정본은 Archiving Bot 이
+    // 다른 자리에 쌓는다. 여기서 옛 경로를 요구하면 그 모드로는 **기동 자체가 안 된다.**
+    //
+    // 대신 **읽을 자료가 실제로 있는지**를 본다. 설정이 틀렸으면 `createReader` 가 이미
+    // 던졌으므로, 여기까지 와서 비어 있다는 것은 「아직 안 쌓였다」 다. 그 둘을 가른다.
+    if (!archiveSource.hasContent()) {
+      throw new Error(
+        `Archiver 정본에서 읽을 채널을 찾지 못했습니다: ${archiveSource.root}/${archiveSource.workspace}\n`
+        + '구조는 <root>/<workspace>/<channel-id>__<채널명>/archive/raw/*.md 입니다.\n'
+        + 'Archiving Bot 수집이 아직 안 돌았거나, archiver.workspace 키가 경로와 다릅니다.\n'
+        + '기존 slack-export 로 되돌리려면 HERMES_MODE=pf 로 실행하세요.',
+      );
+    }
+    return;
+  }
   if (!fs.existsSync(ARCHIVE_DIR)) {
     throw new Error(
       `대화 아카이브를 아직 만들지 않았습니다: ${ARCHIVE_DIR}\n`
@@ -39,8 +61,18 @@ export function assertArchive() {
   }
 }
 
-/** index.md 전문 */
+/** index.md 전문
+ *
+ * `pf-archiver` 에는 사람이 손으로 쓴 `index.md` 가 없다 — 그 파일은 Hermes 아카이브의
+ * 물건이고 정본에는 없다. **빈 문자열로 대신하지 않고 한 줄을 적는다**: 색인 앞머리가
+ * 통째로 비면 프롬프트에서 「자료 설명이 없는 아카이브」 가 되고, 모델은 그 상태를
+ * 「자료가 빈약하다」 로 읽는다.
+ */
 export function getIndexText() {
+  if (archiveSource) {
+    return `# 아카이브 색인\n\nArchiver 정본 (워크스페이스 ${archiveSource.workspace})`
+      + ` 에서 읽습니다. 채널 ${archiveSource.channelNames().length}개.\n`;
+  }
   return readCached(path.join(ARCHIVE_DIR, 'index.md'));
 }
 
@@ -54,6 +86,10 @@ export function getIndexText() {
  * 「재지 않은 것을 적지 않는다」다. (2026-09-03)
  */
 export function listArchivedChannels() {
+  // `pf-archiver` 에서는 정본 디렉터리가 목록의 근거다. **slack-export 를 함께 세지
+  // 않는다** — 두 자료가 디스크에 함께 있으면 같은 채널이 두 번 들어오고, 그때
+  // 검색·색인이 같은 메시지를 두 벌로 본다(요구사항 9).
+  if (archiveSource) return archiveSource.channelNames();
   if (!fs.existsSync(CHANNELS_DIR)) return [];
   return fs
     .readdirSync(CHANNELS_DIR)
@@ -296,7 +332,21 @@ export function uninvitedChannels({ live = [], known = [], joinedIds, archived =
   };
 }
 
+/**
+ * 그 채널의 본문을 어디서 읽나. `pf` 에서는 파일 경로, `pf-archiver` 에서는 **가상 키**다.
+ *
+ * 돌려주는 값이 `readCached()` 로 그대로 들어간다는 것이 이 함수의 계약이고,
+ * `readCached` 가 두 모양을 모두 받는다(`config.js`). 그래서 `metaBlock`·`channelBrief`·
+ * `readChannel`·`scanArchive` 를 한 줄도 고치지 않는다 — 고치면 그 자리마다 모드 분기가
+ * 하나씩 생기고, 하나를 빼먹는 날 **그 자리만 slack-export 를 읽는다.**
+ */
 function channelPath(name) {
+  if (archiveSource) {
+    const key = archiveSource.channelKeyOf(name);
+    // 못 찾으면 **실제 경로로 물러서지 않는다.** 물러서면 그 채널만 조용히 옛 자료를
+    // 읽고, 그게 「왜 이 채널만 날짜가 멈췄나」 로 나타난다.
+    return key || `${KEY_PREFIX}ch/__missing__/${name}`;
+  }
   return path.join(CHANNELS_DIR, `${name}.md`);
 }
 

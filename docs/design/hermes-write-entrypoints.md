@@ -342,3 +342,148 @@ Hermes 의 결정 기록(`.sync-state.json` 의 `applied`·`dismissed`)은 **항
 메시지를 같은 것으로 보게 되고, 그건 조용히 틀린다. 지금 닫힌 고리는 **PF 안**
 (한 PC 에서 정한 것을 다른 PC·VM 이 읽는다)이고, 두 좌표계가 하나가 되는 것은
 아카이브가 Archiver 아래로 모일 때다.
+
+## 7. PF Archiver reader 어댑터 (2026-10-07 구현)
+
+> `HERMES_MODE=pf-archiver` 에서 **근거를 Archiver 정본만** 읽는다. 질문·DM·요약은
+> 그대로 돌고, Hermes 의 원문 writer 는 계속 막혀 있다. `pf` 는 손대지 않은 롤백 모드다.
+
+### 7.1 왜 reader 를 갈아 끼우나
+
+§3 의 모드 스위치는 **쓰기**를 막았다. 그런데 읽는 쪽이 그대로면 Hermes 는 자기
+`slack-export/` 를 계속 본다 — 그 자료는 writer 가 막힌 날부터 **자라지 않는다.**
+오류는 한 줄도 안 나고, 「요즘 봇이 옛 얘기만 한다」 로 몇 주 뒤에 드러난다.
+
+### 7.2 구조
+
+```text
+<root>/<workspace>/<channel-id>__<채널명>/archive/raw/<YYYY-MM-DD>.md
+<root>/<workspace>/<channel-id>__<채널명>/archive/attachments/<file-id>/<판>.md
+<root>/<workspace>/dm/<user-id>/archive/…      ← 절대 읽지 않는다
+<root>/<다른 workspace>/…                       ← 절대 읽지 않는다
+```
+
+구현: [`subbots/hermes/src/archive-reader/archiver.js`](../../subbots/hermes/src/archive-reader/archiver.js)
+— `node:fs`·`node:path`·`node:crypto` 만 쓰는 **leaf** 다. `config.js` 를 가져가지 않는다:
+가져가면 맞물린 import 가 되고, 그때 `config` 가 초기화 전 `undefined` 로 보여
+「설정이 없다」 로 조용히 갈린다.
+
+| 설정 | 값 |
+|---|---|
+| 루트 | `config.json` 의 `archiver.root`(자료 저장소 기준) 또는 `HERMES_ARCHIVER_ROOT` |
+| workspace 키 | `archiver.workspace` 또는 `HERMES_ARCHIVER_WORKSPACE` |
+
+**`config.workspace` 를 경로 키로 추정하지 않는다.** 그 값은 사람이 읽는 이름이고
+(그 줄의 주석이 「동작에 안 씁니다」 라고 적고 있다) 실제로 `태영건설 재무팀` 같은
+문장이 들어온다 — 경로로 쓰면 디렉터리를 못 찾아 **빈 아카이브**가 되고, 빈 아카이브는
+오류가 아니라 「자료가 없습니다」 로 나가서 아무도 못 알아챈다. 키 모양이 아니면 던진다.
+
+설정이 없는데 `pf-archiver` 면 **기동을 막는다.** 조용히 slack-export 로 물러서면
+writer 를 끈 상태의 낡은 자료를 최신으로 읽는다.
+
+### 7.3 사본을 만들지 않는다 — 투영이다
+
+디스크에 Hermes 모양 md 를 깔면 `archive.js` 를 한 줄도 안 고쳐도 된다. **안 한다.**
+그 파일은 권한 판정을 거치지 않은 **원문 사본**이고, 이 모드가 막으려는 것이 그것이다
+(§3). 두 자료가 디스크에 함께 있으면 어느 날 양쪽이 함께 읽혀 **같은 메시지가 두 번**
+나온다.
+
+그래서 투영은 메모리에만 있고, 파일 경로 대신 **가상 키**(`archiver:ch/<id>` ·
+`archiver:doc/<id>/<file-id>`)를 돌려준다. `config.readCached()` 가 그 키를 받아
+reader 에게 넘기므로 `metaBlock`·`channelBrief`·`readChannel`·`scanArchive`·
+`documents/store.js` 를 **한 줄도 고치지 않았다** — 고치면 그 자리마다 모드 분기가
+하나씩 생기고, 하나를 빼먹는 날 그 자리만 slack-export 를 읽는다.
+
+갈아 끼운 자리는 넷뿐이다.
+
+| 자리 | 무엇 |
+|---|---|
+| `config.readCached()` | 가상 키를 reader 로 넘긴다. 실제 경로는 그대로 통과 |
+| `config.loadSyncState()` | 개명 지도를 정본 디렉터리에서 만든다(`{name, file}` 같은 모양) |
+| `archive.listArchivedChannels()` · `channelPath()` · `assertArchive()` · `getIndexText()` | 채널 목록과 본문 출처 |
+| `documents.hasDocuments()` · `listProjects()` · `listDocuments()` · `projectDir()` | 첨부 정본을 문서로 |
+
+### 7.4 채널 ID 가 정체성이다
+
+디렉터리 이름에는 **처음 이름**이 남고 지금 이름은 가장 최근 raw 의 프론트매터
+`channel:` 에서 읽는다. 그래서 개명해도 같은 채널이고, 개명 지도는
+`{name: 지금 이름, file: 처음 이름}` 으로 그대로 성립한다.
+
+이름이 **겹치면 둘 다 뺀다.** 개명 직후 두 채널이 같은 이름을 가질 수 있고, 그때
+어느 채널인지 모르는 이름으로 답하면 출처가 틀린다.
+
+### 7.5 좌표가 TYBot 과 **같다** — §6.5 의 전제가 바뀐다
+
+§6.5 는 「좌표계가 둘이라 사내↔PF 대조가 안 된다」 고 적었다. 이 모드에서는 **양쪽이
+같은 파일을 읽으므로** 그 전제가 사라진다.
+
+| | 값 |
+|---|---|
+| locator | `<상대경로>:<줄번호>` — TYBot `_source_rows` 와 같은 모양 |
+| `evidence_hash` | `sha256(at \0 author \0 text)` — TYBot `evidence_refs.content_hash` 와 **같은 공식** |
+| `message_ts` | 정본 raw 의 `|ts|` 를 그대로 |
+
+실측(2026-10-07): 같은 fixture 에서 Hermes(JS)와 TYBot(Python)이 낸 locator·ts·hash 가
+**4건 전부 일치**했다. 관문은 `tests/test_hermes_archiver_reader.py` ②.
+
+한 블록이 두 raw 줄일 수 있다(본문 + 첨부 표시는 같은 ts·작성자로 두 줄에 적힌다).
+TYBot 은 그 둘을 **각각** 세므로, Hermes 의 블록 좌표는 **첫 줄**에 맞춘다.
+
+**여전히 추정하지 않는다.** 투영 줄 범위가 블록 하나에 정확히 안 맞으면(두 블록에
+걸침·범위 어긋남·`message_ts` 없는 옛 줄) 좌표를 안 내고, 받는 쪽은 다시 묻는다.
+
+### 7.6 격리는 세 겹이다
+
+경로로 거르고 **내용으로 두 번 더** 거른다.
+
+1. `<id>__<이름>` 디렉터리만 읽는다 — `dm/<user-id>` 는 모양이 달라 **경로의 성질로**
+   빠진다(B-68 과 같은 축). 다른 워크스페이스는 디렉터리를 아예 안 연다
+2. 프론트매터 `workspace` 가 설정 키와 다르면 그 파일을 버린다
+3. 프론트매터에 `dm_user` 가 있거나 `channel_id` 가 디렉터리의 ID 와 다르면 버린다
+
+경로 체인의 **모든 칸**이 심볼릭 링크가 아닌지도 본다(`shadow_paths.
+refuse_symlinked_chain` 과 같은 판정) — 마지막 칸만 보면 `<workspace>` 가 남의 자리를
+가리킬 때 통과한다.
+
+실측: 셋을 **전부** 끄면 샌다(잘못 놓인 정본 파일을 fixture 가 만든다). 하나만 끄면
+남은 둘이 잡는다 — 그게 겹의 뜻이고, 그래서 「하나를 지우면 빨개지는」 시험은 만들 수
+없다. 대신 세 판정이 **소스에 남아 있는지**를 시험이 본다. 겹 하나가 조용히 사라지는
+쪽이 이 자리의 실패 방식이다.
+
+### 7.7 비공개 판정은 바꾸지 않았다 — 남은 전제
+
+Hermes 의 공개·비공개는 `config.json` 의 `privateChannels` 가 쥔다(`isPrivateChannel`).
+정본의 `visibility` 는 기본값이 `private` 이라, 그것으로 갈아치우면 PF 의 거의 모든
+채널이 비공개가 되어 답변이 통째로 닫힌다. **그래서 권위를 옮기지 않았다.**
+
+대신 그 값을 투영 본문에 **적지 않는다** — 적으면 모델이 공개 채널을 비공개로 읽고
+「말할 수 없다」 로 닫는다. 값은 `channelMeta().visibility` 로 꺼내 진단에서 대본다.
+
+> **운영 전제**: `pf-archiver` 로 전환해도 `privateChannels` 는 **계속 `config.json` 에
+> 선언해야 한다.** 정본의 `visibility`·`acl` 을 권위로 올리는 것은 별건이고, 올릴
+> 때는 PF 의 모든 채널이 한 번에 닫히지 않는지 먼저 세어야 한다.
+
+첨부의 `열람` 은 정본 `visibility` 에서만 온다. **`공개승인` 은 만들지 않는다** —
+그건 사람이 Slack 스레드의 `[공개]` 를 옮겨 적은 기록이고 정본에는 그 개념이 없다.
+없는 승인을 지어내면 비공개 채널 자료가 팀 앞에 나간다(Hermes 의 두 줄 규칙).
+
+### 7.8 fixture 는 실제 수집기가 만든다
+
+[`scripts/make_archiver_fixture.py`](../../scripts/make_archiver_fixture.py) 가
+`archiving_bot.ShadowCollector` + `backfill.run` 을 그대로 돌린다. Slack 클라이언트만
+가짜다 — 경로는 `shadow_paths`, 줄 모양은 `archive.writer`, 첨부 정본은
+`attachment_writer` 가 만든다.
+
+손으로 적은 fixture 는 **적은 사람이 생각한 모양**만 고정하고, 정본이 바뀌어도 시험은
+통과한다. 그때 reader 는 운영에서만 깨진다.
+
+### 7.9 관문
+
+| 무엇 | 어디 |
+|---|---|
+| 기능·격리·좌표를 봇이 쓰는 함수로 | `subbots/hermes/scripts/check-archiver-reader.js` |
+| 위를 CI 에 들이고 TYBot 좌표와 대조 | `tests/test_hermes_archiver_reader.py` |
+| `pf` 롤백이 slack-export 를 읽는다 | 같은 파일 ④ |
+| 설정 없음·사람 이름 키는 기동 실패 | 같은 파일 ⑤⑥ |
+| `pf-archiver` 에서 쓰기가 계속 막힌다 | 같은 파일 ⑦ · `tests/test_hermes_tybot_mode.py` |
+| fixture 가 실제 writer 에서 나왔다 | 같은 파일 ⑧ |
