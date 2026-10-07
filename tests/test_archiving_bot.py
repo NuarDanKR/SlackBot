@@ -344,6 +344,38 @@ def test_active_channel_writes_only_live_root_when_all_gates_agree(tmp_path, mon
     assert list((tmp_path / "shadow").glob("tyit/C12345678__*/archive/raw/*.md"))
 
 
+@pytest.mark.parametrize(
+    ("is_private", "expected"),
+    [(False, "public"), (True, "private")],
+)
+def test_raw_frontmatter_preserves_slack_channel_visibility(
+    tmp_path, is_private, expected,
+):
+    cfg = replace(
+        archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
+        separate_attachments=True,
+    )
+    collector = archiving_bot.ShadowCollector(
+        cfg, tmp_path / "shadow", layout="per-channel-v1",
+    )
+
+    result = collector.ingest_message(
+        Client(),
+        {
+            "ts": "1790070000.000001",
+            "user": "U12345678",
+            "text": "채널 공개 여부를 원문 메타데이터에 보존합니다.",
+        },
+        channel="#general",
+        channel_id="C12345678",
+        is_private=is_private,
+    )
+
+    assert result == "written"
+    raw = next((tmp_path / "shadow").glob("tyit/C12345678__*/archive/raw/*.md"))
+    assert f"visibility: {expected}\n" in raw.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("reason", ["env", "flag", "owner", "membership"])
 def test_active_channel_denies_write_when_a_gate_is_missing(tmp_path, reason):
     cfg = replace(archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],

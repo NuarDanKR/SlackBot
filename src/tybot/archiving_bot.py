@@ -310,6 +310,7 @@ class ShadowCollector:
             channel=channel,
             channel_id=channel_id,
             messages=messages,
+            visibility="private" if is_private else "public",
             acl=[channel],
             channel_directory=channel_archive,
         )

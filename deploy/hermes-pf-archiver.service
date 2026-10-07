@@ -1,0 +1,59 @@
+[Unit]
+Description=PF Hermes backed by the TYBot Archiver canonical store
+Documentation=file:///opt/tybot/docs/deploy/hermes-pf-archiver.md
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/tybot/archive /var/lib/hermes-pf
+ConditionPathExists=/etc/hermes-pf/hermes.env
+ConditionPathExists=/etc/hermes-pf/privacy-manifest.json
+ConditionPathExists=/var/lib/hermes-pf/config.json
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/tybot/subbots/hermes
+
+# Secrets and the workspace key live outside the repository. The mode and roots
+# are fixed here so an env-file typo cannot silently revive Hermes ingestion.
+EnvironmentFile=/etc/hermes-pf/hermes.env
+Environment=HERMES_MODE=pf-archiver
+Environment=HERMES_DATA_ROOT=/var/lib/hermes-pf
+Environment=HERMES_ARCHIVER_ROOT=/var/lib/tybot/archive
+Environment=HERMES_PRIVACY_MANIFEST=/etc/hermes-pf/privacy-manifest.json
+Environment=LANG=C.UTF-8
+
+ExecStartPre=/usr/bin/test -d /var/lib/tybot/archive
+ExecStartPre=/usr/bin/node scripts/check-archiver-privacy.js
+ExecStart=/usr/bin/node scripts/run-server.js
+
+Restart=on-failure
+RestartSec=10
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-pf-archiver
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+
+# The canonical archive is evidence, never Hermes state. Runtime state and
+# conversation audit logs are the only writable locations.
+ReadOnlyPaths=/var/lib/tybot/archive /opt/tybot/subbots/hermes /etc/hermes-pf/privacy-manifest.json
+ReadWritePaths=/var/lib/hermes-pf /opt/tybot/subbots/hermes/logs
+InaccessiblePaths=-/var/lib/tybot/state -/var/lib/tybot/archiver-shadow -/var/lib/tybot/qa-log
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
