@@ -159,55 +159,6 @@ export const archiveSource = ARCHIVE_SOURCE === 'archiver' ? lazyArchiverReader(
  * `null` 이면 이상 없음, 문자열이면 그 사유다. 참·거짓만 돌려주면 화면이 무엇을
  * 고쳐야 하는지 못 적고, 못 적으면 아무도 안 고친다.
  */
-/**
- * 정본의 `visibility` 와 `config.privateChannels` 를 **전수 대조**한다.
- *
- * `{ checked, missing, extra, unknown }` — `missing` 이 비어 있지 않으면 **운영 전환을
- * 하면 안 된다.**
- *
- * ## 왜 대조만 하고 권위를 안 옮기나
- *
- * 정본의 `visibility` 기본값은 `private` 다(`archive.writer` 가 그렇게 쓴다). 그것을
- * 권위로 올리면 PF 의 거의 모든 채널이 한 번에 닫히고, 봇은 「말할 수 없다」 만 답한다.
- * 그 변경은 **별건 결정**이고 닫히는 채널 수를 먼저 세야 한다.
- *
- * 그렇다고 엇갈림을 모른 채 전환하면 반대쪽으로 샌다 — 정본이 비공개라고 적은 채널이
- * `privateChannels` 에 없으면 Hermes 는 그 채널을 **공개로** 다룬다. 그 상태는 오류가
- * 아니라 평범한 답변으로 나가고, 내용을 아는 사람만 알아챈다. 그래서 **세어서 막는다.**
- *
- * `extra` 는 반대다 — 선언은 비공개인데 정본은 공개라고 적은 것. 닫는 쪽이라 전환을
- * 막지는 않지만, 둘 중 하나는 틀렸으므로 사람이 봐야 한다.
- */
-export function archiverPrivacyAudit() {
-  if (!archiveSource) return null;
-  const declared = new Set(
-    (config.privateChannels || []).map((n) => normalizeChannel(n)).filter(Boolean),
-  );
-  const rows = archiveSource.privateByCanonical()
-    .map((r) => ({ ...r, name: normalizeChannel(r.name) }))
-    .filter((r) => r.name);
-  const names = rows.map((r) => r.name);
-  const rawValues = [...new Set(rows.map((r) => r.rawVisibility || ''))];
-  return {
-    checked: rows.length,
-    rows,
-    // 정본이 비공개라고 적었는데 선언에 없다 — **공개로 다뤄진다.** 전환을 막는 쪽.
-    missing: rows.filter((r) => r.private && !declared.has(r.name)).map((r) => r.name).sort(),
-    // 선언은 비공개인데 정본은 공개라고 적었다 — 닫는 쪽이라 막지는 않는다.
-    extra: rows.filter((r) => r.signalled && !r.private && declared.has(r.name))
-      .map((r) => r.name).sort(),
-    // **신호가 아예 없는 채널.** 첨부가 없으면 정본에 공개 여부가 안 실린다.
-    // 「공개」 가 아니라 「모른다」 이고, 모르는 것은 세어서 보여 준다.
-    unverifiable: rows.filter((r) => !r.signalled).map((r) => r.name).sort(),
-    // 선언에 있는데 정본에 그 채널이 아예 없다. 옛 이름이거나 오타다.
-    unknown: [...declared].filter((n) => !names.includes(n)).sort(),
-    // raw 의 `visibility` 가 채널마다 같은 값뿐이면 **정보가 없다**(수집기가 안 넘긴다).
-    // 그 사실을 화면이 말해야 사람이 「왜 대조가 첨부에만 걸리나」 를 안다.
-    rawVisibilityInformative: rawValues.length > 1,
-    rawVisibilityValues: rawValues,
-  };
-}
-
 export function archiverConfigProblem() {
   if (ARCHIVE_SOURCE !== 'archiver') return null;
   try {

@@ -537,29 +537,100 @@ raw 의 mtime 이 그대로인 것도 함께 확인한다(`tests/test_hermes_arc
 옛 이름이 공개로 판정되는 자리다(`deadOrFresh` 주석). 링크 하나로 권한이 열리는 길이라
 그 `try` 를 좁혔다. 관문: 같은 파일 ⑩⑪.
 
-### 7.12 공개·비공개 대조 — raw 의 `visibility` 는 쓸 수 없다
+### 7.12 공개·비공개 — 권위는 `archive_channel_mode.is_private` 다
 
-> **대조 결과(2026-10-07).** 정본 raw 의 `visibility` 는 **전 채널이 `private`** 이고
-> 거기엔 아무 정보도 없다.
+> **2026-10-07.** 정본의 `visibility` 로는 공개 여부를 알 수 없다. 권위를 DB 의
+> `archive_channel_mode.is_private` 로 못 박고, 그 값만 담은 **manifest** 로 넘긴다.
 
-수집기(`archiving_bot.ShadowCollector`)는 raw 를 쓸 때 `visibility` 를 **안 넘긴다** —
-`writer.ingest` 의 기본값 `private` 가 그대로 박힌다. 실제 Slack 의 `is_private` 가
-실리는 곳은 **첨부 정본**뿐이다(`archiving_bot.py:347`).
+#### 왜 정본으로는 안 되나
 
-그래서 raw 로 대조하면 **모든 채널**이 「비공개인데 선언이 없다」 로 나온다. 늘 빨개지는
-관문은 사람이 끄는 법부터 배우므로, 대조는 **첨부 정본의 `visibility`** 로만 한다.
-
-| 갈래 | 동작 |
+| 자리 | 값 |
 |---|---|
-| 정본 비공개 · 선언 없음 | **전환 거부**(종료코드 1). Hermes 가 그 채널을 공개로 다루게 된다 |
-| 정본 공개 · 선언 비공개 | 적고 통과. 닫히는 쪽이라 막지 않는다 |
-| 신호 없음(첨부 없는 채널) | 적고 통과. 막으면 영영 전환 못 한다 |
-| 선언에 있는데 정본에 없음 | 적고 통과. 옛 이름·오타라 그 줄은 아무것도 안 가린다 |
+| raw 의 `visibility` | **전 채널 `private`.** 수집기가 그 값을 안 넘겨 `writer.ingest` 기본값이 박힌다 |
+| 첨부 정본의 `visibility` | 진짜 값(`is_private` 에서 왔다). 다만 **첨부 없는 채널에는 없다** |
 
-실행: `HERMES_MODE=pf-archiver node scripts/check-archiver-privacy.js`
+raw 로 대조하면 모든 채널이 「비공개인데 선언이 없다」 로 나오고, 늘 빨개지는 관문은
+사람이 끄는 법부터 배운다. 첨부로만 대조하면 첨부 없는 채널이 영영 「모름」 이다.
 
-**ACL 권위는 옮기지 않았다.** 정본을 권위로 올리려면 두 가지가 먼저다 —
-(1) 수집기가 raw 에도 `visibility` 를 넘길 것, (2) 「신호 없음」 이 0 이 될 것.
-그 전까지는 `config.privateChannels` 가 권위이고, 이 점검은 **그 두 기록이 엇갈리는지
-세는 자리**일 뿐이다. 권위 변경은 별건 결정으로 남긴다 — 지금 올리면 raw 기본값
-때문에 PF 의 모든 채널이 한 번에 닫힌다.
+진짜 권위는 Slack 의 `conversations.list` 가 주는 `is_private` 이고, 그 값은
+`channel_membership.sync` 가 `archive_channel_mode` 에 적어 둔다.
+
+#### manifest — 담는 것이 다섯뿐
+
+```json
+{
+  "schema": "channel-privacy-manifest/v1",
+  "workspace": "tyit",
+  "generated_at": "2026-10-07T00:00:00+00:00",
+  "channels": [{ "channel_id": "C…", "channel_name": "팀_…", "is_private": false }]
+}
+```
+
+이 파일은 **조직 경계를 넘어 다닌다**(사내 DB → PF 파일). 그래서 원문·토큰·DSN 은
+물론이고 `note`·`updated_by`·`cutover_ts` 같은 운영 흔적도 안 담는다 — 공개 여부를
+판정하는 데 필요 없고, 필요 없는 것을 담으면 그 파일이 언젠가 다른 용도로 쓰인다.
+행을 dict 그대로 싣지 않고 키를 코드에 박는 이유도 같다: 표에 열이 늘면 그 열이 조용히
+건너간다.
+
+만드는 쪽: [`src/tybot/archive/privacy_manifest.py`](../../src/tybot/archive/privacy_manifest.py)
+
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python -m tybot.archive.privacy_manifest \
+    --workspace tyit --out /var/lib/tybot/state/privacy-manifest.json
+```
+
+**읽기 전용이다.** 질의는 `SELECT` 하나뿐이고 그 앞에 `SET TRANSACTION READ ONLY` 를
+건다 — 「쓸 리 없다」 와 「쓸 수 없다」 는 다르고, 운영 DB 에 붙는 코드라 후자로 둔다.
+못 거는 드라이버에서는 조용히 넘어간다(보호막이지 전제가 아니다).
+
+#### 확인된 행만 담는다
+
+`is_private` 의 기본값은 `false` 다. **한 번도 동기화되지 않은 행은 「공개」 라고 적혀
+있다.** 그 값을 내보내면 비공개 채널이 공개로 선언된다.
+
+그래서 `membership_checked_at IS NOT NULL` 인 행만 담는다 — 그 칸은 `is_private` 와
+**같은 UPDATE 문**에서 채워지므로(`archiver_save_membership`), 값이 있다는 것은 Slack
+에서 실제로 받아 적었다는 뜻이다. 빠진 채널은 받는 쪽에서 「미확인」 이 되어 전환을
+막는다.
+
+#### 전환 관문
+
+`subbots/hermes/scripts/check-archiver-privacy.js` — manifest 와 정본 채널 ID 를
+**전수 대조**한다.
+
+| 갈래 | 종료코드 |
+|---|---|
+| manifest 가 없다·못 읽는다·형식이 다르다·남의 워크스페이스다 | **2** |
+| `is_private` 가 불리언이 아니다 | **2** |
+| 정본에 있는데 manifest 에 없다(미확인) | **1** |
+| manifest 가 비공개인데 `privateChannels` 에 없다 | **1** |
+| manifest 가 공개인데 선언은 비공개 | 0 (경고) |
+| manifest 에 있는데 정본에 아직 없다 | 0 (경고) |
+| 첨부 정본의 값과 manifest 가 다르다 | 0 (경고) |
+
+「모른다」 에서 막는 것이 요점이다. 모르는 채널을 공개로 다루면 오류가 아니라 **평범한
+답변**으로 내용이 나가고, 내용을 아는 사람만 알아챈다.
+
+닫히는 쪽으로 틀린 것(공개인데 비공개 선언)으로는 막지 않는다 — 막으면 선언이 과한
+설치가 영영 전환 못 하고, 그 상태에서 사람이 배우는 것은 이 관문을 끄는 법이다.
+
+#### Hermes 는 DB 에 안 붙는다
+
+이 관문은 **파일만 읽는다.** 자격증명을 Hermes 쪽에 두면 PF 에 운영 DB 로 가는 길이
+하나 더 생기고, 그 길은 읽기 전용이라는 보장이 없다. `tests/test_hermes_privacy_gate.py`
+⑫ 가 Hermes 소스와 `package.json` 양쪽에서 DB 클라이언트를 금지한다 — import 를 안
+해도 깔려 있으면 다음 사람이 쓴다.
+
+#### ACL 권위는 여전히 `config.privateChannels` 다
+
+이 관문은 **두 기록이 엇갈리는지 세는 자리**다. 정본·manifest 를 권한 판정의 권위로
+올리는 것은 별건 결정이고, 그때는 닫히는 채널 수를 먼저 세야 한다.
+
+#### 관문
+
+| 무엇 | 어디 |
+|---|---|
+| exporter 가 읽기만 하고, 다섯 가지만 담는다 | `tests/test_privacy_manifest.py` (합성 DB) |
+| 전환 관문의 일곱 갈래 | `tests/test_hermes_privacy_gate.py` |
+| Hermes 가 DB 에 안 붙는다 | 같은 파일 ⑫ |
+| 두 쪽이 같은 형식 이름을 쓴다 | 같은 파일 ⑪ |
