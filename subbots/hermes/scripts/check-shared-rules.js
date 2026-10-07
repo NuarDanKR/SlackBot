@@ -477,6 +477,10 @@ function jsPrivAnswers(spelled, names) {
       encoding: 'utf-8',
       env: {
         ...process.env,
+        // This probe owns a synthetic slack-export and rename map. Operational
+        // pf-archiver variables would make it read the live Archiver instead,
+        // so the test would compare different inputs across JS and Python.
+        HERMES_MODE: 'pf',
         HERMES_DATA_ROOT: tmp,
         HERMES_DOCS_DIR: path.join(tmp, 'documents'),
         PRIV_CASES: JSON.stringify(names.map((n) => [n])),

@@ -252,6 +252,16 @@ def test_the_integration_contract_still_declares_read_only_tools():
     assert 'prompt = "contract/prompt.md"' in toml
 
 
+def test_shared_rule_fixture_does_not_inherit_the_operational_archiver_mode():
+    """합성 개명 지도는 운영 정본이 아니라 자기 fixture를 읽어야 한다."""
+    text = (HERMES / "scripts" / "check-shared-rules.js").read_text(encoding="utf-8")
+    probe = text.split("function jsPrivAnswers", 1)[1].split("} finally", 1)[0]
+
+    inherited = probe.index("...process.env")
+    isolated = probe.index("HERMES_MODE: 'pf'")
+    assert inherited < isolated, "운영 HERMES_MODE를 합성 probe가 다시 덮지 못한다"
+
+
 # --- 의존성 없이도 보는 것 ----------------------------------------------------
 #
 # 위 실행 시험은 `node_modules` 가 있어야 돈다. 없을 때 아무것도 안 보면

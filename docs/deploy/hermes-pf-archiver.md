@@ -64,16 +64,42 @@ HERMES_PRIVACY_WORKSPACE=invest
 
 ## 3. 아카이브 읽기 권한
 
-서비스 계정에 TYBot 그룹 전체 권한을 주지 않는다. ACL로 아카이브 읽기만 연다.
+서비스 계정에 TYBot 그룹 전체 권한을 주지 않는다. 코드와 파일럿 워크스페이스만 ACL로
+연다. Rocky 8의 `/usr/bin/python3`는 3.6이므로 Hermes 검사에는 3.11 전용 이름을 쓴다.
 
 ```bash
 command -v setfacl >/dev/null
-sudo setfacl -m u:hermes:--x /var/lib/tybot
-sudo find /var/lib/tybot/archive -type d \
+workspace=invest
+
+sudo setfacl -m u:hermes:--x /opt/tybot /opt/tybot/subbots
+sudo find /opt/tybot/subbots/hermes -type d \
   -exec setfacl -m u:hermes:rx,d:u:hermes:rx {} +
-sudo find /var/lib/tybot/archive -type f \
+sudo find /opt/tybot/subbots/hermes -type f -exec setfacl -m u:hermes:r-- {} +
+sudo find /opt/tybot/subbots/hermes -type f -perm /111 \
+  -exec setfacl -m u:hermes:r-x {} +
+
+sudo setfacl -m u:hermes:r-x /usr/bin/python3.11
+sudo install -d -o root -g hermes -m 0750 /etc/hermes-pf/bin
+sudo ln -sfn /usr/bin/python3.11 /etc/hermes-pf/bin/python3
+sudo chown -h root:hermes /etc/hermes-pf/bin/python3
+
+sudo setfacl -m u:hermes:--x /var/lib/tybot /var/lib/tybot/archive
+sudo setfacl -m d:u:hermes:--- /var/lib/tybot/archive
+sudo find /var/lib/tybot/archive -mindepth 1 -maxdepth 1 -type d \
+  ! -name "$workspace" -exec setfacl -m u:hermes:---,d:u:hermes:--- {} +
+sudo find "/var/lib/tybot/archive/$workspace" -type d \
+  -exec setfacl -m u:hermes:rx,d:u:hermes:rx {} +
+sudo find "/var/lib/tybot/archive/$workspace" -type f \
   -exec setfacl -m u:hermes:r-- {} +
-sudo -u hermes test -r /var/lib/tybot/archive
+if [[ -d "/var/lib/tybot/archive/$workspace/dm" ]]; then
+  sudo setfacl -m u:hermes:---,d:u:hermes:--- \
+    "/var/lib/tybot/archive/$workspace/dm"
+fi
+
+sudo -u hermes test -r "/var/lib/tybot/archive/$workspace"
+sudo -u hermes test ! -r /var/lib/tybot/archive/mgmt
+sudo -u hermes test ! -r "/var/lib/tybot/archive/$workspace/dm"
+sudo -u hermes env PATH=/etc/hermes-pf/bin:/usr/bin python3 --version
 ```
 
 unit은 별도로 `/var/lib/tybot/state`, shadow, QA 로그를 숨긴다.

@@ -27,6 +27,11 @@ def test_pf_archiver_unit_fixes_read_only_mode_and_roots():
         "Environment=HERMES_PRIVACY_MANIFEST=/etc/hermes-pf/privacy-manifest.json"
         in lines
     )
+    assert (
+        "Environment=PATH=/etc/hermes-pf/bin:/usr/local/sbin:/usr/local/bin:"
+        "/usr/sbin:/usr/bin"
+        in lines
+    )
     assert "ExecStart=/usr/bin/node scripts/run-server.js" in lines
     assert "ExecStartPre=/usr/bin/node scripts/check-archiver-privacy.js" in lines
     assert not any("run-ingest" in line for line in lines)
@@ -81,6 +86,9 @@ def test_runbook_stops_the_old_instance_before_starting_the_new_one():
     assert "node scripts/run-ingest.js" in text
     assert "종료 코드 2" in text
     assert "setfacl" in text
+    assert "! -name \"$workspace\"" in text
+    assert 'test ! -r "/var/lib/tybot/archive/$workspace/dm"' in text
+    assert "/etc/hermes-pf/bin/python3" in text
     assert "전체 Python·Hermes 시험" in text
 
 

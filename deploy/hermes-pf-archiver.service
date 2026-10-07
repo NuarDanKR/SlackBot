@@ -26,6 +26,7 @@ Environment=HERMES_DATA_ROOT=/var/lib/hermes-pf
 Environment=HERMES_ARCHIVER_ROOT=/var/lib/tybot/archive
 Environment=HERMES_PRIVACY_MANIFEST=/etc/hermes-pf/privacy-manifest.json
 Environment=LANG=C.UTF-8
+Environment=PATH=/etc/hermes-pf/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 
 ExecStartPre=/usr/bin/test -d /var/lib/tybot/archive
 ExecStartPre=/usr/bin/node scripts/check-archiver-privacy.js
