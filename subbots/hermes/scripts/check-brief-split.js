@@ -72,19 +72,46 @@ const fail = (msg) => {
   console.error(`  ✗ ${msg}`);
 };
 
+/* ── 진행 표시 ──────────────────────────────────────────────────────────
+ *
+ * 이 검사의 비용은 **권한 조합 수 × 색인 생성**이다. 2026-10-07 TYIT 에서 12분을
+ * 돌았는데, 조합별 결과를 **끝난 뒤에만** 찍고 있어서 화면의 마지막 줄은 늘 이미
+ * 끝난 항목이었다 — 사람이 본 것은 멈춘 화면이다.
+ *
+ * 그래서 조합마다 **일을 시작하기 전에** 이름을 찍고, 끝나면 그 조합에 걸린 시간을
+ * 붙인다. 느린 자리를 다음 사람이 숫자로 받는다.
+ *
+ * (`check-setup.js` 의 자식 러너와 같은 생각이지만 서식을 가져다 쓰지는 않는다 —
+ *  이 파일은 그 러너 **안에서** 도는 자식이고, 자식이 부모의 서식을 흉내 내면 한
+ *  화면에 같은 모양이 두 겹으로 겹친다.) */
+const startedAll = Date.now();
+const ms = (t) => (t < 1000 ? `${Math.round(t)}ms` : `${(t / 1000).toFixed(1)}초`);
+/** 일을 시작하기 **전에** 찍고, 끝나면 걸린 시간을 돌려준다. */
+const begin = (label) => {
+  console.log(`  … ${label}`);
+  const t = Date.now();
+  return () => Date.now() - t;
+};
+
+console.log(`권한 조합 ${cases.length}개 — ${cases.map(([l]) => l).join(' · ')}`);
+
 /* ── ① 공통 블록이 모두 같은가 ── */
-console.log('① 공통 블록이 권한과 무관하게 같은가');
+console.log('\n① 공통 블록이 권한과 무관하게 같은가');
 const commons = new Map();
+const startedCommon = Date.now();
 for (const [label, access] of cases) {
+  const done = begin(label);
   const a = buildArchiveBriefSplit({ access }).common;
   const d = hasDocuments() ? buildDocumentsBriefSplit({ access }).common : '';
   const key = `${sha(a)}/${sha(d)}`;
   if (!commons.has(key)) commons.set(key, []);
   commons.get(key).push(label);
+  console.log(`  ✓ ${label} — 공통 ${a.length + d.length}자 (${ms(done())})`);
 }
+const commonMs = Date.now() - startedCommon;
 if (commons.size === 1) {
   const [key, labels] = [...commons.entries()][0];
-  console.log(`  ✓ ${labels.length}개 권한 조합이 모두 같은 공통 블록 (${key})`);
+  console.log(`  ✓ ${labels.length}개 권한 조합이 모두 같은 공통 블록 (${key}) · ${ms(commonMs)}`);
 } else {
   fail(`공통 블록이 ${commons.size}종류로 갈렸습니다 — 캐시가 안 걸립니다`);
   for (const [key, labels] of commons) console.error(`      ${key}  ${labels.join(', ')}`);
@@ -92,7 +119,9 @@ if (commons.size === 1) {
 
 /* ── ② 줄이 없어지지 않았는가 ── */
 console.log('\n② 쪼갠 뒤에도 보이던 줄이 그대로인가');
+const startedLines = Date.now();
 for (const [label, access] of cases) {
+  const done = begin(label);
   const before = new Set([
     ...lines(buildArchiveBrief({ access })),
     ...(hasDocuments() ? lines(buildDocumentsBrief({ access })) : []),
@@ -109,7 +138,7 @@ for (const [label, access] of cases) {
   const foldBefore = hasDocuments() ? foldedCount(buildDocumentsBrief({ access })) : 0;
   const foldAfter = foldedCount(dp.common) + foldedCount(dp.extra);
   if (lost.length) {
-    fail(`${label} — ${lost.length}줄이 사라졌습니다`);
+    fail(`${label} — ${lost.length}줄이 사라졌습니다 (${ms(done())})`);
     for (const l of lost.slice(0, 5)) console.error(`      ${l.slice(0, 100)}`);
   } else {
     // 문서 색인은 공개·비공개가 예산을 나눠 갖게 되어 공개 쪽이 **늘어날 수** 있다. 그건 이득이다.
@@ -118,10 +147,11 @@ for (const [label, access] of cases) {
     console.log(
       `  ✓ ${label} — 잃은 줄 0${grew ? ` · 늘어난 줄 ${grew}` : ''} · ${fold}` +
         ` · 공통 ${sp.common.length + dp.common.length}자 / 추가 ${sp.extra.length + dp.extra.length}자` +
-        ` (추가분 ${((sp.extra.length + dp.extra.length) / size * 100).toFixed(1)}%)`,
+        ` (추가분 ${((sp.extra.length + dp.extra.length) / size * 100).toFixed(1)}%) · ${ms(done())}`,
     );
   }
 }
+const lineMs = Date.now() - startedLines;
 
 /* ── ③ 적힌 채널 수가 그 블록에 실제로 남은 표 행과 맞는가 ──
  * 색인 원본의 수는 사람이 보는 참값이라, 가리기가 행을 지운 공통 블록과는 다르다. 그 차이가
@@ -130,7 +160,9 @@ for (const [label, access] of cases) {
  * 세는 것은 archive.js 를 부르지 않고 **문자열을 여기서 다시 훑는다** — 같은 코드로 세면
  * 그 코드가 틀렸을 때 검사도 함께 틀린다. */
 console.log('\n③ 공통 블록에 적힌 채널 수 = 그 블록에 실제로 남은 표 행 (공개 전용)');
+const startedRows = Date.now();
 {
+  const doneRows = begin('공개 전용 표 행 세기');
   const { common } = buildArchiveBriefSplit({ access: PUBLIC_ACCESS });
   const src = common.split('\n');
   const secs = [];
@@ -155,7 +187,19 @@ console.log('\n③ 공통 블록에 적힌 채널 수 = 그 블록에 실제로 
   if (!totalLine) fail('총계 줄(`> **채널**: …`)이 없습니다');
   else if (totalLine.trim() === want) console.log(`  ✓ ${want} — 절 합계와 같음`);
   else fail(`총계 줄이 「${want}」 가 아닙니다 (공개·비공개 내역이 남아 있으면 그것부터 샙니다) — ${totalLine.trim()}`);
+  console.log(`  · 절 ${secs.length}개 (${ms(doneRows())})`);
 }
+const rowMs = Date.now() - startedRows;
+
+/* 숫자를 `[보임]` 으로 적는다 — 통과해도 `check-setup` 이 올려 준다.
+ *
+ * PF 인계 문서(§PF 개발자 확인 사항 1·3)가 요구하는 「`check-brief-split` 소요 시간」
+ * 과 「공개·비공개 권한 조합 수」가 그것이다. 사람이 초시계를 들고 재게 하면 아무도
+ * 안 잰다. 느려지는 것은 **에러가 아니라 비용**이라 이 줄이 없으면 며칠 뒤에야 안다. */
+console.log(
+  `\n[보임] 권한 조합 ${cases.length}개 · 전체 ${ms(Date.now() - startedAll)}` +
+    ` (①공통 ${ms(commonMs)} · ②줄 ${ms(lineMs)} · ③행 ${ms(rowMs)})`,
+);
 
 console.log(failed ? `\n실패 ${failed}건` : '\n이상 없음');
 process.exit(failed ? 1 : 0);

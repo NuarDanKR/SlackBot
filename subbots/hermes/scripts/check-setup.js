@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { runCheck, childLimitMs, formatDuration } from './_child-run.js';
 import { CHECKS, LIVE_CHECKS } from './check-catalog.js';
 import { parseMode, selectChecks, discoverTests, validateCatalog, discoverNodeChecks, validateNodeChecks, runOffline } from './check-runner.js';
 
@@ -150,8 +151,16 @@ console.log('\nHermes 설치 점검\n' + '='.repeat(50));
 //  읽는 자리를 검사하는 것이라 파일 없이는 잴 수가 없다.)
 const CROSS_CHECKS = selectChecks(CHECKS, mode).filter(c => c.runtime === 'node').map(c => [path.basename(c.file), c.what]);
 
+/* 자식 하나의 상한. `HERMES_CHECK_TIMEOUT_MS` 로 조정한다.
+ *
+ * 상한이 없던 동안 `check-brief-split.js` 가 12분을 돌았고, 그동안 화면은 침묵했다 —
+ * 침묵은 「빠르다」 와 화면에서 같다(2026-10-07 TYIT). 느린 서버에서 관문을 통째로
+ * 끄게 만들지 않으려고 환경변수로 연다. */
+const CHILD_LIMIT_MS = childLimitMs();
+
 if (mode !== 'live') {
-console.log('\n[1/6] 코드 일관성');
+console.log(`\n[1/6] 코드 일관성  (검사 ${CROSS_CHECKS.length}개 · 개별 상한 ${formatDuration(CHILD_LIMIT_MS)})`);
+const crossStarted = Date.now();
 for (const [file, what] of CROSS_CHECKS) {
   const script = path.join(ROOT, 'scripts', file);
   if (!fs.existsSync(script)) {
@@ -160,58 +169,20 @@ for (const [file, what] of CROSS_CHECKS) {
     failed = true;
     continue;
   }
-  const r = spawnSync(process.execPath, [script], { encoding: 'utf-8' });
-  if (r.status === 0) {
-    ok(`${what}`);
-    /* 통과한 검사의 출력은 버리지만 **두 종류만은 올려 보인다.**
-     *
-     * ① 「못 잼·건너뜀」 — 2026-09-01 실측: 자료 저장소의 `check-fixtures.json` 을 잃으면
-     * 검사 둘이 질의를 못 읽어 **한 항목도 안 돌고** 종료코드 0 을 낸다. 그 검사들은
-     * 「재지 못했습니다 · 만들 자리는 …」 를 화면에 성실히 적는데, 여기서 통째로
-     * 버려져서 `npm run check` 는 초록으로 「안전망이 켜지고 권한을 지키나 ✓」 라고
-     * 말했다. 안전망 둘이 꺼진 것이 어디에도 안 보였다.
-     *
-     * 종료코드는 그대로 0 이다 — 새 팀에는 그 파일이 없는 것이 정상이라 실패로 내면
-     * 매일 빨간 줄을 보며 무시하는 법을 배운다. 대신 **조용하지는 않게** 한다.
-     *
-     * ② `[보임]` 으로 시작하는 줄 — **통과여도 사람이 봐야 하는 숫자**를 검사가 스스로
-     * 지목하는 자리다. 「몇 개를 대봤나」 같은 값이 여기 온다. 그런 검사의 고장은
-     * ✗ 가 아니라 **재료가 조용히 줄어드는 것**이라 통과 화면에 숫자가 없으면 아무도
-     * 모른다(`check-business-names.js` 의 이름 출처가 그 예다 — `documentsPath` 오타
-     * 하나로 사업장 몫이 0이 되어도 검사는 그냥 초록을 낸다).
-     *
-     * 남용하면 ①이 안 읽히므로 **숫자 한 줄**로 끝낼 것. 말은 그 검사 안에 적는다.
-     *
-     * ── ①을 문구로 찾지 않는다 (2026-09-03) ──
-     *
-     * ①은 오래 **말버릇 목록**(`건너뜀|재지 못|못 잼|못 쟀`)으로 찾았다. 그 목록에 안 드는
-     * 말로 「못 쟀다」를 적은 검사는 여기서 통째로 버려지고 화면에 **초록 한 줄만** 남는다.
-     * 실제로 넷이 그랬다 — `check-outside-hits.js` 의 「건너뛰**고**」(그 안에 「비공개가
-     * 밖으로 안 새나」가 들어 있다) · `check-brief-stamp.js`·`check-log-render.js` 의
-     * 「안 댔습니다」 · `check-attachment-marks.js` 의 「시험할 수 없습니다」.
-     *
-     * 문구를 목록에 맞추면 다음 사람이 문구를 바꿀 때 또 갈린다 — 이 파일이 스코프 목록에서
-     * 이미 배운 것이다(「목록을 여기 또 적으면 반드시 어긋난다」). 그래서 **검사가 스스로
-     * 지목하게** 한다: `[못잼]` 으로 시작하는 줄은 말이 무엇이든 올려 보인다. `[보임]` 과
-     * 같은 방식이고, 표시를 단 검사는 문구를 아무렇게나 바꿔도 안 갈린다.
-     *
-     * 말버릇 목록은 **아직 표시를 안 단 검사들을 위해 남겨 둔다.** 지우면 그 검사들이
-     * 오늘 당장 조용해진다 — 표시가 다 붙은 날 지운다. */
-    for (const line of `${r.stdout || ''}${r.stderr || ''}`.split('\n')) {
-      const t = line.trim();
-      if (t.startsWith('[보임]')) console.log(`      ${t.slice('[보임]'.length).trim()}`);
-      else if (t.startsWith('[못잼]')) console.log(`      ${t.slice('[못잼]'.length).trim()}`);
-      else if (/건너뜀|재지 못|못 잼|못 쟀/.test(line)) console.log(`      ${t}`);
-    }
-  } else {
-    bad(`${what}  (node scripts/${file})`);
-    // 사유는 그 검사가 이미 사람 말로 적어 두었다. 그대로 들여쓰기만 해서 보인다.
-    for (const line of `${r.stderr || ''}${r.stdout || ''}`.trim().split('\n')) {
-      if (line.trim()) console.log(`      ${line}`);
-    }
-    failed = true;
-  }
+  /* **공통 러너를 쓴다** (`_child-run.js`). 시작 즉시 이름을 찍고, 끝나면 소요 시간을
+   * 찍고, 상한을 넘기면 어느 검사인지 적고 중단한다 — 그리고 중단돼도 그때까지의
+   * 출력을 보인다.
+   *
+   * 전에는 여기서 `spawnSync` 를 직접 불렀다. 출력이 버퍼에 갇혀서, 자식이 12분을
+   * 돌아도 화면에는 **한 글자도** 안 나왔다(2026-10-07 TYIT). 판독 규칙(`[보임]`·
+   * `[못잼]`)은 러너가 그대로 들고 있다. */
+  const r = runCheck({ file: script, label: what, limitMs: CHILD_LIMIT_MS, log: console.log, ok, bad });
+  /* 통과·실패 화면과 `[보임]`·`[못잼]` 판독은 러너가 들고 있다 — 그 경위와 전례는
+   * `_child-run.js` 의 `visibleLines` 주석에 있다. 여기서는 집계만 한다. */
+  if (!r.ok) failed = true;
 }
+// 구간 합계. PF 인계 문서가 요구하는 「전체 소요 시간」의 재료다.
+console.log(`  [보임] 코드 일관성 ${CROSS_CHECKS.length}개 · ${formatDuration(Date.now() - crossStarted)}`);
 
 /* **파이썬 시험도 관문이 돌린다.** 안 그러면 사람이 손으로 돌릴 때만 도는데,
  * 이 저장소는 이미 같은 일을 겪었다 (`.githooks/pre-commit:234` 참조 — `test-push-gate.sh`

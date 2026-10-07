@@ -147,7 +147,11 @@ async function execute(text,args=[],options={}){
  let code=text.replace(/^#![^\n]*\n/,'');
  // Evaluate exactly the source statements with inert imports; no application module runs.
  code=code.replace(/^import\s([\s\S]*?)\sfrom\s'([^']+)';\r?\n/gm,(_m,binding,spec)=>{
-  if(spec.startsWith('node:')||spec==='./check-catalog.js'||spec==='./check-runner.js')return '';
+  /* `./_child-run.js` 도 **지운다**(2026-10-07). 자식 검사 러너는 설정도 아카이브도
+   * 안 읽는 순수 모듈이라 `--list` 가 「아무것도 안 불렀다」를 지키는 데 걸림돌이
+   * 되면 안 된다 — `check-catalog.js`·`check-runner.js` 와 같은 자리다. 대신 아래
+   * `deps` 가 **`spawn` 스텁을 지나는** 가짜를 꽂는다(진짜를 쓰면 자식 71개가 실제로 돈다). */
+  if(spec.startsWith('node:')||spec==='./check-catalog.js'||spec==='./check-runner.js'||spec==='./_child-run.js')return '';
   return 'const '+(binding.startsWith('{')?binding:'{ default: '+binding+' }')+' = await load('+JSON.stringify(spec)+');\n';
  });
  code=code.replace(/\bimport\(([^)]+)\)/g,'load($1)').replace(/import\.meta\.url/g,JSON.stringify(new URL('./check-setup.js',import.meta.url).href));
@@ -156,6 +160,13 @@ async function execute(text,args=[],options={}){
   discoverTests:()=>[],validateCatalog(){calls.push(['catalog']);},
   discoverNodeChecks:()=>[],validateNodeChecks(){calls.push(['catalog']);},
   runOffline:(selected,opts)=>runOffline(selected,{...opts,spawn,exists:()=>true,env:{},log:l=>lines.push(l)}),
+  runCheck:({file,label,log,ok})=>{
+   log?.(`  … ${label}`);
+   const r=spawn(process.execPath,[file],undefined);
+   if(r.status===0)ok?.(label);
+   return {ok:r.status===0,timedOut:false,ms:0,output:r.stdout||'',visible:[]};
+  },
+  childLimitMs:()=>120000,formatDuration:ms=>`${ms}ms`,
   load,process:processStub,console:{log:(...x)=>lines.push(x.join(' '))},
   fetch:async()=>{calls.push(['scopes']);return {headers:{get:()=> 'channels:history'}};}};
  const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
