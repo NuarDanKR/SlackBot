@@ -234,7 +234,7 @@ def test_misplaced_canonical_files_are_refused_by_content(fixture_root, archiver
     for guard in (
         "meta.workspace !== key",
         "meta.dm_user",
-        "meta.channel_id !== channelId",
+        "meta.channel_id !== source.channelId",
     ):
         assert guard in source, f"내용 기반 방어가 사라졌다: {guard}"
 
