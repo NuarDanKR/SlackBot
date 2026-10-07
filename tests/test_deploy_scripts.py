@@ -393,7 +393,19 @@ def test_subbots_is_not_excluded_from_the_copy():
         block for block in install.split("\n\n") if "TREE_EXCLUDES=(" in block
     )
 
-    assert "subbots" not in excludes
+    assert not re.search(r"--exclude=\.?/subbots(?:\s|$)", excludes)
+    assert "subbots/hermes/node_modules" in excludes
+
+
+def test_deploy_preserves_hermes_dependencies_and_does_not_follow_bin_links():
+    """서버 npm 산출물을 지우거나 끊어진 `.bin` 링크를 따라가면 배포가 중단된다."""
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    permissions = install.split('echo "== 5/6 권한', 1)[1].split(
+        'echo "== 6/6 설정 파일', 1
+    )[0]
+
+    assert permissions.count("subbots/hermes/node_modules") >= 2
+    assert "chown -h root:tybot" in permissions
 
 
 # --- 스키마 적용 (2026-09-14) --------------------------------------------------

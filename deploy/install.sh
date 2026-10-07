@@ -143,6 +143,7 @@ TREE_EXCLUDES=(
   --exclude=./.git --exclude=./.venv --exclude=./.env --exclude=./archive
   --exclude=./wheels
   --exclude=./console-web/node_modules --exclude=./console-web/dist
+  --exclude=./subbots/hermes/node_modules
   --exclude=__pycache__ --exclude=.pytest_cache --exclude='*.egg-info'
 )
 # 목적지에만 있고 지우면 안 되는 것. 소스에 없다고 지우면 배포가 자기 발을 밟는다.
@@ -340,15 +341,20 @@ if ! chmod u+rwx "$APP_DIR" 2>/dev/null; then
   echo "           lsattr -d $APP_DIR         # 불변 속성(i)이 붙었는지"
   exit 1
 fi
-# node_modules 는 건너뛴다 — 파일이 수만 개라 매 배포마다 수십 초가 든다.
-# 빌드 산출물(dist)만 봇이 읽을 수 있으면 된다.
-find "$APP_DIR" -path "$APP_DIR/console-web/node_modules" -prune -o -print0 |
-  xargs -0 -r chown root:tybot
+# node_modules 는 건너뛴다 — 파일이 수만 개라 매 배포마다 수십 초가 든다. Hermes 것은
+# 서버에서 `npm ci` 로 설치한 런타임 의존성이라 소스 체크아웃에 없다고 지우면 안 된다.
+# `.bin` 에는 심볼릭 링크도 있으므로 chown 은 링크 대상을 역참조하지 않는다.
+find "$APP_DIR" \
+  \( -path "$APP_DIR/console-web/node_modules" \
+     -o -path "$APP_DIR/subbots/hermes/node_modules" \) -prune \
+  -o -print0 | xargs -0 -r chown -h root:tybot
 # `g+rX` 로 **읽기를 명시적으로 준다.** 예전에는 `g-w,o-rwx` 만 있었는데 그건 비트를
 # 빼기만 한다. 배포가 umask 077 로 돌면 파일이 600 으로 만들어지고, 그 뒤 이 줄을
 # 지나도 그대로 600 이라 봇이 자기 코드를 못 읽는다. 오류는 기동할 때야 난다.
-find "$APP_DIR" -path "$APP_DIR/console-web/node_modules" -prune -o -print0 |
-  xargs -0 -r chmod g+rX,g-w,o-rwx
+find "$APP_DIR" \
+  \( -path "$APP_DIR/console-web/node_modules" \
+     -o -path "$APP_DIR/subbots/hermes/node_modules" \) -prune \
+  -o -print0 | xargs -0 -r chmod g+rX,g-w,o-rwx
 chmod -R u+w "$APP_DIR/.venv"
 
 # 봇 계정이 실제로 읽을 수 있는지 확인한다. 여기서 막히면 서비스가 기동에 실패하는데,
