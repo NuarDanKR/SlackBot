@@ -52,6 +52,35 @@ export function childLimitMs(env = process.env) {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LIMIT_MS;
 }
 
+/* ── 끝난 이유 ───────────────────────────────────────────────────────────
+ *
+ * 넷을 가른다. **합치면 안 되는 쌍이 있다** — 2026-10-07 후속에서 그걸로 한 번 틀렸다.
+ *
+ * 처음 판은 `status === null && signal != null` 이면 전부 상한 초과로 봤다. 그런데
+ * 자식이 **스스로** `SIGTERM`·`SIGABRT` 로 죽는 경우가 바로 그 모양이다. 그때
+ * 「상한을 넘겼습니다」 라고 적으면 다음 사람은 **상한을 올린다** — 고칠 곳은 그 검사가
+ * 왜 죽었는지인데, 엉뚱한 데를 고치고 증상은 그대로 남는다.
+ *
+ * 상한의 근거는 `error.code === 'ETIMEDOUT'` **하나**다. 그건 우리가 건 `timeout` 이
+ * 실제로 불을 붙였다는 Node 의 보고라, 짐작이 아니다.
+ *
+ * **이 결함은 서버에서만 드러난다.** 윈도우는 자기 신호 종료를 `status:1, signal:null`
+ * 로 보고해서 그 갈래가 아예 안 생긴다(실측 2026-10-07). 개발 PC 에서 안 보이는 결함을
+ * 개발 PC 에서 잡으려면 판정을 떼어내 직접 몰아야 한다 — 그래서 순수 함수다.
+ */
+export const EXIT_OK = 'ok';
+export const EXIT_FAILED = 'failed';
+export const EXIT_TIMEOUT = 'timeout';
+export const EXIT_SIGNAL = 'signal';
+
+/** `spawnSync` 결과 → 끝난 이유. **`spawnSync` 를 안 부른다** — 그래서 시험이 몰 수 있다. */
+export function classifyExit({ error, status, signal } = {}) {
+  if (error?.code === 'ETIMEDOUT') return EXIT_TIMEOUT;
+  if (signal) return EXIT_SIGNAL;
+  // `ENOENT` 처럼 **띄우지도 못한** 경우는 신호도 상한도 아니다. 종료코드가 없으니 실패다.
+  return status === 0 ? EXIT_OK : EXIT_FAILED;
+}
+
 /** 사람이 읽는 소요 시간. 1초 미만은 ms 로 — 「0초」 가 줄지어 있으면 아무 정보가 없다. */
 export function formatDuration(ms) {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}초`;
@@ -122,22 +151,22 @@ export function runCheck({
   ok = console.log,
   bad = console.error,
   indent = '      ',
+  spawnFn = spawnSync,
 }) {
   const name = path.basename(file);
   // **먼저 찍는다.** 자식이 오래 걸려도 무엇이 도는지는 이 줄로 남는다.
   log(`  … ${label}`);
 
   const started = Date.now();
-  const r = spawnSync(node, [file], {
+  const r = spawnFn(node, [file], {
     encoding: 'utf-8',
     timeout: limitMs,
     killSignal: 'SIGKILL',
   });
   const ms = Date.now() - started;
   const output = `${r.stdout || ''}${r.stderr || ''}`;
-  // `spawnSync` 는 상한에 걸리면 `error.code = 'ETIMEDOUT'` 을 주고 신호로 끊긴다.
-  // 둘 다 본다 — 플랫폼에 따라 한쪽만 채워지는 경우가 있다.
-  const timedOut = r.error?.code === 'ETIMEDOUT' || (r.status === null && r.signal != null);
+  const why = classifyExit(r);
+  const timedOut = why === EXIT_TIMEOUT;
 
   /* 표시 줄은 **어느 길에서나** 뽑는다 (2026-10-07 후속).
    *
@@ -159,13 +188,33 @@ export function runCheck({
     if (seen) for (const line of seen.split('\n')) log(`${indent}${line}`);
     else log(`${indent}(이 검사는 중단될 때까지 한 줄도 적지 않았습니다)`);
     restate();
-    return { ok: false, timedOut: true, ms, output, visible };
+    return { ok: false, timedOut: true, killedBySignal: false, signal: r.signal || '', ms, output, visible };
   }
 
-  if (r.status === 0) {
+  if (why === EXIT_SIGNAL) {
+    /* **상한 초과와 다른 사유다.** 자식이 스스로(또는 밖에서) 신호로 끝났다.
+     *
+     * 신호 이름을 적는 이유: `SIGKILL` 은 메모리 부족일 때가 많고, `SIGABRT` 는 그
+     * 검사 안의 단정이 터진 것이며, `SIGTERM` 은 누가 끊은 것이다 — 셋의 조치가 다르다.
+     * 「죽었습니다」 만으로는 다음 사람이 할 수 있는 일이 없다. */
+    bad(`${label} — ${r.signal} 신호로 끝났습니다 (node scripts/${name})  (${formatDuration(ms)})`);
+    const seen = output.trim();
+    if (seen) for (const line of seen.split('\n')) log(`${indent}${line}`);
+    else log(`${indent}(이 검사는 끝나기 전에 한 줄도 적지 않았습니다)`);
+    /* 상한 가까이에서 신호로 끝났으면 **그 사실도 적는다.** 어떤 플랫폼·래퍼는
+     * `ETIMEDOUT` 없이 신호만 남길 수 있는데, 그때 「신호로 죽었다」 만 보면 상한을
+     * 의심할 단서가 사라진다. 단정하지 않고 가능성만 적는다. */
+    if (ms >= limitMs * 0.95) {
+      log(`${indent}(상한 ${formatDuration(limitMs)} 에 가깝습니다 — 상한에 걸린 것일 수도 있습니다)`);
+    }
+    restate();
+    return { ok: false, timedOut: false, killedBySignal: true, signal: r.signal, ms, output, visible };
+  }
+
+  if (why === EXIT_OK) {
     ok(`${label}  (${formatDuration(ms)})`);
     for (const line of visible) log(`${indent}${line}`);
-    return { ok: true, timedOut: false, ms, output, visible };
+    return { ok: true, timedOut: false, killedBySignal: false, signal: '', ms, output, visible };
   }
 
   bad(`${label}  (node scripts/${name})  (${formatDuration(ms)})`);
@@ -173,8 +222,10 @@ export function runCheck({
   for (const line of output.trim().split('\n')) {
     if (line.trim()) log(`${indent}${line}`);
   }
+  // 띄우지도 못한 경우(`ENOENT` 등)는 검사가 아무 말도 안 남긴다 — 그 사유를 우리가 적는다.
+  if (!output.trim() && r.error) log(`${indent}(실행하지 못했습니다: ${r.error.code || r.error.message})`);
   restate();
-  return { ok: false, timedOut: false, ms, output, visible };
+  return { ok: false, timedOut: false, killedBySignal: false, signal: '', ms, output, visible };
 }
 
 /* ── 구간 예산 ───────────────────────────────────────────────────────────

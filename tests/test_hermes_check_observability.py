@@ -474,3 +474,142 @@ def test_check_setup_uses_the_phase_budget():
     body = SETUP.read_text(encoding="utf-8")
     assert "reportPhase(" in body, "구간 예산을 안 쓴다"
     assert "phaseBudgetMs(" in body
+
+
+# --- ⑧ 신호 종료를 상한 초과로 잘못 말하지 않는다 ------------------------------
+
+_CLASSIFY_PROBE = """
+const m = await import({helper});
+process.stdout.write(JSON.stringify({{
+  timeout: m.classifyExit({{ error: {{ code: 'ETIMEDOUT' }}, status: null, signal: 'SIGKILL' }}),
+  selfSignal: m.classifyExit({{ status: null, signal: 'SIGTERM' }}),
+  abort: m.classifyExit({{ status: null, signal: 'SIGABRT' }}),
+  ok: m.classifyExit({{ status: 0, signal: null }}),
+  failed: m.classifyExit({{ status: 1, signal: null }}),
+  spawnError: m.classifyExit({{ error: {{ code: 'ENOENT' }}, status: null, signal: null }}),
+  names: {{ ok: m.EXIT_OK, failed: m.EXIT_FAILED, timeout: m.EXIT_TIMEOUT, signal: m.EXIT_SIGNAL }},
+}}));
+"""
+
+
+@needs_node
+def test_a_signal_death_is_not_a_timeout():
+    """⑱ `status === null && signal` 만 보고 **상한 초과**라고 말하면 안 된다.
+
+    자식이 스스로 `SIGTERM`·`SIGABRT` 로 죽는 경우가 바로 그 모양이다. 그때
+    「상한을 넘겼습니다」 라고 적으면 다음 사람은 **상한을 올린다** — 고칠 곳은
+    그 검사가 왜 죽었는지인데, 엉뚱한 데를 고치고 증상은 그대로 남는다.
+
+    윈도우는 자기 신호 종료를 `status:1, signal:null` 로 보고해서 이 결함이 안
+    드러난다. **서버(POSIX)에서만** 드러나므로 판정을 순수 함수로 떼어 잰다.
+    """
+    code = _CLASSIFY_PROBE.format(helper=json.dumps(HELPER.as_uri()))
+    got = json.loads(_node(code).stdout)
+
+    assert got["timeout"] == got["names"]["timeout"]
+    assert got["selfSignal"] == got["names"]["signal"], "자기 신호 종료를 상한으로 읽었다"
+    assert got["abort"] == got["names"]["signal"]
+    assert got["ok"] == got["names"]["ok"]
+    assert got["failed"] == got["names"]["failed"]
+    # spawn 자체가 실패한 것(ENOENT)은 신호도 상한도 아니다.
+    assert got["spawnError"] == got["names"]["failed"]
+
+
+#: `spawnSync` 를 주입해 신호 종료를 **어느 플랫폼에서나** 만든다.
+_SIGNAL_PROBE = """
+const {{ runCheck }} = await import({helper});
+const log = [], ok = [], bad = [];
+const r = runCheck({{
+  file: 'scripts/가짜검사.js', label: '스스로 죽은 검사', limitMs: 60000,
+  spawnFn: () => ({{ status: null, signal: {signal}, stdout: {out}, stderr: {err} }}),
+  log: (m) => log.push(String(m)), ok: (m) => ok.push(String(m)), bad: (m) => bad.push(String(m)),
+}});
+process.stdout.write(JSON.stringify({{
+  log, ok, bad, ok_: r.ok, timedOut: r.timedOut,
+  killedBySignal: r.killedBySignal, signal: r.signal,
+  output: r.output, visible: r.visible,
+}}));
+"""
+
+
+#: 죽기 전 출력. **heredoc 을 거치지 않게** 여기서 JSON 으로 넘긴다 — 이스케이프가
+#: 중간에 한 번이라도 풀리면 JS 문자열 안에 진짜 줄바꿈이 들어가 문법 오류가 된다.
+_DYING_STDOUT = "\n".join(["[보임] 여기까지 7건 대봤습니다", "죽기 전 마지막 줄", ""])
+_DYING_STDERR = "[못잼] 나머지는 못 쟀습니다\n"
+
+
+def _signal_probe(signal: str) -> str:
+    return _SIGNAL_PROBE.format(
+        helper=json.dumps(HELPER.as_uri()),
+        signal=json.dumps(signal),
+        out=json.dumps(_DYING_STDOUT, ensure_ascii=False),
+        err=json.dumps(_DYING_STDERR, ensure_ascii=False),
+    )
+
+
+@needs_node
+@pytest.mark.parametrize("signal", ["SIGTERM", "SIGABRT"])
+def test_a_signal_death_names_the_signal_and_the_file(signal):
+    """⑲ 실패 문구에 **신호 이름과 검사 파일**이 보인다.
+
+    「죽었습니다」 만으로는 다음 사람이 할 수 있는 일이 없다. 어느 신호인지가
+    메모리 부족(`SIGKILL`)·단정 실패(`SIGABRT`)·누가 끊었나(`SIGTERM`)를 가른다.
+    """
+    code = _signal_probe(signal)
+    got = json.loads(_node(code).stdout)
+
+    assert got["ok_"] is False
+    assert got["timedOut"] is False, "신호 종료를 상한 초과로 분류했다"
+    assert got["killedBySignal"] is True
+    assert got["signal"] == signal
+    joined = " ".join(got["bad"])
+    assert signal in joined, joined
+    assert "스스로 죽은 검사" in joined, joined
+    assert "가짜검사.js" in joined, joined
+    assert "상한" not in joined, f"상한 초과라고 말한다: {joined}"
+
+
+@needs_node
+def test_a_signal_death_keeps_its_output_and_markers():
+    """⑳ 죽기 전 stdout·stderr 와 `[보임]`·`[못잼]` 이 보존된다.
+
+    어디까지 갔는지와 무엇을 못 쟀는지는 **죽은 뒤에도 알아야 하는 것**이다.
+    """
+    code = _signal_probe("SIGTERM")
+    got = json.loads(_node(code).stdout)
+
+    assert "죽기 전 마지막 줄" in got["output"]
+    joined = " ".join(got["visible"])
+    assert "7건" in joined, got["visible"]
+    assert "나머지는 못 쟀습니다" in joined, got["visible"]
+    printed = "\n".join(got["log"])
+    assert "죽기 전 마지막 줄" in printed, printed
+    assert "스스로 지목한 줄" in printed, printed
+
+
+@needs_node
+def test_a_real_timeout_is_still_a_timeout(tmp_path):
+    """㉑ 진짜 `ETIMEDOUT` 은 **그대로 상한 초과**다 — 고치면서 잃으면 안 된다."""
+    child = _child(tmp_path, "hang2.js", "setInterval(()=>{}, 1000);\n")
+    got = _run_helper(child, "진짜 멈춘 검사", limit_ms=700)
+
+    assert got["timedOut"] is True
+    assert got["ok_"] is False
+    assert "상한" in " ".join(got["bad"])
+
+
+@needs_node
+@pytest.mark.skipif(os.name == "nt",
+                    reason="윈도우는 자기 신호 종료를 status:1 로 보고해 이 갈래가 안 생긴다")
+def test_a_real_self_killed_child_is_not_reported_as_a_timeout(tmp_path):
+    """㉒ 실제 프로세스로도 확인한다 — 주입한 가짜만 맞고 실물이 틀리면 뜻이 없다."""
+    child = _child(tmp_path, "selfkill.js",
+                   "console.log('죽기 전 줄');\n"
+                   "process.kill(process.pid, 'SIGTERM');\n"
+                   "setInterval(()=>{}, 1000);\n")
+    got = _run_helper(child, "스스로 끝낸 검사", limit_ms=10000)
+
+    assert got["timedOut"] is False, got
+    assert got["killedBySignal"] is True
+    assert "SIGTERM" in " ".join(got["bad"])
+    assert "죽기 전 줄" in got["output"]
