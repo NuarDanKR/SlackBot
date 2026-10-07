@@ -560,6 +560,50 @@ def test_attachment_changes_are_seen_without_touching_raw(fixture_root, archiver
     assert {p.name: p.stat().st_mtime_ns for p in raw_dir.glob("*.md")} == raw_before
 
 
+@needs_node
+def test_unchanged_reader_calls_do_not_reread_canonical_bodies(fixture_root):
+    """⑩ 공개 API를 거듭 불러도 변경 없는 정본 본문은 한 번만 읽는다.
+
+    권한 조합별 색인 검사는 같은 reader 를 수십 번 부른다. 변경 확인이 본문 파싱이면
+    작은 파일럿도 한 코어를 수십 분 점유한다. 파일 inventory 는 다시 재도 되지만 raw 와
+    첨부 정본 본문은 지문이 바뀔 때만 다시 읽어야 한다.
+    """
+    probe = (
+        "const fs = await import('node:fs');"
+        "const path = await import('node:path');"
+        "const original = fs.default.readFileSync;"
+        "const root = path.resolve(process.argv[1]);"
+        "let canonicalReads = 0;"
+        "fs.default.readFileSync = function(file, ...args) {"
+        " const p = path.resolve(String(file));"
+        " if (p.startsWith(root + path.sep) && p.endsWith('.md')) canonicalReads += 1;"
+        " return original.call(this, file, ...args);"
+        "};"
+        "const { createReader } = await import('./src/archive-reader/archiver.js');"
+        "const reader = createReader({ root, workspace: 'tyit' });"
+        "reader.channelNames(); reader.channelIds(); reader.renameRows();"
+        "reader.documents(); reader.channelNames(); reader.documents();"
+        "process.stdout.write(JSON.stringify({ canonicalReads }));"
+    )
+    done = subprocess.run(
+        [NODE, "--input-type=module", "-e", probe, str(fixture_root)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(HERMES),
+    )
+    assert done.returncode == 0, done.stderr
+    reads = json.loads(done.stdout)["canonicalReads"]
+    canonical_files = len(list((fixture_root / "tyit").glob("*__*/archive/raw/*.md")))
+    canonical_files += len(
+        list((fixture_root / "tyit").glob("*__*/archive/attachments/*/*.md"))
+    )
+    assert reads == canonical_files, (
+        f"변경 없는 공개 API 호출이 정본 {canonical_files}개를 {reads}번 읽었다"
+    )
+
+
 # --- ⑦ 순회하는 모든 칸에서 심볼릭 링크를 거부한다 ----------------------------
 
 _LINK_SPOTS = [

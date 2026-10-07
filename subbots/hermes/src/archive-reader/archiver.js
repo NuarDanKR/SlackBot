@@ -261,8 +261,8 @@ function canonicalVisibility(channel) {
 
 function statKey(file) {
   try {
-    const st = fs.statSync(file);
-    return `${file}:${st.mtimeMs}:${st.size}`;
+    const st = fs.statSync(file, { bigint: true });
+    return `${file}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
   } catch {
     return `${file}:missing`;
   }
@@ -297,16 +297,24 @@ export function createReader({ root, workspace }) {
 
   let cache = null;
 
-  function scan() {
+  /**
+   * 파일 구성과 stat 만 센다. **본문은 읽지 않는다.**
+   *
+   * reader 공개 함수는 한 질문에서도 여러 번 호출된다. 이 단계에서 raw 본문까지 읽으면
+   * `channelNames()`·`readKey()`·`documents()` 호출마다 워크스페이스 전체를 다시 파싱한다.
+   * 변경 여부는 경로·inode·크기·mtime·ctime 으로 판단하고, 달라졌을 때만 `build()`가
+   * 본문을 한 번 읽는다.
+   */
+  function inventory() {
     refuseSymlinkedChain(base, workspaceDir);
     let entries = [];
     try {
       entries = fs.readdirSync(workspaceDir, { withFileTypes: true });
     } catch {
-      return { channels: [], stamp: 'none' };
+      return { sources: [], stamp: 'none' };
     }
     const stamps = [];
-    const channels = [];
+    const sources = [];
     for (const entry of entries) {
       // `dm` 은 디렉터리 모양 자체가 다르다 — `<id>__<이름>` 이 아니므로 여기서
       // 걸러진다. 그 「빠짐」이 필터가 아니라 **경로의 성질**이어야 한다(B-68).
@@ -334,20 +342,38 @@ export function createReader({ root, workspace }) {
       // 넣으면 raw 를 안 건드린 채 첨부가 새로 생기거나 재변환되거나 지워져도 캐시가
       // 안 갈린다. 그 상태는 「문서가 안 바뀐다」 로만 드러나고 오류가 없다.
       const docFiles = scanAttachmentFiles(archive, stamps);
-      const messages = [];
-      let name = '';
-      let visibility = '';
-      let acl = [];
       for (const file of rawFiles) {
         const full = path.join(rawDir, file);
         assertNoLink(full, 'raw 파일');
         stamps.push(statKey(full));
+      }
+      sources.push({
+        channelId,
+        dirName: entry.name,
+        firstName: entry.name.slice(split + 2),
+        archiveDir: archive,
+        rawFiles: rawFiles.map((file) => path.join(rawDir, file)),
+        docFiles,
+      });
+    }
+    return { sources, stamp: stamps.sort().join('|') };
+  }
+
+  /** inventory 가 고정한 파일만 읽어 메모리 스냅샷을 만든다. */
+  function loadChannels(snapshot) {
+    const channels = [];
+    for (const source of snapshot.sources) {
+      const messages = [];
+      let name = '';
+      let visibility = '';
+      let acl = [];
+      for (const full of source.rawFiles) {
         const text = fs.readFileSync(full, 'utf8').replace(/\r\n/g, '\n');
         const meta = frontmatter(text);
         // **내용으로 한 번 더 거른다.** 경로 판정이 틀리는 날의 마지막 벽이다.
         if (meta.workspace && meta.workspace !== key) continue;
         if (meta.dm_user) continue;
-        if (meta.channel_id && meta.channel_id !== channelId) continue;
+        if (meta.channel_id && meta.channel_id !== source.channelId) continue;
         // **`#` 을 뗀다.** `pf` 에서 채널 이름의 근거는 `자금.md` 같은 **파일명**이라
         // `#` 이 없다. 여기서 `#팀_자금…` 을 내면 같은 채널이 두 모드에서 다른 이름이
         // 되고, 그러면 `privateChannels`·`skipChannels`·개명 지도가 전부 안 맞는다 —
@@ -377,19 +403,19 @@ export function createReader({ root, workspace }) {
       }
       if (!messages.length) continue;
       channels.push({
-        channelId,
-        dirName: entry.name,
-        firstName: entry.name.slice(split + 2),
-        name: name || entry.name.slice(split + 2),
+        channelId: source.channelId,
+        dirName: source.dirName,
+        firstName: source.firstName,
+        name: name || source.firstName,
         visibility,
         acl,
-        archiveDir: archive,
-        docFiles,
+        archiveDir: source.archiveDir,
+        docFiles: source.docFiles,
         messages,
       });
     }
     channels.sort((a, b) => a.name.localeCompare(b.name));
-    return { channels, stamp: stamps.sort().join('|') };
+    return channels;
   }
 
   /**
@@ -551,8 +577,8 @@ export function createReader({ root, workspace }) {
     return { text: lines.join('\n'), coords };
   }
 
-  function build() {
-    const { channels, stamp } = scan();
+  function build(snapshot) {
+    const channels = loadChannels(snapshot);
     const byId = new Map();
     const byName = new Map();
     const documents = [];
@@ -568,12 +594,12 @@ export function createReader({ root, workspace }) {
       documents.push(...docs);
     }
     for (const [name, id] of [...byName]) if (id === null) byName.delete(name);
-    return { stamp, byId, byName, documents };
+    return { stamp: snapshot.stamp, byId, byName, documents };
   }
 
   function state() {
-    const fresh = scan();
-    if (!cache || cache.stamp !== fresh.stamp) cache = build();
+    const fresh = inventory();
+    if (!cache || cache.stamp !== fresh.stamp) cache = build(fresh);
     return cache;
   }
 
