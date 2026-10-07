@@ -432,9 +432,9 @@ def test_the_console_error_message_gives_no_broken_command():
     서버에는 `uvicorn` 이 PATH 에 없다 — venv 절대경로라야 한다
     (CLAUDE.md 「서버 명령은 가상환경 기준으로 적는다」).
     """
-    client = (
-        Path(__file__).resolve().parents[1] / "console-web" / "src" / "api" / "client.ts"
-    ).read_text(encoding="utf-8")
+    from console_web_path import console_src_or_skip
+
+    client = (console_src_or_skip() / "api" / "client.ts").read_text(encoding="utf-8")
     start = client.index("const SERVER_DOWN")
     message = client[start : client.index(".join(", start)]
 
