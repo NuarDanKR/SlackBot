@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHECKS, LIVE_CHECKS } from './check-catalog.js';
+import { planChecks, runtimeCheckProfile, PF_ARCHIVER_PROFILE, STANDALONE_PROFILE } from './_check-profile.js';
 import { parseMode, selectChecks, discoverTests, validateCatalog, discoverNodeChecks, validateNodeChecks, NODE_CHECK_EXEMPT, offlineEnvironment, runOffline } from './check-runner.js';
 const root=fileURLToPath(new URL('../',import.meta.url));
 const source=fs.readFileSync(new URL('./check-setup.js',import.meta.url),'utf8');
@@ -40,6 +41,23 @@ await test('unknown, missing and duplicate classifications fail closed',()=>{
  assert.throws(()=>validateCatalog([a],[],{exists:()=>false}),/Missing/);
  assert.throws(()=>validateCatalog([{...a,file:'../outside'}],[]),/Invalid/);
  assert.throws(()=>selectChecks([a],'typo'));
+});
+await test('pf-archiver readiness runs only active-source checks and explains every exclusion',()=>{
+ assert.equal(runtimeCheckProfile({HERMES_MODE:' pf-archiver '}),PF_ARCHIVER_PROFILE);
+ assert.equal(runtimeCheckProfile({HERMES_MODE:'pf'}),STANDALONE_PROFILE);
+ assert.equal(runtimeCheckProfile({}),STANDALONE_PROFILE);
+ const plan=planChecks(CHECKS,'archive',PF_ARCHIVER_PROFILE);
+ const files=new Set(plan.selected.map(c=>c.file));
+ for(const file of ['scripts/check-shared-rules.js','scripts/check-board-docs.js',
+  'scripts/check-attachment-marks.js','scripts/check-archiver-privacy.js'])assert.ok(files.has(file),file);
+ for(const file of ['scripts/check-archiver-reader.js','scripts/check-excel-sheets.js',
+  '.claude/skills/doc-archive/scripts/test_insert_entry.py','deploy/test-setup-guard.sh']){
+  assert.ok(!files.has(file),file);
+  const skipped=plan.excluded.find(x=>x.check.file===file);
+  assert.ok(skipped?.reason,file+' has no exclusion reason');
+ }
+ assert.equal(plan.selected.length+plan.excluded.length,selectChecks(CHECKS,'archive').length);
+ assert.deepEqual(planChecks(CHECKS,'archive',STANDALONE_PROFILE).excluded,[]);
 });
 await test('node checks missing from the catalog or hidden by the exempt list fail closed',()=>{
  const real=discoverNodeChecks(root);
@@ -109,7 +127,7 @@ async function execute(text,args=[],options={}){
  const checks=options.checks || [item('offline'),item('archive',{mode:'archive'})];
  const f={pyStatus:0,docs:false,...options};
  const config={timezone:'UTC',privateChannels:[],digest:{skipChannels:[]},limits:{},models:{qa:{id:'fixture'}}};
- const processStub={argv:['node','check-setup.js',...args],execPath:'node-fixture',env:{},platform:'linux',exitCode:0,
+ const processStub={argv:['node','check-setup.js',...args],execPath:'node-fixture',env:f.env||{},platform:'linux',exitCode:0,
   exit(code){this.exitCode=code;}};
  const entry=name=>({name,isDirectory:()=>false,isFile:()=>true,isSymbolicLink:()=>false});
  const io={existsSync:()=>true,
@@ -135,10 +153,10 @@ async function execute(text,args=[],options={}){
    DOC_PROJECTS_DIR:null,FULL_ACCESS:{},companyWideDocProjects:[],
    requireEnv:()=>{calls.push(['tokens']);return {SLACK_BOT_TOKEN:'xoxb-'+'f'.repeat(30),SLACK_APP_TOKEN:'xapp-'+'f'.repeat(30),ANTHROPIC_API_KEY:'sk-ant-'+'f'.repeat(30)};}},
   '../src/archive.js':{
-   assertArchive:()=>{calls.push(['archive']);},listAllChannels:()=>[],listArchivedChannels:()=>[],
+   assertArchive:()=>{calls.push(['archive']);},listAllChannels:()=>[],listArchivedChannels:()=>f.archived?[{}]:[],
    buildArchiveBriefSplit:()=>({common:'',extra:''}),uninvitedChannels:()=>({actionable:[],ignored:[]}),
    staleChannelRefs:()=>[]},
-  '../src/documents.js':{hasDocuments:()=>false},
+  '../src/documents.js':{hasDocuments:()=>false,listDocuments:()=>[]},
   '../src/slack-live.js':{listBotChannels:async()=>[],listSlackChannels:async()=>[]},
   '../src/doc-index-audit.js':{},'./_card-warnings.js':{reportCardWarnings:()=>{}},
   '../src/llm/provider.js':{PROVIDERS:{anthropic:{}}},
@@ -151,12 +169,13 @@ async function execute(text,args=[],options={}){
    * 안 읽는 순수 모듈이라 `--list` 가 「아무것도 안 불렀다」를 지키는 데 걸림돌이
    * 되면 안 된다 — `check-catalog.js`·`check-runner.js` 와 같은 자리다. 대신 아래
    * `deps` 가 **`spawn` 스텁을 지나는** 가짜를 꽂는다(진짜를 쓰면 자식 71개가 실제로 돈다). */
-  if(spec.startsWith('node:')||spec==='./check-catalog.js'||spec==='./check-runner.js'||spec==='./_child-run.js')return '';
+  if(spec.startsWith('node:')||spec==='./check-catalog.js'||spec==='./check-runner.js'||spec==='./_child-run.js'||spec==='./_check-profile.js')return '';
   return 'const '+(binding.startsWith('{')?binding:'{ default: '+binding+' }')+' = await load('+JSON.stringify(spec)+');\n';
  });
  code=code.replace(/\bimport\(([^)]+)\)/g,'load($1)').replace(/import\.meta\.url/g,JSON.stringify(new URL('./check-setup.js',import.meta.url).href));
  // Old source's independently saved list stays intact for baseline comparison.
  const deps={fs:io,path,fileURLToPath,URL,spawnSync:spawn,CHECKS:checks,LIVE_CHECKS,parseMode,selectChecks,
+  planChecks,runtimeCheckProfile,PF_ARCHIVER_PROFILE,
   discoverTests:()=>[],validateCatalog(){calls.push(['catalog']);},
   discoverNodeChecks:()=>[],validateNodeChecks(){calls.push(['catalog']);},
   runOffline:(selected,opts)=>runOffline(selected,{...opts,spawn,exists:()=>true,env:{},log:l=>lines.push(l)}),
@@ -200,6 +219,17 @@ for(const mode of ['offline','archive','live','all']){
 await test('scoped live failure and archive missing documents propagate failure',async()=>{
  assert.equal((await execute(source,['--live'],{modelFail:true})).exit,1);
  assert.equal((await execute(source,['--archive'],{docs:true})).exit,1);
+});
+await test('actual pf-archiver archive route skips legacy suites and reads the active source',async()=>{
+ const operational={file:'scripts/check-shared-rules.js',runtime:'node',mode:'archive',what:'shared',reason:'fixture'};
+ const legacy={file:'scripts/check-excel-sheets.js',runtime:'node',mode:'archive',what:'legacy',reason:'fixture'};
+ const out=await execute(source,['--archive'],{env:{HERMES_MODE:'pf-archiver'},archived:true,checks:[operational,legacy]});
+ assert.equal(out.exit,0,out.lines.join('\n'));
+ assert.ok(out.lines.some(line=>line.includes('[운영 프로필] pf-archiver')));
+ assert.ok(out.lines.some(line=>line.includes('check-excel-sheets.js')));
+ assert.ok(out.lines.some(line=>line.includes('[3/6] Archiver 정본')));
+ assert.ok(out.lines.some(line=>line.includes('[4/6] Archiver 첨부 정본')));
+ assert.equal(out.calls.filter(call=>call[0]==='spawn').length,1);
 });
 await test('full mode preserves optional Python dependency exit semantics',async()=>{
  const out=await execute(source,[],{pyStatus:2});

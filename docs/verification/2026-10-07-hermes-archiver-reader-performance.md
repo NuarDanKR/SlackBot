@@ -1,5 +1,11 @@
 # Hermes Archiver reader 성능 결함과 PF 인계
 
+> **2026-10-08 운영 전제 정정:** PF 전용 서버와 GCP Hermes는 두지 않는다. PF용
+> Hermes도 TYBot·Archiver가 있는 같은 서버에서 별도 서비스 인스턴스로 운영한다.
+> 아래의 "PF 서버"는 별도 호스트가 아니라 **같은 호스트의 PF Hermes 인스턴스**를
+> 뜻한다. 서비스 계정·환경 파일·workspace·privacy manifest·쓰기 가능한 state는
+> 인스턴스별로 분리한다.
+
 ## 발견
 
 2026-10-07 TYIT 파일럿 사전 검사에서 `npm run check:archive`의
@@ -37,6 +43,26 @@ PF 적용 전 동일한 `check:archive`를 PF 서버 자료 규모로 실행해 
 5. manifest 실패 시 전체 권한 외 접근이 계속 닫히는지
 
 진행 표시 개선 없이 장시간 검사가 조용히 멈춘 것처럼 보이는 상태로 PF에 전달하지 않는다.
+
+## 2026-10-08 운영 readiness 프로필 분리
+
+`HERMES_MODE=pf-archiver npm run check:archive`는 더 이상 standalone 개발 검사를
+운영 정본에 억지로 실행하지 않는다. 다음 네 검사는 활성 Archiver source를 대상으로
+계속 실행한다.
+
+- 공유 규칙의 JS/Python 일치와 거부 경로
+- 상황판 투영 필드 계약
+- 첨부 본문 표시와 활성 source 일치
+- privacy manifest와 비공개 선언 대조
+
+legacy `slack-export`, Git writer, 원문 삽입 skill, 합성 fixture, standalone 설치 저장소
+검사는 운영 readiness에서 제외한다. 제외는 통과로 숨기지 않고 **파일명과 사유를 전부
+출력**한다. 이 검사는 저장소 CI와 회귀시험에서 계속 실행한다. `pf` 모드의 기존
+`check:archive` 전수 개발 검사는 바꾸지 않는다.
+
+운영 프로필의 `[3/6]`·`[4/6]`은 경로를 직접 순회하지 않고 현재 reader API가 반환하는
+Archiver 채널·첨부 정본 건수를 센다. 따라서 같은 서버인지 여부와 무관하게 다른
+workspace나 legacy 자료 루트를 우연히 읽어 성공하는 것을 readiness로 인정하지 않는다.
 
 ## 로컬 합성 기준선
 

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { runCheck, childLimitMs, formatDuration, reportPhase, phaseBudgetMs } from './_child-run.js';
+import { planChecks, runtimeCheckProfile, PF_ARCHIVER_PROFILE } from './_check-profile.js';
 import { CHECKS, LIVE_CHECKS } from './check-catalog.js';
 import { parseMode, selectChecks, discoverTests, validateCatalog, discoverNodeChecks, validateNodeChecks, runOffline } from './check-runner.js';
 
@@ -12,9 +13,11 @@ const CHECK_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const { mode, list } = parseMode(process.argv.slice(2));
 validateCatalog(CHECKS, discoverTests(CHECK_ROOT), { exists: f => fs.existsSync(path.join(CHECK_ROOT, f)) });
 validateNodeChecks(CHECKS, discoverNodeChecks(CHECK_ROOT));
+const checkProfile = runtimeCheckProfile(process.env);
+const checkPlan = planChecks(CHECKS, mode, checkProfile);
 if (list) {
   console.log(JSON.stringify({
-    mode, checks: selectChecks(CHECKS, mode),
+    mode, profile: checkProfile, checks: checkPlan.selected, excluded: checkPlan.excluded,
     live: mode === 'all' || mode === 'live' ? LIVE_CHECKS : [],
   }, null, 2));
 } else if (mode === 'offline') {
@@ -149,7 +152,7 @@ console.log('\nHermes 설치 점검\n' + '='.repeat(50));
 // 모은다. 뺀 것은 잊은 게 아니라 정한 것이다 — 돌리려면 `node scripts/check-sync-for-read.js`.
 // (`check-line-endings.js` 는 임시 파일 넷을 쓰지만 git 도 네트워크도 안 타서 여기 둔다.
 //  읽는 자리를 검사하는 것이라 파일 없이는 잴 수가 없다.)
-const CROSS_CHECKS = selectChecks(CHECKS, mode).filter(c => c.runtime === 'node').map(c => [path.basename(c.file), c.what]);
+const CROSS_CHECKS = checkPlan.selected.filter(c => c.runtime === 'node').map(c => [path.basename(c.file), c.what]);
 
 /* 자식 하나의 상한. `HERMES_CHECK_TIMEOUT_MS` 로 조정한다.
  *
@@ -163,6 +166,12 @@ const CHILD_LIMIT_MS = childLimitMs();
 const PHASE_BUDGET_MS = phaseBudgetMs();
 
 if (mode !== 'live') {
+if (checkPlan.excluded.length) {
+  console.log(`\n[운영 프로필] ${checkProfile} — 개발·legacy 검사 ${checkPlan.excluded.length}개 제외`);
+  for (const { check, reason } of checkPlan.excluded) {
+    console.log(`  - ${check.file}: ${reason}`);
+  }
+}
 console.log(`\n[1/6] 코드 일관성  (검사 ${CROSS_CHECKS.length}개 · 개별 상한 ${formatDuration(CHILD_LIMIT_MS)}`
   + `${PHASE_BUDGET_MS ? ` · 구간 예산 ${formatDuration(PHASE_BUDGET_MS)}` : ' · 구간 예산 끔'})`);
 const crossStarted = Date.now();
@@ -229,7 +238,9 @@ function findPyTests(dir) {
   return out;
 }
 
-const PY_TESTS = findPyTests(PY_TEST_ROOT).sort();
+const PY_TESTS = checkProfile === PF_ARCHIVER_PROFILE
+  ? checkPlan.selected.filter((check) => check.runtime === 'python').map((check) => check.file).sort()
+  : findPyTests(PY_TEST_ROOT).sort();
 
 // `python` 이라는 이름이 없는 곳이 있다 — 리눅스(VM)에는 `python3` 만 깔린 경우가 흔하다.
 // check-roots.js·check-shared-rules.js 와 같은 방식이다.
@@ -255,12 +266,14 @@ function findPython() {
 const PY_ENV = { ...process.env };
 delete PY_ENV.HERMES_DATA_ROOT;
 
-const py = findPython();
+const py = PY_TESTS.length ? findPython() : null;
 pySkipped = []; // 종료코드 2 로 「못 쟀다」고 말한 시험들 (선택 의존성 없음)
 if (!PY_TESTS.length) {
-  // 찾기가 깨져 0개가 된 것은 「시험이 없다」가 아니라 「안 돌렸다」다.
-  bad(`${path.relative(ROOT, PY_TEST_ROOT)} 아래에서 test_*.py 를 하나도 못 찾았습니다 — 파이썬 시험이 한 개도 안 돌았습니다`);
-  failed = true;
+  if (checkProfile !== PF_ARCHIVER_PROFILE) {
+    // 찾기가 깨져 0개가 된 것은 「시험이 없다」가 아니라 「안 돌렸다」다.
+    bad(`${path.relative(ROOT, PY_TEST_ROOT)} 아래에서 test_*.py 를 하나도 못 찾았습니다 — 파이썬 시험이 한 개도 안 돌았습니다`);
+    failed = true;
+  }
 } else if (!py) {
   // 조용히 건너뛰지 않는다 — 파이썬이 없어 관문이 안 돈 것은 "이상 없음"이 아니다.
   bad(`파이썬 시험 ${PY_TESTS.length}개를 못 돌렸습니다 — python/python3 를 찾지 못했습니다 (PATH 확인)`);
@@ -348,7 +361,9 @@ function findShTests(dir) {
     .map((e) => path.relative(ROOT, path.join(dir, e.name)).replace(/\\/g, '/'));
 }
 
-const SH_TESTS = findShTests(SH_TEST_DIR).sort();
+const SH_TESTS = checkProfile === PF_ARCHIVER_PROFILE
+  ? checkPlan.selected.filter((check) => check.runtime === 'bash').map((check) => check.file).sort()
+  : findShTests(SH_TEST_DIR).sort();
 
 function findBash() {
   const candidates = [];
@@ -369,11 +384,13 @@ function findBash() {
   return null;
 }
 
-const sh = findBash();
+const sh = SH_TESTS.length ? findBash() : null;
 if (!SH_TESTS.length) {
-  // 찾기가 깨져 0개가 된 것은 「시험이 없다」가 아니라 「안 돌렸다」다.
-  bad(`${path.relative(ROOT, SH_TEST_DIR)} 아래에서 test-*.sh 를 하나도 못 찾았습니다 — 셸 시험이 한 개도 안 돌았습니다`);
-  failed = true;
+  if (checkProfile !== PF_ARCHIVER_PROFILE) {
+    // 찾기가 깨져 0개가 된 것은 「시험이 없다」가 아니라 「안 돌렸다」다.
+    bad(`${path.relative(ROOT, SH_TEST_DIR)} 아래에서 test-*.sh 를 하나도 못 찾았습니다 — 셸 시험이 한 개도 안 돌았습니다`);
+    failed = true;
+  }
 } else if (!sh) {
   bad(`셸 시험 ${SH_TESTS.length}개를 못 돌렸습니다 — bash 를 찾지 못했습니다`
     + ' (윈도우는 Git for Windows 의 …\\Git\\bin\\bash.exe · 다른 곳은 PATH · 직접 지정은 BASH 환경변수)');
@@ -450,7 +467,28 @@ for (const [name, spec] of Object.entries(config.models || {})) {
   }
 }
 
-if (mode !== 'live') {
+if (mode !== 'live' && checkProfile === PF_ARCHIVER_PROFILE) {
+console.log('\n[3/6] Archiver 정본');
+try {
+  assertArchive();
+  const channels = listArchivedChannels();
+  if (!channels.length) throw new Error('Archiver 정본에서 읽을 수 있는 채널이 없습니다');
+  ok(`활성 Archiver source 채널 ${channels.length}개`);
+} catch (e) {
+  bad(e.message);
+  failed = true;
+}
+
+console.log('\n[4/6] Archiver 첨부 정본');
+try {
+  const docs = listDocuments();
+  const rounds = docs.reduce((n, doc) => n + doc.entries.length, 0);
+  ok(`문서 ${docs.length}개 · 정본 ${rounds}건`);
+} catch (e) {
+  bad(e.message);
+  failed = true;
+}
+} else if (mode !== 'live') {
 // 3. 아카이브
 console.log('\n[3/6] 슬랙 아카이브');
 try {
