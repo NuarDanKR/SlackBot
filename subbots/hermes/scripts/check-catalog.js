@@ -750,6 +750,27 @@ export const CHECKS = [
     "reason": "Synthetic inputs or repository source inspection; default arguments only."
   },
   {
+    "file": "scripts/check-rpc-wire.js",
+    "what": "v3 전문봇 계약 거울이 Python 원본·서명과 바이트로 맞나",
+    "runtime": "node",
+    "mode": "offline",
+    "reason": "Synthetic inputs or repository source inspection; default arguments only."
+  },
+  {
+    "file": "scripts/check-rpc-server.js",
+    "what": "RPC worker 왕복 — 근거·서명·재생·상한·health·취소",
+    "runtime": "node",
+    "mode": "offline",
+    "reason": "Synthetic inputs or repository source inspection; default arguments only."
+  },
+  {
+    "file": "scripts/check-rpc-isolation.js",
+    "what": "RPC worker 경계 — Slack·아카이브 미접근과 요청 간 토큰 격리",
+    "runtime": "node",
+    "mode": "offline",
+    "reason": "Synthetic inputs or repository source inspection; default arguments only."
+  },
+  {
     "file": ".claude/skills/_shared/test_paths.py",
     "what": ".claude/skills/_shared/test_paths.py",
     "runtime": "python",

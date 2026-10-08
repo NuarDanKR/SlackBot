@@ -1,0 +1,114 @@
+# Hermes 전문봇 RPC worker — 워크스페이스 하나당 인스턴스 하나.
+#
+#   systemctl start hermes-rpc@tyit
+#
+# 인스턴스 이름(%i)은 **워크스페이스 key** 다. 소켓 자리·계정·비밀·상태가 전부 여기서
+# 갈린다. 이름은 소문자·숫자·하이픈만 쓴다 — `%i` 는 이스케이프된 문자열이라 `.` 이나
+# `/` 가 들어가면 `\x2e` 로 풀려 **만들어 둔 계정 이름과 안 맞는다.**
+#
+# 계약: docs/design/specialist-v3-tool-contract.md
+# 인계: docs/verification/2026-10-08-hermes-external-router-claude-handoff.md
+#
+# ── 설치 전제 (unit 이 만들지 않는다) ──────────────────────────────────────
+#
+#   useradd --system --home-dir /nonexistent --shell /sbin/nologin \
+#           --groups tybot-specialist-rpc hermes-rpc-tyit
+#   install -d -o root -g hermes-rpc-tyit -m 0750 /etc/hermes-rpc-tyit
+#   install -d -o root -g hermes-rpc-tyit -m 0750 /var/lib/tybot/specialist-secrets/hermes-tyit
+#   openssl rand -hex 32 > /var/lib/tybot/specialist-secrets/hermes-tyit/hmac
+#   chown root:hermes-rpc-tyit /var/lib/tybot/specialist-secrets/hermes-tyit/hmac
+#   chmod 0640 /var/lib/tybot/specialist-secrets/hermes-tyit/hmac
+#
+# **systemd 는 계정을 만들지 않는다.** 없으면 exec 이 217/USER 로 죽고, 아래 재시작
+# 상한을 태운 뒤 영구 failed 로 굳는다.
+#
+# 비밀은 **인스턴스마다 다르다.** 한 벌을 돌려 쓰면 워크스페이스 A 의 worker 가 B 의
+# 요청을 위조할 수 있다 — 소켓 그룹이 공유되므로 파일 권한만으로는 안 막힌다.
+
+[Unit]
+Description=Hermes v3 전문봇 RPC worker (%i)
+Documentation=file:///opt/tybot/docs/design/specialist-v3-tool-contract.md
+After=network-online.target
+# TYBot 이 도구 소켓을 들고 있다. 먼저 떠 있어야 첫 질문이 안 샌다 —
+# 다만 Requires 는 아니다: TYBot 재시작이 worker 를 같이 죽이면 회복이 두 배로 느려진다.
+After=tybot.service
+Wants=tybot.service
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=hermes-rpc-%i
+Group=hermes-rpc-%i
+# **이 그룹 하나만** 더한다(인계 요구 11). TYBot 기본 그룹에 넣으면 도구 소켓과 함께
+# 아카이브 파일 권한까지 따라오고, 그러면 자료가 도구 말고 다른 문으로도 들어온다.
+SupplementaryGroups=tybot-specialist-rpc
+WorkingDirectory=/opt/tybot/subbots/hermes
+
+# 자기 소켓 자리. systemd 가 만들고 종료할 때 치운다 — 남은 소켓 파일 때문에
+# 다음 기동이 EADDRINUSE 로 죽는 갈래를 아예 없앤다.
+RuntimeDirectory=tybot-subbots/hermes-%i
+RuntimeDirectoryMode=0750
+# TYBot(`tybot`)이 들어와야 하므로 디렉터리 그룹을 공유 그룹으로 둔다.
+# 소켓 파일 자체는 프로세스가 0660 으로 만든다(src/rpc/server.js).
+ExecStartPre=+/usr/bin/chgrp tybot-specialist-rpc /run/tybot-subbots/hermes-%i
+ExecStartPre=+/usr/bin/chmod 0750 /run/tybot-subbots/hermes-%i
+
+# HMAC 비밀은 **파일로** 받는다. 환경변수 값으로 주면 `systemctl show` 와
+# /proc/<pid>/environ 에 그대로 보인다.
+LoadCredential=hmac:/var/lib/tybot/specialist-secrets/hermes-%i/hmac
+
+# 모델 키·버전 같은 인스턴스 값. 토큰은 여기 두지 않는다.
+EnvironmentFile=/etc/hermes-rpc-%i/rpc.env
+# 아래 넷은 unit 이 **고정한다** — env 파일 오타로 모드가 바뀌면 원문 쓰기와 독립
+# Slack 역할이 열린 채로 RPC 가 돈다. 열린 것은 원문이 늘어난 뒤에야 안다.
+Environment=HERMES_MODE=tybot
+Environment=HERMES_RPC_SPECIALIST=hermes
+Environment=HERMES_RPC_WORKSPACE=%i
+Environment=LANG=C.UTF-8
+
+# ConditionPathExists 를 쓰지 않는다. 조건이 틀리면 systemd 는 유닛을 **건너뛰고
+# `systemctl start` 는 0 을 반환한다** — 봇이 조용히 없는 상태가 되고 아무 경보도 안 난다.
+# 같은 것을 ExecStartPre 로 보면 실패로 남는다.
+ExecStartPre=/usr/bin/test -f /etc/hermes-rpc-%i/rpc.env
+ExecStartPre=/usr/bin/test -S /run/tybot/specialist-tools.sock
+ExecStart=/usr/bin/node scripts/run-rpc-worker.js
+
+# 상한을 넉넉히 두고 간격을 벌린다. RPC 는 TYBot 소켓에 기대므로 TYBot 이 늦게 뜨는
+# 아침에 몇 번 실패하는 것이 정상이다 — 좁게 잡으면 그 아침에 영구 failed 로 굳는다.
+Restart=on-failure
+RestartSec=15
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-rpc-%i
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# 모델 호출(HTTPS)과 두 Unix socket 만 쓴다.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# worker 는 **아무것도 안 쓴다.** 상태도 로그도 journal 로만 나간다.
+ReadOnlyPaths=/opt/tybot/subbots/hermes /etc/hermes-rpc-%i
+# 자료 저장소를 아예 안 보이게 한다. 코드가 안 읽는 것은 시험이 재지만(check-rpc-isolation),
+# 커널에서도 막아 두면 나중에 누가 한 줄 더해도 거기서 멈춘다.
+InaccessiblePaths=-/var/lib/tybot/archive -/var/lib/tybot/archiver-shadow -/var/lib/tybot/state -/var/lib/hermes-pf
+# 다른 워크스페이스 worker 의 소켓 자리도 안 보인다. 그룹을 공유하므로
+# 파일 권한만으로는 서로 닿을 수 있다 — 네임스페이스에서 끊는다.
+InaccessiblePaths=-/var/lib/tybot/specialist-secrets
+
+MemoryMax=1500M
+TasksMax=64
+
+# [Install] 을 일부러 두지 않는다. 계정·비밀·소켓 그룹을 사람이 확인한 뒤
+# `systemctl enable hermes-rpc@<workspace>` 로 켠다.

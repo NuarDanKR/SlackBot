@@ -45,6 +45,11 @@ READONLY_NPM_SCRIPTS = frozenset({
     "ask", "health", "doctor", "deployed",
     "check", "check:offline", "check:archive", "check:live",
     "log:render", "log:measure",
+    # 2026-10-08. 전문봇 RPC worker. `start` 와 달리 **스케줄러를 안 올린다** —
+    # 기동만으로 예약되는 쓰기가 없고, 모드가 `tybot` 으로 고정돼 원문 쓰기가 막혀
+    # 있다(`run-rpc-worker.js` 가 다른 모드면 종료코드 2). 자료는 TYBot 도구 소켓
+    # 으로만 들어온다(`scripts/check-rpc-isolation.js` 가 그 경계를 잰다).
+    "rpc",
 })
 
 WRITING_SKILL_SCRIPTS = frozenset({
@@ -77,6 +82,12 @@ WRITING_SRC_MODULES = frozenset({
     "src/ingest/util.js",
     "src/ingest/verify.js",
     "src/slack-live.js",
+    # 2026-10-08. **자기 소켓 자리만** 만진다 — `/run/tybot-subbots/<key>/` 아래
+    # 디렉터리 생성·죽은 소켓 치우기·chmod. 아카이브도 자료 저장소도 안 건드린다.
+    # 그래도 적는 이유는 `decision_export.py` 와 같다: 이 목록은 「원문 쓰기」 가
+    # 아니라 **쓰기 신호가 있는 자리** 목록이다. 한 번 빼 주면 다음 사람이 그 파일에
+    # `writeFile` 을 더해도 관문이 안 걸린다.
+    "src/rpc/server.js",
 })
 
 SCHEDULED_JOBS = frozenset({

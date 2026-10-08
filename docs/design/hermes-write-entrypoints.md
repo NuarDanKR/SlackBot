@@ -41,6 +41,16 @@ Claude Code 스킬까지.
 | `ask` · `health` · `doctor` · `deployed` | 아니오 | 읽기·진단 |
 | `check` · `check:offline` · `check:archive` · `check:live` | 아니오 | 점검 |
 | `log:render` · `log:measure` | 아니오 | 로그 가공 |
+| `rpc` (2026-10-08) | 아니오 | 전문봇 RPC worker. 아래 설명 |
+
+`rpc` 는 `start` 와 **다르다.** 스케줄러를 안 올리므로 기동만으로 예약되는 쓰기가 없고,
+모드가 `HERMES_MODE=tybot` 으로 고정돼 있어 원문 쓰기 자체가 막혀 있다
+(`scripts/run-rpc-worker.js` 가 다른 모드면 종료코드 2 로 거부한다).
+
+자료는 TYBot 도구 소켓으로만 들어온다 — worker 가 닿는 파일 그래프에 아카이브도 Slack 도
+없고, 그것을 `scripts/check-rpc-isolation.js` 가 잰다. 계약:
+[`specialist-v3-tool-contract.md`](specialist-v3-tool-contract.md),
+인계: [`2026-10-08-hermes-rpc-worker-handback.md`](../verification/2026-10-08-hermes-rpc-worker-handback.md).
 
 ### 2.3 스킬 — `.claude/skills/*/scripts/`
 
@@ -73,6 +83,15 @@ Claude Code 스킬까지.
 | `src/slack-live.js` | `writeFile` · `mkdirSync` · `renameSync` |
 | `src/ingest/git.js` · `verify.js` | `execFile` (git) |
 | `src/ingest/slack-archive.js` · `pending-work.js` | `unlinkSync` |
+| `src/rpc/server.js` (2026-10-08) | `mkdirSync` · `unlinkSync` — **자기 소켓 자리만** |
+
+`src/rpc/server.js` 가 만지는 것은 `/run/tybot-subbots/<specialist>-<ws>/` 아래 소켓
+파일 하나뿐이다(디렉터리 생성, 죽은 소켓 치우기, `chmod 0660`). 아카이브도 자료
+저장소도 안 건드린다.
+
+그래도 이 표에 적는 이유는 §2.3 의 `decision_export.py` 와 같다 — 이 목록은 「원문
+쓰기」 목록이 아니라 **쓰기 신호가 있는 자리** 목록이다. 「소켓뿐이니까」 로 한 번
+빼 주면, 다음 사람이 그 파일에 `writeFile` 을 더해도 관문이 안 걸린다.
 
 ## 3. TYBot 연동 모드 — 스위치 하나로 막는다 (2026-10-06 구현)
 
