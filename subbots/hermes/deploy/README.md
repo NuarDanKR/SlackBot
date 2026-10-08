@@ -367,3 +367,98 @@ GCP 추가 비용은 사실상 없고, 지출은 Anthropic API(월 $100~200)가 
 | 답이 두 번 옴 | 노트북 봇이 아직 돌고 있음 |
 
 무슨 일이든 먼저: `journalctl -u hermes -n 50`
+
+---
+
+## RPC worker (전문봇 v3) — 2026-10-08
+
+Slack 봇과 **다른 프로세스**다. TYBot 이 Unix socket 으로 부르고, 답을 Slack 에 올리지
+않는다. 계약: [`specialist-v3-tool-contract.md`](../../../docs/design/specialist-v3-tool-contract.md),
+회신: [`2026-10-08-hermes-rpc-worker-handback.md`](../../../docs/verification/2026-10-08-hermes-rpc-worker-handback.md)
+
+### 설치
+
+```bash
+sudo subbots/hermes/deploy/install-rpc.sh tyit
+```
+
+unit 을 `/etc/systemd/system/hermes-rpc@.service` 로 깔고 `daemon-reload` 한다.
+**멱등**이고, enable 도 start 도 하지 않는다. 워크스페이스를 주면 모자란 준비물을
+점검해 칠 명령을 적어 준다 — 만들어 주지는 않는다.
+
+### 사람이 먼저 해야 하는 것
+
+```bash
+ws=tyit
+
+sudo groupadd --system tybot-specialist-rpc          # 이미 있으면 건너뛴다
+sudo useradd --system --home-dir /nonexistent --shell /sbin/nologin \
+             --groups tybot-specialist-rpc hermes-rpc-$ws
+
+sudo install -d -o root -g hermes-rpc-$ws -m 0750 /etc/hermes-rpc-$ws
+sudo install -o root -g hermes-rpc-$ws -m 0640 /dev/null /etc/hermes-rpc-$ws/rpc.env
+#   HERMES_DOMAIN=pf-construction   (또는 enterprise)
+#   ANTHROPIC_API_KEY=...
+#   HERMES_RPC_VERSION=$(git rev-parse --short HEAD)
+
+sudo install -d -o root -g hermes-rpc-$ws -m 0750 /var/lib/tybot/specialist-secrets/hermes-$ws
+```
+
+**HMAC 비밀은 TYBot 쪽과 같은 값**이어야 한다. 한쪽만 새로 만들면 모든 요청이 401 이
+되고, 증상은 「전문가가 조용히 답을 안 함」 이라 소켓 권한 문제와 구별되지 않는다.
+비밀 파일은 `0640 root:hermes-rpc-$ws`.
+
+> `systemd` 는 계정을 만들지 않는다. 없으면 `217/USER` 로 죽고, 재시작 상한을 태운 뒤
+> 영구 `failed` 로 굳는다.
+
+### 켜기
+
+```bash
+sudo systemctl enable --now hermes-rpc@tyit
+```
+
+### 소켓 권한 — 여기가 조용히 틀린다
+
+TYBot 은 공유 그룹 `tybot-specialist-rpc` 로 들어온다. worker 의 기본 그룹은
+`hermes-rpc-<ws>` 라, 디렉터리에 **SGID** 가 없으면 소켓이 그 기본 그룹을 받고 TYBot 은
+0660 이어도 못 붙는다. 오류는 안 난다 — **아무 응답이 없을 뿐**이다.
+
+```bash
+stat -c '%n %U:%G %a' /run/tybot-subbots/hermes-tyit \
+                      /run/tybot-subbots/hermes-tyit/http.sock
+#   디렉터리 hermes-rpc-tyit:tybot-specialist-rpc 2750
+#   소켓     hermes-rpc-tyit:tybot-specialist-rpc 660
+
+sudo -u tybot test -w /run/tybot-subbots/hermes-tyit/http.sock && echo "TYBot 닿는다"
+```
+
+디렉터리 소유자를 `root` 로 돌리지 않는다. `2750` 에서 group 은 `r-x` 라 worker 가
+그 안에 소켓 파일을 **만들지 못한다.**
+
+### 서명까지 포함한 왕복 확인
+
+```bash
+cd /opt/tybot/subbots/hermes && node scripts/check-rpc-unit.js   # SGID 상속을 실제로 잰다
+```
+
+`health` 는 모델을 부르지 않고 2초 안에 답한다. TYBot 쪽에서:
+
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python - <<'PY'
+from tybot.specialist_http import UnixSocketTransport, health
+secret = open('/var/lib/tybot/specialist-secrets/hermes-tyit/hmac','rb').read().rstrip(b'\n')
+print(health(UnixSocketTransport('/run/tybot-subbots/hermes-tyit/http.sock'), secret=secret))
+PY
+```
+
+`(True, '<버전>')` 이면 그룹·권한·서명·경로가 전부 맞은 것이다. 권한까지 맞는데
+`False` 면 비밀이 양쪽에서 다르다.
+
+| 증상 | 확인 |
+|---|---|
+| `217/USER` | 계정이 없다. `useradd` 부터 |
+| `no installation config` | unit 이 낡았다. `install-rpc.sh` 를 다시 돌린다 |
+| TYBot 이 `transport` 로 적음 | 소켓 그룹·SGID. 위 `stat` 로 본다 |
+| 전부 401 | HMAC 비밀이 양쪽에서 다르다 |
+| 400 만 돌아옴 | 요청 `workspace` 와 `HERMES_RPC_WORKSPACE` 가 다르다 |
+| `도메인 프로필이 올바르지 않습니다` | `rpc.env` 에 `HERMES_DOMAIN` 이 없다 |

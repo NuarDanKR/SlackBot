@@ -210,10 +210,13 @@ export function createRpcServer({
       server.once('error', reject);
       server.listen(socketPath, () => { server.off('error', reject); resolve(); });
     });
-    // 그룹에게만 연다. 소유 그룹은 unit 이 정한다(RuntimeDirectory + Group).
-    // `mode: null` 은 **개발 PC 의 named pipe 전용**이다 — 운영 기본값은 언제나 0660 이고,
-    // 그 자리에서 끄는 길을 설정으로 내보내지 않는다(그러면 언젠가 운영에서 꺼진다).
-    if (mode != null) fs.chmodSync(socketPath, mode);
+    // 그룹에게만 연다. `mode: null` 은 **개발 PC 의 named pipe 전용**이다 — 운영
+    // 기본값은 언제나 0660 이고, 그 자리를 끄는 길을 설정으로 내보내지 않는다
+    // (내보내면 언젠가 운영에서 꺼진다).
+    if (mode != null) {
+      fs.chmodSync(socketPath, mode);
+      alignSocketGroup(socketPath);
+    }
     return socketPath;
   }
 
@@ -222,6 +225,56 @@ export function createRpcServer({
   }
 
   return { listen, close, server, get inFlightCount() { return inFlight.size; } };
+}
+
+/**
+ * 소켓의 그룹이 **디렉터리 그룹과 같은가.** 다르면 맞추고, 못 맞추면 **던진다.**
+ *
+ * ## 왜 재는가
+ *
+ * TYBot 은 공유 그룹(`tybot-specialist-rpc`)으로 들어온다. 우리 프로세스의 기본
+ * 그룹은 `hermes-rpc-<ws>` 라, 그냥 만들면 소켓이 **그 그룹**을 받는다 — 0660 이어도
+ * TYBot 은 못 붙는다.
+ *
+ * unit 은 디렉터리에 SGID(`2750`)를 걸어 그룹을 상속시킨다. 그게 이 함수가 기대하는
+ * 상태다. 다만 SGID 는 **한 줄이 빠지면 조용히 사라지는** 종류의 설정이고, 빠진
+ * 증상은 오류가 아니라 「아무 응답이 없음」 이다. 그래서 여기서 실제로 재고, 틀리면
+ * 고쳐 보고, 못 고치면 **기동을 막는다.**
+ *
+ * 고칠 수 있는 이유: POSIX 에서 파일 소유자는 **자기가 속한 그룹으로는** 그룹을
+ * 바꿀 수 있다. worker 는 소켓 소유자이고 공유 그룹의 보조 멤버다(`SupplementaryGroups`).
+ * 저쪽 `ToolServer` 가 `os.chown(path, -1, gid)` 로 하는 것과 같은 일이다.
+ *
+ * 그룹 **이름**을 여기 적지 않는다 — 디렉터리의 gid 를 기준으로 삼으면 이름이 바뀌어도
+ * 맞고, 이름을 적으면 Node 에는 이름→gid 변환이 없어 `/etc/group` 을 파싱하게 된다.
+ */
+export function alignSocketGroup(socketPath, { stat = fs.statSync, chown = fs.chownSync } = {}) {
+  let dir;
+  let sock;
+  try {
+    dir = stat(path.dirname(socketPath));
+    sock = stat(socketPath);
+  } catch (err) {
+    // 그룹을 확인할 수 없다. Windows 등 gid 가 없는 자리에서는 둘 다 0 이라 여기 안 온다.
+    throw new Error(
+      `소켓 권한을 확인하지 못했습니다: ${err.code || err.message}\n`
+      + `  ${socketPath}`,
+    );
+  }
+  if (sock.gid === dir.gid) return dir.gid;
+
+  try {
+    chown(socketPath, -1, dir.gid);
+  } catch (err) {
+    throw new Error(
+      `소켓 그룹을 디렉터리 그룹에 맞추지 못했습니다(${err.code || err.message}).\n`
+      + `  소켓 ${socketPath} 의 그룹은 ${sock.gid}, 디렉터리는 ${dir.gid} 입니다.\n`
+      + '  디렉터리에 SGID 가 걸려 있는지 보세요 — `chmod 2750 <디렉터리>`.\n'
+      + '  이 상태로 띄우면 TYBot 이 소켓에 못 붙고, 증상은 오류가 아니라'
+      + ' **아무 응답이 없는 것**이라 원인을 찾기 어렵습니다.',
+    );
+  }
+  return dir.gid;
 }
 
 /**

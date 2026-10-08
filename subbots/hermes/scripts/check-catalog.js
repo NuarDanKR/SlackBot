@@ -771,6 +771,13 @@ export const CHECKS = [
     "reason": "Synthetic inputs or repository source inspection; default arguments only."
   },
   {
+    "file": "scripts/check-rpc-unit.js",
+    "what": "RPC 배치 계약 — 소켓 그룹(SGID)·enable 가능·설치 helper 멱등",
+    "runtime": "node",
+    "mode": "offline",
+    "reason": "Synthetic inputs or repository source inspection; default arguments only."
+  },
+  {
     "file": ".claude/skills/_shared/test_paths.py",
     "what": ".claude/skills/_shared/test_paths.py",
     "runtime": "python",

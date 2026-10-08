@@ -16,7 +16,8 @@ TYBot 쪽 다섯 파일(`intent.py` · `master_planner.py` · `specialist_router
 | npm | `npm run rpc` (= `node scripts/run-rpc-worker.js`) |
 | 서버 | `sudo -u hermes-rpc-<ws> /usr/bin/node /opt/tybot/subbots/hermes/scripts/run-rpc-worker.js` |
 | unit | `subbots/hermes/deploy/hermes-rpc@.service` → `systemctl start hermes-rpc@tyit` |
-| 기본 상태 | **disabled.** `[Install]` 을 일부러 안 뒀다 |
+| 설치 | `sudo subbots/hermes/deploy/install-rpc.sh [<ws> ...]` — 멱등. enable·start 안 함 |
+| 기본 상태 | **disabled.** `[Install]` 은 있다(없으면 `systemctl enable` 자체가 실패) |
 
 인스턴스 이름(`%i`)이 **워크스페이스 key** 다. 소켓·계정·비밀·설정이 전부 여기서 갈린다.
 
@@ -27,6 +28,34 @@ Slack 프로세스와 **같이 띄우지 않는다**(요구 10). Socket Mode 의
 프로세스의 이벤트 루프를 쓰는데, RPC 답변은 모델을 여러 번 부르며 수십 초를 쓴다.
 같은 자리에 얹으면 ping 이 늦어 Slack 이 연결을 끊고, 끊기면 **질문이 아예 안 들어온다** —
 느려지는 게 아니라 조용히 멈춘다.
+
+### 중앙 `deploy/install.sh` 에서 부를 자리
+
+`deploy/install.sh` 는 **안 건드렸다**(Codex 몫). 부를 것은 이것 하나다.
+
+```bash
+# 인자: 준비 상태를 점검할 워크스페이스들. 없으면 unit 설치만 한다.
+bash "$REPO/subbots/hermes/deploy/install-rpc.sh" tyit
+```
+
+`bash <경로>` 로 부르기를 권한다 — 실행 비트에 기대지 않는다. 비트는 git 에
+`100755` 로 들어 있지만(저장소의 다른 deploy 스크립트는 `100644` 다), zip 으로 풀거나
+`core.fileMode=false` 인 체크아웃에서는 사라진다. 직접 실행도 물론 된다.
+
+| 성질 | 값 |
+|---|---|
+| 경로 | `subbots/hermes/deploy/install-rpc.sh` |
+| 인자 | `[<workspace> ...]` — 선택. 각 워크스페이스의 준비 상태를 **점검만** 한다 |
+| 권한 | root 필요(아니면 안내하고 1 로 끝난다) |
+| 하는 일 | `hermes-rpc@.service` → `/etc/systemd/system/` 0644, `daemon-reload` |
+| 멱등 | 내용이 같으면 복사도 reload 도 안 한다 |
+| 종료코드 | 모자란 것이 있어도 **0** — 설치는 됐고 준비가 덜 된 것이라 배포를 멈추지 않는다 |
+
+**안 하는 것**: enable · start · 계정 생성 · 그룹 생성 · HMAC 비밀 생성 · env 생성.
+특히 비밀은 양쪽이 같은 값이어야 하는데 한쪽만 새로 만들면 전부 401 이 되고,
+증상은 「전문가가 조용히 답을 안 함」 이라 소켓 그룹 오류와 구별되지 않는다.
+모자란 것은 **고치지 않고 칠 명령을 적어 준다** — 설치가 조용히 메워 주면 그 자리에
+무엇이 필요한지 아무도 모르는 채로 운영이 시작된다.
 
 ## 2. 소켓 경로
 
@@ -59,7 +88,24 @@ worker 는 `$CREDENTIALS_DIRECTORY/hmac` 를 읽는다. 대안은 `HERMES_RPC_HM
 
 > **인스턴스마다 다른 비밀을 쓰세요.** 한 벌을 돌려 쓰면 워크스페이스 A 의 worker 가
 > B 의 요청을 위조할 수 있습니다 — 소켓 그룹(`tybot-specialist-rpc`)이 공유되므로
-> 파일 권한만으로는 안 막힙니다. unit 의 `InaccessiblePaths` 로 한 겹 더 끊어 뒀습니다.
+> 파일 권한만으로는 안 막힙니다. 남의 비밀 **파일**은 unit 의 `InaccessiblePaths` 가
+> 가립니다.
+
+### 남는 위험 하나 (2026-10-08 정정)
+
+첫 회신의 unit 주석에 「다른 워크스페이스 worker 의 소켓도 안 보인다」 고 적었다.
+**틀렸다.** `InaccessiblePaths` 가 가리는 것은 비밀 경로뿐이다.
+
+`/run/tybot-subbots/` 아래 형제 디렉터리를 가리려 하면 그 아래 있는 **자기
+RuntimeDirectory 까지** 함께 가려지므로, 네임스페이스로는 못 막는다.
+
+닿아도 **답은 못 받는다** — 요청마다 HMAC 서명을 보고 비밀이 인스턴스마다 다르므로
+전부 401 이고, 요청 본문의 `workspace` 도 대조한다(다르면 400).
+
+남는 것은 **로컬 DoS** 다: 같은 호스트의 다른 worker 계정이 남의 소켓에 연결을 퍼부어
+처리를 늦출 수 있다. **자료가 새지는 않는다.** 더 줄이려면 워크스페이스마다 소켓
+그룹을 나눠야 하는데, 그러면 TYBot 이 그룹을 전부 들고 있어야 해서 「한 계정이 여러
+워크스페이스 권한을 합쳐 갖는」 쪽으로 문제가 옮겨 간다. 그래서 **그대로 둔다.**
 
 ### 그 밖의 env (`/etc/hermes-rpc-<ws>/rpc.env`)
 
@@ -110,9 +156,26 @@ env 파일 오타로 모드가 바뀌면 원문 쓰기와 독립 Slack 역할이
 | status | 언제 | 비고 |
 |---|---|---|
 | `answered` | 본문이 있고 **발급받은** `[eN]` 을 하나 이상 인용 | `used_evidence` 는 실제로 인용한 것만 |
-| `no_evidence` | 본문이 없거나, 본문은 있는데 인용이 하나도 없다 | 마스터 폴백 없음 |
-| `refused` | 모델이 거절(`stop_reason: refusal`) | 마스터 폴백 없음 |
-| `failed` | 예외·취소·**지어낸 인용**·금지 문구 | 마스터가 폴백 |
+| `no_evidence` | 본문이 없거나, 본문은 있는데 인용이 하나도 없다 | 임의 폴백 없음 |
+| `refused` | 모델이 거절(`stop_reason: refusal`) | 임의 폴백 없음 |
+| `failed` | 예외·취소·deadline·**지어낸 인용**·금지 문구 | **실패로 닫는다** |
+
+### `failed` 는 「마스터가 대신 답한다」 가 아니다 (2026-10-08 정정)
+
+첫 회신에 「`failed` 면 마스터가 폴백한다」 고 적었다. **틀렸다.** 실제 정책은 이렇다.
+
+| 상황 | 마스터가 하는 일 |
+|---|---|
+| 전문가가 **등록되지 않았거나** 그 capability 가 없다 | 자기 지식으로 직접 답할 수 있다 |
+| Hermes timeout · 서명 오류 · worker 장애 · route DB 장애 | **실패로 닫는다.** 직접 답변으로 숨기지 않는다 |
+| `refused` · `no_evidence` | 그대로 전한다. 임의 폴백 없음 |
+
+즉 **한 번 우리에게 온 질문은 어느 상태로도 「마스터 직접 답변」 으로 가지 않는다.**
+장애를 직접 답변으로 덮으면, 근거로 답한 것과 기억으로 답한 것이 사람에게 **같은
+모양**으로 보인다 — 그게 이 계약 전체가 막으려는 일이다.
+
+그래서 `failed` 를 돌려주는 것은 「누가 대신 답하겠지」 가 아니라 **「이 질문은 답이
+안 나갔다」** 는 뜻이다. 가볍게 쓰지 않는다. `src/rpc/answer.js` 머리말도 고쳤다.
 
 ### 「읽었다」 와 「썼다」 를 가른다
 
@@ -165,6 +228,7 @@ cd subbots/hermes
 node scripts/check-rpc-wire.js        # 26건
 node scripts/check-rpc-server.js      # 19건
 node scripts/check-rpc-isolation.js   #  6건
+node scripts/check-rpc-unit.js        # 14건 (리눅스에서 3건이 더 실측된다)
 npm run check:offline                 # 카탈로그에 등록돼 함께 돈다
 ```
 
@@ -179,6 +243,7 @@ pytest -q tests/test_hermes_rpc_contract.py     # 6 passed
 | `check-rpc-wire.js` | 스키마·엔드포인트·상한·도구·상태가 Python 원본과 같다. `canonical`/응답 서명을 **Python 이 만든 값과 직접 비교**. 요청 파싱 거절 7종. 응답 조립 규칙. 인용·금지 문구 | 26/26 |
 | `check-rpc-server.js` | 실제 소켓 왕복: 정상 답변 · 근거 없음 · 지어낸 인용 · 출처 줄 · 서명 위조 · 과거/미래 시각 · nonce 재사용 · 본문 변조 · 경로 바꿔치기 · 스키마 불일치 · 다른 workspace · 모르는 경로 · request_id 반향 · 출력 상한 · health(모델 미호출, 2초) · 같은 request_id 중복 409 · 취소 · **deadline** | 19/19 |
 | `check-rpc-isolation.js` | worker 가 닿는 **12개 파일** 정적 그래프에 Slack·아카이브·문서 저장소가 없다. 외부 의존이 Anthropic SDK 뿐이다. 요청 둘이 각자 토큰으로만 부른다. 한 바퀴 도는 동안 `slack.com` 요청 0건 | 6/6 |
+| `check-rpc-unit.js` | 소켓 그룹(SGID 2750 · chgrp · 소유자를 root 로 안 돌림 · 소켓 0660 · 그룹 어긋나면 기동 거부) · `[Install]` · 설치 helper(0644 설치 · daemon-reload · 멱등 · 계정/비밀/env 를 안 만듦 · enable·start 안 함) | 14/14 |
 
 `ruff check src tests scripts` → All checks passed.
 
@@ -189,9 +254,41 @@ pytest -q tests/test_hermes_rpc_contract.py     # 6 passed
 양쪽에서 같은 API 라 재는 것이 달라지지 않는다 — 바뀌는 것은 경로 모양과 파일 권한뿐이고,
 권한은 unit 이 쥔다. 리눅스에서 돌리면 같은 검사가 진짜 Unix socket 으로 돈다.
 
-> **못 잰 것**: 실제 `tybot` 계정이 우리 소켓에 **연결되는지**는 이 환경에서 못 쟀다.
-> 그룹 멤버십과 `RuntimeDirectory` 권한이 맞아야 하고, 그건 서버에서 한 번 확인해야 한다.
-> `sudo -u tybot test -w /run/tybot-subbots/hermes-tyit/http.sock` 로 본다.
+### 리눅스에서만 남은 smoke (Windows 에서 **못 쟀다**)
+
+`check-rpc-unit.js` 는 리눅스에서 SGID 디렉터리를 임시로 만들어 **소켓이 디렉터리
+그룹을 물려받는지**를 실제로 잰다. Windows 에는 gid 가 없어 그 셋을 건너뛰고,
+건너뛴 사실을 「못 쟀다」 로 찍는다 — 통과와 같은 모양으로 두면 「맞았다」 와
+「안 쟀다」 를 가릴 수 없다.
+
+서버에서 한 번 돌려야 하는 것:
+
+```bash
+# 1. 배치 계약 (SGID 상속을 실제 gid 로 잰다)
+cd /opt/tybot/subbots/hermes && node scripts/check-rpc-unit.js
+
+# 2. 소켓 자리와 권한
+systemctl start hermes-rpc@tyit
+stat -c '%n %U:%G %a' /run/tybot-subbots/hermes-tyit                       /run/tybot-subbots/hermes-tyit/http.sock
+#   기대: 디렉터리 hermes-rpc-tyit:tybot-specialist-rpc 2750
+#         소켓   hermes-rpc-tyit:tybot-specialist-rpc 660
+
+# 3. TYBot 계정이 실제로 닿는가
+sudo -u tybot test -r /run/tybot-subbots/hermes-tyit/http.sock && echo "읽기 OK"
+sudo -u tybot test -w /run/tybot-subbots/hermes-tyit/http.sock && echo "쓰기 OK"
+
+# 4. 서명까지 포함한 진짜 왕복 — health 는 모델을 안 부른다
+sudo -u tybot /opt/tybot/.venv/bin/python - <<'EOF'
+from tybot.specialist_http import UnixSocketTransport, health
+secret = open('/var/lib/tybot/specialist-secrets/hermes-tyit/hmac','rb').read().rstrip(b'
+')
+ok, version = health(UnixSocketTransport('/run/tybot-subbots/hermes-tyit/http.sock'), secret=secret)
+print('health', ok, version)
+EOF
+```
+
+4번이 `True` 면 그룹·권한·서명·경로가 전부 맞은 것이다. 3번까지만 맞고 4번이
+`False` 면 비밀이 양쪽에서 다르다.
 
 ### 쓰기 경계 목록에 두 줄이 늘었다
 
@@ -208,10 +305,11 @@ pytest -q tests/test_hermes_rpc_contract.py     # 6 passed
 
 ## 8. 배포 전 확인할 것
 
-1. `hermes-rpc-<ws>` 계정과 `tybot-specialist-rpc` 보조 그룹 — **unit 이 안 만든다**
+0. `sudo subbots/hermes/deploy/install-rpc.sh tyit` — unit 을 깔고 **모자란 것을 적어 준다**
+1. `hermes-rpc-<ws>` 계정과 `tybot-specialist-rpc` 보조 그룹 — **unit 도 helper 도 안 만든다**
 2. 인스턴스별 HMAC 비밀 파일 (`0640 root:hermes-rpc-<ws>`)
 3. `/etc/hermes-rpc-<ws>/rpc.env` 에 `HERMES_DOMAIN` 과 `ANTHROPIC_API_KEY`
-4. `tybot` 이 `/run/tybot-subbots/hermes-<ws>/http.sock` 에 닿는가
+4. `tybot` 이 `/run/tybot-subbots/hermes-<ws>/http.sock` 에 닿는가 (위 smoke 2~4번)
 5. TYBot 쪽 라우팅(`specialist_router`)에서 이 전문가를 켜는 것은 **Codex 몫**이다
 
 ## 9. 전제가 바뀐 곳 하나
