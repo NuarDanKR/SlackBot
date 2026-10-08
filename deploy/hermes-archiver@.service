@@ -55,9 +55,11 @@ RestrictNamespaces=true
 LockPersonality=true
 
 # Canonical evidence, code and configuration are immutable to Hermes. Only this
-# instance's runtime state is writable; logs go to journald.
+# instance's runtime state and the shared bot-identity lock directory are writable;
+# logs go to journald. The lock file is what prevents two instances from owning the
+# same Slack bot token, so making the directory read-only disables the safety gate.
 ReadOnlyPaths=/opt/tybot/subbots/hermes /etc/hermes/%i /var/lib/hermes/%i/config.json
-ReadWritePaths=/var/lib/hermes/%i/state
+ReadWritePaths=/var/lib/hermes/%i/state /run/hermes-bot-locks
 TemporaryFileSystem=/var/lib/tybot/archive:ro
 BindReadOnlyPaths=/var/lib/tybot/archive/%i
 InaccessiblePaths=-/var/lib/tybot/archive/%i/dm -/var/lib/tybot/state -/var/lib/tybot/archiver-shadow -/var/lib/tybot/qa-log

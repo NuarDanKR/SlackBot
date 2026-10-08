@@ -68,7 +68,10 @@ def test_archiver_unit_never_opens_evidence_or_code_for_writing():
 
     assert "/opt/tybot/subbots/hermes" in readonly.split("=", 1)[1].split()
     assert "/etc/hermes/%i" in readonly.split("=", 1)[1].split()
-    assert writable == "ReadWritePaths=/var/lib/hermes/%i/state"
+    assert set(writable.split("=", 1)[1].split()) == {
+        "/var/lib/hermes/%i/state",
+        "/run/hermes-bot-locks",
+    }
     assert "TemporaryFileSystem=/var/lib/tybot/archive:ro" in lines
     assert "BindReadOnlyPaths=/var/lib/tybot/archive/%i" in lines
     hidden = next(line for line in lines if line.startswith("InaccessiblePaths="))
@@ -111,6 +114,10 @@ def test_manifest_refresh_is_per_instance_and_publishes_atomically():
     assert "User=tybot" in text
     assert "Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env" in text
     assert "EnvironmentFile=/etc/hermes/%i/privacy.env" in text
+    # systemd PID 1 reads the mandatory EnvironmentFile as root. Rechecking it in
+    # ExecStartPre runs as tybot and incorrectly requires traverse access to the
+    # sibling directory that also contains Hermes secrets.
+    assert "ExecStartPre=/usr/bin/test -f /etc/hermes/%i/privacy.env" not in text
     assert "ExecStartPre=/usr/local/libexec/hermes-archiver-run workspace %i" in text
     assert "--workspace ${HERMES_PRIVACY_WORKSPACE}" in text
     assert "/var/lib/tybot/state/hermes-privacy-%i.json" in text
@@ -187,6 +194,10 @@ def test_start_wrapper_locks_by_expected_slack_bot_not_instance():
     assert '$lock_dir/$instance.lock' not in text
     assert "^[a-z][a-z0-9]{0,15}$" in text
     assert "2770 root hermes-runtime" in tmpfiles
+    writable = next(
+        line for line in _directives() if line.startswith("ReadWritePaths=")
+    )
+    assert "/run/hermes-bot-locks" in writable.split("=", 1)[1].split()
 
 
 def test_runtime_checks_slack_identity_before_opening_socket_mode():

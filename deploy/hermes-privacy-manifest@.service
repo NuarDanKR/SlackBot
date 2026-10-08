@@ -17,7 +17,6 @@ EnvironmentFile=/etc/hermes/%i/privacy.env
 ExecStartPre=/usr/local/libexec/hermes-archiver-run validate %i
 ExecStartPre=/usr/local/libexec/hermes-archiver-run workspace %i
 ExecStartPre=/usr/bin/test -f /etc/tybot/tybot.env
-ExecStartPre=/usr/bin/test -f /etc/hermes/%i/privacy.env
 ExecStartPre=/usr/bin/test -d /etc/hermes/%i
 ExecStart=/opt/tybot/.venv/bin/python -m tybot.archive.privacy_manifest --workspace ${HERMES_PRIVACY_WORKSPACE} --out /var/lib/tybot/state/hermes-privacy-%i.json
 ExecStartPost=+/usr/bin/install -o root -g hermes-%i -m 0640 /var/lib/tybot/state/hermes-privacy-%i.json /etc/hermes/%i/.privacy-manifest.json.new
