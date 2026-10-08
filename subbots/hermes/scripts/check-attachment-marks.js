@@ -30,7 +30,7 @@ import { searchArchive, assertArchive } from '../src/archive.js';
 import {
   markArchivedAttachments, listDocuments, hasDocuments, ARCHIVED_MARK, entryFileName,
 } from '../src/documents.js';
-import { PUBLIC_ACCESS, FULL_ACCESS, CHANNELS_DIR } from '../src/config.js';
+import { PUBLIC_ACCESS, FULL_ACCESS, CHANNELS_DIR, archiveSource } from '../src/config.js';
 import { loadFixtures, skipNote } from './fixtures.js';
 
 let failed = 0;
@@ -46,13 +46,23 @@ const bad = (m) => { failed += 1; console.error(`  ✗ ${m}`); };
  */
 function channelAttachmentLines() {
   const out = [];
-  for (const f of fs.readdirSync(CHANNELS_DIR)) {
-    if (!f.endsWith('.md')) continue;
-    const text = fs.readFileSync(path.join(CHANNELS_DIR, f), 'utf8');
+  const channels = archiveSource
+    ? archiveSource.channelNames().map((channel) => ({
+      channel,
+      text: archiveSource.readKey(archiveSource.channelKeyOf(channel)),
+    }))
+    : fs.readdirSync(CHANNELS_DIR)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => ({
+        channel: f.replace(/\.md$/, ''),
+        text: fs.readFileSync(path.join(CHANNELS_DIR, f), 'utf8'),
+      }));
+
+  for (const { channel, text } of channels) {
     for (const line of text.split(/\r?\n/)) {
       if (!line.includes('📎 첨부:')) continue;
       const names = [...line.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
-      if (names.length) out.push({ channel: f.replace(/\.md$/, ''), line, names });
+      if (names.length) out.push({ channel, line, names });
     }
   }
   return out;

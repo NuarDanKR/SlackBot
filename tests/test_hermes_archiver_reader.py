@@ -133,6 +133,25 @@ def test_the_reader_check_passes(fixture_root, archiver_dataroot):
     assert "전부 통과" in done.stdout
 
 
+@needs_node
+@needs_deps
+def test_attachment_mark_check_uses_only_the_archiver_source(fixture_root, archiver_dataroot):
+    """`pf-archiver` 점검도 없는 레거시 `slack-export/channels`를 열면 안 된다.
+
+    운영 설치에는 그 디렉터리가 없는 것이 정상이다. 점검만 레거시 경로를 직접 읽으면
+    런타임 reader는 정상이어도 마지막 단계에서 `ENOENT`로 실패한다. 실제 수집기로 만든
+    정본을 쓰되 Hermes 데이터 루트에는 레거시 아카이브를 만들지 않고 끝까지 실행한다.
+    """
+    assert not (archiver_dataroot / "slack-export" / "channels").exists()
+
+    done = _node(["scripts/check-attachment-marks.js"],
+                 dataroot=archiver_dataroot, mode="pf-archiver")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "[7/7]" in done.stdout
+    assert "ENOENT" not in done.stdout + done.stderr
+
+
 # --- ② 좌표가 TYBot 과 같은가 (이 모드의 값) ---------------------------------
 
 @needs_node
