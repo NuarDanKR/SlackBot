@@ -364,6 +364,8 @@ def test_every_timer_unit_is_actually_enabled():
     line = next(row for row in install.splitlines() if row.startswith("TIMERS="))
 
     for timer in sorted((ROOT / "deploy").glob("*.timer")):
+        if "@" in timer.stem:
+            continue  # Instance templates are installed but never auto-enabled.
         # `tybot-deploy.path` 처럼 path 유닛은 따로 켠다. 타이머만 본다.
         assert timer.stem in line, f"{timer.name} 을 켜는 코드가 없다"
 
@@ -373,6 +375,8 @@ def test_every_timer_can_be_switched_from_the_console():
     wrapper = (ROOT / "deploy" / "tybot-console-timers").read_text(encoding="utf-8")
 
     for timer in sorted((ROOT / "deploy").glob("*.timer")):
+        if "@" in timer.stem:
+            continue  # External console needs an instance inventory first.
         assert timer.name in wrapper, f"{timer.name} 을 콘솔에서 켜고 끌 수 없다"
 
 

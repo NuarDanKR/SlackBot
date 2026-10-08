@@ -20,6 +20,7 @@ import { toSlackMrkdwn, chunkForSlack } from './format.js';
 import { append as logConversation, permalink } from './convo-log.js';
 import { startScheduler } from './scheduler.js';
 import { assertOwnsRole, ROLES } from './mode.js';
+import { assertSlackIdentity } from './slack/identity.js';
 
 const { App } = pkg;
 
@@ -111,8 +112,13 @@ app.error(async (error) => {
 /* ── 기동 ─────────────────────────────────────────────────────── */
 
 (async () => {
-  await app.start();
   const auth = await app.client.auth.test();
+  const expectedTeamId = process.env.HERMES_SLACK_TEAM_ID || '';
+  const expectedBotUserId = process.env.HERMES_SLACK_BOT_USER_ID || '';
+  if (expectedTeamId || expectedBotUserId) {
+    assertSlackIdentity(auth, expectedTeamId, expectedBotUserId);
+  }
+  await app.start();
 
   console.log('\n' + '='.repeat(52));
   console.log(`Hermes 실행 중`);

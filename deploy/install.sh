@@ -418,11 +418,19 @@ install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.servic
 # 다만 **꺼져 있다는 사실을 아무도 모르는 것**이 실제 문제였다. 타이머가 안 켜져 있으면
 # 일정 동기화·DM 알림·백필이 통째로 돌지 않는데, 오류가 나지 않으니 몇 주가 지나도
 # 모른다. 그래서 설치 끝에 어떤 것이 꺼져 있는지 이름을 대고 알린다.
-TIMERS=(tybot-update tybot-collect tybot-tidy tybot-index tybot-schedule-sync tybot-schedule-reconcile tybot-schedule-dm tybot-review-dm tybot-convert-retry tybot-convert-nightly tybot-convert-alert hermes-privacy-manifest)
+TIMERS=(tybot-update tybot-collect tybot-tidy tybot-index tybot-schedule-sync tybot-schedule-reconcile tybot-schedule-dm tybot-review-dm tybot-convert-retry tybot-convert-nightly tybot-convert-alert)
 for u in "${TIMERS[@]}"; do
   install -m 0644 "$APP_DIR/deploy/$u.service" "/etc/systemd/system/$u.service"
   install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"
 done
+# Hermes instances are deliberately not enabled here. Each instance needs its
+# own OS account, workspace ACL, domain profile, state and secrets first.
+install -m 0644 "$APP_DIR/deploy/hermes-archiver@.service" /etc/systemd/system/hermes-archiver@.service
+install -m 0644 "$APP_DIR/deploy/hermes-privacy-manifest@.service" /etc/systemd/system/hermes-privacy-manifest@.service
+install -m 0644 "$APP_DIR/deploy/hermes-privacy-manifest@.timer" /etc/systemd/system/hermes-privacy-manifest@.timer
+install -d -m 0755 /usr/local/libexec
+install -o root -g root -m 0755 "$APP_DIR/deploy/hermes-archiver-run" /usr/local/libexec/hermes-archiver-run
+install -o root -g root -m 0644 "$APP_DIR/deploy/hermes-bot-locks.conf" /etc/tmpfiles.d/hermes-bot-locks.conf
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   visudo -cf "$APP_DIR/deploy/tybot-console-logs.sudoers" >/dev/null
   visudo -cf "$APP_DIR/deploy/tybot-console-timers.sudoers" >/dev/null

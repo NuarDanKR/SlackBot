@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Validate an instance name, serialize Slack bot ownership, or recover a unit
+# after a successful manifest refresh. Installed root-owned in /usr/local/libexec.
+set -euo pipefail
+
+action=${1:-}
+instance=${2:-}
+
+if [[ ! "$instance" =~ ^[a-z][a-z0-9]{0,15}$ ]]; then
+  echo "invalid Hermes instance: $instance" >&2
+  exit 2
+fi
+
+assert_workspace() {
+  local workspace=${HERMES_ARCHIVER_WORKSPACE:-${HERMES_PRIVACY_WORKSPACE:-}}
+  if [[ "$workspace" != "$instance" ]]; then
+    echo "Hermes instance/workspace mismatch: instance=$instance workspace=${workspace:-'(empty)'}" >&2
+    exit 2
+  fi
+}
+
+case "$action" in
+  validate)
+    exit 0
+    ;;
+  workspace)
+    assert_workspace
+    ;;
+  start)
+    assert_workspace
+    bot_user_id=${HERMES_SLACK_BOT_USER_ID:-}
+    if [[ ! "$bot_user_id" =~ ^[A-Z][A-Z0-9]{5,31}$ ]]; then
+      echo "HERMES_SLACK_BOT_USER_ID is missing or invalid" >&2
+      exit 2
+    fi
+    lock_dir=/run/hermes-bot-locks
+    if [[ ! -d "$lock_dir" || -L "$lock_dir" ]]; then
+      echo "$lock_dir is missing or unsafe" >&2
+      exit 2
+    fi
+    umask 0007
+    exec 9>"$lock_dir/$bot_user_id.lock"
+    if ! /usr/bin/flock -n 9; then
+      echo "Slack bot $bot_user_id is already owned by another Hermes instance" >&2
+      exit 2
+    fi
+    exec /usr/bin/node scripts/run-server.js
+    ;;
+  recover)
+    unit="hermes-archiver@$instance.service"
+    if /usr/bin/systemctl is-failed --quiet "$unit"; then
+      /usr/bin/systemctl reset-failed "$unit"
+      /usr/bin/systemctl --no-block start "$unit"
+    fi
+    ;;
+  *)
+    echo "usage: hermes-archiver-run {validate|workspace|start|recover} INSTANCE" >&2
+    exit 2
+    ;;
+esac

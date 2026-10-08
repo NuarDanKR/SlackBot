@@ -1,0 +1,67 @@
+[Unit]
+Description=Hermes %i backed by the TYBot Archiver canonical store
+Documentation=file:///opt/tybot/docs/deploy/hermes-pf-archiver.md
+After=network-online.target hermes-privacy-manifest@%i.service
+Wants=network-online.target hermes-privacy-manifest@%i.service
+Conflicts=hermes.service
+RequiresMountsFor=/var/lib/tybot/archive /var/lib/hermes/%i
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=hermes-%i
+Group=hermes-%i
+WorkingDirectory=/opt/tybot/subbots/hermes
+
+# Domain, workspace and secrets are instance data. Mode and roots are fixed so
+# an env typo cannot revive ingestion or redirect canonical reads.
+EnvironmentFile=/etc/hermes/%i/hermes.env
+Environment=HERMES_MODE=pf-archiver
+Environment=HERMES_DATA_ROOT=/var/lib/hermes/%i
+Environment=HERMES_STATE_DIR=/var/lib/hermes/%i/state
+Environment=HERMES_ARCHIVER_ROOT=/var/lib/tybot/archive
+Environment=HERMES_PRIVACY_MANIFEST=/etc/hermes/%i/privacy-manifest.json
+Environment=LANG=C.UTF-8
+Environment=PATH=/etc/hermes/%i/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+ExecStartPre=/usr/local/libexec/hermes-archiver-run validate %i
+ExecStartPre=/usr/local/libexec/hermes-archiver-run workspace %i
+ExecStartPre=/usr/bin/test -f /etc/hermes/%i/hermes.env
+ExecStartPre=/usr/bin/test -f /etc/hermes/%i/privacy-manifest.json
+ExecStartPre=/usr/bin/test -f /var/lib/hermes/%i/config.json
+ExecStartPre=/usr/bin/test -d /var/lib/hermes/%i/state
+ExecStartPre=/usr/bin/test -d /var/lib/tybot/archive/%i
+ExecStartPre=/usr/bin/node scripts/check-archiver-privacy.js
+ExecStart=/usr/local/libexec/hermes-archiver-run start %i
+
+Restart=on-failure
+RestartSec=10
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-archiver-%i
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+
+# Canonical evidence, code and configuration are immutable to Hermes. Only this
+# instance's runtime state is writable; logs go to journald.
+ReadOnlyPaths=/opt/tybot/subbots/hermes /etc/hermes/%i /var/lib/hermes/%i/config.json
+ReadWritePaths=/var/lib/hermes/%i/state
+TemporaryFileSystem=/var/lib/tybot/archive:ro
+BindReadOnlyPaths=/var/lib/tybot/archive/%i
+InaccessiblePaths=-/var/lib/tybot/archive/%i/dm -/var/lib/tybot/state -/var/lib/tybot/archiver-shadow -/var/lib/tybot/qa-log
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

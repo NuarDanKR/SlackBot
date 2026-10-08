@@ -116,10 +116,17 @@
   자기 문서에서 정정한다. 여기서 남의 문서를 고치지 않는다 — 고치면 그 문서의
   결정 이력이 누구 것인지 흐려진다
 
+## 배포 구현 상태
+
+- systemd 는 `hermes-archiver@.service`, `hermes-privacy-manifest@.service`와
+  `hermes-privacy-manifest@.timer`로 인스턴스별 분리됐다. 계정은 `hermes-%i`, 설정은
+  `/etc/hermes/%i`, 자료·상태는 `/var/lib/hermes/%i`를 사용한다
+- 설치는 템플릿만 배치하고 인스턴스를 자동 활성화하지 않는다. 계정·workspace ACL·
+  domain·토큰을 먼저 확인한 뒤 운영자가 구체적인 `@tyit` 또는 `@pf`를 켠다
+- 실제 절차와 롤백은 `docs/deploy/hermes-pf-archiver.md`를 따른다
+
 ## 남은 것
 
-- systemd unit 을 인스턴스별로 나누는 일(= `hermes-pf-archiver@.service` 꼴)은 배포
-  담당 몫이다. 이 작업은 **코드가 그 구성을 받을 수 있게** 만든 데까지다
 - 웹 콘솔에서 인스턴스·프로필을 보여 주는 일은 아직 안 했다(콘솔 담당 범위)
 - `enterprise` 인스턴스의 실제 운영 설정(`domain` · `HERMES_STATE_DIR`)은 사람이
   적는다. 안 적으면 기동이 막히고, 막히는 것이 의도다

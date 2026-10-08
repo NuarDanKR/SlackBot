@@ -1,259 +1,247 @@
-# PF Hermes를 Archiver 정본에 연결하는 절차
+# 한 서버에서 Hermes Archiver 인스턴스 운영
 
-상태: **운영 적용 전**. 이 문서는 TYBot 서버에서 PF Hermes를 별도 서비스로 실행하는
-수동 전환 절차다. 설치 스크립트는 이 서비스를 자동으로 활성화하지 않는다.
+상태: **사내 파일럿 준비**. 먼저 `tyit` 인스턴스를 14일 검증하고, 통과한 뒤 같은
+서버에 PF 인스턴스를 추가한다. 두 인스턴스는 같은 코드를 사용하지만 계정, Slack 토큰,
+설정, 상태, manifest와 읽을 수 있는 Archiver workspace가 모두 다르다.
 
-## 배치 원칙
+## 원칙
 
-- Hermes 질문·DM·일간/주간 요약은 유지한다.
-- 원문 수집·소급·첨부 저장은 Archiving Bot만 수행한다.
-- Hermes는 `/var/lib/tybot/archive`를 읽기 전용으로만 연다.
-- 기존 PF VM과 이 서비스를 동시에 실행하지 않는다.
-- 토큰과 workspace 키는 저장소 밖 `/etc/hermes-pf/hermes.env`에 둔다.
-- 인터넷 인바운드 포트는 열지 않는다. Slack Socket Mode와 모델 API로 나가는 연결만 쓴다.
+- 둘 다 `HERMES_MODE=pf-archiver`로 실행하며 원문을 쓰지 않는다.
+- 사내는 `HERMES_DOMAIN=enterprise`, PF는 `HERMES_DOMAIN=pf-construction`을 쓴다.
+- 코드만 공유한다. `/var/lib/hermes/<instance>`와 `/etc/hermes/<instance>`는 공유하지 않는다.
+- OS 계정도 `hermes-<instance>`로 나눈다. 한 계정에 두 workspace ACL을 주지 않는다.
+- instance는 Archiver workspace key와 같아야 하며 `[a-z][a-z0-9]{0,15}`만 허용한다.
+- 같은 Slack App/Bot 토큰으로 기존 Hermes와 새 서비스를 동시에 실행하지 않는다.
+- 인터넷 인바운드 포트는 열지 않는다. Slack Socket Mode 아웃바운드만 사용한다.
 
-## 1. 코드와 의존성 준비
+## 1. 템플릿 설치
 
-아직 서비스를 시작하지 않는다.
+배포가 아래 세 템플릿을 설치한다. 설정되지 않은 인스턴스를 자동으로 켜지는 않는다.
 
 ```bash
-id -u hermes >/dev/null 2>&1 || \
-  sudo useradd --system --home-dir /var/lib/hermes-pf --shell /sbin/nologin hermes
-node --version
-cd /opt/tybot/subbots/hermes
-sudo npm ci --omit=dev
-sudo install -d -o hermes -g hermes -m 0700 /var/lib/hermes-pf
-sudo install -d -o hermes -g hermes -m 0700 /opt/tybot/subbots/hermes/logs
+sudo systemctl daemon-reload
+sudo systemd-analyze verify \
+  /etc/systemd/system/hermes-archiver@.service \
+  /etc/systemd/system/hermes-privacy-manifest@.service \
+  /etc/systemd/system/hermes-privacy-manifest@.timer
 ```
 
-`/var/lib/hermes-pf/config.json`에는 PF의 기존 `config.json`을 두되 다음을 확인한다.
+## 2. 사내 인스턴스 디렉터리와 계정
 
-- `privateChannels`가 채널 공개 여부 manifest와 일치한다.
+첫 파일럿의 instance와 Archiver workspace는 모두 `tyit`이다.
+
+```bash
+instance=tyit
+workspace=tyit
+account=hermes-tyit
+
+getent group hermes-runtime >/dev/null || sudo groupadd --system hermes-runtime
+getent group "$account" >/dev/null || sudo groupadd --system "$account"
+id -u "$account" >/dev/null 2>&1 || sudo useradd --system \
+  --gid "$account" --groups hermes-runtime \
+  --home-dir "/var/lib/hermes/$instance" --shell /sbin/nologin "$account"
+
+sudo install -d -o root -g "$account" -m 0750 "/etc/hermes/$instance"
+sudo install -d -o "$account" -g "$account" -m 0700 "/var/lib/hermes/$instance"
+sudo install -d -o "$account" -g "$account" -m 0700 "/var/lib/hermes/$instance/state"
+sudo install -d -o root -g "$account" -m 0750 "/etc/hermes/$instance/bin"
+sudo ln -sfn /usr/bin/python3.11 "/etc/hermes/$instance/bin/python3"
+sudo chown -h root:"$account" "/etc/hermes/$instance/bin/python3"
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/hermes-bot-locks.conf
+```
+
+기존 설정을 `/var/lib/hermes/tyit/config.json`으로 옮기고 다음을 확인한다.
+
+- `domain`은 `enterprise`다.
+- `archiver.root`는 `/var/lib/tybot/archive`, `archiver.workspace`는 `tyit`이다.
+- `archiver.privacyManifest`는 `/etc/hermes/tyit/privacy-manifest.json`이다.
+- `privateChannels`와 질문·DM·일간/주간 요약 설정은 사내 값이다.
 - `digest.ingest.enabled`와 `digest.ingestPre.enabled`는 꺼져 있다.
-- 질문·DM·`digest.daily`·`digest.weekly` 설정은 기존 PF 값이다.
-- `archiver.root`는 환경변수가 덮어쓰므로 운영 경로를 중복 기입하지 않는다.
-- `archiver.workspace`는 Slack 표시명이 아니라 Archiver workspace 키다.
 
-## 2. 비밀 환경 파일
+## 3. 사내 환경 파일
 
 ```bash
-sudo install -d -o root -g hermes -m 0750 /etc/hermes-pf
-sudo install -o root -g hermes -m 0640 /dev/null /etc/hermes-pf/hermes.env
-sudoedit /etc/hermes-pf/hermes.env
-sudo install -o root -g hermes -m 0640 /dev/null /etc/hermes-pf/privacy.env
-sudoedit /etc/hermes-pf/privacy.env
+sudo install -o root -g hermes-tyit -m 0640 /dev/null /etc/hermes/tyit/hermes.env
+sudoedit /etc/hermes/tyit/hermes.env
+sudo install -o root -g hermes-tyit -m 0640 /dev/null /etc/hermes/tyit/privacy.env
+sudoedit /etc/hermes/tyit/privacy.env
 ```
 
-값은 다음 네 개만 둔다. 실제 값은 문서나 셸 이력에 남기지 않는다.
+`hermes.env`에는 저장소 밖의 실제 값만 둔다. 인라인 주석은 쓰지 않는다.
 
 ```dotenv
 SLACK_BOT_TOKEN=<secret>
 SLACK_APP_TOKEN=<secret>
 ANTHROPIC_API_KEY=<secret>
-HERMES_ARCHIVER_WORKSPACE=invest
+HERMES_ARCHIVER_WORKSPACE=tyit
+HERMES_DOMAIN=enterprise
+HERMES_SLACK_TEAM_ID=<auth.test team_id>
+HERMES_SLACK_BOT_USER_ID=<auth.test user_id>
 ```
 
-`privacy.env`에는 비밀값 없이 같은 workspace 키만 둔다. manifest exporter는 Hermes의
-Slack·LLM 토큰을 읽지 않는다.
+`privacy.env`:
 
 ```dotenv
-HERMES_PRIVACY_WORKSPACE=invest
+HERMES_PRIVACY_WORKSPACE=tyit
 ```
 
-`HERMES_MODE`, `HERMES_DATA_ROOT`, `HERMES_ARCHIVER_ROOT`는 unit이 고정한다.
+`HERMES_MODE`, data/state root, Archiver root와 manifest 경로는 unit이 고정한다.
 
-## 3. 아카이브 읽기 권한
+## 4. 코드와 Archiver ACL
 
-서비스 계정에 TYBot 그룹 전체 권한을 주지 않는다. 코드와 파일럿 워크스페이스만 ACL로
-연다. Rocky 8의 `/usr/bin/python3`는 3.6이므로 Hermes 검사에는 3.11 전용 이름을 쓴다.
+공유 코드에는 `hermes-runtime` 그룹의 읽기 권한만 준다. 각 인스턴스 계정에는 자기
+workspace만 읽게 하고, DM과 다른 workspace는 명시적으로 막는다.
 
 ```bash
-command -v setfacl >/dev/null
-workspace=invest
-
-sudo setfacl -m u:hermes:--x /opt/tybot /opt/tybot/subbots
+sudo setfacl -m g:hermes-runtime:--x /opt/tybot /opt/tybot/subbots
 sudo find /opt/tybot/subbots/hermes -type d \
-  -exec setfacl -m u:hermes:rx,d:u:hermes:rx {} +
-sudo find /opt/tybot/subbots/hermes -type f -exec setfacl -m u:hermes:r-- {} +
+  -exec setfacl -m g:hermes-runtime:rx,d:g:hermes-runtime:rx {} +
+sudo find /opt/tybot/subbots/hermes -type f \
+  -exec setfacl -m g:hermes-runtime:r-- {} +
 sudo find /opt/tybot/subbots/hermes -type f -perm /111 \
-  -exec setfacl -m u:hermes:r-x {} +
+  -exec setfacl -m g:hermes-runtime:r-x {} +
+sudo setfacl -m g:hermes-runtime:r-x /usr/bin/python3.11
 
-sudo setfacl -m u:hermes:r-x /usr/bin/python3.11
-sudo install -d -o root -g hermes -m 0750 /etc/hermes-pf/bin
-sudo ln -sfn /usr/bin/python3.11 /etc/hermes-pf/bin/python3
-sudo chown -h root:hermes /etc/hermes-pf/bin/python3
-
-sudo setfacl -m u:hermes:--x /var/lib/tybot /var/lib/tybot/archive
-sudo setfacl -m d:u:hermes:--- /var/lib/tybot/archive
+sudo setfacl -m u:hermes-tyit:--x /var/lib/tybot /var/lib/tybot/archive
+sudo setfacl -m d:u:hermes-tyit:--- /var/lib/tybot/archive
 sudo find /var/lib/tybot/archive -mindepth 1 -maxdepth 1 -type d \
-  ! -name "$workspace" -exec setfacl -m u:hermes:---,d:u:hermes:--- {} +
-sudo find "/var/lib/tybot/archive/$workspace" -type d \
-  -exec setfacl -m u:hermes:rx,d:u:hermes:rx {} +
-sudo find "/var/lib/tybot/archive/$workspace" -type f \
-  -exec setfacl -m u:hermes:r-- {} +
-if [[ -d "/var/lib/tybot/archive/$workspace/dm" ]]; then
-  sudo setfacl -m u:hermes:---,d:u:hermes:--- \
-    "/var/lib/tybot/archive/$workspace/dm"
-fi
+  ! -name tyit -exec setfacl -m u:hermes-tyit:---,d:u:hermes-tyit:--- {} +
+sudo find /var/lib/tybot/archive/tyit -type d \
+  -exec setfacl -m u:hermes-tyit:rx,d:u:hermes-tyit:rx {} +
+sudo find /var/lib/tybot/archive/tyit -type f \
+  -exec setfacl -m u:hermes-tyit:r-- {} +
+sudo install -d -o tybot -g tybot -m 0750 /var/lib/tybot/archive/tyit/dm
+sudo setfacl -m u:hermes-tyit:---,d:u:hermes-tyit:--- /var/lib/tybot/archive/tyit/dm
 
-sudo -u hermes test -r "/var/lib/tybot/archive/$workspace"
-sudo -u hermes test ! -r /var/lib/tybot/archive/mgmt
-sudo -u hermes test ! -r "/var/lib/tybot/archive/$workspace/dm"
-sudo -u hermes env PATH=/etc/hermes-pf/bin:/usr/bin python3 --version
+sudo -u hermes-tyit test -r /var/lib/tybot/archive/tyit
+sudo -u hermes-tyit test ! -r /var/lib/tybot/archive/mgmt
+sudo -u hermes-tyit test ! -r /var/lib/tybot/archive/tyit/dm
+sudo -u hermes-tyit env PATH=/etc/hermes/tyit/bin:/usr/bin python3 --version
 ```
 
-unit은 별도로 `/var/lib/tybot/state`, shadow, QA 로그를 숨긴다.
+unit도 mount namespace에서 다른 workspace 전체와 `dm/`을 가린다. ACL은 그 앞의 첫
+방어선이다. 배포가 inode를 교체할 수 있으므로 **배포할 때마다 4절의 코드·workspace
+ACL을 재적용**하고 `sudo -u hermes-tyit test -r`/`test ! -r`를 다시 확인한다.
 
-## 4. 설치 전 검사
-
-아직 새 Hermes를 시작하지 않는다.
-
-TYBot 서비스 계정으로 DB의 확인된 공개 여부만 임시 위치에 내보낸 뒤, root가
-Hermes의 읽기 전용 설정 디렉터리로 설치한다. Hermes에는 TYBot state 디렉터리
-접근 권한을 주지 않는다.
+## 5. Manifest와 준비 점검
 
 ```bash
-sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env \
-  PYTHONPATH=/opt/tybot/src \
-  /opt/tybot/.venv/bin/python -m tybot.archive.privacy_manifest \
-  --workspace invest --out /var/lib/tybot/state/hermes-pf-privacy.json
-sudo install -o root -g hermes -m 0640 \
-  /var/lib/tybot/state/hermes-pf-privacy.json \
-  /etc/hermes-pf/privacy-manifest.json
-sudo -u hermes test -r /etc/hermes-pf/privacy-manifest.json
-```
-
-manifest 기본 유효기간은 26시간이다. 한 번만 만들면 다음 날 일반 사용자의 모든 접근이
-fail-closed로 닫히므로, 12시간 갱신 타이머를 함께 설치한다. DB 조회는 `tybot`으로 하고
-최종 파일 교체만 root 권한으로 수행한다.
-
-빈 workspace와 확인된 채널 0개는 발행 실패다. 마지막 정상 manifest를 빈 파일로
-덮어쓰지 않는다. Hermes 서비스는 갱신 oneshot이 끝난 뒤에만 기동한다.
-
-```bash
-sudo install -m 0644 /opt/tybot/deploy/hermes-pf-archiver.service /etc/systemd/system/
-sudo install -m 0644 /opt/tybot/deploy/hermes-privacy-manifest.service /etc/systemd/system/
-sudo install -m 0644 /opt/tybot/deploy/hermes-privacy-manifest.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemd-analyze verify /etc/systemd/system/hermes-pf-archiver.service
-sudo systemd-analyze verify /etc/systemd/system/hermes-privacy-manifest.service
-sudo systemd-analyze verify /etc/systemd/system/hermes-privacy-manifest.timer
-sudo systemctl start hermes-privacy-manifest.service
-sudo systemctl show hermes-privacy-manifest.service \
+sudo systemctl start hermes-privacy-manifest@tyit.service
+systemctl show hermes-privacy-manifest@tyit.service \
   --property=Result --property=ExecMainStatus --no-pager
-sudo systemctl enable --now hermes-privacy-manifest.timer
-systemctl list-timers hermes-privacy-manifest.timer --no-pager
-sudo systemctl is-enabled hermes-pf-archiver.service
+sudo -u hermes-tyit test -r /etc/hermes/tyit/privacy-manifest.json
+
+cd /opt/tybot/subbots/hermes
+sudo -u hermes-tyit /usr/bin/bash -c '
+  set -a
+  source /etc/hermes/tyit/hermes.env
+  set +a
+  export HERMES_MODE=pf-archiver
+  export HERMES_DATA_ROOT=/var/lib/hermes/tyit
+  export HERMES_STATE_DIR=/var/lib/hermes/tyit/state
+  export HERMES_ARCHIVER_ROOT=/var/lib/tybot/archive
+  export HERMES_PRIVACY_MANIFEST=/etc/hermes/tyit/privacy-manifest.json
+  export PATH=/etc/hermes/tyit/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+  /usr/bin/npm run check:archive
+'
 ```
 
-마지막 결과는 `disabled`여야 한다. 개인정보 대조 관문은 서비스의 `ExecStartPre`에서도
-다시 실행되며, 누락·미확인 채널이 있으면 기동을 거부해야 한다.
+점검은 0으로 끝나야 한다. 수집 명령은 반대로 차단되어야 한다.
 
-## 5. 단일 인스턴스 전환
+```bash
+sudo -u hermes-tyit env \
+  HERMES_MODE=pf-archiver HERMES_DOMAIN=enterprise \
+  HERMES_DATA_ROOT=/var/lib/hermes/tyit \
+  HERMES_STATE_DIR=/var/lib/hermes/tyit/state \
+  HERMES_ARCHIVER_ROOT=/var/lib/tybot/archive \
+  HERMES_ARCHIVER_WORKSPACE=tyit \
+  HERMES_PRIVACY_MANIFEST=/etc/hermes/tyit/privacy-manifest.json \
+  /usr/bin/node scripts/run-ingest.js
+test $? -eq 2
+```
 
-기존 PF VM에서 먼저 실행한다.
+## 6. 사내 인스턴스 시작
+
+같은 Slack 토큰을 쓰는 기존 프로세스를 먼저 멈춘다. 새 서비스가 정상임을 확인하기 전에는
+기존 설정이나 데이터를 지우지 않는다.
 
 ```bash
 sudo systemctl stop hermes.service
 systemctl is-active hermes.service
-```
 
-결과가 `inactive`인 것을 확인한 뒤에만 TYBot 서버에서 시작한다.
-
-```bash
-sudo systemctl start hermes-pf-archiver.service
-systemctl show hermes-pf-archiver.service \
+sudo systemctl enable --now hermes-privacy-manifest@tyit.timer
+sudo systemctl start hermes-archiver@tyit.service
+systemctl show hermes-archiver@tyit.service \
   --property=NRestarts --property=ExecMainStatus \
   --property=ActiveState --property=SubState --no-pager
-journalctl -u hermes-pf-archiver.service -n 100 --no-pager
+journalctl -u hermes-archiver@tyit.service -n 100 --no-pager
 ```
 
-`active/running`, `NRestarts=0`, `ExecMainStatus=0`이 아니면 진행하지 않는다.
-
-## 6. Smoke test
-
-순서대로 한 건씩 확인한다.
-
-1. 공개 채널 질문이 정본 좌표와 출처를 붙여 답한다.
-2. 비공개 채널 비회원 질문이 답변 생성 전에 차단된다.
-3. 비공개 채널 회원 질문과 DM 질문이 허용된 채널만 읽는다.
-4. 변환된 첨부의 본문을 검색하고 `read_document`로 연다.
-5. `node scripts/run-digest.js daily --dry`와 `weekly --dry`가 전송 없이 완료된다.
-6. `node scripts/run-ingest.js`는 종료 코드 2로 거부된다.
-7. 기존 `hermes-archive-pull.timer`와 PF VM Hermes가 계속 꺼져 있다.
+기대값은 `active/running`, `NRestarts=0`, `ExecMainStatus=0`이다.
+누락된 설정은 `ConditionPathExists`로 조용히 건너뛰지 않고 `ExecStartPre` 실패로 남는다.
+같은 `HERMES_SLACK_BOT_USER_ID`를 가진 다른 Hermes가 돌고 있으면 공용 flock이 기동을
+거부한다. `auth.test`의 team/user가 환경 파일의 기대값과 다르면 Socket Mode를 열기 전에
+종료한다.
 
 ## 7. 사내 14일 파일럿
 
-PF에 바로 적용하지 않는다. 동일한 빌드와 설정 형식을 사내 워크스페이스에서 14일간
-먼저 검증한다. 파일럿에서도 같은 Slack 토큰을 쓰는 기존 Hermes와 새 서비스를 동시에
-실행하지 않는다.
+아래 조건이 14일 연속 만족된 뒤에만 PF 인스턴스를 추가한다.
 
-### 7.1 무발송 검증
-
-서비스를 켜기 전에 아래 항목을 모두 확인한다.
-
-1. privacy manifest 관문이 종료 코드 0이다.
-2. 질문, DM, 일간 및 주간 요약을 dry-run으로 실행해 출처 좌표가 Archiver 정본을 가리킨다.
-3. 공개 채널, 비공개 채널 회원, 비회원의 결과가 각각 기대한 권한 경계를 지킨다.
-4. 첨부 신규 생성, 재변환, 삭제가 한 프로세스의 캐시에 즉시 반영된다.
-5. 모든 원문 쓰기 진입점이 `HERMES_MODE=pf-archiver`에서 종료 코드 2로 거부된다.
-
-### 7.2 제한 운영
-
-첫날은 사내 지정 채널과 지정 사용자 DM만 허용한다. 기존 Hermes를 멈춘 것을 확인한 뒤
-새 서비스를 시작한다. 제한 대상을 넓히는 것은 하루 단위로 하며, 권한 오류나 중복 발송이
-한 건이라도 있으면 즉시 롤백한다.
+- 권한 밖 채널 노출 0건
+- 원문 쓰기와 Git 아카이브 쓰기 0건
+- 중복 질문 답변과 중복 검토 DM 0건
+- manifest 만료, workspace 불일치, 중복 ID를 관문이 모두 거부
+- 질문·DM·일간/주간 요약의 출처 좌표 오류 0건
+- 첨부 신규·재변환·삭제가 재시작 없이 반영
+- 서비스 재시작과 rollback을 각각 한 번 실측
 
 매일 다음을 기록한다.
 
-- 서비스 재시작 수와 마지막 종료 상태
-- privacy manifest 생성 시각과 관문 결과
-- 권한 거부, manifest 불일치, 정본 읽기 실패 건수
-- 질문과 DM 표본의 출처 `locator` 및 `message_ts` 대조 결과
-- 일간/주간 요약의 중복 발송 및 누락 건수
-- 첨부 신규 생성, 재변환, 삭제 후 검색 반영 여부
-- Hermes 원문 쓰기 거부 로그와 Archiver 정본 쓰기 시도 0건
-
 ```bash
-systemctl show hermes-pf-archiver.service \
+systemctl show hermes-archiver@tyit.service \
   --property=NRestarts --property=ExecMainStatus \
   --property=ActiveState --property=SubState --no-pager
-journalctl -u hermes-pf-archiver.service --since '24 hours ago' --no-pager
+systemctl list-timers hermes-privacy-manifest@tyit.timer --no-pager
+journalctl -u hermes-archiver@tyit.service --since '24 hours ago' --no-pager
 ```
 
-### 7.3 PF 승격 조건
+## 8. PF 인스턴스 추가
 
-다음 조건을 14일 연속 만족한 뒤에만 PF 전환 일정을 잡는다.
+PF는 별도 서버가 아니라 같은 서버의 두 번째 인스턴스다. 아래 값으로 2~6절을 반복한다.
 
-- 권한 밖 채널 노출 0건
-- 원문 쓰기 및 Git 아카이브 쓰기 0건
-- 중복 질문 응답과 중복 검토 DM 0건
-- manifest 누락, 만료, 중복 ID를 관문이 모두 거부
-- 공개에서 비공개로 바뀐 채널과 새 비공개 채널이 재시작 없이 닫힘
-- 첨부 캐시 신규, 재변환, 삭제 회귀 0건
-- 질문, DM, 일간 및 주간 요약의 출처 좌표 오류 0건
-- 운영자가 롤백 절차를 한 번 실제로 수행하고 정상 복구 확인
+```text
+instance=invest
+account=hermes-invest
+workspace=invest
+HERMES_DOMAIN=pf-construction
+data=/var/lib/hermes/invest
+state=/var/lib/hermes/invest/state
+config=/etc/hermes/invest
+service=hermes-archiver@invest.service
+timer=hermes-privacy-manifest@invest.timer
+```
 
-PF에는 검증된 커밋과 설정 형식, manifest 갱신 절차만 전달한다. 사내 토큰, manifest,
-아카이브 및 로그는 전달하지 않는다. PF 환경에서도 시작 직전에 같은 privacy 관문과
-무발송 검증을 다시 실행한다.
-
-## 8. 롤백
-
-TYBot 서버에서 먼저 중지한다.
+`/var/lib/hermes/invest/config.json`, `/etc/hermes/invest/hermes.env`, PF 전용 Slack 토큰과
+`invest` workspace ACL을 별도로 만든다. `hermes-invest` 계정에 `tyit` ACL을 주지 않고,
+`hermes-tyit` 계정에 `invest` ACL을 주지 않는다. 시작 전 다음이 모두 성공해야 한다.
 
 ```bash
-sudo systemctl stop hermes-pf-archiver.service
-sudo systemctl disable --now hermes-privacy-manifest.timer
-systemctl is-active hermes-pf-archiver.service
+sudo -u hermes-invest test -r /var/lib/tybot/archive/invest
+sudo -u hermes-invest test ! -r /var/lib/tybot/archive/tyit
+sudo -u hermes-tyit test ! -r /var/lib/tybot/archive/invest
+sudo -u hermes-invest test ! -r /var/lib/tybot/archive/invest/dm
 ```
 
-`inactive` 확인 뒤 PF VM에서 기존 Hermes를 시작한다. 두 인스턴스를 동시에 켜서 확인하지
-않는다. 롤백은 기존 PF `HERMES_MODE=pf`와 기존 Git 아카이브를 그대로 사용한다.
+## 9. 롤백
 
-## 운영 전 남은 조건
+사내 인스턴스만 중단할 때:
 
-- 채널 공개 여부 manifest에서 누락·미확인 채널이 0개여야 한다.
-- 전체 Python·Hermes 시험이 현재 커밋에서 통과해야 한다.
-- 실제 TYBot 서버의 Node 버전이 Hermes의 `node >= 20` 조건을 만족해야 한다.
-- `setfacl` 패키지와 재부팅 뒤 ACL 상속을 실제 새 파일로 확인해야 한다.
+```bash
+sudo systemctl stop hermes-archiver@tyit.service
+sudo systemctl disable --now hermes-privacy-manifest@tyit.timer
+systemctl is-active hermes-archiver@tyit.service
+```
+
+PF는 `@invest`만 중단한다. 한 인스턴스의 롤백에서 다른 인스턴스의 서비스, 상태,
+manifest, ACL을 변경하지 않는다. 기존 Hermes를 되살릴 때도 같은 Slack 토큰의 새
+인스턴스가 `inactive`인지 먼저 확인한다.

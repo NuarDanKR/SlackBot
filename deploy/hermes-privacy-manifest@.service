@@ -1,0 +1,33 @@
+[Unit]
+Description=Refresh the Hermes %i channel privacy manifest
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+Environment=PYTHONPATH=/opt/tybot/src
+Environment=LANG=C.UTF-8
+EnvironmentFile=/etc/hermes/%i/privacy.env
+
+# Query as tybot, then publish a per-instance file atomically as root. The
+# exporter also rejects an empty workspace and an empty verified channel set.
+ExecStartPre=/usr/local/libexec/hermes-archiver-run validate %i
+ExecStartPre=/usr/local/libexec/hermes-archiver-run workspace %i
+ExecStartPre=/usr/bin/test -f /etc/tybot/tybot.env
+ExecStartPre=/usr/bin/test -f /etc/hermes/%i/privacy.env
+ExecStartPre=/usr/bin/test -d /etc/hermes/%i
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.archive.privacy_manifest --workspace ${HERMES_PRIVACY_WORKSPACE} --out /var/lib/tybot/state/hermes-privacy-%i.json
+ExecStartPost=+/usr/bin/install -o root -g hermes-%i -m 0640 /var/lib/tybot/state/hermes-privacy-%i.json /etc/hermes/%i/.privacy-manifest.json.new
+ExecStartPost=+/usr/bin/mv -f /etc/hermes/%i/.privacy-manifest.json.new /etc/hermes/%i/privacy-manifest.json
+ExecStartPost=+/usr/local/libexec/hermes-archiver-run recover %i
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tybot/state /etc/hermes/%i
+InaccessiblePaths=-/var/lib/tybot/archive -/var/lib/tybot/archiver-shadow -/var/lib/tybot/qa-log

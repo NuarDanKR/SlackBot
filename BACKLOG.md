@@ -244,6 +244,9 @@ Hermes 적용이 끝난 다음, 담당자가 구현할 수 있는 Markdown 인�
    `execution_mode=tools`와 독립 Node Hermes를 같은 스위치로 끄지 않는다.
 6. 웹 콘솔은 원문을 편집하거나 표시하지 않는다. 상태·건수·좌표·오류 코드만 보여 주고,
    시크릿·DSN·Slack 토큰·원문 경로의 내용은 API와 로그 양쪽에서 가린다.
+7. manifest 첫 갱신 실패부터 경보하고, 만료로 `hermes-archiver@<instance>`가 failed가 된
+   경우 manifest 복구 뒤 재기동됐는지 표시한다. CLI 템플릿은 failed 인스턴스만 자동
+   복구하며, 의도적으로 stop한 인스턴스는 다시 켜지 않는다.
 
 ### 완료 조건
 
