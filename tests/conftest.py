@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-_GUARDED = ("TYBOT_ENV_FILE", "ENV_SETTINGS_PATH")
+_ENV_FILE_GUARDS = ("TYBOT_ENV_FILE", "ENV_SETTINGS_PATH")
+_RUNTIME_PATH_GUARDS = ("STATE_DIR", "LOCK_DIR")
 _guard_dir: tempfile.TemporaryDirectory[str] | None = None
 _previous: dict[str, str | None] = {}
 
@@ -23,11 +24,15 @@ def pytest_configure(config: pytest.Config) -> None:
             "TYBOT_SCHEMA_TEST_DSN for isolated PostgreSQL tests."
         )
     _guard_dir = tempfile.TemporaryDirectory(prefix="tybot-pytest-env-")
-    empty = Path(_guard_dir.name) / "empty.env"
+    guard_root = Path(_guard_dir.name)
+    empty = guard_root / "empty.env"
     empty.write_text("", encoding="utf-8")
-    for key in _GUARDED:
+    for key in (*_ENV_FILE_GUARDS, *_RUNTIME_PATH_GUARDS):
         _previous[key] = os.environ.get(key)
+    for key in _ENV_FILE_GUARDS:
         os.environ[key] = str(empty)
+    os.environ["STATE_DIR"] = str(guard_root / "runtime")
+    os.environ["LOCK_DIR"] = str(guard_root / "locks")
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

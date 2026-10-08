@@ -520,7 +520,9 @@ def test_deleted_message_appends_tombstone_and_revision(tmp_path):
     assert recorded[0]["kind"] == "delete"
 
 
-def test_revision_metadata_failure_is_not_reported_as_success(monkeypatch, tmp_path):
+def test_revision_metadata_failure_is_not_reported_as_success(
+    monkeypatch, tmp_path, acked
+):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
     collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test")

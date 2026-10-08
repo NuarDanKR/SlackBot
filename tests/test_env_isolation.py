@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from tybot.archive import ingest_ack
 from tybot.envfile import load_env_file
 
 REPO = Path(__file__).resolve().parent.parent
@@ -43,6 +44,20 @@ def test_loading_the_env_file_here_brings_no_database_url():
     load_env_file()
 
     assert os.environ.get("DATABASE_URL") == before
+
+
+def test_runtime_state_cannot_fall_through_to_the_operational_tree():
+    """Tests without a local override must never touch the live ACK outbox."""
+    state_root = Path(os.environ["STATE_DIR"]).resolve()
+    lock_root = Path(os.environ["LOCK_DIR"]).resolve()
+    env_guard = Path(os.environ["TYBOT_ENV_FILE"]).resolve().parent
+
+    assert state_root.parent == env_guard
+    assert lock_root.parent == env_guard
+    assert ingest_ack.outbox_path("tyit") == (
+        state_root / "state" / "ingest-ack-outbox" / "tyit.jsonl"
+    )
+    assert Path("/var/lib/tybot") not in (state_root, lock_root)
 
 
 def test_ambient_database_url_is_rejected_before_collection(monkeypatch):
