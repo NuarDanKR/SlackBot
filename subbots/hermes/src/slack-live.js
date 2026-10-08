@@ -10,6 +10,7 @@ import { createSlackLiveRender } from './slack/live-render.js';
 import { createSlackLiveWindow } from './slack/live-window.js';
 import {
   config, ROOT, FULL_ACCESS, canSeePrivateChannel, isPrivateChannel, canSee,
+  DIGEST_STATE_FILE as CONFIGURED_DIGEST_STATE_FILE,
   canonicalChannel, currentChannelNames,
   redactPrivateMentions, BOT_ANSWER_MARK,
 } from './config.js';
@@ -473,7 +474,9 @@ export async function fetchThreadContext(client, {
  * 멈춘다 — `config.js` 의 LOG_DIR 주석이 같은 이유로 로그 원본을 여기 둔다.
  * `LOG_ENABLED` 와 무관하게 이 자리를 쓴다: 로그를 꺼도 요약 구간은 이어져야 한다.
  */
-const DIGEST_STATE_FILE = path.join(ROOT, 'logs', 'digest-state.json');
+/* 자리는 `config.js` 가 정한다 — 인스턴스마다 달라야 해서다(2026-10-08).
+ * 여기서 또 조립하면 한쪽만 고쳐지고, 그때 두 인스턴스가 같은 파일을 쓴다. */
+const DIGEST_STATE_FILE = CONFIGURED_DIGEST_STATE_FILE;
 
 /** 기록이 없거나 깨졌으면 `null` — 그때는 아래에서 예전처럼 24시간을 쓴다. */
 function readDailySentThrough(file = DIGEST_STATE_FILE) {

@@ -98,6 +98,10 @@ function realToolBuilder() {
     isPrivateChannel: () => false,
     matchesHiddenPrivate: () => false,
     BLOCKED_NOTE: 'blocked-note-fixture',
+    // 표시 용어는 **주입**이다(2026-10-08). 픽스처도 적어야 한다 — 기본값을 두면
+    // 사내 인스턴스가 PF 말투로 말하고, 그건 오류로 안 나타난다.
+    terms: { place: '사업장', area: '사업장',
+      examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } },
     truncMarker: s => `…(${s})`,
     searchArchive: ({ query, channel }) => {
       if (query.includes(CRASH)) throw new Error('synthetic search crash');
@@ -144,6 +148,10 @@ async function replay(factory, scenario) {
     return runner;
   };
   const answer = factory({
+    /* 표시 용어(2026-10-08 주입). 기준판(git 고정)은 이 키를 안 쓰므로 그냥 무시한다 —
+     * 값이 지금 PF 문구와 같아야 두 판의 출력이 글자까지 같다. */
+    terms: { place: '사업장', area: '사업장',
+      examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } },
     config, anthropic: () => client,
     toolSession: (spec) => createToolSession(spec, { client: () => client }),
     now: () => new Date(fixedTime),

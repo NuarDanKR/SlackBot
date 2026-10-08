@@ -5,9 +5,14 @@
  */
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
+import { terms as domainTerms } from '../domain.js';
 
 export function createPromptContext({
   ROOT, DATA_ROOT, ARCHIVE_DIR, DOCS_DIR, config, accessLabel, canSeePrivateChannel,
+  /* 표시 용어 프로필. 안 주면 자료 저장소의 `domain` 을 본다 — **기본값은 없다.**
+   * 환경변수가 설정을 이기는 것은 `config.js` 의 `DOMAIN` 이 정하고, 운영은 그 값을
+   * 여기로 넘긴다(`claude.js`). 검사 픽스처는 자기 값을 넘기면 된다. */
+  domain = undefined,
   buildArchiveBriefSplit, buildDocumentsBriefSplit, hasDocuments, listArchivedChannels,
   fs = nodeFs, path = nodePath,
 }) {
@@ -22,7 +27,10 @@ export function createPromptContext({
    * 키는 쓰임이 아니라 **이름 기준**이다 — 같은 이름이 `#이름`(채널)과 `*이름*`(사업장)
    * 양쪽에 쓰여서, 쓰임별로 나누면 같은 사업장이 두 키가 된다.
    */
-  const EXAMPLE_FALLBACK = { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' };
+  /* 예시 이름은 **프로필 것**이다 (2026-10-08). 사내 인스턴스 화면에 「사업장가」 가
+   * 뜨면 안 된다 — 그건 오류가 아니라 어색한 문장이라 아무도 고쳐 달라고 안 한다. */
+  const profile = () => domainTerms(domain ?? config.domain);
+  const EXAMPLE_FALLBACK = () => profile().examples;
 
   /**
    * 회사·팀 이름과 받는 사람 표기도 **자료 저장소에서 온다** (2026-09-01).
@@ -52,13 +60,18 @@ export function createPromptContext({
       Object.entries(config.promptExamples || {})
         .filter(([k, v]) => /^EX_[A-Z]$/.test(k) && typeof v === 'string' && v.trim()),
     );
-    const ex = { ...EXAMPLE_FALLBACK, ...given };
+    const t = profile();
+    const ex = { ...t.examples, ...given };
     // `<…>` 로 시작하는 값은 안 채운 자리다 — config.example.json 을 복사만 하고 값을
     // 안 넣으면 `<받는 사람 이름>` 이 그대로 프롬프트에 실린다. 빈 값과 같이 본다.
     const filled = (v) => (typeof v === 'string' && v.trim() && !/^<.*>$/.test(v.trim()) ? v.trim() : '');
     ex.ORG = filled(config.org) || ORG_FALLBACK;
     ex.OWNER = filled(config.owner?.label) || filled(config.owner?.name) || OWNER_FALLBACK;
-    return raw.replace(/\{\{(EX_[A-Z]|ORG|OWNER)\}\}/g, (m, k) => ex[k] ?? m);
+    /* 표시 용어도 자리표시자로 넣는다 — `{{ORG}}` 와 같은 자리, 같은 관문
+     * (`check-bootstrap.js` 갈래 ⑨ 가 「치환 뒤 자리표시자가 남지 않나」를 본다). */
+    ex.PLACE = t.place;
+    ex.AREA = t.area;
+    return raw.replace(/\{\{(EX_[A-Z]|ORG|OWNER|PLACE|AREA)\}\}/g, (m, k) => ex[k] ?? m);
   }
 
   const promptFile = renderPrompt;

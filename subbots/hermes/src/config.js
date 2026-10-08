@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { archiveWritesBlocked, mode as hermesMode } from './mode.js';
 import { createReader as createArchiverReader, isKey as isArchiverKey } from './archive-reader/archiver.js';
 import { loadPrivacyManifest } from './archive-reader/privacy-manifest.js';
+import { DomainConfigError, resolveDomain } from './domain.js';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -84,6 +85,60 @@ function loadConfig() {
 }
 
 export const config = loadConfig();
+
+/* ── 인스턴스 ────────────────────────────────────────────────────────────
+ *
+ * 2026-10-08 오너 정정: PF 전용 서버도 기존 GCP 운영도 없다. **같은 서버에서 같은
+ * 바이너리로** 여러 Hermes 인스턴스가 돈다. 그래서 「서버가 다르니 안 섞인다」 가
+ * 더는 보장이 아니고, 가르는 것은 전부 **설정**이어야 한다.
+ *
+ * | 무엇 | 어디서 |
+ * |---|---|
+ * | 자료(workspace) | `HERMES_DATA_ROOT` |
+ * | Slack·LLM 토큰 | `EnvironmentFile` (unit 마다 다른 파일) |
+ * | Archiver 정본 | `HERMES_ARCHIVER_ROOT` · `HERMES_ARCHIVER_WORKSPACE` |
+ * | 공개 여부 manifest | `HERMES_PRIVACY_MANIFEST` |
+ * | **쓰는 상태** | `HERMES_STATE_DIR` ← 이번에 생겼다 |
+ * | 표시 용어 | `HERMES_DOMAIN` 또는 config 의 `domain` |
+ */
+
+/**
+ * 표시 용어 프로필. **환경변수가 설정 파일을 이긴다.**
+ *
+ * 인스턴스를 가르는 것은 systemd unit 이다. 자료 저장소의 오타 하나가 사내 인스턴스를
+ * PF 말투로 바꾸면 안 된다 — `HERMES_ARCHIVER_WORKSPACE` 와 같은 자리, 같은 이유다.
+ *
+ * **여기서 던지지 않는다.** `config.js` 는 거의 모든 모듈이 가져가므로 import 에서
+ * 던지면 용어와 상관없는 자리(검사·진단)까지 전부 죽는다. 기동을 막는 것은 아래
+ * `assertInstanceIsolated()` 이고, 용어를 실제로 쓰는 자리는 `DOMAIN` 이 빈 값이면
+ * `domain.js` 가 던진다 — 어느 쪽도 **조용히 기본값으로 가지 않는다.**
+ */
+export const DOMAIN_RAW = process.env.HERMES_DOMAIN || config.domain || '';
+export const DOMAIN = (() => {
+  try {
+    return resolveDomain(DOMAIN_RAW);
+  } catch {
+    return '';
+  }
+})();
+
+/**
+ * 이 인스턴스가 **쓰는** 자리. 대화 원본 JSONL·요약 발송 상태가 여기 쌓인다.
+ *
+ * 전에는 코드 저장소(`ROOT/logs`) 기준이었다. 한 바이너리를 두 인스턴스가 쓰면 **둘의
+ * 대화 기록이 같은 파일에 섞인다** — 오류가 아니라 섞인 로그로만 나타나고, 어느 쪽
+ * 대화인지 되돌릴 방법이 없다.
+ *
+ * 자료 저장소(`DATA_ROOT`)에 두지 않는 이유는 그대로다 — 거기 쓰면 작업 트리가
+ * 더러워져 다음 자동 반영의 `syncBeforeWork()` 가 멈춘다(아래 `LOG_DIR` 주석).
+ * 그래서 **두 저장소 어느 쪽도 아닌 자리**를 명시적으로 받는다.
+ *
+ * 안 주면 지금까지의 자리를 쓴다 — 한 인스턴스만 돌던 설치를 말없이 옮기지 않는다.
+ * 대신 `assertInstanceIsolated()` 가 **기동을 막는다.**
+ */
+export const STATE_DIR = process.env.HERMES_STATE_DIR
+  ? path.resolve(process.env.HERMES_STATE_DIR)
+  : null;
 
 /** 아카이브 루트 (자료 저장소의 slack-export) 절대경로 */
 export const ARCHIVE_DIR = path.resolve(DATA_ROOT, config.archivePath);
@@ -315,7 +370,47 @@ export const companyWideDocProjects = config.search?.companyWideDocProjects || [
  */
 export const LOG_ENABLED = !!(config.log && config.log.enabled !== false && config.log.path);
 export const LOG_DIR = LOG_ENABLED ? path.resolve(DATA_ROOT, config.log.path) : null;
-export const LOG_RAW_DIR = LOG_ENABLED ? path.resolve(ROOT, config.log.rawPath || 'logs') : null;
+export const LOG_RAW_DIR = LOG_ENABLED
+  ? (STATE_DIR
+    ? path.join(STATE_DIR, config.log.rawPath || 'logs')
+    : path.resolve(ROOT, config.log.rawPath || 'logs'))
+  : null;
+
+/**
+ * 요약이 「어디까지 보냈나」. **인스턴스마다 다른 자리**여야 한다.
+ *
+ * `slack-live.js` 가 코드 저장소 안(`ROOT/logs/digest-state.json`)에 두고 있었다. 두
+ * 인스턴스가 그 파일을 함께 쓰면 한쪽이 보낸 구간을 다른 쪽이 「이미 보냈다」 로 읽어
+ * **그 구간이 어느 요약에도 안 실린다.** 오류는 안 난다.
+ */
+export const DIGEST_STATE_FILE = path.join(STATE_DIR || path.join(ROOT, 'logs'),
+  'digest-state.json');
+
+/**
+ * 이 인스턴스가 **혼자 쓰는 자리를 가졌나.** 기동 직전에 부른다.
+ *
+ * 한 호스트에서 같은 바이너리로 둘이 도는 것이 전제가 됐으므로, 겹치는 자리는
+ * **반드시 겹친다.** 겹친 뒤에는 되돌릴 수 없으므로 쓰기 전에 멈춘다.
+ */
+export function assertInstanceIsolated() {
+  if (!DOMAIN) throw new DomainConfigError(DOMAIN_RAW);
+  if (!STATE_DIR) {
+    throw new Error(
+      'HERMES_STATE_DIR 이 설정되지 않았습니다.\n'
+      + `  지금 자리는 코드 저장소 안입니다: ${path.join(ROOT, config.log?.rawPath || 'logs')}\n`
+      + '  한 서버에서 같은 바이너리로 인스턴스 둘이 돌면 **대화 기록이 같은 파일에 섞입니다** —\n'
+      + '  오류가 아니라 섞인 로그로만 나타나고, 어느 쪽 대화인지 되돌릴 방법이 없습니다.\n'
+      + '  unit 마다 다른 자리를 주세요 (예: /var/lib/hermes-<인스턴스>/state).',
+    );
+  }
+  if (STATE_DIR === ROOT || STATE_DIR.startsWith(ROOT + path.sep)) {
+    throw new Error(
+      `HERMES_STATE_DIR 이 코드 저장소 안입니다: ${STATE_DIR}\n`
+      + '  코드 저장소는 인스턴스끼리 나눠 쓰는 자리라 그 안에 두면 반드시 겹칩니다.\n'
+      + '  저장소 **밖**의 자리를 주세요 (예: /var/lib/hermes-<인스턴스>/state).',
+    );
+  }
+}
 
 /**
  * 필수 환경변수를 확인한다. 없으면 무엇이 빠졌는지 알려주고 종료.

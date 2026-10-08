@@ -3,6 +3,9 @@
  * Factory creation performs no I/O. The entry point retains event registration.
  */
 export function createSlackQuestion({
+  /* 표시 용어. **주입받는다** — 이 모듈은 설정을 안 읽는 팩토리이고,
+   * 같은 호스트에서 프로필이 다른 인스턴스가 함께 돌기 때문이다(2026-10-08). */
+  terms: T,
   resolveAccess, accessLabel, fetchThreadContext, answerQuestion,
   toSlackMrkdwn, chunkForSlack, logConversation, permalink, usageFields, console,
   resolveChannelMentions,
@@ -40,7 +43,7 @@ export function createSlackQuestion({
     };
 
     if (!question) {
-      await post('무엇을 찾아드릴까요? 예: `사업장나 PF 잔액`, `사업장가 연체이자 쟁점 정리해줘`');
+      await post(`무엇을 찾아드릴까요? 예: \`${T.examples.EX_B} 잔액\`, \`${T.examples.EX_A} 쟁점 정리해줘\``);
       logConversation({ ...logBase, kind: 'empty', ok: true, elapsedMs: Date.now() - t0 });
       return;
     }

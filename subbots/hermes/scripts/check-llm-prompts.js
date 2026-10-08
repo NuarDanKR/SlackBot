@@ -36,7 +36,8 @@ function fixture(factory, options = {}) {
     ['/data/slack/.sync-state.json', '{"last_sync":"fixture-time"}'],
   ]);
   const mtimes = new Map(stampPaths.map(p => [p, 1]));
-  const config = { privateChannels: ['secret-a', 'secret-b'], promptExamples: {} };
+  // 프로필은 **명시**다 — 기본값이 없으므로 픽스처도 적어야 한다(2026-10-08).
+  const config = { domain: 'pf-construction', privateChannels: ['secret-a', 'secret-b'], promptExamples: {} };
   const state = { documents: true, channels: 1, version: 1, archiveError: false };
   const deps = {
     ROOT: '/code', DATA_ROOT: '/data', ARCHIVE_DIR: '/data/slack',

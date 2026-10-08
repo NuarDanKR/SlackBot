@@ -177,6 +177,7 @@ function qa(sequence, toolError, estimate = estimateCost) {
     };
   } } } };
   return createQuestionAnswerer({
+    terms: { place: '사업장', area: '사업장', examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } },
     config, anthropic: () => client,
     toolSession: (spec) => createToolSession(spec, { client: () => client }),
     buildTools: () => [], systemBlocks: () => ({ common: 'synthetic' }),
@@ -418,6 +419,7 @@ for (const response of [msg('claude-opus-5', 'refusal'), msg('claude-opus-5', 'm
 await check('Slack Q&A posting failure logs generated cost exactly once', async () => {
   const logs = [];
   const { handleQuestion: handle } = createSlackQuestion({
+    terms: { place: '사업장', area: '사업장', examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } },
     answerQuestion: async () => ({ text: 'answer', channels: [], toolCalls: [], accounting: one }),
     resolveAccess: async () => ({ access: {}, origin: 'fixture' }), accessLabel: () => 'public',
     permalink: () => null, logConversation: (r) => logs.push(r), usageFields,

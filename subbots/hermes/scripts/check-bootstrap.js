@@ -480,8 +480,12 @@ if (promptFiles.length) {
       '  console.log(left.length ? "LEFT " + left.join(",") : "CLEAN");',
       '}).catch((e) => console.log("ERR " + String(e.message).split("\\n")[0]));',
     ].join('\n');
+    /* 표시 용어 프로필을 박고 돌린다(2026-10-08). 여기서 재는 것은 **치환이 남지
+     * 않나** 이지 설정이 갖춰졌나가 아니다 — 프로필이 없으면 기동이 막히는 것은
+     * 의도이고, 그 갈래는 tests/test_hermes_domain_profile.py 가 따로 잰다. */
     const out = execFileSync(process.execPath, ['--input-type=module', '-e', probe], {
       cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HERMES_DOMAIN: 'pf-construction' },
     }).trim();
     if (out === 'CLEAN') ok('치환 뒤 프롬프트에 자리표시자가 남지 않습니다');
     else if (out.startsWith('LEFT')) fail(`치환 뒤에도 {{EX_…}} 가 남습니다 — ${out.slice(5)}`);

@@ -10,7 +10,9 @@ import { usageFields } from './llm/usage.js';
  * 이 프로세스가 떠 있는 동안에만 동작한다 (PC 절전/재부팅 시 중단).
  */
 import pkg from '@slack/bolt';
-import { config, requireEnv, normalizeChannel, canonicalChannel, accessFor, accessLabel, PUBLIC_ACCESS } from './config.js';
+import { config, requireEnv, normalizeChannel, canonicalChannel, accessFor, accessLabel, PUBLIC_ACCESS,
+  DOMAIN, assertInstanceIsolated } from './config.js';
+import { lazyTerms as domainTerms } from './domain.js';
 import { assertArchive } from './archive.js';
 import { answerQuestion, lastSyncedAt } from './claude.js';
 import { fetchThreadContext, isBotMessage, SKIP_SUBTYPES, resolveChannelMentions } from './slack-live.js';
@@ -31,6 +33,10 @@ try {
   process.exit(2);
 }
 
+/* **같은 호스트에서 인스턴스 여럿이 돈다**(2026-10-08 오너 정정). 그래서 「서버가
+ * 다르니 안 섞인다」 가 더는 보장이 아니고, 가르는 것은 전부 설정이다. 쓰기 전에
+ * 그 설정이 실제로 갈라져 있는지 본다 — 섞인 뒤에는 되돌릴 수 없다. */
+assertInstanceIsolated();
 const env = requireEnv(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'ANTHROPIC_API_KEY']);
 assertArchive();
 
@@ -63,6 +69,7 @@ const { resolveAccess } = createSlackAccess({
 
 // Codex R3f: preserve question delivery and failure accounting order.
 const { handleQuestion } = createSlackQuestion({
+  terms: domainTerms(DOMAIN),
   resolveAccess, accessLabel, fetchThreadContext, answerQuestion,
   toSlackMrkdwn, chunkForSlack, logConversation, permalink, usageFields, console,
   resolveChannelMentions,

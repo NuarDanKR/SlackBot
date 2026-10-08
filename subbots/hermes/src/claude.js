@@ -13,9 +13,10 @@ import { createDigestGenerator } from './llm/digest.js';
 import { createTextModel, createJsonModel, createToolSession } from './llm/provider.js';
 import { createSummaryChecker } from './llm/summary-check.js';
 import { createToolBuilder } from './llm/tools.js';
+import { lazyTerms as domainTerms } from './domain.js';
 import {
   ROOT, DATA_ROOT, ARCHIVE_DIR, DOCS_DIR, config, accessLabel, canSeePrivateChannel, canSee,
-  isPrivateChannel, matchesHiddenPrivate, BLOCKED_NOTE, BOT_ANSWER_MARK, truncMarker,
+  isPrivateChannel, matchesHiddenPrivate, BLOCKED_NOTE, BOT_ANSWER_MARK, truncMarker, DOMAIN,
 } from './config.js';
 import {
   buildArchiveBriefSplit, searchArchive, readChannel, resolveChannel, listArchivedChannels,
@@ -43,12 +44,15 @@ const toolSession = (spec) => createToolSession(spec, { client: anthropic });
 const promptContext = createPromptContext({
   ROOT, DATA_ROOT, ARCHIVE_DIR, DOCS_DIR, config, accessLabel, canSeePrivateChannel,
   buildArchiveBriefSplit, buildDocumentsBriefSplit, hasDocuments, listArchivedChannels,
+  // 환경변수가 설정 파일을 이기는 판정은 `config.js` 하나다.
+  domain: DOMAIN,
 });
 export const { renderPrompt, lastSyncedAt, briefStampPaths } = promptContext;
 const { systemBlocks, privateQuoteLine } = promptContext;
 const promptFile = renderPrompt;
 
 export const { autoNarrow, buildTools } = createToolBuilder({
+  terms: domainTerms(DOMAIN),
   config, canSee, canSeePrivateChannel, isPrivateChannel, matchesHiddenPrivate,
   BLOCKED_NOTE, truncMarker, searchArchive, readChannel, resolveChannel,
   listReadableChannels, searchDocuments, readDocument, hasDocuments,
@@ -58,6 +62,7 @@ export const { autoNarrow, buildTools } = createToolBuilder({
 
 // Keep the public facade and a single cross-question diagnostics owner.
 const answerWithLocalArchive = createQuestionAnswerer({
+  terms: domainTerms(DOMAIN),
   config, toolSession, buildTools, systemBlocks, lastSyncedAt, privateQuoteLine,
   BOT_ANSWER_MARK, logUsage, estimateCost,
 });

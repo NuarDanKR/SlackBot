@@ -43,6 +43,8 @@ function fixture(factory) {
     constructor(...args) { super(...(args.length ? args : [state.time])); if (!args.length) log('clock', state.time); }
   }
   const deps = {
+    // 표시 용어는 주입이다(2026-10-08). 픽스처도 적는다 — 기본값은 없다.
+    terms: { place: '사업장', area: '사업장', examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } },
     path, DOCS_DIR: '/fixture', PUBLIC_ACCESS: PUB,
     Date: FixedDate, DOC_BRIEF_MAX_CHARS: 6000, DOC_BRIEF_PRIVATE_MAX_CHARS: 1500,
     DOC_BRIEF_RECENT_MONTHS: 3, FOLD_KINDS_MAX: 3,

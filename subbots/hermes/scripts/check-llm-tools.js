@@ -24,6 +24,10 @@ function fixture(factory) {
   const log = (name, args) => trace.push([name, clone(args)]);
   const deps = {
     config, BLOCKED_NOTE: 'BLOCKED', DEFAULT_LIVE_FETCH_MAX_DAYS: 14,
+    // 표시 용어는 **주입**이다(2026-10-08). 픽스처도 적어야 한다 — 기본값을 두면
+    // 사내 인스턴스가 PF 말투로 말하고, 그건 오류로 안 나타난다.
+    terms: { place: '사업장', area: '사업장',
+      examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } },
     canSee: (a, c) => a.allowed.includes(c),
     canSeePrivateChannel: (a, c) => a.allowed.includes(c),
     isPrivateChannel: c => c.startsWith('secret'),

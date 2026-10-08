@@ -137,7 +137,13 @@ reader 의 반복 파싱에서 왔고, 그 수정은 Codex 몫이다 — 여기�
 | 4. raw·첨부·메시지 수 | reader 몫(Codex). 이 작업 범위 밖 |
 | 5. manifest 실패 시 접근 차단 | `tests/test_hermes_privacy_runtime.py` 가 고정 |
 
-PF 서버에서 돌릴 때:
+> **전제 정정 (2026-10-08) — superseded.** 「PF 서버」 는 없다. PF Hermes 는 TYBot·
+> Archiver 가 있는 **같은 서버의 별도 인스턴스**로 돈다
+> ([`../design/hermes-instances-one-host-2026-10-08.md`](../design/hermes-instances-one-host-2026-10-08.md)).
+> 아래 명령은 그대로 쓰되, **그 인스턴스의 `HERMES_DATA_ROOT`·`HERMES_STATE_DIR` 로**
+> 돌린다. 숫자는 인스턴스마다 따로 잰다 — 한 호스트라 서로의 부하가 섞여 보인다.
+
+PF 인스턴스로 돌릴 때:
 
 ```bash
 cd /opt/tybot/subbots/hermes

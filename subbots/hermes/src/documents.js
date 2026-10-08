@@ -14,8 +14,9 @@ import path from 'node:path';
 import {
   DOCS_DIR, DOC_PROJECTS_DIR, config, canSeePrivateChannel, isPrivateChannel, normalizeChannel,
   redactPrivateMentions, matchesHiddenPrivate, BLOCKED_NOTE, PUBLIC_ACCESS, companyWideDocProjects,
-  TRUNC_PHRASE, truncMarker, currentChannelNames, archiveSource,
+  TRUNC_PHRASE, truncMarker, currentChannelNames, archiveSource, DOMAIN,
 } from './config.js';
+import { lazyTerms as domainTerms } from './domain.js';
 import { docKey } from './archive-reader/archiver.js';
 import {
   readCached, fold, splitMessages, metaBlock, preambleOf, preambleOutline,
@@ -145,6 +146,7 @@ const sourceFs = archiveSource
 
 // Access construction is lazy: listDocuments may use the store initialized below.
 const { projectIsPrivate, projectPrivateChannel, maskProject, realProjects, documentsFor, canSeeDoc, visibleProjects, resolveProjectFor, resolveDocumentFor } = createDocumentAccess({
+  terms: domainTerms(DOMAIN),
   isPrivateChannel, normalizeChannel, canSeePrivateChannel, listProjects, listDocuments, resolveProject, resolveDocument, matchesHiddenPrivate, BLOCKED_NOTE
 });
 
@@ -368,6 +370,7 @@ const DOC_PREAMBLE_MARK = '**문서 md 상단 정리 — 사람이 회차들을 
 
 // One lazy index builder; preserve the existing public facade and limit snapshots.
 const { foldedLine, floorParts, indexGauge, buildDocumentsBrief, buildDocumentsBriefSplit } = createDocumentBrief({
+  terms: domainTerms(DOMAIN),
   path, DOCS_DIR, readCached, hasDocuments, listProjects, listDocuments, canSeeDoc, maskProject, projectPrivateChannel, canSeePrivateChannel, redactPrivateMentions, PUBLIC_ACCESS, preambleOutline, latestDate, isSheetDoc, isSeriesDoc, DOC_BRIEF_MAX_CHARS, DOC_BRIEF_PRIVATE_MAX_CHARS, DOC_BRIEF_RECENT_MONTHS, FOLD_KINDS_MAX
 });
 export { foldedLine, floorParts, indexGauge, buildDocumentsBrief, buildDocumentsBriefSplit };

@@ -6,6 +6,9 @@
 import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema';
 
 export function createToolBuilder({
+  /* 표시 용어. **주입받는다** — 이 모듈은 설정을 안 읽는 팩토리이고,
+   * 같은 호스트에서 프로필이 다른 인스턴스가 함께 돌기 때문이다(2026-10-08). */
+  terms: T,
   config, canSee, canSeePrivateChannel, isPrivateChannel, matchesHiddenPrivate,
   BLOCKED_NOTE, truncMarker, searchArchive, readChannel, resolveChannel,
   listReadableChannels, searchDocuments, readDocument, hasDocuments,
@@ -112,7 +115,7 @@ export function createToolBuilder({
           type: 'object',
           properties: {
             query: { type: 'string', description: '검색 낱말들. 예: "대출 만기 연장 협의"' },
-            where: { type: 'string', description: '사업장(=채널)으로 좁힐 때만. 예: "사업장나"' },
+            where: { type: 'string', description: `${T.place}으로 좁힐 때만. 예: "${T.examples.EX_B}"` },
             document: { type: 'string', description: '특정 문서로 좁힐 때만. where 와 같이 준다.' },
             only: {
               type: 'string',
@@ -176,7 +179,7 @@ export function createToolBuilder({
               // 밖의 것도 근거 줄에 적는다 (WHK 결정 2026-08-19) — 이 코드는 「봇에게 보여 준
               // 것」을 근거로 적고, 밖의 것도 봇이 본다.
               outside.forEach((h) => touched.add(h.channel));
-              outsides.push({ title: '다른 사업장에서도 (대화)', hits: outside, render, where: chWhere });
+              outsides.push({ title: `다른 ${T.place}에서도 (대화)`, hits: outside, render, where: chWhere });
             }
           }
 
@@ -192,7 +195,7 @@ export function createToolBuilder({
             sections.push({ title: '문서 (원문)', label: '문서', hits, note, partial, render });
             if (outside?.length) {
               outside.forEach((h) => touched.add(`📄 ${h.project}/${h.document}`));
-              outsides.push({ title: '다른 사업장에서도 (문서)', hits: outside, render, where: pjWhere });
+              outsides.push({ title: `다른 ${T.area}에서도 (문서)`, hits: outside, render, where: pjWhere });
             }
             if (r.cards?.length) {
               /* 전사 종합 카드 — 발췌를 일부러 안 싣는다(문서 머리 = 엉뚱한 사업장 구간이
@@ -207,7 +210,7 @@ export function createToolBuilder({
               outsides.push({
                 title: '전사 종합 문서 (발췌 없음 — 카드만)',
                 hits: r.cards,
-                note: `아래는 여러 사업장을 한 문서에 담은 **전사 종합 보고서**입니다 — `
+                note: `아래는 여러 ${T.area}을 한 문서에 담은 **전사 종합 보고서**입니다 — `
                   + `${pjWhere} 의 값도 이 안에 들어 있을 수 있습니다. `
                   + `이 목록으로 답하지 말고, 카드마다 붙은 안내를 보고 여세요.`,
                 partial: false,
@@ -253,7 +256,7 @@ export function createToolBuilder({
           // **자리 이름은 구역마다 다를 수 있다** — 스스로 좁힐 때 대화와 문서를 따로 잡기
           // 때문이다. 하나로 고정해 두면 문서 구역에 대화 쪽 이름이 적힌다.
           const outsideNote = (w) => `${w} 에서는 낱말을 다 맞춘 것이 없어, 좁히지 않고 찾은 것을 `
-            + `함께 실었습니다. **다른 사업장 자료입니다** — ${w} 것으로 읽지 마세요.`;
+            + `함께 실었습니다. **다른 ${T.area} 자료입니다** — ${w} 것으로 읽지 마세요.`;
           /* 밖 구역이 **전부** 부분 일치일 때는 머리에도 표시를 단다. 항목마다 `(1/4 낱말)` 은
            * 붙지만 구역 머리가 비어 있으면, 네 낱말 중 하나만 걸린 줄이 확정 결과와 같은
            * 모양으로 「3건」 목록 안에 앉는다 (실측: 발동 15건 중 4건이 이 상태).
@@ -310,12 +313,12 @@ export function createToolBuilder({
       betaTool({
         name: 'read_channel',
         description:
-          '채널 md 파일을 읽는다. 한 사업장의 흐름을 시간순으로 봐야 할 때 쓴다. ' +
+          `채널 md 파일을 읽는다. 한 ${T.place}의 흐름을 시간순으로 봐야 할 때 쓴다. ` +
           'month 를 주면 해당 월만 읽어 토큰을 아낄 수 있다.',
         inputSchema: {
           type: 'object',
           properties: {
-            channel: { type: 'string', description: '채널명. 예: "사업장나"' },
+            channel: { type: 'string', description: `채널명. 예: "${T.examples.EX_B}"` },
             month: { type: 'string', description: 'YYYY-MM 형식. 예: "2026-07". 생략하면 전체.' },
           },
           required: ['channel'],
@@ -353,7 +356,7 @@ export function createToolBuilder({
           inputSchema: {
             type: 'object',
             properties: {
-              project: { type: 'string', description: '사업장. 예: "사업장나"' },
+              project: { type: 'string', description: `${T.area}. 예: "${T.examples.EX_B}"` },
               document: { type: 'string', description: '문서명. 일부만 적어도 된다. 예: "잔금수금"' },
               month: { type: 'string', description: 'YYYY-MM 형식. 예: "2026-07". 생략하면 전체.' },
               week: { type: 'string', description: '그 달이 또 길 때 주 하나만. 주 목차에 적힌 이름 또는 그 앞의 월요일 날짜. 예: "2026-08-03". month 와 함께 써야 한다.' },

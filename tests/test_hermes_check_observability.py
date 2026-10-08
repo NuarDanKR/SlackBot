@@ -261,6 +261,8 @@ def pf_dataroot(tmp_path_factory) -> Path:
             cfg["digest"][sub] = {
                 k: v for k, v in cfg["digest"][sub].items() if not k.startswith("_")
             }
+    # 표시 용어 프로필은 **명시**다(2026-10-08) — 기본값이 없으므로 픽스처도 적는다.
+    cfg["domain"] = "pf-construction"
     cfg["workspace"] = "시험"
     cfg["org"] = "시험"
     cfg["owner"] = {"name": "담당", "label": "", "slackUserId": "U0000000001"}

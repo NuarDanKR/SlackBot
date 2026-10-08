@@ -6,6 +6,9 @@
  * Keep byte-identical in Hermes and Clio.
  */
 export function createDocumentBrief({
+  /* 표시 용어. **주입받는다** — 이 모듈은 설정을 안 읽는 팩토리이고,
+   * 같은 호스트에서 프로필이 다른 인스턴스가 함께 돌기 때문이다(2026-10-08). */
+  terms: T,
   path, DOCS_DIR, readCached, hasDocuments, listProjects, listDocuments, canSeeDoc, maskProject, projectPrivateChannel, canSeePrivateChannel, redactPrivateMentions, PUBLIC_ACCESS, preambleOutline, latestDate, isSheetDoc, isSeriesDoc, DOC_BRIEF_MAX_CHARS, DOC_BRIEF_PRIVATE_MAX_CHARS, DOC_BRIEF_RECENT_MONTHS, FOLD_KINDS_MAX, Date = globalThis.Date
 }) {
   function entryDateRange(entries) {
@@ -284,7 +287,7 @@ export function createDocumentBrief({
       }
       if (merged.length) {
         const docsN = merged.reduce((n, g) => n + g.folded.length, 0);
-        body.push(`- 그 외 ${docsN}건 — 아래 사업장 ${merged.length}곳의 문서로, 검색에는 그대로 걸립니다:`
+        body.push(`- 그 외 ${docsN}건 — 아래 ${T.area} ${merged.length}곳의 문서로, 검색에는 그대로 걸립니다:`
           + ` ${merged.map((g) => g.project).join(' · ')}`);
         body.push('');
       }

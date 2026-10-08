@@ -4,6 +4,9 @@
  * Keep byte-identical in Hermes and Clio; preserve existing policy and call order.
  */
 export function createDocumentAccess({
+  /* 표시 용어. **주입받는다** — 이 모듈은 설정을 안 읽는 팩토리이고,
+   * 같은 호스트에서 프로필이 다른 인스턴스가 함께 돌기 때문이다(2026-10-08). */
+  terms: T,
   isPrivateChannel, normalizeChannel, canSeePrivateChannel, listProjects, listDocuments, resolveProject, resolveDocument, matchesHiddenPrivate, BLOCKED_NOTE
 }) {
   /** '_공통/정기보고' 의 비공개 판정은 맨 앞 마디로 한다 (채널명과 맞물리는 자리) */
@@ -119,7 +122,7 @@ export function createDocumentAccess({
     // 문서가 아직 한 건도 없는 비공개 채널은 이름으로만 잡힌다 (아래 문구가 이름을 되돌려 준다).
     if (matchesHiddenPrivate(input, access)) return { ok: false, error: BLOCKED_NOTE };
     if (resolveProject(input).ok) return { ok: false, error: BLOCKED_NOTE };
-    return { ok: false, error: `'${input}' 사업장을 찾지 못했습니다. 후보: ${visible.slice(0, 15).join(', ')}` };
+    return { ok: false, error: `'${input}' ${T.area}을 찾지 못했습니다. 후보: ${visible.slice(0, 15).join(', ')}` };
   }
 
   function resolveDocumentFor(project, input, access) {

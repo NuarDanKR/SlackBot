@@ -88,6 +88,14 @@ async function run(factory, label) {
       } },
     };
     const deps = {
+      /* 표시 용어(2026-10-08 주입). **두 벌이 필요하다** — 이 검사는 팩토리를 직접
+       * 부르고(`terms`), 그 결과를 `index.js` 호출부를 떼어 돌린 것과 대보기 때문이다
+       * (그쪽은 `domainTerms(DOMAIN)` 을 스스로 부른다). 값은 같아야 두 길이 같은
+       * 결과를 낸다 — 다르면 「두 길이 다르다」 가 아니라 「용어가 다르다」 로 깨진다. */
+      terms: { place: '사업장', area: '사업장',
+        examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } },
+      DOMAIN: 'pf-construction',
+      domainTerms: () => ({ place: '사업장', area: '사업장', examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } }),
       createSlackQuestion,
       async resolveAccess(actualClient, options) {
         assert.equal(actualClient, client); record('access', options);

@@ -66,6 +66,8 @@ def _config(archiver: dict | None) -> dict:
             cfg["digest"][sub] = {
                 k: v for k, v in cfg["digest"][sub].items() if not k.startswith("_")
             }
+    # 표시 용어 프로필은 **명시**다(2026-10-08) — 기본값이 없으므로 픽스처도 적는다.
+    cfg["domain"] = "pf-construction"
     cfg["workspace"] = "태영건설 전산팀"          # 사람이 읽는 이름 — 경로 키가 아니다
     cfg["org"] = "태영건설 전산팀"
     cfg["owner"] = {"name": "담당", "label": "", "slackUserId": "U0000000001"}

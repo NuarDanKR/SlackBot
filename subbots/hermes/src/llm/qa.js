@@ -6,6 +6,9 @@
 import { createUsageCollector, attachUsage } from './usage.js';
 
 export function createQuestionAnswerer({
+  /* 표시 용어. **주입받는다** — 이 모듈은 설정을 안 읽는 팩토리이고,
+   * 같은 호스트에서 프로필이 다른 인스턴스가 함께 돌기 때문이다(2026-10-08). */
+  terms: T,
   config, toolSession, buildTools, systemBlocks, lastSyncedAt, privateQuoteLine,
   BOT_ANSWER_MARK, logUsage, estimateCost, now = () => new Date(), console = globalThis.console,
 }) {
@@ -128,7 +131,7 @@ export function createQuestionAnswerer({
       ...(threadContext
         ? [
             '[이 스레드의 앞 대화]',
-            '지시어("그럼", "거기", "그 사업장")가 무엇을 가리키는지 푸는 데만 쓰세요.',
+            `지시어("그럼", "거기", "그 ${T.place}")가 무엇을 가리키는지 푸는 데만 쓰세요.`,
             `\`${BOT_ANSWER_MARK}\` 은 봇이 앞서 말한 자리입니다. **그 내용은 주어지지 않았고,`,
             '무슨 값이었을지 짐작해서도 안 됩니다** — 필요한 숫자·날짜·이름은 전부 도구로 다시 확인하세요.',
             '',
@@ -322,7 +325,7 @@ export function createQuestionAnswerer({
     const stopped =
       `⚠️ *여기서 멈췄습니다* — 자료를 찾아 읽기를 ${config.limits.maxToolIterations}번(상한)까지 되풀이하고도 ` +
       '끝나지 않아, 답을 다 쓰지 못한 채 멈췄습니다. **질문이 잘못돼서가 아닙니다.** ' +
-      '사업장이나 기간을 나눠 (예: 한 사업장씩) 다시 물어봐 주시면 끝까지 답할 수 있습니다.';
+      `${T.place}이나 기간을 나눠 (예: 한 ${T.place}씩) 다시 물어봐 주시면 끝까지 답할 수 있습니다.`;
     if (toolLimit) console.warn(`  ! 도구 반복 상한(${config.limits.maxToolIterations}회) 도달 — 답을 못 맺고 멈춤`);
 
     return {

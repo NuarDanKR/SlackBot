@@ -30,6 +30,10 @@ function fixture(factory) {
   const privateNames = new Set(['secret', 'other', 'empty']);
   const dependencies = {
     BLOCKED_NOTE: 'BLOCKED',
+    // 표시 용어는 **주입**이다(2026-10-08). 픽스처도 적어야 한다 — 기본값을 두면
+    // 사내 인스턴스가 PF 말투로 말하고, 그건 오류로 안 나타난다.
+    terms: { place: '사업장', area: '사업장',
+      examples: { EX_A: '사업장가', EX_B: '사업장나', EX_C: '사업장다' } },
     normalizeChannel: s => { log('normalize', s); return String(s).replace(/^#/, ''); },
     isPrivateChannel: s => { log('private', s); return privateNames.has(s); },
     canSeePrivateChannel: (a, s) => { log('canSee', a, s); return !!(a?.full || a?.channels?.includes(s)); },
