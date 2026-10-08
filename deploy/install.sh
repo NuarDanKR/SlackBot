@@ -317,7 +317,15 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
     [[ -f "$APP_DIR/console-web/dist-pf/index.html" ]] || return 1
   }
 
-  if [[ "${OFFLINE:-0}" == "1" ]]; then
+  # 화면 소스(console-web)는 별도 저장소(choisy5570-bot/console-web)로 분리됐다.
+  # 화면 배포는 그 저장소의 deploy/deploy-console.sh 가 따로 한다(봇 배포와 분리).
+  # 이 저장소에 console-web 이 없으면 빌드하지 않는다 — 없다고 봇 배포를 실패시키면
+  # 화면 사정 때문에 봇이 못 나간다. 콘솔이 어느 화면을 서빙할지는 tybot.env 의
+  # CONSOLE_DIST 가 정한다.
+  if [[ ! -f "$SRC_DIR/console-web/package.json" ]]; then
+    echo "  화면 빌드 건너뜀 — 화면은 console-web 저장소에서 따로 배포합니다"
+    echo "    현재 CONSOLE_DIST: $(grep -E '^CONSOLE_DIST=' "$CONF_DIR/tybot.env" 2>/dev/null | cut -d= -f2- || echo '(없음)')"
+  elif [[ "${OFFLINE:-0}" == "1" ]]; then
     echo "  화면 빌드 건너뜀(OFFLINE=1) — dist 를 직접 올려 두세요"
   else
     echo "  콘솔 화면 빌드"

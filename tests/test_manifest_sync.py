@@ -32,7 +32,6 @@ def _developer():
 
     return ConsoleUser(email="dev@taeyoung.com", name="개발자", role=DEVELOPER)
 REPO_MANIFEST = ROOT / "docs" / "pilot" / "slack-app-manifest.yaml"
-CONSOLE_SRC = ROOT / "console-web" / "src"
 
 
 def test_repo_manifest_exists():
@@ -82,15 +81,17 @@ def test_missing_file_is_reported_not_silently_empty(monkeypatch, tmp_path):
     assert e.value.status_code == 503
 
 
-@pytest.mark.skipif(not CONSOLE_SRC.is_dir(), reason="콘솔 소스 없음")
 def test_no_manifest_copy_in_console_source():
     """화면 코드에 매니페스트 사본이 다시 생기면 같은 어긋남이 돌아온다."""
+    from console_web_path import console_src_or_skip
+
+    console_src = console_src_or_skip()
     offenders = []
-    for path in CONSOLE_SRC.rglob("*.tsx"):
+    for path in console_src.rglob("*.tsx"):
         text = path.read_text(encoding="utf-8")
         # 주석·설명이 아니라 '실제 매니페스트 본문'만 잡는다.
         if re.search(r"^\s*display_information:\s*$", text, re.M):
-            offenders.append(path.relative_to(ROOT))
+            offenders.append(path.relative_to(console_src.parent))
     assert not offenders, (
         f"매니페스트 사본이 있다: {offenders}. "
         "GET /api/manifest 로 저장소 파일을 받아 쓰세요."
