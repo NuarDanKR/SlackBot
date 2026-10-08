@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,6 +15,7 @@ MANIFEST_SERVICE = ROOT / "deploy" / "hermes-privacy-manifest@.service"
 MANIFEST_TIMER = ROOT / "deploy" / "hermes-privacy-manifest@.timer"
 INSTALL = ROOT / "deploy" / "install.sh"
 IDENTITY = ROOT / "subbots" / "hermes" / "src" / "slack" / "identity.js"
+SLACK_MANIFEST = ROOT / "subbots" / "hermes" / "slack-app-manifest.yaml"
 NODE = shutil.which("node")
 
 
@@ -234,3 +236,20 @@ def test_slack_identity_rejects_each_mismatch():
         "SlackIdentityError",
         "SlackIdentityError",
     ]
+
+
+def test_archiver_runtime_manifest_does_not_request_ingestion_scopes():
+    text = SLACK_MANIFEST.read_text(encoding="utf-8")
+
+    bot_scopes = set(re.findall(r"^\s+-\s+([a-z_]+:[a-z_]+)", text, re.MULTILINE))
+    assert "files:read" not in bot_scopes
+    assert "channels:join" not in bot_scopes
+    for required in (
+        "app_mentions:read",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "im:write",
+        "chat:write",
+    ):
+        assert required in bot_scopes
