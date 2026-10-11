@@ -885,7 +885,7 @@ class AnswerEngine:
         max_hits: int = 20,
         max_lines_per_channel: int = 60,
         specialist=None,
-        allow_master_business_answers: bool = False,
+        allow_master_business_answers=False,
     ) -> None:
         self._store = store
         self._router = router
@@ -895,8 +895,8 @@ class AnswerEngine:
         # 넣어 준다. 그래야 엔진 테스트가 DB 없이 돌고, 전문가가 없는 설치에서도
         # 이 파일이 그대로 쓰인다.
         self._specialist = specialist
-        self._allow_master_business_answers = bool(allow_master_business_answers)
-        if specialist is None and self._allow_master_business_answers:
+        self._master_answer_policy = allow_master_business_answers
+        if specialist is None and allow_master_business_answers is True:
             # 비교 측정과 구형 단위 테스트에서만 명시적으로 여는 호환 경로다.
             logger.warning(
                 "전문 봇 계층 없이 마스터 업무 답변을 명시적으로 허용했습니다. "
@@ -905,6 +905,25 @@ class AnswerEngine:
         self._sensitivity = sensitivity
         self._max_hits = max_hits
         self._max_lines_per_channel = max_lines_per_channel
+
+    def _master_answers_allowed(self, ctx: RequestContext) -> bool:
+        policy = self._master_answer_policy
+        if callable(policy):
+            try:
+                return bool(policy(ctx))
+            except Exception as exc:  # noqa: BLE001 - rollout errors fail closed
+                logger.warning("마스터 답변 rollout 판정 실패: %s", exc)
+                return False
+        return bool(policy)
+
+    def _may_fall_back_to_master(self, ctx: RequestContext, outcome) -> bool:
+        """Only absence of a suitable specialist permits a master answer."""
+        if not self._master_answers_allowed(ctx):
+            return False
+        code = str(getattr(outcome, "error_code", "") or "")
+        return code == "no-specialist-registered" or code.startswith(
+            "no-specialist-for:"
+        )
 
     @classmethod
     def from_env(cls, archive_dir: str | Path, **kw) -> AnswerEngine:
@@ -1323,9 +1342,10 @@ class AnswerEngine:
                     context_resolution="transmitted_evidence",
                 )
             # 전문 봇 계층이 있는데 못 답했다. 여기서 끝난다.
-            return self._unavailable(outcome, hits=total, terms=terms, task=task)
+            if not self._may_fall_back_to_master(ctx, outcome):
+                return self._unavailable(outcome, hits=total, terms=terms, task=task)
 
-        if not self._allow_master_business_answers:
+        if not self._master_answers_allowed(ctx):
             return self._unavailable(
                 _Outcome("unavailable", error_code="specialist-layer-missing"),
                 hits=total,
@@ -1463,9 +1483,10 @@ class AnswerEngine:
                     context_resolution="transmitted_evidence",
                     master_interim=master_interim,
                 )
-            return self._unavailable(outcome, hits=len(hits), terms=terms, task=task)
+            if not self._may_fall_back_to_master(ctx, outcome):
+                return self._unavailable(outcome, hits=len(hits), terms=terms, task=task)
 
-        if not self._allow_master_business_answers:
+        if not self._master_answers_allowed(ctx):
             return self._unavailable(
                 _Outcome("unavailable", error_code="specialist-layer-missing"),
                 hits=len(hits),
@@ -1524,6 +1545,7 @@ class AnswerEngine:
         conversation_context: str = "",
         thread_has_refs: bool = False,
         specialists=None,
+        allow_rule_fallback: bool = True,
     ) -> list[Intent]:
         """복합 질문을 하위질문 목록으로 분해한다(1차 LLM, 실패 시 규칙).
 
@@ -1537,6 +1559,7 @@ class AnswerEngine:
             conversation_context=conversation_context,
             thread_has_refs=thread_has_refs,
             specialists=specialists,
+            allow_rule_fallback=allow_rule_fallback,
         )
 
     @property
@@ -1916,7 +1939,11 @@ class AnswerEngine:
                 "answer no_hits(전문가도 못 찾음) q=%r ws=%s code=%s",
                 q, ctx.workspace, outcome.error_code if outcome else "-",
             )
-            if outcome is not None and outcome.status not in ("success",):
+            if (
+                outcome is not None
+                and outcome.status not in ("success",)
+                and not self._may_fall_back_to_master(ctx, outcome)
+            ):
                 return self._specialist_no_hits(outcome, q, ctx, terms=terms, task=task)
 
         if not hits:
@@ -2015,9 +2042,10 @@ class AnswerEngine:
                     subject_terms=list(terms or []),
                     context_resolution="transmitted_evidence",
                 )
-            return self._unavailable(outcome, hits=len(hits), terms=terms, task=task)
+            if not self._may_fall_back_to_master(ctx, outcome):
+                return self._unavailable(outcome, hits=len(hits), terms=terms, task=task)
 
-        if not self._allow_master_business_answers:
+        if not self._master_answers_allowed(ctx):
             return self._unavailable(
                 _Outcome("unavailable", error_code="specialist-layer-missing"),
                 hits=len(hits),

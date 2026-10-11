@@ -636,6 +636,7 @@ def test_runtime_reader_status_matches_the_actual_contracts():
 
     assert touched == {
         "Archiver 기동 설정": ["archiver_connection_config"],
+        "Master 의 전문 봇 라우팅": ["specialist_route"],
     }
     assert admin.RUNTIME_READER_STATUS == {
         "master_connection": False,

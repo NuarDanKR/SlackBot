@@ -10,6 +10,7 @@ from tybot.archive.store import ArchiveStore
 from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity
 from tybot.gateway.router import Router
 from tybot.intent import Intent
+from tybot.specialist_router import UNAVAILABLE, SpecialistOutcome
 
 DOC = """---
 workspace: pilot
@@ -98,6 +99,42 @@ def test_zero_hits_never_answers_something_else(engine):
     assert ans.reason == "no_hits"
     assert "추측으로 답하지 않습니다" in ans.text
     assert "#현장_김해외동(180182)_채팅방" in ans.text  # 어디를 볼지는 알려준다
+    assert fake.calls == []
+
+
+def test_master_v2_answers_when_no_specialist_is_registered(engine):
+    base, fake = engine
+    routed = AnswerEngine(
+        base._store,
+        base._router,
+        specialist=lambda *args, **kwargs: SpecialistOutcome(
+            UNAVAILABLE, error_code="no-specialist-registered"
+        ),
+        allow_master_business_answers=lambda ctx: ctx.workspace == "pilot",
+    )
+
+    answer = routed.answer("기성금 얼마야", _ctx())
+
+    assert answer.reason == "answered"
+    assert answer.specialist == ""
+    assert fake.calls
+
+
+def test_master_v2_does_not_hide_a_specialist_runtime_failure(engine):
+    base, fake = engine
+    routed = AnswerEngine(
+        base._store,
+        base._router,
+        specialist=lambda *args, **kwargs: SpecialistOutcome(
+            UNAVAILABLE, error_code="timeout", attempted=("hermes",)
+        ),
+        allow_master_business_answers=lambda ctx: ctx.workspace == "pilot",
+    )
+
+    answer = routed.answer("기성금 얼마야", _ctx())
+
+    assert answer.reason == "specialist_unavailable"
+    assert answer.specialist_error_code == "timeout"
     assert fake.calls == []
 
 

@@ -118,6 +118,7 @@ from ..intent import (
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
+from ..master_v2_rollout import is_enabled as master_v2_enabled
 from ..orgsearch import NO_MATCH as ORG_NO_MATCH
 from ..orgsearch import UNAVAILABLE as ORG_UNAVAILABLE
 from ..orgsearch import defaults_by_prefix, my_org_chain, notice_option
@@ -580,7 +581,14 @@ class WorkspaceBot:
         확인한다. 그쪽에서 읽지 못하면 그때 `registry_error` 로 닫힌다.
         """
         try:
-            return list(specialist_router.available(self.workspace) or [])
+            return list(
+                specialist_router.available_for_routes(
+                    self.workspace, route_modes=frozenset({"active"})
+                )
+                if master_v2_enabled(self.workspace)
+                else specialist_router.available(self.workspace)
+                or []
+            )
         except Exception as exc:
             log.warning("[%s] 전문 봇 목록을 분해기에 싣지 못했습니다: %s", self.workspace, exc)
             return []
@@ -3148,28 +3156,41 @@ class WorkspaceBot:
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
 
-        # 명시 명령은 LLM 을 거치지 않는다(비용·지연 절약).
+        master_v2 = master_v2_enabled(self.workspace)
+
+        # 구형 경로의 명시 명령은 LLM 을 거치지 않는다(비용·지연 절약).
+        # master v2에서는 명령을 포함한 모든 의도 선택을 한 번의 LLM 판정으로 한다.
+        # 실행 권한과 쓰기 게이트는 아래 결정적 코드가 계속 강제한다.
         # 그 외에는 1차 LLM 이 **하위질문 목록**으로 분해한다 - 사람은 한 번에 여러 가지를
         # 묻는데, 라벨 하나만 고르던 예전 구조에서는 그중 하나만 처리 경로에 도달했다.
         turns: list[dict] = []
-        if INGEST_ALL_RE.search(text):
+        if not master_v2 and INGEST_ALL_RE.search(text):
             tasks = [Intent("ingest_all", source="cmd", question=text)]
-        elif INGEST_RE.search(text):
+        elif not master_v2 and INGEST_RE.search(text):
             tasks = [Intent("ingest", source="cmd", question=text)]
         else:
             turns = self._thread_turns(event)
-            tasks = self.engine.plan(
-                text,
-                conversation_context=self._thread_conversation_context(turns),
+            plan_kwargs = {
+                "conversation_context": self._thread_conversation_context(turns),
                 # 좌표가 있으면 옛 답변 문구를 정규식으로 다시 파싱하지 않는다.
-                thread_has_refs=any(
-                    turn.get("evidence_refs") or turn.get("attachment_refs") for turn in turns
+                "thread_has_refs": any(
+                    turn.get("evidence_refs") or turn.get("attachment_refs")
+                    for turn in turns
                 ),
                 # **한 번의 판정**으로 분해와 전문 봇 선택을 함께 한다. 예전에는
                 # 여기서 분해하고 라우터가 LLM 을 한 번 더 불렀는데, 그 두 번째
                 # 판정은 스레드 맥락을 못 봤다(설계 §2).
-                specialists=self._specialist_roster(),
-            )
+                "specialists": self._specialist_roster(),
+            }
+            # 구형 WorkspaceBot/FakeEngine 호출 계약은 그대로 둔다. 새 인자는
+            # rollout 워크스페이스에서만 필요하고 그때만 전달한다.
+            if master_v2:
+                plan_kwargs["allow_rule_fallback"] = False
+            tasks = self.engine.plan(text, **plan_kwargs)
+        if not tasks and master_v2:
+            from ..intent import PlanningUnavailable
+
+            raise PlanningUnavailable("LLM planner returned no tasks")
         if not tasks:
             tasks = [Intent("search", source="regex", question=text)]
 
@@ -4236,7 +4257,7 @@ def _kst_stamp(ts: str) -> str:
         return ts
 
 
-def specialist_hook(router, store=None, live_fetch=None):
+def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=None):
     """엔진이 근거를 모은 뒤 부를 훅. **전문 봇 호출의 결말**을 돌려준다.
 
     예전에는 여기서 `route()` 가 LLM 을 **한 번 더** 불러 전문 봇을 골랐다. 그
@@ -4299,6 +4320,10 @@ def specialist_hook(router, store=None, live_fetch=None):
                 visual=visual,
                 authorization_id=f"{workspace}:{getattr(ctx, 'role', '-') or '-'}",
                 decision_id=str(getattr(task, "decision_id", "") or ""),
+                active_routes_only=master_v2_enabled(workspace),
+                external_v3_factory=(
+                    external_v3_factory if master_v2_enabled(workspace) else None
+                ),
             )
         except Exception as exc:
             log.exception("[%s] 전문가 호출 실패: %s", workspace, exc)
@@ -4311,11 +4336,57 @@ def specialist_hook(router, store=None, live_fetch=None):
     return hook
 
 
+_external_v3_tool_server = None
+
+
+def _start_external_v3(configs):
+    """Start the external-specialist bridge only for rollout workspaces."""
+    enabled = {cfg.key for cfg in configs if master_v2_enabled(cfg.key)}
+    if not enabled:
+        return None
+    credential_dir = os.getenv("TYBOT_SPECIALIST_V3_HMAC_DIR", "").strip()
+    if not credential_dir:
+        raise RuntimeError(
+            "TYBOT_MASTER_V2_WORKSPACES is enabled but "
+            "TYBOT_SPECIALIST_V3_HMAC_DIR is missing"
+        )
+
+    from ..specialist_v3_broker import ToolSessionRegistry
+    from ..specialist_v3_client import ExternalV3Adapter
+    from ..specialist_v3_secrets import CredentialStore
+    from ..specialist_v3_tool_server import ToolServer
+
+    registry = ToolSessionRegistry()
+    credentials = CredentialStore(credential_dir)
+    server = ToolServer(registry)
+    server.start()
+    global _external_v3_tool_server
+    _external_v3_tool_server = server
+
+    def factory(chosen, *, workspace, authorization_id, toolbox):
+        identity, secret = credentials.get(chosen.key, workspace)
+        server.register_credential(identity, secret)
+        return ExternalV3Adapter(
+            chosen.key,
+            workspace=workspace,
+            authorization_id=authorization_id,
+            toolbox=toolbox,
+            secret=secret,
+            credential_id=identity,
+            registry=registry,
+        )
+
+    log.info("외부 전문봇 v3 브리지 시작 workspaces=%s", ",".join(sorted(enabled)))
+    return factory
+
+
 def build_bots() -> list[WorkspaceBot]:
     """설정을 읽어 워크스페이스별 봇을 만든다. 공유 자원은 한 번만 생성한다."""
     from ..gateway.budget import WorkspaceLimits
     from ..gateway.router import Router
 
+    configs = load_workspaces()
+    external_v3_factory = _start_external_v3(configs)
     archive_dir = os.getenv("ARCHIVE_DIR", "./archive")
     qa_log = QALog(
         os.getenv("QA_LOG_DIR", "./qa-log"), write_md=_truthy(os.getenv("QA_LOG_MD", "1"))
@@ -4343,10 +4414,15 @@ def build_bots() -> list[WorkspaceBot]:
 
     engine = AnswerEngine(
         store, router,
-        specialist=specialist_hook(router, store=store, live_fetch=live_fetch),
+        specialist=specialist_hook(
+            router,
+            store=store,
+            live_fetch=live_fetch,
+            external_v3_factory=external_v3_factory,
+        ),
+        allow_master_business_answers=lambda ctx: master_v2_enabled(ctx.workspace),
     )
 
-    configs = load_workspaces()
     # 상태 트리가 다른 워크스페이스 이름을 표시하려면 키만으로는 부족하다.
     # 각 봇은 자기 cfg 만 알기 때문에 여기서 지도를 만들어 넘긴다.
     labels = {c.key: c.label for c in configs}

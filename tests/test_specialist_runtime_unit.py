@@ -257,3 +257,15 @@ def test_the_helper_is_installed_and_owned_by_root():
 
     assert "tybot-specialist-run" in install, "install.sh 가 helper 를 배치하지 않는다"
     assert "tybot-specialist@.service" in install
+
+
+def test_master_service_can_serve_the_external_specialist_tool_socket():
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    unit = (ROOT / "deploy" / "tybot.service").read_text(encoding="utf-8")
+
+    assert "groupadd -r tybot-specialist-rpc" in install
+    assert "usermod -a -G tybot-specialist-rpc tybot" in install
+    assert "SupplementaryGroups=tybot-specialist-rpc" in unit
+    assert "RuntimeDirectory=tybot" in unit
+    assert "RuntimeDirectoryMode=0750" in unit
+    assert "ReadWritePaths=/var/lib/tybot /run/tybot" in unit

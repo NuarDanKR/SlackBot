@@ -280,8 +280,7 @@ sudo -u tybot test -w /run/tybot-subbots/hermes-tyit/http.sock && echo "쓰기 O
 # 4. 서명까지 포함한 진짜 왕복 — health 는 모델을 안 부른다
 sudo -u tybot /opt/tybot/.venv/bin/python - <<'EOF'
 from tybot.specialist_http import UnixSocketTransport, health
-secret = open('/var/lib/tybot/specialist-secrets/hermes-tyit/hmac','rb').read().rstrip(b'
-')
+secret = open('/etc/tybot/credentials/specialist-v3/hermes-tyit.hmac','rb').read().rstrip(b'\n')
 ok, version = health(UnixSocketTransport('/run/tybot-subbots/hermes-tyit/http.sock'), secret=secret)
 print('health', ok, version)
 EOF

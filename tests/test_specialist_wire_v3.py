@@ -73,6 +73,7 @@ def test_the_tool_block_carries_the_budget_so_hermes_can_count_too():
     assert budget["max_seconds"] > 0
     # 판정은 우리가 한다. 보낸 숫자를 그쪽이 지킬 것이라고 믿지 않는다.
     assert body["tools"]["endpoint"] == v3.TOOL_ENDPOINT
+    assert body["tools"]["socket"] == v3.TOOL_SOCKET_PATH
 
 
 def test_the_deadline_is_long_enough_for_several_searches():
@@ -215,6 +216,27 @@ def test_an_invented_evidence_id_kills_the_answer():
         _validate(_response(used_evidence=["e7", "e99"]))
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "답입니다.\n출처: #내부채널",
+        "https://example.slack.com/archives/C1/p123",
+        "file:///var/lib/tybot/archive/private.md",
+        "<script>alert(1)</script>",
+        "<IFRAME src='x'>",
+    ),
+)
+def test_specialist_cannot_attach_sources_or_active_content(text):
+    with pytest.raises(WireViolation):
+        _validate(_response(answer=text))
+
+
+@pytest.mark.parametrize("evidence_id", ("7", "e0x", "e12345", " e7", "e7 "))
+def test_used_evidence_must_have_the_opaque_id_shape(evidence_id):
+    with pytest.raises(WireViolation, match="형식"):
+        _validate(_response(used_evidence=[evidence_id]), issued=frozenset({evidence_id}))
+
+
 def test_answering_with_no_evidence_at_all_is_refused():
     """v2 는 요청에서 막았고 v3 는 여기서 막는다. 판정 시점이 옮겼을 뿐이다."""
     with pytest.raises(WireViolation, match="근거 없이"):
@@ -232,10 +254,11 @@ def test_the_four_statuses_are_told_apart():
     assert set(v3.STATUSES) == {"answered", "no_evidence", "refused", "failed"}
 
 
-def test_only_a_failure_falls_back_to_the_master():
-    """`refused` 는 권한·계약 때문에 답하지 않은 것이다. 마스터가 대신 답하면
-    그 판단이 무의미해진다."""
-    assert _validate(_response(status="failed", used_evidence=[], answer="")).should_fall_back
+def test_specialist_results_do_not_fall_back_to_the_master():
+    """전문봇 호출 뒤의 장애를 직접 답변으로 숨기거나 비용을 두 번 쓰지 않는다."""
+    assert not _validate(
+        _response(status="failed", used_evidence=[], answer="")
+    ).should_fall_back
     assert not _validate(
         _response(status="refused", used_evidence=[], answer="권한이 없습니다")
     ).should_fall_back

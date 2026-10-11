@@ -24,6 +24,7 @@ v3 는 찾는 일을 되돌려 주되 **찾는 주체는 그대로 둔다.** 자
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import uuid
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ SCHEMA_TOOL_RESULT = "tybot.specialist.tool_result.v3"
 SCHEMA_RESPONSE = "tybot.specialist.response.v3"
 
 TOOL_ENDPOINT = "/v3/tools/call"
+TOOL_SOCKET_PATH = "/run/tybot/specialist-tools.sock"
 ANSWER_ENDPOINT = "/v3/answer"
 CANCEL_ENDPOINT = "/v3/cancel"
 
@@ -69,9 +71,19 @@ STATUS_REFUSED = "refused"
 STATUS_FAILED = "failed"
 STATUSES = (STATUS_ANSWERED, STATUS_NO_EVIDENCE, STATUS_REFUSED, STATUS_FAILED)
 
-# 마스터가 폴백해야 하는 상태. `refused` 는 폴백하지 않는다 — 권한·계약 때문에
-# 답하지 않은 것을 마스터가 대신 답하면 그 판단이 무의미해진다.
-FALLBACK_STATUSES = (STATUS_FAILED,)
+# 전문봇을 호출한 뒤에는 마스터가 같은 질문을 다시 답하지 않는다. 장애를 직접 답변으로
+# 숨기면 어떤 경로가 근거를 만들었는지 감사할 수 없고 비용도 두 번 든다. 직접 답변은
+# 라우팅 단계에서 전문봇이 없거나 맞는 capability가 없을 때만 선택한다.
+FALLBACK_STATUSES: tuple[str, ...] = ()
+
+_FORBIDDEN = (
+    ("출처:", "출처는 마스터 봇만 부착할 수 있습니다."),
+    ("slack.com/archives/", "전문 봇 응답에 Slack 링크가 있습니다."),
+    ("file://", "전문 봇 응답에 파일 경로가 있습니다."),
+    ("<script", "전문 봇 응답에 스크립트가 있습니다."),
+    ("<iframe", "전문 봇 응답에 프레임이 있습니다."),
+)
+_EVIDENCE_ID_RE = re.compile(r"^e[0-9]{1,4}$")
 
 
 @dataclass(frozen=True)
@@ -170,6 +182,7 @@ class Request:
             "tools": {
                 "token": self.tool_token,
                 "endpoint": TOOL_ENDPOINT,
+                "socket": TOOL_SOCKET_PATH,
                 "allow": list(self.allow),
                 "budget": self.budget.to_json(),
             },
@@ -335,6 +348,8 @@ def validate_response(
     if not isinstance(used, list):
         raise WireViolation("used_evidence 가 목록이 아닙니다.")
     used_ids = tuple(str(item) for item in used)
+    if any(not _EVIDENCE_ID_RE.fullmatch(item) for item in used_ids):
+        raise WireViolation("근거 식별자 형식이 올바르지 않습니다.")
     unknown = sorted(set(used_ids) - issued_evidence)
     if unknown:
         raise WireViolation(f"발급하지 않은 근거 식별자가 섞였습니다: {unknown}")
@@ -344,6 +359,10 @@ def validate_response(
         raise WireViolation(
             f"답변이 상한을 넘습니다({len(text)} > {max_output_chars})."
         )
+    lowered = text.lower()
+    for needle, reason in _FORBIDDEN:
+        if needle in text or needle in lowered:
+            raise WireViolation(reason)
 
     if status == STATUS_ANSWERED:
         if not text.strip():
@@ -388,6 +407,7 @@ __all__ = [
     "STATUS_REFUSED",
     "TOOLS",
     "TOOL_ENDPOINT",
+    "TOOL_SOCKET_PATH",
     "Answer",
     "FollowUpRef",
     "Request",

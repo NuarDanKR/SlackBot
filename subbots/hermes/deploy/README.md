@@ -446,7 +446,7 @@ cd /opt/tybot/subbots/hermes && node scripts/check-rpc-unit.js   # SGID 상속�
 ```bash
 sudo -u tybot /opt/tybot/.venv/bin/python - <<'PY'
 from tybot.specialist_http import UnixSocketTransport, health
-secret = open('/var/lib/tybot/specialist-secrets/hermes-tyit/hmac','rb').read().rstrip(b'\n')
+secret = open('/etc/tybot/credentials/specialist-v3/hermes-tyit.hmac','rb').read().rstrip(b'\n')
 print(health(UnixSocketTransport('/run/tybot-subbots/hermes-tyit/http.sock'), secret=secret))
 PY
 ```

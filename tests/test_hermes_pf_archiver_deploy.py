@@ -151,6 +151,9 @@ def test_install_places_templates_without_enabling_an_unconfigured_instance():
         assert f"enable --now {name}" not in text
     assert 'deploy/hermes-archiver-run" /usr/local/libexec/hermes-archiver-run' in text
     assert 'deploy/hermes-bot-locks.conf" /etc/tmpfiles.d/hermes-bot-locks.conf' in text
+    assert 'bash "$APP_DIR/subbots/hermes/deploy/install-rpc.sh"' in text
+    assert 'enable --now hermes-rpc@' not in text
+    assert 'systemctl start hermes-rpc@' not in text
 
 
 def test_runbook_uses_two_isolated_instances_and_stops_legacy_first():

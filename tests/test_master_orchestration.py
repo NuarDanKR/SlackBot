@@ -451,6 +451,82 @@ def test_selection_is_deterministic_and_ignores_invented_keys(monkeypatch):
     assert [c.key for c in chain] == ["zeta", "alpha"]
 
 
+def test_master_v2_requires_the_llm_to_name_the_specialist(monkeypatch):
+    monkeypatch.setattr(
+        specialist_router,
+        "capabilities_of",
+        lambda specialist: ("internal_document_qa",),
+    )
+    roster = [_row(key="hermes")]
+
+    assert specialist_router.select(
+        _task(suggested_specialist=""),
+        roster,
+        require_explicit_specialist=True,
+    ) == ()
+    assert specialist_router.select(
+        _task(suggested_specialist="unknown"),
+        roster,
+        require_explicit_specialist=True,
+    ) == ()
+    assert specialist_router.select(
+        _task(suggested_specialist="hermes"),
+        roster,
+        require_explicit_specialist=True,
+    ) == (roster[0],)
+
+
+def test_master_v2_injects_the_external_v3_adapter(monkeypatch):
+    from tybot.specialist_tools import ToolBudget, Touched
+
+    chosen = _row(key="hermes", execution_mode="tools")
+    monkeypatch.setattr(
+        specialist_router,
+        "available_for_routes",
+        lambda workspace, *, route_modes: [chosen],
+    )
+    monkeypatch.setattr(
+        specialist_router,
+        "capabilities_of",
+        lambda specialist: ("internal_document_qa",),
+    )
+    made = {}
+
+    class External:
+        def __init__(self):
+            self.touched = Touched(documents=[object()])
+            self.budget = ToolBudget()
+            self.last_model = "external:hermes"
+            self.last_cost_usd = 0.01
+            self.last_stop_reason = ""
+
+        def complete(self, request):
+            return "외부 Hermes 답변"
+
+    def factory(specialist, **kwargs):
+        made["key"] = specialist.key
+        made.update(kwargs)
+        return External()
+
+    outcome = specialist_router.serve(
+        _task(suggested_specialist="hermes", routing_confidence=0.9),
+        workspace="tyit",
+        evidence=[],
+        router=None,
+        authorization_id="tyit:member",
+        toolbox_factory=lambda: object(),
+        active_routes_only=True,
+        external_v3_factory=factory,
+        record_call_row=False,
+    )
+
+    assert outcome.ok
+    assert outcome.answer.text == "외부 Hermes 답변"
+    assert outcome.answer.model == "external:hermes"
+    assert made["key"] == "hermes"
+    assert made["workspace"] == "tyit"
+
+
 def test_a_failed_candidate_hands_off_to_the_next_approved_one(monkeypatch):
     """첫 봇이 실패하면 **같은 능력의 다음 승인 봇**을 시도한다(설계 §5.2)."""
     from tybot import specialist_adapters

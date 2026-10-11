@@ -217,6 +217,38 @@ def available(workspace: str) -> list[Specialist]:
     return rows
 
 
+def available_for_routes(
+    workspace: str, *, route_modes: frozenset[str]
+) -> list[Specialist]:
+    """New master path roster, filtered by the explicit route table.
+
+    This is separate from :func:`available` so workspaces outside the rollout do
+    not acquire a new schema dependency or a changed candidate list.
+    """
+    specialists = available(workspace)
+    if not specialists:
+        return []
+    url = os.getenv("DATABASE_URL", "").strip()
+    if not url:
+        return []
+    try:
+        import psycopg
+
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT specialist
+                  FROM specialist_route
+                 WHERE workspace = %s AND route_mode = ANY(%s)
+                """,
+                (workspace, list(route_modes)),
+            )
+            allowed = {str(row[0]) for row in cur.fetchall()}
+    except Exception as exc:
+        raise RegistryUnavailable(str(exc)) from exc
+    return [item for item in specialists if item.key in allowed]
+
+
 def prompt_for(question: str, specialists: list[Specialist]) -> str:
     """분류기에 줄 본문. 질문은 **맨 뒤에** 둔다.
 
@@ -279,7 +311,12 @@ def capabilities_of(specialist: Specialist) -> tuple[str, ...]:
     return (INTERNAL_QA, INTERNAL_SUMMARY)
 
 
-def select(task, specialists: list[Specialist]) -> tuple[Specialist, ...]:
+def select(
+    task,
+    specialists: list[Specialist],
+    *,
+    require_explicit_specialist: bool = False,
+) -> tuple[Specialist, ...]:
     """이 작업을 맡길 후보를 **순서대로**. LLM 을 다시 부르지 않는다.
 
     설계 §5.1. 같은 검증된 작업과 같은 레지스트리 스냅샷이면 같은 순서가 나온다 —
@@ -291,6 +328,10 @@ def select(task, specialists: list[Specialist]) -> tuple[Specialist, ...]:
     capability = str(getattr(task, "required_capability", "") or "")
     if not capability:
         return ()
+    suggested = str(getattr(task, "suggested_specialist", "") or "").strip().lower()
+    if require_explicit_specialist and not suggested:
+        return ()
+
     ranked: list[Specialist] = []
     for item in specialists:
         if capability in capabilities_of(item):
@@ -298,7 +339,6 @@ def select(task, specialists: list[Specialist]) -> tuple[Specialist, ...]:
     if not ranked:
         return ()
     ranked.sort(key=lambda x: x.key)
-    suggested = str(getattr(task, "suggested_specialist", "") or "").strip().lower()
     if suggested:
         # 제안은 **후보 안에 있을 때만** 앞으로 당긴다. 목록 밖 이름은 모델이
         # 지어낸 것이고, 지어낸 값을 신뢰하면 그 순간 선택의 입력이 모델 출력이 된다.
@@ -308,6 +348,8 @@ def select(task, specialists: list[Specialist]) -> tuple[Specialist, ...]:
                 break
         else:
             log.info("후보에 없는 전문 봇 제안 무시: %r", suggested[:40])
+            if require_explicit_specialist:
+                return ()
     return tuple(ranked)
 
 
@@ -602,6 +644,8 @@ def serve(
     record_call_row: bool = True,
     decision_id: str = "",
     visual: tuple = (),
+    active_routes_only: bool = False,
+    external_v3_factory=None,
 ) -> SpecialistOutcome:
     """이 작업을 전문 봇에게 맡긴다. 실패하면 **다음 승인 후보**를 시도한다.
 
@@ -613,7 +657,11 @@ def serve(
     """
     decision_id = decision_id or str(getattr(task, "decision_id", "") or "")
     try:
-        specialists = available(workspace)
+        specialists = (
+            available_for_routes(workspace, route_modes=frozenset({"active"}))
+            if active_routes_only
+            else available(workspace)
+        )
     except RegistryUnavailable as exc:
         log.error("전문 봇 레지스트리 장애 ws=%s: %s", workspace, exc)
         return SpecialistOutcome(
@@ -624,7 +672,11 @@ def serve(
             UNAVAILABLE, error_code="no-specialist-registered", decision_id=decision_id
         )
 
-    candidates = select(task, specialists)
+    candidates = select(
+        task,
+        specialists,
+        require_explicit_specialist=active_routes_only,
+    )
     if not candidates:
         return SpecialistOutcome(
             NO_CAPABILITY,
@@ -682,6 +734,7 @@ def serve(
             task_kind=str(getattr(task, "kind", "") or ""),
             required_capability=str(getattr(task, "required_capability", "") or ""),
             display_hint=display_hint_for(task),
+            external_v3_factory=external_v3_factory,
         )
         if answer is not None:
             return SpecialistOutcome(
@@ -935,6 +988,7 @@ def _run_one(
     task_kind: str = "",
     required_capability: str = "",
     display_hint: str = "",
+    external_v3_factory=None,
 ) -> tuple[SpecialistAnswer | None, str]:
     """후보 하나를 실제로 부른다. `(답, 사유코드)`."""
     import time
@@ -958,12 +1012,22 @@ def _run_one(
     recovered = False
     try:
         toolbox = None
-        if chosen.execution_mode == "tools" and toolbox_factory is not None:
+        if (chosen.execution_mode == "tools" or external_v3_factory) and toolbox_factory is not None:
             toolbox = toolbox_factory()
-        adapter = specialist_adapters.build(
-            chosen.adapter, router, model=chosen.model, rules=chosen.rules,
-            execution_mode=chosen.execution_mode, toolbox=toolbox, live=live,
-        )
+        if external_v3_factory is not None:
+            if toolbox is None:
+                raise specialist_adapters.AdapterError("toolbox-unavailable")
+            adapter = external_v3_factory(
+                chosen,
+                workspace=workspace,
+                authorization_id=authorization_id,
+                toolbox=toolbox,
+            )
+        else:
+            adapter = specialist_adapters.build(
+                chosen.adapter, router, model=chosen.model, rules=chosen.rules,
+                execution_mode=chosen.execution_mode, toolbox=toolbox, live=live,
+            )
         authorized = tuple(
             AuthorizedEvidence.from_acl_filter(
                 workspace=workspace, text=text, authorization_id=authorization_id
@@ -978,7 +1042,7 @@ def _run_one(
             # 0건이라고 전문가를 못 부르게 하면 그 봇의 값이 통째로 사라진다.
             # 예전에는 "(검색 결과 없음)" 이라는 **가짜 근거 한 줄**을 만들어
             # 넣었다. 근거가 아닌 것을 근거 자리에 두면 그 자리를 믿을 수 없게 된다.
-            allow_empty_evidence=chosen.execution_mode == "tools",
+            allow_empty_evidence=chosen.execution_mode == "tools" or external_v3_factory is not None,
             visual=tuple(visual or ()),
             editing_text=editing_text,
             display_hint=display_hint,
@@ -994,7 +1058,11 @@ def _run_one(
             minimum_confidence=chosen.min_confidence,
         )
         error_code = result.error_code
-        if _may_recover(result, request, adapter, evidence=evidence, visual=visual):
+        if external_v3_factory is not None and getattr(adapter, "last_error_code", ""):
+            error_code = adapter.last_error_code
+        if external_v3_factory is None and _may_recover(
+            result, request, adapter, evidence=evidence, visual=visual
+        ):
             # 근거는 이미 읽었는데 본문이 비었다. **같은 Hermes 가 이미 읽은 것으로**
             # 한 번 마무리한다 — 마스터가 대신 답하지 않는다(장애 §5.4).
             log.info("전문 봇 무도구 복구 1회 key=%s code=%s", chosen.key, error_code)
@@ -1003,7 +1071,11 @@ def _run_one(
                 result, error_code, recovered = retried, retried.error_code, True
             else:
                 error_code = f"{error_code}+recovery-failed"
-        if result.result == "success" and is_execution_refusal(result.text):
+        if (
+            external_v3_factory is None
+            and result.result == "success"
+            and is_execution_refusal(result.text)
+        ):
             # 전문 봇이 "Canvas는 못 만든다" 는 **실행 거절**로 답했다. 근거는
             # 이미 찾았는데 산출물 요청 때문에 답이 통째로 버려진다 — 그래서 한
             # 번만 보정해 다시 묻는다.
@@ -1068,7 +1140,7 @@ def _run_one(
     touched_live_messages = tuple(getattr(touched, "live_messages", ()) or ())
     if (
         ok
-        and chosen.execution_mode == "tools"
+        and (chosen.execution_mode == "tools" or external_v3_factory is not None)
         and not evidence
         and not visual
         and not touched_documents

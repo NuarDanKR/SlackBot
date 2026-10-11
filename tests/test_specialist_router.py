@@ -134,6 +134,35 @@ def test_a_registry_failure_becomes_a_named_outcome(monkeypatch):
     assert outcome.answer is None
 
 
+def test_master_v2_uses_only_active_routes(monkeypatch):
+    seen = {}
+
+    def active_only(workspace, *, route_modes=None):
+        seen["workspace"] = workspace
+        seen["route_modes"] = route_modes
+        return []
+
+    monkeypatch.setattr(sr, "available_for_routes", active_only)
+    task = SimpleNamespace(
+        required_capability="internal_document_qa",
+        suggested_specialist="",
+        routing_confidence=0.9,
+        question="회의록 정리해줘",
+    )
+
+    outcome = sr.serve(
+        task,
+        workspace="tyit",
+        evidence=[],
+        router=None,
+        authorization_id="tyit:member",
+        active_routes_only=True,
+    )
+
+    assert seen == {"workspace": "tyit", "route_modes": frozenset({"active"})}
+    assert outcome.error_code == "no-specialist-registered"
+
+
 # --- 2. 실패는 마스터로 접힌다 -----------------------------------------------
 def test_a_dead_router_model_falls_back_to_the_master(monkeypatch):
     monkeypatch.setattr(sr, "available", lambda ws: [HERMES])

@@ -29,6 +29,13 @@ WRITE = (
 
 def failure_message(e: Exception) -> str:
     """예외 → 사용자용 문구. 조치 주체(사용자/관리자)를 문구에 밝힌다."""
+    from .intent import PlanningUnavailable
+
+    if isinstance(e, PlanningUnavailable):
+        return (
+            "⚠️ 지금은 요청을 분류할 수 없어 답변을 만들지 않았습니다. "
+            "잠시 뒤 다시 요청해 주세요."
+        )
     s = f"{e.__class__.__name__}: {e}"
     low = s.lower()
 

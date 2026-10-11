@@ -104,6 +104,8 @@ fi
 
 echo "== 2/6 계정·디렉터리 =="
 id tybot &>/dev/null || useradd -r -d "$DATA_DIR" -s /sbin/nologin tybot
+getent group tybot-specialist-rpc >/dev/null || groupadd -r tybot-specialist-rpc
+usermod -a -G tybot-specialist-rpc tybot
 mkdir -p "$APP_DIR" "$CONF_DIR" "$DATA_DIR"/{archive,cache,qa-log,reports}
 # 소스 체크아웃(`$DATA_DIR/src`)은 건드리지 않는다.
 #
@@ -439,6 +441,10 @@ install -m 0644 "$APP_DIR/deploy/hermes-privacy-manifest@.timer" /etc/systemd/sy
 install -d -m 0755 /usr/local/libexec
 install -o root -g root -m 0755 "$APP_DIR/deploy/hermes-archiver-run" /usr/local/libexec/hermes-archiver-run
 install -o root -g root -m 0644 "$APP_DIR/deploy/hermes-bot-locks.conf" /etc/tmpfiles.d/hermes-bot-locks.conf
+# Install the external Hermes RPC template, but never enable or start an
+# instance from the common installer. Instance accounts and secrets must be
+# prepared explicitly before activation.
+bash "$APP_DIR/subbots/hermes/deploy/install-rpc.sh"
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   visudo -cf "$APP_DIR/deploy/tybot-console-logs.sudoers" >/dev/null
   visudo -cf "$APP_DIR/deploy/tybot-console-timers.sudoers" >/dev/null
