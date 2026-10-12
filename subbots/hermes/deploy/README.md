@@ -420,25 +420,25 @@ sudo systemctl enable --now hermes-rpc@tyit
 ### 소켓 권한 — 여기가 조용히 틀린다
 
 TYBot 은 공유 그룹 `tybot-specialist-rpc` 로 들어온다. worker 의 기본 그룹은
-`hermes-rpc-<ws>` 라, 디렉터리에 **SGID** 가 없으면 소켓이 그 기본 그룹을 받고 TYBot 은
-0660 이어도 못 붙는다. 오류는 안 난다 — **아무 응답이 없을 뿐**이다.
+`hermes-rpc-<ws>` 이므로 worker가 TYBot 도구 소켓의 GID를 기준으로 디렉터리와 응답
+소켓 그룹을 각각 명시적으로 맞춘다. 둘 중 하나라도 실패하면 worker 기동을 막는다.
 
 ```bash
 stat -c '%n %U:%G %a' /run/tybot-subbots/hermes-tyit \
                       /run/tybot-subbots/hermes-tyit/http.sock
-#   디렉터리 hermes-rpc-tyit:tybot-specialist-rpc 2750
+#   디렉터리 hermes-rpc-tyit:tybot-specialist-rpc 750
 #   소켓     hermes-rpc-tyit:tybot-specialist-rpc 660
 
 sudo -u tybot test -w /run/tybot-subbots/hermes-tyit/http.sock && echo "TYBot 닿는다"
 ```
 
-디렉터리 소유자를 `root` 로 돌리지 않는다. `2750` 에서 group 은 `r-x` 라 worker 가
-그 안에 소켓 파일을 **만들지 못한다.**
+디렉터리 소유자는 worker로 유지한다. 공유 그룹은 `r-x`만 가지며, worker만 그 안에
+소켓 파일을 만들 수 있다.
 
 ### 서명까지 포함한 왕복 확인
 
 ```bash
-cd /opt/tybot/subbots/hermes && node scripts/check-rpc-unit.js   # SGID 상속을 실제로 잰다
+cd /opt/tybot/subbots/hermes && node scripts/check-rpc-unit.js
 ```
 
 `health` 는 모델을 부르지 않고 2초 안에 답한다. TYBot 쪽에서:
@@ -458,7 +458,7 @@ PY
 |---|---|
 | `217/USER` | 계정이 없다. `useradd` 부터 |
 | `no installation config` | unit 이 낡았다. `install-rpc.sh` 를 다시 돌린다 |
-| TYBot 이 `transport` 로 적음 | 소켓 그룹·SGID. 위 `stat` 로 본다 |
+| TYBot 이 `transport` 로 적음 | 디렉터리·소켓 공유 그룹. 위 `stat` 로 본다 |
 | 전부 401 | HMAC 비밀이 양쪽에서 다르다 |
 | 400 만 돌아옴 | 요청 `workspace` 와 `HERMES_RPC_WORKSPACE` 가 다르다 |
 | `도메인 프로필이 올바르지 않습니다` | `rpc.env` 에 `HERMES_DOMAIN` 이 없다 |

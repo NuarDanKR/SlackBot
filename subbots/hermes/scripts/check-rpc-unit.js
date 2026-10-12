@@ -15,12 +15,9 @@
  * ## 소켓 그룹 — 무엇이 틀리기 쉬운가
  *
  * 프로세스의 기본 그룹은 `hermes-rpc-<ws>` 이고 TYBot 은 거기 없다. 그래서 소켓은
- * **공유 그룹**(`tybot-specialist-rpc`)을 받아야 하는데, 디렉터리 그룹만 바꾸면
- * 안 된다 — 그 안에 만들어지는 파일은 여전히 프로세스 기본 그룹을 받는다.
- * 그룹을 물려주는 것은 **SGID**(`2750`) 하나뿐이다.
- *
- * 디렉터리 소유자를 `root` 로 돌리는 것도 안 된다. 그러면 `2750` 에서 group 은 `r-x`
- * 라, worker 는 그 안에 **소켓 파일을 만들지 못한다**.
+ * **공유 그룹**(`tybot-specialist-rpc`)을 받아야 한다. Rocky 8의 systemd 239는
+ * ExecStartPre 뒤 RuntimeDirectory 그룹을 되돌리므로 worker가 디렉터리와 소켓을
+ * 각각 명시적으로 공유 그룹에 맞춘다.
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -62,24 +59,16 @@ await test('RuntimeDirectory 가 인스턴스별 자리다', () => {
     'RuntimeDirectory 가 `tybot-subbots/hermes-%i` 가 아닙니다');
 });
 
-await test('디렉터리에 SGID 가 걸려 있다 (2750)', () => {
+await test('런타임 디렉터리는 worker만 쓸 수 있다 (0750)', () => {
   const mode = unit.find((l) => l.startsWith('RuntimeDirectoryMode='));
   assert.ok(mode, 'RuntimeDirectoryMode 가 없습니다');
   const value = mode.split('=')[1].trim();
-  assert.equal(value, '2750',
-    `RuntimeDirectoryMode 가 ${value} 입니다. SGID(2) 가 없으면 소켓이 프로세스 기본 그룹을 받고, TYBot 은 못 붙습니다`);
-  // systemd 판본에 따라 SGID 가 떨어지므로 한 번 더 거는 줄이 있어야 한다.
-  assert.ok(has(/^ExecStartPre=\+\/usr\/bin\/chmod 2750 \/run\/tybot-subbots\/hermes-%i$/),
-    'chmod 2750 을 다시 거는 ExecStartPre 가 없습니다');
+  assert.equal(value, '0750', `RuntimeDirectoryMode 가 ${value} 입니다`);
 });
 
-await test('디렉터리 그룹만 공유 그룹으로 바꾼다', () => {
-  assert.ok(has(new RegExp(`^ExecStartPre=\\+/usr/bin/chgrp ${SHARED_GROUP} /run/tybot-subbots/hermes-%i$`)),
-    `chgrp ${SHARED_GROUP} 이 없습니다`);
-  // **소유자를 root 로 돌리지 않는다.** 돌리면 2750 에서 group 이 `r-x` 라
-  // worker 가 그 안에 소켓 파일을 만들지 못한다.
-  assert.ok(!has(/^ExecStartPre=.*\bchown\b.*root[: ]/),
-    '디렉터리 소유자를 root 로 바꾸고 있습니다 — worker 가 소켓을 만들지 못합니다');
+await test('systemd 239에서 사라지는 ExecStartPre 그룹 변경에 의존하지 않는다', () => {
+  assert.ok(!has(/^ExecStartPre=.*\b(chgrp|chmod)\b.*\/run\/tybot-subbots\/hermes-%i$/),
+    'RuntimeDirectory 그룹을 ExecStartPre에서 바꾸고 있습니다');
 });
 
 await test('계정은 인스턴스별, 보조 그룹은 공유 그룹 하나', () => {
@@ -108,7 +97,7 @@ await test('worker가 TYBot 도구 소켓 그룹에 런타임 디렉터리를 �
   assert.equal(gid, 2002);
   assert.deepEqual(seen, [
     ['chown', '/run/worker', -1, 2002],
-    ['chmod', '/run/worker', 0o2750],
+    ['chmod', '/run/worker', 0o750],
   ]);
   const runner = fs.readFileSync(path.join(ROOT, 'scripts', 'run-rpc-worker.js'), 'utf8');
   assert.match(runner, /alignSocketDirectoryGroup\(cfg\.socketPath, TOOL_SOCKET_PATH\)/);
@@ -116,7 +105,7 @@ await test('worker가 TYBot 도구 소켓 그룹에 런타임 디렉터리를 �
 
 console.log('[2/4] 실제 그룹 상속 (리눅스에서만)');
 
-await test('SGID 디렉터리에서 연 소켓이 디렉터리 그룹을 받는다', async () => {
+await test('소켓을 디렉터리의 공유 그룹으로 명시 정렬한다', async () => {
   if (process.platform === 'win32') {
     notes.push('그룹 상속: Windows 에는 gid 가 없다 — **못 쟀다**. 리눅스 smoke 참조');
     return;
@@ -128,11 +117,11 @@ await test('SGID 디렉터리에서 연 소켓이 디렉터리 그룹을 받는�
     return;
   }
   const target = groups[0];
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sgid-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-group-'));
   const sub = path.join(dir, 'sock');
   fs.mkdirSync(sub);
   fs.chownSync(sub, -1, target);
-  fs.chmodSync(sub, 0o2750); // SGID
+  fs.chmodSync(sub, 0o750);
 
   const at = path.join(sub, 'http.sock');
   const worker = createRpcServer({
@@ -143,7 +132,7 @@ await test('SGID 디렉터리에서 연 소켓이 디렉터리 그룹을 받는�
     await worker.listen(at);
     const st = fs.statSync(at);
     assert.equal(st.gid, target,
-      `소켓 그룹이 ${st.gid} 입니다(디렉터리 ${target}). SGID 상속이 안 됐습니다`);
+      `소켓 그룹이 ${st.gid} 입니다(디렉터리 ${target}). 명시 정렬이 안 됐습니다`);
     assert.equal(st.mode & 0o777, 0o660, `소켓 모드가 ${(st.mode & 0o777).toString(8)} 입니다`);
   } finally {
     await worker.close().catch(() => {});
@@ -163,7 +152,7 @@ await test('그룹이 어긋나면 기동을 막는다', async () => {
       stat: (p) => ({ gid: p.endsWith('.sock') ? 1001 : 2002 }),
       chown: () => { const e = new Error('EPERM'); e.code = 'EPERM'; throw e; },
     }),
-    /SGID/,
+    /그룹/,
     '그룹을 못 맞췄는데 그냥 지나갑니다',
   );
   // 이미 맞으면 아무 일도 안 한다.

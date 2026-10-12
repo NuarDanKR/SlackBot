@@ -43,7 +43,7 @@ CHECKS = (
     ("check-rpc-wire.js", "v3 계약 거울이 Python 원본·서명과 맞나"),
     ("check-rpc-server.js", "worker 왕복 — 근거·서명·재생·상한·health·취소"),
     ("check-rpc-isolation.js", "경계 — Slack·아카이브 미접근과 요청 간 토큰 격리"),
-    ("check-rpc-unit.js", "배치 — 소켓 그룹(SGID)·enable 가능·설치 helper 멱등"),
+    ("check-rpc-unit.js", "배치 — 소켓 그룹·enable 가능·설치 helper 멱등"),
 )
 
 
@@ -117,12 +117,14 @@ def test_socket_group_contract_is_written_down() -> None:
         for line in unit.splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
-    # SGID 가 없으면 소켓은 프로세스 기본 그룹(`hermes-rpc-<ws>`)을 받는다.
-    assert "RuntimeDirectoryMode=2750" in live
-    assert "ExecStartPre=+/usr/bin/chgrp tybot-specialist-rpc /run/tybot-subbots/hermes-%i" in live
-    assert "ExecStartPre=+/usr/bin/chmod 2750 /run/tybot-subbots/hermes-%i" in live
-    # 소유자를 root 로 돌리면 2750 에서 group 이 `r-x` 라 worker 가 소켓을 못 만든다.
-    assert not [line for line in live if line.startswith("ExecStartPre=") and "chown" in line]
+    assert "RuntimeDirectoryMode=0750" in live
+    assert not [
+        line
+        for line in live
+        if line.startswith("ExecStartPre=")
+        and any(command in line for command in ("chgrp", "chmod"))
+        and "/run/tybot-subbots/hermes-%i" in line
+    ]
     # `[Install]` 이 없으면 `systemctl enable` 이 「no installation config」 로 실패한다.
     assert "[Install]" in live
     assert "WantedBy=multi-user.target" in live

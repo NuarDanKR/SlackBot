@@ -45,19 +45,10 @@ WorkingDirectory=/opt/tybot/subbots/hermes
 # 자기 소켓 자리. systemd 가 만들고 종료할 때 치운다 — 남은 소켓 파일 때문에
 # 다음 기동이 EADDRINUSE 로 죽는 갈래를 아예 없앤다.
 RuntimeDirectory=tybot-subbots/hermes-%i
-# **SGID 를 건다(2750).** 안 걸면 디렉터리 그룹만 바뀌고 그 안에 만들어지는 **소켓
-# 파일**은 프로세스 기본 그룹(`hermes-rpc-%i`)을 받는다. TYBot 은 그 그룹에 없으므로
-# 0660 이어도 연결하지 못한다 — 증상은 오류가 아니라 **아무 응답이 없는 것**이다.
-RuntimeDirectoryMode=2750
-# 그룹만 공유 그룹으로 바꾼다. **소유자는 worker 그대로다** — root 로 두면
-# 디렉터리가 `root:tybot-specialist-rpc 2750` 이 되고, worker 는 그룹 멤버일 뿐이라
-# 그 안에 소켓 파일을 만들지 못한다(group 은 `r-x`).
-# systemd 239 may restore RuntimeDirectory ownership before ExecStart. The
-# worker performs the final group alignment against TYBot's tool socket.
-ExecStartPre=+/usr/bin/chgrp tybot-specialist-rpc /run/tybot-subbots/hermes-%i
-# systemd 가 RuntimeDirectoryMode 의 SGID 를 떨어뜨리는 판본이 있어 한 번 더 건다.
-# 멱등이고, 걸려 있으면 아무 일도 안 한다.
-ExecStartPre=+/usr/bin/chmod 2750 /run/tybot-subbots/hermes-%i
+# systemd 239는 ExecStartPre 뒤 RuntimeDirectory 소유권을 다시 적용한다. worker가
+# TYBot 도구 소켓의 GID를 기준으로 디렉터리와 응답 소켓 그룹을 명시적으로 맞춘다.
+# RestrictSUIDSGID=true를 유지하므로 SGID 비트에는 의존하지 않는다.
+RuntimeDirectoryMode=0750
 
 # Rocky 8의 systemd 239에는 LoadCredential=이 없다. 비밀 값은 여전히 환경변수에
 # 넣지 않고, worker만 읽을 수 있는 인스턴스별 파일의 **경로만** 고정한다.

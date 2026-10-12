@@ -243,7 +243,7 @@ pytest -q tests/test_hermes_rpc_contract.py     # 6 passed
 | `check-rpc-wire.js` | 스키마·엔드포인트·상한·도구·상태가 Python 원본과 같다. `canonical`/응답 서명을 **Python 이 만든 값과 직접 비교**. 요청 파싱 거절 7종. 응답 조립 규칙. 인용·금지 문구 | 26/26 |
 | `check-rpc-server.js` | 실제 소켓 왕복: 정상 답변 · 근거 없음 · 지어낸 인용 · 출처 줄 · 서명 위조 · 과거/미래 시각 · nonce 재사용 · 본문 변조 · 경로 바꿔치기 · 스키마 불일치 · 다른 workspace · 모르는 경로 · request_id 반향 · 출력 상한 · health(모델 미호출, 2초) · 같은 request_id 중복 409 · 취소 · **deadline** | 19/19 |
 | `check-rpc-isolation.js` | worker 가 닿는 **12개 파일** 정적 그래프에 Slack·아카이브·문서 저장소가 없다. 외부 의존이 Anthropic SDK 뿐이다. 요청 둘이 각자 토큰으로만 부른다. 한 바퀴 도는 동안 `slack.com` 요청 0건 | 6/6 |
-| `check-rpc-unit.js` | 소켓 그룹(SGID 2750 · chgrp · 소유자를 root 로 안 돌림 · 소켓 0660 · 그룹 어긋나면 기동 거부) · `[Install]` · 설치 helper(0644 설치 · daemon-reload · 멱등 · 계정/비밀/env 를 안 만듦 · enable·start 안 함) | 14/14 |
+| `check-rpc-unit.js` | 소켓 그룹(디렉터리 0750 · 소켓 0660 · TYBot 도구 소켓 GID로 명시 정렬 · 그룹 어긋나면 기동 거부) · `[Install]` · 설치 helper(0644 설치 · daemon-reload · 멱등 · 계정/비밀/env 를 안 만듦 · enable·start 안 함) | 15/15 |
 
 `ruff check src tests scripts` → All checks passed.
 
@@ -256,21 +256,21 @@ pytest -q tests/test_hermes_rpc_contract.py     # 6 passed
 
 ### 리눅스에서만 남은 smoke (Windows 에서 **못 쟀다**)
 
-`check-rpc-unit.js` 는 리눅스에서 SGID 디렉터리를 임시로 만들어 **소켓이 디렉터리
-그룹을 물려받는지**를 실제로 잰다. Windows 에는 gid 가 없어 그 셋을 건너뛰고,
+`check-rpc-unit.js` 는 리눅스에서 별도 그룹 디렉터리를 임시로 만들어 **소켓 그룹을
+디렉터리 그룹으로 명시 정렬하는지**를 실제로 잰다. Windows 에는 gid 가 없어 그 셋을 건너뛰고,
 건너뛴 사실을 「못 쟀다」 로 찍는다 — 통과와 같은 모양으로 두면 「맞았다」 와
 「안 쟀다」 를 가릴 수 없다.
 
 서버에서 한 번 돌려야 하는 것:
 
 ```bash
-# 1. 배치 계약 (SGID 상속을 실제 gid 로 잰다)
+# 1. 배치 계약 (명시 그룹 정렬을 실제 gid 로 잰다)
 cd /opt/tybot/subbots/hermes && node scripts/check-rpc-unit.js
 
 # 2. 소켓 자리와 권한
 systemctl start hermes-rpc@tyit
 stat -c '%n %U:%G %a' /run/tybot-subbots/hermes-tyit                       /run/tybot-subbots/hermes-tyit/http.sock
-#   기대: 디렉터리 hermes-rpc-tyit:tybot-specialist-rpc 2750
+#   기대: 디렉터리 hermes-rpc-tyit:tybot-specialist-rpc 750
 #         소켓   hermes-rpc-tyit:tybot-specialist-rpc 660
 
 # 3. TYBot 계정이 실제로 닿는가
