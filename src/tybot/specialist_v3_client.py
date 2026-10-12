@@ -166,6 +166,14 @@ class ExternalV3Adapter:
         self.phase = "external-v3"
 
     def complete(self, request) -> str:
+        # 실시간 Slack 조회는 요청별 ToolBox가 그 경로를 실제로 제공할 때만 연다.
+        # 기본 계약에는 이 도구가 없으므로 여기서 명시하지 않으면, 수집 직후의
+        # 질문은 아카이브가 따라잡을 때까지 외부 전문가가 근거를 얻을 수 없다.
+        allow = (
+            wire.TOOLS
+            if getattr(self.toolbox, "live_fetch", None) is not None
+            else wire.DEFAULT_TOOLS
+        )
         outcome = call(
             self.transport,
             workspace=self.workspace,
@@ -175,6 +183,7 @@ class ExternalV3Adapter:
             secret=self.secret,
             credential_id=self.credential_id,
             registry=self.registry,
+            allow=allow,
             deadline_ms=int(request.deadline.remaining() * 1000),
         )
         if outcome.answer is None:

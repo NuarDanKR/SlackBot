@@ -430,6 +430,10 @@ class ArchiveStore:
         return result
 
     def docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
+        """일반 근거 문서. 내부에서 항상 ``revision_reader.apply`` 를 거친다."""
+        return self._docs(dm_scope=dm_scope)
+
+    def _docs(self, *, dm_scope: str = "", predicate=None) -> list[ArchiveDoc]:
         loaded = self.source_docs(dm_scope=dm_scope)
 
         # 같은 이름의 문서에 **진짜 Slack ID** 가 있으면 그 ID 로 묶는다.
@@ -475,6 +479,11 @@ class ArchiveStore:
                 )
             grouped.setdefault((doc.workspace, identity), []).append(doc)
         merged = [self._merge(parts) for parts in grouped.values()]
+        if predicate is not None:
+            # 요청 경로에서는 ACL을 revision DB 조회보다 먼저 적용한다. 그렇지 않으면
+            # 최종 답에는 안 들어가더라도 다른 워크스페이스 문서의 revision 상태를
+            # 불필요하게 읽고 경고까지 남긴다.
+            merged = [doc for doc in merged if predicate(doc)]
         # **수정·삭제된 줄은 여기서 빠진다.** 한 자리에서 거르는 이유는 직접
         # 조회와 색인 조회가 같은 결과를 내야 하기 때문이다 — 색인 경로도
         # `visible_docs` 가 준 문서에서 줄을 찾는다(`_scan`·`candidates`).
@@ -490,7 +499,10 @@ class ArchiveStore:
         # 같은 본문이 raw 에도 있기 때문이다.
         from . import attachment_reader
 
-        return channels + attachment_reader.archive_docs(self.root, channels)
+        attachments = attachment_reader.archive_docs(self.root, channels)
+        if predicate is not None:
+            attachments = [doc for doc in attachments if predicate(doc)]
+        return channels + attachments
 
     def audit_docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
         """**전부** 돌려준다 — 과거 revision 포함. 감사 조회 전용.
@@ -631,11 +643,8 @@ class ArchiveStore:
         # 요청자가 특정되지 않으면 DM 은 아예 읽지 않는다. 특정돼도 **그 사람
         # 것만** 읽는다. 판정을 `can_access` 하나에만 기대지 않는다 — 개인 기록은
         # 막는 문이 둘이어야 하고, 하나는 파일을 열지 않는 문이어야 한다.
-        return [
-            d
-            for d in self.docs(dm_scope=str(getattr(ctx, "user_id", "") or ""))
-            if keep(d, allow_retired=allow_retired)
-            and can_access(
+        def permitted(d: ArchiveDoc) -> bool:
+            return keep(d, allow_retired=allow_retired) and can_access(
                 ctx,
                 visibility=d.visibility,
                 acl=d.acl if d.acl else None,
@@ -645,7 +654,11 @@ class ArchiveStore:
                 channel=d.channel,
                 dm_user=d.dm_user,
             )
-        ]
+
+        return self._docs(
+            dm_scope=str(getattr(ctx, "user_id", "") or ""),
+            predicate=permitted,
+        )
 
     def titles(self, ctx: RequestContext) -> list[str]:
         """검색 0건 폴백 — 권한 내 문서 제목 목록."""

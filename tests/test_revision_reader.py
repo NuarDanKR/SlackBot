@@ -12,6 +12,7 @@ DB 를 요구하지 않는다. 조회 함수를 갈아 끼우고 **무엇이 남
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -483,6 +484,48 @@ def test_the_search_path_and_the_store_agree(tmp_path, monkeypatch):
 
     assert direct == {"[수정 후] 회의는 11시입니다"}
     assert hits == direct
+
+
+def test_visible_docs_filters_workspace_before_revision_lookup(tmp_path, monkeypatch):
+    """TYIT 요청이 다른 워크스페이스 revision 상태를 먼저 읽지 않는다."""
+    from tybot.access import RequestContext
+    from tybot.archive import writer
+    from tybot.archive.store import ArchiveStore
+
+    for workspace, channel_id, channel in (
+        ("tyit", "C-TYIT", "#팀-전산_abb155-공지"),
+        ("mgmt", "C-MGMT", "#팀-경영_abb100-공지"),
+    ):
+        writer.ingest(
+            tmp_path,
+            workspace=workspace,
+            channel=channel,
+            channel_id=channel_id,
+            messages=[writer.IncomingMessage(
+                datetime.now(UTC),
+                "U1",
+                "[수정 후] 현재 본문",
+                source_ts="1790070000.000001",
+            )],
+            acl=[channel],
+        )
+
+    looked_up = []
+
+    def latest(workspace, coordinates):
+        looked_up.append(workspace)
+        channel_id = coordinates[0][0]
+        return {(channel_id, "1790070000.000001"): _revision("change", "현재 본문")}
+
+    monkeypatch.setattr(reader, "latest_revisions", latest)
+    ctx = RequestContext(
+        workspace="tyit", channels=frozenset({"#팀-전산_abb155-공지"})
+    )
+
+    docs = ArchiveStore(tmp_path).visible_docs(ctx)
+
+    assert [doc.workspace for doc in docs] == ["tyit"]
+    assert looked_up == ["tyit"]
 
 
 def test_searching_the_old_body_finds_nothing(tmp_path, monkeypatch):

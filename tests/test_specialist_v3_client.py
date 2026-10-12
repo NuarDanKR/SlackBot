@@ -15,7 +15,8 @@ CREDENTIAL_ID = "hermes:tyit"
 
 
 class Box:
-    def __init__(self):
+    def __init__(self, *, live_fetch=None):
+        self.live_fetch = live_fetch
         self.touched = SimpleNamespace(
             evidence_hits=[], documents=[], live_permalinks=[]
         )
@@ -39,12 +40,14 @@ class Hermes:
         self.registry = registry
         self.bad_signature = bad_signature
         self.calls = []
+        self.requests = []
 
     def post(self, path, body, headers, *, timeout_s):
         self.calls.append(path)
         if path == wire.CANCEL_ENDPOINT:
             return HttpReply(200, b"{}")
         request = json.loads(body)
+        self.requests.append(request)
         tool = json.dumps(
             {
                 "schema": wire.SCHEMA_TOOL_CALL,
@@ -151,3 +154,30 @@ def test_socket_path_is_derived_and_rejects_path_input():
             pass
         else:
             raise AssertionError(value)
+
+
+def test_external_adapter_allows_live_tool_only_when_request_can_fetch_live():
+    class Deadline:
+        def remaining(self):
+            return 30
+
+    request = SimpleNamespace(question="summarize", deadline=Deadline())
+
+    def allowed(live_fetch):
+        registry = ToolSessionRegistry()
+        hermes = Hermes(registry)
+        adapter = client.ExternalV3Adapter(
+            "hermes",
+            workspace="tyit",
+            authorization_id="tyit:member",
+            toolbox=Box(live_fetch=live_fetch),
+            secret=SECRET,
+            credential_id=CREDENTIAL_ID,
+            registry=registry,
+            transport=hermes,
+        )
+        assert adapter.complete(request) == "grounded answer"
+        return hermes.requests[0]["tools"]["allow"]
+
+    assert "fetch_recent_slack" not in allowed(None)
+    assert "fetch_recent_slack" in allowed(lambda _channel, _limit: [])
