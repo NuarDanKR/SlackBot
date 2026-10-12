@@ -182,28 +182,36 @@ def save_workspace(
             existing = cur.fetchone()
             exists = existing is not None
             db_key = str(existing["key"]) if existing else key
-            if not exists and not encrypted:
-                raise WorkspaceStoreError("새 워크스페이스에는 봇 토큰과 앱 토큰이 필요합니다.")
+            # **봇 토큰을 요구하지 않는다.** 이 행은 조직 metadata 다 —
+            # 이름·등급·상한·열람 범위.
+            #
+            # 토큰을 워크스페이스에 매는 것은 봇이 하나뿐이던 시절의 구조다.
+            # 지금은 한 워크스페이스에 Master·Archiver·Hermes 가 붙으므로 한 쌍으로
+            # 표현할 수 없고, 정본은 `봇 관리 > 워크스페이스 연결`(bot_connection)에
+            # 있다. 화면도 이미 토큰을 안 받는다(`Workspaces.tsx:211`).
+            #
+            # 요구하던 때는 **새 워크스페이스를 하나도 만들 수 없었다.** 화면은
+            # 안 보내고 여기서는 있어야 한다고 했다.
             if exists and not encrypted:
                 cur.execute(
                     "SELECT count(*) AS count FROM workspace_secret WHERE workspace = %s",
                     (db_key,),
                 )
                 if int(cur.fetchone()["count"]) < 2:
+                    # 옛 배포본은 토큰을 env 에 뒀다. 남아 있으면 옮겨 준다 —
+                    # 다만 **없다고 저장을 막지는 않는다.** 막으면 상한 하나
+                    # 바꾸려고 이 화면이 받지도 않는 값을 넣어야 한다.
                     suffix = re.sub(r"[^A-Z0-9]+", "_", key.upper()).strip("_")
                     env_bot = os.getenv(f"SLACK_BOT_TOKEN_{suffix}")
                     env_app = os.getenv(f"SLACK_APP_TOKEN_{suffix}")
-                    if not env_bot or not env_app:
-                        raise WorkspaceStoreError(
-                            "DB에 저장된 토큰이 없습니다. 봇 토큰과 앱 토큰을 입력하세요."
-                        )
-                    bot = _validate_token(env_bot, "xoxb-", "기존 봇 토큰")
-                    app = _validate_token(env_app, "xapp-", "기존 앱 토큰")
-                    cipher = _fernet()
-                    encrypted = {
-                        "bot": (cipher.encrypt(bot.encode("utf-8")), _mask(bot)),
-                        "app": (cipher.encrypt(app.encode("utf-8")), _mask(app)),
-                    }
+                    if env_bot and env_app:
+                        bot = _validate_token(env_bot, "xoxb-", "기존 봇 토큰")
+                        app = _validate_token(env_app, "xapp-", "기존 앱 토큰")
+                        cipher = _fernet()
+                        encrypted = {
+                            "bot": (cipher.encrypt(bot.encode("utf-8")), _mask(bot)),
+                            "app": (cipher.encrypt(app.encode("utf-8")), _mask(app)),
+                        }
             if targets:
                 cur.execute("SELECT key FROM workspace WHERE lower(key) = any(%s)", (targets,))
                 target_keys = {str(row["key"]).lower(): str(row["key"]) for row in cur.fetchall()}
