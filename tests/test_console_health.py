@@ -368,10 +368,30 @@ def _client():
 
 
 def test_health_probe_stays_open():
-    """살아 있는지 확인하는 용도라 인증을 요구하지 않는다. 내용은 담지 않는다."""
+    """살아 있는지 확인하는 용도라 인증을 요구하지 않는다. **내용은 담지 않는다.**
+
+    2026-10-12 에 `deployedCommit`·`startedAt`·`pid` 를 더했다. 「무엇이 응답하고
+    있나」 를 화면에서 보기 위해서다 — 그날 nginx 가 5일 된 프로세스를 가리키는
+    것을 찾느라 서버에서 `ps` 를 봐야 했다.
+
+    셋 다 **자료가 아니다.** 커밋 해시는 저장소 좌표, PID 는 그 호스트 안의 값,
+    기동 시각은 프로세스 사실이다. 여기 열 수 있는 것은 그 성격까지다.
+    """
     res = _client().get("/api/health")
     assert res.status_code == 200
-    assert set(res.json()) == {"ok", "at"}
+    assert set(res.json()) == {"ok", "at", "deployedCommit", "startedAt", "pid"}
+
+
+def test_the_open_probe_never_carries_operational_content():
+    """인증 없이 열린 문이다. **운영 자료가 한 글자도 나가면 안 된다.**
+
+    키를 더할 때마다 이 시험이 묻는다 — 이것도 열어도 되는 값인가.
+    """
+    body = _client().get("/api/health").json()
+    text = str(body)
+
+    for leaked in ("token", "xoxb", "xapp", "postgresql://", "workspace", "channel"):
+        assert leaked not in text.lower(), f"공개 health 에 {leaked} 가 들어 있습니다"
 
 
 def test_health_report_is_never_served_without_login():

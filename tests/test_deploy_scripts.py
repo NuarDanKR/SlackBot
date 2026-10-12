@@ -628,3 +628,81 @@ def test_drift_check_separates_denied_from_missing():
     body = (ROOT / "scripts" / "check_schema_drift.py").read_text(encoding="utf-8")
     assert "denied" in body
     assert "GRANT" in body
+
+
+# ---------------------------------------------------------------------------
+# WC-02 — 배포가 닿지 않는 콘솔이 조용히 돌았다 (2026-10-12 실사고)
+# ---------------------------------------------------------------------------
+#
+# 실제로 일어난 일:
+#
+#   브라우저 → nginx :8788 → 127.0.0.1:8789 (손으로 띄운 10월 7일 프로세스)
+#                            :8787 (systemd, 새 코드) ← 아무도 안 봄
+#
+# 배포는 성공으로 끝났고, 파일도 새것이었고, `systemctl restart tybot-console` 도
+# 돌았다. 그런데 **사람이 보는 화면은 5일 된 코드**였고 아무 오류도 안 났다.
+#
+# 찾는 데 서버에서 `ps` 를 봐야 했다. 그게 이 항목들이 막으려는 것이다.
+
+
+def _install_sh() -> str:
+    return (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+
+
+def _update_sh() -> str:
+    return (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
+
+
+def test_the_nginx_check_does_not_hardcode_one_filename():
+    """설정 파일 이름을 하나로 박으면 **다른 이름이면 못 본다.**
+
+    실제 파일은 `tybot-console-next.conf` 였는데 검사는 `tybot-console.conf` 만
+    봤다. 그래서 nginx 가 콘솔을 받고 있는데도 「안 받는다」 로 판정하고,
+    평문 바인딩(0.0.0.0)을 유지하는 drop-in 을 계속 썼다.
+    """
+    source = _install_sh()
+
+    assert '[[ -f /etc/nginx/conf.d/tybot-console.conf ]]' not in source, (
+        "설정 파일 이름을 하나로 박고 있습니다 — 다른 이름을 쓰면 못 봅니다"
+    )
+    # 이름이 아니라 **내용**(그 포트로 넘기는가)으로 판정해야 한다.
+    assert "proxy_pass" in source
+
+
+def test_the_deploy_notices_a_console_outside_systemd():
+    """systemd 밖에서 도는 콘솔을 **세어서 알린다.**
+
+    `systemctl restart` 는 자기가 만든 프로세스만 내린다. 손으로 띄운 것은 남고,
+    nginx 가 그쪽을 가리키고 있으면 배포가 영원히 안 닿는다.
+    """
+    source = _install_sh()
+
+    # 세는 함수가 있고 — 세기만 하고 안 부르면 아무 일도 안 일어난다.
+    assert "warn_about_consoles_outside_systemd()" in source
+    assert source.count("warn_about_consoles_outside_systemd") >= 2, (
+        "함수를 정의만 하고 부르지 않습니다"
+    )
+    assert "pgrep -f" in source
+    assert "MainPID" in source
+
+
+def test_the_pf_console_does_not_claim_a_port_nginx_may_hold():
+    """PF 콘솔 포트가 nginx 와 겹치면 둘 중 하나가 못 뜬다.
+
+    8788 은 2026-10-12 현재 nginx 가 쥐고 있다(TYBot 콘솔 프록시).
+    같은 포트를 PF 콘솔 기본값으로 두면, PF 를 설치하는 날 조용히 충돌한다.
+    """
+    source = _install_sh()
+
+    assert "port_is_taken_by_another()" in source
+    assert "port_is_taken_by_another 8788" in source, (
+        "PF 콘솔 포트가 이미 쓰이는지 확인하지 않습니다"
+    )
+    # 충돌이면 **올리지 않는다.** 경고만 하고 그대로 올리면 둘 중 하나가 죽는다.
+    guard = source[source.index("console_bind_guard() {"):]
+    before_pf = guard.split("console_bind_guard_for pf-hermes-console")[0]
+    assert "else" in before_pf, "충돌을 알리고도 그대로 PF 콘솔을 올립니다"
+    # **조용히 건너뛰지 않는다.** 아무 말 없이 안 올리면 PF 콘솔이 왜 없는지
+    # 아무도 설명하지 못한다 — 이 저장소가 반복해서 데인 모양이다.
+    assert "포트 8788 을 이미 쓰고 있는" in before_pf
+    assert ">&2" in before_pf

@@ -2745,3 +2745,33 @@ def test_sending_still_requires_a_reviewer(client, monkeypatch):
 
     assert response.status_code == 422
     assert "검토자" in response.json()["detail"]
+
+
+# --- 배포가 화면에 닿았는지 화면에서 본다 (WC-02) ------------------------------
+#
+# 2026-10-12: nginx 가 손으로 띄운 5일 된 프로세스를 가리키고 있었다. 배포는
+# 성공으로 끝났고 파일도 새것이었는데 화면은 옛 코드였고, 찾는 데 서버에서
+# `ps` 를 봐야 했다. 응답하는 프로세스가 **자기가 무엇인지 말하면** 바로 보인다.
+
+
+def test_the_health_probe_says_which_build_is_answering(client, tmp_path, monkeypatch):
+    """응답한 프로세스가 **자기 배포 커밋과 포트**를 말한다."""
+    marker = tmp_path / ".deployed-commit"
+    marker.write_text("dad503c7e2aef1b403ffc12f2a4bb1abfd00f5ba\n", encoding="utf-8")
+    monkeypatch.setenv("TYBOT_APP_DIR", str(tmp_path))
+
+    body = client.get("/api/health").json()
+
+    assert body["ok"] is True
+    assert body["deployedCommit"] == "dad503c"
+    assert "startedAt" in body
+    assert body["pid"] > 0
+
+
+def test_an_unknown_build_is_not_reported_as_fine(client, tmp_path, monkeypatch):
+    """커밋을 못 읽었으면 **모른다고 한다.** 빈 값을 「최신」 으로 읽으면 안 된다."""
+    monkeypatch.setenv("TYBOT_APP_DIR", str(tmp_path / "없는곳"))
+
+    body = client.get("/api/health").json()
+
+    assert body["deployedCommit"] == ""

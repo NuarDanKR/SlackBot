@@ -223,13 +223,20 @@ REQ_FILES=(-r "$APP_DIR/requirements.txt")
 #
 # 조용히 평문으로 되돌리지 않는다. 조용하면 임시 상태가 영구 상태가 된다 —
 # B-35 가 3주 걸린 이유가 그것이다.
-nginx_is_serving_the_console() {
-  # nginx 가 있고, 활성이고, 콘솔 설정이 배치돼 있고, 문법이 맞는가.
-  # 넷 중 하나라도 아니면 프록시가 요청을 못 받는다.
-  command -v nginx >/dev/null 2>&1 \
-    && systemctl is-active --quiet nginx 2>/dev/null \
-    && [[ -f /etc/nginx/conf.d/tybot-console.conf ]] \
-    && nginx -t >/dev/null 2>&1
+# nginx 가 **이 포트로** 넘기고 있나. 파일 이름이 아니라 내용으로 본다.
+#
+# 전에는 `/etc/nginx/conf.d/tybot-console.conf` 하나만 봤다. 실제 파일이
+# `tybot-console-next.conf` 였고, 그래서 nginx 가 콘솔을 받고 있는데도
+# 「안 받는다」 로 판정해 평문 바인딩을 계속 유지했다(2026-10-12).
+#
+# 이름은 사람이 정하고 또 바뀐다. 판정은 **그 포트로 넘기는 설정이 있는가** 다.
+nginx_proxies_port() {
+  local port="$1"
+  command -v nginx >/dev/null 2>&1 || return 1
+  systemctl is-active --quiet nginx 2>/dev/null || return 1
+  nginx -t >/dev/null 2>&1 || return 1
+  grep -rlE "proxy_pass[[:space:]]+https?://(127\.0\.0\.1|localhost):${port}\b" \
+    /etc/nginx/conf.d /etc/nginx/nginx.conf 2>/dev/null | grep -q .
 }
 
 # 한 서비스의 바인딩 안전장치.
@@ -242,13 +249,13 @@ console_bind_guard_for() {
   # 설치되지 않은 unit 은 건드리지 않는다. PF 콘솔은 나중에 붙는다.
   [[ -f "/etc/systemd/system/$unit.service" ]] || return 0
 
-  if nginx_is_serving_the_console; then
+  if nginx_proxies_port "$port"; then
     if [[ -f "$dropin" ]]; then
       rm -f "$dropin"
       rmdir "$dropin_dir" 2>/dev/null || true
       systemctl daemon-reload
       systemctl is-active --quiet "$unit" && systemctl restart "$unit" || true
-      echo "  → nginx 가 $label 을 받고 있습니다. 루프백 바인딩으로 전환했습니다 (B-35)"
+      echo "  → nginx 가 127.0.0.1:$port 로 넘깁니다. $label 을 루프백 바인딩으로 전환했습니다 (B-35)"
     fi
     return 0
   fi
@@ -257,7 +264,7 @@ console_bind_guard_for() {
   cat > "$dropin" <<DROPIN
 # 자동 생성 — deploy/install.sh 의 console_bind_guard
 #
-# nginx 리버스 프록시가 아직 $label 을 받지 않아 **예전 바인딩을 유지**합니다.
+# nginx 가 아직 127.0.0.1:$port 로 넘기지 않아 **예전 바인딩을 유지**합니다.
 # 이 파일이 없어야 정상(루프백)입니다.
 #
 # 이 상태는 평문 HTTP 입니다. 로그인 비밀번호와 세션 쿠키가 사내망을 그대로
@@ -272,15 +279,63 @@ ExecStart=/opt/tybot/.venv/bin/uvicorn $app \\
 DROPIN
   systemctl daemon-reload
   systemctl is-active --quiet "$unit" && systemctl restart "$unit" || true
-  echo "  ⚠ nginx 가 $label 을 받지 않아 평문 바인딩(0.0.0.0:$port)을 유지합니다." >&2
+  echo "  ⚠ nginx 가 127.0.0.1:$port 로 넘기지 않아 평문 바인딩(0.0.0.0:$port)을 유지합니다." >&2
+  echo "    nginx 설정에서 proxy_pass 가 그 포트를 가리키는지 확인하세요." >&2
   echo "    B-35 가 끝나지 않은 상태입니다 — 비밀번호와 세션 쿠키가 평문으로 흐릅니다." >&2
   echo "    방화벽에서 $port 출발지를 필요한 대역으로 좁히세요. 끝내는 방법: $dropin" >&2
 }
 
+# systemd 밖에서 도는 콘솔을 **센다.**
+#
+# `systemctl restart` 는 자기가 만든 프로세스만 내린다. 손으로 띄운 것은 남고,
+# nginx 가 그쪽을 가리키고 있으면 **배포가 영원히 안 닿는다.**
+#
+# 2026-10-12 에 그랬다. 10월 7일에 손으로 띄운 uvicorn 이 8789 에 떠 있었고
+# nginx 가 그쪽으로 넘겼다. 배포는 매번 성공으로 끝났고 파일도 새것이었는데,
+# 사람이 보는 화면은 5일 된 코드였다. **아무 오류도 안 났다.**
+warn_about_consoles_outside_systemd() {
+  command -v pgrep >/dev/null 2>&1 || return 0
+  local main stray pid
+  main=$(systemctl show tybot-console -p MainPID --value 2>/dev/null || echo 0)
+  stray=""
+  for pid in $(pgrep -f "uvicorn .*tybot\.console\.app" 2>/dev/null); do
+    [[ "$pid" == "$main" ]] && continue
+    stray+=" $pid"
+  done
+  [[ -n "$stray" ]] || return 0
+  echo "  ⚠ systemd 밖에서 도는 콘솔이 있습니다:$stray" >&2
+  echo "    배포는 systemd 가 만든 프로세스만 내립니다. nginx 가 저쪽을 가리키면" >&2
+  echo "    이 배포는 화면에 **닿지 않습니다** — 그리고 오류가 나지 않습니다." >&2
+  for pid in $stray; do
+    ps -o pid,lstart,cmd -p "$pid" --no-headers 2>/dev/null | sed 's/^/      /' >&2
+  done
+}
+
+# 이미 다른 프로세스가 그 포트를 쥐고 있나. 쥐고 있으면 유닛이 못 뜬다.
+port_is_taken_by_another() {
+  local port="$1" unit="$2" main owner
+  command -v ss >/dev/null 2>&1 || return 1
+  main=$(systemctl show "$unit" -p MainPID --value 2>/dev/null || echo 0)
+  owner=$(ss -lptnH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+  [[ -n "$owner" && "$owner" != "$main" ]]
+}
+
 console_bind_guard() {
+  warn_about_consoles_outside_systemd
   console_bind_guard_for tybot-console tybot.console.app:app 8787 "TYBot 콘솔"
   # PF 콘솔은 설치돼 있을 때만. 없으면 조용히 넘어간다.
-  console_bind_guard_for pf-hermes-console tybot_pf.app:app 8788 "PF 콘솔"
+  #
+  # **2026-10-12 기준 PF 콘솔은 운영하지 않는다**(오너 확인). 유닛이 없으므로
+  # 아래는 돌지 않는다. 지우지 않고 두는 이유는 포트 때문이다 —
+  # 8788 은 그날 nginx 가 가져갔다(TYBot 콘솔 프록시). 나중에 누가 PF 콘솔을
+  # 되살리면 **둘 중 하나가 조용히 못 뜬다.** 그때 알리려고 남긴다.
+  if [[ -f /etc/systemd/system/pf-hermes-console.service ]] \
+     && port_is_taken_by_another 8788 pf-hermes-console; then
+    echo "  ⚠ PF 콘솔 포트 8788 을 이미 쓰고 있는 프로세스가 있습니다." >&2
+    echo "    PF 콘솔 포트를 바꾸거나 그 프로세스를 먼저 정리하세요." >&2
+  else
+    console_bind_guard_for pf-hermes-console tybot_pf.app:app 8788 "PF 콘솔"
+  fi
 }
 
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
@@ -459,6 +514,7 @@ install -o root -g root -m 0644 "$APP_DIR/deploy/hermes-bot-locks.conf" /etc/tmp
 # instance from the common installer. Instance accounts and secrets must be
 # prepared explicitly before activation.
 bash "$APP_DIR/subbots/hermes/deploy/install-rpc.sh"
+bash "$APP_DIR/subbots/hermes/deploy/install-rpc-shared.sh"
 if [[ "${WITH_CONSOLE:-0}" == "1" ]]; then
   visudo -cf "$APP_DIR/deploy/tybot-console-logs.sudoers" >/dev/null
   visudo -cf "$APP_DIR/deploy/tybot-console-timers.sudoers" >/dev/null

@@ -2840,10 +2840,42 @@ def decide_deploy_request(
     return {"requests": [_deploy_request_response(row) for row in rows]}
 
 
+#: 이 프로세스가 뜬 시각. 재시작 때마다 새로 잡힌다.
+_STARTED_AT = datetime.now(KST).isoformat(timespec="seconds")
+
+
+def _deployed_commit() -> str:
+    """이 프로세스가 돌리는 **배포 커밋**. 못 읽으면 빈 문자열.
+
+    빈 값을 「최신」 으로 읽으면 안 된다 — 모르는 것과 맞는 것은 다르다.
+    """
+    base = os.getenv("TYBOT_APP_DIR", "").strip() or "/opt/tybot"
+    try:
+        return (Path(base) / ".deployed-commit").read_text(encoding="utf-8").strip()[:7]
+    except OSError:
+        return ""
+
+
 @app.get("/api/health")
 def health_probe() -> dict:
-    """인증 없이 열어 두는 확인용 엔드포인트. 상태만 알려 주고 내용은 담지 않는다."""
-    return {"ok": True, "at": datetime.now(KST).isoformat(timespec="seconds")}
+    """인증 없이 열어 두는 확인용 엔드포인트. 상태만 알려 주고 내용은 담지 않는다.
+
+    **무엇이 응답하고 있는지**를 함께 말한다.
+
+    2026-10-12 에 nginx 가 손으로 띄운 5일 된 프로세스를 가리키고 있었다. 배포는
+    성공으로 끝났고 파일도 새것이었는데 화면은 옛 코드였다. 아무 오류도 안 났고,
+    찾는 데 서버에 들어가 `ps` 를 봐야 했다.
+
+    응답한 프로세스가 자기 커밋·기동 시각·PID 를 말하면 그 한 번이 필요 없다.
+    시크릿은 아니다 — 커밋 해시는 공개 저장소 좌표이고, PID 는 그 호스트 안의 값이다.
+    """
+    return {
+        "ok": True,
+        "at": datetime.now(KST).isoformat(timespec="seconds"),
+        "deployedCommit": _deployed_commit(),
+        "startedAt": _STARTED_AT,
+        "pid": os.getpid(),
+    }
 
 
 # ---------------------------------------------------------------------------
