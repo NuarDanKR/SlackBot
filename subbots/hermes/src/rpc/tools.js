@@ -44,7 +44,15 @@ export function buildRemoteTools({ client, allow, terms: T, trace, signal }) {
     if (signal?.aborted) return HALT_NOTE;
     const out = await client.call(tool, args);
     if (out.halted) return HALT_NOTE;
-    return out.text;
+    // evidence 는 전선 검증용 메타데이터인 동시에 모델이 최종 답에 붙여야 할
+    // opaque 인용 ID다. 본문만 넘기면 모델은 ID를 한 번도 보지 못해 모든 정상
+    // 답변이 no_evidence 로 폐기된다. 좌표·경로는 보이지 않고 발급 ID만 덧붙인다.
+    const citations = out.evidence
+      .map((item) => String(item?.id || '').trim())
+      .filter(Boolean)
+      .map((id) => `[${id}]`);
+    if (!citations.length) return out.text;
+    return `${out.text}\n\n이 결과에서 인용 가능한 근거: ${citations.join(' ')}`;
   }
 
   // 호출 기록은 **이름과 글자 수만** 남긴다. 인자에는 질문자가 쓴 낱말이 들어가고,

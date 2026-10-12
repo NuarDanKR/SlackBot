@@ -242,6 +242,25 @@ console.log(`\n자리: ${WIN ? 'named pipe (개발 PC)' : `unix socket (${tmp})`
 
 /* ── 1. 정상 ───────────────────────────────────────────────────────────── */
 console.log('[1/10] 정상 답변');
+await test('TYBot 이 발급한 근거 ID를 모델에게 보여 준다', async () => {
+  const [search] = buildRemoteTools({
+    client: {
+      async call() {
+        return {
+          text: '권한 안의 원문',
+          evidence: [{ id: 'e7', kind: 'channel_line' }, { id: 'e8', kind: 'document' }],
+          halted: false,
+        };
+      },
+    },
+    allow: ['search'], terms: TERMS, trace: [],
+  });
+  const rendered = await search.run({ query: '정산' });
+  assert.match(rendered, /권한 안의 원문/);
+  assert.match(rendered, /\[e7\] \[e8\]/);
+  assert.ok(!rendered.includes('channel_line'));
+});
+
 await test('도구를 돌고 인용한 근거만 담는다', async () => {
   const tools = await bootTools({
     token: 'tok-1', requestId: 'r-1',
