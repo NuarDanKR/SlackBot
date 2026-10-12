@@ -2775,3 +2775,41 @@ def test_an_unknown_build_is_not_reported_as_fine(client, tmp_path, monkeypatch)
     body = client.get("/api/health").json()
 
     assert body["deployedCommit"] == ""
+
+
+# --- 거절 사유를 말한다 (WC-02 후속, 2026-10-12) ------------------------------
+#
+# nginx 를 앞에 두자 모든 쓰기가 403 이 됐다. 메시지는 「허용되지 않은 화면에서
+# 보낸 변경 요청입니다」 뿐이었고, 그걸로는 무엇을 어디에 넣어야 하는지 알 수 없다.
+#
+# 실제로 두 번 헤맸다 — nginx 가 Host 에서 포트를 떼는 것(`$host`)과,
+# CONSOLE_ALLOWED_ORIGINS 에 콜론을 하나 더 친 오타(`::8788`). 둘 다 **받은
+# Origin 과 기대한 값을 보여 줬으면** 그 자리에서 끝났다.
+
+
+def test_a_rejected_origin_says_what_it_saw_and_what_to_set(client):
+    """거절은 하되 **고칠 방법**을 같이 준다."""
+    body = client.put(
+        "/api/workspaces/tec",
+        json={"label": "프로젝트금융"},
+        headers={**owner(client), "Origin": "http://218.234.43.115:8788",
+                 "X-TYBot-CSRF": "1"},
+    ).json()
+    detail = body["detail"]
+
+    assert "http://218.234.43.115:8788" in detail, "받은 Origin 을 안 알려 줍니다"
+    assert "CONSOLE_ALLOWED_ORIGINS" in detail, "어디에 넣어야 하는지 안 알려 줍니다"
+
+
+def test_a_missing_origin_is_told_apart_from_a_wrong_one(client):
+    """Origin 이 **없는 것**과 **다른 것**은 고치는 방법이 다르다."""
+    body = client.put(
+        "/api/workspaces/tec",
+        json={"label": "프로젝트금융"},
+        headers={**owner(client), "X-TYBot-CSRF": "1"},
+    ).json()
+
+    assert "Origin" in body["detail"]
+    assert "CONSOLE_ALLOWED_ORIGINS" not in body["detail"], (
+        "Origin 이 없는 것은 허용 목록 문제가 아닙니다"
+    )

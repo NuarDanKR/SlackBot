@@ -706,3 +706,35 @@ def test_the_pf_console_does_not_claim_a_port_nginx_may_hold():
     # 아무도 설명하지 못한다 — 이 저장소가 반복해서 데인 모양이다.
     assert "포트 8788 을 이미 쓰고 있는" in before_pf
     assert ">&2" in before_pf
+
+
+def test_the_console_unit_trusts_only_the_local_proxy():
+    """nginx 뒤에서 `request.url.scheme` 이 맞아야 한다.
+
+    지금은 둘 다 http 라 안 드러나지만, TLS(WC-04)를 붙이면 브라우저는 https 로
+    오고 uvicorn 은 http 로 본다. 그러면 CSRF 검사의 `same_origin` 이 또 어긋나
+    **모든 쓰기가 403** 이 된다 — 2026-10-12 와 같은 모양으로.
+
+    `--forwarded-allow-ips` 를 넓히지 않는다. 아무나 보낸 `X-Forwarded-Proto` 를
+    믿으면 그 헤더로 검사를 우회할 수 있다.
+    """
+    unit = (ROOT / "deploy" / "tybot-console.service").read_text(encoding="utf-8")
+
+    assert "--proxy-headers" in unit
+    assert "--forwarded-allow-ips=127.0.0.1" in unit
+    assert "--forwarded-allow-ips=*" not in unit
+
+
+def test_the_plaintext_dropin_keeps_the_proxy_options():
+    """drop-in 은 ExecStart 를 **통째로 바꾼다.**
+
+    유닛에만 `--proxy-headers` 를 넣으면, drop-in 이 걸린 서버에서는 그 옵션이
+    조용히 사라진다. 그런 서버가 나중에 nginx 를 붙이면 또 403 이 난다.
+    """
+    source = _install_sh()
+    start = source.index('cat > "$dropin" <<DROPIN')
+    block = source[start:source.index("\nDROPIN\n", start)]
+
+    assert "ExecStart=" in block, "drop-in 블록을 잘못 잘랐습니다"
+    assert "--proxy-headers" in block
+    assert "--forwarded-allow-ips=127.0.0.1" in block

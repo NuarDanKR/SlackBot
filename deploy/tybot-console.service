@@ -32,8 +32,17 @@ EnvironmentFile=/etc/tybot/tybot.env
 #
 # 4번을 먼저 하면 브라우저가 쿠키를 보내지 않아 로그인이 안 되고, 화면에는
 # 「비밀번호가 틀렸다」 처럼 보인다.
+# `--proxy-headers` 는 nginx 가 넘긴 X-Forwarded-Proto 를 읽게 한다.
+#
+# 없으면 TLS 를 붙였을 때 브라우저는 https 로 오는데 uvicorn 은 http 로 보고,
+# CSRF 검사의 same_origin 이 어긋나 **모든 쓰기가 403** 이 된다. 2026-10-12 에
+# nginx 를 앞에 두자 같은 모양으로 한 번 터졌다(그때는 Host 의 포트 때문).
+#
+# `--forwarded-allow-ips` 를 넓히지 않는다. 아무나 보낸 X-Forwarded-Proto 를
+# 믿으면 그 헤더 하나로 검사를 우회할 수 있다. 프록시는 같은 호스트에만 있다.
 ExecStart=/opt/tybot/.venv/bin/uvicorn tybot.console.app:app \
-    --host 127.0.0.1 --port 8787 --app-dir /opt/tybot/src
+    --host 127.0.0.1 --port 8787 --app-dir /opt/tybot/src \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
 
 Restart=on-failure
 RestartSec=5s

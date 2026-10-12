@@ -1874,8 +1874,31 @@ def _check_write_request(request: Request) -> None:
         for value in (os.getenv("CONSOLE_ALLOWED_ORIGINS") or "").split(",")
         if value.strip()
     }
-    if not origin or (origin != same_origin and origin not in allowed):
-        raise HTTPException(status_code=403, detail="허용되지 않은 화면에서 보낸 변경 요청입니다.")
+    # **거절 사유를 말한다.** 전에는 「허용되지 않은 화면」 한 줄이었고, 그걸로는
+    # 무엇을 어디에 넣어야 하는지 알 수 없었다.
+    #
+    # 2026-10-12 에 nginx 를 앞에 두자 모든 쓰기가 403 이 됐다. 두 번 헤맸다 —
+    # nginx 가 `$host` 로 **포트를 떼는 것**, 그리고 CONSOLE_ALLOWED_ORIGINS 에
+    # 콜론을 하나 더 친 오타(`::8788`). 받은 값과 기대한 값을 보여 줬으면 그
+    # 자리에서 끝났을 일이다.
+    #
+    # Origin 은 **그 클라이언트가 보낸 자기 값**이라 돌려줘도 새는 것이 없다.
+    # 허용 목록의 내용은 돌려주지 않는다 — 내부 호스트 이름이 드러난다.
+    if not origin:
+        raise HTTPException(
+            status_code=403,
+            detail="변경 요청에 Origin 헤더가 없습니다. 브라우저에서 보낸 요청이 맞는지 확인하세요.",
+        )
+    if origin != same_origin and origin not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"허용되지 않은 화면에서 보낸 변경 요청입니다. 받은 Origin: {origin} · "
+                f"이 서버가 기대한 값: {same_origin}. 리버스 프록시를 앞에 두었다면 "
+                "nginx 가 `proxy_set_header Host $http_host` 로 포트까지 넘기게 하거나, "
+                "CONSOLE_ALLOWED_ORIGINS 에 그 주소를 더하세요."
+            ),
+        )
 
 
 @app.get("/api/env-settings")

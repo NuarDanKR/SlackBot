@@ -275,7 +275,8 @@ console_bind_guard_for() {
 [Service]
 ExecStart=
 ExecStart=/opt/tybot/.venv/bin/uvicorn $app \\
-    --host 0.0.0.0 --port $port --app-dir /opt/tybot/src
+    --host 0.0.0.0 --port $port --app-dir /opt/tybot/src \\
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
 DROPIN
   systemctl daemon-reload
   systemctl is-active --quiet "$unit" && systemctl restart "$unit" || true
