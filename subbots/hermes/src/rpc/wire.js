@@ -299,13 +299,28 @@ export function buildAnswerResponse({
   return raw;
 }
 
-/** `/v1/health` 응답. **모델을 부르지 않는다** — 저쪽은 2초를 준다. */
-export function buildHealthResponse({ version }) {
-  return Buffer.from(JSON.stringify({
+/**
+ * `/v1/health` 응답. **모델을 부르지 않는다** — 저쪽은 2초를 준다.
+ *
+ * `workspaces` 는 공유 worker 전용이고 **선택**이다. 저쪽 `validate_health` 는
+ * `status`·`contract_version`·`version` 셋만 보므로 모르는 키는 그냥 지나간다 —
+ * 그래서 계약을 안 흔들고 「전체 ok 인데 한 칸이 죽음」 을 말할 수 있다.
+ *
+ * **담는 것은 workspace key 와 준비 여부뿐이다.** 경로·키 파일 이름·사유 문구를
+ * 실으면 그 값이 저쪽 로그와 콘솔로 흘러 들어간다.
+ */
+export function buildHealthResponse({ version, workspaces }) {
+  const payload = {
     status: 'ok',
     contract_version: CONTRACT_VERSION,
     version: String(version ?? ''),
-  }), 'utf8');
+  };
+  if (workspaces && typeof workspaces === 'object') {
+    payload.workspaces = Object.fromEntries(
+      Object.entries(workspaces).map(([ws, ready]) => [String(ws), ready === true]),
+    );
+  }
+  return Buffer.from(JSON.stringify(payload), 'utf8');
 }
 
 /* ── 도구 호출 (Hermes → TYBot) ────────────────────────────────────────── */

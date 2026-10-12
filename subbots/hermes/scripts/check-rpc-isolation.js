@@ -35,7 +35,12 @@ import * as wire from '../src/rpc/wire.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
-const ENTRY = path.join(HERE, 'run-rpc-worker.js');
+/* **두 진입점을 같이 건다.** 공유 worker 가 생긴 뒤에도 개별 worker 만 재면,
+ * 공유 쪽에 Slack 한 줄이 들어가도 아무것도 안 빨개진다. */
+const ENTRIES = [
+  path.join(HERE, 'run-rpc-worker.js'),
+  path.join(HERE, 'run-rpc-shared.js'),
+];
 
 let failed = 0;
 const lines = [];
@@ -91,7 +96,10 @@ function walk(entry) {
   return seen;
 }
 
-const graph = walk(ENTRY);
+const graph = new Map();
+for (const entry of ENTRIES) {
+  for (const [file, external] of walk(entry)) graph.set(file, external);
+}
 const rel = (f) => path.relative(ROOT, f).replace(/\\/g, '/');
 
 console.log(`\n[1/3] worker 가 닿는 파일 ${graph.size}개`);

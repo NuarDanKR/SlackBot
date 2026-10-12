@@ -18,6 +18,7 @@ Node 쪽 거울이 Python 원본과 같은지는 `check-rpc-wire.js` 가 Python 
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -44,6 +45,7 @@ CHECKS = (
     ("check-rpc-server.js", "worker 왕복 — 근거·서명·재생·상한·health·취소"),
     ("check-rpc-isolation.js", "경계 — Slack·아카이브 미접근과 요청 간 토큰 격리"),
     ("check-rpc-unit.js", "배치 — 소켓 그룹·enable 가능·설치 helper 멱등"),
+    ("check-rpc-shared.js", "공유 — 명부·workspace 선택·교차 인용·취소·429·health"),
 )
 
 
@@ -59,8 +61,31 @@ def _run(script: str) -> subprocess.CompletedProcess:
         check=False,
         # 이 검사들은 모델도 Slack 도 안 부른다. 키가 환경에 있어도 **쓰지 않는다**는
         # 것을 여기서 못박는다 — 빈 값으로 넘겨 두면 실수로 붙는 날 바로 터진다.
-        env={"PATH": __import__("os").environ.get("PATH", ""), "PYTHON": sys.executable},
+        #
+        # 넘기는 것은 **비밀이 아닌 것뿐**이다. 임시 디렉터리 변수(Windows 의
+        # TEMP/TMP, POSIX 의 TMPDIR)를 빼면 `os.tmpdir()` 가 `undefined` 를 내놓고,
+        # 검사는 자기 fixture 도 못 만든 채 죽는다 — 그건 「계약이 깨졌다」 가 아니라
+        # 「검사를 못 돌렸다」 인데 둘이 같은 모양으로 보인다.
+        env=_clean_env(),
     )
+
+
+def _clean_env() -> dict[str, str]:
+    """검사에 줄 환경. **API 키·토큰은 한 개도 안 넘긴다.**"""
+    import os
+
+    keep = (
+        "PATH", "TEMP", "TMP", "TMPDIR", "HOME",
+        # Windows 가 경로를 푸는 데 쓰는 것들. 빼면 Node 와 그 자식이 `%SystemDrive%`
+        # 같은 **안 풀린 문자열을 디렉터리 이름으로** 쓰고, 그 디렉터리가 저장소
+        # 작업 트리에 생긴다(2026-10-12 실제로 그랬다 — `subbots/hermes/%SystemDrive%/`).
+        # 비밀이 아니다.
+        "SystemRoot", "SystemDrive", "windir",
+        "ProgramData", "ALLUSERSPROFILE", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
+    )
+    env = {name: os.environ[name] for name in keep if name in os.environ}
+    env["PYTHON"] = sys.executable
+    return env
 
 
 @needs_node
@@ -146,6 +171,44 @@ def test_rpc_unit_uses_a_systemd_239_compatible_secret_file():
     assert not any(line.startswith("LoadCredential=") for line in live)
     assert "Environment=HERMES_RPC_HMAC_FILE=/etc/hermes-rpc-%i/hmac" in live
     assert "ReadOnlyPaths=/opt/tybot/subbots/hermes /etc/hermes-rpc-%i" in live
+
+
+def test_shared_worker_keeps_the_individual_one() -> None:
+    """공유 worker 가 개별 worker 를 **대체하지 않는다**(2026-10-12 인계).
+
+    OS 수준 격리가 필요한 workspace 는 개별 worker 를 계속 쓴다. 공유 쪽을 만들면서
+    개별 unit·entrypoint 를 건드리면 그 선택지가 사라지는데, 사라진 것은 쓰려고
+    할 때야 안다.
+    """
+    deploy = HERMES / "deploy"
+    assert (deploy / "hermes-rpc@.service").is_file(), "개별 unit 이 사라졌다"
+    assert (deploy / "hermes-rpc-shared.service").is_file(), "공유 unit 이 없다"
+    assert (SCRIPTS / "run-rpc-worker.js").is_file(), "개별 entrypoint 가 사라졌다"
+    assert (SCRIPTS / "run-rpc-shared.js").is_file(), "공유 entrypoint 가 없다"
+    # helper 도 따로다 — 한 스크립트에 섞으면 「공유를 깔려다 개별 설정을 덮었다」 가 생긴다.
+    assert (deploy / "install-rpc.sh").is_file()
+    assert (deploy / "install-rpc-shared.sh").is_file()
+
+    scripts = json.loads((HERMES / "package.json").read_text(encoding="utf-8"))["scripts"]
+    assert scripts["rpc"] == "node scripts/run-rpc-worker.js"
+    assert scripts["rpc:shared"] == "node scripts/run-rpc-shared.js"
+
+
+def test_shared_worker_takes_its_allowlist_from_the_server() -> None:
+    """허용 목록이 **서버 설정**에 있다(인계 §6).
+
+    요청 본문이 domain·모델·키 파일을 고르면, 요청 하나로 남의 키를 쓰게 할 수 있고
+    그 요청은 실제로 답을 받아 가므로 아무 경보도 안 울린다.
+    """
+    profiles = (HERMES / "src" / "rpc" / "profiles.js").read_text(encoding="utf-8")
+    # 전역 fallback 키가 없다 — 있으면 미등록 workspace 가 그냥 돈다.
+    assert "ANTHROPIC_API_KEY" not in profiles
+    assert "wildcard" in profiles
+    shared_cfg = (HERMES / "src" / "rpc" / "config.js").read_text(encoding="utf-8")
+    # 공유 설정은 workspace·domain·모델 키를 env 에서 안 읽는다.
+    shared_block = shared_cfg.split("loadSharedRpcConfig", 1)[1]
+    for forbidden in ("HERMES_RPC_WORKSPACE", "HERMES_DOMAIN", "ANTHROPIC_API_KEY"):
+        assert forbidden not in shared_block, f"공유 설정이 {forbidden} 를 읽는다"
 
 
 def test_installer_prepares_nothing_it_cannot_verify() -> None:

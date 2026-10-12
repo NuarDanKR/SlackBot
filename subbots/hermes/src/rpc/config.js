@@ -131,3 +131,81 @@ export function loadRpcConfig(env = process.env) {
     version: String(env.HERMES_RPC_VERSION || '').trim() || 'unversioned',
   });
 }
+
+/* ── 공유 worker (2026-10-12) ──────────────────────────────────────────────
+ *
+ * 한 프로세스가 여러 workspace 요청을 받는다. 바뀌는 것은 **누가 어떤 설정으로
+ * 답하는가**뿐이고, 소켓·서명·재생·요청 격리 규칙은 개별 worker 와 같다.
+ *
+ * ## 신뢰 경계가 넓어진다 — 숨기지 않는다
+ *
+ * 한 프로세스가 여러 workspace 의 API 키를 들고 있다. 그 프로세스가 새면 **전부**
+ * 샌다. 장애도 같다 — 재시작 한 번이 공유 대상 전체를 끊는다. OS 수준 격리가
+ * 필요한 workspace 는 기존 개별 worker(`hermes-rpc@<ws>.service`)를 쓴다.
+ *
+ * 그래서 설정 쪽에서 할 수 있는 일은 둘이다. ① 허용 목록을 **서버가** 쥔다,
+ * ② 전역 fallback 키를 두지 않는다. 둘 다 `profiles.js` 가 강제한다.
+ */
+
+/** 공유 받기 소켓. **고정값이다** — 설정에서 받으면 그 값이 곧 임의 자리 listen 권한이다. */
+export const SHARED_SOCKET_PATH = '/run/tybot-subbots/hermes-shared/http.sock';
+
+/** 공유 worker 의 기본 동시 상한. env 로 올리고 내릴 수 있다. */
+export const DEFAULT_MAX_CONCURRENT = 4;
+export const DEFAULT_MAX_PER_WORKSPACE = 2;
+
+function positiveInt(env, name, fallback) {
+  const raw = env[name];
+  if (raw === undefined || String(raw).trim() === '') return fallback;
+  const value = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(value) || value < 1) {
+    throw new RpcConfigError(`${name} 은 1 이상 정수여야 합니다: ${raw}`);
+  }
+  return value;
+}
+
+/**
+ * 공유 worker 설정.
+ *
+ * 개별 worker 의 `loadRpcConfig` 와 **가르는 지점**이 둘이다.
+ *   - `HERMES_RPC_WORKSPACE` 와 `HERMES_DOMAIN` 을 **안 읽는다.** 그건 workspace 마다
+ *     다르고 명부(`profiles.json`)가 쥔다. 여기서 읽으면 공유 프로세스 전체가 한
+ *     workspace 의 말투로 답하게 된다
+ *   - 모델 키도 안 읽는다. `ANTHROPIC_API_KEY` 가 환경에 있어도 **쓰지 않는다** —
+ *     쓰면 그게 곧 전역 fallback 키이고, 미등록 workspace 가 그냥 돈다
+ */
+export function loadSharedRpcConfig(env = process.env) {
+  const profilesFile = String(env.HERMES_RPC_PROFILES_FILE || '').trim();
+  if (!profilesFile) {
+    throw new RpcConfigError(
+      'HERMES_RPC_PROFILES_FILE 이 없습니다.\n'
+      + '  공유 worker 는 받을 workspace 와 각자의 domain·키 파일을 이 명부에서 읽습니다.\n'
+      + '  예: /etc/hermes-rpc-shared/profiles.json',
+    );
+  }
+
+  const max = positiveInt(env, 'HERMES_RPC_MAX_CONCURRENT', DEFAULT_MAX_CONCURRENT);
+  const maxPerWorkspace = positiveInt(env, 'HERMES_RPC_MAX_PER_WORKSPACE', DEFAULT_MAX_PER_WORKSPACE);
+  if (maxPerWorkspace > max) {
+    throw new RpcConfigError(
+      `HERMES_RPC_MAX_PER_WORKSPACE(${maxPerWorkspace}) 가 HERMES_RPC_MAX_CONCURRENT(${max}) 보다 큽니다.\n`
+      + '  워크스페이스 상한이 전체보다 크면 그 상한은 아무 일도 안 합니다 —'
+      + ' 있다고 믿는 상한만큼 나쁜 것은 없습니다.',
+    );
+  }
+
+  return Object.freeze({
+    /** 공유 인스턴스의 이름. **workspace 가 아니다** — 소켓 자리를 가르는 값이다. */
+    instance: 'shared',
+    socketPath: SHARED_SOCKET_PATH,
+    profilesFile,
+    // Rocky 8/systemd 239 에서는 `LoadCredential` 없이 파일 경로로 받는다(인계 §5).
+    // `CREDENTIALS_DIRECTORY` 도 그대로 받는다 — 나중에 쓰게 되면 그쪽이 이긴다.
+    secret: readSecret({
+      credentialsDir: env.CREDENTIALS_DIRECTORY,
+      file: env.HERMES_RPC_HMAC_FILE,
+    }),
+    limits: Object.freeze({ max, maxPerWorkspace }),
+    version: String(env.HERMES_RPC_VERSION || '').trim() || 'unversioned',
+  });
+}

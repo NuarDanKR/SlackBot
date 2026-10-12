@@ -31,6 +31,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const UNIT = path.join(ROOT, 'deploy', 'hermes-rpc@.service');
 const INSTALLER = path.join(ROOT, 'deploy', 'install-rpc.sh');
+const SHARED_UNIT = path.join(ROOT, 'deploy', 'hermes-rpc-shared.service');
+const SHARED_INSTALLER = path.join(ROOT, 'deploy', 'install-rpc-shared.sh');
 const SHARED_GROUP = 'tybot-specialist-rpc';
 
 let failed = 0;
@@ -103,7 +105,7 @@ await test('worker가 TYBot 도구 소켓 그룹에 런타임 디렉터리를 �
   assert.match(runner, /alignSocketDirectoryGroup\(cfg\.socketPath, TOOL_SOCKET_PATH\)/);
 });
 
-console.log('[2/4] 실제 그룹 상속 (리눅스에서만)');
+console.log('[2/5] 실제 그룹 상속 (리눅스에서만)');
 
 await test('소켓을 디렉터리의 공유 그룹으로 명시 정렬한다', async () => {
   if (process.platform === 'win32') {
@@ -165,7 +167,7 @@ await test('그룹이 어긋나면 기동을 막는다', async () => {
   assert.equal(touched, false, '이미 맞는데 chown 을 불렀습니다');
 });
 
-console.log('[3/4] enable 할 수 있는가');
+console.log('[3/5] enable 할 수 있는가');
 
 await test('[Install] 이 있다', () => {
   assert.ok(unit.includes('[Install]'),
@@ -188,7 +190,7 @@ await test('그래도 기본은 꺼져 있다', () => {
   assert.ok(/systemctl enable/.test(run.join('\n')), '켜는 명령을 안내하지 않습니다');
 });
 
-console.log('[4/4] 설치 helper');
+console.log('[4/5] 설치 helper');
 
 const sh = fs.readFileSync(INSTALLER, 'utf8');
 const shCode = sh.split(/\r?\n/).filter((l) => !l.trim().startsWith('#')).join('\n');
@@ -229,6 +231,98 @@ await test('실행 권한 비트가 서 있다', () => {
     return;
   }
   assert.ok(fs.statSync(INSTALLER).mode & 0o111, 'install-rpc.sh 에 실행 비트가 없습니다');
+});
+
+console.log('[5/5] 공유 worker 의 배치 계약');
+
+const shared = directives(fs.readFileSync(SHARED_UNIT, 'utf8'));
+const sharedHas = (re) => shared.some((l) => re.test(l));
+const sharedShell = fs.readFileSync(SHARED_INSTALLER, 'utf8');
+const sharedRuns = sharedShell.split(/\r?\n/)
+  .map((l) => l.trim())
+  .filter((l) => l && !l.startsWith('#'));
+
+await test('공유 unit 은 템플릿이 아니다 — %i 가 없다', () => {
+  const templated = shared.filter((l) => l.includes('%i'));
+  assert.deepEqual(templated, [], `공유 unit 에 인스턴스 지시어가 있습니다: ${templated.join(' / ')}`);
+  assert.ok(sharedHas(/^RuntimeDirectory=tybot-subbots\/hermes-shared$/),
+    'RuntimeDirectory 가 hermes-shared 가 아닙니다');
+});
+
+await test('개별 unit 은 그대로다 — 공유가 대체하지 않는다', () => {
+  // OS 수준 격리가 필요한 workspace 는 개별 worker 를 계속 쓴다(인계 §소유 범위).
+  assert.ok(has(/^ExecStart=\/usr\/bin\/node scripts\/run-rpc-worker\.js$/),
+    '개별 unit 의 ExecStart 가 바뀌었습니다');
+  assert.ok(sharedHas(/^ExecStart=\/usr\/bin\/node scripts\/run-rpc-shared\.js$/),
+    '공유 unit 이 공유 entrypoint 를 안 부릅니다');
+});
+
+await test('공유 계정·그룹과 보조 그룹 하나', () => {
+  assert.ok(sharedHas(/^User=hermes-rpc-shared$/));
+  assert.ok(sharedHas(/^Group=hermes-rpc-shared$/));
+  assert.deepEqual(
+    shared.filter((l) => l.startsWith('SupplementaryGroups=')),
+    [`SupplementaryGroups=${SHARED_GROUP}`],
+  );
+});
+
+await test('비밀·명부를 **경로로만** 받는다', () => {
+  assert.ok(sharedHas(/^Environment=HERMES_RPC_HMAC_FILE=\/etc\/hermes-rpc-shared\/hmac$/),
+    'HMAC 파일 경로가 고정돼 있지 않습니다');
+  assert.ok(sharedHas(/^Environment=HERMES_RPC_PROFILES_FILE=\/etc\/hermes-rpc-shared\/profiles\.json$/),
+    '명부 경로가 고정돼 있지 않습니다');
+  // **값**을 환경변수로 받는 자리가 없어야 한다 — `systemctl show` 에 그대로 보인다.
+  const valued = shared.filter((l) => /^Environment=(HERMES_RPC_HMAC|ANTHROPIC_API_KEY)=/.test(l));
+  assert.deepEqual(valued, [], `비밀 값을 환경변수로 받습니다: ${valued.join(' / ')}`);
+});
+
+await test('모드를 unit 이 고정하고 workspace·domain 은 안 박는다', () => {
+  assert.ok(sharedHas(/^Environment=HERMES_MODE=tybot$/), 'HERMES_MODE 가 고정돼 있지 않습니다');
+  // 박으면 그 한 workspace 의 말투로 전부 답한다 — 사내 사람에게 「사업장」 이라고 말한다.
+  const pinned = shared.filter((l) => /^Environment=HERMES_(RPC_WORKSPACE|DOMAIN)=/.test(l));
+  assert.deepEqual(pinned, [], `공유 unit 에 workspace·domain 이 박혀 있습니다: ${pinned.join(' / ')}`);
+});
+
+await test('개별 worker 의 비밀 저장소와 자료 저장소를 못 읽는다', () => {
+  const blocked = shared.filter((l) => l.startsWith('InaccessiblePaths=')).join(' ');
+  assert.ok(blocked.includes('/var/lib/tybot/specialist-secrets'),
+    '개별 worker 비밀 저장소가 안 막혀 있습니다 — 공유를 안 쓰기로 한 workspace 의 격리가 무너집니다');
+  assert.ok(blocked.includes('/var/lib/tybot/archive'), '자료 저장소가 안 막혀 있습니다');
+});
+
+await test('공유 unit 도 enable 할 수 있고 helper 는 안 켠다', () => {
+  assert.ok(shared.includes('[Install]'), '[Install] 이 없으면 systemctl enable 이 실패합니다');
+  assert.ok(sharedHas(/^WantedBy=multi-user\.target$/));
+  const executes = sharedRuns.filter((l) => /^(sudo\s+)?systemctl\s+(enable|start|restart)\b/.test(l));
+  assert.deepEqual(executes, [], `공유 helper 가 켭니다: ${executes.join(' / ')}`);
+  assert.ok(/systemctl enable/.test(sharedShell), '켜는 명령을 안내하지 않습니다');
+});
+
+await test('공유 helper 가 계정·비밀·명부를 만들거나 복제하지 않는다', () => {
+  const made = sharedRuns.filter((l) => /^(sudo\s+)?(useradd|groupadd|usermod|openssl)\b/.test(l));
+  assert.deepEqual(made, [], `공유 helper 가 준비물을 만듭니다: ${made.join(' / ')}`);
+  // 개별 worker 설정·비밀을 복제하지 않는다(인계 §4).
+  assert.ok(!sharedRuns.some((l) => /^(sudo\s+)?(cp|install)\b.*specialist-secrets/.test(l)),
+    '개별 worker 비밀을 복제합니다');
+  assert.match(sharedShell, /install -o root -g root -m 0644/, '0644 로 설치하지 않습니다');
+  assert.match(sharedShell, /cmp -s/, '멱등하지 않습니다');
+  assert.match(sharedShell, /useradd/, '모자란 것을 안내하지 않습니다');
+  // 비밀을 길이로만 본다.
+  assert.ok(/wc -c/.test(sharedShell), '비밀을 길이로만 보지 않습니다');
+});
+
+await test('공유 entrypoint 도 디렉터리 그룹을 TYBot 소켓에 맞춘다', () => {
+  const runner = fs.readFileSync(path.join(ROOT, 'scripts', 'run-rpc-shared.js'), 'utf8');
+  assert.match(runner, /alignSocketDirectoryGroup\(cfg\.socketPath, TOOL_SOCKET_PATH\)/,
+    '공유 worker 가 런타임 디렉터리 그룹을 안 맞춥니다');
+});
+
+await test('공유 helper 에 실행 비트가 서 있다', () => {
+  if (process.platform === 'win32') {
+    notes.push('공유 helper 실행 비트: Windows 에서 **못 쟀다**');
+    return;
+  }
+  assert.ok(fs.statSync(SHARED_INSTALLER).mode & 0o111, 'install-rpc-shared.sh 에 실행 비트가 없습니다');
 });
 
 console.log(`\n${lines.join('\n')}`);

@@ -462,3 +462,148 @@ PY
 | 전부 401 | HMAC 비밀이 양쪽에서 다르다 |
 | 400 만 돌아옴 | 요청 `workspace` 와 `HERMES_RPC_WORKSPACE` 가 다르다 |
 | `도메인 프로필이 올바르지 않습니다` | `rpc.env` 에 `HERMES_DOMAIN` 이 없다 |
+
+---
+
+## 공유 RPC worker — 2026-10-12
+
+여러 workspace 가 **한 프로세스**를 쓴다. 개별 worker(`hermes-rpc@<ws>.service`)는
+그대로 있고, 이 unit 이 그것을 대체하지 않는다 — **OS 수준 격리가 필요한 workspace 는
+개별 worker 를 계속 쓴다.**
+
+인계: [`2026-10-12-hermes-shared-rpc-handoff.md`](../../../docs/verification/2026-10-12-hermes-shared-rpc-handoff.md)
+회신: [`2026-10-12-hermes-shared-rpc-handback.md`](../../../docs/verification/2026-10-12-hermes-shared-rpc-handback.md)
+
+> **신뢰 경계가 넓어진다.** 한 프로세스가 여러 workspace 의 API 키를 든다. 그 프로세스가
+> 새면 전부 샌다. 재시작 한 번이 공유 대상 전체를 끊는다. **TYIT 를 먼저 공유 경로로
+> 보내고 확인한 뒤 넓힌다.**
+
+### 설치
+
+```bash
+sudo bash subbots/hermes/deploy/install-rpc-shared.sh
+```
+
+unit 을 `/etc/systemd/system/hermes-rpc-shared.service` 로 깔고 `daemon-reload` 한다.
+**멱등**이고, enable 도 start 도 하지 않는다. 모자란 준비물을 점검해 칠 명령을 적어 준다.
+
+### 사람이 먼저 해야 하는 것
+
+```bash
+sudo groupadd --system tybot-specialist-rpc           # 이미 있으면 건너뛴다
+sudo useradd --system --home-dir /nonexistent --shell /sbin/nologin \
+             --groups tybot-specialist-rpc hermes-rpc-shared
+
+sudo install -d -o root -g hermes-rpc-shared -m 0750 /etc/hermes-rpc-shared
+sudo install -d -o root -g hermes-rpc-shared -m 0750 /etc/hermes-rpc-shared/keys
+```
+
+**HMAC — 공유 전용으로 새로 만든다.** 개별 worker 의 비밀을 복사하지 않는다.
+TYBot 쪽 `$TYBOT_SPECIALIST_V3_HMAC_DIR/hermes-shared.hmac` 과 **같은 값**이어야 한다.
+
+```bash
+sudo install -o root -g hermes-rpc-shared -m 0640 /dev/null /etc/hermes-rpc-shared/hmac
+# 양쪽에 같은 값을 넣는다. 한쪽만 새로 만들면 전부 401 이고,
+# 증상은 「전문가가 조용히 답을 안 함」 이라 소켓 권한 문제와 구별되지 않는다.
+```
+
+`rpc.env` — **비밀을 여기 두지 않는다.**
+
+```bash
+sudo install -o root -g hermes-rpc-shared -m 0640 /dev/null /etc/hermes-rpc-shared/rpc.env
+#   HERMES_RPC_MAX_CONCURRENT=4
+#   HERMES_RPC_MAX_PER_WORKSPACE=2
+#   HERMES_RPC_VERSION=$(git rev-parse --short HEAD)
+```
+
+### 명부 (`/etc/hermes-rpc-shared/profiles.json`)
+
+받을 workspace 와 각자의 말투·모델·키를 **서버가** 정한다. 요청 본문은 고르지 못한다.
+
+```json
+{
+  "tyit": {
+    "domain": "pf-construction",
+    "api_key_file": "/etc/hermes-rpc-shared/keys/tyit"
+  },
+  "mgmt": {
+    "domain": "enterprise",
+    "api_key_file": "/etc/hermes-rpc-shared/keys/mgmt",
+    "model": "claude-opus-5-5",
+    "effort": "high"
+  }
+}
+```
+
+| 규칙 | 왜 |
+|---|---|
+| 키 **값**을 안 적는다. 파일 경로만 | 이 파일은 사람이 열어 보고 화면에 띄우는 파일이다 |
+| `*` wildcard 없음 | 미등록 workspace 가 그냥 돈다 |
+| 전역 fallback 키 없음 | 비용이 엉뚱한 데 찍히고, 몇 달 뒤에 안다 |
+| 모르는 필드는 거절 | 오타가 설정처럼 보인다 |
+| `domain` 은 필수 | 기본값을 두면 사내 사람에게 「사업장」 이라고 말한다 |
+
+같은 키 파일을 여러 profile 이 가리켜도 된다. **명시해야** 할 뿐이다.
+
+```bash
+sudo install -o root -g hermes-rpc-shared -m 0640 /dev/null /etc/hermes-rpc-shared/keys/tyit
+sudo chmod 0640 /etc/hermes-rpc-shared/profiles.json
+```
+
+### 켜기
+
+```bash
+sudo systemctl enable --now hermes-rpc-shared
+```
+
+### 확인
+
+```bash
+stat -c '%n %U:%G %a' /run/tybot-subbots/hermes-shared \
+                      /run/tybot-subbots/hermes-shared/http.sock
+#   디렉터리 hermes-rpc-shared:tybot-specialist-rpc 750
+#   소켓     hermes-rpc-shared:tybot-specialist-rpc 660
+
+sudo -u tybot test -w /run/tybot-subbots/hermes-shared/http.sock && echo "TYBot 닿는다"
+```
+
+health 는 **전체와 workspace 별을 가른다.** 한 workspace 의 키 파일이 망가져도 전체는
+`ok` 이고 그 칸만 `false` 다 — 멀쩡한 쪽까지 라우팅이 닫히면 안 된다.
+
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python - <<'PY'
+import json
+from tybot.specialist_http import UnixSocketTransport, wire
+from tybot import specialist_wire as signing
+secret = open('/etc/hermes-rpc-shared/hmac','rb').read().rstrip(b'\n')
+body = b'{}'
+t = UnixSocketTransport('/run/tybot-subbots/hermes-shared/http.sock')
+r = t.post(wire.HEALTH_PATH, body,
+           signing.signature_headers(secret, method='POST', path=wire.HEALTH_PATH, body=body),
+           timeout_s=2.0)
+print(json.loads(r.body))
+PY
+#   {'status': 'ok', 'contract_version': 'v2', 'version': '...',
+#    'workspaces': {'tyit': True, 'mgmt': False}}
+```
+
+`workspaces` 에 `false` 가 있으면 그 workspace 의 `domain` 이나 키 파일이 문제다.
+사유는 journal 에 `[rpc-shared] 준비 안 됨 — <ws>: …` 로 한 줄 남는다.
+
+### TYBot 쪽에서 공유로 보내기
+
+```text
+TYBOT_HERMES_SHARED_WORKSPACES=tyit        # 먼저 하나만
+```
+
+목록 밖 workspace 는 기존 `hermes-<ws>/http.sock` 을 그대로 쓴다. 공유 연결이
+실패해도 개별 worker 로 **재시도하지 않는다** — 재시도하면 같은 질문이 두 번 처리된다.
+
+| 증상 | 확인 |
+|---|---|
+| `217/USER` | `hermes-rpc-shared` 계정이 없다 |
+| 모든 요청 400 | 요청 workspace 가 명부에 없다. `profiles.json` 과 journal 을 본다 |
+| 전부 401 | HMAC 이 TYBot 쪽과 다르다. **개별 worker 비밀을 복사하지 않았는지** 본다 |
+| `overloaded` (429) | 동시 상한. `HERMES_RPC_MAX_*` 를 보거나 부하를 줄인다 |
+| health 의 한 칸이 `false` | 그 workspace 의 `domain`·키 파일. journal 한 줄에 사유가 있다 |
+| TYBot 이 `transport` | 소켓 그룹. 위 `stat` 로 본다 |

@@ -771,6 +771,13 @@ export const CHECKS = [
     "reason": "Synthetic inputs or repository source inspection; default arguments only."
   },
   {
+    "file": "scripts/check-rpc-shared.js",
+    "what": "공유 RPC worker — 명부·workspace 선택·교차 인용·취소·429·health",
+    "runtime": "node",
+    "mode": "offline",
+    "reason": "Synthetic inputs or repository source inspection; default arguments only."
+  },
+  {
     "file": "scripts/check-rpc-unit.js",
     "what": "RPC 배치 계약 — 소켓 그룹(SGID)·enable 가능·설치 helper 멱등",
     "runtime": "node",

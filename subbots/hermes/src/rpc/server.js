@@ -42,20 +42,36 @@ const ERRORS = Object.freeze({
   404: Buffer.from('{"error":"not_found"}', 'utf8'),
   409: Buffer.from('{"error":"bad_request"}', 'utf8'),
   413: Buffer.from('{"error":"bad_request"}', 'utf8'),
+  // 지금은 자리가 없다. **대기열을 만들지 않는다** — 줄을 세우면 저쪽 deadline 이
+  // 먼저 끝나고, 그때 우리는 아무도 안 기다리는 답을 만들고 있다.
+  // `overloaded` 는 v2 `ERROR_CODES` 에 있는 값이라 저쪽 `parse_error` 가 그대로 읽는다.
+  429: Buffer.from('{"error":"overloaded"}', 'utf8'),
   500: Buffer.from('{"error":"internal_error"}', 'utf8'),
 });
 
 /**
  * @param {object} o
  * @param {Buffer} o.secret        양방향 공유 HMAC 비밀
- * @param {string} o.workspace     이 인스턴스의 workspace. 요청과 **다르면 거절한다**
+ * @param {string} [o.workspace]   **단일 모드**: 이 인스턴스의 workspace. 요청과 다르면 거절
+ * @param {{answer:Function}} [o.answerer]  단일 모드의 답변기
+ * @param {(ws:string)=>({answer:Function}|null)} [o.route]
+ *   **공유 모드**: workspace → 그 workspace 의 답변기. 모르는 workspace 면 `null`.
+ *   `workspace`+`answerer` 를 주면 그 둘로 만든 라우터가 기본값이다 — 즉 **단일 모드는
+ *   라우터가 하나뿐인 공유 모드**이고, 코드 경로가 하나로 남는다.
+ * @param {{acquire:(ws:string)=>(null|Function)}} [o.limits]
+ *   공유 모드의 동시성 게이트. `acquire` 가 `null` 을 주면 **429 로 즉시 돌려보낸다** —
+ *   대기열을 만들지 않는다(인계 §동시성).
+ * @param {()=>object} [o.readiness]  health 에 실을 workspace 별 준비 상태
  * @param {string} o.version       health 가 밝히는 자기 버전
- * @param {{answer:Function}} o.answerer
  */
 export function createRpcServer({
   secret, workspace, version, answerer,
+  route: routeTo, limits, readiness,
   now = () => Date.now(), console: log = globalThis.console,
 }) {
+  /* 단일 모드를 **라우터 하나짜리 공유 모드**로 접는다. 두 경로를 따로 두면 서명·
+   * 재생·격리 같은 규칙이 한쪽에만 고쳐지는 날이 오고, 그 차이는 에러 없이 흐른다. */
+  const resolveAnswerer = routeTo || ((ws) => (ws === workspace ? answerer : null));
   const auth = createAuthenticator({ secret, now: () => now() / 1000 });
   /** 도는 요청. `request_id` → `{controller}`. 끝나면 **반드시** 지운다. */
   const inFlight = new Map();
@@ -113,7 +129,12 @@ export function createRpcServer({
     if (route === HEALTH_ENDPOINT) {
       // **모델을 부르지 않는다.** 저쪽은 2초를 준다 — 여기서 모델을 부르면 health 가
       // 느려지고, 느린 health 는 「죽었다」 로 읽혀 라우팅이 닫힌다.
-      return send(res, 200, buildHealthResponse({ version }));
+      //
+      // **전체와 workspace 별을 가른다**(인계 §7). 공유 worker 는 한 workspace 의
+      // 키 파일이 망가져도 나머지는 멀쩡히 돈다 — 그걸 「전체 ok」 하나로만 말하면
+      // 그 한 칸이 죽은 것을 아무도 모르고, 「전체 실패」 로 말하면 멀쩡한 쪽까지
+      // 라우팅이 닫힌다. **비밀도 경로도 싣지 않는다 — key 와 준비 여부뿐이다.**
+      return send(res, 200, buildHealthResponse({ version, workspaces: readiness?.() }));
     }
 
     if (route === CANCEL_ENDPOINT) {
@@ -131,10 +152,16 @@ export function createRpcServer({
       return fail(res, 400);
     }
 
-    // **워크스페이스를 대조한다.** 다른 워크스페이스 요청을 받으면 우리 도구 설명·
-    // 표시 용어가 그쪽 자료에 붙고, 그건 크로스 워크스페이스 노출이다(절대 원칙 4).
-    if (request.workspace !== workspace) {
-      log?.warn?.('[rpc] 다른 워크스페이스 요청을 거절했습니다.');
+    /* **워크스페이스를 대조한다.** 모르는 workspace 를 받으면 우리 도구 설명·표시
+     * 용어·모델 키가 그쪽 자료에 붙고, 그건 크로스 워크스페이스 노출이다(절대 원칙 4).
+     *
+     * 공유 worker 도 같다 — **허용 목록은 서버 설정에서 온다**(인계 §6). 요청 본문이
+     * workspace 를 고르는 것이 아니라, 요청이 고른 workspace 가 설정에 있어야 한다. */
+    const forThis = resolveAnswerer(request.workspace);
+    if (!forThis) {
+      // 로그에 workspace key 는 남긴다 — 운영자가 「목록에 넣는 걸 잊었나」 를
+      // 그 자리에서 판단해야 한다. 질문·원문·토큰은 남기지 않는다(인계 §로그).
+      log?.warn?.(`[rpc] 등록되지 않은 workspace 요청을 거절했습니다: ${request.workspace}`);
       return fail(res, 400);
     }
 
@@ -144,18 +171,30 @@ export function createRpcServer({
       return fail(res, 409);
     }
 
+    /* 자리를 **먼저** 잡는다. 잡고 나서 `inFlight` 에 넣어야, 429 로 돌려보낸 요청이
+     * `request_id` 를 점유한 채 남지 않는다 — 남으면 저쪽이 같은 id 로 재시도할 때
+     * 429 가 409 로 바뀌어 원인이 뒤바뀐다. */
+    const release = limits ? limits.acquire(request.workspace) : () => {};
+    if (!release) {
+      log?.warn?.(`[rpc] 동시 요청 상한으로 거절했습니다: ${request.workspace}`);
+      return fail(res, 429);
+    }
+
     const controller = new AbortController();
     inFlight.set(request.requestId, { controller });
     let result;
     try {
-      result = await answerer.answer(request, { signal: controller.signal });
+      result = await forThis.answer(request, { signal: controller.signal });
     } catch (err) {
       // 답변 코어는 예외를 안 내기로 돼 있다. 그래도 여기서 한 번 더 받는다 —
       // 안 받으면 소켓이 응답 없이 닫히고, 저쪽은 `transport` 로 읽어 **원인이 지워진다.**
       log?.error?.(`[rpc] 답변기가 던졌습니다: ${err?.code || err?.name || 'Error'}`);
       result = { status: 'failed', answer: '', usedEvidence: [], uncertain: [], usage: {} };
     } finally {
+      // 성공·실패·취소 **어느 길로 나가도** 자리를 돌려준다. 한 번이라도 안 돌려주면
+      // 그 칸은 영영 줄고, 증상은 「어느 날부터 429 가 잦다」 뿐이다.
       inFlight.delete(request.requestId);
+      release();
     }
 
     // 원문·질문·도구 인자는 기록하지 않는다. 운영에서 no_evidence 와 빈 답을
@@ -249,7 +288,13 @@ export function createRpcServer({
     return new Promise((resolve) => server.close(() => resolve()));
   }
 
-  return { listen, close, server, get inFlightCount() { return inFlight.size; } };
+  return {
+    listen, close, server,
+    get inFlightCount() { return inFlight.size; },
+    /** 동시성 게이트. **시험이 슬롯 반환을 실측한다** — 세는 값이 없으면 「돌려줬다」 를
+     * 증명할 길이 호출 횟수뿐이고, 그건 두 번 돌려준 버그를 못 잡는다. */
+    limits,
+  };
 }
 
 /**

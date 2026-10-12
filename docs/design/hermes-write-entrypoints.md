@@ -41,16 +41,21 @@ Claude Code 스킬까지.
 | `ask` · `health` · `doctor` · `deployed` | 아니오 | 읽기·진단 |
 | `check` · `check:offline` · `check:archive` · `check:live` | 아니오 | 점검 |
 | `log:render` · `log:measure` | 아니오 | 로그 가공 |
-| `rpc` (2026-10-08) | 아니오 | 전문봇 RPC worker. 아래 설명 |
+| `rpc` (2026-10-08) | 아니오 | 전문봇 RPC worker(개별). 아래 설명 |
+| `rpc:shared` (2026-10-12) | 아니오 | 같은 worker 의 **공유** 실행. 아래 설명 |
 
-`rpc` 는 `start` 와 **다르다.** 스케줄러를 안 올리므로 기동만으로 예약되는 쓰기가 없고,
+둘 다 `start` 와 **다르다.** 스케줄러를 안 올리므로 기동만으로 예약되는 쓰기가 없고,
 모드가 `HERMES_MODE=tybot` 으로 고정돼 있어 원문 쓰기 자체가 막혀 있다
-(`scripts/run-rpc-worker.js` 가 다른 모드면 종료코드 2 로 거부한다).
+(`run-rpc-worker.js`·`run-rpc-shared.js` 가 다른 모드면 종료코드 2 로 거부한다).
 
-자료는 TYBot 도구 소켓으로만 들어온다 — worker 가 닿는 파일 그래프에 아카이브도 Slack 도
-없고, 그것을 `scripts/check-rpc-isolation.js` 가 잰다. 계약:
+자료는 TYBot 도구 소켓으로만 들어온다 — **두 진입점**이 닿는 파일 그래프에 아카이브도
+Slack 도 없고, 그것을 `scripts/check-rpc-isolation.js` 가 잰다. 계약:
 [`specialist-v3-tool-contract.md`](specialist-v3-tool-contract.md),
-인계: [`2026-10-08-hermes-rpc-worker-handback.md`](../verification/2026-10-08-hermes-rpc-worker-handback.md).
+인계: [`2026-10-08`](../verification/2026-10-08-hermes-rpc-worker-handback.md) ·
+[`2026-10-12`(공유)](../verification/2026-10-12-hermes-shared-rpc-handback.md).
+
+`rpc:shared` 는 여러 workspace 를 한 프로세스가 받는다. **개별 실행을 대체하지 않는다** —
+OS 수준 격리가 필요한 workspace 는 `rpc` 를 계속 쓴다.
 
 ### 2.3 스킬 — `.claude/skills/*/scripts/`
 

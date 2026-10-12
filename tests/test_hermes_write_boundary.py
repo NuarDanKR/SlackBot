@@ -50,6 +50,10 @@ READONLY_NPM_SCRIPTS = frozenset({
     # 있다(`run-rpc-worker.js` 가 다른 모드면 종료코드 2). 자료는 TYBot 도구 소켓
     # 으로만 들어온다(`scripts/check-rpc-isolation.js` 가 그 경계를 잰다).
     "rpc",
+    # 2026-10-12. 같은 worker 의 **공유** 실행(여러 workspace 를 한 프로세스가 받는다).
+    # 쓰기 성격은 `rpc` 와 같다 — 스케줄러를 안 올리고 모드가 `tybot` 으로 고정된다.
+    # 개별 실행을 대체하지 않는다: OS 수준 격리가 필요한 workspace 는 `rpc` 를 쓴다.
+    "rpc:shared",
 })
 
 WRITING_SKILL_SCRIPTS = frozenset({
