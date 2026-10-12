@@ -258,6 +258,31 @@ def save_workspace(
         raise WorkspaceStoreError(f"워크스페이스 저장 실패: {exc}") from exc
 
 
+def pick_runtime_tokens(row: dict) -> tuple[bytes | None, bytes | None, str]:
+    """이 워크스페이스의 Master 토큰을 **어느 표에서** 쓸지 고른다.
+
+    `(bot, app, 출처)`. 쓸 수 있는 쌍이 없으면 `(None, None, "")`.
+
+    `bot_connection` 이 정본이다(`봇 관리 > 워크스페이스 연결`). 다만 아직 거기로
+    옮기지 않은 워크스페이스가 있어 `workspace_secret` 을 폴백으로 둔다 — 전환
+    중에도 **돌던 봇은 계속 돌아야** 한다.
+
+    **한 쪽이라도 모자라면 그 출처는 통째로 버린다.** 섞으면 봇 토큰과 앱 토큰이
+    서로 다른 앱의 것이 되고, Slack 은 그걸 연결 실패로만 알려 준다. 담당자는
+    어느 쪽이 틀렸는지 화면에서 못 본다.
+
+    고르는 것만 한다 — 복호화는 부르는 쪽이 한다. 여기서 풀면 DB 없이 규칙을
+    시험할 수 없고, 규칙이 틀리면 **다른 워크스페이스에 수집한다.**
+    """
+    connection = (row.get("connection_bot"), row.get("connection_app"))
+    if all(value is not None for value in connection):
+        return connection[0], connection[1], "bot_connection"
+    legacy = (row.get("legacy_bot"), row.get("legacy_app"))
+    if all(value is not None for value in legacy):
+        return legacy[0], legacy[1], "workspace_secret"
+    return None, None, ""
+
+
 def runtime_workspaces() -> list[dict]:
     """Return registry rows for bot startup, decrypting only complete token pairs."""
     from cryptography.fernet import InvalidToken
@@ -268,7 +293,9 @@ def runtime_workspaces() -> list[dict]:
             cur.execute(
                 """
                 SELECT w.key, w.label, w.role, w.state,
-                       bot.ciphertext AS bot_token, app.ciphertext AS app_token,
+                       bot.ciphertext AS legacy_bot, app.ciphertext AS legacy_app,
+                       mbot.ciphertext AS connection_bot,
+                       mapp.ciphertext AS connection_app,
                        coalesce(array_agg(wr.target ORDER BY wr.target) FILTER (
                            WHERE wr.target IS NOT NULL
                        ), '{}') AS readable
@@ -277,8 +304,24 @@ def runtime_workspaces() -> list[dict]:
                     ON bot.workspace = w.key AND bot.kind = 'bot'
                   LEFT JOIN workspace_secret app
                     ON app.workspace = w.key AND app.kind = 'app'
+                  -- **Archiver 가 쓰는 함수와 같은 네 조건이다**
+                  -- (`archiver_connection_config`). 느슨하게 하면 확인 안 된
+                  -- 토큰으로 기동하고, 토큰을 잘못 붙이면 다른 워크스페이스에
+                  -- 수집한다 — 그건 오류가 아니라 유출이다.
+                  LEFT JOIN bot_connection mc
+                    ON mc.workspace = w.key
+                   AND mc.bot_key = 'master'
+                   AND mc.connector_type = 'slack_socket'
+                   AND mc.state = 'enabled'
+                   AND mc.identity_ok IS TRUE
+                  LEFT JOIN bot_connection_secret mbot
+                    ON mbot.connection_id = mc.id AND mbot.kind = 'bot'
+                  LEFT JOIN bot_connection_secret mapp
+                    ON mapp.connection_id = mc.id AND mapp.kind = 'app'
                   LEFT JOIN workspace_readable wr ON wr.reader = w.key
-                 GROUP BY w.key, w.label, w.role, w.state, bot.ciphertext, app.ciphertext
+                 GROUP BY w.key, w.label, w.role, w.state,
+                          bot.ciphertext, app.ciphertext,
+                          mbot.ciphertext, mapp.ciphertext
                  ORDER BY w.key
                 """
             )
@@ -287,6 +330,15 @@ def runtime_workspaces() -> list[dict]:
                 item = dict(row)
                 item["key"] = str(item["key"]).lower()
                 item["readable"] = [str(value).lower() for value in item["readable"]]
+                bot_cipher, app_cipher, source = pick_runtime_tokens(item)
+                for column in ("legacy_bot", "legacy_app",
+                               "connection_bot", "connection_app"):
+                    item.pop(column, None)
+                item["bot_token"] = bot_cipher
+                item["app_token"] = app_cipher
+                # **어느 표에서 왔는지 남긴다.** 전환 중에는 「콘솔에서 본 값」 과
+                # 「봇이 쓰는 값」 이 다를 수 있고, 그 간극은 조용하다.
+                item["token_source"] = source
                 if item["bot_token"] is not None and item["app_token"] is not None:
                     try:
                         item["bot_token"] = cipher.decrypt(bytes(item["bot_token"])).decode()

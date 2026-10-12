@@ -180,3 +180,116 @@ def test_the_old_refusal_message_is_gone():
     source = Path(workspace_store.__file__).read_text(encoding="utf-8")
 
     assert "새 워크스페이스에는 봇 토큰과 앱 토큰이" not in source
+
+
+# ---------------------------------------------------------------------------
+# WC-14 — Master 가 `bot_connection` 토큰을 읽는다
+# ---------------------------------------------------------------------------
+#
+# 전에는 Archiver 만 새 `bot_connection` 을 읽었고 Master 는 `workspace_secret` 만
+# 봤다(`bot_admin.py:60` 주석). 그래서 **봇 관리에서 Master 토큰을 넣어도 실제로
+# 안 붙었다** — 화면의 저장은 기록이지 적용이 아니었다.
+#
+# 그 상태로 WC-01 을 켜면 반쪽이 된다. 토큰 없이 등록은 되는데, 봇을 붙일 방법이
+# 없다. 「등록했는데 왜 수집이 안 되지」 가 되고, 아무 오류도 안 난다.
+
+
+def _pick(**over):
+    """`runtime_workspaces` 가 DB 에서 받는 한 행."""
+    row = {
+        "key": "tyit",
+        "label": "전산팀",
+        "role": "member",
+        "state": "enabled",
+        "legacy_bot": None,
+        "legacy_app": None,
+        "connection_bot": None,
+        "connection_app": None,
+        "readable": [],
+    }
+    row.update(over)
+    return row
+
+
+def test_a_master_connection_token_wins_over_the_legacy_secret():
+    """`bot_connection` 이 정본이다. 둘 다 있으면 새 쪽을 쓴다."""
+    chosen = workspace_store.pick_runtime_tokens(
+        _pick(legacy_bot=b"old-bot", legacy_app=b"old-app",
+              connection_bot=b"new-bot", connection_app=b"new-app")
+    )
+
+    assert chosen == (b"new-bot", b"new-app", "bot_connection")
+
+
+def test_the_legacy_secret_is_used_while_no_connection_exists():
+    """전환 중에도 돌던 봇은 계속 돌아야 한다."""
+    chosen = workspace_store.pick_runtime_tokens(
+        _pick(legacy_bot=b"old-bot", legacy_app=b"old-app")
+    )
+
+    assert chosen == (b"old-bot", b"old-app", "workspace_secret")
+
+
+def test_a_half_configured_connection_never_mixes_sources():
+    """한쪽만 새 표에 있으면 **섞지 않는다.**
+
+    섞으면 봇 토큰과 앱 토큰이 서로 다른 앱의 것이 된다. Slack 은 그걸 연결
+    실패로만 알려 주고, 담당자는 어느 쪽이 틀렸는지 화면에서 못 본다.
+    """
+    chosen = workspace_store.pick_runtime_tokens(
+        _pick(legacy_bot=b"old-bot", legacy_app=b"old-app", connection_bot=b"new-bot")
+    )
+
+    assert chosen == (b"old-bot", b"old-app", "workspace_secret")
+
+
+def test_nothing_anywhere_is_not_a_token():
+    chosen = workspace_store.pick_runtime_tokens(_pick())
+
+    assert chosen == (None, None, "")
+
+
+def test_only_a_connection_pair_is_enough():
+    """`workspace_secret` 이 비어도 새 연결만으로 뜬다 — WC-01 의 목적지다."""
+    chosen = workspace_store.pick_runtime_tokens(
+        _pick(connection_bot=b"new-bot", connection_app=b"new-app")
+    )
+
+    assert chosen == (b"new-bot", b"new-app", "bot_connection")
+
+
+def test_the_query_only_takes_a_verified_enabled_master_connection():
+    """토큰을 잘못 붙이면 **다른 워크스페이스에 수집한다.** 그건 오류가 아니라 유출이다.
+
+    그래서 Archiver 가 쓰는 함수와 같은 네 조건을 건다.
+    """
+    import inspect
+
+    source = inspect.getsource(workspace_store.runtime_workspaces)
+
+    assert "bot_key = 'master'" in source
+    assert "connector_type = 'slack_socket'" in source
+    assert "state = 'enabled'" in source
+    assert "identity_ok IS TRUE" in source
+
+
+def test_a_half_configured_legacy_secret_is_not_used_either():
+    """옛 표도 반쪽이면 안 쓴다. 섞이는 것은 어느 표에서든 같은 사고다."""
+    assert workspace_store.pick_runtime_tokens(_pick(legacy_bot=b"old-bot")) == (
+        None, None, "",
+    )
+    assert workspace_store.pick_runtime_tokens(_pick(legacy_app=b"old-app")) == (
+        None, None, "",
+    )
+
+
+def test_the_row_carries_where_its_token_came_from():
+    """전환 중에는 「콘솔에서 본 값」 과 「봇이 쓰는 값」 이 다를 수 있다.
+
+    그 간극은 조용하다 — 출처를 안 남기면 어느 표가 이겼는지 아무도 모른다.
+    """
+    import inspect
+
+    source = inspect.getsource(workspace_store.runtime_workspaces)
+
+    assert 'item["token_source"] = source' in source

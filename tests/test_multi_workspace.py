@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from tybot import workspaces
 from tybot.access import RequestContext, can_access
 from tybot.archive.store import ArchiveStore
 from tybot.workspaces import ConfigError, load_workspaces, parse_cross_read
@@ -571,7 +572,13 @@ def test_complete_db_registry_starts_without_workspace_environment(monkeypatch):
     assert configs[0].bot_token == "xoxb-db_1"
 
 
-def test_incomplete_db_registry_without_environment_fails(monkeypatch):
+def test_incomplete_db_registry_without_environment_does_not_start_it(monkeypatch):
+    """토큰 없는 행은 **건너뛴다.** 그게 전부면 뜰 것이 없어 멈춘다.
+
+    전에는 행 하나만으로 `ConfigError` 였다. 지금은 콘솔에서 조직 metadata 만으로
+    등록하는 길이 생겨(WC-01) 그 상태가 정상이기도 하다 — 다만 그 하나뿐이면
+    기동할 워크스페이스가 없는 것이고, 그건 여전히 말해야 한다.
+    """
     from tybot.console import workspace_store
 
     monkeypatch.setattr(
@@ -590,7 +597,7 @@ def test_incomplete_db_registry_without_environment_fails(monkeypatch):
         ],
     )
 
-    with pytest.raises(ConfigError, match="tyit"):
+    with pytest.raises(ConfigError, match="활성화된 워크스페이스"):
         load_workspaces(
             {
                 "DATABASE_URL": "postgresql://unused",
@@ -644,15 +651,21 @@ def test_undecryptable_token_blocks_startup_with_its_own_reason(monkeypatch):
     assert "등록되지 않" not in message
 
 
-def test_missing_token_keeps_the_registration_message(monkeypatch):
-    """사유가 없으면 정말 등록이 안 된 것이다. 그때는 등록을 안내해야 한다."""
+def test_missing_token_is_not_reported_as_a_decryption_failure(monkeypatch):
+    """사유가 없으면 **봇을 아직 안 붙인 것**이다. 복호화 실패와 조치가 다르다.
+
+    복호화 실패는 키 불일치를 확인해야 하고, 이쪽은 봇 관리에서 봇을 붙이면 된다.
+    같은 문구로 나가면 담당자는 엉뚱한 곳을 본다.
+    """
     from tybot.console import workspace_store
 
     monkeypatch.setattr(workspace_store, "runtime_workspaces", lambda: [_db_row()])
+
     with pytest.raises(ConfigError) as caught:
         load_workspaces(_registry_env())
-    assert "등록되지 않" in str(caught.value)
+
     assert "복호화" not in str(caught.value)
+    assert workspaces.pending_connection() == ("tyit",)
 
 
 def test_environment_fallback_survives_but_says_so(monkeypatch, caplog):
@@ -675,3 +688,121 @@ def test_environment_fallback_survives_but_says_so(monkeypatch, caplog):
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert "복호화" in logged
     assert "xoxb-env_1" not in logged  # 토큰은 로그에 남기지 않는다
+
+
+# --- 봇이 아직 안 붙은 워크스페이스는 Master 를 멈추지 않는다 -----------------
+#
+# WC-01 로 콘솔에서 **토큰 없이** 워크스페이스를 등록할 수 있게 됐다. 봇 연결은
+# `봇 관리 > 워크스페이스 연결`에서 따로 한다.
+#
+# 그 조합이 이 함수에서 터졌다 — 토큰 없는 행 하나가 `ConfigError` 를 내고
+# **Master 전체가 안 뜬다.** 워크스페이스 하나를 등록한 대가로 다른 본부의 수집이
+# 전부 멈춘다. 등록은 준비 작업이지 사고가 아니다.
+#
+# 스키마도 같은 쪽을 말한다 — `workspace.state` 주석: "등록 오류는 이 워크스페이스만
+# 멈춘다. 다른 봇은 계속 뜬다."
+
+
+def _tokenless(key="tec", **over):
+    row = {
+        "key": key,
+        "label": "프로젝트금융",
+        "role": "member",
+        "state": "enabled",
+        "bot_token": None,
+        "app_token": None,
+        "readable": [],
+    }
+    row.update(over)
+    return row
+
+
+def test_a_workspace_without_a_bot_does_not_stop_the_others(monkeypatch):
+    """등록만 하고 봇을 아직 안 붙인 행이 **다른 봇을 끌어내리면 안 된다.**"""
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store, "runtime_workspaces",
+        lambda: [_db_row(key="tyit", bot_token=BOT, app_token=APP), _tokenless(key="tec")],
+    )
+
+    configs = load_workspaces(_registry_env())
+
+    assert [cfg.key for cfg in configs] == ["tyit"]
+
+
+def test_skipping_a_tokenless_workspace_is_not_silent(monkeypatch, caplog):
+    """조용히 빠지면 「등록했는데 왜 안 되지」 를 아무도 설명하지 못한다."""
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store, "runtime_workspaces",
+        lambda: [_db_row(key="tyit", bot_token=BOT, app_token=APP), _tokenless(key="tec")],
+    )
+
+    with caplog.at_level("WARNING"):
+        load_workspaces(_registry_env())
+
+    assert any("tec" in record.message for record in caplog.records)
+    assert any("봇 관리" in record.message for record in caplog.records)
+
+
+def test_the_skipped_workspaces_are_reported(monkeypatch):
+    """화면이 「봇 미연결」 로 보여 줄 근거. 로그 한 줄은 아무도 안 본다."""
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store, "runtime_workspaces",
+        lambda: [_db_row(key="tyit", bot_token=BOT, app_token=APP), _tokenless(key="tec")],
+    )
+
+    load_workspaces(_registry_env())
+
+    assert workspaces.pending_connection() == ("tec",)
+
+
+def test_a_tokenless_row_still_prefers_its_environment_fallback(monkeypatch):
+    """env 로 돌고 있던 워크스페이스를 건너뛰면 **수집이 조용히 멈춘다.**"""
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store, "runtime_workspaces", lambda: [_tokenless(key="tyit")]
+    )
+    env = _registry_env(
+        WORKSPACES="tyit", SLACK_BOT_TOKEN_TYIT=BOT, SLACK_APP_TOKEN_TYIT=APP
+    )
+
+    configs = load_workspaces(env)
+
+    assert [cfg.key for cfg in configs] == ["tyit"]
+    assert workspaces.pending_connection() == ()
+
+
+def test_only_tokenless_rows_still_refuses_to_start(monkeypatch):
+    """**하나도 못 뜨는 것은 다른 문제다.** 그때까지 조용하면 봇이 죽은 줄 모른다."""
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store, "runtime_workspaces", lambda: [_tokenless(key="tec")]
+    )
+
+    with pytest.raises(ConfigError, match="활성화된 워크스페이스"):
+        load_workspaces(_registry_env())
+
+
+def test_an_undecryptable_token_still_stops_everything(monkeypatch):
+    """토큰이 **있는데** 못 읽는 것은 건너뛸 일이 아니다.
+
+    그 워크스페이스는 수집 중이었고, 빠지면 그 기간의 대화가 영구히 유실된다 —
+    Slack 백필은 분당 1회라 되찾을 수 없다. 조치도 다르다(키 불일치 확인).
+    """
+    from tybot.console import workspace_store
+
+    monkeypatch.setattr(
+        workspace_store, "runtime_workspaces",
+        lambda: [_db_row(key="tyit", bot_token=BOT, app_token=APP),
+                 _tokenless(key="mgmt", secret_error="현재 암호화 키로 복호화 실패")],
+    )
+
+    with pytest.raises(ConfigError, match="복호화하지 못한"):
+        load_workspaces(_registry_env())

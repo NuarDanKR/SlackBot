@@ -48,7 +48,8 @@
 
 | 날짜 | 내용 |
 |---|---|
-| 2026-10-12 | **WC-01 API 수정 완료** — 토큰 없이 워크스페이스 등록 가능 |
+| 2026-10-12 | **WC-14 추가·완료** — Master 가 `bot_connection` 토큰을 읽는다 |
+| 2026-10-12 | **WC-01 ①② 완료** — 토큰 없이 등록 가능, 토큰 없는 행이 Master 를 막지 않음 |
 | 2026-10-12 | 작업 보드로 재구성. `WC-xx` 번호 부여, 완료 보고 칸 추가 |
 | 2026-10-12 | 단일 문서로 통합. WC-01·WC-02·WC-03 추가 |
 | 2026-10-06 | 요약 검토 주기 계약 (→ WC-07) |
@@ -63,7 +64,7 @@
 
 | ID | 항목 | 상태 | TYBot 팀 | 콘솔 담당자 |
 |---|---|---|---|---|
-| **[WC-01](#wc-01)** | **워크스페이스 등록 실패** | 🟠 **API 수정됨 · 콘솔 대기** | ✅ 토큰 필수조건 제거 | 토큰 마스크 열 제거 · 등록 후 안내 |
+| **[WC-01](#wc-01)** | **워크스페이스 등록 실패** | 🟠 **서버 작업 완료 · 콘솔 대기** | ✅ ①②③ 전부 | 토큰 마스크 열 제거 · 등록 후 안내 |
 | **[WC-02](#wc-02)** | **봇·콘솔 배포 분리** | 🔴 요청됨 | `update.sh`·`install.sh` | `CONSOLE_DIST` 소유 · 최초 1회 재시작 |
 | **[WC-03](#wc-03)** | **Hermes 설정·시크릿 DB 전환** | 🔴 요청됨 | 스키마·API | **신규 화면** |
 | [WC-04](#wc-04) | 콘솔 TLS | 🟡 우리 작업 | nginx·쿠키 플래그 | 절대 URL 확인 |
@@ -76,10 +77,15 @@
 | [WC-11](#wc-11) | 워크스페이스 안내 문구 | 🔴 요청됨 | — | 문구 절차화 |
 | [WC-12](#wc-12) | 전문봇 배포 화면 | ⏸ **대기** | B-72 선행 | **착수 금지** |
 | [WC-13](#wc-13) | OpenAPI 스펙 내보내기 | 🟡 우리 작업 | `docs/openapi.json` 커밋 | 받아서 사용 |
+| [WC-14](#wc-14) | Master 가 `bot_connection` 토큰 읽기 | ✅ **완료** | ✅ 2026-10-12 | 없음 |
 
-**WC-01 의 막는 코드는 고쳤습니다**(2026-10-12). 이제 콘솔에서 워크스페이스를
-등록할 수 있습니다. 남은 것은 화면 정리 두 가지입니다 — 토큰 마스크 열 제거와
+**WC-01 의 서버 쪽은 세 단계 모두 끝났습니다**(2026-10-12). 콘솔 담당자가 지적한
+순서 ①→②→③ 그대로입니다. 남은 것은 화면 정리 두 가지 — 토큰 마스크 열 제거와
 등록 후 안내.
+
+> **콘솔 담당자 지적이 맞았습니다.** ② 만 하면 토큰 없는 행 때문에
+> `load_workspaces` 가 `ConfigError` 로 **Master 기동을 막고**, ③ 없이는 봇 관리에서
+> Master 토큰을 넣어도 **실제로 안 붙습니다.** 둘 다 코드로 확인하고 고쳤습니다.
 
 **❓ WC-07 은 2026-10-06 에 전달했습니다.** 끝났는지 모르겠습니다 — **확인해 주시면
 `완료`로 옮기고 다시 안 묻겠습니다.**
@@ -112,13 +118,13 @@
 
 | | |
 |---|---|
-| 상태 | 🟠 **API 수정 완료 · 콘솔 화면 정리 대기** |
-| 담당 | ~~TYBot 팀(API)~~ → 콘솔 담당자(화면 정리) |
+| 상태 | 🟠 **서버 작업 완료(①②③) · 콘솔 화면 정리 대기** |
+| 담당 | ~~TYBot 팀(서버)~~ → 콘솔 담당자(화면 정리) |
 | 등록 | 2026-10-12 |
-| API 수정 | 2026-10-12 |
+| 서버 완료 | 2026-10-12 |
 
-> **등록이 다시 됩니다.** 막던 조건을 `workspace_store.save_workspace()` 에서
-> 제거했습니다. 아래 **TYBot 팀 할 일**은 전부 끝났고, 남은 것은 화면 정리입니다.
+> **등록이 되고, Master 도 안 죽고, 봇 관리에서 붙인 Master 토큰이 실제로 먹습니다.**
+> 아래 **TYBot 팀 할 일**은 끝났고 남은 것은 화면 정리입니다.
 
 ## 증상
 
@@ -151,12 +157,46 @@ payload 에 `botToken`·`appToken` 이 **없습니다.**
 워크스페이스에 매는 것은 봇이 하나뿐이던 시절의 구조이고, 지금은 한 워크스페이스에
 봇이 여럿이라 애초에 한 쌍으로 표현할 수 없습니다.
 
+## 콘솔 담당자 회신 (2026-10-12) — **지적이 맞았습니다**
+
+> WC-01 API 쪽 보니까 `workspace_store.py:186` 토큰 조건만 빼면, 토큰 없는
+> 워크스페이스 때문에 재시작 때 `workspaces.load_workspaces` 가 `ConfigError` 로
+> Master 기동을 막을 것 같아요. ① 토큰 없는 행은 건너뛰기 → ② 필수 조건 제거 →
+> ③ Master 가 `bot_connection` 토큰 읽기, 순서로 가야 할 것 같습니다.
+> ③ 없으면 봇 관리에서 Master 토큰을 넣어도 실제로 안 붙는다.
+
+**둘 다 코드로 확인했습니다.**
+
+| 지적 | 확인 |
+|---|---|
+| ① `ConfigError` 로 Master 기동이 막힌다 | ✅ `workspaces.py:234`. **워크스페이스 하나 등록한 대가로 다른 본부 수집이 전부 멈춥니다** — 원래 버그보다 나쁩니다 |
+| ③ Master 는 `bot_connection` 을 안 읽는다 | ✅ `bot_admin.py:60` 주석이 직접 적어 뒀습니다 — "Archiver 는 새 `bot_connection` 을 읽는다. **Master 는 아직 `workspace_secret`**… 이 화면의 저장은 **기록이지 적용이 아니다**" |
+
+②가 먼저 커밋됐지만 **배포 전**이라 실제 피해는 없었고, ①③을 같은 배포에 묶어
+순서를 지켰습니다.
+
+### ① 이 왜 생겼나
+
+그 분기가 만들어질 땐 토큰 없는 행이 생기는 길이 **하나뿐**이었습니다 —
+레지스트리 이전의 깨진 이관. 그땐 크게 소리치는 것이 맞았습니다. WC-01 이
+**정상인 길을 하나 더** 만들면서 같은 상태가 두 가지 뜻을 갖게 됐습니다.
+
+고친 방향: 건너뛰되 **WARNING 로그 + `workspaces.pending_connection()`** 으로 목록을
+남깁니다. 스키마 주석도 같은 쪽입니다 — `workspace.state`: "등록 오류는 이
+워크스페이스만 멈춘다. 다른 봇은 계속 뜬다."
+
+**복호화 실패(`undecryptable`)는 그대로 막습니다.** 그쪽은 토큰이 **있는데** 못 읽는
+것이라 그 워크스페이스는 수집 중이었고, 빠지면 그 기간이 영구 유실됩니다(Slack
+백필 분당 1회). 조치도 다릅니다 — 키 불일치 확인.
+
 ## TYBot 팀 할 일
 
-- [x] `save_workspace()` 에서 **신규 생성 시 토큰 필수 조건 제거** (2026-10-12)
+- [x] ① 토큰 없는 행은 건너뛴다 — Master 는 계속 뜬다 (2026-10-12)
+- [x] ② `save_workspace()` 에서 **신규 생성 시 토큰 필수 조건 제거** (2026-10-12)
+- [x] ③ Master 가 `bot_connection` 토큰을 읽는다 → [WC-14](#wc-14) (2026-10-12)
 - [x] 토큰 없는 **기존** 워크스페이스도 수정 가능 — env 폴백은 남기되 없다고 막지 않음
 - [x] 기존 워크스페이스의 토큰 교체 경로(둘을 **같이** 줄 때만 허용)는 유지
-- [x] 회귀시험 5건 (`tests/test_workspace_store.py`) · 변이 시험 3/3 CAUGHT
+- [x] 회귀시험 16건 · 변이 시험 14/14 CAUGHT
 - [ ] `connectedBots`·`botStatus` 응답 필드 추가 — **화면에서 쓰기로 하시면** 만듭니다
 - [ ] `botTokenMask`·`appTokenMask` 응답에서 제거 — **화면에서 먼저 지운 뒤**
 
@@ -193,17 +233,25 @@ PUT /api/workspaces/{key}
 ### TYBot 팀 (2026-10-12)
 
 ```
-무엇   : workspace_store.save_workspace() 의 토큰 필수조건 제거
-자리   : src/tybot/console/workspace_store.py:186 (옛 줄번호)
-시험   : tests/test_workspace_store.py 에 5건 추가
-         - 토큰 없이 신규 생성된다
-         - 토큰 없는 기존 워크스페이스도 수정된다
-         - 한쪽만 주면 여전히 거부된다
-         - 둘 다 주면 예전처럼 저장된다
-         - 옛 거부 문구가 소스에 남아 있지 않다
-변이   : 3/3 CAUGHT (조건 되살리기 · 수정 막기 · 한쪽 토큰 통과)
-확인   : 콘솔에서 키·이름·등급·상태·상한만 넣고 등록 → 저장됨
-배포   : 다음 봇 배포에 포함 (tybot-console 재시작 필요)
+① 토큰 없는 행 건너뛰기
+   자리 : src/tybot/workspaces.py — incomplete 분기를 ConfigError 에서 skip 으로
+   더함 : workspaces.pending_connection() — 건너뛴 목록(화면이 「봇 미연결」 로 쓸 근거)
+   유지 : undecryptable 은 여전히 기동을 막는다(수집 중이던 자료의 영구 유실)
+   변이 : 5/5 CAUGHT
+
+② 토큰 필수조건 제거
+   자리 : src/tybot/console/workspace_store.py:186 (옛 줄번호)
+   같이 : 토큰 없는 기존 워크스페이스 수정도 막고 있었다 — env 폴백은 남기되
+          없다고 저장을 막지는 않는다
+   변이 : 3/3 CAUGHT
+
+③ Master 가 bot_connection 토큰을 읽는다  → WC-14
+   변이 : 6/6 CAUGHT
+
+시험 : 16건 추가 (tests/test_workspace_store.py · tests/test_multi_workspace.py)
+확인 : 격리 DB 에 실제 행을 넣고 조인을 돌렸다 — 옛 토큰만/새 연결만/둘 다/
+       draft 연결 네 경우 모두 맞는 출처를 골랐다
+배포 : 다음 봇 배포에 포함. ①②③ 은 반드시 같은 배포에 들어가야 한다
 ```
 
 ### 콘솔 담당자
@@ -921,6 +969,67 @@ GET http://<콘솔>/docs              # 사람이 보는 화면
 
 ---
 
+<a id="wc-14"></a>
+# WC-14. Master 가 `bot_connection` 토큰을 읽는다
+
+| | |
+|---|---|
+| 상태 | ✅ **완료** (2026-10-12) |
+| 담당 | TYBot 팀 · 콘솔 변경 없음 |
+| 등록 | 2026-10-12 (콘솔 담당자 지적 ③) |
+
+## 무엇이 문제였나
+
+Archiver 만 새 `bot_connection` 을 읽고 **Master 는 `workspace_secret` 만** 봤습니다.
+그래서 `봇 관리 > 워크스페이스 연결`에서 Master 토큰을 넣어도 **실제로 안 붙었습니다.**
+코드 주석이 직접 적어 뒀습니다 — "이 화면의 저장은 **기록이지 적용이 아니다**".
+
+WC-01 과 겹치면 반쪽이 됩니다. 토큰 없이 등록은 되는데 붙일 방법이 없고,
+**아무 오류도 안 납니다.**
+
+## 어떻게 고쳤나
+
+`runtime_workspaces()` 가 두 출처를 함께 읽고 Python 이 고릅니다
+(`pick_runtime_tokens`).
+
+| 상태 | 쓰는 토큰 |
+|---|---|
+| `bot_connection` 에 쌍이 있음 | **`bot_connection`** (정본) |
+| 없음 · `workspace_secret` 에 쌍 | `workspace_secret` (전환 중 폴백) |
+| 어느 쪽도 **반쪽** | 안 씀 — 섞지 않는다 |
+| 둘 다 없음 | 안 뜸(WC-01 ①이 건너뜀) |
+
+**섞지 않는 것이 핵심입니다.** 봇 토큰과 앱 토큰이 서로 다른 앱의 것이 되면 Slack 은
+연결 실패로만 알려 주고, 담당자는 어느 쪽이 틀렸는지 화면에서 못 봅니다.
+
+연결을 받는 조건은 Archiver 함수(`archiver_connection_config`)와 **같은 넷**입니다 —
+`bot_key='master'` · `connector_type='slack_socket'` · `state='enabled'` ·
+`identity_ok IS TRUE`. 느슨하게 하면 확인 안 된 토큰으로 기동하고, 토큰을 잘못
+붙이면 **다른 워크스페이스에 수집합니다.** 그건 오류가 아니라 유출입니다.
+
+**스키마 변경은 없습니다.** `tyslackai` 가 이미 `bot_connection` ·
+`bot_connection_secret` 에 SELECT 권한을 갖고 있어 지문이 그대로입니다
+(`b96ee558a1b8`).
+
+각 행에 `token_source` 를 실어 보냅니다 — 전환 중에는 「콘솔에서 본 값」 과
+「봇이 쓰는 값」 이 다를 수 있고, 그 간극은 조용합니다.
+
+## 콘솔에 영향
+
+없습니다. 다만 **봇 관리의 「기록이지 적용이 아니다」 안내 문구는 Master 에 대해
+더 이상 맞지 않습니다** — 이제 적용됩니다. 화면에 그 취지의 문구가 있으면 고쳐
+주세요.
+
+## 완료 보고
+
+```
+자리 : src/tybot/console/workspace_store.py — pick_runtime_tokens + runtime_workspaces 질의
+시험 : 8건 (우선순위 · 폴백 · 반쪽 거부 양쪽 · 둘 다 없음 · 질의 조건 · 출처 기록)
+변이 : 6/6 CAUGHT
+확인 : 격리 DB 에 실제 행을 넣고 조인 실행 — 네 경우 모두 맞는 출처
+```
+
+---
 # 3. 【참고】 화면 계약 시험 — 모르면 우리 배포가 깨집니다
 
 > 항목이 아니라 **상시 규칙**입니다. 모든 화면 작업에 적용됩니다.
@@ -1020,9 +1129,67 @@ Slack 토큰·DSN·API 키·원문 경로는 API 응답과 로그 **양쪽에서
 >
 > 적을 것: **무엇이 안 되는가 / 무엇을 하고 싶은가 / 급한가**
 
+## Hermes 토큰 등록과 PF Hermes RPC 라우트를 구분해 주세요
+
+### 무엇이 안 되는가
+
+2026-10-12 TYIT 운영 확인에서 `봇 관리 > 워크스페이스 연결`로 Hermes의 Bot/App
+Token을 등록했지만, PF Hermes RPC 라우트는 계속 꺼진 상태였습니다.
+
+```text
+specialist       | hermes
+workspace        | tyit
+route_mode       | disabled
+fallback_bot_key | master
+updated_by       | dan@taeyoung.com
 ```
-(비어 있음)
+
+서버의 `/etc/hermes/tyit/hermes.env`에도 이미 `SLACK_BOT_TOKEN`과
+`SLACK_APP_TOKEN`이 있습니다. 두 토큰 저장소는 자동 동기화되지 않으며, 어느 쪽도
+PF Hermes RPC 라우트를 켜는 설정이 아닙니다.
+
+현재 화면에서는 아래 두 연결이 같은 "Hermes 연결"처럼 보여 운영자가 Slack 토큰을
+등록하면 Master의 PF Hermes RPC 호출도 활성화된 것으로 오해합니다.
+
+| 연결 | 정본 | 토큰 |
+|---|---|---|
+| Slack에서 `@Hermes` 직접 호출 | `bot_connection(hermes, slack_socket)` | Bot/App Token 필요 |
+| TYBot Master가 PF Hermes RPC 호출 | `specialist_route(hermes, workspace)` | Slack Token 없음 |
+
+### 무엇을 만들어야 하는가
+
+1. Hermes 연결 상세에 `Slack 직접 연결`과 `PF Hermes RPC (Master 내부 호출)`을 별도
+   행 또는 별도 섹션으로 표시합니다.
+2. Bot/App Token 저장 성공을 RPC 활성화 성공처럼 표시하지 않습니다. 토큰 저장 뒤에도
+   RPC 라우트가 `disabled`이면 그대로 `꺼짐`으로 표시합니다.
+3. PF Hermes RPC에는 별도의 `disabled / shadow / active` 제어를 제공합니다. 변경 시
+   사유를 필수로 받고 기존 API를 호출합니다.
+
+```http
+PUT /api/workspaces/{workspace}/bot-routes/{bot_key}
+Content-Type: application/json
+
+{"mode":"active","fallbackBotKey":"master","reason":"PF Hermes RPC TYIT 베타 활성화"}
 ```
+
+4. 변경 성공 뒤 목록을 다시 읽어 실제 `route_mode`를 표시합니다. 낙관적으로 버튼만
+   바꾸지 않습니다.
+5. `active` 전환이 거부되면 전문봇 배정, runtime `enabled`, health `ok` 중 어느 조건이
+   부족한지 API 오류를 그대로 사람이 이해할 수 있게 표시합니다.
+6. 화면 명칭은 `내부 Hermes`가 아니라 **`PF Hermes RPC`**로 통일합니다. TYIT의
+   Master v2에서는 기존 Python `ToolSpecialist`가 아니라 Unix socket의 Node.js Hermes를
+   호출하기 때문입니다.
+
+### 완료 조건
+
+- TYIT Hermes 화면에서 Slack 직접 연결과 PF Hermes RPC 상태를 동시에 구분할 수 있다.
+- 토큰 등록만 했을 때 RPC 상태는 계속 `disabled`로 정확히 보인다.
+- 사유를 입력해 RPC를 `active`로 바꾸면 재조회 결과도 `active`다.
+- 토큰 원문은 화면, 응답, 로그 어디에도 나오지 않는다.
+- 다른 워크스페이스의 라우트는 바뀌지 않는다.
+
+긴급도: **TYIT 베타 검증 차단 중**. PF Hermes RPC 호출 시험을 계속하려면 이 구분과
+라우트 제어가 필요합니다.
 
 ---
 

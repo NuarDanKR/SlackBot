@@ -156,6 +156,16 @@ def _load_env_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceCon
     return configs
 
 
+#: 마지막 기동에서 **봇이 없어 건너뛴** 워크스페이스. 화면이 「봇 미연결」 로
+#: 보여 줄 근거다 — 로그 한 줄은 아무도 안 본다.
+_pending_connection: tuple[str, ...] = ()
+
+
+def pending_connection() -> tuple[str, ...]:
+    """등록은 됐지만 봇이 아직 안 붙은 워크스페이스들."""
+    return _pending_connection
+
+
 def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
     """Load DB-managed workspaces, retaining environment fallback for migration.
 
@@ -231,10 +241,30 @@ def load_workspaces(env: dict[str, str] | None = None) -> list[WorkspaceConfig]:
             "토큰을 다시 등록하는 것으로는 해결되지 않는다 — 등록 당시의 키와 "
             "지금 키가 다른지 먼저 확인하라."
         )
+    # **봇이 아직 안 붙은 워크스페이스는 건너뛴다. 멈추지 않는다.**
+    #
+    # 전에는 여기서 `ConfigError` 였다. 그때는 토큰 없는 행이 생기는 길이 하나뿐이라
+    # (레지스트리 이전의 깨진 이관) 크게 소리치는 것이 맞았다.
+    #
+    # 지금은 **정상인 길이 하나 더** 생겼다 — 콘솔에서 조직 metadata 만으로 등록하고
+    # 봇은 `봇 관리 > 워크스페이스 연결`에서 따로 붙인다(WC-01). 그 사이의 행은
+    # 사고가 아니라 준비 상태다. 그걸로 Master 를 멈추면 **워크스페이스 하나를
+    # 등록한 대가로 다른 본부의 수집이 전부 멈춘다.**
+    #
+    # 스키마도 같은 쪽이다 — `workspace.state` 주석: "등록 오류는 이 워크스페이스만
+    # 멈춘다. 다른 봇은 계속 뜬다."
+    #
+    # `undecryptable` 은 위에서 여전히 막는다. 그쪽은 토큰이 **있는데** 못 읽는
+    # 것이라 그 워크스페이스는 수집 중이었고, 빠지면 그 기간이 영구히 유실된다.
+    global _pending_connection
+    _pending_connection = tuple(sorted(incomplete))
     if incomplete:
-        raise ConfigError(
-            "DB에 Slack 토큰이 모두 등록되지 않았고 환경변수 대체 설정도 없는 "
-            f"워크스페이스: {', '.join(sorted(incomplete))}"
+        # 조용히 빠지지 않는다. 등록한 사람은 「등록했는데 왜 안 되지」 를
+        # 설명해 줄 무언가가 있어야 한다.
+        logger.warning(
+            "Slack 토큰이 없어 기동하지 않는 워크스페이스: %s — "
+            "봇 관리 > 워크스페이스 연결에서 봇을 붙이면 다음 기동부터 돕니다",
+            ", ".join(_pending_connection),
         )
     if not merged:
         if not rows and env_configs:
