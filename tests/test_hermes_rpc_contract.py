@@ -128,6 +128,19 @@ def test_socket_group_contract_is_written_down() -> None:
     assert "WantedBy=multi-user.target" in live
 
 
+def test_rpc_unit_uses_a_systemd_239_compatible_secret_file():
+    unit = (HERMES / "deploy" / "hermes-rpc@.service").read_text(encoding="utf-8")
+    live = [
+        line.strip()
+        for line in unit.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    assert not any(line.startswith("LoadCredential=") for line in live)
+    assert "Environment=HERMES_RPC_HMAC_FILE=/etc/hermes-rpc-%i/hmac" in live
+    assert "ReadOnlyPaths=/opt/tybot/subbots/hermes /etc/hermes-rpc-%i" in live
+
+
 def test_installer_prepares_nothing_it_cannot_verify() -> None:
     """설치 helper 가 계정·비밀을 **만들지 않는다.**
 

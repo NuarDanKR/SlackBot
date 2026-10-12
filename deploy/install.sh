@@ -365,6 +365,14 @@ find "$APP_DIR" \
   \( -path "$APP_DIR/console-web/node_modules" \
      -o -path "$APP_DIR/subbots/hermes/node_modules" \) -prune \
   -o -print0 | xargs -0 -r chmod g+rX,g-w,o-rwx
+# RPC worker는 tybot 그룹에 들어가지 않는다. 그 그룹을 주면 코드뿐 아니라 TYBot의
+# 운영 자료 권한까지 따라오기 때문이다. Hermes 코드만 공유 RPC 그룹으로 다시 묶는다.
+find "$APP_DIR/subbots/hermes" \
+  \( -path "$APP_DIR/subbots/hermes/node_modules" \) -prune \
+  -o -print0 | xargs -0 -r chgrp -h tybot-specialist-rpc
+find "$APP_DIR/subbots/hermes" \
+  \( -path "$APP_DIR/subbots/hermes/node_modules" \) -prune \
+  -o \( -type d -o -type f \) -print0 | xargs -0 -r chmod g+rX,g-w,o-rwx
 chmod -R u+w "$APP_DIR/.venv"
 
 # 봇 계정이 실제로 읽을 수 있는지 확인한다. 여기서 막히면 서비스가 기동에 실패하는데,

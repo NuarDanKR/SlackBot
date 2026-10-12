@@ -31,7 +31,7 @@ TYBOT_SPECIALIST_V3_HMAC_DIR=/etc/tybot/credentials/specialist-v3
 
 TYBot이 읽는 파일명은 `<specialist>-<workspace>.hmac`으로 고정한다. 첫 파일은
 `/etc/tybot/credentials/specialist-v3/hermes-tyit.hmac`이다. Hermes worker의
-`LoadCredential` 원본과 **같은 바이트**여야 하지만 파일 소유권은 분리한다. TYBot 쪽은
+`/etc/hermes-rpc-tyit/hmac`과 **같은 바이트**여야 하지만 파일 소유권은 분리한다. TYBot 쪽은
 `root:tybot 0440`, worker 쪽은 `root:hermes-rpc-tyit 0640`으로 두며 한 파일의 그룹을
 여러 서비스에 열지 않는다.
 

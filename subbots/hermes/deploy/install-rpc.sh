@@ -32,6 +32,7 @@ UNIT_SRC="$HERE/hermes-rpc@.service"
 UNIT_DST="/etc/systemd/system/hermes-rpc@.service"
 SHARED_GROUP="tybot-specialist-rpc"
 TOOL_SOCKET="/run/tybot/specialist-tools.sock"
+HERMES_ROOT="$(cd "$HERE/.." && pwd)"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
@@ -78,7 +79,7 @@ missing=0
 for ws in "$@"; do
   user="hermes-rpc-$ws"
   envfile="/etc/hermes-rpc-$ws/rpc.env"
-  secret="/var/lib/tybot/specialist-secrets/hermes-$ws/hmac"
+  secret="/etc/hermes-rpc-$ws/hmac"
 
   say ""
   say "[$ws]"
@@ -90,6 +91,13 @@ for ws in "$@"; do
     else
       warn "$user 가 $SHARED_GROUP 에 없습니다 — 도구 소켓에 못 붙습니다."
       warn "  usermod -aG $SHARED_GROUP $user"
+      missing=1
+    fi
+    if sudo -u "$user" test -r "$HERMES_ROOT/scripts/run-rpc-worker.js"; then
+      ok "$user 가 RPC worker 코드를 읽을 수 있음"
+    else
+      warn "$user 가 RPC worker 코드를 읽지 못합니다: $HERMES_ROOT/scripts/run-rpc-worker.js"
+      warn "  중앙 deploy/install.sh 를 다시 실행해 $SHARED_GROUP 코드 권한을 적용하세요."
       missing=1
     fi
   else

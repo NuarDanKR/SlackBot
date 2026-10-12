@@ -14,10 +14,7 @@
 #   useradd --system --home-dir /nonexistent --shell /sbin/nologin \
 #           --groups tybot-specialist-rpc hermes-rpc-tyit
 #   install -d -o root -g hermes-rpc-tyit -m 0750 /etc/hermes-rpc-tyit
-#   install -d -o root -g hermes-rpc-tyit -m 0750 /var/lib/tybot/specialist-secrets/hermes-tyit
-#   openssl rand -hex 32 > /var/lib/tybot/specialist-secrets/hermes-tyit/hmac
-#   chown root:hermes-rpc-tyit /var/lib/tybot/specialist-secrets/hermes-tyit/hmac
-#   chmod 0640 /var/lib/tybot/specialist-secrets/hermes-tyit/hmac
+#   install -o root -g hermes-rpc-tyit -m 0640 <same-HMAC-source> /etc/hermes-rpc-tyit/hmac
 #
 # **systemd 는 계정을 만들지 않는다.** 없으면 exec 이 217/USER 로 죽고, 아래 재시작
 # 상한을 태운 뒤 영구 failed 로 굳는다.
@@ -60,9 +57,9 @@ ExecStartPre=+/usr/bin/chgrp tybot-specialist-rpc /run/tybot-subbots/hermes-%i
 # 멱등이고, 걸려 있으면 아무 일도 안 한다.
 ExecStartPre=+/usr/bin/chmod 2750 /run/tybot-subbots/hermes-%i
 
-# HMAC 비밀은 **파일로** 받는다. 환경변수 값으로 주면 `systemctl show` 와
-# /proc/<pid>/environ 에 그대로 보인다.
-LoadCredential=hmac:/var/lib/tybot/specialist-secrets/hermes-%i/hmac
+# Rocky 8의 systemd 239에는 LoadCredential=이 없다. 비밀 값은 여전히 환경변수에
+# 넣지 않고, worker만 읽을 수 있는 인스턴스별 파일의 **경로만** 고정한다.
+Environment=HERMES_RPC_HMAC_FILE=/etc/hermes-rpc-%i/hmac
 
 # 모델 키·버전 같은 인스턴스 값. 토큰은 여기 두지 않는다.
 EnvironmentFile=/etc/hermes-rpc-%i/rpc.env
@@ -109,8 +106,8 @@ ReadOnlyPaths=/opt/tybot/subbots/hermes /etc/hermes-rpc-%i
 # 자료 저장소를 아예 안 보이게 한다. 코드가 안 읽는 것은 시험이 재지만(check-rpc-isolation),
 # 커널에서도 막아 두면 나중에 누가 한 줄 더해도 거기서 멈춘다.
 InaccessiblePaths=-/var/lib/tybot/archive -/var/lib/tybot/archiver-shadow -/var/lib/tybot/state -/var/lib/hermes-pf
-# 남의 HMAC 비밀을 못 읽게 한다. 비밀은 인스턴스마다 다르고, 이 한 줄이
-# 「파일 권한이 잘못 깔린 날」 의 마지막 방어선이다.
+# 예전 배치가 쓰던 비밀 저장소는 못 읽게 한다. 현재 인스턴스의 비밀은
+# ReadOnlyPaths에 포함된 /etc/hermes-rpc-%i/hmac 하나뿐이다.
 InaccessiblePaths=-/var/lib/tybot/specialist-secrets
 
 # ── 남는 위험 하나 (가리지 않고 적는다) ───────────────────────────────────

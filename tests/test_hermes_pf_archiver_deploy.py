@@ -156,6 +156,14 @@ def test_install_places_templates_without_enabling_an_unconfigured_instance():
     assert 'systemctl start hermes-rpc@' not in text
 
 
+def test_install_grants_only_hermes_code_to_the_rpc_group():
+    text = INSTALL.read_text(encoding="utf-8")
+
+    assert 'chgrp -h tybot-specialist-rpc' in text
+    assert 'find "$APP_DIR/subbots/hermes"' in text
+    assert 'usermod -aG tybot hermes-rpc' not in text
+
+
 def test_runbook_uses_two_isolated_instances_and_stops_legacy_first():
     text = RUNBOOK.read_text(encoding="utf-8")
 

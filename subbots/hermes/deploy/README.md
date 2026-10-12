@@ -401,7 +401,7 @@ sudo install -o root -g hermes-rpc-$ws -m 0640 /dev/null /etc/hermes-rpc-$ws/rpc
 #   ANTHROPIC_API_KEY=...
 #   HERMES_RPC_VERSION=$(git rev-parse --short HEAD)
 
-sudo install -d -o root -g hermes-rpc-$ws -m 0750 /var/lib/tybot/specialist-secrets/hermes-$ws
+sudo install -o root -g hermes-rpc-$ws -m 0640 <same-HMAC-source> /etc/hermes-rpc-$ws/hmac
 ```
 
 **HMAC 비밀은 TYBot 쪽과 같은 값**이어야 한다. 한쪽만 새로 만들면 모든 요청이 401 이

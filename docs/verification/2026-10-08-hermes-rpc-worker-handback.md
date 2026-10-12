@@ -79,10 +79,10 @@ bash "$REPO/subbots/hermes/deploy/install-rpc.sh" tyit
 ## 3. HMAC credential
 
 ```ini
-LoadCredential=hmac:/var/lib/tybot/specialist-secrets/hermes-%i/hmac
+HERMES_RPC_HMAC_FILE=/etc/hermes-rpc-%i/hmac
 ```
 
-worker 는 `$CREDENTIALS_DIRECTORY/hmac` 를 읽는다. 대안은 `HERMES_RPC_HMAC_FILE` 하나뿐이고,
+Rocky 8의 systemd 239에서는 worker가 위 고정 경로를 읽는다. 환경변수에는 경로만 있고,
 **환경변수 값으로는 받지 않는다** — `systemctl show` 와 `/proc/<pid>/environ` 에 그대로 보인다.
 32바이트 미만은 기동을 막는다. 끝 줄바꿈 하나는 떼고 나머지는 바이트 그대로 쓴다.
 
