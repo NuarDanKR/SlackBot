@@ -284,6 +284,38 @@ await test('인용이 없으면 answered 가 아니다', async () => {
   assert.deepEqual(got.used_evidence, []);
 });
 
+await test('정상 RPC 완료 로그는 계측만 남기고 질문과 원문은 남기지 않는다', async () => {
+  const lines = [];
+  const answerer = {
+    async answer() {
+      return {
+        status: 'no_evidence', answer: '비밀 원문', usedEvidence: [], uncertain: [],
+        usage: {
+          model: 'stub', stop_reason: 'max_tokens', input_tokens: 120,
+          output_tokens: 80, tool_calls: 1, elapsed_ms: 321,
+        },
+        trace: [{ name: 'search', chars: 456 }],
+      };
+    },
+  };
+  const worker = createRpcServer({
+    secret: SECRET, workspace: WORKSPACE, version: 'x', answerer,
+    console: { info: (line) => lines.push(line), error() {}, warn() {} },
+  });
+  const at = place('observability');
+  await worker.listen(at, listenOpts);
+  openServers.push(worker);
+
+  const got = readAnswer(await callWorker(at, wire.ANSWER_ENDPOINT, requestBody()));
+  assert.equal(got.status, 'no_evidence');
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /status=no_evidence/);
+  assert.match(lines[0], /stop_reason=max_tokens/);
+  assert.match(lines[0], /tool_calls=1 tools=search=1\/456/);
+  assert.ok(!lines[0].includes('지난주 정산'));
+  assert.ok(!lines[0].includes('비밀 원문'));
+});
+
 /* ── 3. 지어낸 인용 ────────────────────────────────────────────────────── */
 console.log('[3/10] 지어낸 인용은 답 전체를 버린다');
 await test('받지 않은 [eN] 이 섞이면 failed', async () => {

@@ -67,6 +67,14 @@ class Hermes:
                 "status": wire.STATUS_ANSWERED,
                 "answer": "grounded answer",
                 "used_evidence": [evidence_id],
+                "usage": {
+                    "model": "claude-opus-5-5",
+                    "stop_reason": "end_turn",
+                    "input_tokens": 123,
+                    "output_tokens": 45,
+                    "tool_calls": 1,
+                    "tool_calls_by_name": {"search": 1},
+                },
             },
             sort_keys=True,
         ).encode()
@@ -181,3 +189,31 @@ def test_external_adapter_allows_live_tool_only_when_request_can_fetch_live():
 
     assert "fetch_recent_slack" not in allowed(None)
     assert "fetch_recent_slack" in allowed(lambda _channel, _limit: [])
+
+
+def test_external_adapter_exposes_sanitized_rpc_runtime_metrics():
+    class Deadline:
+        def remaining(self):
+            return 30
+
+    registry = ToolSessionRegistry()
+    adapter = client.ExternalV3Adapter(
+        "hermes",
+        workspace="tyit",
+        authorization_id="tyit:member",
+        toolbox=Box(),
+        secret=SECRET,
+        credential_id=CREDENTIAL_ID,
+        registry=registry,
+        transport=Hermes(registry),
+    )
+
+    assert adapter.complete(SimpleNamespace(question="summarize", deadline=Deadline()))
+    assert adapter.last_model == "claude-opus-5-5"
+    assert adapter.last_stop_reason == "end_turn"
+    assert adapter.input_tokens == 123
+    assert adapter.output_tokens == 45
+    assert adapter.rounds == 1
+    assert adapter.search_calls == 1
+    assert adapter.search_rounds == 1
+    assert adapter.tool_calls_by_name == {"search": 1}

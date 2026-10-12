@@ -109,7 +109,9 @@ export function createRpcAnswerer({
       `답변은 ${request.maxOutputChars}자 안에서, 기댄 문장마다 [eN] 을 붙여 적으세요.`,
     ].join('\n');
 
-    const usage = { tool_calls: 0, input_tokens: 0, output_tokens: 0, model: model.id };
+    const usage = {
+      tool_calls: 0, input_tokens: 0, output_tokens: 0, model: model.id, stop_reason: '',
+    };
     let text = '';
     let refused = false;
 
@@ -156,6 +158,7 @@ export function createRpcAnswerer({
           if (turn.text) text = turn.text;
           usage.input_tokens += turn.usage?.input_tokens || 0;
           usage.output_tokens += turn.usage?.output_tokens || 0;
+          usage.stop_reason = turn.stopReason || usage.stop_reason;
 
           if (turn.stopReason === 'refusal') { refused = true; break; }
           if (halted) break;
@@ -227,12 +230,22 @@ export function createRpcAnswerer({
     return done(STATUS_ANSWERED, clipped, uncertain, known);
 
     function done(status, answerText, notes = [], usedEvidence = []) {
+      const toolCallsByName = {};
+      for (const item of trace) {
+        const name = String(item?.name || 'unknown');
+        toolCallsByName[name] = (toolCallsByName[name] || 0) + 1;
+      }
       return {
         status,
         answer: answerText,
         usedEvidence,
         uncertain: notes,
-        usage: { ...usage, tool_calls: client.callCount, elapsed_ms: Math.max(0, now() - started) },
+        usage: {
+          ...usage,
+          tool_calls: client.callCount,
+          tool_calls_by_name: toolCallsByName,
+          elapsed_ms: Math.max(0, now() - started),
+        },
         trace,
       };
     }

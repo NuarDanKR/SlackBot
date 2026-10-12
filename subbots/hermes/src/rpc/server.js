@@ -158,6 +158,31 @@ export function createRpcServer({
       inFlight.delete(request.requestId);
     }
 
+    // 원문·질문·도구 인자는 기록하지 않는다. 운영에서 no_evidence 와 빈 답을
+    // 구분하는 데 필요한 비민감 계측값만 한 줄로 남긴다.
+    const usage = result.usage || {};
+    const trace = Array.isArray(result.trace) ? result.trace : [];
+    const byTool = new Map();
+    for (const item of trace) {
+      const name = String(item?.name || 'unknown').replace(/[^a-z0-9_-]/gi, '_');
+      const current = byTool.get(name) || { calls: 0, chars: 0 };
+      current.calls += 1;
+      current.chars += Math.max(0, Number(item?.chars) || 0);
+      byTool.set(name, current);
+    }
+    const toolSummary = [...byTool.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, value]) => `${name}=${value.calls}/${value.chars}`)
+      .join(',') || '-';
+    log?.info?.(
+      `[rpc] 완료 request=${request.requestId} status=${result.status} `
+      + `elapsed_ms=${Math.max(0, Number(usage.elapsed_ms) || 0)} `
+      + `model=${String(usage.model || '-')} stop_reason=${String(usage.stop_reason || '-')} `
+      + `in_tok=${Math.max(0, Number(usage.input_tokens) || 0)} `
+      + `out_tok=${Math.max(0, Number(usage.output_tokens) || 0)} `
+      + `tool_calls=${Math.max(0, Number(usage.tool_calls) || 0)} tools=${toolSummary}`,
+    );
+
     let payload;
     try {
       payload = buildAnswerResponse({

@@ -163,6 +163,12 @@ class ExternalV3Adapter:
         self.last_cost_usd = 0.0
         self.last_error_code = ""
         self.last_stop_reason = ""
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.rounds = 0
+        self.search_calls = 0
+        self.search_rounds = 0
+        self.tool_calls_by_name: dict[str, int] = {}
         self.phase = "external-v3"
 
     def complete(self, request) -> str:
@@ -192,6 +198,17 @@ class ExternalV3Adapter:
         answer = outcome.answer
         self.last_cost_usd = float(answer.usage.get("cost_usd", 0.0) or 0.0)
         self.last_model = str(answer.usage.get("model") or self.last_model)
+        self.last_stop_reason = str(answer.usage.get("stop_reason") or "")
+        self.input_tokens = int(answer.usage.get("input_tokens", 0) or 0)
+        self.output_tokens = int(answer.usage.get("output_tokens", 0) or 0)
+        self.rounds = int(answer.usage.get("tool_calls", 0) or 0)
+        by_name = answer.usage.get("tool_calls_by_name", {})
+        if isinstance(by_name, dict):
+            self.tool_calls_by_name = {
+                str(name): int(count or 0) for name, count in by_name.items()
+            }
+        self.search_calls = self.tool_calls_by_name.get("search", 0)
+        self.search_rounds = self.search_calls
         self._record_used(outcome.evidence_objects)
         if answer.status == wire.STATUS_ANSWERED:
             return answer.text
