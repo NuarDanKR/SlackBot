@@ -367,6 +367,12 @@ find "$APP_DIR" \
   -o -print0 | xargs -0 -r chmod g+rX,g-w,o-rwx
 # RPC worker는 tybot 그룹에 들어가지 않는다. 그 그룹을 주면 코드뿐 아니라 TYBot의
 # 운영 자료 권한까지 따라오기 때문이다. Hermes 코드만 공유 RPC 그룹으로 다시 묶는다.
+# 상위 두 디렉터리는 목록 읽기 없이 알려진 Hermes 경로만 통과하도록 `--x`만 준다.
+if ! command -v setfacl >/dev/null 2>&1; then
+  echo "  ! Hermes RPC 경로 격리에 필요한 setfacl 명령이 없습니다." >&2
+  exit 1
+fi
+setfacl -m g:tybot-specialist-rpc:--x "$APP_DIR" "$APP_DIR/subbots"
 find "$APP_DIR/subbots/hermes" \
   \( -path "$APP_DIR/subbots/hermes/node_modules" \) -prune \
   -o -print0 | xargs -0 -r chgrp -h tybot-specialist-rpc

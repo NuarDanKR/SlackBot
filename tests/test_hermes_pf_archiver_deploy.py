@@ -161,6 +161,7 @@ def test_install_grants_only_hermes_code_to_the_rpc_group():
 
     assert 'chgrp -h tybot-specialist-rpc' in text
     assert 'find "$APP_DIR/subbots/hermes"' in text
+    assert 'setfacl -m g:tybot-specialist-rpc:--x "$APP_DIR" "$APP_DIR/subbots"' in text
     assert 'usermod -aG tybot hermes-rpc' not in text
 
 
