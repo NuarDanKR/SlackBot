@@ -26,7 +26,7 @@ import { TYBOT, mode } from '../src/mode.js';
 import { createToolSession } from '../src/llm/provider.js';
 import { lazyTerms } from '../src/domain.js';
 import { createRpcAnswerer } from '../src/rpc/answer.js';
-import { createRpcServer } from '../src/rpc/server.js';
+import { alignSocketDirectoryGroup, createRpcServer } from '../src/rpc/server.js';
 import { createToolClient } from '../src/rpc/tool-client.js';
 import { buildRemoteTools } from '../src/rpc/tools.js';
 import { loadRpcConfig } from '../src/rpc/config.js';
@@ -74,6 +74,7 @@ async function main() {
   }
 
   const cfg = loadRpcConfig();
+  alignSocketDirectoryGroup(cfg.socketPath, TOOL_SOCKET_PATH);
   const worker = wireWorker(cfg);
   const at = await worker.listen(cfg.socketPath);
   console.log(

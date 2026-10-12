@@ -278,6 +278,45 @@ export function alignSocketGroup(socketPath, { stat = fs.statSync, chown = fs.ch
 }
 
 /**
+ * Match the runtime directory to TYBot's tool socket group before listening.
+ *
+ * systemd 239 may re-apply RuntimeDirectory ownership between ExecStartPre and
+ * ExecStart. The worker therefore performs the final alignment itself, using
+ * the protected TYBot tool socket as the source of truth.
+ */
+export function alignSocketDirectoryGroup(
+  socketPath,
+  referenceSocketPath,
+  { stat = fs.statSync, chown = fs.chownSync, chmod = fs.chmodSync } = {},
+) {
+  const directory = path.dirname(socketPath);
+  let current;
+  let reference;
+  try {
+    current = stat(directory);
+    reference = stat(referenceSocketPath);
+  } catch (err) {
+    throw new Error(
+      `RPC socket directory group could not be verified: ${err.code || err.message}\n`
+      + `  directory: ${directory}\n`
+      + `  TYBot tool socket: ${referenceSocketPath}`,
+    );
+  }
+
+  try {
+    if (current.gid !== reference.gid) chown(directory, -1, reference.gid);
+    chmod(directory, 0o2750);
+  } catch (err) {
+    throw new Error(
+      `RPC socket directory could not be aligned with the TYBot tool socket group: ${err.code || err.message}\n`
+      + `  directory: ${directory}\n`
+      + `  TYBot tool socket: ${referenceSocketPath}`,
+    );
+  }
+  return reference.gid;
+}
+
+/**
  * 소켓 자리가 비었나. **살아 있으면 던진다.**
  *
  * 그냥 지우고 뜨면 중복 기동이 조용히 성립한다 — 먼저 뜬 쪽은 아무 요청도 못 받는

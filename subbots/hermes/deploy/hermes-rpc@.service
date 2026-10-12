@@ -52,6 +52,8 @@ RuntimeDirectoryMode=2750
 # 그룹만 공유 그룹으로 바꾼다. **소유자는 worker 그대로다** — root 로 두면
 # 디렉터리가 `root:tybot-specialist-rpc 2750` 이 되고, worker 는 그룹 멤버일 뿐이라
 # 그 안에 소켓 파일을 만들지 못한다(group 은 `r-x`).
+# systemd 239 may restore RuntimeDirectory ownership before ExecStart. The
+# worker performs the final group alignment against TYBot's tool socket.
 ExecStartPre=+/usr/bin/chgrp tybot-specialist-rpc /run/tybot-subbots/hermes-%i
 # systemd 가 RuntimeDirectoryMode 의 SGID 를 떨어뜨리는 판본이 있어 한 번 더 건다.
 # 멱등이고, 걸려 있으면 아무 일도 안 한다.

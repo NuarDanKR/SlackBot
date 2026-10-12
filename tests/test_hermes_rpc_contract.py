@@ -127,6 +127,11 @@ def test_socket_group_contract_is_written_down() -> None:
     assert "[Install]" in live
     assert "WantedBy=multi-user.target" in live
 
+    runner = (HERMES / "scripts" / "run-rpc-worker.js").read_text(encoding="utf-8")
+    server = (HERMES / "src" / "rpc" / "server.js").read_text(encoding="utf-8")
+    assert "alignSocketDirectoryGroup(cfg.socketPath, TOOL_SOCKET_PATH)" in runner
+    assert "export function alignSocketDirectoryGroup" in server
+
 
 def test_rpc_unit_uses_a_systemd_239_compatible_secret_file():
     unit = (HERMES / "deploy" / "hermes-rpc@.service").read_text(encoding="utf-8")

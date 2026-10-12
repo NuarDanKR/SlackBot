@@ -28,7 +28,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRpcServer } from '../src/rpc/server.js';
+import { alignSocketDirectoryGroup, createRpcServer } from '../src/rpc/server.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -96,6 +96,22 @@ await test('서버가 소켓을 0660 으로 열고 그룹을 맞춘다', () => {
   assert.match(src, /mode = 0o660/, '소켓 기본 모드가 0660 이 아닙니다');
   assert.match(src, /alignSocketGroup\(socketPath\)/, '소켓 그룹을 맞추는 호출이 없습니다');
   assert.match(src, /export function alignSocketGroup/, 'alignSocketGroup 이 없습니다');
+});
+
+await test('worker가 TYBot 도구 소켓 그룹에 런타임 디렉터리를 맞춘다', () => {
+  const seen = [];
+  const gid = alignSocketDirectoryGroup('/run/worker/http.sock', '/run/tybot/tools.sock', {
+    stat: (target) => ({ gid: target.includes('/tybot/') ? 2002 : 1001 }),
+    chown: (target, uid, group) => seen.push(['chown', target, uid, group]),
+    chmod: (target, mode) => seen.push(['chmod', target, mode]),
+  });
+  assert.equal(gid, 2002);
+  assert.deepEqual(seen, [
+    ['chown', '/run/worker', -1, 2002],
+    ['chmod', '/run/worker', 0o2750],
+  ]);
+  const runner = fs.readFileSync(path.join(ROOT, 'scripts', 'run-rpc-worker.js'), 'utf8');
+  assert.match(runner, /alignSocketDirectoryGroup\(cfg\.socketPath, TOOL_SOCKET_PATH\)/);
 });
 
 console.log('[2/4] 실제 그룹 상속 (리눅스에서만)');
