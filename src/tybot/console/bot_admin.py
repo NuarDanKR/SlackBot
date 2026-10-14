@@ -57,11 +57,14 @@ HEALTHY = "ok"
 
 #: **돌고 있는 봇이 이 표들을 읽는가.**
 #:
-#: Archiver 는 새 `bot_connection`을 읽는다(`archiver_connection_config`). Master 는
-#: 아직 `workspace_secret`(`workspaces.load_workspaces`), Master 의 전문 봇 라우팅은
-#: `specialist_workspace`(`specialist_router`)를 읽는다. 전환 상태를 하나의 bool 로
-#: 뭉개면 Archiver 연결이 적용된다는 사실 또는 나머지가 미적용이라는 사실 중 하나를
-#: 거짓으로 말하게 된다.
+#: Archiver 는 `bot_connection`을 읽고(`archiver_connection_config`), Master 도
+#: 2026-10-12 부터 읽는다(`workspace_store.pick_runtime_tokens` — 그 표에 쌍이
+#: 있으면 쓰고, 없으면 `workspace_secret` 로 내려간다). 전문 봇 라우팅은 아직
+#: `specialist_workspace` 가 정본이고 `specialist_route` 는 v2 를 켠 워크스페이스
+#: 에서만 읽힌다(`specialist_router.available_for_routes`).
+#:
+#: 전환 상태를 하나의 bool 로 뭉개면 적용되는 것과 안 되는 것 중 하나를 거짓으로
+#: 말하게 된다.
 #:
 #: 그래서 이 화면의 저장은 **기록이지 적용이 아니다.** 그 사실을 화면이 말하지
 #: 않으면, 연결을 끈 사람은 수집이 멈춘 줄 알고 자리를 뜬다. 그 오해는 조용하고
@@ -70,7 +73,7 @@ HEALTHY = "ok"
 #: 모든 runtime reader가 전환됐는지를 나타내는 집계다. 화면은 이 값이 false인 동안
 #: 아래 상세를 반드시 보여 준다.
 RUNTIME_READER_STATUS = {
-    "master_connection": False,
+    "master_connection": True,
     "archiver_connection": True,
     "specialist_route": False,
 }
@@ -80,10 +83,10 @@ RUNTIME_READS_NEW_TABLES = all(RUNTIME_READER_STATUS.values())
 RUNTIME_EFFECT_NOW = (
     "Archiver 연결의 저장·검증은 **Archiver를 다음에 시작할 때 적용**된다. 이미 실행 중인"
     " 프로세스를 자동 재시작하지 않으며, 연결을 꺼도 실행 중인 수집이 멈추지 않는다.",
-    "Master 연결은 아직 옛 설정을 읽으므로 이 화면의 변경이 실행 중인 Master에 바로"
-    " 반영되지 않는다.",
-    "라우트 모드를 바꿔도 **지금 답변 경로는 그대로다.** Master 는 아직 배정"
-    "(`specialist_workspace`)만 보고 라우팅한다.",
+    "Master 연결도 **다음 기동에 적용**된다. 연결을 끄면 그 워크스페이스의 Master 는"
+    " 다음에 시작할 때 뜨지 않는다 — 지금 돌고 있는 프로세스는 그대로다.",
+    "라우트 모드는 **v2 를 켠 워크스페이스에서만** 읽힌다. 켜지 않은 곳에서는 Master 가"
+    " 배정(`specialist_workspace`)만 보고 라우팅하므로 이 화면의 변경이 반영되지 않는다.",
 )
 
 
@@ -96,7 +99,7 @@ def runtime_effect() -> dict:
     return {
         "appliesNow": RUNTIME_READS_NEW_TABLES,
         "summary": (
-            "Archiver 연결만 다음 기동에 적용됩니다. Master 연결과 라우팅은 아직 기록만 됩니다."
+            "연결은 다음 기동에 적용됩니다. 전문 봇 라우팅은 v2 를 켠 워크스페이스에서만 적용됩니다."
             if not RUNTIME_READS_NEW_TABLES
             else "저장 즉시 런타임에 반영됩니다."
         ),

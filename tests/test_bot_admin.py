@@ -626,7 +626,11 @@ def test_the_scan_covers_every_runtime_reader():
 
 
 def test_runtime_reader_status_matches_the_actual_contracts():
-    """Archiver만 전환됐다. 화면이 전부 적용/미적용이라고 뭉개면 안 된다."""
+    """화면이 전부 적용/미적용이라고 뭉개면 안 된다.
+
+    2026-10-12 에 Master 도 `bot_connection` 을 읽게 됐다(WC-14). 라우팅은 아직
+    v2 를 켠 워크스페이스에서만 `specialist_route` 를 본다.
+    """
     reads = {
         name: [table for table in NEW_TABLES
                if mentions_table(path.read_text(encoding="utf-8"), table)]
@@ -639,10 +643,11 @@ def test_runtime_reader_status_matches_the_actual_contracts():
         "Master 의 전문 봇 라우팅": ["specialist_route"],
     }
     assert admin.RUNTIME_READER_STATUS == {
-        "master_connection": False,
+        "master_connection": True,
         "archiver_connection": True,
         "specialist_route": False,
     }
+    # 라우팅이 전 워크스페이스에서 전환되기 전까지는 **전부 적용**이 아니다.
     assert admin.RUNTIME_READS_NEW_TABLES is False
 
 
@@ -655,16 +660,21 @@ def test_the_read_model_says_it_does_not_apply_now(repo):
     ):
         effect = payload["runtimeEffect"]
         assert effect["appliesNow"] is False
-        assert "Archiver 연결만 다음 기동에 적용" in effect["summary"]
+        assert "다음 기동에 적용" in effect["summary"]
         assert len(effect["details"]) >= 3
 
 
 def test_the_notice_names_what_does_not_stop(repo):
-    """「연결을 껐으니 수집도 멈췄겠지」 가 제일 비싼 오해다."""
+    """「연결을 껐으니 수집도 멈췄겠지」 가 제일 비싼 오해다.
+
+    반대쪽도 같이 말해야 한다 — 지금은 안 멈추지만 **다음 기동에는 안 뜬다.**
+    그 말이 없으면 끈 사람은 아무 일도 없는 줄 알고, 재시작한 날 알게 된다.
+    """
     details = " ".join(admin.runtime_effect()["details"])
 
     assert "수집이 멈추지 않는다" in details
-    assert "답변 경로는 그대로" in details
+    assert "다음에 시작할 때 뜨지 않는다" in details
+    assert "v2 를 켠 워크스페이스에서만" in details
 
 
 def test_disabling_a_connection_changes_no_collection_state(repo, actor):
@@ -700,3 +710,34 @@ def test_no_source_file_hides_a_control_character():
                 offenders.append(str(path.relative_to(ROOT)))
 
     assert offenders == []
+
+
+# --- 런타임 전환 상태는 사실이어야 한다 (2026-10-14) ---------------------------
+#
+# WC-14 로 Master 가 bot_connection 을 읽게 됐는데(`workspace_store.
+# pick_runtime_tokens`) 이 화면은 아직 「Master 연결은 아직 옛 설정을 읽는다」 고
+# 말하고 있었다.
+#
+# 그 문구를 믿은 사람은 Master 연결을 꺼도 아무 일 없을 줄 안다. 실제로는 다음
+# 기동에서 그 워크스페이스의 Master 가 안 뜬다.
+
+
+def test_the_master_reader_flag_matches_the_code():
+    """화면이 말하는 것과 코드가 하는 것이 같아야 한다."""
+    import inspect
+
+    from tybot.console import workspace_store
+
+    source = inspect.getsource(workspace_store.runtime_workspaces)
+    reads_new_table = "bot_connection" in source
+
+    assert admin.RUNTIME_READER_STATUS["master_connection"] == reads_new_table, (
+        "Master 가 bot_connection 을 읽는지 여부가 화면 문구와 다릅니다"
+    )
+
+
+def test_the_notice_never_claims_master_ignores_this_screen():
+    """적용되는데 「기록만 된다」 고 하면, 끈 사람이 끊긴 줄 모른다."""
+    notice = " ".join(admin.runtime_effect()["details"])
+
+    assert "Master 연결은 아직 옛 설정을 읽으므로" not in notice
