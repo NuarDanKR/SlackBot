@@ -191,6 +191,55 @@ def _health(last_ingested: str | None, *, has_problem: bool, broken: int) -> str
     return "ok"
 
 
+def _shadow_store() -> ArchiveStore | None:
+    """Archiver 그림자 루트. 설정이 없으면 `None`.
+
+    **현황판 전용이다.** 답변 근거는 단일 루트 그대로다(2026-10-02 오너 결정) —
+    여기서 읽은 것을 근거로 넘기는 경로를 만들지 않는다.
+
+    왜 필요한가: Archiver 는 채널 모드에 따라 두 곳에 쓴다. `shadow` 면
+    `ARCHIVER_SHADOW_DIR`, `active` 면 `ARCHIVE_DIR` 이다. 운영 루트만 세면
+    **전환 중인 워크스페이스가 「수집 중단」 으로 보인다** — Archiver 는 멀쩡히
+    수집하는데 화면은 사고라고 말하고, 그 빨간 줄은 눌러도 고칠 것이 없다.
+    """
+    configured = os.getenv("ARCHIVER_SHADOW_DIR", "").strip()
+    if not configured:
+        return None
+    root = Path(configured)
+    if not root.is_dir():
+        return None
+    return ArchiveStore(root)
+
+
+def _shadow_rollup() -> tuple[dict, str]:
+    """`{workspace: (docs, lines, last_ingested)}` 와 오류 문구.
+
+    못 읽으면 **빈 dict 가 아니라 사유를 함께** 돌려준다. 0 으로 보여 주면
+    「그림자 수집이 안 되고 있다」 로 읽힌다 — 못 본 것과 없는 것은 다르다.
+    """
+    try:
+        store = _shadow_store()
+    except Exception as exc:  # noqa: BLE001 - 못 읽어도 현황판은 떠야 한다
+        logger.warning("그림자 루트를 읽지 못했습니다: %s", exc)
+        return {}, f"그림자 루트를 읽지 못했습니다({type(exc).__name__})"
+    if store is None:
+        return {}, ""
+    try:
+        docs = store.docs()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("그림자 루트 문서를 읽지 못했습니다: %s", exc)
+        return {}, f"그림자 루트를 읽지 못했습니다({type(exc).__name__})"
+
+    rolled: dict[str, list] = {}
+    for doc in docs:
+        entry = rolled.setdefault(doc.workspace, [0, 0, None])
+        entry[0] += 1
+        entry[1] += len(doc.raw_lines)
+        if doc.last_ingested and (entry[2] is None or doc.last_ingested > entry[2]):
+            entry[2] = doc.last_ingested
+    return {key: tuple(value) for key, value in rolled.items()}, ""
+
+
 def workspace_status(store: ArchiveStore | None = None) -> list[dict]:
     """`데이터 현황` 화면이 쓰는 목록."""
     store = store or ArchiveStore(archive_dir())
@@ -201,6 +250,7 @@ def workspace_status(store: ArchiveStore | None = None) -> list[dict]:
     roots = _root_keys()
     today = _now().date()
     spend = _spend_by_workspace_today()
+    shadow, shadow_error = _shadow_rollup()
 
     by_ws: dict[str, list] = defaultdict(list)
     for d in docs:
@@ -210,7 +260,7 @@ def workspace_status(store: ArchiveStore | None = None) -> list[dict]:
         broken_by_ws[workspace_from_path(path, store.root)] += 1
 
     # 설정에 없지만 아카이브에는 있는 워크스페이스도 보여 준다(설정에서 빠진 것을 알 수 있게)
-    keys = sorted(set(labels) | set(by_ws) | set(broken_by_ws))
+    keys = sorted(set(labels) | set(by_ws) | set(broken_by_ws) | set(shadow))
 
     out: list[dict] = []
     for key in keys:
@@ -226,6 +276,9 @@ def workspace_status(store: ArchiveStore | None = None) -> list[dict]:
                     lines_by_day[day] += 1
             if d.last_ingested and (last_ts is None or d.last_ingested > last_ts):
                 last_ts = d.last_ingested
+
+        shadow_docs, shadow_lines, shadow_ts = shadow.get(key, (0, 0, None))
+        newest = max((value for value in (last_ts, shadow_ts) if value), default=None)
 
         beat = heartbeat.read(key)
         stale = beat is None or heartbeat.is_stale(beat)
@@ -246,13 +299,25 @@ def workspace_status(store: ArchiveStore | None = None) -> list[dict]:
                 "docs": len(ws_docs),
                 "rawLines": raw_lines,
                 "brokenDocs": broken_by_ws.get(key, 0),
-                "lastIngestedAt": last_ts,
+                # **합치지 않는다.** 운영과 그림자를 나란히 둔다 — 합치면 인수
+                # 전후를 대조할 수 없고, 어느 쪽이 멈췄는지도 못 본다.
+                "liveDocs": len(ws_docs),
+                "liveRawLines": raw_lines,
+                "liveLastIngestedAt": last_ts,
+                "shadowDocs": None if shadow_error else shadow_docs,
+                "shadowRawLines": None if shadow_error else shadow_lines,
+                "shadowLastIngestedAt": shadow_ts,
+                "shadowError": shadow_error,
+                # 「수집이 돌고 있나」 는 둘 중 **새 쪽**이다. 전환 중에는 운영
+                # 루트가 조용한 것이 정상이고, 그걸 사고로 적으면 진짜 사고와
+                # 구별되지 않는다.
+                "lastIngestedAt": newest,
                 "writeProblem": write_problem,
                 "courses": _courses(lines_by_day, today),
                 "spendTodayUsd": spend.get(key, 0.0),
                 "limitUsd": float((beat or {}).get("limit_usd", 0.0)),
                 "health": _health(
-                    last_ts, has_problem=bool(write_problem), broken=broken_by_ws.get(key, 0)
+                    newest, has_problem=bool(write_problem), broken=broken_by_ws.get(key, 0)
                 ),
             }
         )
