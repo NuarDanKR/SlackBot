@@ -684,6 +684,30 @@ def _dm_handoff_loop(consumer, stop: threading.Event, interval_seconds: int) -> 
         stop.wait(interval_seconds)
 
 
+def _live_archive_root(workspace: str, env: dict[str, str] | None = None) -> Path | None:
+    values = os.environ if env is None else env
+    if values.get("ARCHIVER_LIVE_WRITES_ENABLED", "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        return None
+    supplied = values.get("ARCHIVE_DIR", "")
+    if not supplied or not Path(supplied).is_absolute():
+        raise ArchiverConfigError("ARCHIVE_DIR must be absolute for live writes")
+    live_root = Path(supplied).resolve()
+    if not live_root.is_dir():
+        raise ArchiverConfigError("live archive root must already exist")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", workspace):
+        raise ArchiverConfigError("invalid workspace key for live archive")
+    # Unrelated legacy namespaces must not prevent a new workspace starting.
+    # Keep the same-workspace guard to avoid two canonical layouts for its data.
+    legacy = live_root / "workspaces" / workspace
+    if legacy.exists() or legacy.is_symlink():
+        raise ArchiverConfigError(
+            f"live archive root still contains legacy workspace: {workspace}"
+        )
+    return live_root
+
+
 def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -694,19 +718,8 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     validate_slack_identity(cfg, app.client.auth_test())
     repo = default_repo()
     channel_membership.sync(app.client, repo, cfg.key, actor="startup-membership-sync")
-    live_enabled = os.getenv("ARCHIVER_LIVE_WRITES_ENABLED", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
-    live_root = None
-    if live_enabled:
-        supplied = os.getenv("ARCHIVE_DIR", "")
-        if not supplied or not Path(supplied).is_absolute():
-            raise ArchiverConfigError("ARCHIVE_DIR must be absolute for live writes")
-        live_root = Path(supplied).resolve()
-        if not live_root.is_dir():
-            raise ArchiverConfigError("live archive root must already exist")
-        if (live_root / "workspaces").exists():
-            raise ArchiverConfigError("live archive root still contains legacy workspaces")
+    live_root = _live_archive_root(cfg.key)
+    live_enabled = live_root is not None
     collector = ShadowCollector(
         cfg, root, membership_repo=repo,
         layout=os.getenv("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower(),

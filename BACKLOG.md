@@ -889,6 +889,9 @@ B-39의 외부 MCP 조사는 공식 법령을 읽는 도구 계층으로 한정�
 Archiver+Hermes만 운영할 수 있도록 DB 기동 함수와 runtime loader의 Master 필수
 조건을 제거한다. 등록된 Master의 신원 검증과 앱 분리는 유지하고, Master 없는
 workspace의 DM 인계만 비활성화한다. 채널 writer 인수와 운영 수집 게이트는 유지한다.
+TEC 후속 기동 보완: 운영 root의 구형 레이아웃 검사를 workspace별로 제한한다.
+`workspaces/mgmt`, `archi`, `invest`의 잔여 자료 때문에 새 TEC 수집을 차단하지 않되
+TEC 자체 구형 자료가 있으면 기동을 막는다. 기존 원문 이동/삭제와 다른 수집기 재시작은 없다.
 
 **긴급 · 진행중 (Codex/2026-09-23) · 의존 B-38, B-42, B-63**
 

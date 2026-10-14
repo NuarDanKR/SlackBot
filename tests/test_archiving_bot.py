@@ -322,6 +322,36 @@ def test_runtime_collector_respects_operator_hold(tmp_path):
     assert not (tmp_path / "shadow").exists()
 
 
+def test_new_workspace_can_start_beside_unrelated_legacy_archives(tmp_path):
+    archive = tmp_path / "archive"
+    for workspace in ("mgmt", "archi", "invest"):
+        (archive / "workspaces" / workspace).mkdir(parents=True)
+    env = {"ARCHIVE_DIR": str(archive), "ARCHIVER_LIVE_WRITES_ENABLED": "1"}
+
+    assert archiving_bot._live_archive_root("tec", env) == archive.resolve()
+    assert {item.name for item in (archive / "workspaces").iterdir()} == {
+        "mgmt", "archi", "invest",
+    }
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="legacy workspace: mgmt"):
+        archiving_bot._live_archive_root("mgmt", env)
+    (archive / "workspaces" / "tec").mkdir()
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="legacy workspace: tec"):
+        archiving_bot._live_archive_root("tec", env)
+
+
+def test_live_root_keeps_absolute_existing_path_checks(tmp_path):
+    assert archiving_bot._live_archive_root("tec", {}) is None
+    env = {"ARCHIVER_LIVE_WRITES_ENABLED": "1", "ARCHIVE_DIR": "relative"}
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="absolute"):
+        archiving_bot._live_archive_root("tec", env)
+    env["ARCHIVE_DIR"] = str(tmp_path / "missing")
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="already exist"):
+        archiving_bot._live_archive_root("tec", env)
+    env["ARCHIVE_DIR"] = str(tmp_path)
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="invalid workspace"):
+        archiving_bot._live_archive_root("../tec", env)
+
+
 def test_active_channel_writes_only_live_root_when_all_gates_agree(tmp_path, monkeypatch):
     cfg = replace(archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
                   separate_attachments=True)
