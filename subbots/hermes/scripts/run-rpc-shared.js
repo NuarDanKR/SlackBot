@@ -60,8 +60,8 @@ export function answererFor(profile, { toolSocketPath, secret, console: log }) {
   return createRpcAnswerer({
     toolSession: (spec) => createToolSession(spec, { client: anthropic }),
     buildTools: buildRemoteTools,
-    createClient: ({ requestId, token, allow }) => createToolClient({
-      socketPath: toolSocketPath, secret, requestId, token, allow,
+    createClient: ({ requestId, token, allow, signal }) => createToolClient({
+      socketPath: toolSocketPath, secret, requestId, token, allow, signal,
     }),
     // 말투는 **그 workspace 의 것**이다. 공유 프로세스가 한 말투로 통일하면
     // 사내 사람에게 「사업장」 이라고 말하게 된다.

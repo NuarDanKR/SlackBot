@@ -45,8 +45,8 @@ export function wireWorker(cfg, { toolSocketPath = TOOL_SOCKET_PATH, console: lo
   const answerer = createRpcAnswerer({
     toolSession: (spec) => createToolSession(spec, { client: anthropic }),
     buildTools: buildRemoteTools,
-    createClient: ({ requestId, token, allow }) => createToolClient({
-      socketPath: toolSocketPath, secret: cfg.secret, requestId, token, allow,
+    createClient: ({ requestId, token, allow, signal }) => createToolClient({
+      socketPath: toolSocketPath, secret: cfg.secret, requestId, token, allow, signal,
     }),
     renderPrompt: ({ maxOutputChars }) => renderRpcPrompt({ domain: cfg.domain, maxOutputChars }),
     model: cfg.model,

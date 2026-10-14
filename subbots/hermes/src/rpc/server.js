@@ -191,10 +191,23 @@ export function createRpcServer({
       log?.error?.(`[rpc] 답변기가 던졌습니다: ${err?.code || err?.name || 'Error'}`);
       result = { status: 'failed', answer: '', usedEvidence: [], uncertain: [], usage: {} };
     } finally {
-      // 성공·실패·취소 **어느 길로 나가도** 자리를 돌려준다. 한 번이라도 안 돌려주면
-      // 그 칸은 영영 줄고, 증상은 「어느 날부터 429 가 잦다」 뿐이다.
       inFlight.delete(request.requestId);
-      release();
+      /* 자리는 **일이 실제로 끝난 뒤에** 돌려준다.
+       *
+       * 예산 만료는 답을 먼저 내보내고 실행 루프는 아직 돈다. 그때 바로 돌려주면
+       * 살아 있는 모델 호출 위로 새 요청이 올라타 **실제 호출 수가 상한을 넘는다**
+       * (Codex 리뷰 P1: 상한 1에서 살아 있는 작업 2개를 실측). 평소 경로에서는
+       * `settled` 가 이미 풀려 있어 아래가 같은 tick 에 돈다.
+       *
+       * 성공·실패·취소 **어느 길로 나가도** 돌려준다. 한 번이라도 안 돌려주면 그 칸은
+       * 영영 줄고, 증상은 「어느 날부터 429 가 잦다」 뿐이다. 그래서 `settled` 가
+       * 깨져도 돌려준다(`finally`). */
+      const settled = result?.settled;
+      if (settled && typeof settled.then === 'function') {
+        settled.then(release, release);
+      } else {
+        release();
+      }
     }
 
     // 원문·질문·도구 인자는 기록하지 않는다. 운영에서 no_evidence 와 빈 답을
@@ -213,8 +226,16 @@ export function createRpcServer({
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([name, value]) => `${name}=${value.calls}/${value.chars}`)
       .join(',') || '-';
+    /* **workspace 를 적는다.** 공유 worker 에는 여러 workspace 요청이 섞여 들어오므로,
+     * 이 줄에 workspace 가 없으면 「어느 쪽이 느린가·어느 쪽이 근거를 못 찾나」 를
+     * journal 만 보고는 못 가린다(Codex 리뷰 P2).
+     *
+     * 적는 값은 **대조를 통과한 `request.workspace`** 다 — 명부에 있는 key 라는 뜻이고,
+     * 그래서 임의 문자열이 로그로 들어오지 않는다. 원문·질문·검색어·키·token 은 계속
+     * 안 적는다. */
     log?.info?.(
-      `[rpc] 완료 request=${request.requestId} status=${result.status} `
+      `[rpc] 완료 request=${request.requestId} workspace=${request.workspace} `
+      + `status=${result.status} `
       + `elapsed_ms=${Math.max(0, Number(usage.elapsed_ms) || 0)} `
       + `model=${String(usage.model || '-')} stop_reason=${String(usage.stop_reason || '-')} `
       + `in_tok=${Math.max(0, Number(usage.input_tokens) || 0)} `

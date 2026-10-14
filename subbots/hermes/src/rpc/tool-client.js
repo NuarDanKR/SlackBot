@@ -44,13 +44,20 @@ const READ_CAP = MAX_TOOL_RESULT_BYTES + 8192;
  * 한 번 POST 한다. **상한을 두고 읽는다** — 두지 않으면 상대가 무한히 흘려보내
  * 우리 메모리를 채운다.
  */
-function post({ socketPath, path, body, headers, timeoutMs, agent, request = http.request }) {
+function post({ socketPath, path, body, headers, timeoutMs, agent, signal, request = http.request }) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ToolTransportError('이미 중단된 요청입니다.'));
+      return;
+    }
     const req = request({
       socketPath,
       path,
       method: 'POST',
       agent,
+      // **진행 중인 연결까지 끊는다.** 안 주면 예산이 끝난 뒤에도 이 왕복은 끝까지
+      // 가고, 저쪽 ToolBox 예산을 한 번 더 태운다(Codex 리뷰 P1).
+      signal,
       headers: {
         Host: 'tybot',
         Connection: 'close',
@@ -96,9 +103,11 @@ function post({ socketPath, path, body, headers, timeoutMs, agent, request = htt
  * @param {string} o.requestId    이 요청
  * @param {string} o.token        이 요청 하나짜리 도구 토큰. **닫아 둔다**
  * @param {string[]} o.allow      허용 도구
+ * @param {AbortSignal} [o.signal] 예산·취소. **진행 중인 왕복까지 끊는다** — 안 주면
+ *   예산이 끝난 뒤에도 이 호출은 끝까지 가고, 저쪽 ToolBox 예산을 한 번 더 태운다.
  */
 export function createToolClient({
-  socketPath, secret, requestId, token, allow,
+  socketPath, secret, requestId, token, allow, signal,
   timeoutMs = 30_000, now = () => Date.now(), post: postFn = post,
 }) {
   let calls = 0;
@@ -121,7 +130,7 @@ export function createToolClient({
     });
 
     const reply = await postFn({
-      socketPath, path: TOOL_ENDPOINT, body, headers, timeoutMs,
+      socketPath, path: TOOL_ENDPOINT, body, headers, timeoutMs, signal,
     });
 
     if (reply.status !== 200) {

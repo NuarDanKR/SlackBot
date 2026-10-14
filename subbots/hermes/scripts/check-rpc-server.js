@@ -331,8 +331,16 @@ await test('정상 RPC 완료 로그는 계측만 남기고 질문과 원문은 
   assert.match(lines[0], /status=no_evidence/);
   assert.match(lines[0], /stop_reason=max_tokens/);
   assert.match(lines[0], /tool_calls=1 tools=search=1\/456/);
+  /* **workspace 를 적는다**(Codex 리뷰 P2). 공유 worker 에는 여러 workspace 요청이
+   * 섞여 들어오므로, 이 줄에 workspace 가 없으면 「어느 쪽이 느린가·어느 쪽이 근거를
+   * 못 찾나」 를 journal 만 보고는 못 가린다. 개별 worker 에도 같이 적어 둔다 —
+   * 두 줄 모양이 다르면 집계가 두 벌이 된다. */
+  assert.match(lines[0], new RegExp(`workspace=${WORKSPACE}\\b`),
+    `완료 로그에 workspace 가 없습니다: ${lines[0]}`);
   assert.ok(!lines[0].includes('지난주 정산'));
   assert.ok(!lines[0].includes('비밀 원문'));
+  // 토큰·서명은 계속 안 적는다.
+  assert.ok(!lines[0].includes('tok-1'));
 });
 
 /* ── 3. 지어낸 인용 ────────────────────────────────────────────────────── */

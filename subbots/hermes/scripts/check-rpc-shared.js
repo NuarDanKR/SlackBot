@@ -286,10 +286,19 @@ function readAnswer(reply, requestId) {
   return got;
 }
 
-const waitFor = async (cond) => {
-  for (let i = 0; i < 400 && !cond(); i += 1) await new Promise((r) => setTimeout(r, 5));
-  assert.ok(cond(), '기다리던 상태가 안 됐습니다');
+const waitFor = async (cond, ms = 2_000) => {
+  const until = Date.now() + ms;
+  while (!cond() && Date.now() < until) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(cond(), `기다리던 상태가 ${ms}ms 안에 안 됐습니다`);
 };
+
+/** `ask` 와 같되 `limits` 를 바꿀 수 있다. 예산 만료 경로를 재려면 deadline 이 짧아야 한다. */
+const ask2 = (id, ws, token, limits) => Buffer.from(JSON.stringify({
+  schema: wire.SCHEMA_REQUEST, request_id: id, authorization_id: `auth-${id}`,
+  workspace: ws, question: `질문 ${id}`, evidence: [], follow_up: [],
+  tools: { token, endpoint: wire.TOOL_ENDPOINT, allow: ['search'], budget: {} },
+  limits: { deadline_ms: 90000, max_output_chars: 3000, ...limits },
+}), 'utf8');
 
 const PROFILES = loadProfiles(goodProfiles()).profiles;
 
@@ -525,6 +534,203 @@ await test('답변기가 던져도 슬롯이 돌아온다', async () => {
   const got = readAnswer(await call(at, wire.ANSWER_ENDPOINT, ask('e-1', 'tyit', 'tok')), 'e-1');
   assert.equal(got.status, 'failed');
   assert.equal(gate.inFlight, 0, '오류 뒤 슬롯이 안 돌아왔습니다');
+});
+
+/* ── 5b. timeout 뒤에도 상한을 넘지 않는다 (Codex 리뷰 P1) ───────────────── */
+console.log('[5b/7] 예산 만료 — 살아 있는 작업이 상한을 넘지 않는다');
+
+/**
+ * **지연된 모델 세션.** 회차 하나를 `delayMs` 동안 붙잡고, 중단 신호가 오면 그때
+ * 끝난다. 실제 SDK 가 `signal` 을 받아 하는 일을 같은 모양으로 흉내 낸다.
+ *
+ * `live` 는 **지금 모델 호출 안에 있는 요청 수**다. Codex 가 잰 `modelCallsStillActive`
+ * 와 같은 값이고, 이게 상한을 넘으면 공유 worker 가 실제로 과점유 중이라는 뜻이다.
+ */
+function slowSession(state, { delayMs = 60_000, teardownMs = 400 } = {}) {
+  return () => ({
+    open({ signal }) {
+      let served = false;
+      return {
+        previousMessageId: null,
+        [Symbol.asyncIterator]: () => ({
+          async next() {
+            if (served) return { done: true, value: undefined };
+            served = true;
+            state.live += 1;
+            state.peak = Math.max(state.peak, state.live);
+            try {
+              // **중단 신호를 실제로 본다.** 안 보면 `delayMs` 를 다 채운다.
+              //
+              // 다만 **즉시 끝나지는 않는다**(`teardownMs`). 진짜 SDK 도 신호를 받고
+              // 소켓을 정리하는 데 시간이 걸리고, 그 틈이 바로 Codex 가 잰 창이다 —
+              // 그 동안 슬롯이 돌아가 있으면 새 요청이 올라탄다. 0ms 로 두면 창이
+              // 없어서 「안 넘었다」 가 공짜로 참이 된다.
+              await new Promise((resolve, reject) => {
+                const timer = setTimeout(resolve, delayMs);
+                timer.unref?.();
+                signal?.addEventListener?.('abort', () => {
+                  clearTimeout(timer);
+                  const tearing = setTimeout(
+                    () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+                    teardownMs,
+                  );
+                  tearing.unref?.();
+                }, { once: true });
+              });
+            } finally {
+              state.live -= 1;
+            }
+            return { done: false, value: {
+              text: '늦게 온 답[e1].', stopReason: 'end_turn',
+              usage: { input_tokens: 1, output_tokens: 1 }, toolUses: [], raw: {},
+            } };
+          },
+          return: async () => ({ done: true, value: undefined }),
+        }),
+        async generateToolResponse() { return null; },
+        continueWith() {},
+      };
+    },
+  });
+}
+
+async function bootSlow({ limits, delayMs, teardownMs }) {
+  const state = { live: 0, peak: 0 };
+  const seen = [];
+  const toolSocket = await listenOn(toolsServerFor({}, seen), 'tools');
+  const gate = createConcurrencyGate(limits);
+  const route = (ws) => {
+    const profile = PROFILES.get(ws);
+    if (!profile) return null;
+    return createRpcAnswerer({
+      toolSession: slowSession(state, { delayMs, teardownMs }),
+      buildTools: buildRemoteTools,
+      createClient: ({ requestId, token, allow, signal }) => createToolClient({
+        socketPath: toolSocket, secret: SECRET, requestId, token, allow, signal,
+      }),
+      renderPrompt: () => 'x',
+      model: profile.model,
+      maxIterations: profile.maxIterations,
+      terms: lazyTerms(profile.domain),
+      console: { error() {}, warn() {} },
+    });
+  };
+  const worker = createRpcServer({
+    secret: SECRET, version: 'slow', route, limits: gate,
+    console: { error() {}, warn() {} },
+  });
+  const at = await worker.listen(place('slow'), listenOpts);
+  shut.push(worker);
+  return { worker, socketPath: at, gate, state };
+}
+
+await test('예산이 끝나도 모델 호출이 살아 있는 동안 슬롯을 안 돌려준다', async () => {
+  // 상한 1. 첫 요청은 deadline 이 짧아 예산에서 접히고, 모델은 아직 안 끝났다.
+  const s = await bootSlow({ limits: { max: 1, maxPerWorkspace: 1 }, delayMs: 60_000 });
+  const first = call(s.socketPath, wire.ANSWER_ENDPOINT,
+    ask2('p1-a', 'tyit', 'tok-A', { deadline_ms: 2600 }), { timeoutMs: 8_000 });
+  await waitFor(() => s.state.live === 1);
+
+  const got = readAnswer(await first, 'p1-a');
+  assert.equal(got.status, 'failed', '예산 만료가 failed 로 안 접혔습니다');
+  assert.ok(got.uncertain.some((u) => u.includes('시간')), JSON.stringify(got.uncertain));
+
+  // 여기가 핵심이다. 답은 나갔지만 **일은 아직 안 끝났다** — 슬롯이 돌아가 있으면
+  // 다음 요청이 올라타고, 실제 모델 호출 수가 상한 1 을 넘는다(Codex 실측 2건).
+  const second = await call(s.socketPath, wire.ANSWER_ENDPOINT,
+    ask2('p1-b', 'tyit', 'tok-B', { deadline_ms: 2600 }), { timeoutMs: 8_000 });
+  assert.equal(second.status, 429,
+    `예산 만료 직후 새 요청이 통과했습니다(살아 있는 모델 호출 ${s.state.live}건)`);
+
+  // 중단 신호가 SDK 까지 닿았으면 곧 끝난다. 안 닿으면 60초를 다 채운다.
+  await waitFor(() => s.state.live === 0, 3_000);
+  assert.equal(s.state.peak, 1, `동시에 산 모델 호출이 ${s.state.peak}건입니다 (상한 1)`);
+
+  // 끝난 뒤에는 자리가 돌아온다 — 영구 점유가 아니다.
+  await waitFor(() => s.gate.inFlight === 0, 3_000);
+});
+
+await test('취소도 같다 — 끝나기 전에는 슬롯을 안 돌려준다', async () => {
+  const s = await bootSlow({ limits: { max: 1, maxPerWorkspace: 1 }, delayMs: 60_000 });
+  const first = call(s.socketPath, wire.ANSWER_ENDPOINT,
+    ask2('p1-c', 'tyit', 'tok-A', { deadline_ms: 30_000 }), { timeoutMs: 10_000 });
+  await waitFor(() => s.state.live === 1);
+
+  const cancel = Buffer.from(JSON.stringify({ request_id: 'p1-c' }), 'utf8');
+  assert.equal((await call(s.socketPath, wire.CANCEL_ENDPOINT, cancel)).status, 200);
+
+  const got = readAnswer(await first, 'p1-c');
+  assert.equal(got.status, 'failed');
+  await waitFor(() => s.state.live === 0, 3_000);
+  assert.equal(s.state.peak, 1);
+  await waitFor(() => s.gate.inFlight === 0, 3_000);
+});
+
+await test('평소 경로는 느려지지 않는다 — 슬롯이 같은 tick 에 돌아온다', async () => {
+  const s = await bootShared({
+    profiles: PROFILES,
+    limits: { max: 1, maxPerWorkspace: 1 },
+    answers: { 'p1-d': '답[e1].', 'p1-e': '답[e1].' },
+    byRequest: {
+      'p1-d': { text: 'a', evidence: [{ id: 'e1', kind: 'channel_line' }] },
+      'p1-e': { text: 'a', evidence: [{ id: 'e1', kind: 'channel_line' }] },
+    },
+  });
+  // 상한 1 인데 **연달아** 두 번 보낸다. 정상 완료에서 슬롯이 늦게 돌아오면
+  // 두 번째가 429 가 된다 — 그러면 이 수정이 멀쩡한 길을 망가뜨린 것이다.
+  assert.equal(readAnswer(await call(s.socketPath, wire.ANSWER_ENDPOINT, ask('p1-d', 'tyit', 'tok-A')), 'p1-d').status, 'answered');
+  assert.equal(readAnswer(await call(s.socketPath, wire.ANSWER_ENDPOINT, ask('p1-e', 'tyit', 'tok-B')), 'p1-e').status, 'answered');
+  assert.equal(s.gate.inFlight, 0);
+});
+
+await test('모델 세션에 중단 신호를 실제로 내려 준다', () => {
+  // 배선을 소스로 고정한다. 신호가 빠져도 **느린 모델이 없으면 아무것도 안 빨개진다** —
+  // 위 시험이 그걸 재지만, 어느 줄이 사라졌는지는 여기서 바로 보인다.
+  const answerSrc = fs.readFileSync(new URL('../src/rpc/answer.js', import.meta.url), 'utf8');
+  assert.match(answerSrc, /signal: own\.signal,/, '모델 세션에 signal 을 안 넘깁니다');
+  const providerSrc = fs.readFileSync(new URL('../src/llm/provider.js', import.meta.url), 'utf8');
+  assert.match(providerSrc, /\}, signal \? \{ signal \} : undefined\);/,
+    'toolRunner 에 signal 을 안 넘깁니다');
+  const clientSrc = fs.readFileSync(new URL('../src/rpc/tool-client.js', import.meta.url), 'utf8');
+  assert.match(clientSrc, /timeoutMs, signal,/, '도구 HTTP 에 signal 을 안 넘깁니다');
+  const serverSrc = fs.readFileSync(new URL('../src/rpc/server.js', import.meta.url), 'utf8');
+  assert.match(serverSrc, /settled\.then\(release, release\)/,
+    '서버가 settled 를 기다리지 않고 슬롯을 돌려줍니다');
+});
+
+await test('완료 로그가 workspace 를 적는다 — 섞여 들어와도 가릴 수 있게', async () => {
+  const logged = [];
+  const gate = createConcurrencyGate({ max: 4, maxPerWorkspace: 2 });
+  const worker = createRpcServer({
+    secret: SECRET, version: 'log', limits: gate,
+    route: (ws) => (PROFILES.has(ws) ? {
+      answer: async () => ({
+        status: 'no_evidence', answer: '못 찾았습니다.', usedEvidence: [], uncertain: [],
+        usage: { model: 'stub', elapsed_ms: 1 }, trace: [],
+      }),
+    } : null),
+    console: { info: (line) => logged.push(line), error() {}, warn() {} },
+  });
+  const at = await worker.listen(place('log'), listenOpts);
+  shut.push(worker);
+
+  await call(at, wire.ANSWER_ENDPOINT, ask('log-1', 'tyit', 'tok-A'));
+  await call(at, wire.ANSWER_ENDPOINT, ask('log-2', 'mgmt', 'tok-B'));
+
+  assert.equal(logged.length, 2);
+  const byWs = logged.map((line) => (line.match(/workspace=([a-z0-9-]+)/) || [])[1]);
+  assert.deepEqual(byWs, ['tyit', 'mgmt'],
+    `완료 로그로 workspace 를 가릴 수 없습니다:\n${logged.join('\n')}`);
+  // 적는 값은 **대조를 통과한** key 다 — 임의 문자열이 로그로 들어오지 않는다.
+  for (const line of logged) {
+    assert.ok(!line.includes('질문 log-'), '질문이 로그에 있습니다');
+    assert.ok(!line.includes('tok-'), '토큰이 로그에 있습니다');
+    assert.ok(!line.includes('못 찾았습니다'), '답변 본문이 로그에 있습니다');
+  }
+
+  // 미등록 workspace 는 완료 로그 자체가 없다(400 에서 끊긴다).
+  await call(at, wire.ANSWER_ENDPOINT, ask('log-3', 'payroll', 'tok-C'));
+  assert.equal(logged.length, 2, '거절된 요청이 완료 로그를 남겼습니다');
 });
 
 /* ── 6. health ────────────────────────────────────────────────────────── */

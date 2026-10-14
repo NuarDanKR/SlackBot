@@ -26,7 +26,7 @@ domain·모델·키가 정해지고, 공유 worker 는 요청의 workspace 로 �
 | `src/rpc/server.js` | `route`(workspace→답변기) · `limits`(429) · `readiness`(health) |
 | `src/rpc/wire.js` | `buildHealthResponse` 에 선택적 `workspaces` |
 | `scripts/run-rpc-shared.js` (신규) | 공유 entrypoint |
-| `scripts/check-rpc-shared.js` (신규) | 공유 계약 시험 25건 |
+| `scripts/check-rpc-shared.js` (신규) | 공유 계약 시험 30건 |
 | `scripts/check-rpc-isolation.js` | **두 entrypoint** 를 같이 건다 |
 | `scripts/check-rpc-unit.js` | 공유 배치 계약 10건 추가 |
 | `scripts/check-catalog.js` | 등록 1줄 |
@@ -175,6 +175,66 @@ helper 가 같은 일을 멱등으로 한다(내용이 같으면 복사도 reloa
 **429 는 `request_id` 를 점유하지 않는다.** 점유하면 저쪽이 같은 id 로 재시도할 때
 429 가 409 로 바뀌어 원인이 뒤바뀐다. 시험이 그 순서를 본다.
 
+## 6.1 timeout 뒤에도 상한을 지킨다 (2026-10-14 · 리뷰 P1 반영)
+
+Codex 가 잡은 것이 맞았다. 첫 구현은 **예산이 끝나면 답을 내보내고 슬롯도 같이
+돌려줬다.** 그런데 모델 호출은 아직 살아 있었다 — `own.abort()` 가 다음 회차와 다음
+도구 호출만 막고 **이미 나간 HTTP 요청에는 닿지 않았기** 때문이다.
+
+Codex 실측: 상한 1에서 `{"gateOccupied":1,"modelCallsStillActive":2}`.
+
+고친 것은 둘이다.
+
+### ① 중단 신호를 **끝까지** 내려 준다
+
+| 어디 | 무엇이 끊기나 |
+|---|---|
+| `tools.js` | 다음 도구 호출(호출 직전에 본다) — 이미 있던 것 |
+| `tool-client.js` → `http.request({signal})` | **진행 중인 도구 왕복** |
+| `answer.js` → `provider.js` → `toolRunner(params, {signal})` | **진행 중인 모델 호출** |
+
+SDK 는 `signal` 을 `messages.create` 와 `generateToolResponse` 에 그대로 넘긴다.
+`provider.js` 변경은 선택 인자라 Slack Q&A 경로는 그대로다(그쪽은 안 넘기므로 `undefined`).
+
+### ② 일이 **실제로 끝난 뒤에** 슬롯을 돌려준다
+
+`answer()` 는 예산 만료에서 `settled`(아직 도는 실행 루프)를 함께 돌려주고,
+서버는 그것이 풀린 뒤 `release()` 한다.
+
+```js
+const settled = result?.settled;
+if (settled?.then) settled.then(release, release);
+else release();
+```
+
+평소 경로에서는 `settled` 가 이미 풀려 있어 같은 tick 에 돈다 — **멀쩡한 길은
+느려지지 않는다**(시험이 상한 1로 연달아 두 번 보내 확인한다).
+
+`settled` 가 깨져도 돌려준다. 한 번이라도 안 돌려주면 그 칸은 영영 줄고, 증상은
+「어느 날부터 429 가 잦다」 뿐이다.
+
+> **뒤집힌 위험 하나.** 중단이 안 먹는 상대라면 슬롯이 오래 잡혀 429 가 는다.
+> 그게 맞는 모양이다 — 그 시점에 우리는 **실제로** 그만큼의 모델 호출을 쓰고 있고,
+> 429 는 그 사실을 밖에서 볼 수 있게 한다. 억지로 돌려주면 숫자만 예뻐지고 비용은
+> 그대로 난다.
+
+### 재현 시험
+
+`check-rpc-shared.js` §5b 가 **지연된 모델 세션**을 주입해 Codex 가 잰 경로를 그대로
+돈다. 그 가짜는 중단 신호를 보되 **즉시 끝나지 않는다**(`teardownMs`) — 진짜 SDK 도
+소켓 정리에 시간이 걸리고, **그 틈이 바로 창**이다. 0ms 로 두면 창이 없어서
+「안 넘었다」 가 공짜로 참이 된다.
+
+| 시험 | 재는 것 |
+|---|---|
+| 예산이 끝나도 모델 호출이 살아 있는 동안 슬롯을 안 돌려준다 | 첫 요청 `failed` 직후 둘째가 **429**. 동시에 산 모델 호출 최대 **1** |
+| 취소도 같다 | `/v3/cancel` 뒤에도 같은 불변식 |
+| 평소 경로는 느려지지 않는다 | 상한 1에서 연속 두 요청이 **둘 다 answered** |
+| 모델 세션에 중단 신호를 실제로 내려 준다 | 네 배선 줄을 소스로 고정 |
+
+**시험이 진짜로 잡는지 확인했다** — `settled.then(release, release)` 를 `release()` 로
+되돌리면 2건이 빨개진다.
+
 ## 7. health — 전체와 workspace 별
 
 ```json
@@ -201,14 +261,32 @@ workspace key · `request_id` · 상태 · 도구 횟수 · 토큰 수 · 시간
 workspace key 는 **남긴다** — 400 이 났을 때 운영자가 「목록에 넣는 걸 잊었나」 를
 그 자리에서 판단해야 한다.
 
+### 완료 줄에도 workspace 를 적는다 (2026-10-14 · 리뷰 P2 반영)
+
+첫 구현의 정상 완료 줄에는 `request_id` 와 계측값만 있었다. 공유 worker 에는 여러
+workspace 요청이 **섞여 들어오므로**, 그 줄로는 「어느 쪽이 느린가·어느 쪽이 근거를
+못 찾나」 를 가릴 수 없었다 — 회신에 「workspace key 를 기록한다」 고 적어 놓고
+실제 줄에는 없었다.
+
+```text
+[rpc] 완료 request=<id> workspace=tyit status=answered elapsed_ms=... model=... \
+      stop_reason=... in_tok=... out_tok=... tool_calls=... tools=search=2/1840
+```
+
+적는 값은 **대조를 통과한 `request.workspace`** 다. 명부에 있는 key 라는 뜻이고,
+그래서 임의 문자열이 로그로 들어오지 않는다. 미등록 workspace 는 400 에서 끊기므로
+완료 줄 자체가 없다(시험이 그것도 본다).
+
+개별 worker 의 완료 줄에도 같이 적었다 — 두 줄 모양이 다르면 집계가 두 벌이 된다.
+
 ## 9. 시험 결과
 
 ```bash
 cd subbots/hermes
-node scripts/check-rpc-shared.js      # 25건  ← 이번 작업
+node scripts/check-rpc-shared.js      # 30건  ← 이번 작업 (리뷰 반영 5건 포함)
 node scripts/check-rpc-unit.js        # 25건 (공유 10건 포함)
 node scripts/check-rpc-wire.js        # 26건
-node scripts/check-rpc-server.js      # 19건
+node scripts/check-rpc-server.js      # 21건
 node scripts/check-rpc-isolation.js   #  6건 (두 entrypoint 를 같이 건다)
 ```
 
@@ -226,6 +304,8 @@ ruff check src tests scripts                        # All checks passed
 | 교차 인용 | **동시에 돌 때** TYIT 가 MGMT 의 `[e9]` 를 인용하면 `failed`(본문도 안 나감) · 도구가 각자 토큰으로만 나감 |
 | 취소 | 하나 취소해도 다른 workspace 는 완주 · 슬롯 반환 · 모르는 id 취소는 무해 |
 | 동시성 | 게이트 두 겹 + 중복 반환 방지 · workspace 429 + 다른 workspace 통과 · 전체 429 · 429 가 id 점유 안 함 · 예외 뒤 슬롯 반환 |
+| **예산 만료**(§5b) | **지연된 모델**로 재현 — 예산 뒤 살아 있는 호출이 상한을 안 넘음 · 취소도 같음 · 평소 경로는 안 느려짐 · 네 배선 줄 고정 |
+| **완료 로그** | 섞여 들어와도 `workspace=` 로 가림 · 질문·토큰·답변 본문 없음 · 미등록은 완료 줄 자체 없음 |
 | health | 전체 ok + workspace 별 · 2초 안 · 비밀/경로 안 샘 · 개별 worker 는 `workspaces` 없음 |
 | 그대로인 것 | 서명 401 · nonce 재사용 401 · 중복 `request_id` 409 · 소켓 자리 고정 |
 
@@ -253,17 +333,29 @@ stat -c '%n %U:%G %a' /run/tybot-subbots/hermes-shared \
 sudo -u tybot test -w /run/tybot-subbots/hermes-shared/http.sock && echo "닿는다"
 
 # ④ 서명까지 포함한 health (모델을 안 부른다)
+#    **TYBot 사본을 읽는다.** worker 쪽 /etc/hermes-rpc-shared/hmac 은
+#    root:hermes-rpc-shared 0750/0640 이라 tybot 이 못 읽는다 — 읽히려고 권한을
+#    넓히면 공유 worker 의 격리가 그만큼 무너진다. 줄바꿈 처리도 CredentialStore 에
+#    맡긴다(.rstrip() 을 손으로 쓰면 정규화 규칙이 두 벌이 된다).
 sudo -u tybot /opt/tybot/.venv/bin/python - <<'PY'
 import json
 from tybot.specialist_http import UnixSocketTransport
+from tybot.specialist_v3_secrets import CredentialStore
 from tybot import specialist_wire as signing
-secret = open('/etc/hermes-rpc-shared/hmac','rb').read().rstrip(b'\n')
+
+_, secret = CredentialStore('/etc/tybot/credentials/specialist-v3').get('hermes', 'shared')
 body = b'{}'
-t = UnixSocketTransport('/run/tybot-subbots/hermes-shared/http.sock')
-r = t.post(signing.HEALTH_PATH, body,
-           signing.signature_headers(secret, method='POST', path=signing.HEALTH_PATH, body=body),
-           timeout_s=2.0)
-print(json.loads(r.body))
+transport = UnixSocketTransport('/run/tybot-subbots/hermes-shared/http.sock')
+reply = transport.post(
+    signing.HEALTH_PATH, body,
+    signing.signature_headers(secret, method='POST', path=signing.HEALTH_PATH, body=body),
+    timeout_s=2,
+)
+assert reply.status == 200, f'health HTTP {reply.status}'
+data = json.loads(reply.body)
+signing.validate_health(reply.body)
+assert data.get('workspaces', {}).get('tyit') is True, 'TYIT profile not ready'
+print(data)
 PY
 
 # ⑤ 실제 workspace 하나로 진짜 질문 한 번 (TYIT 만)
@@ -273,6 +365,14 @@ PY
 ④가 `workspaces` 까지 돌려주면 그룹·권한·서명·경로·명부가 전부 맞은 것이다.
 ③까지 맞고 ④가 401 이면 **HMAC 이 TYBot 쪽과 다르다** — 개별 worker 비밀을
 복사하지 않았는지 먼저 본다.
+
+> **원시 응답의 `workspaces` 를 본다.** Python `validate_health` 는 계약대로
+> `status`·`contract_version`·`version` 셋만 돌려주고 나머지를 버린다. 그래서 위
+> 스크립트는 `json.loads(reply.body)` 로 한 번 더 읽는다 — `validate_health` 의
+> 반환값만 보면 「한 workspace 가 죽었다」 가 안 보인다.
+>
+> health 응답 자체에는 answer 용 서명이 안 붙는다. 그래서 이것은 「서명된 **요청**의
+> 왕복」 으로 검증하는 것이고, 응답 서명을 확인하는 것이 아니다.
 
 **그 밖에 못 쟀다**: 실제 모델 호출(키가 workspace 별로 맞는지), 실제 부하에서의
 동시 상한 값, 공유 프로세스의 메모리 사용량(`MemoryMax=3G` 는 추정치다).

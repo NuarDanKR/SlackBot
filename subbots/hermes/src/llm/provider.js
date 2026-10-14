@@ -174,7 +174,14 @@ function anthropicToolSession(spec, client) {
     provider: 'anthropic',
     id: spec.id,
     retryable: anthropicRetryable,
-    open({ system, messages, tools, maxIterations, previousMessageId }) {
+    /**
+     * @param {AbortSignal} [signal] 중단 신호. **SDK 까지 내려 준다** — 안 내려 주면
+     *   우리 쪽 루프만 멈추고 **이미 나간 HTTP 요청은 끝까지 간다.** 그 상태에서
+     *   호출부가 「끝났다」 로 치고 다음 요청을 받으면 실제 모델 호출 수가 상한을
+     *   넘는다(2026-10-12 Codex 리뷰 P1 — 상한 1에서 살아 있는 작업 2개를 실측).
+     *   SDK 는 이 값을 `messages.create` 와 `generateToolResponse` 에 그대로 넘긴다.
+     */
+    open({ system, messages, tools, maxIterations, previousMessageId, signal }) {
       /* 모양 판정은 **보내는 쪽에만** 둔다. 회차가 내는 messageId 는 회사가 준 id 그대로다 —
        * 호출 자리는 그 값을 「다음 질문의 기준 후보」로 들고 있는데, 받을 때 걸러 버리면
        * 모양이 틀린 id 가 앞서 들고 있던 멀쩡한 값을 **안 덮어** 다음 질문이 낡은 기준을
@@ -192,7 +199,7 @@ function anthropicToolSession(spec, client) {
         // betas 를 빼면 400 "Extra inputs are not permitted" 이 난다 — 베타 기능이라 플래그가 필요하다.
         betas: ['cache-diagnosis-2026-04-07'],
         diagnostics: { previous_message_id: baseline },
-      });
+      }, signal ? { signal } : undefined);
       return {
         // 이 세션이 **실제로 보낸** 대조 기준. 호출 자리는 「기준이 있었나」를 답에 실을 때
         // 이 값을 본다 — 같은 모양 규칙을 호출 자리에 한 벌 더 두지 않기 위해서다.

@@ -73,14 +73,17 @@ export function createRpcAnswerer({
   async function answer(request, { signal } = {}) {
     const started = now();
     const trace = [];
+    // 예산 시계는 `own` 이 쥔다(아래). **세 군데에 같은 신호를 준다** — 도구 래퍼는
+    // 호출 직전에 보고 멈추고, 도구 HTTP 는 진행 중인 왕복을 끊고, 모델 세션은 SDK
+    // 까지 내려가 이미 나간 요청을 끊는다. 하나라도 빠지면 예산이 끝난 뒤에도 그
+    // 경로는 끝까지 가고, 호출부가 「끝났다」 로 치면 실제 작업 수가 상한을 넘는다.
+    const own = new AbortController();
     const client = createClient({
       requestId: request.requestId,
       token: request.token,
       allow: request.allow,
+      signal: own.signal,
     });
-    // 예산 시계는 `own` 이 쥔다(아래). 도구는 **호출 직전에** 그 신호를 보고 멈춘다 —
-    // 안 보면 예산이 끝난 뒤에도 저쪽 도구 예산을 한 번 더 태운다.
-    const own = new AbortController();
     const tools = buildTools({ client, allow: request.allow, terms, trace, signal: own.signal });
 
     // 요청이 준 씨앗 근거. v3 에서는 **선택**이고, 있으면 그대로 싣는다 — 그 ID 도
@@ -141,6 +144,10 @@ export function createRpcAnswerer({
           tools,
           maxIterations,
           previousMessageId: null,
+          // **SDK 까지 내려 준다.** 안 내려 주면 예산이 끝나도 이미 나간 HTTP 요청은
+          // 끝까지 가고, 호출부가 「끝났다」 로 치고 다음 요청을 받으면 실제 모델
+          // 호출 수가 상한을 넘는다(Codex 리뷰 P1).
+          signal: own.signal,
         });
 
         // 계약이 깨진 뒤(토큰 만료·요청 불일치) **한 회차만 더** 돈다. 도구는 이미
@@ -185,11 +192,15 @@ export function createRpcAnswerer({
     }
 
     if (early === TIMED_OUT) {
-      /* 예산이 끝났다. **돌던 회차는 여기서 못 죽인다** — 모델 스트림과 도구 호출은
-       * 각자의 상한으로 끝난다(도구는 `timeoutMs`, 모델은 `maxIterations`). 우리가
-       * 하는 것은 `own.abort()` 로 다음 회차·다음 도구 호출을 막는 것까지다. */
+      /* 예산이 끝났다. **답은 지금 돌려주되 일이 끝난 척하지 않는다.**
+       *
+       * `own.abort()` 는 다음 회차·다음 도구 호출을 막고, 그 신호는 SDK 와 도구
+       * HTTP 까지 내려가 **이미 나간 요청도 끊는다**. 그래도 끊기까지는 시간이
+       * 걸리므로, 「끝났다」 를 호출부에 알리는 것은 `settled` 가 풀린 뒤다 —
+       * 안 그러면 호출부가 슬롯을 돌려주고, 아직 살아 있는 모델 호출 위로 새 요청이
+       * 올라타 실제 호출 수가 상한을 넘는다(Codex 리뷰 P1 실측). */
       log?.error?.(`[rpc] 예산 ${budgetMs}ms 를 넘겼습니다.`);
-      return done(STATUS_FAILED, '', ['시간 안에 끝내지 못했습니다.']);
+      return done(STATUS_FAILED, '', ['시간 안에 끝내지 못했습니다.'], [], loop);
     }
     if (early) return early;
 
@@ -229,7 +240,12 @@ export function createRpcAnswerer({
     }
     return done(STATUS_ANSWERED, clipped, uncertain, known);
 
-    function done(status, answerText, notes = [], usedEvidence = []) {
+    /**
+     * @param {Promise} [pending] 아직 도는 실행 루프. **예산 만료에서만 준다** —
+     *   그 길에서만 답이 루프보다 먼저 나간다. 호출부는 이것이 풀린 뒤에
+     *   동시성 슬롯을 돌려준다(Codex 리뷰 P1).
+     */
+    function done(status, answerText, notes = [], usedEvidence = [], pending = null) {
       const toolCallsByName = {};
       for (const item of trace) {
         const name = String(item?.name || 'unknown');
@@ -247,6 +263,8 @@ export function createRpcAnswerer({
           elapsed_ms: Math.max(0, now() - started),
         },
         trace,
+        /** 실제로 일이 끝나는 시점. 평소에는 **이미 끝났으므로** 즉시 풀린다. */
+        settled: pending || Promise.resolve(),
       };
     }
   }
