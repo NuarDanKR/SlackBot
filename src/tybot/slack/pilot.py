@@ -4341,6 +4341,9 @@ _external_v3_tool_server = None
 
 def _start_external_v3(configs):
     """Start the external-specialist bridge only for rollout workspaces."""
+    from ..specialist_v3_endpoints import EndpointPolicy
+
+    endpoints = EndpointPolicy.from_env()
     enabled = {cfg.key for cfg in configs if master_v2_enabled(cfg.key)}
     if not enabled:
         return None
@@ -4351,6 +4354,7 @@ def _start_external_v3(configs):
             "TYBOT_SPECIALIST_V3_HMAC_DIR is missing"
         )
 
+    from ..specialist_http import UnixSocketTransport
     from ..specialist_v3_broker import ToolSessionRegistry
     from ..specialist_v3_client import ExternalV3Adapter
     from ..specialist_v3_secrets import CredentialStore
@@ -4364,7 +4368,8 @@ def _start_external_v3(configs):
     _external_v3_tool_server = server
 
     def factory(chosen, *, workspace, authorization_id, toolbox):
-        identity, secret = credentials.get(chosen.key, workspace)
+        endpoint = endpoints.for_request(chosen.key, workspace)
+        identity, secret = credentials.get(chosen.key, endpoint.credential_workspace)
         server.register_credential(identity, secret)
         return ExternalV3Adapter(
             chosen.key,
@@ -4374,9 +4379,14 @@ def _start_external_v3(configs):
             secret=secret,
             credential_id=identity,
             registry=registry,
+            transport=UnixSocketTransport(endpoint.socket),
         )
 
-    log.info("외부 전문봇 v3 브리지 시작 workspaces=%s", ",".join(sorted(enabled)))
+    log.info(
+        "외부 전문봇 v3 브리지 시작 workspaces=%s shared_hermes=%s",
+        ",".join(sorted(enabled)),
+        ",".join(sorted(endpoints.shared_workspaces)) or "-",
+    )
     return factory
 
 

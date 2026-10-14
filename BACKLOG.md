@@ -199,6 +199,13 @@ _최종 갱신: 2026-10-08_
 
 ### 작업 분리
 
+**2026-10-12 공유 RPC 확장: 진행중 (Codex+Claude/2026-10-12).** TYIT의 외부 RPC
+답변 검증은 완료했다. 다음은 워크스페이스별 프로세스 복제 대신 공유 Hermes worker를
+기본으로 추가한다. 기존 개별 worker는 유지하고 명시적으로 선택한 워크스페이스만
+공유 경로로 전환한다. 요청별 ACL·도구 토큰·근거·취소 상태는 계속 분리한다.
+Codex는 Python 연결/인증 선택, Claude는 Node 다중 워크스페이스/동시성/배치를 맡는다.
+상세 계약: [공유 worker 작업 인계](docs/verification/2026-10-12-hermes-shared-rpc-handoff.md).
+
 - **Codex:** TYBot의 workspace allowlist, LLM-only 판정 실패 계약, `active/shadow`
   라우팅, 전문봇 없음 시 마스터 답변, Python RPC 클라이언트와 회귀시험.
 - **Claude:** `subbots/hermes` 질문 코어의 RPC worker 진입점, v3 도구 계약 호환,
