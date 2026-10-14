@@ -100,8 +100,11 @@ def test_runtime_config_fails_closed_without_attachment_reader(monkeypatch):
         runtime.load_runtime_config("tyit")
 
 
-def test_runtime_config_requires_verified_master_identity(monkeypatch):
+def test_runtime_config_allows_archiver_without_master(monkeypatch):
     _install(monkeypatch, master="")
 
-    with pytest.raises(runtime.ArchiverRuntimeStoreError, match="Master"):
-        runtime.load_runtime_config("tyit")
+    result = runtime.load_runtime_config("tec")
+    assert result["master_bot_user_id"] == ""
+    assert result["bot_user_id"] == "U_ARCHIVER"
+    assert result["bot_token"] == "xoxb-archiver"
+    assert result["channel_ids"] == ["C111", "C222"]

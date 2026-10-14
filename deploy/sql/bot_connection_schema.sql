@@ -191,8 +191,8 @@ COMMENT ON TABLE bot_connection_secret IS
 
 -- Archiver 런타임은 자기 연결 토큰만 기동할 때 읽는다. 표 SELECT 를 주지 않고
 -- SECURITY DEFINER 함수로 열을 제한해 master/Hermes 토큰이 같은 계정에 보이지 않게
--- 한다. `archiver_runtime_config` 와 **같은 조건**이다 — 조건이 갈리면 이관 전후로
--- 기동 가능 여부가 달라지고, 그건 이관이 아니라 정책 변경이다.
+-- 한다. Master 없는 Archiver+Hermes 운영도 허용한다. Master 연결이 있는 경우에는
+-- 신원이 검증되어야 하고 Archiver와 다른 앱이어야 한다.
 CREATE OR REPLACE FUNCTION archiver_connection_config(requested_workspace text)
 RETURNS TABLE (
     state text,
@@ -225,8 +225,11 @@ AS $$
        AND a.connector_type = 'slack_socket'
        AND a.state = 'enabled'
        AND a.identity_ok IS TRUE
-       AND m.identity_ok IS TRUE
-       AND coalesce(m.bot_user_id, '') <> ''
+       AND (m.id IS NULL OR (
+           m.identity_ok IS TRUE
+           AND coalesce(m.bot_user_id, '') <> ''
+           AND m.bot_user_id <> a.bot_user_id
+       ))
 $$;
 
 REVOKE ALL ON FUNCTION archiver_connection_config(text) FROM PUBLIC;

@@ -137,8 +137,11 @@ AS $$
        AND a.service = 'archiver'
        AND a.state = 'enabled'
        AND a.identity_ok IS TRUE
-       AND m.identity_ok IS TRUE
-       AND coalesce(m.bot_user_id, '') <> ''
+       AND (m.workspace IS NULL OR (
+           m.identity_ok IS TRUE
+           AND coalesce(m.bot_user_id, '') <> ''
+           AND m.bot_user_id <> a.bot_user_id
+       ))
 $$;
 
 REVOKE ALL ON FUNCTION archiver_runtime_config(text) FROM PUBLIC;

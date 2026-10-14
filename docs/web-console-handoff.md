@@ -1345,6 +1345,26 @@ Master와 Archiver의 등록·수집 관리는 유지합니다. Slack 직접 연
 
 ---
 
+## Master 없는 Archiver + Hermes 운영과 수집기 기동 상태
+
+2026-10-14 TEC 운영 요구: 프로젝트 금융팀은 TYBot Master 없이 Archiver와 Hermes만
+사용할 수 있다. 콘솔에서 Master 등록을 Archiver 활성화의 선행조건으로 요구하지 않는다.
+기존 DB 기동 함수와 Python loader가 Master 부재를 거절하던 조건은 TYBot 측에서 수정한다.
+Master가 등록되어 있으면 신원 검증과 앱 분리는 계속 강제하고, Master 없는 workspace는
+Master DM 인계만 비활성화한다. Archiver 자체 토큰/신원 검증과 채널 writer 인수는 유지한다.
+
+- Archiver 연결이 enabled/identity_ok이고 자체 Bot/App 토큰이 있으면 독립 기동 가능하다.
+- 연결 등록 완료와 수집 프로세스 실행/멤버십 동기화/실제 이벤트 수신을 구분해 표시한다.
+- "등록/연결 검증" 이후 승인된 수집기 기동 요청을 서버 관리 API에 연결한다.
+  기동 API와 감독 서비스는 별도 서버 구현이 필요하며 현재 자동 기동된다고 표시하지 않는다.
+- Master 없는 workspace에 불필요한 Master 앱/토큰 등록을 안내하지 않는다.
+- shadow 수집기 기동과 active 운영 writer 인수 승인을 분리한다. 등록 버튼만으로
+  cutover/writer_owner/전역 쓰기 게이트를 자동 변경하지 않는다.
+- 연결이 없거나 토큰/신원 검증이 부족하면 조건별 사유를 표시한다. 단순 "config 없음"으로
+  접지 않는다. 실제 토큰 값은 반환하지 않는다.
+
+---
+
 <a id="완료"></a>
 # 100. 완료 항목
 

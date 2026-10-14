@@ -313,16 +313,17 @@ def test_the_archiver_reads_its_own_tokens_through_one_function(sql):
     assert "REVOKE ALL ON FUNCTION archiver_connection_config(text) FROM PUBLIC" in sql
 
 
-def test_the_function_keeps_the_old_start_conditions(sql):
-    """조건이 갈리면 이관 전후로 기동 가능 여부가 달라진다 — 그건 정책 변경이다."""
+def test_the_function_allows_absent_master_but_validates_present_master(sql):
+    """Master 없는 운영을 허용하고 등록된 Master는 검증한다."""
     body = " ".join(_section(sql, "CREATE OR REPLACE FUNCTION archiver_connection_config", "$$;").split())
 
     assert "a.bot_key = 'archiver'" in body
     assert "a.state = 'enabled'" in body
     assert "a.identity_ok IS TRUE" in body
-    # Master 신원이 확인되기 전에는 Archiver 가 기동하지 않는다.
+    assert "m.id IS NULL OR" in body
     assert "m.identity_ok IS TRUE" in body
     assert "m.bot_key = 'master'" in body
+    assert "m.bot_user_id <> a.bot_user_id" in body
 
 
 def test_the_console_role_can_manage_connections(sql):

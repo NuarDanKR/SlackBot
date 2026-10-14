@@ -39,12 +39,17 @@ class ArchiverWorkspace:
     master_bot_user_id: str
     allowed_channels: frozenset[str]
     separate_attachments: bool = False
+    bot_user_id: str = ""
 
 
 def validate_slack_identity(cfg: ArchiverWorkspace, identity: dict) -> None:
     if identity.get("team_id") != cfg.team_id:
         raise ArchiverConfigError(f"archiver token belongs to the wrong workspace: {cfg.key}")
-    if identity.get("user_id") == cfg.master_bot_user_id:
+    if not identity.get("user_id"):
+        raise ArchiverConfigError(f"archiver bot identity is missing: {cfg.key}")
+    if cfg.bot_user_id and identity.get("user_id") != cfg.bot_user_id:
+        raise ArchiverConfigError(f"archiver token belongs to the wrong bot: {cfg.key}")
+    if cfg.master_bot_user_id and identity.get("user_id") == cfg.master_bot_user_id:
         raise ArchiverConfigError(f"archiver app is the TYBot app in workspace {cfg.key}")
 
 
@@ -67,6 +72,7 @@ def load_archiver_workspaces(env: dict[str, str] | None = None) -> list[Archiver
             master_bot_user_id=str(row["master_bot_user_id"]),
             allowed_channels=channel_ids,
             separate_attachments=bool(row.get("separate_attachments", False)),
+            bot_user_id=str(row.get("bot_user_id") or ""),
         )]
     if source != "env":
         raise ArchiverConfigError("ARCHIVER_CONFIG_SOURCE must be db or env")
@@ -85,7 +91,7 @@ def load_archiver_workspaces(env: dict[str, str] | None = None) -> list[Archiver
             for item in values.get(f"ARCHIVER_CHANNEL_IDS_{suffix}", "").split(",")
             if item.strip()
         ]
-        if not bot or not app or not team_id or not master_user_id:
+        if not bot or not app or not team_id:
             raise ArchiverConfigError(f"archiver identity or token pair missing for {key}")
         if not channel_ids or any(
             re.fullmatch(r"[CG][A-Z0-9]{8,}", item) is None for item in channel_ids
@@ -639,6 +645,9 @@ def _dm_handoff_consumer(
     cfg: ArchiverWorkspace, root: Path, env: dict[str, str] | None = None,
 ):
     values = os.environ if env is None else env
+    if not cfg.master_bot_user_id:
+        log.info("[%s] Master 없이 채널을 수집합니다. Master DM 인계는 사용하지 않습니다.", cfg.key)
+        return None
     if values.get("ARCHIVER_DM_CONSUME_ENABLED", "").strip().lower() not in {
         "1", "true", "yes", "on",
     }:

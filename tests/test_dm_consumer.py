@@ -166,6 +166,16 @@ def test_worker_consumer_is_off_by_default(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+def test_standalone_archiver_does_not_open_master_dm_handoff(tmp_path):
+    cfg = archiving_bot.ArchiverWorkspace(
+        "tec", "bot", "app", "T12345678", "", frozenset(), True,
+    )
+    assert archiving_bot._dm_handoff_consumer(
+        cfg, tmp_path, {"ARCHIVER_DM_CONSUME_ENABLED": "1"},
+    ) is None
+    assert not list(tmp_path.iterdir())
+
+
 def test_worker_consumer_requires_private_layout_and_existing_inbox(monkeypatch, tmp_path):
     cfg = archiving_bot.ArchiverWorkspace(
         "tyit", "bot", "app", "T12345678", "U87654321", frozenset(), True,

@@ -177,6 +177,24 @@ def test_slack_identity_must_match_workspace_and_not_master(tmp_path):
         )
 
 
+def test_archiver_can_start_without_master_and_verifies_its_own_bot(tmp_path):
+    env = _env(tmp_path)
+    del env["ARCHIVER_MASTER_BOT_USER_TYIT"]
+    cfg = replace(
+        archiving_bot.load_archiver_workspaces(env)[0], bot_user_id="U_ARCHIVER",
+    )
+    assert cfg.master_bot_user_id == ""
+    archiving_bot.validate_slack_identity(
+        cfg, {"team_id": "T12345678", "user_id": "U_ARCHIVER"},
+    )
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="wrong bot"):
+        archiving_bot.validate_slack_identity(
+            cfg, {"team_id": "T12345678", "user_id": "U_OTHER"},
+        )
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="identity is missing"):
+        archiving_bot.validate_slack_identity(cfg, {"team_id": "T12345678"})
+
+
 def test_shadow_must_not_overlap_live_archive(tmp_path):
     env = _env(tmp_path)
     assert archiving_bot.shadow_archive_dir(env) == Path(env["ARCHIVER_SHADOW_DIR"]).resolve()

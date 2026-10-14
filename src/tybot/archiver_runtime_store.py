@@ -20,10 +20,6 @@ def load_runtime_config(workspace: str) -> dict:
                 raise ArchiverRuntimeStoreError(
                     f"활성화되고 신원이 확인된 Archiver 서비스가 없습니다: {workspace}"
                 )
-            if not str(row.get("master_bot_user_id") or ""):
-                raise ArchiverRuntimeStoreError(
-                    f"신원이 확인된 Master 서비스가 없습니다: {workspace}"
-                )
             cur.execute(
                 """
                 SELECT channel_id
@@ -45,6 +41,7 @@ def load_runtime_config(workspace: str) -> dict:
             flags = {str(item["name"]): bool(item["enabled"]) for item in cur.fetchall()}
         cipher = _fernet()
         result = dict(row)
+        result["master_bot_user_id"] = str(result.get("master_bot_user_id") or "")
         result["bot_token"] = cipher.decrypt(bytes(result.pop("bot_ciphertext"))).decode()
         result["app_token"] = cipher.decrypt(bytes(result.pop("app_ciphertext"))).decode()
         result["channel_ids"] = channel_ids

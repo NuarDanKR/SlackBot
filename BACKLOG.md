@@ -885,6 +885,11 @@ B-39의 외부 MCP 조사는 공식 법령을 읽는 도구 계층으로 한정�
 ## B-65
 ### Archiving Bot 분리·PF 원본 Hermes 직접 호출
 
+2026-10-14 TEC 운영 보완: **진행중 (Codex/2026-10-14)**. Master 없이
+Archiver+Hermes만 운영할 수 있도록 DB 기동 함수와 runtime loader의 Master 필수
+조건을 제거한다. 등록된 Master의 신원 검증과 앱 분리는 유지하고, Master 없는
+workspace의 DM 인계만 비활성화한다. 채널 writer 인수와 운영 수집 게이트는 유지한다.
+
 **긴급 · 진행중 (Codex/2026-09-23) · 의존 B-38, B-42, B-63**
 
 결정: [Archiving Bot 분리와 Hermes 직접 호출](docs/design/archiving-bot-separation-2026-09-23.md).
