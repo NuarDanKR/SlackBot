@@ -24,7 +24,9 @@ from tybot.archive.convert import (
     CONVERTER_VERSION,
     FALLBACK_CONVERTER,
     Coverage,
+    config_snapshot,
     conversion_stamp,
+    converter_version,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -148,3 +150,45 @@ def _reconvert(which: str, meta_path: Path, coverage: Coverage) -> None:
         "meta_path": meta_path, "name": "주간보고.pptx", "object_path": "",
     })()
     convert_staged._record_result(item, status="converted", body=body, coverage=coverage)
+
+
+# --- 형식별 판 (2026-10-15 쪽별 OCR) ---------------------------------------
+
+
+def test_only_the_changed_format_gets_a_new_version():
+    """전역 판을 올리면 **아무것도 안 바뀐 형식의 정본까지** 한꺼번에 옛 판이 된다.
+
+    그러면 재변환 큐가 멀쩡한 첨부 전부를 다시 읽고, 같은 결과를 새 경로에 쌓는다.
+    """
+    assert converter_version("pdf") != CONVERTER_VERSION, "pdf 는 출력이 달라졌다"
+    for kind in ("xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "hwpx", "hwp", ""):
+        assert converter_version(kind) == CONVERTER_VERSION, kind
+
+
+def test_the_pdf_only_setting_stays_out_of_other_formats_config():
+    """config 는 revision 에 들어간다. 전역에 넣으면 xlsx 해시까지 달라진다."""
+    pdf = conversion_stamp("pdf", None, produced=True)["converter_config"]
+    xlsx = conversion_stamp("xlsx", None, produced=True)["converter_config"]
+
+    assert "pdf_ocr_max_pages" in pdf
+    assert "pdf_ocr_max_pages" not in xlsx
+    assert xlsx == config_snapshot(), "다른 형식의 설정은 그대로여야 한다"
+
+
+def test_the_new_pdf_converter_does_not_overwrite_the_old_canonical():
+    """판 2 의 PDF 정본을 덮으면 **그 변환본을 인용한 답변의 출처에 문장이 없다.**"""
+    fixed = {
+        "sha256": "a" * 64,
+        "converter_name": "pdf:primary",
+        "staged_at": "2026-09-23T10:00:00+00:00",
+    }
+    stamp = conversion_stamp("pdf", None, produced=True)
+
+    old = attachment_doc.revision_for(converter_version="2", config=config_snapshot(), **fixed)
+    new = attachment_doc.revision_for(
+        converter_version=stamp["converter_version"],
+        config=stamp["converter_config"],
+        **fixed,
+    )
+
+    assert old != new

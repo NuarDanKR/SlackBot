@@ -820,7 +820,7 @@ def test_outdated_backfill_queues_only_old_successful_conversions(
         "F2",
         status="converted",
         conversion_state="succeeded",
-        converter_version=drain.CONVERTER_VERSION,
+        converter_version=drain.converter_version("pdf"),
     )
     added = []
     monkeypatch.setattr(queue, "enqueue", lambda **kw: added.append(kw) or 1)
@@ -828,7 +828,10 @@ def test_outdated_backfill_queues_only_old_successful_conversions(
     assert drain.outdated_backfill(str(tmp_path / "archive"), apply=True) == 0
 
     assert [item["file_id"] for item in added] == ["F1"]
-    assert added[0]["pipeline_version"] == queue.PIPELINE_VERSION
+    assert added[0]["pipeline_version"] == (
+        f"{queue.PIPELINE_VERSION}:pdf:primary:{drain.converter_version('pdf')}"
+    )
+    assert added[0]["converter_version"] == drain.converter_version("pdf")
     assert added[0]["force"] is True
     assert "구버전 성공 첨부 1건" in capsys.readouterr().out
 
@@ -851,6 +854,54 @@ def test_outdated_backfill_is_a_dry_run(tmp_path, monkeypatch, capsys):
 
     assert drain.outdated_backfill(str(tmp_path / "archive"), apply=False) == 0
     assert "--outdated --apply" in capsys.readouterr().out
+
+
+def test_outdated_backfill_uses_format_versions_and_new_job_keys(tmp_path, monkeypatch):
+    import drain_conversion_queue as drain
+
+    for file_id, kind, version, state in [
+        ("FPDFOLD", "pdf", "2", "succeeded"),
+        ("FPDFPART", "pdf", "2", "partial"),
+        ("FPDFNEW", "pdf", "3", "succeeded"),
+        ("FXLSX", "xlsx", "2", "succeeded"),
+    ]:
+        _staged_review(tmp_path, file_id, status="converted", conversion_state=state,
+                       converter_version=version, filetype=kind)
+    added = []
+
+    def enqueue(**kwargs):
+        # Same original + old pipeline already succeeded: it must get a new key.
+        assert kwargs["pipeline_version"] != queue.PIPELINE_VERSION
+        added.append(kwargs)
+        return len(added)
+
+    monkeypatch.setattr(queue, "enqueue", enqueue)
+    assert drain.outdated_backfill(str(tmp_path / "archive"), apply=True) == 0
+    assert {item["file_id"] for item in added} == {"FPDFOLD", "FPDFPART"}
+    assert all(item["converter_version"] == "3" for item in added)
+    assert all(item["converter"] == "pdf:primary" for item in added)
+
+
+def test_outdated_backfill_skips_file_only_receipts(tmp_path, monkeypatch, capsys):
+    import drain_conversion_queue as drain
+
+    base = tmp_path / "archive/mgmt/C0123456789__board"
+    staged = base / "staging/F123"
+    staged.mkdir(parents=True)
+    original = base / "objects/F123/original.pdf"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"pdf")
+    (staged / "metadata.json").write_text(json.dumps({
+        "slack_file_id": "F123", "name": "minutes.pdf", "filetype": "pdf",
+        "status": "converted", "conversion_state": "partial", "converter_version": "2",
+        "object_path": str(original),
+    }))
+    receipt = base / "file-inventory/F123.json"
+    receipt.parent.mkdir()
+    receipt.write_text("{}")
+    monkeypatch.setattr(queue, "enqueue", lambda **kwargs: pytest.fail("not the message queue"))
+    assert drain.outdated_backfill(str(tmp_path / "archive"), apply=True) == 0
+    assert "파일 기반 복구 별도 처리 1건" in capsys.readouterr().out
 
 
 def test_nightly_unit_requeues_and_can_publish_to_the_archive():
@@ -879,6 +930,7 @@ def _staged_review(
     retryable=False,
     conversion_state="failed",
     converter_version="",
+    filetype="pdf",
 ) -> None:
     """`attachment_review.scan()` 이 읽는 모양으로 하나 만든다."""
     d = (
@@ -891,7 +943,7 @@ def _staged_review(
         object_path.write_bytes(b"pdf")
     (d / "metadata.json").write_text(
         json.dumps({
-            "name": f"{file_id}.pdf", "filetype": "pdf", "status": status,
+            "name": f"{file_id}.{filetype}", "filetype": filetype, "status": status,
             "error_code": error_code, "retryable": retryable, "sha256": "abc123",
             "conversion_state": conversion_state,
             "converter_version": converter_version,

@@ -41,7 +41,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
 from tybot import conversion_queue as queue
-from tybot.archive.convert import CONVERTER_VERSION
+from tybot.archive.convert import converter_name, converter_version
 from tybot.envfile import load_env_file
 
 EXIT_OK = 0
@@ -604,10 +604,20 @@ def outdated_backfill(archive_dir: str, *, apply: bool) -> int:
     """
     from tybot.attachment_review import APPROVED, CONVERTED, scan
 
+    scanned = scan(archive_dir)
+    # File-only recovery owns its generation pointer; do not enqueue its initial
+    # metadata into the legacy message ACK/publication pipeline.
+    file_only = [item for item in scanned if (
+        item.meta_path.parent.parent.name == "staging"
+        and (item.meta_path.parent.parent.parent / "file-inventory"
+             / f"{item.file_id}.json").exists()
+    )]
+    file_only_paths = {item.meta_path for item in file_only}
     converted = [
-        item for item in scan(archive_dir)
+        item for item in scanned
         if item.status in {APPROVED, CONVERTED}
         and item.conversion_state in {"succeeded", "partial"}
+        and item.meta_path not in file_only_paths
     ]
     candidates = []
     original_missing = []
@@ -616,7 +626,7 @@ def outdated_backfill(archive_dir: str, *, apply: bool) -> int:
             meta = json.loads(item.meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if str(meta.get("converter_version") or "") == CONVERTER_VERSION:
+        if str(meta.get("converter_version") or "") == converter_version(item.filetype):
             continue
         if item.object_path is None or not item.object_path.is_file():
             original_missing.append(item)
@@ -628,6 +638,8 @@ def outdated_backfill(archive_dir: str, *, apply: bool) -> int:
         f"원본 없음 {len(original_missing)}건 · "
         f"현재판 {len(converted) - len(candidates) - len(original_missing)}건"
     )
+    if file_only:
+        print(f"파일 기반 복구 별도 처리 {len(file_only)}건 — recover_archiver_files.py --reconvert")
     if not candidates:
         return EXIT_OK
     if not apply:
@@ -658,8 +670,12 @@ def outdated_backfill(archive_dir: str, *, apply: bool) -> int:
                 original_sha256=digest,
                 error_code="converter_outdated",
                 retryable=True,
-                converter_version=CONVERTER_VERSION,
-                pipeline_version=queue.PIPELINE_VERSION,
+                converter=converter_name(item.filetype),
+                converter_version=converter_version(item.filetype),
+                # Converter version is not part of conversion_job's unique key.
+                # Use a distinct target pipeline so an older succeeded job cannot hide it.
+                pipeline_version=(f"{queue.PIPELINE_VERSION}:"
+                                  f"{converter_name(item.filetype)}:{converter_version(item.filetype)}"),
                 force=True,
             )
         except queue.QueueUnavailable as exc:

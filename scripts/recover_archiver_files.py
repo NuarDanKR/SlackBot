@@ -36,9 +36,12 @@ def main(argv=None) -> int:
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--index-only", action="store_true")
     parser.add_argument("--by", default="")
+    parser.add_argument("--reconvert", action="store_true")
     args = parser.parse_args(argv)
     if args.apply and not args.by.strip():
         parser.error("--apply requires --by")
+    if args.reconvert and args.index_only:
+        parser.error("--reconvert cannot be combined with --index-only")
     lock = None
     stage = "environment"
     try:
@@ -82,7 +85,7 @@ def main(argv=None) -> int:
         report = recover(
             client, default_repo(), OwnerLookup(cfg.key, cache_seconds=0), cfg, args.file_id,
             live_root=live_root, shadow_root=shadow_root, channel_id=args.channel,
-            apply=args.apply, actor=args.by,
+            apply=args.apply, actor=args.by, reconvert=args.reconvert,
         )
     except Exception as exc:  # noqa: BLE001 - no credential or private SDK response output
         print(json.dumps({"error": type(exc).__name__, "stage": stage,
@@ -92,7 +95,9 @@ def main(argv=None) -> int:
         if lock is not None:
             lock.release()
     print(json.dumps(report, ensure_ascii=True, sort_keys=True))
-    good = {"recovered", "published-index-pending"} if args.apply else {"missing", "resume"}
+    good = {"recovered", "published-index-pending"} if args.apply else {
+        "missing", "resume", "reconvert-planned",
+    }
     return 0 if all(item["status"] in good for item in report["results"]) else 2
 
 

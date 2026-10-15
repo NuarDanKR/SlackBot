@@ -609,7 +609,8 @@ await test('검토 기본 예산은 Q&A 8000/high 와 분리된다', () => {
 
 await test('개별 worker env 는 검토 spec 만 덮어쓴다', () => {
   const secretFile = path.join(tmp, 'review-config-hmac');
-  fs.writeFileSync(secretFile, SECRET);
+  // Budget parsing is not a random binary-key/newline compatibility test.
+  fs.writeFileSync(secretFile, Buffer.alloc(32, 0x61));
   const env = { HERMES_DOMAIN: 'enterprise', HERMES_RPC_WORKSPACE: 'tyit',
     HERMES_RPC_HMAC_FILE: secretFile, HERMES_RPC_MODEL: 'qa-model' };
   const base = loadRpcConfig(env);

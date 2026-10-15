@@ -117,9 +117,20 @@ def _original_verified(meta: dict, channel_root: Path) -> bool:
     return digest.hexdigest() == meta.get("sha256")
 
 
+def _metadata_path(root: Path, base: Path, file_id: str, receipt: dict) -> Path:
+    relative = receipt.get("metadata_relpath")
+    if relative:
+        candidate = base / str(relative)
+        allowed = base / "staging" / file_id / "reconversions"
+        if not candidate.resolve().is_relative_to(allowed.resolve()):
+            raise ValueError("reconversion metadata escaped its file scope")
+        return _safe_path(root, candidate)
+    return _safe_path(root, base / "staging" / file_id / "metadata.json")
+
+
 def recover(client, repo, owner, cfg, file_ids: list[str], *, live_root: Path,
             shadow_root: Path, channel_id: str, apply: bool, actor: str,
-            indexer=None) -> dict:
+            indexer=None, reconvert: bool = False) -> dict:
     """Caller must hold the collector instance lock for the entire apply run.
 
     Existing unrelated artifacts are reported, not overwritten. A receipt written
@@ -158,8 +169,13 @@ def recover(client, repo, owner, cfg, file_ids: list[str], *, live_root: Path,
             if records and receipt is None:
                 item.update(status="existing-needs-review", records=records)
                 continue
+            if reconvert and receipt is None:
+                item["status"] = "reconversion-requires-receipt"
+                continue
             if not apply:
-                item["status"] = "resume" if receipt else "missing"
+                item["status"] = "reconvert-planned" if reconvert else (
+                    "resume" if receipt else "missing"
+                )
                 continue
             receipt = receipt or {
                 "schema": "tybot.file-recovery.v1", "workspace": cfg.key,
@@ -169,7 +185,7 @@ def recover(client, repo, owner, cfg, file_ids: list[str], *, live_root: Path,
             }
             receipt.update(status="started")
             _receipt(receipt_path, receipt)
-            meta_path = _safe_path(live_root, storage.staging_dir / file_id / "metadata.json")
+            meta_path = _metadata_path(live_root, base, file_id, receipt)
             _safe_path(live_root, storage.objects_dir / file_id)
             _safe_path(live_root, storage.staging_dir / file_id / "extracted.md")
             if not meta_path.exists():
@@ -183,6 +199,19 @@ def recover(client, repo, owner, cfg, file_ids: list[str], *, live_root: Path,
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("slack_file_id") != file_id or meta.get("origin_message_ts"):
                 raise ValueError("staging provenance does not match file-only recovery")
+            if reconvert:
+                from .file_reconversion import reconvert as reconvert_original
+
+                if not _original_verified(meta, base):
+                    raise ValueError("reconversion requires a verified retained original")
+                destination = _safe_path(live_root, storage.staging_dir / file_id / "reconversions")
+                meta_path = reconvert_original(meta, destination)
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                receipt["metadata_relpath"] = meta_path.relative_to(base).as_posix()
+                receipt["reconverted_by"] = actor
+                receipt["status"] = "reconverted"
+                _receipt(receipt_path, receipt)
+            _safe_path(live_root, meta_path.parent / "extracted.md")
             item["original_verified"] = _original_verified(meta, base)
             item["conversion_state"] = str(meta.get("conversion_state") or "unknown")
             if not item["original_verified"]:
@@ -251,18 +280,25 @@ def index_recovered(root: Path, workspace: str, channel_id: str,
                     or receipt.get("channel_id") != channel_id
                     or receipt.get("file_id") != file_id):
                 raise ValueError("invalid recovery receipt")
-            meta_path = _safe_path(root, base / "staging" / file_id / "metadata.json")
+            meta_path = _metadata_path(root, base, file_id, receipt)
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if (meta.get("slack_file_id") != file_id or meta.get("origin_message_ts")
+                    or meta.get("conversion_state") != "succeeded"
                     or not _original_verified(meta, base)):
                 raise ValueError("original is not verified")
             folder = _safe_path(root, base / "archive" / "attachments" / file_id)
             docs = []
+            expected_revision = revision_for(
+                sha256=str(meta.get("sha256") or ""),
+                converter_name=str(meta.get("converter_name") or ""),
+                converter_version=str(meta.get("converter_version") or ""),
+                config=meta.get("converter_config") or {}, staged_at=str(meta.get("staged_at") or ""),
+            )
             for path in folder.glob("*.md"):
                 _safe_path(root, path)
                 doc = attachment_reader.load_checked(path, root)
                 if (doc and doc.conversion_state == "succeeded" and doc.text.strip()
-                        and doc.sha256 == meta.get("sha256")):
+                        and doc.sha256 == meta.get("sha256") and doc.revision == expected_revision):
                     docs.append(doc)
             docs = attachment_reader.current_by_file(docs)
             if len(docs) != 1:

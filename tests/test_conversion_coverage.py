@@ -475,3 +475,168 @@ def test_a_screening_code_is_shown_as_words_not_as_a_code(tmp_path):
     assert "민감 용어 언급" in said
     assert "sensitive-term-mentioned" not in said
     assert "미확인코드" in status_line(_item("미확인코드"))
+
+
+# --- 쪽별 OCR (2026-10-15 서버 사례) -----------------------------------------
+#
+# 기본 추출 0/3쪽인데 OCR 본문이 2,543자 나왔고, metadata 는 `partial` ·
+# 미확인 [1,2,3] 이었다. 본문은 있는데 **어느 쪽에서 나왔는지 아무도 몰랐다** —
+# 문서를 통째로 OCR 했기 때문이다. 그래서 쪽마다 떼어 내 OCR 한다.
+
+
+class _Kordoc:
+    """쪽별 OCR 스텁. **한 쪽짜리 PDF 로 불리는지까지 본다.**
+
+    호출 횟수만 세면 「통째로 한 번」 과 「쪽마다 한 번」 을 구별하지 못한다.
+    """
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.page_counts: list[int] = []
+
+    def __call__(self, data, suffix, *, force_ocr=False):
+        import io as _io
+
+        from pypdf import PdfReader
+
+        assert suffix == "pdf" and force_ocr, "OCR 폴백은 강제 OCR 이어야 한다"
+        self.page_counts.append(len(PdfReader(_io.BytesIO(data)).pages))
+        result = self.results.pop(0) if self.results else None
+        if isinstance(result, Exception):
+            raise result
+        return [cv.OCR_NOTICE, *(result or [])]
+
+
+BODY = "스캔 쪽에서 읽은 본문 " + "가" * 60
+
+
+def test_ocr_body_does_not_make_every_page_succeeded(monkeypatch):
+    """**OCR 본문이 있다는 사실은 다 읽었다는 뜻이 아니다.**
+
+    서버에서 난 그 일이다. 1쪽만 읽히고 2·3쪽은 못 읽었는데 본문은 나온다.
+    """
+    kordoc = _Kordoc(
+        [BODY],
+        cv.ExternalConversionError("kordoc 결과에 읽을 수 있는 본문이 없습니다"),
+        cv.ExternalConversionError("kordoc 결과에 읽을 수 있는 본문이 없습니다"),
+    )
+    monkeypatch.setattr(cv, "kordoc_lines", kordoc)
+
+    lines, cov = cv.convert_with_coverage("pdf", _pdf(["", "", ""]))
+
+    assert kordoc.page_counts == [1, 1, 1], "쪽마다 떼어 내 OCR 해야 어느 쪽인지 안다"
+    assert cov.total == 3
+    assert cov.converted == 1, "본문이 나왔다고 세 쪽을 다 읽은 것이 아니다"
+    assert cov.missing == (2, 3)
+    assert cov.state == cv.PARTIAL
+    assert any(BODY in line for line in lines), "읽힌 쪽의 본문은 남는다"
+    assert lines.count(cv.OCR_NOTICE) == 1, "OCR 안내가 쪽마다 반복되면 본문이 묻힌다"
+
+
+def test_every_page_ocred_is_a_full_read(monkeypatch):
+    """고친 쪽으로 너무 넓히면 멀쩡히 OCR 된 스캔본이 전부 미확인으로 보인다."""
+    kordoc = _Kordoc([BODY], [BODY], [BODY])
+    monkeypatch.setattr(cv, "kordoc_lines", kordoc)
+
+    _lines, cov = cv.convert_with_coverage("pdf", _pdf(["", "", ""]))
+
+    assert cov.converted == 3
+    assert cov.missing == ()
+    assert cov.state == cv.SUCCEEDED
+
+
+def test_a_mixed_text_and_scan_pdf_only_ocrs_the_scanned_page(monkeypatch):
+    """글자가 있는 쪽을 다시 OCR 하면 비용이 쪽수만큼 늘고 본문이 바뀐다."""
+    long = (
+        "Page body long enough that the extracted text stays well above the two "
+        "hundred character floor that triggers the OCR fallback path in convert"
+    )
+    kordoc = _Kordoc([BODY])
+    monkeypatch.setattr(cv, "kordoc_lines", kordoc)
+
+    lines, cov = cv.convert_with_coverage("pdf", _pdf([long, "", long]))
+
+    assert kordoc.page_counts == [1], "텍스트가 있는 쪽은 OCR 대상이 아니다"
+    assert cov.converted == 3
+    assert cov.state == cv.SUCCEEDED
+    assert lines.index("[1쪽]") < lines.index("[2쪽]") < lines.index("[3쪽]")
+
+
+def test_a_scan_with_no_readable_page_is_refused(monkeypatch):
+    """빈 결과만 돌아왔다. **본문이 없으면 변환본도 없다** — 성공으로 닫지 않는다."""
+    monkeypatch.setattr(cv, "kordoc_lines", _Kordoc(
+        *[cv.ExternalConversionError("읽을 수 있는 본문이 없습니다")] * 2
+    ))
+
+    with pytest.raises(cv.ConvertError, match="본문을 얻지 못했다"):
+        cv.convert_with_coverage("pdf", _pdf(["", ""]))
+
+
+def test_an_ocr_free_host_flags_the_pages_it_could_not_check(monkeypatch):
+    """OCR 이 없는 서버에서 **읽은 것이 원본의 전부라고 말할 수 없다.**"""
+    def unavailable(*_a, **_k):
+        raise cv.ExternalConverterUnavailable("kordoc 미설치")
+
+    monkeypatch.setattr(cv, "kordoc_lines", unavailable)
+    long = (
+        "Page body long enough that the extracted text stays well above the two "
+        "hundred character floor that triggers the OCR fallback path in convert"
+    )
+
+    _lines, cov = cv.convert_with_coverage("pdf", _pdf([long, "", long]))
+
+    assert cv.OCR_UNAVAILABLE in cov.flags
+    assert cov.converted == 2
+    assert cov.missing == (2,)
+    assert cov.state == cv.PARTIAL
+
+
+def test_the_ocr_page_cap_is_recorded_not_silent(monkeypatch):
+    """상한에 걸린 쪽은 **시도조차 안 한 쪽**이다. 조용히 사라지면 안 된다."""
+    monkeypatch.setattr(cv, "MAX_PDF_OCR_PAGES", 1)
+    kordoc = _Kordoc([BODY])
+    monkeypatch.setattr(cv, "kordoc_lines", kordoc)
+
+    lines, cov = cv.convert_with_coverage("pdf", _pdf(["", "", ""]))
+
+    assert kordoc.page_counts == [1], "상한을 넘겨 부르면 상한이 아니다"
+    assert cv.OCR_PAGE_LIMIT_REACHED in cov.flags
+    assert cov.converted == 1
+    assert cov.missing == (2, 3)
+    assert any("OCR 상한" in line for line in lines)
+
+
+def test_a_text_pdf_never_calls_the_ocr_converter(monkeypatch):
+    """회귀: 글자가 멀쩡한 PDF 를 쪽마다 OCR 하면 변환 시간이 쪽수만큼 늘어난다."""
+    def boom(*_a, **_k):
+        raise AssertionError("텍스트 PDF 에서 OCR 을 부르면 안 된다")
+
+    monkeypatch.setattr(cv, "kordoc_lines", boom)
+    long = (
+        "Page body long enough that the extracted text stays well above the two "
+        "hundred character floor that triggers the OCR fallback path in convert"
+    )
+
+    _lines, cov = cv.convert_with_coverage("pdf", _pdf([long, long]))
+
+    assert cov.state == cv.SUCCEEDED
+    assert cov.converted == 2
+
+
+def test_thin_text_is_not_full_coverage_when_required_ocr_fails(monkeypatch):
+    kordoc = _Kordoc(cv.ExternalConversionError("fixture failure"), [BODY])
+    monkeypatch.setattr(cv, "kordoc_lines", kordoc)
+    lines, cov = cv.convert_with_coverage("pdf", _pdf(["Header only", ""]))
+    assert "Header only" in "\n".join(lines)
+    assert cov.converted == 1
+    assert cov.missing == (1,)
+    assert cov.state == cv.PARTIAL
+
+
+def test_thin_text_beyond_ocr_cap_stays_unverified(monkeypatch):
+    monkeypatch.setattr(cv, "MAX_PDF_OCR_PAGES", 1)
+    monkeypatch.setattr(cv, "kordoc_lines", _Kordoc([BODY]))
+    _lines, cov = cv.convert_with_coverage("pdf", _pdf(["Header one", "Header two"]))
+    assert cov.converted == 1
+    assert cov.missing == (2,)
+    assert cv.OCR_PAGE_LIMIT_REACHED in cov.flags

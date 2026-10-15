@@ -9,6 +9,8 @@
 2. **표는 구조를 살려 옮긴다**(시트명·행 단위). 요약·정리하지 않는다 — 그건 LLM 이 할 일이다.
 3. **변환 실패는 조용히 넘기지 않는다.** 목록 줄은 남기고 경고를 올린다.
 4. **OCR 결과는 변환 안내로 표시한다.** 금액·날짜·조문은 원본 확인이 필요하다.
+   OCR 은 **쪽마다** 돌린다 — 문서를 통째로 돌리면 본문이 나와도 어느 쪽이
+   읽혔는지 알 수 없고, 그 순간 「본문이 있다」 가 「다 읽었다」 로 둔갑한다.
 5. 외부 변환기가 없으면 기본 파서로 내리거나 미변환 처리하고 경고를 남긴다.
 
 ## 지원
@@ -17,7 +19,7 @@
 | xlsx/xlsm | Hermes 유래 openpyxl 렌더러 | 표시값·표·시트·마스킹 메타 |
 | docx | kordoc, python-docx 폴백 | 문단 + 표 |
 | pptx/ppt | LibreOffice PDF + kordoc | 시각 배치·이미지 OCR, 기본 텍스트 폴백 |
-| pdf | pypdf + kordoc OCR | 텍스트가 없거나 매우 짧으면 OCR |
+| pdf | pypdf + kordoc OCR | 글자 없는 쪽만 **쪽별로** OCR, 쪽 단위 coverage |
 | hwpx | kordoc, 안전 XML 폴백 | 표·배치 우선, XML은 텍스트 폴백 |
 | hwp(구형 바이너리) | kordoc | 미설치 시 명시적 실패 |
 | png/jpg/jpeg/webp | kordoc OCR | 검색용 텍스트 + PII 검사 |
@@ -99,6 +101,22 @@ FOLD_HEAD = _limit("TYBOT_CONVERT_FOLD_HEAD")
 FOLD_TAIL = _limit("TYBOT_CONVERT_FOLD_TAIL")
 # 셀 한 칸 길이. 긴 메모가 든 칸을 자르면 **그 칸의 뒷부분이 영영 없어진다.**
 MAX_CELL = _limit("TYBOT_CONVERT_MAX_CELL")
+
+# 한 PDF 에서 OCR 로 다시 읽어 볼 쪽 수 상한.
+#
+# 여기만 기본이 무제한이 아니다. 쪽별 OCR 은 비용이 쪽수에 비례하고, 쪽마다
+# 외부 변환기 호출 하나에 120초 상한이 걸린다 — 500쪽 스캔본 하나가 변환기를
+# 반나절 붙들 수 있다. 그래서 상한을 둔다.
+#
+# 다른 상한과 달리 **조용히 사라지지 않는다.** 상한에 걸린 쪽은 미확인으로
+# 세고 `ocr_page_limit_reached` 플래그를 세운다 — 사람이 보고 올릴 수 있다.
+# `0` 은 무제한이다.
+MAX_PDF_OCR_PAGES = _limit("TYBOT_PDF_OCR_MAX_PAGES", 50)
+
+# 텍스트 레이어에서 뽑은 글자가 이보다 적으면 스캔본일 수 있다고 본다.
+# 머리글·쪽번호만 텍스트로 들어간 스캔 문서가 이 자리에 온다.
+MIN_PDF_TEXT_CHARS = 200
+
 CONVERTIBLE = {"xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp"}
 
 #: 변환 로직의 판. **출력이 달라지는 변경마다 올린다.**
@@ -108,21 +126,41 @@ CONVERTIBLE = {"xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp
 #: 답변의 출처를 눌렀을 때 인용된 문장이 없다.
 CONVERTER_VERSION = "2"
 
+#: 형식별 판 덮어쓰기. **그 형식의 출력이 실제로 달라졌을 때만** 적는다.
+#:
+#: 전역 판을 올리면 아무것도 안 바뀐 xlsx·docx 정본까지 한꺼번에 옛 판이 되고,
+#: 재변환 큐가 멀쩡한 첨부 전부를 다시 읽는다. 바뀐 형식만 올린다.
+#:
+#: - `pdf` 3: 쪽별 OCR 로 처리 범위를 검증한다(2026-10-15). 같은 파일에서 나오는
+#:   줄도 coverage 도 판 2 와 다르므로 **판 2 의 정본을 덮으면 안 된다.**
+_FORMAT_CONVERTER_VERSIONS = {"pdf": "3"}
 
-def config_snapshot() -> dict:
+
+def converter_version(filetype: str) -> str:
+    """이 형식 변환기의 판. 형식별 덮어쓰기가 없으면 전역 판이다."""
+    return _FORMAT_CONVERTER_VERSIONS.get((filetype or "").strip().lower(), CONVERTER_VERSION)
+
+
+def config_snapshot(filetype: str = "") -> dict:
     """출력을 바꾸는 설정들. **revision 에 들어간다.**
 
     상한을 올리면 같은 파일에서 더 많은 줄이 나온다 — 그건 다른 변환본이다.
     설정을 revision 에서 빼면 그 차이가 같은 경로에 겹쳐 쓰이고, 옛 답변의
     출처가 조용히 달라진다.
+
+    한 형식에만 듣는 설정은 **그 형식일 때만** 넣는다. 전역에 넣으면 그 값을
+    건드린 적도 없는 형식의 config 해시까지 달라져, 멀쩡한 정본이 옛 판이 된다.
     """
-    return {
+    snapshot = {
         "max_lines": MAX_LINES,
         "max_total_chars": MAX_TOTAL_CHARS,
         "fold_head": FOLD_HEAD,
         "fold_tail": FOLD_TAIL,
         "max_cell": MAX_CELL,
     }
+    if (filetype or "").strip().lower() == "pdf":
+        snapshot["pdf_ocr_max_pages"] = MAX_PDF_OCR_PAGES
+    return snapshot
 
 
 def converter_name(filetype: str, flags=()) -> str:
@@ -152,8 +190,8 @@ def conversion_stamp(filetype: str, coverage=None, *, produced: bool) -> dict:
     flags = tuple(getattr(coverage, "flags", ()) or ())
     stamp = {
         "converter_name": converter_name(filetype, flags),
-        "converter_version": CONVERTER_VERSION,
-        "converter_config": config_snapshot(),
+        "converter_version": converter_version(filetype),
+        "converter_config": config_snapshot(filetype),
     }
     if produced:
         stamp["converted_at"] = datetime.now(UTC).isoformat(timespec="seconds")
@@ -533,6 +571,58 @@ def _pptx(data: bytes) -> list[str]:
         return [f"[변환 안내] 슬라이드 이미지·도형 미해석: {exc}", *_pptx_basic(data)]
 
 
+#: kordoc 이 OCR 결과 맨 위에 붙이는 안내. 쪽마다 부르면 쪽마다 붙으므로
+#: 떼어 내고 문서 맨 위에 한 번만 남긴다.
+OCR_NOTICE = "[변환 안내] OCR 사용 - 금액·날짜·조문은 원본 확인 필요"
+
+
+def _pdf_text_layer(reader) -> tuple[dict[int, list[str]], list[int]]:
+    """쪽마다 텍스트 레이어를 읽는다. `(쪽번호→줄, 글자를 못 얻은 쪽)`.
+
+    한 쪽이 실패해도 전체를 막지 않는 것은 맞지만, 그 사실을 아무 데도 안 남기면
+    3쪽만 읽은 10쪽 문서가 「성공」 이 된다.
+    """
+    text: dict[int, list[str]] = {}
+    unread: list[int] = []
+    for number, page in enumerate(reader.pages, 1):
+        try:
+            try:
+                raw = page.extract_text(extraction_mode="layout") or ""
+            except TypeError:
+                # 구형 pypdf 에서는 위치 보존 모드가 없다. 기존 텍스트 추출로
+                # 내리되, 없는 열 위치를 추측해 만들지는 않는다.
+                raw = page.extract_text() or ""
+        except Exception:  # noqa: BLE001 - 한 페이지 실패가 전체를 막지 않는다
+            unread.append(number)
+            continue
+        lines = _layout_markdown_lines(raw)
+        if lines:
+            text[number] = lines
+        else:
+            # 글자가 없는 쪽. 그림만 있는 쪽일 수도, 추출이 실패한 것일 수도
+            # 있다 — **어느 쪽인지 모르므로 읽었다고 세지 않는다.**
+            unread.append(number)
+    return text, unread
+
+
+def _ocr_pdf_page(reader, number: int) -> list[str]:
+    """그 쪽만 떼어 내 OCR 한다.
+
+    **문서를 통째로 OCR 하면 어느 쪽이 읽혔는지 알 수 없다.** 2,543자가 나왔다는
+    사실은 3쪽을 다 읽었다는 뜻이 아니다. 그걸 성공으로 닫으면 사람은 안 읽힌
+    쪽까지 본 줄 알고, 거기 없는 내용을 「없다」 고 답하게 된다 — 서버에서 실제로
+    기본 추출 0/3쪽 · OCR 본문 2,543자가 함께 나왔다(2026-10-15).
+    """
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_page(reader.pages[number - 1])
+    buf = io.BytesIO()
+    writer.write(buf)
+    lines = kordoc_lines(buf.getvalue(), "pdf", force_ocr=True)
+    return [line for line in lines if line.strip() != OCR_NOTICE]
+
+
 def _pdf(data: bytes) -> list[str]:
     try:
         from pypdf import PdfReader
@@ -542,54 +632,77 @@ def _pdf(data: bytes) -> list[str]:
     reader = PdfReader(io.BytesIO(data))
     if getattr(reader, "is_encrypted", False):
         raise ConvertError("암호가 걸린 PDF - 변환하지 않음")
-    out: list[str] = []
-    # **쪽마다 읽었는지 센다.** 한 쪽이 실패해도 전체를 막지 않는 것은 맞지만,
-    # 그 사실을 아무 데도 안 남기면 3쪽만 읽은 10쪽 문서가 「성공」 이 된다.
+
     total_pages = len(reader.pages)
+    text, unread = _pdf_text_layer(reader)
+
+    # 문서 전체 글자가 너무 적으면 텍스트 레이어가 머리글뿐인 스캔본일 수 있다.
+    # 그때는 글자가 나온 쪽도 다시 본다 — 단 **쪽 단위로** 본다.
+    extracted_chars = sum(len(line) for lines in text.values() for line in lines)
+    thin = extracted_chars < MIN_PDF_TEXT_CHARS
+    targets = sorted(set(unread) | (set(text) if thin else set()))
+    required_ocr = set(targets)
+    over_limit: list[int] = []
+    if MAX_PDF_OCR_PAGES and len(targets) > MAX_PDF_OCR_PAGES:
+        targets, over_limit = targets[:MAX_PDF_OCR_PAGES], targets[MAX_PDF_OCR_PAGES:]
+
+    ocr: dict[int, list[str]] = {}
+    ocr_unavailable = ""
+    for number in targets:
+        try:
+            lines = _ocr_pdf_page(reader, number)
+        except ExternalConverterUnavailable as exc:
+            # 변환기가 이 서버에 없다. 남은 쪽도 결과가 같으므로 더 부르지 않는다.
+            ocr_unavailable = str(exc)
+            break
+        except Exception as exc:  # noqa: BLE001 - 한 쪽 실패가 전체를 막지 않는다
+            logger.warning("PDF %d쪽 OCR 실패: %s", number, exc)
+            continue
+        if lines:
+            ocr[number] = lines
+
+    out: list[str] = []
     read_pages: list[int] = []
     missing_pages: list[int] = []
-    for i, page in enumerate(reader.pages, 1):
-        try:
-            try:
-                text = page.extract_text(extraction_mode="layout") or ""
-            except TypeError:
-                # 구형 pypdf 에서는 위치 보존 모드가 없다. 기존 텍스트 추출로
-                # 내리되, 없는 열 위치를 추측해 만들지는 않는다.
-                text = page.extract_text() or ""
-        except Exception:  # noqa: BLE001 - 한 페이지 실패가 전체를 막지 않는다
-            missing_pages.append(i)
+    for number in range(1, total_pages + 1):
+        # OCR 을 돌린 쪽은 OCR 결과를 쓴다. 실패했으면 텍스트 레이어가 남는다.
+        lines = ocr.get(number) or text.get(number) or []
+        if not lines:
+            missing_pages.append(number)
             continue
-        lines = _layout_markdown_lines(text)
-        if lines:
-            out.append(f"[{i}쪽]")
-            out.extend(lines)
-            read_pages.append(i)
-        else:
-            # 글자가 없는 쪽. 그림만 있는 쪽일 수도, 추출이 실패한 것일 수도
-            # 있다 — **어느 쪽인지 모르므로 읽었다고 세지 않는다.**
-            missing_pages.append(i)
+        out.append(f"[{number}쪽]")
+        out.extend(lines)
+        # 표시 줄만 있는 쪽은 **읽은 쪽이 아니다**(설계 §5). 줄 자체는 남긴다.
+        verified = _has_body(lines) and (
+            number not in required_ocr or _has_body(ocr.get(number) or [])
+        )
+        (read_pages if verified else missing_pages).append(number)
+
     _record(
         "page",
         total=total_pages,
         converted=len(read_pages),
         missing=tuple(missing_pages),
     )
-    extracted_chars = sum(len(line) for line in out if not line.startswith("["))
-    if out and extracted_chars < 200:
-        try:
-            return _finish(kordoc_lines(data, "pdf", force_ocr=True))
-        except (ExternalConverterUnavailable, ExternalConversionError) as exc:
-            logger.warning("PDF 본문이 짧지만 OCR을 쓰지 못함: %s", exc)
-            out.insert(0, f"[변환 안내] 이미지 본문 OCR 미사용: {exc}")
-            # 글자가 모자란데 OCR 도 못 썼다. 읽은 것이 원본의 전부라고 말할 수 없다.
-            _record("", flag=OCR_UNAVAILABLE)
+    if ocr_unavailable:
+        # 다시 봐야 할 쪽이 있는데 OCR 을 못 썼다. 읽은 것이 원본의 전부라고
+        # 말할 수 없다.
+        _record("", flag=OCR_UNAVAILABLE)
+    if over_limit:
+        _record("", flag=OCR_PAGE_LIMIT_REACHED)
+
     if not out:
-        try:
-            return _finish(kordoc_lines(data, "pdf", force_ocr=True))
-        except ExternalConverterUnavailable as exc:
-            raise ConvertError(f"텍스트 레이어 없음 - OCR 변환기 미설치: {exc}") from exc
-        except ExternalConversionError as exc:
-            raise ConvertError(f"스캔 PDF OCR 실패: {exc}") from exc
+        if ocr_unavailable:
+            raise ConvertError(f"텍스트 레이어 없음 - OCR 변환기 미설치: {ocr_unavailable}")
+        raise ConvertError("스캔 PDF OCR 실패: 어느 쪽에서도 본문을 얻지 못했다")
+
+    # 안내 줄은 본문이 있을 때만 붙인다 — 안내만 남으면 그것이 본문으로 보인다.
+    if over_limit:
+        out.insert(0, f"[변환 안내] OCR 상한 {MAX_PDF_OCR_PAGES}쪽 도달 - {len(over_limit)}쪽 미시도")
+    if ocr_unavailable:
+        out.insert(0, f"[변환 안내] 이미지 본문 OCR 미사용: {ocr_unavailable}")
+    if ocr:
+        out.insert(0, OCR_NOTICE)
     return _finish(out)
 
 
@@ -714,6 +827,9 @@ FALLBACK_CONVERTER = "fallback_converter"
 # 렌더 과정에서 단위(슬라이드·쪽)가 줄었다. 원본에 있던 것이 산출물에 없다.
 RENDER_LOST_UNITS = "render_lost_units"
 OCR_UNAVAILABLE = "ocr_unavailable"
+# 쪽별 OCR 상한에 걸려 **시도조차 못 한 쪽**이 있다. 읽을 수 없는 쪽과 다르다 —
+# 상한을 올리거나 다시 돌리면 읽힐 수 있다.
+OCR_PAGE_LIMIT_REACHED = "ocr_page_limit_reached"
 TITLE_ONLY = "title_only"
 
 

@@ -39,6 +39,21 @@ def test_apply_requires_an_actor(cli):
     assert exc.value.code == 2
 
 
+def test_reconvert_plan_does_not_enable_apply(cli, monkeypatch):
+    def recover(*args, **kwargs):
+        assert kwargs["reconvert"] is True
+        assert kwargs["apply"] is False
+        return {"results": [{"status": "reconvert-planned"}]}
+
+    monkeypatch.setattr(cli, "recover", recover)
+    assert cli.main([*ARGS, "--reconvert"]) == 0
+
+
+def test_reconvert_cannot_be_mixed_with_index_only(cli):
+    with pytest.raises(SystemExit):
+        cli.main([*ARGS, "--reconvert", "--index-only"])
+
+
 def test_running_collector_prevents_recovery(cli, monkeypatch, capsys):
     from tybot.lock import AlreadyRunning
 
