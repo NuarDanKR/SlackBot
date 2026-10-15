@@ -69,3 +69,4 @@ subbots/pf-hermes-source/
 # 문서다. 개발용 복제이고 운영 검색에서 제외한다(분리 결정 §4.A). 한 번 커밋되면
 # 이력에서 지우기 어렵고, 그 이력은 저장소를 받는 모든 사람에게 따라간다.
 subbots/pf-hermes-archive/
+artifacts/hermes-tybot-integration-수정.zip
