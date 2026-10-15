@@ -45,7 +45,7 @@ import { createToolClient } from '../src/rpc/tool-client.js';
 import { buildRemoteTools } from '../src/rpc/tools.js';
 import { createConcurrencyGate } from '../src/rpc/limits.js';
 import { loadProfiles } from '../src/rpc/profiles.js';
-import { loadSharedRpcConfig } from '../src/rpc/config.js';
+import { loadSharedRpcConfig, reviewModelFor } from '../src/rpc/config.js';
 import { renderRpcPrompt } from '../src/rpc/prompt.js';
 import { TOOL_SOCKET_PATH } from '../src/rpc/wire.js';
 
@@ -80,12 +80,12 @@ export function answererFor(profile, { toolSocketPath, secret, console: log }) {
  * workspace 별로 캐시하지 않는다. 캐시하면 「저 client 에 어느 키가 들어 있나」 를
  * 사람이 추적해야 하고, 그 추적이 틀리는 날 남의 키로 나간다.
  */
-export function reviewerFor(profile, { console: log } = {}) {
+export function reviewerFor(profile, { console: log, textModel } = {}) {
   const anthropic = () => new Anthropic({ apiKey: profile.apiKey });
   return createReviewer({
-    textModel: (spec) => createTextModel(spec, { client: anthropic }),
+    textModel: textModel || ((spec) => createTextModel(spec, { client: anthropic })),
     renderPrompt: () => renderReviewPrompt(),
-    model: profile.model,
+    model: profile.reviewModel || reviewModelFor(profile.model),
     console: log,
   });
 }

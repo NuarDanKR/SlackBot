@@ -20,12 +20,12 @@ from .cost import CostGuard, current_workspace
 
 logger = logging.getLogger("tybot.gateway")
 
-# 외부 검토 호출의 **출력 토큰 봉투**. 계약이 후보 10건을 상한으로 두고
-# (`subbots/hermes/contract/summary-review.md`), 한 건은 제안문·인용문·메타를
-# 합쳐 길어야 수백 토큰이다. 넉넉히 잡아도 이 자리를 넘지 않는다.
+# 외부 검토 호출의 출력 견적. JSON 후보 수만으로 모델의 전체 출력 토큰을
+# 추정하지 않는다. thinking 등을 포함한 worker의 기본 출력 예산과 맞춘다.
+# workspace가 기본보다 큰 상한을 설정하면 여전히 사전 견적을 넘길 수 있다.
 #
 # 이 숫자는 **한도 검사에만** 쓰인다. 실제 기록은 보고된 토큰으로 한다.
-REVIEW_OUTPUT_TOKEN_ENVELOPE = 4096
+REVIEW_OUTPUT_TOKEN_ENVELOPE = 16000
 
 
 def _reported(metrics: dict) -> bool:
@@ -181,10 +181,9 @@ class Router:
         한도에 걸리고, 그 차단은 「오늘은 요약이 안 되네」 로만 보인다. 너무 줄이면
         한도를 넘긴 뒤에야 안다.
 
-        그래서 **계약이 정한 범위**로 묶는다. 출력은 후보 10건이 상한이고
-        (`contract/summary-review.md`), 한 건은 제안문·인용문·메타를 합쳐 길어야
-        수백 토큰이다. 32768 같은 숫자는 그 계약과 아무 관계가 없다 — 그 값을 쓰면
-        실제의 수십 배를 예약하게 된다.
+        worker의 검토 기본 출력 예산을 사용한다. 후보 JSON 외의 모델 출력도 예산을
+        쓰므로 후보 10건만 보고 출력이 짧다고 가정하지 않는다. 이것은 견적이지
+        모든 사용자 지정 worker 설정의 비용을 보장하는 상한은 아니다.
 
         입력은 글자 수를 그대로 토큰으로 센다. 한국어는 글자보다 토큰이 적은 쪽이
         흔해 **보수적인 방향**이고, 토크나이저를 여기서 흉내 내지 않는다.

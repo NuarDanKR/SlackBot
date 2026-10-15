@@ -100,16 +100,14 @@ def test_unpriced_model_is_estimated_from_reported_tokens():
 
 
 def test_review_budget_check_stays_inside_the_candidate_contract():
-    """한도 검사 봉투가 계약 범위를 넘지 않는다.
+    """Match the worker budget, including output beyond the final JSON."""
+    from pathlib import Path
 
-    후보는 10건이 상한이고 한 건은 수백 토큰이다. 봉투가 그보다 수십 배 크면
-    **첫 호출부터** 워크스페이스 한도에 걸린다.
-    """
     router = make_router()
     reservation = router.check_external_review("tyit", input_chars=40_000)
-    # 하루 $50 한도에서 한 자릿수 회차 만에 막히면 안 된다.
-    assert reservation < 0.5, f"봉투가 ${reservation:.2f} 입니다"
-    assert REVIEW_OUTPUT_TOKEN_ENVELOPE <= 8192
+    assert reservation < 1.0, f"봉투가 ${reservation:.2f} 입니다"
+    config = (Path(__file__).resolve().parents[1] / "subbots/hermes/src/rpc/config.js").read_text(encoding="utf-8")
+    assert f"DEFAULT_REVIEW_MAX_TOKENS = {REVIEW_OUTPUT_TOKEN_ENVELOPE};" in config
 
 
 def test_model_selection_and_response():

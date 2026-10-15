@@ -31,7 +31,7 @@ import { renderReviewPrompt } from '../src/rpc/review-prompt.js';
 import { alignSocketDirectoryGroup, createRpcServer } from '../src/rpc/server.js';
 import { createToolClient } from '../src/rpc/tool-client.js';
 import { buildRemoteTools } from '../src/rpc/tools.js';
-import { loadRpcConfig } from '../src/rpc/config.js';
+import { loadRpcConfig, reviewModelFor } from '../src/rpc/config.js';
 import { renderRpcPrompt } from '../src/rpc/prompt.js';
 import { TOOL_SOCKET_PATH } from '../src/rpc/wire.js';
 
@@ -58,11 +58,11 @@ export function wireWorker(cfg, { toolSocketPath = TOOL_SOCKET_PATH, console: lo
   });
 
   /* 검토 후보 생성기. **도구가 없다** — 자료는 요청 본문으로 받고, 아카이브·Slack 을
-   * 직접 보지 않는다(인계 §독립 작업). 모델은 Q&A 와 같은 workspace 설정을 쓴다. */
+   * 직접 보지 않는다. 같은 workspace 키를 쓰되 출력/effort 설정은 Q&A 와 분리한다. */
   const reviewer = createReviewer({
     textModel: (spec) => createTextModel(spec, { client: anthropic }),
     renderPrompt: () => renderReviewPrompt(),
-    model: cfg.model,
+    model: cfg.reviewModel || reviewModelFor(cfg.model),
     console: log,
   });
 

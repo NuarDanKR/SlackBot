@@ -31,6 +31,9 @@ import { renderReviewPrompt } from '../src/rpc/review-prompt.js';
 import { createRpcServer } from '../src/rpc/server.js';
 import * as review from '../src/rpc/review-wire.js';
 import * as wire from '../src/rpc/wire.js';
+import { loadRpcConfig, reviewModelFor } from '../src/rpc/config.js';
+import { loadProfiles } from '../src/rpc/profiles.js';
+import { reviewerFor } from './run-rpc-shared.js';
 
 const SECRET = crypto.randomBytes(32);
 const WORKSPACE = 'tyit';
@@ -594,6 +597,83 @@ await test('failed 에 후보를, 비실패에 오류 코드를 못 싣는다', 
   assert.throws(() => review.buildReviewResponse({
     requestId: 'x', workspace: WORKSPACE, sourceDigest: DIGEST, status: 'ok', candidates: [],
   }), /1~10/);
+});
+
+/* Review budget must not silently follow Q&A settings (server truncation regression). */
+await test('검토 기본 예산은 Q&A 8000/high 와 분리된다', () => {
+  const qa = Object.freeze({ id: 'qa-model', maxTokens: 8000, effort: 'high' });
+  assert.deepEqual(reviewModelFor(qa), { id: 'qa-model', maxTokens: 16000, effort: 'low' });
+  assert.deepEqual(qa, { id: 'qa-model', maxTokens: 8000, effort: 'high' });
+  assert.ok(Object.isFrozen(reviewModelFor(qa)));
+});
+
+await test('개별 worker env 는 검토 spec 만 덮어쓴다', () => {
+  const secretFile = path.join(tmp, 'review-config-hmac');
+  fs.writeFileSync(secretFile, SECRET);
+  const env = { HERMES_DOMAIN: 'enterprise', HERMES_RPC_WORKSPACE: 'tyit',
+    HERMES_RPC_HMAC_FILE: secretFile, HERMES_RPC_MODEL: 'qa-model' };
+  const base = loadRpcConfig(env);
+  assert.deepEqual(base.model, { id: 'qa-model', maxTokens: 8000, effort: 'high' });
+  assert.deepEqual(base.reviewModel, { id: 'qa-model', maxTokens: 16000, effort: 'low' });
+  const changed = loadRpcConfig({ ...env, HERMES_RPC_REVIEW_MODEL: 'review-model',
+    HERMES_RPC_REVIEW_MAX_TOKENS: '24000', HERMES_RPC_REVIEW_EFFORT: 'medium' });
+  assert.deepEqual(changed.model, base.model);
+  assert.deepEqual(changed.reviewModel, { id: 'review-model', maxTokens: 24000, effort: 'medium' });
+  assert.throws(() => loadRpcConfig({ ...env, HERMES_RPC_REVIEW_MAX_TOKENS: '16000oops' }));
+});
+
+await test('검토 예산 오타·소수·0·과다 상한·빈 모델을 거절한다', () => {
+  const qa = { id: 'qa' };
+  for (const maxTokens of [0, -1, 1.5, NaN, Infinity, 32769, '', 'bad', true, null]) {
+    assert.throws(() => reviewModelFor(qa, { maxTokens }), /review_max_tokens/);
+  }
+  assert.throws(() => reviewModelFor(qa, { model: '' }), /review_model/);
+  assert.throws(() => reviewModelFor(qa, { effort: 'hihg' }), /review_effort/);
+});
+
+function reviewProfiles(overrides = {}) {
+  const rows = { tyit: { domain: 'enterprise', api_key_file: path.join(tmp, 'tyit.key') },
+    invest: { domain: 'enterprise', api_key_file: path.join(tmp, 'invest.key'),
+      model: 'invest-qa', review_model: 'invest-review', review_max_tokens: 24000,
+      review_effort: 'medium', ...overrides } };
+  return loadProfiles('virtual-profiles', { read: () => JSON.stringify(rows),
+    readKey: (file) => `not-a-real-key-${path.basename(file)}-0123456789` });
+}
+
+await test('공유 명부의 검토 spec 과 키는 workspace 별로 유지된다', () => {
+  const { profiles } = reviewProfiles();
+  assert.deepEqual(profiles.get('tyit').reviewModel,
+    { id: 'claude-opus-5-5', maxTokens: 16000, effort: 'low' });
+  assert.deepEqual(profiles.get('invest').reviewModel,
+    { id: 'invest-review', maxTokens: 24000, effort: 'medium' });
+  assert.deepEqual(profiles.get('invest').model,
+    { id: 'invest-qa', maxTokens: 8000, effort: 'high' });
+  assert.notEqual(profiles.get('tyit').apiKey, profiles.get('invest').apiKey);
+  const broken = reviewProfiles({ review_max_tokens: 0 });
+  assert.deepEqual(broken.readiness(), { tyit: true, invest: false });
+});
+
+await test('실제 공유 검토 배선이 전용 spec 으로 후보 10건을 생성한다', async () => {
+  const { profiles } = reviewProfiles();
+  for (const profile of profiles.values()) {
+    let seen;
+    const sources = Array.from({ length: 10 }, (_, i) => ({ id: `r${i + 1}`, at: 'now',
+      author: 'person', text: `The deadline for item ${i + 1} is confirmed.` }));
+    const candidates = sources.map((source) => ({ source_id: source.id, kind: 'new_issue',
+      form: 'quote', current_text: '', proposed_text: source.text, evidence_quote: source.text }));
+    const reviewer = reviewerFor(profile, { console: { error() {} }, textModel: (spec) => {
+      seen = spec;
+      return { generate: async () => spec.maxTokens === 8000 && spec.effort === 'high'
+        ? { text: '', stopReason: 'max_tokens', usage: { output_tokens: 8000 } }
+        : { text: JSON.stringify({ candidates }), stopReason: 'ok', usage: { output_tokens: 2000 } } };
+    } });
+    const result = await reviewer.review({ sources, approved: [], maxCandidates: 10, deadlineMs: 3000 });
+    assert.equal(seen, profile.reviewModel);
+    assert.equal(result.status, 'ok');
+    assert.equal(result.candidates.length, 10);
+    assert.equal(profile.model.maxTokens, 8000);
+    assert.equal(profile.model.effort, 'high');
+  }
 });
 
 /* ── 정리 ─────────────────────────────────────────────────────────────── */

@@ -32,6 +32,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveDomain } from '../domain.js';
+import { reviewModelFor } from './config.js';
 
 /** workspace key 모양. 소켓 key 와 같은 규칙이다. */
 export const WORKSPACE_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -40,7 +41,8 @@ export const WORKSPACE_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const FORBIDDEN_KEYS = ['api_key', 'apikey', 'apiKey', 'key', 'secret', 'token', 'password'];
 
 /** 쓸 수 있는 필드. 모르는 필드는 거절한다 — 오타가 조용히 무시되면 설정이 거짓말을 한다. */
-const ALLOWED_KEYS = ['domain', 'api_key_file', 'model', 'effort', 'max_tokens', 'max_iterations'];
+const ALLOWED_KEYS = ['domain', 'api_key_file', 'model', 'effort', 'max_tokens', 'max_iterations',
+  'review_model', 'review_max_tokens', 'review_effort'];
 
 export class ProfilesError extends Error {
   constructor(message) {
@@ -179,6 +181,9 @@ export function loadProfiles(file, { read = fs.readFileSync, readKey = readApiKe
         apiKey,
         apiKeyFile: keyFile,
         model: Object.freeze({ id: model, maxTokens, effort }),
+        reviewModel: reviewModelFor({ id: model }, {
+          model: entry.review_model, maxTokens: entry.review_max_tokens, effort: entry.review_effort,
+        }),
         maxIterations,
       }));
     } catch (err) {

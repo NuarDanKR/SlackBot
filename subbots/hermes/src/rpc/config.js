@@ -31,6 +31,26 @@ export class RpcConfigError extends Error {
   }
 }
 
+export const DEFAULT_REVIEW_MAX_TOKENS = 16000;
+
+/** Review is one JSON response, not a Q&A tool turn. Never inherit its token/effort budget. */
+export function reviewModelFor(qaModel, { model, maxTokens, effort } = {}) {
+  const id = model === undefined ? qaModel.id : model;
+  const tokens = maxTokens === undefined ? DEFAULT_REVIEW_MAX_TOKENS : Number(maxTokens);
+  const depth = effort === undefined ? 'low' : effort;
+  if (typeof id !== 'string' || !id.trim()) {
+    throw new RpcConfigError('review_model must be a nonempty model ID');
+  }
+  if ((maxTokens !== undefined && !['number', 'string'].includes(typeof maxTokens))
+      || !Number.isInteger(tokens) || tokens < 1 || tokens > 32768) {
+    throw new RpcConfigError('review_max_tokens must be an integer from 1 to 32768');
+  }
+  if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(depth)) {
+    throw new RpcConfigError('review_effort is invalid');
+  }
+  return Object.freeze({ id: id.trim(), maxTokens: tokens, effort: depth });
+}
+
 /**
  * 소켓 자리. **경로를 받지 않고 key 로 계산한다.**
  *
@@ -126,6 +146,11 @@ export function loadRpcConfig(env = process.env) {
       file: env.HERMES_RPC_HMAC_FILE,
     }),
     model: Object.freeze({ id: model, maxTokens, effort }),
+    reviewModel: reviewModelFor({ id: model }, {
+      model: env.HERMES_RPC_REVIEW_MODEL,
+      maxTokens: env.HERMES_RPC_REVIEW_MAX_TOKENS,
+      effort: env.HERMES_RPC_REVIEW_EFFORT,
+    }),
     maxIterations,
     /** health 가 밝히는 자기 버전. 배포가 무엇을 올렸는지 사람이 대조하는 값이다. */
     version: String(env.HERMES_RPC_VERSION || '').trim() || 'unversioned',

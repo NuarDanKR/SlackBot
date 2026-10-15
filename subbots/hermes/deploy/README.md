@@ -545,6 +545,31 @@ sudo install -o root -g hermes-rpc-shared -m 0640 /dev/null /etc/hermes-rpc-shar
 
 같은 키 파일을 여러 profile 이 가리켜도 된다. **명시해야** 할 뿐이다.
 
+### 검토 전용 모델 설정 (2026-10-15)
+
+Q&A의 `model`/`max_tokens`/`effort`는 유지한다. 요약 검토는 같은 workspace API 키를
+사용하되 **출력 예산과 effort를 상속하지 않는다**. 기본값은 모델 ID만 Q&A에서 가져오고,
+`review_max_tokens=16000`, `review_effort=low`다. 이 값이 실제 모델의 정상 JSON 출력을
+보장하는 것은 아니므로 서버에서 검토 한 회차를 확인해야 한다.
+
+공유 명부의 각 workspace에 선택적으로 다음 필드를 추가할 수 있다(새 코드 배포 후).
+
+```json
+{
+  "review_model": "claude-opus-5-5",
+  "review_max_tokens": 16000,
+  "review_effort": "low"
+}
+```
+
+위는 **추가할 필드만** 보인 예시이며 `domain`/`api_key_file`을 지우거나 명부 전체를
+덮어쓰지 않는다. 토큰 상한은 정수 1~32768이며 잘못된 설정은 해당 workspace의
+기동 준비를 거부한다. Q&A 설정이나 다른 workspace 설정을 고치지 않는다.
+개별 worker의 대응 env는 `HERMES_RPC_REVIEW_MODEL`, `HERMES_RPC_REVIEW_MAX_TOKENS`,
+`HERMES_RPC_REVIEW_EFFORT`다. 공유 worker는 workspace별 명부만 사용한다.
+기존 명부에 추가 필드가 없어도 새 기본값이 적용된다. 코드 배포만으로 기존 프로세스가
+바뀌지는 않으므로, 진행 중 요청을 확인한 뒤 공유 worker를 한 번 재시작한다.
+
 ```bash
 sudo install -o root -g hermes-rpc-shared -m 0640 /dev/null /etc/hermes-rpc-shared/keys/tyit
 sudo chmod 0640 /etc/hermes-rpc-shared/profiles.json
