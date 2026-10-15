@@ -44,6 +44,11 @@ sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/archiver.env \
 `recover_archiver_files.py`는 위 진단에서 누락된 파일을 추가 대조한 뒤 복구한다.
 자동으로 전 채널을 수집하지 않는다. 먼저 대표 파일 한 개로 확인한다.
 
+2026-10-15 보완: 레거시 `workspaces/<workspace>`가 있다는 이유만으로 이
+명령을 막지 않는다. 수집기 기동용 검사는 변경하지 않고, 복구 명령은 파일별
+레거시 기록 대조로 중복 쓰기를 막는다. 기존 경로는 삭제·이동하지 않는다.
+오류의 `stage`는 중단 단계를 표시하며 비밀 값이나 SDK 응답 본문은 출력하지 않는다.
+
 ```bash
 sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/archiver.env \
   /opt/tybot/.venv/bin/python /opt/tybot/scripts/recover_archiver_files.py \

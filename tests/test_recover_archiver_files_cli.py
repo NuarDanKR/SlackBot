@@ -17,9 +17,9 @@ def cli(monkeypatch, tmp_path):
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "load_env_file", lambda: None)
     monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
+    monkeypatch.setenv("ARCHIVER_LIVE_WRITES_ENABLED", "1")
     monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path))
     monkeypatch.setattr(module, "shadow_archive_dir", lambda env: tmp_path / "shadow")
-    monkeypatch.setattr(module, "_live_archive_root", lambda *args: tmp_path)
     monkeypatch.setattr(module, "default_repo", lambda: object())
     monkeypatch.setattr(module, "OwnerLookup", lambda *args, **kwargs: object())
     cfg = SimpleNamespace(key="mgmt", bot_token="fixture")
@@ -91,3 +91,32 @@ def test_plan_has_no_lock_or_write_mode(cli, monkeypatch):
 
     monkeypatch.setattr(cli, "recover", recover)
     assert cli.main(ARGS) == 0
+
+
+def test_plan_accepts_legacy_workspace_without_modifying_it(cli, monkeypatch, tmp_path):
+    legacy = tmp_path / "workspaces/mgmt/keep.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("preserve original", encoding="utf-8")
+    monkeypatch.delenv("ARCHIVER_LIVE_WRITES_ENABLED")
+    monkeypatch.setattr(cli, "recover", lambda *args, **kwargs:
+                        {"results": [{"status": "existing-needs-review"}]})
+    assert cli.main(ARGS) == 2
+    assert legacy.read_text(encoding="utf-8") == "preserve original"
+
+
+def test_apply_still_requires_env_live_gate(cli, monkeypatch, capsys):
+    monkeypatch.setenv("ARCHIVER_LIVE_WRITES_ENABLED", "0")
+    monkeypatch.setattr(cli, "recover", lambda *args, **kwargs: pytest.fail("no writes"))
+    assert cli.main([*ARGS, "--apply", "--by", "operator"]) == 1
+    assert json.loads(capsys.readouterr().out)["stage"] == "live-write-env"
+
+
+def test_errors_report_safe_stage_not_exception_body(cli, monkeypatch, capsys):
+    def fail(values):
+        raise RuntimeError("sensitive configuration details")
+
+    monkeypatch.setattr(cli, "load_archiver_workspaces", fail)
+    assert cli.main(ARGS) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["stage"] == "archiver-config"
+    assert "sensitive" not in str(report)
