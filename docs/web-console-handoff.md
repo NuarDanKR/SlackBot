@@ -771,6 +771,48 @@ PUT /api/workspaces/{key}/archiving/retention
 <a id="wc-07"></a>
 # WC-07. 요약 검토 주기
 
+## 2026-10-15 추가: 검토 상태 DM과 같은 날 증분 재검토
+
+오너 결정: 후보 0건이어도 검토자는 정상 확인인지 오류인지 알 수 있어야 한다.
+TYBot Python 구현 진행중이며 서버 배포/실발송 검증 전이다. PF Hermes 후보 생성
+RPC는 Claude가 별도로 구현 중이므로 현재 배포가 이미 RPC로 전환됐다고 표시하지 않는다.
+
+- `model-empty`: 원문을 확인했으며 모델이 후보를 제안하지 않음.
+- `no-new-source`: 마지막 처리 이후 새로 수집된 원문 없음. Slack 전체를 조회했다는
+  뜻이 아니며 수집 중단 여부와 별도로 표시한다.
+- `no-accepted-candidate`: 제안은 있었지만 원문 검증에서 전부 탈락. 정상 0건 아님.
+- `generation-retry-deferred`: 실패 후 재시도 대기.
+- `source-already-processed`: 동일 원문 구간 재사용으로 모델 호출 생략.
+
+예약 시각 이후 정상 빈 상태와 오류 상태를 각각 채널/검토자/KST 날짜별로 중복 제한한다.
+`summary_review_status_delivery`는 후보/승인 이력과 별개다. `sending`은 발송 중 또는
+결과 미확정, `sent`는 성공, `failed`는 확정 실패, `ambiguous`는 응답 유실 등으로
+성공 여부 미확정이다. `sending`/`ambiguous`를 성공이나 미발송 확정으로 표시하지 않는다.
+오류나 미확정 기록에 자동 재발송 버튼을 연결하지 말고 서버 재확인 경로를 먼저 정한다.
+확정 실패는 1시간 뒤 재시도 가능하다. 실제 후보가 이미 발송된 날에는 빈 상태 DM은
+생략하고, 빈 상태를 먼저 받았더라도 이후 실제 후보 검토 DM은 받을 수 있다.
+
+같은 날 재생성을 무조건 막던 규칙은 15분 생성 간격 + 원문 커서/digest 기반으로 바꾼다.
+동일 구간을 다시 모델에 보내지 않고, 실패 백오프·게이트웨이 예산·단일 실행 잠금을
+유지한다. 전부 검증 탈락한 구간은 성공 처리하지 않고 커서를 보존한다.
+콘솔 즉시 실행 결과 JSON은 `statusSent`/`statusFailed`를 후보 `sent`/`failed`와
+구분해 제공한다. 상태 DM을 후보 승인 완료나 원문 아카이브 작성으로 계산하지 않는다.
+
+배포 시 `deploy/sql/summary_review_schema.sql`의 상태 DM 테이블/권한 적용이 필요하다.
+추가 테이블 미적용을 "보낼 내용 없음"으로 표시하지 않는다. Master 없는 TEC의
+TYBot 발송 신원 부재는 별도 제한이며 Archiver 수집 실패로 표시하지 않는다.
+
+**2026-10-15 RPC 배선 보강 (서버 구현, 운영 검증 전):** 별도
+`TYBOT_HERMES_REVIEW_WORKSPACES` 허용 workspace의
+예약·소급 후보 생성은 PF Hermes `review_candidates_v1`을 사용한다. 미지원 capability,
+잘못된 응답 서명, 모델 오류를 기존 Haiku 생성으로 우회하거나 정상 0건으로 표시하지
+않는다. 실패 상세는 `generation-error=<사유 코드>`로 전달하며 본문/키는 포함하지 않는다.
+`no-new-source`, `model-empty`, `no-accepted-candidate`, `generate-failed`를 구분한다.
+워커 생성 성공만으로 DM 발송 성공을 표시하지 않는다. 정상 0건/오류 상태 DM 이력은
+`summary_review_status_delivery`이며 후보 발송·승인 권한 이력과 별개다.
+이 허용 목록은 기본 OFF, Master v2 허용 목록의 부분집합이다. Q&A RPC 전환과
+예약 요약 검토 RPC 전환을 각각 표시하고, 콘솔 설정 관리 이관 대상에 포함한다.
+
 | | |
 |---|---|
 | 상태 | ❓ **확인 필요** — 2026-10-06 전달, 완료 여부 모름 |
