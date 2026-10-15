@@ -778,6 +778,13 @@ export const CHECKS = [
     "reason": "Synthetic inputs or repository source inspection; default arguments only."
   },
   {
+    "file": "scripts/check-rpc-review.js",
+    "what": "검토 후보 RPC — empty/failed 구분·후보 검증·상한·서명·동시 상한·capability",
+    "runtime": "node",
+    "mode": "offline",
+    "reason": "Synthetic inputs or repository source inspection; default arguments only."
+  },
+  {
     "file": "scripts/check-rpc-unit.js",
     "what": "RPC 배치 계약 — 소켓 그룹(SGID)·enable 가능·설치 helper 멱등",
     "runtime": "node",

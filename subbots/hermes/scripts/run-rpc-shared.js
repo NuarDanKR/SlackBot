@@ -35,9 +35,11 @@
 import { pathToFileURL } from 'node:url';
 import Anthropic from '@anthropic-ai/sdk';
 import { TYBOT, mode } from '../src/mode.js';
-import { createToolSession } from '../src/llm/provider.js';
+import { createTextModel, createToolSession } from '../src/llm/provider.js';
 import { lazyTerms } from '../src/domain.js';
 import { createRpcAnswerer } from '../src/rpc/answer.js';
+import { createReviewer } from '../src/rpc/review.js';
+import { renderReviewPrompt } from '../src/rpc/review-prompt.js';
 import { alignSocketDirectoryGroup, createRpcServer } from '../src/rpc/server.js';
 import { createToolClient } from '../src/rpc/tool-client.js';
 import { buildRemoteTools } from '../src/rpc/tools.js';
@@ -74,6 +76,21 @@ export function answererFor(profile, { toolSocketPath, secret, console: log }) {
 }
 
 /**
+ * 프로필 하나짜리 검토기. **요청마다 부른다** — Q&A 와 같은 이유로 모델 client 를
+ * workspace 별로 캐시하지 않는다. 캐시하면 「저 client 에 어느 키가 들어 있나」 를
+ * 사람이 추적해야 하고, 그 추적이 틀리는 날 남의 키로 나간다.
+ */
+export function reviewerFor(profile, { console: log } = {}) {
+  const anthropic = () => new Anthropic({ apiKey: profile.apiKey });
+  return createReviewer({
+    textModel: (spec) => createTextModel(spec, { client: anthropic }),
+    renderPrompt: () => renderReviewPrompt(),
+    model: profile.model,
+    console: log,
+  });
+}
+
+/**
  * 공유 worker 한 벌을 **배선만** 한다. 소켓은 열지 않는다 — 시험이 같은 배선을
  * 임시 자리에서 띄울 수 있어야 한다.
  */
@@ -90,10 +107,20 @@ export function wireSharedWorker(cfg, {
     return answererFor(profile, { toolSocketPath, secret: cfg.secret, console: log });
   }
 
+  /* 검토기도 **workspace 별 profile** 로 만든다. 모델도 API 키도 그 workspace 것이고,
+   * `process.env` 는 건드리지 않는다 — 한 요청이 전역을 바꾸면 그 사이에 도는 다른
+   * workspace 요청이 남의 키로 나간다(인계 §profile). */
+  function reviewRoute(workspace) {
+    const profile = profiles.get(workspace);
+    if (!profile) return null;
+    return reviewerFor(profile, { console: log });
+  }
+
   return createRpcServer({
     secret: cfg.secret,
     version: cfg.version,
     route,
+    reviewRoute,
     limits: gate,
     readiness,
     console: log,

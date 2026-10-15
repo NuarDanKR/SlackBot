@@ -23,9 +23,11 @@
 import { pathToFileURL } from 'node:url';
 import Anthropic from '@anthropic-ai/sdk';
 import { TYBOT, mode } from '../src/mode.js';
-import { createToolSession } from '../src/llm/provider.js';
+import { createTextModel, createToolSession } from '../src/llm/provider.js';
 import { lazyTerms } from '../src/domain.js';
 import { createRpcAnswerer } from '../src/rpc/answer.js';
+import { createReviewer } from '../src/rpc/review.js';
+import { renderReviewPrompt } from '../src/rpc/review-prompt.js';
 import { alignSocketDirectoryGroup, createRpcServer } from '../src/rpc/server.js';
 import { createToolClient } from '../src/rpc/tool-client.js';
 import { buildRemoteTools } from '../src/rpc/tools.js';
@@ -55,8 +57,18 @@ export function wireWorker(cfg, { toolSocketPath = TOOL_SOCKET_PATH, console: lo
     console: log,
   });
 
+  /* 검토 후보 생성기. **도구가 없다** — 자료는 요청 본문으로 받고, 아카이브·Slack 을
+   * 직접 보지 않는다(인계 §독립 작업). 모델은 Q&A 와 같은 workspace 설정을 쓴다. */
+  const reviewer = createReviewer({
+    textModel: (spec) => createTextModel(spec, { client: anthropic }),
+    renderPrompt: () => renderReviewPrompt(),
+    model: cfg.model,
+    console: log,
+  });
+
   return createRpcServer({
-    secret: cfg.secret, workspace: cfg.workspace, version: cfg.version, answerer, console: log,
+    secret: cfg.secret, workspace: cfg.workspace, version: cfg.version,
+    answerer, reviewer, console: log,
   });
 }
 

@@ -78,7 +78,13 @@ function anthropicTextModel(spec, client) {
     provider: 'anthropic',
     id: spec.id,
     retryable: anthropicRetryable,
-    async generate({ system, messages }) {
+    /**
+     * @param {AbortSignal} [signal] 중단 신호. **SDK 까지 내려 준다** — 안 내려 주면
+     *   우리 쪽만 멈추고 이미 나간 HTTP 요청은 끝까지 가며, 그 동안 호출부가
+     *   「끝났다」 로 치면 동시 호출 수가 상한을 넘는다(2026-10-12 리뷰 P1 과 같은 축).
+     *   `signal` 을 안 주면 지금까지와 똑같이 돈다.
+     */
+    async generate({ system, messages, signal }) {
       // 출력이 길어질 수 있어 스트리밍으로 받는다 (비스트리밍은 HTTP 타임아웃 위험).
       const raw = await client().messages.stream({
         model: spec.id,
@@ -86,7 +92,7 @@ function anthropicTextModel(spec, client) {
         output_config: { effort: spec.effort },
         system,
         messages,
-      }).finalMessage();
+      }, signal ? { signal } : undefined).finalMessage();
       return normalize(raw);
     },
   };

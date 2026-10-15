@@ -309,12 +309,18 @@ export function buildAnswerResponse({
  * **담는 것은 workspace key 와 준비 여부뿐이다.** 경로·키 파일 이름·사유 문구를
  * 실으면 그 값이 저쪽 로그와 콘솔로 흘러 들어간다.
  */
-export function buildHealthResponse({ version, workspaces }) {
+export function buildHealthResponse({ version, workspaces, capabilities }) {
   const payload = {
     status: 'ok',
     contract_version: CONTRACT_VERSION,
     version: String(version ?? ''),
   };
+  /* **무엇을 할 수 있나.** 없는 능력을 TYBot 이 「되겠지」 하고 부르면 그 실패는
+   * 재시도로 보이고, 재시도는 설정 오류를 장애처럼 만든다. 비어 있어도 키는 싣는다 —
+   * 「능력이 없다」 와 「낡은 worker 라 칸이 없다」 를 저쪽이 가릴 수 있게. */
+  if (Array.isArray(capabilities)) {
+    payload.capabilities = capabilities.map(String);
+  }
   if (workspaces && typeof workspaces === 'object') {
     payload.workspaces = Object.fromEntries(
       Object.entries(workspaces).map(([ws, ready]) => [String(ws), ready === true]),

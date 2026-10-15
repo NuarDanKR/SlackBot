@@ -46,6 +46,7 @@ CHECKS = (
     ("check-rpc-isolation.js", "경계 — Slack·아카이브 미접근과 요청 간 토큰 격리"),
     ("check-rpc-unit.js", "배치 — 소켓 그룹·enable 가능·설치 helper 멱등"),
     ("check-rpc-shared.js", "공유 — 명부·workspace 선택·교차 인용·취소·429·health"),
+    ("check-rpc-review.js", "검토 후보 — empty/failed 구분·후보 검증·상한·서명·동시 상한"),
 )
 
 
@@ -171,6 +172,59 @@ def test_rpc_unit_uses_a_systemd_239_compatible_secret_file():
     assert not any(line.startswith("LoadCredential=") for line in live)
     assert "Environment=HERMES_RPC_HMAC_FILE=/etc/hermes-rpc-%i/hmac" in live
     assert "ReadOnlyPaths=/opt/tybot/subbots/hermes /etc/hermes-rpc-%i" in live
+
+
+def test_review_rpc_never_hides_failure_as_empty() -> None:
+    """`empty` 는 **한 경우뿐**이다(2026-10-15 인계).
+
+    검토자는 후보가 없어도 DM 을 받는다. 그래서 「없었다」 와 「못 만들었다」 를
+    합치면, 모델이 죽은 날에도 검토자는 「오늘은 요약할 게 없군요」 를 받는다 —
+    아무도 신고하지 않고 그 상태가 며칠 간다.
+
+    이 시험은 **소스에 그 갈림길이 남아 있는지**를 본다. 동작은 Node 검사가 재고,
+    여기서는 그 검사가 사라져도 보이게 한다.
+    """
+    src = (HERMES / "src" / "rpc" / "review.js").read_text(encoding="utf-8")
+    # 모델이 0건을 낸 자리에서만 empty 가 나온다.
+    assert "STATUS_EMPTY" in src
+    assert src.count("return done(STATUS_EMPTY)") == 1, "empty 로 가는 길이 하나가 아니다"
+    # 장애는 전부 failed 로 간다.
+    for code in (
+        "model_timeout", "model_error", "invalid_json",
+        "truncated_output", "candidate_validation_failed", "cancelled",
+    ):
+        assert code in src, f"{code} 갈래가 없다"
+
+    wire_src = (HERMES / "src" / "rpc" / "review-wire.js").read_text(encoding="utf-8")
+    # failed 에 후보를 실으면 「반쯤 성공」 이 생기고, 그 반쯤을 쓸지 아무도 못 정한다.
+    assert "failed 에는 후보를 싣지 않습니다" in wire_src
+
+
+def test_review_rpc_reuses_the_candidate_contract() -> None:
+    """후보 규칙을 **베껴 적지 않는다.**
+
+    `contract/summary-review.md` 는 PF Hermes 와 TYBot 이 같이 보는 계약이다.
+    한 벌을 더 두면 한쪽만 고쳐지는 날이 오고, 규칙이 느슨해진 것도 에러 없이
+    흐른다 — 후보가 좀 더 많아질 뿐이다.
+    """
+    prompt = (HERMES / "src" / "rpc" / "review-prompt.js").read_text(encoding="utf-8")
+    assert "contract" in prompt and "summary-review.md" in prompt
+    assert (HERMES / "contract" / "summary-review.md").is_file()
+    # 기본 문구로 물러서지 않는다 — 규칙 없는 후보를 검토자가 승인하게 된다.
+    assert "기본 문구로 물러서지 않습니다" in prompt
+
+
+def test_review_rpc_shares_the_qa_concurrency_gate() -> None:
+    """검토용 **별도 슬롯 풀을 만들지 않는다**(인계 §동시 상한).
+
+    상한은 이 프로세스가 동시에 부르는 모델 호출 수를 막는 것이고, 그 모델은
+    Q&A 와 검토를 안 가린다. 풀을 나누면 합산이 상한을 넘는다.
+    """
+    server = (HERMES / "src" / "rpc" / "server.js").read_text(encoding="utf-8")
+    # 게이트를 잡는 자리가 하나뿐이다.
+    assert server.count("limits.acquire(") == 1, "슬롯을 잡는 자리가 둘 이상이다"
+    # 작업 종류는 경로가 정한다 — 질문 문자열로 추측하지 않는다.
+    assert "const isReview = route === REVIEW_ENDPOINT" in server
 
 
 def test_shared_worker_keeps_the_individual_one() -> None:

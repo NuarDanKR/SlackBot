@@ -31,6 +31,9 @@ import {
   WireViolation, buildAnswerResponse, buildHealthResponse,
   parseAnswerRequest, parseCancelRequest, responseSignature,
 } from './wire.js';
+import {
+  CAPABILITY_REVIEW, REVIEW_ENDPOINT, buildReviewResponse, parseReviewRequest,
+} from './review-wire.js';
 import { createAuthenticator } from './replay.js';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
@@ -62,16 +65,27 @@ const ERRORS = Object.freeze({
  *   공유 모드의 동시성 게이트. `acquire` 가 `null` 을 주면 **429 로 즉시 돌려보낸다** —
  *   대기열을 만들지 않는다(인계 §동시성).
  * @param {()=>object} [o.readiness]  health 에 실을 workspace 별 준비 상태
+ * @param {{review:Function}} [o.reviewer]  단일 모드의 검토 후보 생성기
+ * @param {(ws:string)=>({review:Function}|null)} [o.reviewRoute]
+ *   **공유 모드**: workspace → 그 workspace 의 검토기. 없으면 검토 endpoint 는 404 다 —
+ *   그러면 health 의 `capabilities` 에서도 빠지고, TYBot 은 **설정 오류로 진단한다**
+ *   (조용히 Haiku 로 우회하지 않는다, 인계 §health).
  * @param {string} o.version       health 가 밝히는 자기 버전
  */
 export function createRpcServer({
   secret, workspace, version, answerer,
   route: routeTo, limits, readiness,
+  reviewer, reviewRoute,
   now = () => Date.now(), console: log = globalThis.console,
 }) {
   /* 단일 모드를 **라우터 하나짜리 공유 모드**로 접는다. 두 경로를 따로 두면 서명·
    * 재생·격리 같은 규칙이 한쪽에만 고쳐지는 날이 오고, 그 차이는 에러 없이 흐른다. */
   const resolveAnswerer = routeTo || ((ws) => (ws === workspace ? answerer : null));
+  const resolveReviewer = reviewRoute
+    || (reviewer ? (ws) => (ws === workspace ? reviewer : null) : null);
+  /* **검토를 할 수 있나.** 배선이 없으면 endpoint 자체가 없다 — 「있는데 늘 실패」
+   * 보다 「없다」 가 낫다. 전자는 TYBot 이 재시도하고, 후자는 바로 설정을 본다. */
+  const capabilities = resolveReviewer ? [CAPABILITY_REVIEW] : [];
   const auth = createAuthenticator({ secret, now: () => now() / 1000 });
   /** 도는 요청. `request_id` → `{controller}`. 끝나면 **반드시** 지운다. */
   const inFlight = new Map();
@@ -93,11 +107,19 @@ export function createRpcServer({
     return new Promise((resolve, reject) => {
       const chunks = [];
       let total = 0;
+      let over = false;
       req.on('data', (chunk) => {
+        if (over) return;
         total += chunk.length;
         if (total > MAX_REQUEST_BYTES) {
+          /* 상한을 넘었다. **읽기를 멈추되 소켓은 안 끊는다.**
+           *
+           * 끊으면 저쪽은 413 을 못 받고 `socket hang up` 만 본다 — 그러면
+           * 「우리가 상한을 넘겼다」 가 「연결이 이상하다」 로 둔갑하고, 고칠 곳을
+           * 못 찾는다. 상태 코드를 먼저 보내고 호출부가 끊는다. */
+          over = true;
+          req.pause();
           reject(Object.assign(new Error('too large'), { tooLarge: true }));
-          req.destroy();
           return;
         }
         chunks.push(chunk);
@@ -111,15 +133,18 @@ export function createRpcServer({
     if (req.method !== 'POST') return fail(res, 404);
     // 질의 문자열을 떼고 **정확히** 맞춘다. 서명 대상도 이 경로이므로 둘이 갈리면 401 이다.
     const route = String(req.url || '').split('?')[0];
-    if (![ANSWER_ENDPOINT, CANCEL_ENDPOINT, HEALTH_ENDPOINT].includes(route)) {
-      return fail(res, 404);
-    }
+    const known = [ANSWER_ENDPOINT, CANCEL_ENDPOINT, HEALTH_ENDPOINT];
+    if (resolveReviewer) known.push(REVIEW_ENDPOINT);
+    if (!known.includes(route)) return fail(res, 404);
 
     let body;
     try {
       body = await readBody(req);
     } catch (err) {
-      return fail(res, err?.tooLarge ? 413 : 400);
+      fail(res, err?.tooLarge ? 413 : 400);
+      // 응답을 **보낸 뒤에** 남은 본문을 버린다. 순서를 뒤집으면 상대가 사유를 못 받는다.
+      if (err?.tooLarge) res.once('finish', () => req.destroy());
+      return;
     }
 
     if (!auth.accepts({ method: 'POST', path: route, body, headers: req.headers }).ok) {
@@ -134,7 +159,9 @@ export function createRpcServer({
       // 키 파일이 망가져도 나머지는 멀쩡히 돈다 — 그걸 「전체 ok」 하나로만 말하면
       // 그 한 칸이 죽은 것을 아무도 모르고, 「전체 실패」 로 말하면 멀쩡한 쪽까지
       // 라우팅이 닫힌다. **비밀도 경로도 싣지 않는다 — key 와 준비 여부뿐이다.**
-      return send(res, 200, buildHealthResponse({ version, workspaces: readiness?.() }));
+      return send(res, 200, buildHealthResponse({
+        version, workspaces: readiness?.(), capabilities,
+      }));
     }
 
     if (route === CANCEL_ENDPOINT) {
@@ -144,9 +171,12 @@ export function createRpcServer({
       return send(res, 200, Buffer.from('{"status":"ok"}', 'utf8'));
     }
 
+    /* 작업 종류는 **경로**가 정한다. 질문 문자열로 추측하지 않는다 — 추측하면 같은
+     * 문자열이 어느 날 다른 일을 시키고, 그 변화는 에러를 안 낸다(인계 §요청 계약). */
+    const isReview = route === REVIEW_ENDPOINT;
     let request;
     try {
-      request = parseAnswerRequest(body);
+      request = isReview ? parseReviewRequest(body) : parseAnswerRequest(body);
     } catch (err) {
       log?.warn?.(`[rpc] 요청 계약 위반: ${err instanceof WireViolation ? err.message : 'parse'}`);
       return fail(res, 400);
@@ -157,7 +187,9 @@ export function createRpcServer({
      *
      * 공유 worker 도 같다 — **허용 목록은 서버 설정에서 온다**(인계 §6). 요청 본문이
      * workspace 를 고르는 것이 아니라, 요청이 고른 workspace 가 설정에 있어야 한다. */
-    const forThis = resolveAnswerer(request.workspace);
+    const forThis = isReview
+      ? resolveReviewer(request.workspace)
+      : resolveAnswerer(request.workspace);
     if (!forThis) {
       // 로그에 workspace key 는 남긴다 — 운영자가 「목록에 넣는 걸 잊었나」 를
       // 그 자리에서 판단해야 한다. 질문·원문·토큰은 남기지 않는다(인계 §로그).
@@ -165,15 +197,21 @@ export function createRpcServer({
       return fail(res, 400);
     }
 
+    /* **Q&A 와 검토가 같은 `inFlight` 를 쓴다.** 둘을 나누면 같은 `request_id` 가
+     * 양쪽에 하나씩 들어올 수 있고, 그때 취소는 둘 중 하나만 끊는다 — 어느 쪽인지는
+     * 부르는 쪽이 모른다(인계 §request_id 중복 거절·취소 공유). */
     if (inFlight.has(request.requestId)) {
-      // 같은 요청이 겹쳐 들어왔다. 받으면 어느 답이 어느 질문의 것인지 말할 수 없다.
       log?.warn?.('[rpc] 같은 request_id 가 이미 돌고 있습니다.');
       return fail(res, 409);
     }
 
     /* 자리를 **먼저** 잡는다. 잡고 나서 `inFlight` 에 넣어야, 429 로 돌려보낸 요청이
      * `request_id` 를 점유한 채 남지 않는다 — 남으면 저쪽이 같은 id 로 재시도할 때
-     * 429 가 409 로 바뀌어 원인이 뒤바뀐다. */
+     * 429 가 409 로 바뀌어 원인이 뒤바뀐다.
+     *
+     * **검토도 같은 게이트를 쓴다.** 검토용 슬롯 풀을 따로 만들면 합산이 상한을
+     * 넘는다 — 상한은 이 프로세스가 동시에 부르는 모델 호출 수를 막는 것이고,
+     * 그 모델은 Q&A 와 검토를 안 가린다(인계 §동시 상한). */
     const release = limits ? limits.acquire(request.workspace) : () => {};
     if (!release) {
       log?.warn?.(`[rpc] 동시 요청 상한으로 거절했습니다: ${request.workspace}`);
@@ -184,12 +222,16 @@ export function createRpcServer({
     inFlight.set(request.requestId, { controller });
     let result;
     try {
-      result = await forThis.answer(request, { signal: controller.signal });
+      result = isReview
+        ? await forThis.review(request, { signal: controller.signal })
+        : await forThis.answer(request, { signal: controller.signal });
     } catch (err) {
-      // 답변 코어는 예외를 안 내기로 돼 있다. 그래도 여기서 한 번 더 받는다 —
+      // 코어는 예외를 안 내기로 돼 있다. 그래도 여기서 한 번 더 받는다 —
       // 안 받으면 소켓이 응답 없이 닫히고, 저쪽은 `transport` 로 읽어 **원인이 지워진다.**
-      log?.error?.(`[rpc] 답변기가 던졌습니다: ${err?.code || err?.name || 'Error'}`);
-      result = { status: 'failed', answer: '', usedEvidence: [], uncertain: [], usage: {} };
+      log?.error?.(`[rpc] ${isReview ? '검토기' : '답변기'}가 던졌습니다: ${err?.code || err?.name || 'Error'}`);
+      result = isReview
+        ? { status: 'failed', candidates: [], errorCode: 'internal_error', metrics: {} }
+        : { status: 'failed', answer: '', usedEvidence: [], uncertain: [], usage: {} };
     } finally {
       inFlight.delete(request.requestId);
       /* 자리는 **일이 실제로 끝난 뒤에** 돌려준다.
@@ -208,6 +250,61 @@ export function createRpcServer({
       } else {
         release();
       }
+    }
+
+    if (isReview) {
+      /* 검토 완료 줄. **원문·후보 문장·승인 본문·API key 를 안 적는다**(인계 §로그).
+       * 적는 것은 workspace · request_id · status · 모델 · 건수 · 시간뿐이다.
+       *
+       * `proposed/accepted` 를 같이 적는 이유: 「정상 0건」 과 「전부 탈락」 을 journal
+       * 한 줄로 가를 수 있어야 한다. 그걸 못 가르면 장애가 정상으로 묻힌다. */
+      const m = result.metrics || {};
+      const rejected = Object.entries(m.rejected_counts || {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([reason, value]) => `${reason}=${value}`)
+        .join(',') || '-';
+      log?.info?.(
+        `[rpc] 검토 완료 request=${request.requestId} workspace=${request.workspace} `
+        + `status=${result.status} error=${String(result.errorCode || '-') || '-'} `
+        + `elapsed_ms=${Math.max(0, Number(m.elapsed_ms) || 0)} `
+        + `model=${String(m.model || '-')} stop_reason=${String(m.stop_reason || '-')} `
+        + `in_tok=${Math.max(0, Number(m.input_tokens) || 0)} `
+        + `out_tok=${Math.max(0, Number(m.output_tokens) || 0)} `
+        + `proposed=${Math.max(0, Number(m.proposed_count) || 0)} `
+        + `accepted=${Math.max(0, Number(m.accepted_count) || 0)} rejected=${rejected}`,
+      );
+
+      let reviewPayload;
+      try {
+        reviewPayload = buildReviewResponse({
+          requestId: request.requestId,
+          workspace: request.workspace,
+          // 요청값을 **그대로** 돌려준다. 다시 계산하면 어긋났을 때 어느 쪽이
+          // 틀렸는지 못 가린다.
+          sourceDigest: request.sourceDigest,
+          status: result.status,
+          candidates: result.candidates,
+          errorCode: result.errorCode,
+          metrics: result.metrics,
+        });
+      } catch (err) {
+        // 우리가 만든 응답이 계약을 어겼다. **보내지 않는다** — 보내면 저쪽이 버리고,
+        // 버린 이유가 저쪽 로그에만 남아 우리는 영영 모른다.
+        log?.error?.(`[rpc] 검토 응답을 만들지 못했습니다: ${err.message}`);
+        reviewPayload = buildReviewResponse({
+          requestId: request.requestId,
+          workspace: request.workspace,
+          sourceDigest: request.sourceDigest,
+          status: 'failed',
+          errorCode: 'internal_error',
+          metrics: result.metrics,
+        });
+      }
+      return send(res, 200, reviewPayload, {
+        'X-TYBot-Signature': responseSignature(secret, {
+          requestId: request.requestId, body: reviewPayload,
+        }),
+      });
     }
 
     // 원문·질문·도구 인자는 기록하지 않는다. 운영에서 no_evidence 와 빈 답을
