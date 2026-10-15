@@ -240,6 +240,41 @@ def test_channel_source_is_scoped_and_never_reads_bot_lines():
     assert [line.text for line in got] == ["사람 원문"]
 
 
+def test_one_oversized_line_is_truncated_instead_of_wedging_the_channel():
+    """한 줄이 혼자 상한을 넘어도 **채널이 멈추지 않는다.**
+
+    첨부 변환본이 통째로 한 줄에 들어오면 실제로 일어난다. 그대로 두면 RPC 가
+    요청 상한으로 거절하고, 그건 생성 실패로 잡혀 커서가 안 움직인다 — 다음
+    회차도 같은 줄을 집어 **영원히 멈춘다.** 오류는 로그에만 남는다.
+    """
+    huge = SimpleNamespace(
+        ts="2026-10-15 09:00", speaker="홍길동",
+        text="[첨부추출:보고서.pdf] " + "가" * (sr.MAX_NEW_SOURCE_CHARS + 5_000),
+        lineno=10, source_path=Path("2026-10-15.md"),
+    )
+    docs = [SimpleNamespace(workspace="ws", channel_id="C1", raw_lines=[huge],
+                            path=Path("a.md"))]
+    got = sr.channel_source(SimpleNamespace(docs=lambda: docs), "ws", "C1", "")
+
+    assert len(got) == 1, "오래된 줄 하나 때문에 회차가 비면 커서가 영영 안 움직인다"
+    units = len(got[0].text.encode("utf-16-le")) // 2
+    assert units < sr.MAX_NEW_SOURCE_CHARS, f"{units} 단위 — RPC 가 거절한다"
+    # 좌표는 그대로다. 잘린 것은 본문뿐이다.
+    assert got[0].at == huge.ts and got[0].author == huge.speaker
+    # 잘린 앞부분에서 뽑은 인용은 로컬 원문 전체와 대조해도 통과한다.
+    assert huge.text.startswith(got[0].text)
+
+
+def test_source_items_match_the_rpc_contract():
+    """항목 수 상한이 RPC 계약과 같은 숫자다.
+
+    갈리면 한쪽은 보내고 다른 쪽은 400 으로 거절하는 구간이 생긴다. 그 구간의
+    증상은 「가끔 생성 실패」 이고, 원인은 숫자 하나다.
+    """
+    assert sr.MAX_SOURCE_ITEMS == 1_000
+    assert sr.MAX_NEW_SOURCE_CHARS == 31_500
+
+
 def test_schema_keeps_approved_summaries_out_of_raw_archive():
     sql = Path("deploy/sql/summary_review_schema.sql").read_text(encoding="utf-8")
     assert "summary_review_candidate" in sql
@@ -301,6 +336,9 @@ class _OutcomeStore:
     def generated_on(self, workspace, channel_id, on):
         return self._generated
 
+    def generation_due(self, workspace, channel_id, now):
+        return False
+
     def pending(self, workspace, channel_id, on):
         return list(self._rows)
 
@@ -335,7 +373,7 @@ class _OutcomeClient:
 
 def _outcome_run(
     monkeypatch, *, rows, reviewers, already, resend=False, force_generate=False,
-    deliver_only=False, generated=True, generate_only=False,
+    deliver_only=False, generated=True, generate_only=False, notify_status=False,
 ):
     from types import SimpleNamespace
 
@@ -361,6 +399,7 @@ def _outcome_run(
         force_generate=force_generate,
         deliver_only=deliver_only,
         generate_only=generate_only,
+        notify_status=notify_status,
     )
     return result, client, store
 
@@ -428,7 +467,7 @@ def test_manual_run_checks_new_source_even_after_an_earlier_run_today(monkeypatc
     assert [row.code for row in result.outcomes] == ["no-new-source"]
 
 
-def test_scheduled_run_keeps_the_once_per_day_generation_lock(monkeypatch):
+def test_scheduled_run_keeps_the_generation_cooldown(monkeypatch):
     from tybot import summary_review as sr
 
     monkeypatch.setattr(
@@ -438,6 +477,46 @@ def test_scheduled_run_keeps_the_once_per_day_generation_lock(monkeypatch):
     )
 
     _outcome_run(monkeypatch, rows=[], reviewers=["U1"], already=set())
+
+
+def test_scheduled_run_rechecks_new_originals_after_cooldown(monkeypatch):
+    called = []
+    monkeypatch.setattr(_OutcomeStore, "generation_due", lambda *args: True)
+    monkeypatch.setattr(sr, "generate_channel", lambda *args, **kwargs: called.append(kwargs) or 0)
+    _outcome_run(monkeypatch, rows=[], reviewers=["U1"], already=set())
+    assert len(called) == 1
+    assert called[0]["force"] is False
+
+
+def test_empty_status_is_wired_without_marking_candidates_delivered(monkeypatch):
+    from tybot import summary_review_notices as notices
+
+    calls = []
+    monkeypatch.setattr(sr, "_already_sent", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        notices, "send_status", lambda *args, **kwargs: calls.append(kwargs) or (1, 0),
+    )
+    monkeypatch.setattr(sr, "generate_channel", lambda *args, **kwargs: 0)
+    result, client, store = _outcome_run(
+        monkeypatch, rows=[], reviewers=["U1"], already=set(),
+        force_generate=True, notify_status=True,
+    )
+    assert calls[0]["reason"] == sr.OUTCOME_NO_SOURCE
+    assert calls[0]["recipients"] == ["U1"]
+    assert result.status_sent == 1
+    assert result.sent == 0 and not client.posted and not store.delivered
+
+
+def test_generate_only_never_sends_empty_status(monkeypatch):
+    from tybot import summary_review_notices as notices
+
+    monkeypatch.setattr(
+        notices, "send_status", lambda *args, **kwargs: pytest.fail("generate-only sent a notice"),
+    )
+    _outcome_run(
+        monkeypatch, rows=[], reviewers=["U1"], already=set(),
+        generate_only=True, notify_status=True,
+    )
 
 
 # --- 소급 검토 (B-58) ---------------------------------------------------------
@@ -600,6 +679,56 @@ def test_source_read_but_nothing_passed_verification_is_a_different_reason():
 def test_a_skipped_generation_keeps_the_plain_reason():
     assert sr._empty_reason(None) == sr.OUTCOME_NO_CANDIDATES
     assert sr._empty_detail(None) == ""
+
+
+def test_model_empty_is_not_a_validation_failure():
+    stats = sr.GenerateStats(lines=5)
+    assert sr.parse_proposals('{"candidates": []}', _source(), stats=stats) == []
+    assert sr._empty_reason(stats) == sr.OUTCOME_MODEL_EMPTY
+    assert stats.rejected == {}
+
+
+def test_all_rejected_candidates_do_not_advance_the_source_cursor():
+    store = _BackfillStore()
+    before = store.watermark
+    failed = []
+    store.mark_failed = lambda *args: failed.append(args)
+    raw = json.dumps({"candidates": [{
+        "kind": "new_issue", "proposed_text": "요약 제안", "evidence_quote": "원문에 없는 인용",
+    }]})
+    got = sr.generate_channel(
+        store, _archive([_line("2026-09-18 09:00", "사업 진행 상황입니다", 1)]),
+        workspace="ws", channel_id="C1", channel_name="channel",
+        complete=lambda *args: raw, now=datetime(2026, 9, 18, tzinfo=sr.KST),
+    )
+    assert got == 0 and failed
+    assert store.watermark == before
+    assert store.rounds == 0
+
+
+def test_reused_source_is_not_reported_as_model_empty():
+    stats = sr.GenerateStats(lines=5, reused=True)
+    assert sr._empty_reason(stats) == sr.OUTCOME_SOURCE_REUSED
+
+
+def test_retry_wait_is_not_reported_as_successful_empty():
+    stats = sr.GenerateStats(lines=5, retry_deferred=True)
+    assert sr._empty_reason(stats) == sr.OUTCOME_RETRY_DEFERRED
+
+
+def test_rejection_diagnostics_do_not_contain_source_text():
+    stats = sr.GenerateStats(lines=1)
+    raw = json.dumps({"candidates": [
+        {"kind": "new_issue", "proposed_text": "검토 문장", "evidence_quote": "없는 근거 문장"},
+        {"kind": "unknown", "proposed_text": "검토 문장", "evidence_quote": "없는 근거 문장"},
+        None,
+    ]})
+    assert sr.parse_proposals(raw, _source(), stats=stats) == []
+    assert stats.rejected == {
+        "quote-not-in-source": 1, "invalid-fields": 1, "invalid-item": 1,
+    }
+    assert stats.proposed == 3
+    assert stats.accepted == 0
 
 
 def test_the_real_run_reports_why_nothing_was_generated(monkeypatch):

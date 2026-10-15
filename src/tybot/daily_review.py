@@ -32,7 +32,8 @@
 **검토자와 채널 담당자 모두에게.** 같은 사람이 양쪽에 있으면 한 번만 보낸다. 아무도
 없으면 **보내지 않고 그 사실을 남긴다** — 조용한 실패를 만들지 않는다.
 
-**보낼 것이 없으면 보내지 않는다.** 매일 "없습니다" 가 오면 사람이 그 DM 을 끈다.
+**예약 요약 검토는 정상 0건도 상태 DM을 보낸다.** 승인 후보와 별도 이력으로
+중복을 제한한다. 첨부 검수의 빈 목록은 여전히 발송하지 않는다.
 
 ## 첨부 하루치 코드를 남겨 둔 이유
 
@@ -597,7 +598,7 @@ NO_REVIEW_CONFIG = "no-review-config"
 
 
 def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]],
-                  generate_only: bool = False) -> None:
+                  generate_only: bool = False, skipped_reason: str = "") -> None:
     """채널별 결과를 JSON 으로 남긴다. **종료 코드는 이걸 대신하지 못한다.**
 
     보낼 것이 없어도, 검토자가 없어도, 이미 보냈어도 실행은 0 으로 끝난다. 그래서
@@ -631,9 +632,14 @@ def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]],
         "failed": sum(row["failed"] for row in outcomes),
         "generated": result.generated if result else 0,
         "canvasFallback": result.canvas_fallback if result else 0,
+        "statusSent": getattr(result, "status_sent", 0),
+        "statusFailed": getattr(result, "status_failed", 0),
         "generateOnly": bool(generate_only),
         "channels": outcomes,
     }
+    if skipped_reason:
+        # 아무것도 돌지 않았다. 사유를 남겨야 콘솔이 「실행 완료」 로만 보이지 않는다.
+        payload["skippedReason"] = skipped_reason
     try:
         Path(path).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -931,27 +937,49 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 return response.text
 
-            if args.backfill:
-                _run_backfill(
-                    summary_review, conn, store, channels,
-                    complete=complete_summary, now=datetime.now(KST),
-                    since=args.since, rounds=args.rounds, resume=args.resume,
-                )
+            from .gateway.hermes_review import ReviewGenerator
 
-            summary_result = summary_review.run(
-                conn,
-                clients,
-                archive=store,
-                channels=channels,
-                owners=owners,
-                complete=complete_summary,
-                resend=args.resend,
-                deliver_only=args.deliver_only,
-                generate_only=args.generate_only,
-                # 콘솔의 즉시 실행은 오늘 이미 생성기를 돌렸더라도 워터마크 이후
-                # 새 원문을 다시 확인한다. 예약 실행은 하루 한 번 잠금을 유지한다.
-                force_generate=args.force_now,
-            )
+            complete_summary = ReviewGenerator(complete_summary, router)
+
+            from .lock import AlreadyRunning, instance_lock
+
+            lock = instance_lock("summary-review")
+            try:
+                lock.acquire()
+            except AlreadyRunning:
+                logger.info("다른 요약 검토 회차가 실행 중이므로 건너뜁니다.")
+                # **결과 파일을 남기고 나간다.** 안 남기면 콘솔의 `_outcome(None)` 이
+                # `unknown` 을 돌려주고, 즉시 실행을 누른 사람은 무엇이 막았는지
+                # 모른 채 다시 누른다 — 그 재시도도 같은 잠금에 막힌다.
+                if args.result_json:
+                    _write_result(
+                        args.result_json, None, unconfigured=[],
+                        generate_only=args.generate_only, skipped_reason="already-running",
+                    )
+                return 0
+            try:
+                if args.backfill:
+                    _run_backfill(
+                        summary_review, conn, store, channels,
+                        complete=complete_summary, now=datetime.now(KST),
+                        since=args.since, rounds=args.rounds, resume=args.resume,
+                    )
+
+                summary_result = summary_review.run(
+                    conn,
+                    clients,
+                    archive=store,
+                    channels=channels,
+                    owners=owners,
+                    complete=complete_summary,
+                    resend=args.resend,
+                    deliver_only=args.deliver_only,
+                    generate_only=args.generate_only,
+                    force_generate=args.force_now,
+                    notify_status=True,
+                )
+            finally:
+                lock.release()
 
     if args.result_json:
         _write_result(args.result_json, summary_result, unconfigured=unconfigured,
@@ -962,7 +990,7 @@ def main(argv: list[str] | None = None) -> int:
         # 실패하는데도 「잘 보내지고 있다」 로 보인다(B-50).
         logger.info(
             "요약 검토 generated=%d sent=%d skipped=%d failed=%d "
-            "canvas=%d fallback=%d ambiguous=%d expired=%d",
+            "canvas=%d fallback=%d ambiguous=%d expired=%d status_sent=%d status_failed=%d",
             summary_result.generated,
             summary_result.sent,
             summary_result.skipped,
@@ -971,16 +999,19 @@ def main(argv: list[str] | None = None) -> int:
             summary_result.canvas_fallback,
             summary_result.canvas_ambiguous,
             summary_result.expired,
+            summary_result.status_sent,
+            summary_result.status_failed,
         )
         for outcome in summary_result.outcomes:
             logger.info(
-                "요약 검토 채널 ws=%s ch=%s result=%s sent=%d skipped=%d failed=%d",
+                "요약 검토 채널 ws=%s ch=%s result=%s sent=%d skipped=%d failed=%d detail=%s",
                 outcome.workspace,
                 outcome.channel_id,
                 outcome.code,
                 outcome.sent,
                 outcome.skipped,
                 outcome.failed,
+                outcome.detail or "-",
             )
     return 0
 

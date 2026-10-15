@@ -231,6 +231,10 @@ def _outcome(result: dict | None) -> str:
     """
     if not result:
         return "unknown"
+    if result.get("skippedReason"):
+        # 다른 회차가 돌고 있어 아무것도 안 했다. 「unknown」 으로 보이면 누른 사람은
+        # 무엇이 막았는지 모른 채 다시 누르고, 그 재시도도 같은 잠금에 막힌다.
+        return "skipped"
     if result.get("estimate"):
         # 분량만 센 회차다. 「안 보냈다」 로 경고하면 매번 빨간 화면이 뜬다.
         return "estimate"

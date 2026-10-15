@@ -133,12 +133,25 @@ CREATE INDEX IF NOT EXISTS approved_summary_guide
     ON approved_summary_item (workspace, approved_at DESC)
     WHERE superseded_at IS NULL AND stale_at IS NULL;
 
+-- Status notices must never grant the approval authority of candidate delivery.
+CREATE TABLE IF NOT EXISTS summary_review_status_delivery (
+    workspace text NOT NULL,
+    channel_id text NOT NULL,
+    recipient text NOT NULL,
+    review_date date NOT NULL,
+    category text NOT NULL CHECK (category IN ('empty', 'error')),
+    reason text NOT NULL,
+    state text NOT NULL CHECK (state IN ('sending', 'sent', 'failed', 'ambiguous')),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace, channel_id, recipient, review_date, category)
+);
+
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE '
                 'summary_review_cursor, summary_review_candidate, approved_summary_item, '
-                'summary_review_source_run '
+                'summary_review_source_run, summary_review_status_delivery '
                 'TO tyslackai';
     END IF;
 END

@@ -12,7 +12,11 @@ from tybot.gateway import (
     Sensitivity,
     UnknownModel,
 )
-from tybot.gateway.router import DEFAULT_REGISTRY, _content_size
+from tybot.gateway.router import (
+    DEFAULT_REGISTRY,
+    REVIEW_OUTPUT_TOKEN_ENVELOPE,
+    _content_size,
+)
 
 
 class FakeProvider:
@@ -39,6 +43,73 @@ class FakeProvider:
 def make_router(daily_limit=50.0):
     providers = {"anthropic": FakeProvider("anthropic"), "openai": FakeProvider("openai")}
     return Router.from_default_registry(daily_limit_usd=daily_limit, providers=providers)
+
+
+def test_external_review_uses_same_cost_guard_without_provider_call():
+    router = make_router()
+    reservation = router.check_external_review("tyit", input_chars=2000)
+    assert reservation > 0
+    router.record_external_review("tyit", {"model": "claude-sonnet-5", "input_tokens": 100,
+                                          "output_tokens": 200}, reservation=reservation)
+    assert router.spent_today_for("tyit") == pytest.approx(DEFAULT_REGISTRY["claude-sonnet-5"].cost(100, 200))
+    router.record_external_review("mgmt", {"model": "unpriced-worker-model"}, reservation=reservation)
+    assert router.spent_today_for("mgmt") == reservation
+    assert all(provider.calls == 0 for provider in router._providers.values())
+    with pytest.raises(CostLimitExceeded):
+        make_router(daily_limit=0.001).check_external_review("tyit", input_chars=2000)
+
+
+def test_worker_default_model_is_priced():
+    """worker 가 실제로 쓰는 모델이 단가표에 있어야 한다.
+
+    빠지면 **모든 호출이 추정 경로**를 탄다. 비용이 느는 것이 아니라 한도가 먼저
+    닫히고, 그 차단은 「오늘은 요약이 안 되네」 로만 보인다. 2026-10-15 에
+    `claude-opus-5-5` 가 빠져 있어 실제로 그 모양이었다.
+    """
+    # subbots/hermes/src/rpc/config.js 의 HERMES_RPC_MODEL 기본값.
+    assert "claude-opus-5-5" in DEFAULT_REGISTRY
+    spec = DEFAULT_REGISTRY["claude-opus-5-5"]
+    assert (spec.input_price_per_mtok, spec.output_price_per_mtok) == (4.0, 20.0)
+
+
+def test_unpriced_model_is_estimated_from_reported_tokens():
+    """모델을 몰라도 **토큰 수를 받았으면** 그 토큰으로 센다.
+
+    받은 토큰을 버리고 봉투를 기록하면 실제의 수십 배가 한도를 먹는다. 보수적인
+    것과 자릿수가 틀린 것은 다르다.
+    """
+    router = make_router()
+    reservation = router.check_external_review("tyit", input_chars=40_000)
+    router.record_external_review(
+        "tyit", {"model": "unknown-worker", "input_tokens": 20_000, "output_tokens": 400},
+        reservation=reservation,
+    )
+    priciest = max(
+        (s for s in DEFAULT_REGISTRY.values()
+         if s.max_sensitivity.rank() >= Sensitivity.CONFIDENTIAL.rank()),
+        key=lambda s: s.cost(1_000_000, 1_000_000),
+    )
+    charged = router.spent_today_for("tyit")
+    assert charged == pytest.approx(priciest.cost(20_000, 400))
+    # 봉투를 그대로 기록하던 때와 **자릿수가 다르다.**
+    assert charged < reservation
+
+    # 사용량을 아예 못 받았을 때만 봉투를 쓴다(전송 실패·서명 불일치).
+    router.record_external_review("mgmt", {}, reservation=reservation)
+    assert router.spent_today_for("mgmt") == reservation
+
+
+def test_review_budget_check_stays_inside_the_candidate_contract():
+    """한도 검사 봉투가 계약 범위를 넘지 않는다.
+
+    후보는 10건이 상한이고 한 건은 수백 토큰이다. 봉투가 그보다 수십 배 크면
+    **첫 호출부터** 워크스페이스 한도에 걸린다.
+    """
+    router = make_router()
+    reservation = router.check_external_review("tyit", input_chars=40_000)
+    # 하루 $50 한도에서 한 자릿수 회차 만에 막히면 안 된다.
+    assert reservation < 0.5, f"봉투가 ${reservation:.2f} 입니다"
+    assert REVIEW_OUTPUT_TOKEN_ENVELOPE <= 8192
 
 
 def test_model_selection_and_response():

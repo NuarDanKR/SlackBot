@@ -20,6 +20,19 @@ from .cost import CostGuard, current_workspace
 
 logger = logging.getLogger("tybot.gateway")
 
+# 외부 검토 호출의 **출력 토큰 봉투**. 계약이 후보 10건을 상한으로 두고
+# (`subbots/hermes/contract/summary-review.md`), 한 건은 제안문·인용문·메타를
+# 합쳐 길어야 수백 토큰이다. 넉넉히 잡아도 이 자리를 넘지 않는다.
+#
+# 이 숫자는 **한도 검사에만** 쓰인다. 실제 기록은 보고된 토큰으로 한다.
+REVIEW_OUTPUT_TOKEN_ENVELOPE = 4096
+
+
+def _reported(metrics: dict) -> bool:
+    """사용량을 실제로 받았나. **0 도 받은 값이다** — 안 받은 것과 가른다."""
+    return all(isinstance(metrics.get(key), int) and metrics[key] >= 0
+               for key in ("input_tokens", "output_tokens"))
+
 
 class UnknownModel(KeyError):
     """레지스트리에 없는 모델."""
@@ -30,16 +43,36 @@ class ModelNotAllowed(PermissionError):
 
 
 # 기본 모델 레지스트리.
-# 주의: 단가는 예시 자리표시자다. 실제 값은 각 프로바이더 가격표로 확정하고
-# (Claude 는 claude-api 스킬 참조), 민감도 라우팅 표는 DPA/zero-retention 확인 후 조정한다.
+# 단가는 2026-10-15 에 Anthropic 1st-party 가격표로 확정했다(claude-api 스킬).
+# 민감도 라우팅 표는 DPA/zero-retention 확인 후 조정한다.
+#
+# **단가가 틀리면 예산이 엉뚱한 데서 막힌다.** 2026-10-15 이전에는 자리표시자가
+# 남아 있어 opus-4-8 이 실제의 3배(15/75)였고, 그 값이 「가장 비싼 confidential」
+# 로 뽑혀 외부 호출 예약액을 끌어올렸다. 비용은 안 늘지만 **한도가 먼저 닫힌다** —
+# 그 차단은 오류가 아니라 「오늘은 요약이 안 되네」 로만 나타난다.
+#
+# 모델을 더할 때는 **worker 가 실제로 쓰는 ID** 를 반드시 넣는다. 빠지면 그 호출은
+# 전부 추정 경로를 타고, 추정은 보수적이라 한도를 빨리 먹는다.
 DEFAULT_REGISTRY: dict[str, ModelSpec] = {
     "claude-opus-4-8": ModelSpec(
-        "claude-opus-4-8", "anthropic", 15.0, 75.0, Sensitivity.CONFIDENTIAL,
+        "claude-opus-4-8", "anthropic", 5.0, 25.0, Sensitivity.CONFIDENTIAL,
+        supports_sampling=False,
+    ),
+    # 현행 Opus. **RPC worker 의 기본 모델이다**(`HERMES_RPC_MODEL` 기본값).
+    "claude-opus-5-5": ModelSpec(
+        "claude-opus-5-5", "anthropic", 4.0, 20.0, Sensitivity.CONFIDENTIAL,
+        supports_sampling=False,
+    ),
+    "claude-sonnet-5-5": ModelSpec(
+        "claude-sonnet-5-5", "anthropic", 2.0, 10.0, Sensitivity.CONFIDENTIAL,
         supports_sampling=False,
     ),
     "claude-sonnet-5": ModelSpec(
-        "claude-sonnet-5", "anthropic", 3.0, 15.0, Sensitivity.CONFIDENTIAL,
+        "claude-sonnet-5", "anthropic", 2.0, 10.0, Sensitivity.CONFIDENTIAL,
         supports_sampling=False,
+    ),
+    "claude-haiku-5-5": ModelSpec(
+        "claude-haiku-5-5", "anthropic", 0.10, 0.50, Sensitivity.CONFIDENTIAL,
     ),
     # 민감도는 모델 티어가 아니라 **벤더 계약(DPA/zero-retention)** 단위로 정한다.
     # Anthropic 계약 하나로 묶이므로 haiku 도 confidential 허용.
@@ -132,6 +165,66 @@ class Router:
     @property
     def spent_today(self) -> float:
         return self._cost.spent_today
+
+    def _priciest_confidential(self) -> ModelSpec:
+        """가장 비싼 confidential 단가. **모르는 모델의 상한으로만 쓴다.**"""
+        specs = [s for s in self._registry.values()
+                 if s.max_sensitivity.rank() >= Sensitivity.CONFIDENTIAL.rank()]
+        if not specs:
+            raise ModelNotAllowed("No confidential model tariff for external review")
+        return max(specs, key=lambda spec: spec.cost(1_000_000, 1_000_000))
+
+    def check_external_review(self, workspace: str, *, input_chars: int) -> float:
+        """호출 **전** 한도를 본다. 자리를 잡아 두지는 않는다.
+
+        봉투를 어디까지 키울지가 이 함수의 전부다. 너무 키우면 **첫 호출부터**
+        한도에 걸리고, 그 차단은 「오늘은 요약이 안 되네」 로만 보인다. 너무 줄이면
+        한도를 넘긴 뒤에야 안다.
+
+        그래서 **계약이 정한 범위**로 묶는다. 출력은 후보 10건이 상한이고
+        (`contract/summary-review.md`), 한 건은 제안문·인용문·메타를 합쳐 길어야
+        수백 토큰이다. 32768 같은 숫자는 그 계약과 아무 관계가 없다 — 그 값을 쓰면
+        실제의 수십 배를 예약하게 된다.
+
+        입력은 글자 수를 그대로 토큰으로 센다. 한국어는 글자보다 토큰이 적은 쪽이
+        흔해 **보수적인 방향**이고, 토크나이저를 여기서 흉내 내지 않는다.
+        """
+        spec = self._priciest_confidential()
+        reservation = spec.cost(input_chars + 4096, REVIEW_OUTPUT_TOKEN_ENVELOPE)
+        self._cost.check(reservation, workspace=workspace)
+        return reservation
+
+    def record_external_review(self, workspace: str, metrics: dict, *, reservation: float) -> None:
+        """끝난 호출의 비용. **실제 청구액이 아니라 우리 추정이다.**
+
+        세 갈래다.
+
+        1. 모델이 단가표에 있다 — 보고된 토큰으로 계산한다. 가장 정확하다
+        2. 모델을 모르는데 **토큰 수는 받았다** — 가장 비싼 confidential 단가로
+           그 토큰을 계산한다. 보수적이되 **자릿수가 맞는다**. 여기서 봉투를 쓰면
+           실제의 수십 배가 기록되고, 그 숫자가 한도를 먹는다
+        3. 아무것도 못 받았다(전송 실패·서명 불일치) — 그때만 봉투를 쓴다.
+           정말로 모르는 상태이고, 모르면 비싸게 잡는 쪽이 맞다
+        """
+        spec = self._registry.get(str(metrics.get("model") or ""))
+        if spec is not None:
+            usd = spec.cost(metrics["input_tokens"], metrics["output_tokens"])
+        elif _reported(metrics):
+            fallback = self._priciest_confidential()
+            usd = fallback.cost(metrics["input_tokens"], metrics["output_tokens"])
+            logger.warning(
+                "external_review_cost ws=%s model=%s estimated=true tariff=%s usd=%.4f"
+                " — 단가표에 없는 모델입니다. DEFAULT_REGISTRY 에 더하세요.",
+                workspace, metrics.get("model") or "-", fallback.model, usd,
+            )
+        else:
+            usd = reservation
+            logger.warning(
+                "external_review_cost ws=%s estimated=true source=envelope usd=%.4f"
+                " — 사용량을 못 받아 보수적으로 기록합니다.",
+                workspace, usd,
+            )
+        self._cost.record(usd, workspace=workspace)
 
     def spent_today_for(self, workspace: str) -> float:
         """이 워크스페이스의 당일 누적. 화면이 「누가 썼나」 를 말할 근거다."""

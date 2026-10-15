@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -49,6 +49,9 @@ WRONG_PARTS = (
 )
 MAX_CORRECTION = 2000
 MAX_CANDIDATES = 10
+# 한 회차에 보낼 원문 줄 수 상한. RPC 계약과 같은 숫자다 —
+# 갈리면 한쪽은 보내고 다른 쪽은 400 으로 거절하는 구간이 생긴다.
+MAX_SOURCE_ITEMS = 1_000
 MAX_SOURCE_CHARS = 40_000
 MAX_APPROVED_CHARS = 8_000
 MAX_NEW_SOURCE_CHARS = MAX_SOURCE_CHARS - MAX_APPROVED_CHARS - 500
@@ -161,14 +164,20 @@ class GenerateStats:
     accepted: int = 0
     # 이미 요약한 구간이라 LLM 을 부르지 않고 지나갔다.
     reused: bool = False
+    retry_deferred: bool = False
     # 상대편 인터페이스(로컬 스킬 등)에서 **이미 끝난** 검토라 후보에서 뺐다.
     # 「후보 0건」 과 「전부 저쪽에서 끝났다」 는 사람이 할 일이 다르다.
     settled_elsewhere: int = 0
+    rejected: dict[str, int] = field(default_factory=dict)
+
+    def reject(self, reason: str) -> None:
+        self.rejected[reason] = self.rejected.get(reason, 0) + 1
 
 
 def parse_proposals(raw: str, source: list[SourceLine],
                     approved: list[str] | None = None,
-                    stats: GenerateStats | None = None) -> list[Proposal]:
+                    stats: GenerateStats | None = None,
+                    require_source_id: bool = False) -> list[Proposal]:
     """모델 JSON을 읽고 모든 근거·수치를 원문과 다시 대조한다."""
     body = (raw or "").strip()
     if body.startswith("```json") and body.endswith("```"):
@@ -185,13 +194,26 @@ def parse_proposals(raw: str, source: list[SourceLine],
     source_norm = [(_normalized(line.text), line) for line in source]
     accepted: list[Proposal] = []
     approved_norm = {_normalized(item) for item in (approved or [])}
+    by_id = {f"r{i}": line for i, line in enumerate(source, 1)}
+    seen = set()
     for item in rows[:MAX_CANDIDATES]:
         if not isinstance(item, dict):
+            if stats is not None:
+                stats.reject("invalid-item")
+            continue
+        if require_source_id and not all(isinstance(item.get(key), str) for key in (
+                "source_id", "kind", "form", "proposed_text", "evidence_quote", "current_text")):
+            if stats is not None:
+                stats.reject("invalid-fields")
             continue
         kind = str(item.get("kind") or "")
         # **모르면 더 엄격한 쪽.** form 을 빼먹었거나 모르는 값이면 `quote` 로 본다 —
         # 생성문으로 통과시키면 「제안 == 인용」 검사가 조용히 사라진다.
         form = str(item.get("form") or "").strip().lower()
+        if require_source_id and form not in FORMS:
+            if stats is not None:
+                stats.reject("bad-form")
+            continue
         if form not in FORMS:
             form = FORM_QUOTE
         proposed = str(item.get("proposed_text") or "").strip()
@@ -199,21 +221,49 @@ def parse_proposals(raw: str, source: list[SourceLine],
         quote_norm = _normalized(quote)
         # 인용은 form 과 무관하게 필수다. 생성문이라도 근거 없이는 받지 않는다.
         if kind not in KINDS or not proposed or len(quote_norm) < 5:
+            if stats is not None:
+                stats.reject("invalid-fields")
             continue
-        matched = next((line for text, line in source_norm if quote_norm in text), None)
+        if require_source_id:
+            matched = by_id.get(item.get("source_id"))
+            if matched is not None and re.sub(r"\s+", " ", quote).strip() not in re.sub(r"\s+", " ", matched.text).strip():
+                matched = None
+        else:
+            matched = next((line for text, line in source_norm if quote_norm in text), None)
         if matched is None:
+            if stats is not None:
+                stats.reject("quote-not-in-source")
             continue
         current = str(item.get("current_text") or "").strip()
         if current and _normalized(current) not in approved_norm:
+            if stats is not None:
+                stats.reject("unknown-approved-text")
             continue
         # `quote` 후보는 요약기의 창작물이 아니라 원문에서 뽑은 검토 단위다.
         # `abstract` 는 여기 하나만 면제된다 — 문장을 모델이 쓰기 때문이다.
         # 나머지 검사(인용 존재·숫자 상속·기존 승인 대조)는 그대로 지난다.
         if form == FORM_QUOTE and _normalized(proposed) != quote_norm:
+            if stats is not None:
+                stats.reject("quote-form-mismatch")
             continue
         # 새로 만든 숫자는 원문 인용이나 기존 승인 문장에 실제로 있어야 한다.
-        if not _numbers(proposed) <= (_numbers(quote) | _numbers(current)):
+        allowed_numbers = _numbers(quote) if require_source_id else (_numbers(quote) | _numbers(current))
+        numeric_pattern = r"[0-9０-９]+(?:[.,][0-9０-９]+)*"
+        rpc_numbers_valid = (not require_source_id
+                             or set(re.findall(numeric_pattern, proposed)) <= set(re.findall(numeric_pattern, quote)))
+        if not _numbers(proposed) <= allowed_numbers or not rpc_numbers_valid:
+            if stats is not None:
+                stats.reject("unsupported-number")
             continue
+        if require_source_id:
+            flat = re.sub(r"\s+", " ", proposed).strip()
+            if (flat in {re.sub(r"\s+", " ", text).strip() for text in (approved or [])}
+                    or flat in seen
+                    or (form == FORM_QUOTE and flat != re.sub(r"\s+", " ", quote).strip())):
+                if stats is not None:
+                    stats.reject("duplicate-or-invalid-quote")
+                continue
+            seen.add(flat)
         # 숫자가 든 신규 쟁점을 모델이 `new_issue` 로 분류해도 검토 화면에서는
         # 반드시 숫자 확인 대상으로 먼저 보여 준다. 사실은 바꾸지 않고 분류만
         # 결정적으로 보정한다.
@@ -451,6 +501,18 @@ class Store:
                 (workspace, channel_id, on),
             )
             return cur.fetchone() is not None
+
+    def generation_due(self, workspace: str, channel_id: str, now: datetime) -> bool:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """SELECT checked_at FROM summary_review_cursor
+                WHERE workspace=%s AND channel_id=%s""", (workspace, channel_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            return True
+        checked = row.get("checked_at") if isinstance(row, dict) else row[0]
+        return isinstance(checked, datetime) and checked <= now - timedelta(minutes=15)
 
     def mark_failed(self, workspace: str, channel_id: str, digest: str,
                     now: datetime) -> None:
@@ -1445,7 +1507,7 @@ def _source_rows(archive, workspace: str, channel_id: str, watermark: str,
 
 
 def _line_size(item: SourceLine) -> int:
-    return len(item.at) + len(item.author) + len(item.text) + 8
+    return len((item.at + item.author + item.text).encode("utf-16-le")) // 2 + 8
 
 
 def channel_source(archive, workspace: str, channel_id: str, watermark: str,
@@ -1454,12 +1516,50 @@ def channel_source(archive, workspace: str, channel_id: str, watermark: str,
     selected: list[SourceLine] = []
     used = 0
     for item in _source_rows(archive, workspace, channel_id, watermark, start_at):
+        if len(selected) >= MAX_SOURCE_ITEMS:
+            break
         size = _line_size(item)
         if selected and used + size > MAX_NEW_SOURCE_CHARS:
             break
+        if not selected and size > MAX_NEW_SOURCE_CHARS:
+            # **한 줄이 혼자 상한을 넘는다.** 첨부 변환본이 통째로 한 줄에 들어오면
+            # 실제로 일어난다(`[첨부추출:…]`).
+            #
+            # 그대로 두면 RPC 가 요청 상한으로 거절하고, 그건 생성 실패로 잡혀
+            # 커서가 안 움직인다 — 다음 회차도 같은 줄을 다시 집는다. 채널 하나가
+            # **영원히 멈춘 채** 재시도만 쌓인다. 오류는 로그에만 남는다.
+            #
+            # 그래서 잘라서라도 보낸다. 인용 검증은 **로컬 원문 전체**와 대조하므로
+            # (`parse_proposals` 의 `by_id`), 잘린 앞부분에서 뽑은 인용도 그대로
+            # 통과한다. 좌표·작성자·시각은 그대로다.
+            keep = _truncate_units(item.text, MAX_NEW_SOURCE_CHARS - _line_size(
+                replace(item, text="")))
+            log.warning(
+                "원문 한 줄이 상한을 넘어 잘라 보냅니다 ws=%s ch=%s at=%s 원래=%d자",
+                workspace, channel_id, item.at, len(item.text),
+            )
+            item = replace(item, text=keep)
+            size = _line_size(item)
         selected.append(item)
         used += size
     return selected
+
+
+def _truncate_units(text: str, budget: int) -> str:
+    """UTF-16 단위 기준으로 자른다. **대리 쌍을 쪼개지 않는다** — 쪼개면 깨진 글자가 남는다."""
+    if budget <= 0:
+        return ""
+    if len(text.encode("utf-16-le")) // 2 <= budget:
+        return text
+    out: list[str] = []
+    used = 0
+    for char in text:
+        width = len(char.encode("utf-16-le")) // 2
+        if used + width > budget:
+            break
+        out.append(char)
+        used += width
+    return "".join(out)
 
 
 # --- 소급 검토 (B-58) ---------------------------------------------------------
@@ -1541,14 +1641,15 @@ def backfill_channel(store: Store, archive, *, workspace: str, channel_id: str,
     result = BackfillResult()
     for _ in range(rounds):
         before = store.cursor(workspace, channel_id)
+        stats = GenerateStats()
         result.candidates += generate_channel(
             store, archive, workspace=workspace, channel_id=channel_id,
-            channel_name=channel_name, complete=complete, now=now, force=True,
+            channel_name=channel_name, complete=complete, now=now, force=True, stats=stats,
         )
         result.rounds += 1
         if store.cursor(workspace, channel_id) == before:
-            # 커서가 안 움직였다 = 읽을 원문이 없다. 회차를 더 돌아도 같다.
-            result.exhausted = True
+            # Validation failure also preserves the cursor; it is not exhaustion.
+            result.exhausted = not stats.lines
             break
     return result
 
@@ -1615,6 +1716,7 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
                      channel_name: str, complete, now: datetime,
                      force: bool = False,
                      stats: GenerateStats | None = None) -> int:
+    stats = stats if stats is not None else GenerateStats()
     watermark = store.cursor(workspace, channel_id)
     configured_at = store.start_at(workspace, channel_id)
     if not watermark:
@@ -1645,6 +1747,7 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
     # 누른 즉시 실행은 그 백오프도 우회한다 — 장애를 고친 직후 확인하려고 누른
     # 버튼이 이전 실패 시각 때문에 아무 일도 하지 않으면 원인을 다시 숨긴다.
     if not force and not store.may_attempt(workspace, channel_id, digest, now):
+        stats.retry_deferred = True
         return 0
     # **상대편 결정은 후보를 만들기 전에 읽는다.** 만든 뒤에 읽으면, 기록을 못 읽은
     # 날에도 이미 모델을 불러 돈이 나갔고 DB 에는 생략 대상이 들어앉는다. 여기서
@@ -1653,12 +1756,22 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
     external = _counterpart_decisions(workspace)
     try:
         approved = store.approved(workspace, channel_id)
-        raw = complete(
-            contract_prompt(),
-            prompt_input(approved=approved, source=source),
-            workspace,
+        reviewer = getattr(complete, "review_candidates", None)
+        result = reviewer(workspace=workspace, source=source, approved=approved, digest=digest) if callable(reviewer) else None
+        if result is None:
+            raw = complete(contract_prompt(), prompt_input(approved=approved, source=source), workspace)
+            proposals = parse_proposals(raw, source, approved, stats=stats)
+        else:
+            proposals = parse_proposals(json.dumps({"candidates": result["candidates"]}),
+                                       source, approved, stats=stats, require_source_id=True)
+            stats.proposed = result["metrics"]["proposed_count"]
+            for reason, count in result["metrics"]["rejected_counts"].items():
+                stats.rejected[f"worker-{reason}"] = count
+        log.info(
+            "요약 후보 대조 ws=%s ch=%s lines=%d proposed=%d accepted=%d rejected=%s",
+            workspace, channel_id, stats.lines, stats.proposed, stats.accepted,
+            ",".join(f"{key}={value}" for key, value in sorted(stats.rejected.items())) or "-",
         )
-        proposals = parse_proposals(raw, source, approved, stats=stats)
     except Exception:
         with contextlib.suppress(Exception):
             store.conn.rollback()
@@ -1668,6 +1781,9 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
     proposals = _without_settled(
         proposals, external, workspace=workspace, channel_id=channel_id, stats=stats
     )
+    if stats.proposed and not stats.accepted:
+        store.mark_failed(workspace, channel_id, digest, now)
+        return 0
     return store.save_run(
         workspace=workspace, channel_id=channel_id, channel_name=channel_name,
         watermark=watermark_after, digest=digest, proposals=proposals,
@@ -1714,6 +1830,9 @@ OUTCOME_NOTHING_PENDING = "nothing-pending"
 # 실패도 아니다 — 이걸 「아무도 못 받았다」 로 경고하면 매번 빨간 화면이 뜬다.
 OUTCOME_GENERATED_ONLY = "generated-only"
 OUTCOME_NO_ACCEPTED = "no-accepted-candidate"
+OUTCOME_MODEL_EMPTY = "model-empty"
+OUTCOME_SOURCE_REUSED = "source-already-processed"
+OUTCOME_RETRY_DEFERRED = "generation-retry-deferred"
 OUTCOME_NO_CLIENT = "no-client"
 OUTCOME_NO_REVIEWER = "no-reviewer"
 OUTCOME_ALREADY_SENT = "already-sent"
@@ -1725,6 +1844,9 @@ OUTCOME_LABELS = {
     OUTCOME_NO_CANDIDATES: "오늘 검토할 새 후보가 없습니다",
     OUTCOME_NO_SOURCE: "마지막 처리 이후 새로 읽을 원문이 없습니다 — 과거 자료는 소급 검토로 읽습니다",
     OUTCOME_NO_ACCEPTED: "원문은 읽었지만 원문 대조를 통과한 후보가 없습니다",
+    OUTCOME_MODEL_EMPTY: "원문을 확인했으며 모델이 검토 후보를 제안하지 않았습니다",
+    OUTCOME_SOURCE_REUSED: "같은 원문 구간은 이미 처리했습니다",
+    OUTCOME_RETRY_DEFERRED: "이전 생성 실패 후 재시도 대기 중입니다",
     OUTCOME_NOTHING_PENDING: "다시 보낼 대기 후보가 없습니다",
     OUTCOME_GENERATED_ONLY: "후보만 만들어 두었습니다 — 검토자가 지정되면 DM 이 나갑니다",
     OUTCOME_NO_CLIENT: "이 워크스페이스의 Slack 토큰이 없습니다",
@@ -1788,6 +1910,12 @@ def _empty_reason(stats: GenerateStats | None, *, deliver_only: bool = False) ->
         return OUTCOME_NO_CANDIDATES
     if not stats.lines:
         return OUTCOME_NO_SOURCE
+    if stats.reused:
+        return OUTCOME_SOURCE_REUSED
+    if stats.retry_deferred:
+        return OUTCOME_RETRY_DEFERRED
+    if not stats.proposed:
+        return OUTCOME_MODEL_EMPTY
     if not stats.accepted:
         return OUTCOME_NO_ACCEPTED
     # 만들긴 했는데 대기 목록이 비었다 = 같은 후보가 이미 있었다(중복 차단).
@@ -1838,6 +1966,8 @@ class RunResult:
     sent: int = 0
     skipped: int = 0
     failed: int = 0
+    status_sent: int = 0
+    status_failed: int = 0
     # Canvas 회차 수치(B-50). **폴백을 성공과 섞지 않는다** — 섞으면 Canvas 가
     # 계속 실패하는데도 「잘 보내지고 있다」 로 보인다.
     canvas_created: int = 0
@@ -1991,7 +2121,7 @@ def _canvas_failure(exc: Exception) -> tuple[str, str]:
 def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         now: datetime | None = None, resend: bool = False,
         force_generate: bool = False, deliver_only: bool = False,
-        generate_only: bool = False) -> RunResult:
+        generate_only: bool = False, notify_status: bool = False) -> RunResult:
     """설정 시각이 지난 채널의 후보를 만들고 **검토자에게** 민다.
 
     `owners` 는 더 이상 수신자를 만들지 않는다. 호출부 호환으로만 남긴다 —
@@ -2002,7 +2132,7 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
     검토자에게 같은 회차를 다시 민다 — 타이머가 이걸 켜면 하루 종일 같은 DM 이
     간다. 후보 자체가 없으면 재발송도 보낼 것이 없다.
 
-    `force_generate` 는 수동 실행에서만 오늘의 생성 잠금을 우회한다. 원문 워터마크는
+    `force_generate` 는 수동 실행에서만 생성 간격 제한을 우회한다. 원문 워터마크는
     그대로 쓰므로 이미 처리한 대화를 다시 요약하지 않고, 마지막 처리 뒤 새로 수집된
     원문만 후보 생성기에 보낸다.
 
@@ -2022,6 +2152,35 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
     on = now.astimezone(KST).date()
     db = Store(conn)
     result = RunResult()
+
+    def notify(outcome):
+        if not notify_status or generate_only or deliver_only:
+            return
+        from .summary_review_notices import send_status
+
+        try:
+            recipients = db.reviewer_recipients(outcome.workspace, outcome.channel_id)
+            if outcome.code in {OUTCOME_NO_SOURCE, OUTCOME_MODEL_EMPTY}:
+                recipients = [
+                    recipient for recipient in recipients
+                    if not _already_sent(
+                        conn, workspace=outcome.workspace, channel_id=outcome.channel_id,
+                        recipient=recipient, on=on,
+                    )
+                ]
+            sent, failed = send_status(
+                conn, clients.get(outcome.workspace), workspace=outcome.workspace,
+                channel_id=outcome.channel_id, label=outcome.channel_name or outcome.channel_id,
+                recipients=recipients,
+                reason=outcome.code, now=now,
+            )
+            result.status_sent += sent
+            result.status_failed += failed
+        except Exception as exc:  # noqa: BLE001 - Notice failures must not abort candidate delivery.
+            conn.rollback()
+            result.status_failed += 1
+            log.warning("검토 상태 알림 실패 code=%s", type(exc).__name__)
+
     for channel in channels:
         workspace, channel_id, channel_name, send_at, schedule_kind, weekday = (
             schedule_parts(channel)
@@ -2044,6 +2203,7 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
             stats = None
             if not deliver_only and (
                 force_generate or not db.generated_on(workspace, channel_id, on)
+                or db.generation_due(workspace, channel_id, now)
             ):
                 stats = GenerateStats()
                 result.generated += generate_channel(
@@ -2055,19 +2215,25 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
         except Exception as exc:  # noqa: BLE001 - 한 채널 실패로 다음 채널을 막지 않는다
             with contextlib.suppress(Exception):
                 conn.rollback()
+            from .gateway.hermes_review import ReviewRPCError
+
+            error_code = exc.code if isinstance(exc, ReviewRPCError) else type(exc).__name__
             log.warning(
                 "요약 후보 생성 실패 ws=%s ch=%s code=%s",
-                workspace, channel_id, type(exc).__name__,
+                workspace, channel_id, error_code,
             )
             result.failed += 1
             outcome.failed += 1
             outcome.code = OUTCOME_GENERATE_FAILED
+            outcome.detail = f"generation-error={error_code}"
+            notify(outcome)
             continue
         if not rows:
             result.skipped += 1
             outcome.skipped += 1
             outcome.code = _empty_reason(stats, deliver_only=deliver_only)
             outcome.detail = _empty_detail(stats)
+            notify(outcome)
             continue
         if generate_only:
             # 검토자 지정을 기다리는 중이다. 만들어 두고 여기서 멈춘다.

@@ -131,6 +131,22 @@ def test_a_run_that_sent_nothing_is_not_reported_as_a_plain_success(
     assert saved["result"]["channels"][0]["code"] == "already-sent"
 
 
+def test_a_run_blocked_by_the_lock_says_so(tmp_path, monkeypatch):
+    """다른 회차가 돌고 있어 아무것도 안 했다.
+
+    사유 없이 `unknown` 으로 보이면 누른 사람은 무엇이 막았는지 모른 채 다시
+    누르고, 그 재시도도 같은 잠금에 막힌다.
+    """
+    saved = _run(
+        tmp_path, monkeypatch,
+        result={"sent": 0, "skipped": 0, "failed": 0, "generated": 0,
+                "canvasFallback": 0, "channels": [], "skippedReason": "already-running"},
+    )
+
+    assert saved["outcome"] == "skipped"
+    assert saved["result"]["skippedReason"] == "already-running"
+
+
 def test_a_run_that_sent_is_reported_as_sent(tmp_path, monkeypatch):
     saved = _run(
         tmp_path, monkeypatch,
