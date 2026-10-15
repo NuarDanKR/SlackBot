@@ -39,6 +39,79 @@ sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/archiver.env \
 4. 원본 보관·정본 반영·색인을 따로 검증한다. 파일 단위 상태를 기존 메시지 ACK와
    혼동하지 않는 계약과 장애 재개·중복 방지 테스트가 필요하다.
 
+## Archiver 파일 ID 명시형 복구
+
+`recover_archiver_files.py`는 위 진단에서 누락된 파일을 추가 대조한 뒤 복구한다.
+자동으로 전 채널을 수집하지 않는다. 먼저 대표 파일 한 개로 확인한다.
+
+```bash
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/archiver.env \
+  /opt/tybot/.venv/bin/python /opt/tybot/scripts/recover_archiver_files.py \
+  --workspace mgmt --channel C0C3986F9UZ --file-id F0C313QLR1R
+```
+
+기본은 읽기 전용이다. `missing`이면 확인한 경로에 기존 기록이 없고,
+`resume`이면 이 복구 경로가 만든 영수증이 있어 이어갈 수 있다.
+`files.info`로 현재 채널 공유를, `users.info`로 사람이 올린 파일인지 확인한다.
+업로더 확인 실패·봇 업로드는 막는다. 기존 Archiver manifest의 `users:read`와
+`files:read`를 사용하며 새 Slack 권한은 추가하지 않는다.
+`existing-needs-review`는 기존 정본·객체·staging·raw의 파일 ID 참조를 발견한
+경우로, 덮거나 다시 받지 않는다. 실패한 기존 변환은 기존 재시도 경로로 다룬다.
+비표준 아카이브 위치는 자동 탐색하지 않는다. 운영자가 별도 경로를 사용했다면
+먼저 수동 대조한다.
+
+실제 적용은 해당 워크스페이스 수집기를 잠시 중지한 유지보수 시간에 실행한다.
+같은 DB advisory 실행 락을 사용하므로 수집기가 떠 있으면 `AlreadyRunning`으로
+중단하며, 두 경로가 동시에 같은 첨부를 처리하지 않는다. 수집기와 같은 DB DSN과
+동일 OS 계정으로 실행해야 한다. 락을 우회하지 않는다.
+
+```bash
+sudo systemctl stop tybot-archiving-shadow@mgmt.service
+
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/archiver.env \
+  /opt/tybot/.venv/bin/python /opt/tybot/scripts/recover_archiver_files.py \
+  --workspace mgmt --channel C0C3986F9UZ --file-id F0C313QLR1R \
+  --apply --by dan@taeyoung.com
+
+sudo systemctl start tybot-archiving-shadow@mgmt.service
+sudo systemctl is-active --quiet tybot-archiving-shadow@mgmt.service
+echo "collector_active_rc=$?"
+```
+
+복구가 실패해도 수집기는 반드시 다시 시작한다. 중지·재시작 시각을 기록하고,
+그 구간의 메시지는 기존 메시지 소급 작업으로 보충한다. 이 복구 명령 자체는
+중지 구간 메시지를 소급하지 않으며, 수집기를 자동으로 시작·중지하지도 않는다.
+
+적용 결과의 뜻:
+
+- `published-index-pending`: 원본 SHA-256 검증 및 정본 저장 완료, DB 색인 미실행.
+- `retained-not-searchable`: 원본은 확인했으나 PII 차단·부분 변환·변환 실패 등으로
+  일반 검색 근거로 게시하지 않음. `conversion_state`를 확인한다.
+- `original-unverified`: 원본 보관 또는 SHA-256 확인 실패. 수집 완료가 아니다.
+- `incomplete-needs-review`: 중단 흔적이 있으나 안전한 자동 재개 조건이 부족하다.
+- `failed`: 해당 파일 처리 실패. 출력에는 예외 종류만 남긴다.
+
+파일별 영수증은 `<채널 루트>/file-inventory/<file-id>.json`에 쓴다.
+file ID·Slack 파일 링크·조회 시각·작업자·단계 상태만 남기며 원문 본문은 넣지
+않는다. `staging` 및 `archive/attachments`는 기존 변환·정본 작성기를 사용한다.
+메시지 원문을 만들거나 기존 raw·메시지 ACK를 수정하지 않는다.
+
+색인은 Archiver 권한을 넓히지 않고 기존 TYBot DB 자격증명으로 분리 실행한다.
+이 모드는 Slack 토큰을 읽지 않으며, 지정한 복구 파일의 원본 해시와 정본 좌표를
+확인한 뒤에만 검색 색인에 넣는다.
+
+```bash
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env \
+  /opt/tybot/.venv/bin/python /opt/tybot/scripts/recover_archiver_files.py \
+  --workspace mgmt --channel C0C3986F9UZ --file-id F0C313QLR1R --index-only
+```
+
+`recovered`이면 색인까지 완료한 것이다. 같은 명령을 반복해도 원본을 다시
+다운로드하지 않는다. 색인 단계 오류는 해당 파일만 같은 명령으로 재시도한다.
+`--file-id`를 반복하면 최대 100개를 명시할 수 있다. 반환 코드 2는 일부 파일에
+검토·추가 처리가 필요함을 뜻한다. 대표 파일 검증 뒤 나머지 9개를 명시해 확장한다.
+파일 검색 복구와 별개로, 특정 Slack 폴더의 정확한 개수를 답하는 도구는 아직 없다.
+
 ## Master용 기존 절차
 
 봇 초대 전 파일과 메시지 이벤트에서 놓친 파일을 채널별 `files.list`로 찾는다.

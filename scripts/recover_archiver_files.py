@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Plan explicit file recovery; --apply requires exclusive Archiver collector ownership."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+
+from slack_sdk import WebClient
+
+from tybot import search_index
+from tybot.archive.file_recovery import index_recovered, recover
+from tybot.archive.write_owner import OwnerLookup
+from tybot.archiving_bot import (
+    _instance_lock_name,
+    _live_archive_root,
+    load_archiver_workspaces,
+    shadow_archive_dir,
+    validate_slack_identity,
+)
+from tybot.console.archiving_repo import default_repo
+from tybot.envfile import load_env_file
+from tybot.lock import instance_lock
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--channel", required=True)
+    parser.add_argument("--file-id", action="append", required=True)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true")
+    mode.add_argument("--index-only", action="store_true")
+    parser.add_argument("--by", default="")
+    args = parser.parse_args(argv)
+    if args.apply and not args.by.strip():
+        parser.error("--apply requires --by")
+    lock = None
+    try:
+        load_env_file()
+        if args.index_only:
+            root = pathlib.Path(os.environ["ARCHIVE_DIR"])
+            if not root.is_absolute() or not root.is_dir():
+                raise ValueError("an existing absolute archive root is required")
+            report = index_recovered(root, args.workspace, args.channel, args.file_id,
+                                     indexer=search_index.reindex)
+            print(json.dumps(report, ensure_ascii=True, sort_keys=True))
+            return 0 if all(item["status"] == "recovered" for item in report["results"]) else 2
+        values = dict(os.environ, ARCHIVER_CONFIG_SOURCE="db", ARCHIVER_WORKSPACE=args.workspace)
+        cfg, = load_archiver_workspaces(values)
+        shadow_root = shadow_archive_dir(values)
+        live_root = _live_archive_root(cfg.key, values)
+        if values.get("ARCHIVER_SHADOW_LAYOUT") != "per-channel-v1" or live_root is None:
+            raise ValueError("enabled live writes and per-channel-v1 are required")
+        client = WebClient(token=cfg.bot_token, timeout=30)
+        validate_slack_identity(cfg, client.auth_test())
+        if args.apply:
+            lock = instance_lock(_instance_lock_name(cfg.key))
+            lock.acquire()
+        report = recover(
+            client, default_repo(), OwnerLookup(cfg.key, cache_seconds=0), cfg, args.file_id,
+            live_root=live_root, shadow_root=shadow_root, channel_id=args.channel,
+            apply=args.apply, actor=args.by,
+        )
+    except Exception as exc:  # noqa: BLE001 - no credential or private SDK response output
+        print(json.dumps({"error": type(exc).__name__, "apply_requested": args.apply}))
+        return 1
+    finally:
+        if lock is not None:
+            lock.release()
+    print(json.dumps(report, ensure_ascii=True, sort_keys=True))
+    good = {"recovered", "published-index-pending"} if args.apply else {"missing", "resume"}
+    return 0 if all(item["status"] in good for item in report["results"]) else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
