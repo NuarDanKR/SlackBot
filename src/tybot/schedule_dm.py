@@ -248,7 +248,7 @@ select count(distinct fo.source_folder_id) as n
   from employee e
   join schedule_folder_org fo on fo.org_code = e.org_code and fo.enabled
   join schedule_folder f
-    on f.source_folder_id = fo.source_folder_id and f.enabled
+    on f.source_folder_id = fo.source_folder_id and f.enabled and not f.dm_only
  where e.emp_no = %(emp_no)s and e.active
 """
 
@@ -261,8 +261,15 @@ def entitled_folders(conn, emp_no: str) -> int:
     """
     if not emp_no:
         return 0
+    from . import schedule_personal_acl as personal
+
+    sql = ENTITLED_SQL
+    if personal.enabled():
+        sql = f"""SELECT count(DISTINCT f.source_folder_id) AS n
+        FROM employee r CROSS JOIN schedule_folder f
+        WHERE r.emp_no=%(emp_no)s AND r.active AND f.enabled AND ({personal.ACCESS_SQL})"""
     with conn.cursor() as cur:
-        cur.execute(ENTITLED_SQL, {"emp_no": emp_no})
+        cur.execute(sql, {"emp_no": emp_no})
         row = cur.fetchone()
     if row is None:
         return 0
@@ -339,7 +346,15 @@ recipient as (
 )
 """
 
-PLAN_SQL = f"""
+def _plan_sql(*, personal: bool = False) -> str:
+    from .schedule_personal_acl import ACCESS_SQL
+
+    recipients = "cross join recipient r" if personal else """
+  join schedule_folder_org fo
+    on fo.source_folder_id = o.source_folder_id and fo.enabled
+  join recipient r on r.org_code = fo.org_code"""
+    access = ACCESS_SQL if personal else "NOT f.dm_only"
+    return f"""
 insert into schedule_dm_delivery (
     source_folder_id, date_id, emp_no, workspace, slack_user,
     reminder_minutes, scheduled_for, status
@@ -356,9 +371,7 @@ select o.source_folder_id,
   from schedule_occurrence o
   join schedule_folder f
     on f.source_folder_id = o.source_folder_id and f.enabled
-  join schedule_folder_org fo
-    on fo.source_folder_id = o.source_folder_id and fo.enabled
-  join recipient r on r.org_code = fo.org_code
+  {recipients}
   -- 보낼 곳이 **지금도** 유효한지 다시 본다. 설정에 남은 옛 워크스페이스로 보내지
   -- 않는다 — 그 계정은 이미 없을 수 있다.
   join user_identity ui
@@ -367,6 +380,7 @@ select o.source_folder_id,
    and ui.emp_no = r.emp_no
   cross join lateral unnest(r.reminder_minutes) as m(minutes)
  where o.source_deleted_at is null
+   and ({access})
    and not o.is_all_day
    and o.starts_at > %(now)s
    and o.starts_at <= %(horizon)s
@@ -386,6 +400,10 @@ on conflict (source_folder_id, date_id, emp_no, reminder_minutes) do update set
   where schedule_dm_delivery.status in ('pending', 'retry', 'expired', 'cancelled')
 """
 
+
+PLAN_SQL = _plan_sql()
+PLAN_PERSONAL_SQL = _plan_sql(personal=True)
+
 # 일정이 지워졌거나 종일로 바뀌면 미발송 큐를 취소한다.
 CANCEL_GONE_SQL = """
 update schedule_dm_delivery d
@@ -402,7 +420,13 @@ update schedule_dm_delivery d
 # 전근·퇴직으로 수신 자격이 사라진 미발송 큐를 취소한다.
 # 자격이 사라진 미발송 건을 취소한다 — 부서가 바뀌었거나, 폴더가 닫혔거나, 본인이
 # 껐을 때. **자격의 정의는 `RECIPIENT_CTE` 하나뿐이다.**
-CANCEL_INELIGIBLE_SQL = f"""
+def _cancel_ineligible_sql(*, personal: bool = False) -> str:
+    from .schedule_personal_acl import ACCESS_SQL
+
+    access = ACCESS_SQL if personal else """NOT f.dm_only AND EXISTS (
+        SELECT 1 FROM schedule_folder_org fo WHERE fo.source_folder_id=f.source_folder_id
+        AND fo.org_code=r.org_code AND fo.enabled)"""
+    return f"""
 {RECIPIENT_CTE.strip()}
 update schedule_dm_delivery d
    set status = 'cancelled', cancelled_at = now(), updated_at = now()
@@ -410,11 +434,15 @@ update schedule_dm_delivery d
    and not exists (
         select 1
           from recipient r
-          join schedule_folder_org fo on fo.org_code = r.org_code and fo.enabled
-         where fo.source_folder_id = d.source_folder_id
+          join schedule_folder f on f.source_folder_id=d.source_folder_id and f.enabled
+         where ({access})
            and r.emp_no = d.emp_no
    )
 """
+
+
+CANCEL_INELIGIBLE_SQL = _cancel_ineligible_sql()
+CANCEL_PERSONAL_SQL = _cancel_ineligible_sql(personal=True)
 
 EXPIRE_SQL = """
 update schedule_dm_delivery
@@ -445,11 +473,14 @@ def plan(conn, *, now: datetime | None = None) -> PlanResult:
     """
     now = now or datetime.now(UTC)
     result = PlanResult()
+    from .schedule_personal_acl import enabled as personal_enabled
+
+    personal = personal_enabled()
     with conn.cursor() as cur:
         cur.execute(RELEASE_STALE_SQL, {"cutoff": now - STALE_LOCK})
         result.released = max(cur.rowcount or 0, 0)
 
-        cur.execute(PLAN_SQL, {
+        cur.execute(PLAN_PERSONAL_SQL if personal else PLAN_SQL, {
             "now": now,
             "horizon": now + PLAN_HORIZON,
             "grace": LATE_GRACE,
@@ -461,7 +492,8 @@ def plan(conn, *, now: datetime | None = None) -> PlanResult:
         cur.execute(CANCEL_GONE_SQL)
         result.cancelled += max(cur.rowcount or 0, 0)
         # 같은 정의(RECIPIENT_CTE)를 쓰므로 같은 바인딩이 필요하다.
-        cur.execute(CANCEL_INELIGIBLE_SQL, {"default_minutes": list(DEFAULT_MINUTES)})
+        cur.execute(CANCEL_PERSONAL_SQL if personal else CANCEL_INELIGIBLE_SQL,
+                    {"default_minutes": list(DEFAULT_MINUTES)})
         result.cancelled += max(cur.rowcount or 0, 0)
 
         cur.execute(EXPIRE_SQL, {"cutoff": now - LATE_GRACE})
@@ -545,9 +577,10 @@ returning d.id, d.source_folder_id, d.date_id, d.emp_no, d.workspace, d.slack_us
 # 발송 직전에 제목·장소를 읽는다. 큐에는 본문을 저장하지 않는다.
 OCCURRENCE_SQL = """
 select subject, place, starts_at, ends_at
-  from schedule_occurrence
- where source_folder_id = %(folder)s and date_id = %(date_id)s
-   and source_deleted_at is null
+  from schedule_occurrence o
+  join schedule_folder f on f.source_folder_id=o.source_folder_id
+ where o.source_folder_id = %(folder)s and date_id = %(date_id)s
+   and source_deleted_at is null and f.enabled and not f.dm_only
 """
 
 MARK_SENT_SQL = """
@@ -625,8 +658,26 @@ def claim(conn, *, now: datetime | None = None, limit: int = 50, worker: str = "
 
 
 def load_occurrence(conn, due: Due) -> dict | None:
+    from . import schedule_personal_acl as personal
+
+    sql = OCCURRENCE_SQL
+    params = {"folder": due.source_folder_id, "date_id": due.date_id}
+    if personal.enabled():
+        sql = f"""{RECIPIENT_CTE}
+        select subject, place, starts_at, ends_at
+        from schedule_occurrence o
+        join schedule_folder f on f.source_folder_id=o.source_folder_id and f.enabled
+        cross join recipient r
+        join user_identity ui on ui.emp_no=r.emp_no
+          and ui.workspace=r.workspace and ui.slack_user=r.slack_user
+        where o.source_folder_id=%(folder)s and o.date_id=%(date_id)s
+          and o.source_deleted_at is null and not o.is_all_day
+          and r.emp_no=%(emp_no)s and r.workspace=%(workspace)s and r.slack_user=%(slack_user)s
+          and ({personal.ACCESS_SQL})"""
+        params.update(emp_no=due.emp_no, workspace=due.workspace, slack_user=due.slack_user,
+                      default_minutes=list(DEFAULT_MINUTES))
     with conn.cursor() as cur:
-        cur.execute(OCCURRENCE_SQL, {"folder": due.source_folder_id, "date_id": due.date_id})
+        cur.execute(sql, params)
         row = cur.fetchone()
     if not row:
         return None

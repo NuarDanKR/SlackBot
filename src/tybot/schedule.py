@@ -134,6 +134,7 @@ _SELECT = """
       JOIN schedule_folder f ON f.source_folder_id = o.source_folder_id
 """
 _RANGE = """
+       AND NOT f.dm_only
        AND o.source_deleted_at IS NULL
        AND o.starts_at < %(end)s
        AND o.ends_at   > %(start)s

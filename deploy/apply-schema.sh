@@ -39,6 +39,7 @@ FILES=(
   # 기능별
   schedule_schema.sql
   schedule_dm_schema.sql
+  schedule_personal_acl_schema.sql
   reviewer_schema.sql
   review_digest_schema.sql
   summary_review_schema.sql

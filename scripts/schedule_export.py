@@ -141,8 +141,10 @@ def to_record(row: tuple) -> dict:
     }
 
 
-def fetch(conn, schema: str, range_start: str, range_end: str) -> tuple[list, list]:
+def fetch(conn, schema: str, range_start: str, range_end: str, *, personal: bool = False) -> tuple[list, list]:
     with conn.cursor() as cur:
+        if personal:
+            cur.execute("SET TRANSACTION READ ONLY")
         cur.execute(FOLDER_SQL.format(schema=schema))
         folders = [
             {"folder_id": int(r[0]), "folder_name": r[1],
@@ -150,8 +152,21 @@ def fetch(conn, schema: str, range_start: str, range_end: str) -> tuple[list, li
             for r in cur.fetchall()
         ]
 
+        if personal:
+            cur.execute(
+                "select folder_id, folder_name, emp_no, read_allowed "
+                f"from {schema}.V_TYSLACK_SCHEDULE_USER_ACL order by folder_id, emp_no"
+            )
+            for folder_id, name, emp, allowed in cur.fetchall():
+                if allowed not in (0, 1) or not isinstance(emp, str) or not emp.strip():
+                    raise ExportError("개인 일정 ACL 형식이 잘못됐습니다.")
+                folders.append({"folder_id": int(folder_id), "folder_name": name,
+                                "emp_no": emp, "read_allowed": bool(allowed)})
+        sql = SCHEDULE_SQL
+        if personal:
+            sql = sql.replace(".V_TYSLACK_SCHEDULE", ".V_TYSLACK_SCHEDULE_DM")
         cur.execute(
-            SCHEDULE_SQL.format(schema=schema),
+            sql.format(schema=schema),
             {"range_start": range_start, "range_end": range_end},
         )
         rows = [to_record(r) for r in cur.fetchall()]
@@ -175,9 +190,10 @@ def write_snapshot(
     range_end: str,
     folders: list[dict],
     taken_at: datetime,
+    personal_acl_complete: bool = False,
 ) -> pathlib.Path:
     """임시 이름으로 쓰고 rename 한다 — 반쯤 쓰인 파일을 남기지 않는다."""
-    outdir.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     target = outdir / "schedule.jsonl"
     tmp = target.with_suffix(target.suffix + ".tmp")
@@ -207,6 +223,8 @@ def write_snapshot(
         "counts": {"schedule": len(rows)},
         "files": {"schedule.jsonl": _sha256(target)},
     }
+    if personal_acl_complete:
+        manifest.update(personal_acl_complete=True, personal_acl_version=1)
     # manifest 를 마지막에 쓴다. 받는 쪽은 manifest 가 있어야 반영을 시작하므로,
     # 전송이 중간에 끊겨도 반쪽 스냅샷을 반영하지 않는다.
     (outdir / "manifest.json").write_text(
@@ -229,6 +247,7 @@ def resolve_range(args, now: datetime) -> tuple[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env_file()
     ap = argparse.ArgumentParser(description="승인된 팀 일정을 JSONL 로 추출한다")
     ap.add_argument("--out", required=True, help="스냅샷을 만들 상위 폴더")
     ap.add_argument("--mode", choices=("live", "reconcile"), default="live")
@@ -245,8 +264,11 @@ def main(argv: list[str] | None = None) -> int:
     range_start, range_end = resolve_range(args, now)
 
     try:
+        from tybot.schedule_personal_acl import enabled as personal_enabled
+
+        personal = personal_enabled()
         with connect() as conn:
-            folders, rows = fetch(conn, args.schema, range_start, range_end)
+            folders, rows = fetch(conn, args.schema, range_start, range_end, personal=personal)
     except ExportError as exc:
         print(f"중단: {exc}")
         return 2
@@ -267,12 +289,12 @@ def main(argv: list[str] | None = None) -> int:
     write_snapshot(
         outdir, rows,
         mode=args.mode, range_start=range_start, range_end=range_end,
-        folders=folders, taken_at=now,
+        folders=folders, taken_at=now, personal_acl_complete=personal,
     )
 
     # 제목·장소는 찍지 않는다.
     folder_count = len({f["folder_id"] for f in folders})
-    org_count = len({f["org_code"] for f in folders})
+    org_count = len({f["org_code"] for f in folders if f.get("org_code")})
     print(f"{args.mode}: {len(rows)}건 · 폴더 {folder_count}개 · 부서 {org_count}개"
           f" · {range_start} ~ {range_end}")
     print(f"만들었다: {outdir}")

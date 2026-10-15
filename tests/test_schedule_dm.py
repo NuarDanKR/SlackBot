@@ -774,7 +774,7 @@ def test_cancel_binds_the_same_default_minutes():
     plan(conn, now=NOW)
     # `set status = 'cancelled'` 은 취소 쿼리가 둘이라 구별되지 않는다.
     # 이 조인은 자격 취소 쿼리에만 있다.
-    params = conn.params_for("join schedule_folder_org fo on fo.org_code = r.org_code")
+    params = next(params for sql, params in conn.executed if sql == CANCEL_INELIGIBLE_SQL)
     assert params and "default_minutes" in params
 
 

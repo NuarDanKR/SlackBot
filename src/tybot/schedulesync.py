@@ -202,6 +202,11 @@ def check_snapshot(snapshot: Snapshot) -> list[str]:
     """반영 전에 걸러야 할 것들. 문제 문구에 제목·장소를 넣지 않는다."""
     problems: list[str] = []
     m = snapshot.manifest
+    from . import schedule_personal_acl as personal
+
+    problems.extend(personal.validate(m))
+    if "personal_acl_complete" in m and not personal.enabled():
+        problems.append("개인 일정 DM 스위치가 꺼져 있어 개인 ACL 스냅샷을 반영하지 않습니다")
 
     if snapshot.mode not in MODES:
         problems.append(f"mode 가 이상하다: {snapshot.mode!r} (live|reconcile)")
@@ -410,8 +415,8 @@ ACL_BY = "ACL 자동"
 # 이미 있는 행은 건드리지 않는다 — 사람이 끈 것을 동기화가 되살리면 안 된다.
 # `do nothing` 이 그 보장이다.
 FOLDER_CANDIDATE_SQL = """
-insert into schedule_folder (source_folder_id, label, enabled, approved_by)
-values (%(folder_id)s, %(label)s, true, %(by)s)
+insert into schedule_folder (source_folder_id, label, enabled, approved_by, dm_only)
+values (%(folder_id)s, %(label)s, true, %(by)s, %(dm_only)s)
 on conflict (source_folder_id) do nothing
 """
 
@@ -448,7 +453,8 @@ def _register_folder_candidates(cur, snapshot: Snapshot) -> int:
         org_code = str(row.get("org_code") or "").strip()
         label = str(row.get("folder_name") or "").strip() or f"폴더 {folder_id}"
         cur.execute(FOLDER_CANDIDATE_SQL,
-                    {"folder_id": folder_id, "label": label, "by": ACL_BY})
+                    {"folder_id": folder_id, "label": label, "by": ACL_BY,
+                     "dm_only": "emp_no" in row})
         if not org_code:
             continue
         cur.execute(FOLDER_ORG_CANDIDATE_SQL,
@@ -518,6 +524,21 @@ def apply_snapshot(
 
         # manifest 의 폴더↔조직을 **후보로만** 등록한다(자동 승인하지 않는다).
         _register_folder_candidates(cur, snapshot)
+        if "personal_acl_complete" in snapshot.manifest:
+            from .schedule_personal_acl import sync as sync_personal_acl
+
+            try:
+                current = sync_personal_acl(
+                    cur, snapshot.manifest, _parse_ts(snapshot.manifest.get("generated_at")),
+                    now=datetime.now(KST),
+                )
+            except ValueError:
+                conn.rollback()
+                return SyncResult(ok=False, message="개인 일정 ACL 스냅샷 시각/범위 검증 실패")
+            if not current:
+                conn.rollback()
+                return SyncResult(ok=True, already_applied=True,
+                                  message="오래되거나 역순인 개인 ACL 스냅샷을 건너뛰었습니다")
 
         # 승인되지 않은 폴더는 넣지 않는다. schedule_folder 가 허용 목록이다.
         cur.execute(UNKNOWN_FOLDER_SQL)

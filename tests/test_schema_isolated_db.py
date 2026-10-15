@@ -321,6 +321,97 @@ def conn():
 
 
 @needs_db
+def test_personal_schedule_dm_isolation_freshness_and_revocation(conn, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from tybot import schedule, schedule_dm
+    from tybot.schedule_personal_acl import sync
+
+    _prepared(conn)
+    try:
+        verify.apply_files(conn, verify.TARGET_FILES)
+        verify.apply_files(conn, (
+            "schedule_schema.sql", "schedule_dm_schema.sql", "schedule_personal_acl_schema.sql",
+            "schedule_personal_acl_schema.sql",
+        ))
+        monkeypatch.setenv("SCHEDULE_PERSONAL_DM_ENABLED", "1")
+        now = datetime.now(UTC)
+        conn.execute("INSERT INTO org_unit(code,name,kind) VALUES ('ORG1','org','team'),('ORG2','other','team')")
+        conn.execute("INSERT INTO employee(emp_no,name,org_code) VALUES ('E1','a','ORG1'),('E2','b','ORG1')")
+        conn.execute("""INSERT INTO workspace(key,label,archive_path,created_by)
+                     VALUES ('mgmt','test','/test/archive','test')""")
+        conn.execute("""INSERT INTO user_identity(workspace,slack_user,emp_no,verified_by)
+                     VALUES ('mgmt','U1','E1','manual'),('mgmt','U2','E2','manual')""")
+        conn.execute("""INSERT INTO schedule_folder(source_folder_id,label,approved_by)
+                     VALUES (594,'department','test'),(651,'shared','test'),(2423,'personal','test')""")
+        conn.execute("""INSERT INTO schedule_folder_org(source_folder_id,org_code,approved_by)
+                     VALUES (594,'ORG1','test'),(651,'ORG2','test')""")
+        rows = [
+            {"folder_id": 594, "org_code": "ORG1"}, {"folder_id": 651, "org_code": "ORG2"},
+            {"folder_id": 651, "emp_no": "E1", "read_allowed": True},
+            {"folder_id": 2423, "emp_no": "E1", "read_allowed": True},
+        ]
+        metadata = {"personal_acl_complete": True, "personal_acl_version": 1,
+                    "source_folders": [594, 651, 2423], "folders": rows}
+        with conn.transaction(), conn.cursor() as cur:
+            assert sync(cur, metadata, now, now=now)
+        conn.execute("""INSERT INTO schedule_sync_run
+            (snapshot_id,mode,generated_at,horizon_start,horizon_end,source_folders,
+             row_count,manifest_sha256,status,applied_at)
+            VALUES ('live-personal-test','live',%s,%s,%s,ARRAY[594,651,2423],3,%s,'applied',%s)""",
+                     (now, now, now+timedelta(days=2), "0"*64, now))
+        for folder in (594, 651, 2423):
+            conn.execute("""INSERT INTO schedule_occurrence
+                (source_folder_id,date_id,event_id,starts_at,ends_at,content_sha256,last_snapshot_id)
+                VALUES (%s,1,1,%s,%s,%s,'live-personal-test')""",
+                         (folder, now+timedelta(minutes=11), now+timedelta(hours=1), "0"*64))
+        schedule_dm.plan(conn, now=now)
+        recipients = conn.execute("""SELECT emp_no,source_folder_id FROM schedule_dm_delivery
+                                  WHERE status='pending' ORDER BY emp_no,source_folder_id""").fetchall()
+        assert recipients == [("E1", 594), ("E1", 651), ("E1", 2423), ("E2", 594)]
+        # The same folder through two grant paths cannot duplicate a notification.
+        conn.execute("INSERT INTO schedule_folder_org(source_folder_id,org_code,approved_by) VALUES (651,'ORG1','test')")
+        schedule_dm.plan(conn, now=now)
+        assert conn.execute("SELECT count(*) FROM schedule_dm_delivery WHERE emp_no='E1' AND source_folder_id=651").fetchone()[0] == 1
+        conn.execute("DELETE FROM schedule_folder_org WHERE source_folder_id=651 AND org_code='ORG1'")
+        due = schedule_dm.Due(
+            id=1, source_folder_id=2423, date_id=1, emp_no="E1", workspace="mgmt",
+            slack_user="U1", reminder_minutes=10, scheduled_for=now, attempts=0,
+        )
+        assert schedule_dm.load_occurrence(conn, due) is not None
+        conn.execute("UPDATE schedule_personal_acl_state SET generated_at=%s", (now-timedelta(minutes=16),))
+        assert schedule_dm.load_occurrence(conn, due) is None
+        conn.execute("UPDATE schedule_personal_acl_state SET generated_at=%s", (now,))
+        # Even an accidentally configured public channel must not expose a DM-only calendar.
+        conn.execute("""INSERT INTO schedule_channel
+            (workspace,source_folder_id,slack_channel_id,channel_label,updated_by)
+            VALUES ('mgmt',2423,'C12345678','test','test')""")
+        found, _ = schedule.fetch(
+            conn, workspace="mgmt", channel_id="C12345678", slack_user="U1",
+            window=schedule.Window("test", now, now+timedelta(hours=2)),
+        )
+        assert found == []
+        # Drop the direct grants and explicitly deny E2's otherwise entitled department folder.
+        revoked = dict(metadata, folders=[*rows[:2],
+            {"folder_id": 594, "emp_no": "E2", "read_allowed": False},
+        ])
+        with conn.transaction(), conn.cursor() as cur:
+            assert sync(cur, revoked, now+timedelta(seconds=1), now=now+timedelta(seconds=1))
+        assert schedule_dm.load_occurrence(conn, due) is None
+        schedule_dm.plan(conn, now=now)
+        remaining = conn.execute("""SELECT emp_no,source_folder_id FROM schedule_dm_delivery
+                                 WHERE status='pending' ORDER BY emp_no,source_folder_id""").fetchall()
+        assert remaining == [("E1", 594)]
+        with conn.transaction(), conn.cursor() as cur:
+            assert not sync(cur, metadata, now, now=now+timedelta(seconds=2))
+    finally:
+        # This opt-in fixture has already verified an isolated, disposable DB.
+        # Leave no schedule tables behind to confuse later preflight checks.
+        conn.rollback()
+        verify.reset(conn)
+
+
+@needs_db
 def test_clean_install_on_an_empty_database(conn):
     _prepared(conn)
     verify.apply_files(conn, verify.TARGET_FILES)

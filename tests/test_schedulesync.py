@@ -325,6 +325,31 @@ def test_check_failure_writes_nothing():
     assert conn.rolled_back and not conn.committed
 
 
+def test_personal_snapshot_requires_explicit_feature_switch(monkeypatch):
+    monkeypatch.delenv("SCHEDULE_PERSONAL_DM_ENABLED", raising=False)
+    snap = _snap(personal_acl_complete=True, personal_acl_version=1)
+    assert any("스위치" in message for message in check_snapshot(snap))
+
+
+def test_personal_snapshot_does_not_turn_users_into_department_members(monkeypatch):
+    monkeypatch.setenv("SCHEDULE_PERSONAL_DM_ENABLED", "1")
+    snap = _snap(personal_acl_complete=True, personal_acl_version=1)
+    snap.manifest["folders"].append({"folder_id": 654, "emp_no": "E1", "read_allowed": True})
+    cur = FakeCursor(_conn())
+    ss._register_folder_candidates(cur, snap)
+    params = [p for sql, p in cur.c.executed if sql == ss.FOLDER_ORG_CANDIDATE_SQL]
+    assert len(params) == 1 and params[0]["org_code"] == "ABB155"
+
+
+def test_old_personal_snapshot_is_skipped_without_event_upsert(monkeypatch):
+    monkeypatch.setenv("SCHEDULE_PERSONAL_DM_ENABLED", "1")
+    conn = _conn()
+    got = apply_snapshot(conn, _snap(personal_acl_complete=True, personal_acl_version=1))
+    assert got.ok and got.already_applied
+    assert not any(sql == ss.UPSERT_SQL for sql, _ in conn.executed)
+    assert conn.rolled_back
+
+
 def test_already_applied_snapshot_is_skipped():
     """같은 스냅샷을 두 번 반영하면 삭제 판정이 두 번 돌아 위험하다."""
     conn = _conn(run_status={"status": "applied"})

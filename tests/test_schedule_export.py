@@ -158,6 +158,38 @@ def test_query_reads_only_the_dedicated_view():
     assert "COVI_SMART4J" not in joined
 
 
+def test_personal_fetch_uses_one_read_only_snapshot_and_dedicated_views():
+    class PersonalCursor(FakeCursor):
+        def execute(self, sql, params=None):
+            self.executed.append((sql, params or {}))
+            if "V_TYSLACK_SCHEDULE_USER_ACL" in sql:
+                self._pending = [(651, "calendar", "E1", 1), (2423, "personal", "E1", 1)]
+            elif "V_TYSLACK_SCHEDULE_DM" in sql:
+                self._pending = self._rows
+            elif "V_TYSLACK_SCHEDULE_FOLDER" in sql:
+                self._pending = self._folders
+            else:
+                self._pending = []
+
+    cur = PersonalCursor([(594, "department", "ORG1", "org")], [_row(folder_id=2423)])
+    folders, rows = se.fetch(FakeConn(cur), "TYSLACK", "a", "b", personal=True)
+    assert cur.executed[0][0] == "SET TRANSACTION READ ONLY"
+    assert len(folders) == 3 and rows[0]["source_folder_id"] == 2423
+    assert folders[-1]["emp_no"] == "E1" and "org_code" not in folders[-1]
+    assert folders[-1]["read_allowed"] is True
+    assert not any("COVI_SMART4J" in sql for sql, _ in cur.executed)
+
+
+def test_complete_acl_marker_is_explicit_in_the_export(tmp_path):
+    out = se.write_snapshot(
+        tmp_path / "personal", [], mode="live", range_start="2026-10-15 00:00",
+        range_end="2026-10-17 00:00", folders=[], taken_at=datetime.now(KST),
+        personal_acl_complete=True,
+    )
+    data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert data["personal_acl_complete"] is True and data["personal_acl_version"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 스냅샷 파일
 # ---------------------------------------------------------------------------
