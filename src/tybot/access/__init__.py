@@ -49,6 +49,23 @@ class RequestContext:
     # 비어 있으면 DM 문서는 열리지 않는다 — 콘솔·배치처럼 사람이 특정되지 않는
     # 경로가 개인 기록을 읽는 일을 기본값으로 막는다.
     user_id: str = ""
+    # 이 컨텍스트의 **채널 멤버십을 실제로 확인하지 못했다.** Slack 조회가
+    # 실패해 축소 폴백으로 만든 컨텍스트다.
+    #
+    # 권한은 여전히 막는 쪽이 기본값이라 답변이 새지는 않는다. 문제는 **안내**다 —
+    # 이 상태에서 근거가 0건이면 원인이 「자료가 없다」 가 아니라 「우리가 범위를
+    # 모른다」 일 수 있는데, 둘을 같은 문장으로 말하면 사람은 없는 자료를 찾으러
+    # 간다. 판정이 아니라 사유 표시에만 쓴다.
+    permission_unverified: bool = False
+
+    @property
+    def in_channel(self) -> bool:
+        """채널에서 온 질문인가. **범위 고정의 단일 판정 자리다.**
+
+        `channel_id` 와 `channel` 을 부르는 쪽마다 따로 보면 한 곳을 빠뜨리고,
+        빠뜨린 그 한 곳이 채널 질문을 DM 처럼 넓힌다.
+        """
+        return bool(self.channel_id or self.channel)
 
     def may_reach(self, owner_workspace: str) -> bool:
         """워크스페이스 경계 판정. 답변 생성 이전 1차 필터."""

@@ -266,15 +266,30 @@ def answer_section(records: list[dict]) -> dict:
 
     errors = sum(1 for r in records if str(r.get("error") or "").strip())
     grounded = sum(1 for r in records if int(r.get("hits") or 0) > 0)
-    no_hits = total - grounded
     slow = sum(1 for r in records if int(r.get("elapsed_ms") or 0) > SLOW_MS)
 
-    grounded_rate = grounded / total
+    # **근거를 못 찾은 것이 아니라 찾아보지도 못한 질문.** 열람 범위를 확인하지
+    # 못해 끝난 답변이다(`answer.permission_unverified`). 근거율에 섞으면 Slack
+    # 조회 장애가 「아카이브에 자료가 없다」 로 보이고, 운영자는 있지도 않은
+    # 자료를 찾으러 간다. 비율의 분모에서 빼고 따로 센다.
+    unverified = sum(
+        1 for r in records if str(r.get("reason") or "") == "permission_unverified"
+    )
+    searched = total - unverified
+    no_hits = searched - grounded
+
+    grounded_rate = grounded / searched if searched else None
     error_rate = errors / total
 
-    level = _ratio_level(grounded_rate, GROUNDED_WARN, GROUNDED_BAD)
+    level = _ratio_level(grounded_rate, GROUNDED_WARN, GROUNDED_BAD) if searched else "unknown"
     problems = []
-    if grounded_rate < GROUNDED_WARN:
+    if unverified:
+        level = _worst(level, "warn")
+        problems.append(
+            f"열람 범위를 확인하지 못해 끝난 질문 {unverified}건 — "
+            "자료 문제가 아닙니다. Slack 연결·권한 조회를 확인하세요"
+        )
+    if searched and grounded_rate < GROUNDED_WARN:
         problems.append(
             f"근거를 찾은 답변이 {grounded_rate:.0%} 입니다 — "
             "아카이브에 자료가 없거나 검색이 못 찾고 있습니다"
@@ -322,7 +337,10 @@ def answer_section(records: list[dict]) -> dict:
         "questions": total,
         "grounded": grounded,
         "noHits": no_hits,
-        "groundedRate": round(grounded_rate, 3),
+        # 근거율의 분모. `questions` 와 다르면 그 차이가 `permissionUnverified` 다.
+        "searched": searched,
+        "permissionUnverified": unverified,
+        "groundedRate": round(grounded_rate, 3) if grounded_rate is not None else None,
         "errors": errors,
         "errorRate": round(error_rate, 3),
         "slowAnswers": slow,

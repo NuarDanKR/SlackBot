@@ -135,7 +135,13 @@ def issue_codes(row: dict, feedback: list[dict]) -> list[str]:
         "error", "unavailable", "invalid-output", "timeout", "specialist_unavailable",
     }:
         codes.append("error")
-    if int(row.get("hits") or 0) == 0 or reason in {"no_hits", "no_access"}:
+    if reason == "permission_unverified":
+        # **자료 없음으로 세지 않는다.** 권한 조회가 실패한 것이라 사람이 할 일이
+        # 다르고, 자료 없음에 섞으면 운영 지표에서 영원히 안 보인다.
+        codes.append("permission_unverified")
+    elif int(row.get("hits") or 0) == 0 or reason in {
+        "no_hits", "no_access", "channel_no_archive",
+    }:
         codes.append("no_evidence")
     if int(row.get("elapsed_ms") or 0) > SLOW_MS:
         codes.append("slow")
@@ -211,6 +217,7 @@ def render_report(
     labels = {
         "error": "처리 오류",
         "no_evidence": "근거 없음/권한 범위 없음",
+        "permission_unverified": "권한 범위 확인 실패",
         "slow": "15초 초과",
         "specialist_failure": "전문 봇 실패·폴백",
         "feedback": "사용자 문제·정정 피드백",

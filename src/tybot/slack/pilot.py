@@ -528,6 +528,7 @@ class WorkspaceBot:
                 workspace=self.workspace, role="exec", user_id=user_id
             )
         channels: set[str] = set()
+        unverified = False
         try:
             res = client.users_conversations(
                 user=user_id, types="public_channel,private_channel", limit=1000
@@ -535,12 +536,17 @@ class WorkspaceBot:
             channels = {"#" + c["name"] for c in res.get("channels", [])}
         except Exception as e:
             log.warning("users.conversations 실패(%s) — 권한 범위 축소 폴백", e)
+            # 범위를 **좁히는** 폴백이라 자료가 새지는 않는다. 다만 이 상태에서
+            # 근거가 0건이면 원인이 「자료가 없다」 가 아니라 「우리가 범위를
+            # 모른다」 다. 그 사실을 안 들고 가면 답변이 둘을 같은 문장으로 말한다.
+            unverified = True
         return RequestContext(
             workspace=self.workspace,
             channels=frozenset(channels),
             readable_workspaces=self.cfg.readable,
             is_root=self.cfg.is_root,
             user_id=user_id,
+            permission_unverified=unverified,
         )
 
     def _request_context(
@@ -571,6 +577,9 @@ class WorkspaceBot:
             channel_id=channel_id,
             channel=channel,
             user_id=str(getattr(base, "user_id", "") or ""),
+            permission_unverified=bool(
+                getattr(base, "permission_unverified", False)
+            ),
         )
 
     def _specialist_roster(self) -> list:
@@ -1752,6 +1761,15 @@ class WorkspaceBot:
             "no_access": (
                 "직전 질문은 열람 권한 범위에 자료가 없었습니다. "
                 "해당 채널에 저를 초대(`/invite`)해 주세요."
+            ),
+            "channel_no_archive": (
+                "직전 질문은 **현재 채널에 아카이브된 원문이 없어** 끝났습니다. "
+                "초대 문제가 아닐 수 있습니다 — `수집상태` 로 이 채널의 수집 "
+                "여부를 먼저 확인해 주세요."
+            ),
+            "permission_unverified": (
+                "직전 질문은 **열람 범위를 확인하지 못해** 끝났습니다. "
+                "자료가 없다는 뜻이 아닙니다. 다시 물어보시면 재시도합니다."
             ),
             "error": "직전 답변은 처리 오류로 끝났습니다. 다시 물어보시면 재시도합니다.",
             "specialist_unavailable": (

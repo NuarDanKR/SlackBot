@@ -147,11 +147,20 @@ def visible_records(
     return rows, scope
 
 
+# 근거가 0건이지만 **자료 문제가 아닌** 사유. 운영자가 할 일이 전혀 다르다 —
+# 자료를 찾으러 가는 것이 아니라 연결·권한을 본다. `no_hits` 로 접으면 그 구분이
+# 화면에서 사라지고, 연결 장애가 「아카이브에 자료가 없다」 로 몇 주씩 남는다.
+NOT_A_DATA_PROBLEM = {"permission_unverified"}
+
+
 def quality_reasons(row: dict) -> list[str]:
     reasons: list[str] = []
     if str(row.get("error") or "").strip():
         reasons.append("error")
-    if int(row.get("hits") or 0) == 0:
+    reason = str(row.get("reason") or "")
+    if reason in NOT_A_DATA_PROBLEM:
+        reasons.append(reason)
+    elif int(row.get("hits") or 0) == 0:
         reasons.append("no_hits")
     if int(row.get("elapsed_ms") or 0) > health.SLOW_MS:
         reasons.append("slow")

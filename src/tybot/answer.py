@@ -101,8 +101,8 @@ ARCHIVE_SCOPE_RE = re.compile(
 TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 
 
-def _mentioned_workspaces(question: str) -> frozenset[str]:
-    """질문에 명시된 워크스페이스 키·표시 이름을 DB 메타데이터에서 찾는다."""
+def _workspace_labels() -> dict[str, str]:
+    """Load configured workspace names without changing the access boundary."""
     import os
 
     from .workspaces import env_suffix
@@ -123,15 +123,79 @@ def _mentioned_workspaces(question: str) -> frozenset[str]:
             }
     except Exception:  # noqa: BLE001 - environment metadata remains the emergency fallback
         pass
+    return labels
 
+
+def _mentioned_workspaces(question: str) -> frozenset[str]:
+    """질문에 명시된 워크스페이스 키·표시 이름을 DB 메타데이터에서 찾는다."""
     found: set[str] = set()
-    for key, label in labels.items():
+    for key, label in _workspace_labels().items():
         if label and label in question:
             found.add(key)
             continue
         if re.search(rf"(?<![A-Za-z0-9-]){re.escape(key)}(?![A-Za-z0-9-])", question, re.I):
             found.add(key)
     return frozenset(found)
+
+
+def _named_workspace_filter(question: str, ctx) -> frozenset[str] | None:
+    """DM에서 명시적인 워크스페이스 지정만 범위를 좁힌다. 조직명 언급만으로는 아니다.
+
+    채널 질문의 범위는 **현재 워크스페이스·현재 채널로 고정**이고, 질문 본문이
+    그것을 바꾸지 못한다. 이 필터를 채널에서도 걸었더니 이런 일이 났다
+    (2026-10-16 tyit `C0BQYAC28F3`):
+
+        「이번주 CEO 주관 **경영본부** 주간 회의 내용이 뭐야?」
+
+    「경영본부」 가 `mgmt` 의 표시 이름이라 범위가 `{mgmt}` 로 좁혀졌고, 질문이
+    올라온 **tyit 채널의 원문이 통째로 탈락해** `no_access` 로 끝났다. 그 채널에
+    바로 그 회의 기록이 있었는데도.
+
+    범위를 넓히는 것이 아니다 — 필터는 **빼기만** 하므로, 채널 질문에서는 빼야 할
+    것이 이미 ACL 로 다 빠져 있고 남는 효과는 정답을 빼는 것뿐이다.
+
+    현재 채널에 공유된 원문은 **다른 조직 이야기여도 근거로 쓴다.** 그 채널에
+    올라왔다는 사실이 그 방 사람들이 그것을 함께 본다는 뜻이다.
+    """
+    if getattr(ctx, "in_channel", False):
+        return None
+    # An organization mentioned as the topic is not a workspace selector.
+    found: set[str] = set()
+    marker = r"(?:워크스페이스|workspace)"
+    for key, label in _workspace_labels().items():
+        for name in {key, label} - {""}:
+            escaped = re.escape(name)
+            named = rf"(?<!\w){escaped}\s*{marker}(?![A-Za-z0-9_])"
+            assigned = rf"{marker}\s*[:=]\s*{escaped}(?!\w)"
+            if re.search(rf"(?:{named}|{assigned})", question, re.I):
+                found.add(key)
+                break
+    return frozenset(found) or None
+
+
+# --- 근거가 없을 때 무엇이라고 말하나 (2026-10-16) ---------------------------
+#
+# **세 가지를 한 문장으로 접지 않는다.** 사람이 할 일이 각각 다르다.
+#
+# | 상황 | 사람이 할 일 |
+# |---|---|
+# | 접근 가능 문서 0건 | 채널에 봇을 초대 |
+# | 현재 채널에 아카이브된 원문 0건 | 수집 상태 확인 — **초대 문제가 아닐 수 있다** |
+# | 문서는 있는데 걸린 줄 0건 | 낱말·기간을 바꿔 다시 묻기 |
+# | 권한 범위 확인 실패 | 잠시 뒤 다시 묻기 (자료 문제가 아니다) |
+#
+# 전에는 넷이 전부 「열람 권한 범위에 아카이브된 문서가 없습니다. 채널에 봇을
+# 초대(`/invite`)하고…」 로 나갔다. 이미 초대돼 있는 채널에서 그 문장을 받으면
+# 사람은 무엇을 해야 할지 모르고, 수집 장애는 「자료가 없다」 로 덮인다.
+CHANNEL_NO_EVIDENCE = "현재 채널에서 해당 근거를 찾지 못했습니다."
+PERMISSION_UNVERIFIED = (
+    "열람 권한 범위를 확인하지 못했습니다. 자료가 없다는 뜻이 아닙니다. "
+    "잠시 뒤 다시 물어봐 주세요."
+)
+NO_ACCESS_TEXT = (
+    "열람 권한 범위에 아카이브된 문서가 없습니다. "
+    "채널에 봇을 초대(`/invite`)하고 대화가 쌓이길 기다려 주세요."
+)
 
 
 def _euro(word: str) -> str:
@@ -151,7 +215,9 @@ class Answer:
     model: str | None
     cost_usd: float
     hit_count: int
-    reason: str  # answered | advice | no_hits | no_access | smalltalk | out_of_scope | error
+    # answered | advice | no_hits | no_access | channel_no_archive
+    # | permission_unverified | smalltalk | out_of_scope | error
+    reason: str
     # 사용자에게 보여줄 근거 요약용 검색어. 새로 저장하는 값이 아니라 이미 쓴 값이다.
     terms: list[str] = field(default_factory=list)
     # 근거에 언급됐지만 자동 변환하지 못한 첨부.
@@ -1086,11 +1152,9 @@ class AnswerEngine:
             return self._unavailable(outcome, terms=terms, task=task)
         titles = self._store.titles(ctx)
         if not titles:
-            return Answer(
-                "열람 권한 범위에 아카이브된 문서가 없습니다. "
-                "채널에 봇을 초대(`/invite`)하고 대화가 쌓이길 기다려 주세요.",
-                [], None, 0.0, 0, "no_access",
-            )
+            return self._no_evidence(ctx, terms=terms, had_documents=False)
+        if getattr(ctx, "in_channel", False):
+            return self._no_evidence(ctx, terms=terms, had_documents=True)
         return Answer(
             f"「{q}」 에 해당하는 원문을 찾지 못했습니다. 검색과 문서 읽기를 모두 "
             "거쳤고, 추측으로 답하지 않습니다.",
@@ -1126,6 +1190,43 @@ class AnswerEngine:
             [], None, 0.0, hits, "specialist_unavailable",
             terms=list(terms or []),
             **trace,
+        )
+
+    def _no_evidence(self, ctx, *, terms=None, had_documents: bool) -> Answer:
+        """근거가 0건이다. **왜 0건인지를 구별해서** 말한다.
+
+        `had_documents` 는 「이 범위에 읽을 문서가 있었나」 다. 문서가 있었는데
+        걸린 줄이 없는 것(= 주제가 안 맞음)과 문서 자체가 없는 것(= 수집·권한)은
+        사람이 할 일이 전혀 다른데, 전에는 둘 다 「봇을 초대하세요」 였다.
+
+        채널 질문에서는 **「권한 부족」 이라고 말하지 않는다.** 이미 그 채널에서
+        묻고 있고 ACL 은 그 채널을 열어 줬다 — 거기서 「초대하세요」 가 나가면
+        사람은 이미 돼 있는 일을 하러 간다. 수집 장애도 그 문장에 덮인다.
+        """
+        in_channel = bool(getattr(ctx, "in_channel", False))
+        terms = list(terms or [])
+        if getattr(ctx, "permission_unverified", False):
+            # 권한 조회가 실패해 범위를 모른다. **자료 문제로 말하지 않는다.**
+            return Answer(
+                PERMISSION_UNVERIFIED, [], None, 0.0, 0, "permission_unverified",
+                terms=terms,
+            )
+        if not in_channel:
+            if had_documents:
+                return Answer(
+                    "열람 권한 범위에서 해당 근거를 찾지 못했습니다. 추측으로 답하지 않습니다.",
+                    [], None, 0.0, 0, "no_hits", terms=terms,
+                )
+            return Answer(NO_ACCESS_TEXT, [], None, 0.0, 0, "no_access", terms=terms)
+        if had_documents:
+            return Answer(
+                f"{CHANNEL_NO_EVIDENCE} 이 채널의 원문은 조회했고, 추측으로 답하지 않습니다.",
+                [], None, 0.0, 0, "no_hits", terms=terms,
+            )
+        return Answer(
+            f"{CHANNEL_NO_EVIDENCE} 이 채널에는 아직 아카이브된 원문이 없습니다 — "
+            "권한 문제가 아닐 수 있습니다. `수집상태` 로 수집 여부를 확인해 주세요.",
+            [], None, 0.0, 0, "channel_no_archive", terms=terms,
         )
 
     def summarize(
@@ -1166,14 +1267,24 @@ class AnswerEngine:
         citations: list[str] = []
         total = 0
         scoped = evidence_hits is not None
+        # **「읽을 수 있는 문서가 있었나」 는 따로 든다.** `visible_docs` 는 아래에서
+        # 문서 집합 요약이 소비하면서 비워진다 — 그걸 그대로 세면 문서가 1건 있고
+        # 후보가 0건인 경우가 「이 채널에 아카이브된 원문이 없다」 로 뒤집힌다.
+        #
+        # 워크스페이스 필터 **이전** 값이다. 필터는 질문을 좁히는 것이지 접근
+        # 경계가 아니라서, 필터가 다 걷어낸 것을 「권한 범위에 문서가 없다」 로
+        # 말하면 사람은 있지도 않은 권한 문제를 찾으러 간다.
+        had_documents = False
         if scoped:
             summary_hits = list(evidence_hits or ())
             blocks, citations, specialist_parts, total = _blocks_from_hits(summary_hits, ctx)
             visible_docs = []
         else:
+            accessible = self._store.visible_docs(ctx)
+            had_documents = bool(accessible)
             visible_docs = [
                 doc
-                for doc in self._store.visible_docs(ctx)
+                for doc in accessible
                 if not workspace_filter or doc.workspace in workspace_filter
             ]
         # 「여태까지」 는 자르지 않는다. 사용자가 요청한 범위와 실제 조회 범위가
@@ -1238,11 +1349,10 @@ class AnswerEngine:
             )
         if not blocks:
             titles = [doc.channel for doc in visible_docs]
-            if not titles:
-                return Answer(
-                    "열람 권한 범위에 아카이브된 문서가 없습니다. 채널에 봇을 초대하고 수집을 기다려 주세요.",
-                    [], None, 0.0, 0, "no_access",
-                )
+            if not titles or getattr(ctx, "in_channel", False):
+                # **문서 후보 0건과 접근 가능 문서 0건을 가른다.** 채널 질문이면
+                # 「초대하세요」 로 닫지 않는다 — 이미 그 채널에서 묻고 있다.
+                return self._no_evidence(ctx, terms=terms, had_documents=had_documents)
             hint = ""
             if ctx.readable_workspaces:
                 names = ", ".join(sorted(ctx.readable_workspaces))
@@ -1614,7 +1724,7 @@ class AnswerEngine:
                 ctx,
                 days=intent.days or DEFAULT_DAYS,
                 model=model,
-                workspace_filter=_mentioned_workspaces(q) or None,
+                workspace_filter=_named_workspace_filter(q, ctx),
                 question=q,
                 # 문서 종류가 있으면 문서 집합 요약이다 — 채널당 최근 줄이 아니라
                 # 보고서마다 몫을 나눈다(설계 §11).
@@ -1644,7 +1754,7 @@ class AnswerEngine:
                     ctx,
                     days=parse_period(q),
                     model=model,
-                    workspace_filter=_mentioned_workspaces(q) or None,
+                    workspace_filter=_named_workspace_filter(q, ctx),
                     question=q,
                     document_query=list(intent.document_query),
                     all_time=intent.wants_all_time,
@@ -1953,16 +2063,8 @@ class AnswerEngine:
             logger.info(
                 "answer no_hits q=%r terms=%r ws=%s titles=%d", q, terms, ctx.workspace, len(titles)
             )
-            if not titles:
-                return Answer(
-                    "열람 권한 범위에 아카이브된 문서가 없습니다. "
-                    "채널에 봇을 초대(`/invite`)하고 대화가 쌓이길 기다려 주세요.",
-                    [],
-                    None,
-                    0.0,
-                    0,
-                    "no_access",
-                )
+            if not titles or getattr(ctx, "in_channel", False):
+                return self._no_evidence(ctx, terms=terms, had_documents=bool(titles))
             listed = "\n".join(f"• {t}" for t in titles[:20])
             more = f"\n… 외 {len(titles) - 20}건" if len(titles) > 20 else ""
             return Answer(
