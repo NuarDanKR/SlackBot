@@ -343,3 +343,30 @@ def test_the_module_never_logs():
 
     for leaked in ("logging", "print(", "log.", "logger"):
         assert leaked not in source, f"와이어 계약이 로그를 만진다: {leaked}"
+
+
+# --- 근거 표식은 사람에게 안 보인다 (2026-10-16 운영) --------------------------
+
+
+def test_the_citation_marks_do_not_reach_the_reader():
+    """v2 도 같은 자리에서 걷어낸다. 한쪽만 고치면 그쪽 설치만 조용히 샌다."""
+    request = _request()
+
+    got = wire.validate_response(
+        _response(request, text="3공구 기성금은 3.2억입니다[e1]."),
+        request=request, expected_version="1.2.0",
+    )
+
+    assert got.text == "3공구 기성금은 3.2억입니다."
+    assert got.evidence_ids == ("e1",), "쓴 근거는 구조화된 필드로 그대로 남는다"
+
+
+def test_an_answer_that_is_only_marks_is_not_an_answer():
+    """표식을 걷어내고 남는 것이 없으면 그건 답이 아니다."""
+    request = _request()
+
+    with pytest.raises(wire.WireViolation, match="남는 문장이 없"):
+        wire.validate_response(
+            _response(request, text="[e1]"),
+            request=request, expected_version="1.2.0",
+        )

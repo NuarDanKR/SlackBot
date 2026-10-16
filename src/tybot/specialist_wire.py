@@ -85,6 +85,38 @@ _FORBIDDEN = (
 
 _EVIDENCE_ID_RE = re.compile(r"^e[0-9]{1,4}$")
 
+# 본문에 박혀 오는 `[e7]` 표식. 앞의 공백까지 함께 집는다 — 「입니다 [e7].」 를
+# 표식만 지우면 「입니다 .」 가 남는다.
+CITATION_MARK_RE = re.compile(r"[ \t]*(?:\[e[0-9]{1,4}\])+")
+
+# 표식 뒤에 이것들이 오면 공백을 넣지 않는다. 문장부호 앞에 공백이 생기면 안 된다.
+_NO_SPACE_AFTER = " \t\r\n.,:;)]}>!?…·"
+
+
+def strip_citation_marks(text: str) -> str:
+    """사람에게 보일 문장에서 `[e7]` 표식을 걷어낸다.
+
+    **표식은 전선 규약이지 내용이 아니다.** 어느 문장이 어느 근거에 기댔는지를
+    전문 봇이 밝히는 수단이고, 우리는 그것을 `evidence_ids`(v3 는 `used_evidence`)
+    로 **구조화된 형태로 따로 받는다.** 본문의 표식을 소비하는 코드는 이쪽에
+    하나도 없다.
+
+    그런데 지우지 않아 Slack 답변에 `[e264][e265][e266]` 이 그대로 나갔다
+    (2026-10-16 운영 화면). 사람에게는 아무 뜻도 없는 기호이고, 출처는 우리가
+    따로 붙인다(원칙 2) — 그 자리를 이 기호가 대신하는 것처럼 보이기까지 한다.
+
+    검증이 **끝난 뒤에** 부른다. 먼저 지우면 발급하지 않은 표식을 지어냈는지를
+    확인할 수 없고, 그 확인이 「기억으로 답했는지」 를 가리는 유일한 신호다.
+    """
+    if "[e" not in text:
+        return text
+
+    def _drop(match: re.Match) -> str:
+        tail = match.string[match.end():match.end() + 1]
+        return "" if (not tail or tail in _NO_SPACE_AFTER) else " "
+
+    return CITATION_MARK_RE.sub(_drop, text)
+
 
 class WireViolation(RuntimeError):
     """계약 위반. 호출부는 응답을 버리고 마스터로 간다."""
@@ -337,6 +369,11 @@ def validate_response(
         # 우리가 주지 않은 근거를 썼다는 뜻이다 — 그쪽 색인이나 기억으로 답했다.
         raise WireViolation(f"보내지 않은 근거를 인용했습니다: {sorted(unknown)}")
 
+    # 검증이 끝났으니 표식을 걷어낸다. 어느 근거를 썼나는 `evidence_ids` 가 든다.
+    text = strip_citation_marks(text)
+    if not text.strip():
+        raise WireViolation("표식을 걷어내면 남는 문장이 없습니다.")
+
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
     return RuntimeAnswer(
         text=text,
@@ -371,6 +408,7 @@ def validate_health(raw: bytes) -> dict:
 
 
 __all__ = [
+    "CITATION_MARK_RE",
     "CLOCK_SKEW_SECONDS",
     "COMPLETE_PATH",
     "CONTRACT_VERSION",
@@ -393,6 +431,7 @@ __all__ = [
     "request_from_authorized",
     "sign",
     "signature_headers",
+    "strip_citation_marks",
     "validate_health",
     "validate_response",
     "verify_response_signature",

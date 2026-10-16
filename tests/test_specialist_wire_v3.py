@@ -342,3 +342,46 @@ def test_a_partial_answer_is_answered_not_failed():
 
     assert not got.should_fall_back
     assert got.uncertain
+
+
+# --- 근거 표식은 사람에게 안 보인다 (2026-10-16 운영) --------------------------
+
+
+def test_the_citation_marks_do_not_reach_the_reader():
+    """`[e7]` 은 **전선 규약이지 내용이 아니다.**
+
+    운영 화면에 `[e264][e265][e266]` 이 그대로 나갔다. 사람에게 아무 뜻도 없는
+    기호이고, 출처는 우리가 따로 붙인다(원칙 2) — 그 자리를 이 기호가 대신하는
+    것처럼 보이기까지 한다. 어느 근거를 썼나는 `used_evidence` 가 든다.
+    """
+    got = _validate(_response(
+        answer="집행률은 72%입니다[e7]. 만기는 9월 30일로 연장됐습니다[e8].",
+    ))
+
+    assert got.text == "집행률은 72%입니다. 만기는 9월 30일로 연장됐습니다."
+    assert got.used_evidence == ("e7",), "쓴 근거는 구조화된 필드로 그대로 남는다"
+
+
+def test_marks_are_stripped_without_leaving_stray_spaces():
+    """표식만 지우면 「입니다 .」 가 남는다. 묶음·앞공백·문장 중간을 다 본다."""
+    got = _validate(_response(
+        answer="가 [e7][e8]. 나[e7]다\n라[e8]",
+        used_evidence=["e7", "e8"],
+    ))
+
+    assert got.text == "가. 나 다\n라"
+
+
+def test_an_invented_mark_is_still_caught_before_stripping():
+    """지우기 **전에** 검증해야 「기억으로 답했는지」 를 가릴 수 있다.
+
+    먼저 지우면 발급하지 않은 표식을 지어냈다는 사실이 통째로 사라진다.
+    """
+    with pytest.raises(v3.WireViolation):
+        _validate(_response(answer="지어낸 근거입니다[e99].", used_evidence=["e99"]))
+
+
+def test_an_answer_that_is_only_marks_is_not_an_answer():
+    """표식을 걷어내고 남는 것이 없으면 그건 답이 아니다."""
+    with pytest.raises(v3.WireViolation):
+        _validate(_response(answer="[e7][e8]", used_evidence=["e7", "e8"]))

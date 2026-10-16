@@ -29,7 +29,7 @@ import secrets
 import uuid
 from dataclasses import dataclass, field
 
-from .specialist_wire import WireViolation
+from .specialist_wire import WireViolation, strip_citation_marks
 
 SCHEMA_REQUEST = "tybot.specialist.request.v3"
 SCHEMA_TOOL_CALL = "tybot.specialist.tool.v3"
@@ -364,8 +364,14 @@ def validate_response(
         if needle in text or needle in lowered:
             raise WireViolation(reason)
 
+    # 검증이 끝났으니 본문의 `[e7]` 표식을 걷어낸다. 어느 근거를 썼나는
+    # `used_evidence` 가 구조화된 형태로 들고 있고, 본문의 표식을 읽는 코드는
+    # 이쪽에 없다 — 안 지우면 Slack 답변에 그대로 나간다(2026-10-16).
+    text = strip_citation_marks(text)
+
     if status == STATUS_ANSWERED:
         if not text.strip():
+            # 표식을 걷어내고 남는 것이 없으면 그건 답이 아니다.
             raise WireViolation("answered 인데 답변이 비었습니다.")
         if not used_ids:
             # v2 는 요청에서 막았다. v3 는 여기서 막는다 — 규칙이 사라진 게 아니라
