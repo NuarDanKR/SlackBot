@@ -185,6 +185,87 @@ hold 채널은 수집 대상으로 만들지 않고, 멤버십을 자동 등록�
 검사한다. 다운로드·변환·복구·멤버십 변경을 자동 실행하지 않는다.
 종료 코드는 0=전체 완료, 2=부분 실패·설정 불가 연결·빈 등록 목록, 1=실행 오류다.
 
+## 정기 누락 점검 (B-46, 2026-10-16)
+
+`tybot-file-audit.service`는 위 전체 진단을 별도 프로세스로 실행한다. 수집기를
+멈추지 않으며 다운로드·변환·복구·멤버십 동기화·DB 수집 상태 갱신을 하지 않는다.
+Master 토큰은 쓰지 않고 `/etc/tybot/archiver.env`와 등록된 Archiver 연결을 쓴다.
+수집기 장애 감지 자체(B-02)는 별건이다. 이 점검 성공으로 수집기 정상까지 단정하지 않는다.
+
+공통 설치기는 unit과 상태 디렉터리만 배치한다. 자동으로 켜지 않는다.
+배포 후 먼저 한 번 실행하고 결과를 확인한다.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start tybot-file-audit.service
+sudo systemctl show tybot-file-audit.service --no-pager -p Result -p ExecMainStatus
+sudo cat /var/lib/tybot/file-audit/status.json
+```
+
+정상 동작을 확인한 뒤에만 예약 실행을 켠다. 서버 시간대 기준 매일 02:30부터
+최대 15분 지연해 시작한다. 서버 재기동으로 놓친 실행은 `Persistent=true`로 보충한다.
+
+```bash
+sudo systemctl enable --now tybot-file-audit.timer
+sudo systemctl list-timers --all --no-pager tybot-file-audit.timer
+```
+
+끄려면 `sudo systemctl disable --now tybot-file-audit.timer`를 쓴다. 이미 돌고 있는
+점검까지 중단하려면 service도 stop한다. 수집기나 기존 결과는 삭제하지 않는다.
+
+한 회차는 3초 채널 간격, 최대 3,600초다. 시간 초과 시 자식 프로세스를 종료·회수하고
+`audit_timeout`을 기록한다. unit의 3,700초 외부 제한은 추가 안전장치다.
+작업이 계속 한 시간에 걸리면 미완료 범위를 확인해 실행 예산/주기를 사람이 조정한다.
+매번 앞쪽만 점검한 결과를 전체 완료로 읽거나 API 간격을 무작정 줄이지 않는다.
+
+정기 실행기끼리는 OS 파일 락으로 중복 실행을 막는다. 수동으로 같은 실행기를
+호출해도 같은 락을 쓴다. 이미 실행 중이면 종료 코드 3이고 기존 상태를 덮지 않는다.
+기존 `audit_archiver_files.py` 직접 실행은 별도 진단 경로라 이 실행기 락에 참여하지
+않는다. API 부하를 피하려면 정기 작업과 동시에 직접 실행하지 않는다.
+
+### 상태 파일 계약 (웹콘솔 개발자용)
+
+- 경로: `/var/lib/tybot/file-audit/status.json`, 스키마 `tybot.archiver.file-audit.status.v1`.
+  임시 파일을 fsync한 뒤 원자 교체한다. 상태 파일 권한 0600, 디렉터리 0700이다.
+  웹콘솔의 관리자 전용 backend가 읽고, 비관리자나 다른 workspace 사용자에게
+  전체 결과를 그대로 반환하지 않는다. 본문·파일명·토큰·SDK 예외 본문은 저장하지 않는다.
+- `last_run`: `id`, `started_at`, `finished_at`, `status`, `error_code`.
+  상태는 `running/completed/partial/failed`. 시작 전에 running을 남기므로 SIGKILL이나
+  서버 중단 때 running이 남을 수 있다. systemd 상태·시작 시각을 함께 보고 중단으로
+  표시한다. 오래된 running을 현재 점검 중이라고 무한히 표시하지 않는다.
+- `last_success`: 마지막 **전체 점검 완료** 회차다. 실패·부분 실패·시간 초과로 바뀌지
+  않는다. 아직 전체 완료가 없으면 null. 완료와 누락 0건은 다르다.
+- 결과가 있으면 `counts`와 `workspaces[].channels[]`에 `missing`,
+  `existing_needs_review`, `shadow_only`, `files_seen`, `warnings`가 있다.
+  workspace/channel ID와 점검 상태를 포함하며 workspace별 `membership_mismatches`,
+  `skipped_channels`도 있다. 합계는 채널-파일 참조 수이지 workspace 고유 파일 수나
+  Slack 폴더 개수가 아니다. 메타데이터 존재는 원본 보관·변환·검색 가능을 증명하지 않는다.
+- 회차와 workspace의 `coverage`에는 `target_channels`, `attempted_channels`,
+  `complete_channels`, `unconfirmed_channels`, `unknown_workspaces`가 있다.
+  대상은 DB 수집 허용 채널이며 DB에만 남은 참여 채널도 분모에 포함한다. 목록·대조를
+  끝내지 못한 채널은 시도했더라도 완료 수에서 뺀다. 전체 범위를 못 읽은 workspace가
+  있으면 합계 분모·미확인 수는 null이고, 알고 있는 완료 수만 표시한다.
+  채널별 `list_complete`와 `live_metadata_records`도 보존한다. 실패 채널의 파일 건수는
+  null, 목록 일부를 확인한 채널의 건수와 전체 집계는 확인 범위의 하한값이다.
+  알려진 값이 하나도 없으면 집계도 null이다(전체 완료·대상 0개일 때만 0).
+- 누락이 있어도 조회를 끝냈으면 `completed`다. `missing > 0`은 별도 조치 필요 표시로
+  보여준다. `partial`의 건수는 조회된 범위의 수치일 뿐 전체 누락 수가 아니다.
+  `shadow_only`, `existing_needs_review`, 멤버십 불일치도 별도 검토 항목이다.
+- 콘솔에서는 **최근 실행 상태**, **최근 전체 완료 시각**, **누락/검토 건수**를 분리한다.
+  `read_status()`는 최근 완료 36시간을 freshness 기준으로 제공한다. `fresh=true`라도
+  최근 실행이 failed/partial이면 실패 표시를 감추지 않는다. 파일 없음·읽기 실패·잘못된
+  스키마는 미점검/상태 확인 불가이지 정상 0건이 아니다. stale은 내용 없음과도 다르다.
+- `error_code`: `audit_incomplete`, `audit_timeout`, `audit_process_failed`,
+  `audit_result_invalid`. 로그에서도 시크릿이 포함될 수 있는 예외 문자열은 출력하지 않는다.
+  설정/상태 경로 접근 실패로 상태 기록 자체가 불가능할 때는 service 실패와 journald를
+  함께 본다. 종료 코드는 0=완료(누락 존재 가능), 2=부분 완료, 1=실패, 3=중복 실행 생략이다.
+- 현재는 최신 회차와 최근 전체 완료만 보관한다. 영구 실행 이력·Slack 경보·콘솔 API/UI·
+  자동 복구는 이번 범위에 포함하지 않는다. B-02 인계에서 이 결과를 연결한다.
+
+서비스는 `ProtectSystem=strict`이며 쓰기 허용 경로가 `/var/lib/tybot/file-audit`뿐이다.
+아카이브 안으로 상태 경로를 설정하면 실행기가 거부한다. 원본·정본은 수정하지 않는다.
+커스텀 상태 경로를 쓸 때는 env와 unit의 쓰기 허용 경로도 함께 검토해야 한다.
+
 ## Master용 기존 절차
 
 봇 초대 전 파일과 메시지 이벤트에서 놓친 파일을 채널별 `files.list`로 찾는다.

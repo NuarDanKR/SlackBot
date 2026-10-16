@@ -7,6 +7,7 @@ UNITS=(
   tybot-convert-alert.timer
   tybot-convert-nightly.timer
   tybot-convert-retry.timer
+  tybot-file-audit.timer
   tybot-schedule-dm.timer
   tybot-index.timer
   tybot-review-dm.timer

@@ -1,0 +1,11 @@
+[Unit]
+Description=TYBot daily read-only Archiver file audit
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=900
+Persistent=true
+Unit=tybot-file-audit.service
+
+[Install]
+WantedBy=timers.target

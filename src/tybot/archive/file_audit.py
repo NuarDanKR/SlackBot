@@ -37,6 +37,9 @@ def audit(workspaces: list[str], *, config_loader, client_factory, repo,
             client = client_factory(cfg)
             identity_validator(cfg, client.auth_test())
             rows = {str(row["channel_id"]): row for row in repo.channels(workspace)}
+            report["target_channels"] = sum(
+                channel_membership.is_collectible(row) for row in rows.values()
+            )
             joined = channel_membership.fetch_joined(client)
             report["joined_channels"] = len(joined)
             eligible = [channel for channel in joined

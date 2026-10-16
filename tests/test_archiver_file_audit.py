@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tybot.archive.file_audit import audit
+from tybot.archive.file_audit_job import _summary
 
 CHANNEL = "C0123456789"
 
@@ -88,6 +89,7 @@ def test_stale_db_membership_is_reported_not_silently_empty(setup):
     report = audit(["mgmt"], **args)
     assert report["complete"] is False
     assert report["workspaces"][0]["db_joined_not_in_slack"] == [CHANNEL]
+    assert report["workspaces"][0]["target_channels"] == 1
 
 
 def test_failed_workspace_does_not_stop_others_or_leak_errors(setup):
@@ -137,3 +139,27 @@ def test_unverified_slack_identity_is_not_allowed_to_list_files(setup):
 
 def test_empty_registry_is_not_a_successful_audit(setup):
     assert audit([], **setup[0])["complete"] is False
+
+
+def test_actual_audit_output_matches_scheduled_console_summary(setup):
+    source = audit(["mgmt", "tec"], **setup[0])
+    summary = _summary(source)
+    assert summary["complete"] is True
+    assert summary["coverage"]["target_channels"] == 2
+    assert summary["coverage"]["complete_channels"] == 2
+    assert summary["counts"]["missing"] == 2
+    assert all(row["channels"][0]["list_complete"] is True for row in summary["workspaces"])
+
+
+def test_actual_failed_membership_retains_known_db_scope(setup):
+    args, _, clients = setup
+
+    def fail(**kwargs):
+        raise RuntimeError("private SDK body")
+
+    clients["mgmt"].users_conversations = fail
+    summary = _summary(audit(["mgmt"], **args))
+    assert summary["complete"] is False
+    assert summary["counts"]["missing"] is None
+    assert summary["coverage"]["target_channels"] == 1
+    assert summary["coverage"]["unconfirmed_channels"] == 1

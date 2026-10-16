@@ -1,0 +1,27 @@
+[Unit]
+Description=TYBot read-only Archiver file inventory audit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=TYBOT_ENV_FILE=/etc/tybot/archiver.env
+Environment=STATE_DIR=/var/lib/tybot
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.archive.file_audit_job
+TimeoutStartSec=3700
+TimeoutStopSec=30
+KillMode=control-group
+SuccessExitStatus=3
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-file-audit
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tybot/file-audit
+
