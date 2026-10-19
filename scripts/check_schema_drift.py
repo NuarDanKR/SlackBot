@@ -43,6 +43,20 @@ EXIT_INPUT = 2
 
 SQL_DIR = pathlib.Path(__file__).resolve().parent.parent / "deploy" / "sql"
 
+# Exact ownership exceptions, not a prefix/file-wide exclusion. Structure is
+# still checked; granting these tables to Master/collector is itself drift.
+VISION_TABLES = {
+    name: "archiver_vision_schema.sql" for name in (
+        "archiver_vision_approval", "archiver_vision_job",
+        "archiver_vision_policy", "archiver_vision_policy_audit",
+    )
+}
+VISION_ROLE = "tybot_vision"
+VISION_REQUIRED = {
+    table: {"SELECT", "INSERT"} | (set() if table.endswith("_audit") else {"UPDATE"})
+    for table in VISION_TABLES
+}
+
 # 스키마 파일이 선언하는 것들. **주석 처리된 줄은 제외한다** — 예시로 적어 둔 GRANT 나
 # 롤백 안내가 요구사항으로 잡히면 없는 고장을 매번 보고한다.
 ADD_COLUMN_RE = re.compile(
@@ -117,6 +131,48 @@ def live(conn) -> tuple[set[tuple[str, str]], set[str], set[str]]:
     return columns, tables, denied
 
 
+def vision_access(conn) -> tuple[list[tuple[str, str, str]], bool]:
+    """Check effective privileges, including inherited/PUBLIC/owner grants.
+
+    Missing optional service role does not block the existing bot deployment.
+    It must be provisioned/verified separately before Vision activation.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT rolname FROM pg_roles WHERE rolname = ANY(%s) OR rolname=current_user",
+                    (["tyslackai", "tybot", "tybot_archiver", VISION_ROLE],))
+        roles = {str(row["rolname"]) for row in cur.fetchall()}
+        cur.execute("""
+            SELECT r.rolname AS role_name, c.relname AS table_name, p.privilege,
+                   has_table_privilege(r.oid, c.oid, p.privilege) AS allowed,
+                   CASE WHEN p.privilege IN ('SELECT','INSERT','UPDATE','REFERENCES')
+                        THEN has_any_column_privilege(r.oid, c.oid, p.privilege)
+                        ELSE false END AS column_allowed
+              FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+              CROSS JOIN pg_roles r
+              CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE',
+                                     'TRUNCATE','REFERENCES','TRIGGER']) AS p(privilege)
+             WHERE n.nspname='public' AND c.relkind='r'
+               AND c.relname = ANY(%s) AND r.rolname = ANY(%s)
+            """, (list(VISION_TABLES), sorted(roles)))
+        rows = list(cur.fetchall())
+    problems = []
+    for row in rows:
+        role, table, privilege = row['role_name'], row['table_name'], row['privilege']
+        allowed = bool(row['allowed'] or row['column_allowed'])
+        required = role == VISION_ROLE and privilege in VISION_REQUIRED[table]
+        # Required table privileges cannot be replaced with partial column grants.
+        if required and not row['allowed']:
+            problems.append((role, table, f"missing_{privilege.lower()}"))
+        elif not required and allowed:
+            problems.append((role, table, f"unexpected_{privilege.lower()}"))
+    return sorted(problems), VISION_ROLE in roles
+
+
+def required_bot_access(tables: dict[str, str], denied: set[str]) -> list[str]:
+    return sorted(name for name, source in tables.items() if name in denied
+                  and VISION_TABLES.get(name) != source)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="스키마 선언 ↔ 실제 DB 대조 (읽기 전용)")
     ap.add_argument("--verbose", action="store_true", help="대조한 항목 전부 출력")
@@ -149,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
                 return EXIT_INPUT
             return EXIT_OK
         have_columns, have_tables, denied = live(conn)
+        access_problems, vision_role_exists = vision_access(conn)
 
     missing_tables = sorted(
         (t, f) for t, f in want_tables.items() if t not in have_tables
@@ -178,17 +235,26 @@ def main(argv: list[str] | None = None) -> int:
 
     # 선언된 표 중 **권한이 없는 것.** 표가 없는 것과 조치가 다르다 — 스키마를 다시
     # 적용해도 아무것도 안 바뀐다. GRANT 가 필요하다.
-    no_access = sorted(name for name in want_tables if name in denied)
+    no_access = required_bot_access(want_tables, denied)
     if no_access:
         print(f"\n🟠 표는 있는데 봇 역할이 읽거나 쓸 수 없는 것 {len(no_access)}개:")
         for table in no_access:
             print(f"   {table}")
-        print("\n   스키마 재적용으로는 안 고쳐진다. GRANT 가 필요하다:")
-        print("   sudo -u postgres psql -p 55432 -d tyslackai -c \\")
-        print(f'     "GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(no_access)}'
-              ' TO tyslackai"')
+        print("\n   해당 스키마의 역할별 GRANT를 확인하세요. 일괄 CRUD 권한을 주지 마세요:")
+        for source in sorted({want_tables[name] for name in no_access}):
+            print(f"   /opt/tybot/deploy/sql/{source}")
 
-    if not missing_tables and not missing_columns and not no_access:
+    if access_problems:
+        print(f"\nVision 역할별 권한 불일치 {len(access_problems)}개:")
+        for role, table, code in access_problems:
+            print(f"   {role}: {table} ({code})")
+        print("   archiver_vision_schema.sql의 전용 역할 권한을 대조하세요.")
+        print("   Master/수집기 권한을 넓혀 해결하지 마세요.")
+    if any(table in want_tables for table in VISION_TABLES) and not vision_role_exists:
+        print("\nVision 전용 역할 미생성: 구조만 배포된 준비 상태입니다.")
+        print("   Vision 활성화 전 전용 역할/접속 자격 검증이 별도로 필요합니다.")
+
+    if not missing_tables and not missing_columns and not no_access and not access_problems:
         print("\n✅ 선언과 실제가 같다.")
         return EXIT_OK
     if not missing_tables and not missing_columns:
