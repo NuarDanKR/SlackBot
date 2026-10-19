@@ -699,6 +699,17 @@ Codex QA 및 남은 항목:
 
 ### 구현된 것 (2026-09-15)
 
+2026-10-19 후속: **구현 완료·운영 검증 대기 (Codex/2026-10-19)**. PF Hermes v3
+어댑터가 `display_hint`를 전달하지 않아 표 형식 안내가 소실되던 경로를 보완했다.
+비교·순위·현황처럼 같은 필드가 반복되는 답변은 auto/report에서도 표를 우선하고,
+단일 설명과 사용자의 명시적 다른 형식 요청은 유지한다. RPC 스키마·근거·ACL·
+Canvas 공유 범위와 Hermes 소스는 변경하지 않았다.
+서명된 RPC 요청의 다섯 layout 안내 전달·표 응답의 Canvas Markdown 보존·기존
+무힌트 요청 호환성을 검증했다. 전체 4,804 passed · 72 skipped · 7 warnings
+(Windows 가드 출력 디코딩), Ruff 통과. TYBot 배포·재시작 후 비교/순위 질문을
+새 메시지로 실행해 실제 PF 모델의 표 사용·수치·출처와 Canvas 표시를 확인한다.
+Hermes worker 재시작은 이 변경의 필수 절차가 아니다. 실제 모델 호출은 미검증이다.
+
 | 축 | 자리 |
 |---|---|
 | A. 증거 기반 PII 판정 | `src/tybot/pii_screen.py` · `archive/writer.screen` 은 직접 식별자만 |

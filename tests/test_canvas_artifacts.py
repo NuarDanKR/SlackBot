@@ -262,6 +262,21 @@ def test_display_hint_is_a_format_note_not_an_action():
     assert "생성" not in hint and "Canvas" not in hint
 
 
+@pytest.mark.parametrize("layout", ["auto", "report", "table"])
+def test_comparison_display_hints_prefer_tables_without_inventing_cells(layout):
+    task = Intent(kind="search", question="가상 현장별 현황을 비교해줘", artifact_layout=layout)
+    master_task = master_planner.from_intents([task], text=task.question).tasks[0]
+
+    hint = display_hint_for(master_task)
+
+    assert "Markdown 표" in hint
+    assert "비교·순위·현황" in hint
+    assert "단일 사실·설명은 억지로 표로 만들지 않는다" in hint
+    assert "다른 형식을 명시하면 그 요청을 따른다" in hint
+    assert "근거 표시" in hint and "확인 불가" in hint
+    assert "코드펜스" in hint
+
+
 def test_unresolved_research_question_keeps_the_original_sentence():
     """planner 가 못 풀었으면 **정규식으로 잘라 내지 않는다.**
 

@@ -811,14 +811,23 @@ def preview_rules(
 
 # layout → 형식 안내. **동작 요청이 아니다.** 전문 봇은 사실만 쓰고, Canvas 생성과
 # 공유는 호출자가 한다(설계 §3.3).
+TABULAR_HINT = (
+    "비교·순위·현황처럼 여러 대상에 같은 필드가 반복되면 문단 나열보다 Markdown 표를 우선한다. "
+    "질문에 맞는 비교 열을 골라 2~8개로 유지하고, 긴 변동 사유는 표 아래 대상별로 설명한다. "
+    "단일 사실·설명은 억지로 표로 만들지 않는다. "
+    "사용자가 문단·목록 등 다른 형식을 명시하면 그 요청을 따른다. "
+    "표의 수치·단위·기준 시점과 근거 표시는 보존하고, 없는 값은 확인 불가로 표시한다. "
+    "표는 코드펜스로 감싸지 않는다."
+)
 DISPLAY_HINTS = {
+    "auto": TABULAR_HINT,
     "calendar_grid": (
         "반복되는 일정은 날짜/내용/관련 공지/비고 열의 Markdown 표로 답하라. "
         "날짜는 근거에 적힌 정밀도를 그대로 쓴다."
     ),
     "timeline": "시간 순서가 드러나게 시작·종료와 내용을 Markdown 표로 답하라.",
-    "table": "같은 필드가 반복되면 Markdown 표로 답하라. 열은 2~8개로 유지한다.",
-    "report": "결론을 먼저 쓰고 근거를 문단으로 잇는다.",
+    "table": "같은 필드가 반복되면 Markdown 표로 답하라. " + TABULAR_HINT,
+    "report": "결론을 먼저 쓴다. " + TABULAR_HINT,
 }
 
 
@@ -845,8 +854,8 @@ def is_execution_refusal(text: str) -> bool:
 def display_hint_for(task) -> str:
     """이 작업의 표시 힌트. 없으면 빈 문자열이다.
 
-    `auto` 는 힌트를 만들지 않는다 — **모르면서 지시하면** 전문 봇이 자료에 맞지
-    않는 형식에 답을 억지로 끼워 넣는다.
+    `auto`/`report`도 반복 필드는 표를 우선하되, 단일 설명은 문단으로 유지한다.
+    최종 전달이 긴 답변용 Canvas로 전환돼도 표 원문을 그대로 활용할 수 있다.
     """
     artifact = getattr(task, "artifact", None)
     layout = str(getattr(artifact, "layout", "") or "")

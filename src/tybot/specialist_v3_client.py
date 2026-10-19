@@ -172,6 +172,8 @@ class ExternalV3Adapter:
         self.phase = "external-v3"
 
     def complete(self, request) -> str:
+        from .specialist_adapters import _with_display_hint
+
         # 실시간 Slack 조회는 요청별 ToolBox가 그 경로를 실제로 제공할 때만 연다.
         # 기본 계약에는 이 도구가 없으므로 여기서 명시하지 않으면, 수집 직후의
         # 질문은 아카이브가 따라잡을 때까지 외부 전문가가 근거를 얻을 수 없다.
@@ -184,7 +186,7 @@ class ExternalV3Adapter:
             self.transport,
             workspace=self.workspace,
             authorization_id=self.authorization_id,
-            question=request.question,
+            question=_with_display_hint(request.question, request),
             toolbox=self.toolbox,
             secret=self.secret,
             credential_id=self.credential_id,

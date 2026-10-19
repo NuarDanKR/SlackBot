@@ -4,6 +4,8 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from tybot import specialist_v3_client as client
 from tybot import specialist_wire as signing
 from tybot import specialist_wire_v3 as wire
@@ -36,9 +38,10 @@ class Box:
 
 
 class Hermes:
-    def __init__(self, registry, *, bad_signature=False):
+    def __init__(self, registry, *, bad_signature=False, answer="grounded answer"):
         self.registry = registry
         self.bad_signature = bad_signature
+        self.answer = answer
         self.calls = []
         self.requests = []
 
@@ -65,7 +68,7 @@ class Hermes:
                 "schema": wire.SCHEMA_RESPONSE,
                 "request_id": request["request_id"],
                 "status": wire.STATUS_ANSWERED,
-                "answer": "grounded answer",
+                "answer": self.answer,
                 "used_evidence": [evidence_id],
                 "usage": {
                     "model": "claude-opus-5-5",
@@ -217,3 +220,57 @@ def test_external_adapter_exposes_sanitized_rpc_runtime_metrics():
     assert adapter.search_calls == 1
     assert adapter.search_rounds == 1
     assert adapter.tool_calls_by_name == {"search": 1}
+
+
+@pytest.mark.parametrize("layout", ["auto", "report", "table", "calendar_grid", "timeline"])
+def test_external_adapter_transmits_layout_hint_and_preserves_table(layout):
+    from tybot import canvas_answer, master_planner
+    from tybot.intent import Intent
+    from tybot.specialist_router import display_hint_for
+
+    question = "가상 현장별 현황과 변동 사유를 비교해줘"
+    intent = Intent(kind="search", question=question, artifact_layout=layout)
+    task = master_planner.from_intents([intent], text=question).tasks[0]
+    hint = display_hint_for(task)
+    table = "| 대상 | 현황 |\n| --- | --- |\n| 가상 A | 확인 불가 |"
+    registry = ToolSessionRegistry()
+    hermes = Hermes(registry, answer=table)
+    box = Box()
+    adapter = client.ExternalV3Adapter(
+        "hermes", workspace="tyit", authorization_id="tyit:member",
+        toolbox=box, secret=SECRET, credential_id=CREDENTIAL_ID,
+        registry=registry, transport=hermes,
+    )
+    request = SimpleNamespace(
+        question=question, display_hint=hint,
+        deadline=SimpleNamespace(remaining=lambda: 30),
+    )
+
+    answer = adapter.complete(request)
+
+    sent = hermes.requests[0]
+    assert sent["question"].startswith(question + "\n\n")
+    assert hint in sent["question"]
+    assert "Canvas 생성과 공유는 호출자가 담당한다" in sent["question"]
+    assert sent["workspace"] == "tyit"
+    assert sent["authorization_id"] == "tyit:member"
+    assert sent["tools"]["allow"] == list(wire.DEFAULT_TOOLS)
+    assert answer == table
+    assert table in canvas_answer.markdown(answer)
+    assert registry.active_count == 0
+
+
+def test_external_adapter_without_display_hint_keeps_question_unchanged():
+    registry = ToolSessionRegistry()
+    hermes = Hermes(registry)
+    adapter = client.ExternalV3Adapter(
+        "hermes", workspace="tyit", authorization_id="tyit:member",
+        toolbox=Box(), secret=SECRET, credential_id=CREDENTIAL_ID,
+        registry=registry, transport=hermes,
+    )
+    request = SimpleNamespace(
+        question="original question", deadline=SimpleNamespace(remaining=lambda: 30),
+    )
+
+    assert adapter.complete(request) == "grounded answer"
+    assert hermes.requests[0]["question"] == "original question"
