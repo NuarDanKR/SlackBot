@@ -13,6 +13,7 @@ import logging
 import re
 import string
 from dataclasses import dataclass, field
+from time import monotonic as _monotonic
 
 from .gateway.base import Message, Sensitivity
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -22,9 +23,57 @@ logger = logging.getLogger("tybot.intent")
 # 분류 전용 저가 모델. 레지스트리에 없으면 기본 모델로 폴백한다.
 CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
 
+# 분해 출력 상한.
+#
+# **500 은 지금 스키마에 맞지 않는다.** 한 task 가 쓰는 칸이 열다섯이고 그중
+# `question` · `standalone_question` · `research_question` 셋은 **질문 문장을 통째로**
+# 담는다. 한국어는 글자당 토큰이 거의 1 이라 긴 비교 질문 하나면 그 셋만으로
+# 500 을 넘는다. 최대 3 task 까지 허용하므로 실제 필요량은 그 몇 배다.
+#
+# 2026-10-19 08:19 tyit `C0C9A86JUSJ` 에서 그 일이 났다 — 응답이 JSON 으로
+# 시작해 `kind=search` 까지 적다가 상한에서 끊겼고, `_extract_json()` 은 닫는
+# 괄호가 없자 **「JSON 없음」** 으로 보고했다. 모델이 엉뚱한 소리를 한 것과
+# 분량이 모자란 것이 같은 오류로 보여, 상한이 원인이라는 신호가 어디에도 없었다.
+#
+# 잘림이 나면 한 번 더, 더 넉넉한 상한으로 묻는다(아래). 두 값 모두 저가 분류
+# 모델 기준이라 한 번의 재시도 비용이 답변 한 건의 비용을 넘지 않는다.
+PLANNER_MAX_TOKENS = 1200
+PLANNER_RETRY_MAX_TOKENS = 2400
+
+# 분해 전체에 주는 시간. **첫 호출과 재시도가 같은 시계를 쓴다.**
+#
+# 비용은 gateway 가 보지만 시간은 별개다. 남은 시간을 안 보면 첫 호출이 느렸던
+# 질문이 재시도까지 더해 두 배로 느려지고, 그동안 사람은 아무것도 못 본다.
+# 분해는 답변의 **앞단**이라 여기서 쓴 시간이 전문 봇 예산에서 그대로 빠진다.
+#
+# 재시도에는 최소 시간이 필요하다. 2초 남은 상태로 2,400토큰을 부르면 어차피
+# 시간 초과로 끝나고, 그 2초는 「잘렸다」 를 돌려주는 데 쓰는 편이 낫다.
+PLANNER_DEADLINE_SECONDS = 25.0
+PLANNER_RETRY_MIN_SECONDS = 6.0
+
 
 class PlanningUnavailable(RuntimeError):
     """The LLM planner could not produce a valid routing decision."""
+
+
+class PlannerOutputError(ValueError):
+    """분해 출력을 쓸 수 없다. **왜 못 쓰는지**를 코드로 들고 다닌다."""
+
+    code = "planner_invalid_json"
+
+
+class PlannerOutputTruncated(PlannerOutputError):
+    """출력이 **도중에 끊겼다.** 모델이 틀린 것이 아니라 분량이 모자란 것이다.
+
+    둘을 섞으면 안 되는 이유: 사람이 할 일이 다르다. 잘림은 상한을 올리거나 다시
+    물으면 되고, 스키마 오류는 프롬프트를 고쳐야 한다. 한 코드로 묶으면 상한이
+    원인인 장애가 「모델이 이상한 답을 한다」 로 몇 주씩 남는다.
+
+    **끊긴 JSON 을 임의로 닫아 실행하지 않는다.** 닫으면 모델이 쓰다 만 task 가
+    완성된 판단처럼 흘러가고, 빠진 칸은 기본값으로 채워져 아무 신호도 안 남는다.
+    """
+
+    code = "planner_truncated"
 
 KINDS = (
     "status", "help", "summary", "search", "advice", "smalltalk", "out_of_scope",
@@ -551,14 +600,35 @@ PLANNER_PROMPT = CLASSIFIER_PROMPT.replace(
 판정해도 된다 — 코드가 그것을 보고 「지원하지 않는다」 고 사람에게 알린다.
 **실행한 척하지 않기 위해** 있는 그대로 판정하는 것이 낫다.
 
+**출력을 짧게 유지한다.** 긴 질문에서 모든 칸을 채우면 출력이 상한에 걸려
+**JSON 이 도중에 끊기고, 그러면 답을 통째로 못 쓴다.**
+
+항상 넣는 칸: `kind` · `question` · `terms`.
+`specialist` 를 고르면 `capability` 와 `confidence` 도 **반드시** 넣는다 —
+`confidence` 가 없으면 그 선택은 쓰이지 않는다.
+
+아래는 **해당될 때만** 넣고, 아니면 칸 자체를 생략한다.
+
+- `standalone_question`: `question` 과 **다를 때만.** 풀 지칭어가 없으면 생략한다 —
+  같은 문장을 두 번 쓰지 않는다.
+- `research_question`: 뺄 산출물 지시가 **있을 때만.** 없으면 생략한다.
+- `reference_mode`: `none` 이 아닐 때만.
+- `asks_about_our_sources`: `true` 일 때만.
+- `artifact_delivery`·`artifact_operation`·`artifact_layout`·`artifact_title`:
+  산출물 요청이 있을 때만.
+- `target_unit`: 사용자가 단위를 **명시했을 때만.**
+
 JSON 만 출력한다. 설명·코드펜스 금지.
+보통은 이 모양이다:
+{"tasks": [{"kind": "search", "question": "...", "terms": ["..."],
+  "capability": "internal_document_qa", "specialist": "hermes", "confidence": 0.8}]}
+칸이 전부 필요한 경우:
 {"tasks": [{"kind": "...", "question": "...", "standalone_question": "...",
   "capability": "...", "specialist": "...", "confidence": 0.0,
   "reference_mode": "none", "asks_about_our_sources": false,
   "research_question": "...", "artifact_delivery": "message",
   "artifact_operation": "answer_document", "artifact_layout": "auto",
-  "artifact_title": "", "target_unit": "",
-  "days": 7, "terms": ["..."]}]}""",
+  "artifact_title": "", "target_unit": "", "terms": ["..."]}]}""",
 )
 
 _CLAUSE_TRIM = string.whitespace + ',，'
@@ -847,6 +917,95 @@ def artifacts_block() -> str:
     return f"<지원_산출물>\n{rows}\n</지원_산출물>"
 
 
+def _stop_reason(resp) -> str:
+    """응답이 왜 멈췄나. 안 들고 오는 응답 객체도 있어 **없으면 빈 문자열**이다."""
+    return str(getattr(resp, "stop_reason", "") or "")
+
+
+def _log_planner_failure(exc: Exception, resp) -> None:
+    """분해가 왜 실패했나. **질문도 모델 응답 본문도 남기지 않는다.**
+
+    본문을 찍던 줄이 있었다(`raw=%r`). 분해 응답의 `question` 칸에는 사용자가 쓴
+    문장이 그대로 들어 있어서, 그 로그는 업무 내용을 journal 로 복사하는 것과
+    같았다(원칙 5). 원인을 가리는 데 필요한 것은 본문이 아니라 **계기판**이다 —
+    무슨 코드로 실패했고, 어느 모델이, 토큰을 얼마나 쓰고, 왜 멈췄나.
+
+    길이와 괄호 균형은 남긴다. 내용이 아니라 모양이고, 「상한에서 끊겼나」 를
+    사람이 로그만 보고 되짚을 수 있는 유일한 값이다.
+    """
+    text = str(getattr(resp, "text", "") or "")
+    logger.warning(
+        "분해 실패 code=%s model=%s stop=%s in=%d out=%d chars=%d unclosed=%s",
+        getattr(exc, "code", "planner_error"),
+        str(getattr(resp, "model", "") or "-"),
+        str(getattr(resp, "stop_reason", "") or "-"),
+        int(getattr(resp, "input_tokens", 0) or 0),
+        int(getattr(resp, "output_tokens", 0) or 0),
+        len(text),
+        _is_incomplete_json(text),
+    )
+
+
+def _planner_json(router: Router, messages, resp, *, cap: int, clock, ends_at: float):
+    """분해 응답에서 JSON 을 꺼낸다. **잘렸을 때만** 한 번 더 묻는다.
+
+    재시도를 잘림에만 묶는 이유: 스키마가 틀린 답은 다시 물어도 같은 답이 온다.
+    그때 한 번 더 부르는 것은 비용과 시간만 쓰고 결과를 바꾸지 못한다.
+
+    한 번뿐이다. 두 번째 잘림은 상한 문제가 아니라 프롬프트나 질문 쪽 문제이고,
+    계속 올리면 한 질문이 분류 예산을 통째로 먹는다. 올려 보고 안 되면 그대로
+    실패로 올린다 — **끊긴 JSON 을 닫아서 실행하지 않는다.**
+
+    `ends_at` 은 첫 호출과 **같은 시계**의 절대 경계다. 비용은 gateway 가 보지만
+    시간은 별개라, 남은 시간을 안 보면 첫 호출이 느렸던 질문이 재시도까지 더해
+    두 배로 느려진다. 사람은 그동안 아무것도 못 본다.
+
+    실패를 올릴 때는 **실제로 읽은 응답**을 예외에 매단다(`response`). 바깥에서
+    첫 응답으로 로그를 찍으면, 상한을 올린 뒤에도 옛 숫자(`max_tokens`·1,200)가
+    남아 원인을 거꾸로 짚게 된다.
+    """
+    # `getattr` 로 읽는다. 응답 객체가 `stop_reason` 을 안 들고 오는 경로가 있고
+    # (옛 프로바이더·대역), 거기서 AttributeError 가 나면 **분해 전체가 조용히
+    # 규칙 폴백으로 떨어진다** — 잘림을 고치려다 더 넓게 망가뜨리는 길이다.
+    try:
+        return _extract_json(resp.text, stop_reason=_stop_reason(resp)), resp
+    except PlannerOutputTruncated as first:
+        if cap >= PLANNER_RETRY_MAX_TOKENS:
+            raise
+        left = ends_at - clock()
+        if left < PLANNER_RETRY_MIN_SECONDS:
+            # 남은 시간이 없다. **첫 실패를 올린다** — 시간을 더 쓰는 것보다
+            # 「잘렸다」 를 빨리 돌려주는 쪽이 사람에게 낫다.
+            logger.warning("분해 재시도 생략 - 남은 시간 %.1f초", max(0.0, left))
+            raise
+        _log_planner_failure(first, resp)
+        try:
+            retried = router.complete(
+                messages,
+                model=str(getattr(resp, "model", "") or "") or None,
+                sensitivity=Sensitivity.CONFIDENTIAL,
+                max_tokens=PLANNER_RETRY_MAX_TOKENS,
+                timeout_seconds=left,
+            )
+        except Exception as exc:
+            # 재시도 자체가 막혔다(비용 상한·모델 장애·시간 초과). **첫 실패를
+            # 올린다** — 사람이 봐야 할 것은 「잘렸다」 이지 「재시도가 안 됐다」 가
+            # 아니다.
+            logger.warning("분해 재시도 실패(%s) - 첫 결과로 닫는다", type(exc).__name__)
+            raise first from exc
+        logger.info(
+            "분해 잘림 재시도 model=%s cap=%d→%d left=%.1f초",
+            str(getattr(resp, "model", "") or "-"), cap, PLANNER_RETRY_MAX_TOKENS, left,
+        )
+        try:
+            return _extract_json(retried.text, stop_reason=_stop_reason(retried)), retried
+        except PlannerOutputError as second:
+            # **두 번째 응답을 매단다.** 안 매달면 바깥 `resp` 는 첫 응답이고,
+            # 로그에 옛 `stop_reason` 과 옛 토큰 수가 찍힌다.
+            second.response = retried
+            raise
+
+
 def plan(
     text: str,
     router: Router | None,
@@ -880,13 +1039,18 @@ def plan(
     if roster:
         user_text = f"{roster}\n\n{user_text}"
     messages = [Message("system", PLANNER_PROMPT), Message("user", user_text)]
+    # **시계를 한 번만 만든다.** 모델 폴백 후보도, 잘림 재시도도 같은 경계를 본다 —
+    # 후보마다 새 시간을 주면 후보 수만큼 느려진다.
+    clock = _monotonic
+    ends_at = clock() + PLANNER_DEADLINE_SECONDS
     for model in (CLASSIFIER_MODEL, None):
         try:
             resp = router.complete(
                 messages,
                 model=model,
                 sensitivity=Sensitivity.CONFIDENTIAL,
-                max_tokens=500,
+                max_tokens=PLANNER_MAX_TOKENS,
+                timeout_seconds=max(0.0, ends_at - clock()),
             )
             break
         except (UnknownModel, ModelNotAllowed) as e:
@@ -902,10 +1066,13 @@ def plan(
         return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)
 
     try:
-        raw = _extract_json(resp.text)
+        raw, resp = _planner_json(
+            router, messages, resp,
+            cap=PLANNER_MAX_TOKENS, clock=clock, ends_at=ends_at,
+        )
         items = raw.get("tasks")
         if not isinstance(items, list) or not items:
-            raise ValueError(f"tasks 없음: {raw!r}")
+            raise PlannerOutputError("tasks 없음")
         tasks: list[Intent] = []
         for item in items:
             kind = str(item.get("kind", "")).strip()
@@ -940,7 +1107,13 @@ def plan(
                     # 아래 넷은 **제안**이다. 검증은 `master_planner` 와
                     # `specialist_router.select()` 가 한다 — 능력은 열거형,
                     # 전문 봇 키는 활성 후보, 부모 ID 는 이 스레드의 것만 통과한다.
-                    standalone_question=str(item.get("standalone_question") or "").strip(),
+                    # 생략하면 `question` 과 같다는 뜻이다. 모델이 같은 문장을
+                    # 두 번 쓰지 않게 했으므로(프롬프트) 여기서 채운다 — 비워 두면
+                    # `master_planner._standalone()` 이 이전 턴 질문을 앞에 붙이는
+                    # 다른 가지로 가서, 묻지 않은 주제가 검색어에 섞인다.
+                    standalone_question=(
+                        str(item.get("standalone_question") or "").strip() or question
+                    ),
                     required_capability=str(item.get("capability") or "").strip(),
                     suggested_specialist=str(item.get("specialist") or "").strip(),
                     routing_confidence=_clamp_confidence(item.get("confidence")),
@@ -966,10 +1139,13 @@ def plan(
                 )
             )
         if not tasks:
-            raise ValueError("유효한 task 없음")
+            raise PlannerOutputError("유효한 task 없음")
     except Exception as e:
-        logger.warning("분해 파싱 실패(%s) - 규칙 기반으로 폴백. raw=%r", e, resp.text[:200])
+        # **실제로 읽은 응답**으로 찍는다. 재시도의 파싱이 실패하면 바깥 `resp` 는
+        # 아직 첫 응답이라, 그대로 찍으면 옛 `stop_reason` 과 옛 토큰 수가 남는다.
+        _log_planner_failure(e, getattr(e, "response", None) or resp)
         if not allow_rule_fallback:
+            # Master v2 는 정규식으로 내려가지 않는다. 못 판단했으면 못 판단한 것이다.
             raise PlanningUnavailable("LLM planner returned invalid output") from e
         return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)
 
@@ -981,15 +1157,71 @@ def plan(
     return _dedupe(tasks)
 
 
-def _extract_json(raw: str) -> dict:
-    """코드펜스나 앞뒤 설명이 붙어도 첫 JSON 객체를 꺼낸다."""
+def _is_incomplete_json(s: str) -> bool:
+    """이 문자열이 **끝나지 않은** JSON 인가. 문자열 안의 괄호는 세지 않는다.
+
+    닫아 주지 않는다 — 여는 것이 남았는지만 본다. 여기서 추측해 닫으면 모델이
+    쓰다 만 task 가 완성된 판단으로 흘러간다.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in s:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+    return in_string or depth > 0
+
+
+def _extract_json(raw: str, *, stop_reason: str = "") -> dict:
+    """코드펜스나 앞뒤 설명이 붙어도 첫 JSON 객체를 꺼낸다.
+
+    **잘린 출력과 틀린 출력을 가른다.** 전에는 둘 다 「JSON 없음」 이었고, 그래서
+    상한이 모자라 끊긴 장애가 모델 품질 문제로 보였다(2026-10-19).
+
+    ## 종료 사유가 형식 판정보다 먼저다
+
+    `stop_reason == "max_tokens"` 면 **괄호가 맞아도 잘림으로 본다.** 모델이
+    스스로 멈춘 것이 아니라 상한에 걸려 끊긴 것이고, 그때 나온 것은 모델이
+    **쓰려던 것이 아니다.**
+
+    JSON 문법이 완성돼 있어도 작업 생성이 끝났다는 보장은 없다 — 세 개를 쓰려다
+    첫 개를 닫은 자리에서 끊겼는지, 다 쓰고 뒤에 설명을 붙이다 끊겼는지는
+    본문 모양으로 구별할 수 없다. 구별할 수 없는 것을 추측해 **정상으로 수락하면
+    반쪽 계획이 완성된 판단처럼 흘러간다.**
+
+    값은 재시도 한 번뿐이고, 다 쓰고 끊긴 경우에도 재시도가 같은 답을 더 넉넉한
+    상한으로 돌려준다. 잃는 것은 호출 하나, 막는 것은 모르는 채로 내리는 판단이다.
+    """
+    if stop_reason == "max_tokens":
+        raise PlannerOutputTruncated("상한에서 끊긴 응답")
     s = raw.strip()
     if s.startswith("```"):
         s = re.sub(r"^```[a-z]*\n?|\n?```$", "", s).strip()
-    start, end = s.find("{"), s.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError(f"JSON 없음: {raw[:120]!r}")
-    return json.loads(s[start : end + 1])
+    start = s.find("{")
+    if start == -1:
+        raise PlannerOutputError("JSON 없음")
+    body = s[start:]
+    end = body.rfind("}")
+    if end == -1 or _is_incomplete_json(body[: end + 1]):
+        # 열어 놓고 닫지 않았다. 2026-10-19 장애가 정확히 이 모양이었다.
+        # `stop_reason` 을 안 주는 프로바이더에서는 이것이 유일한 신호다.
+        raise PlannerOutputTruncated("JSON 이 닫히지 않음")
+    try:
+        return json.loads(body[: end + 1])
+    except json.JSONDecodeError as exc:
+        raise PlannerOutputError("JSON 파싱 실패") from exc
 
 
 def classify(text: str, router: Router | None) -> Intent:

@@ -22,7 +22,8 @@ class ScriptedProvider:
         self.raises = raises
         self.models: list[str] = []
 
-    def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0):
+    def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0,
+                 timeout_seconds=None):
         if self.raises:
             raise self.raises
         self.models.append(spec.model)
@@ -411,3 +412,335 @@ def test_a_real_capability_question_is_still_caught():
         "그럼 채널에 있는 폴더는?",
     ):
         assert intent.is_source_capability(text), text
+
+
+# --- 분해 출력 잘림 (2026-10-19 tyit C0C9A86JUSJ) -----------------------------
+#
+# 응답이 JSON 으로 시작해 `kind=search` 까지 적다가 상한에서 끊겼는데,
+# `_extract_json()` 은 닫는 괄호가 없자 **「JSON 없음」** 으로 보고했다. 모델이
+# 엉뚱한 소리를 한 것과 분량이 모자란 것이 같은 오류로 보여, 상한이 원인이라는
+# 신호가 어디에도 없었다.
+
+
+class _CountingProvider:
+    """호출마다 다른 응답을 돌려준다. **상한을 그대로 기록한다.**"""
+
+    name = "anthropic"
+
+    def __init__(self, *responses, raises: Exception | None = None):
+        self.responses = list(responses)
+        self.raises = raises
+        self.caps: list[int] = []
+        self.timeouts: list[float | None] = []
+        self.calls = 0
+
+    def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0,
+                 timeout_seconds=None):
+        self.calls += 1
+        self.caps.append(max_tokens)
+        self.timeouts.append(timeout_seconds)
+        if self.raises:
+            raise self.raises
+        text, stop = self.responses[min(self.calls - 1, len(self.responses) - 1)]
+        return LLMResponse(text, spec.model, self.name, 900, 40, 0.0002, stop_reason=stop)
+
+
+LONG_COMPARE = (
+    "코오롱베네시트 AX BOOST SUMMIT 2026 에서 CEO 연설과 코오롱인더스트리 AX "
+    "도입사례 두 발표를 비교해서 각각의 핵심 논점과 성과 지표, 그리고 우리 "
+    "회사에 적용할 때의 시사점을 정리해줘"
+)
+
+# 운영에서 난 모양 그대로 — JSON 으로 시작하고 kind 까지 나왔는데 닫히지 않았다.
+TRUNCATED = (
+    '{"tasks": [{"kind": "search", "question": "코오롱베네시트 AX BOOST SUMMIT '
+    '2026 CEO 연설과 코오롱인더스트리 AX 도입사례의 핵심 논점", '
+    '"standalone_question": "코오롱베네시트 AX BOOST SUMMIT 2026 에서 CEO'
+)
+
+GOOD = json.dumps(
+    {"tasks": [{"kind": "search", "question": "핵심 논점", "terms": ["AX", "도입사례"]}]},
+    ensure_ascii=False,
+)
+
+
+def test_a_cut_off_json_is_not_reported_as_no_json():
+    """**잘린 것과 틀린 것은 다르다.** 사람이 할 일이 다르다."""
+    with pytest.raises(intent.PlannerOutputTruncated) as cut:
+        intent._extract_json(TRUNCATED)
+    assert cut.value.code == "planner_truncated"
+
+    with pytest.raises(intent.PlannerOutputError) as bad:
+        intent._extract_json("죄송합니다. 무슨 뜻인지 모르겠습니다.")
+    assert bad.value.code == "planner_invalid_json"
+    assert not isinstance(bad.value, intent.PlannerOutputTruncated)
+
+
+def test_the_provider_stop_reason_decides_even_without_a_brace():
+    """프로바이더가 「상한에서 끊었다」 고 말했으면 본문 모양을 추측하지 않는다."""
+    with pytest.raises(intent.PlannerOutputTruncated):
+        intent._extract_json("코오롱베네시트 AX BOOST", stop_reason="max_tokens")
+
+
+def test_a_truncated_plan_is_retried_once_with_a_bigger_cap():
+    """이번 긴 비교 질문. 한 번 더, **더 넉넉한 상한으로** 묻는다."""
+    p = _CountingProvider((TRUNCATED, "max_tokens"), (GOOD, "end_turn"))
+
+    tasks = intent.plan(LONG_COMPARE, _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 2, "잘렸으면 한 번 더 묻는다"
+    assert p.caps == [intent.PLANNER_MAX_TOKENS, intent.PLANNER_RETRY_MAX_TOKENS]
+    assert [t.kind for t in tasks] == ["search"]
+    assert tasks[0].source == "llm"
+
+
+def test_a_good_plan_is_not_retried():
+    """정상 JSON 에 재시도를 붙이면 분류 비용이 두 배가 된다."""
+    p = _CountingProvider((GOOD, "end_turn"))
+
+    tasks = intent.plan("핵심 논점 알려줘", _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 1
+    assert p.caps == [intent.PLANNER_MAX_TOKENS]
+    assert [t.kind for t in tasks] == ["search"]
+
+
+def test_a_schema_error_is_not_retried():
+    """스키마가 틀린 답은 다시 물어도 같은 답이 온다. 비용만 쓴다."""
+    p = _CountingProvider((json.dumps({"tasks": []}), "end_turn"))
+
+    with pytest.raises(intent.PlanningUnavailable):
+        intent.plan("핵심 논점 알려줘", _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 1
+
+
+def test_a_twice_truncated_plan_gives_up_instead_of_closing_the_json():
+    """**끊긴 JSON 을 닫아서 실행하지 않는다.** 두 번째도 끊기면 실패로 올린다."""
+    p = _CountingProvider((TRUNCATED, "max_tokens"))
+
+    with pytest.raises(intent.PlanningUnavailable):
+        intent.plan(LONG_COMPARE, _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 2, "재시도는 한 번뿐이다"
+
+
+def test_an_api_failure_still_falls_back_by_rule_when_allowed():
+    """API 가 죽어도 봇은 멈추지 않는다 — 규칙 폴백이 허용된 경로에서만."""
+    p = _CountingProvider(raises=RuntimeError("provider down"))
+
+    tasks = intent.plan("김해외동 기성금 얼마야?", _router(p))
+
+    assert tasks and tasks[0].source != "llm"
+
+
+def test_master_v2_never_falls_back_to_the_regex_planner():
+    """Master v2 는 정규식으로 내려가지 않는다. 못 판단했으면 못 판단한 것이다."""
+    for provider in (
+        _CountingProvider(raises=RuntimeError("provider down")),
+        _CountingProvider((TRUNCATED, "max_tokens")),
+        _CountingProvider(("설명만 적었습니다", "end_turn")),
+    ):
+        with pytest.raises(intent.PlanningUnavailable):
+            intent.plan(LONG_COMPARE, _router(provider), allow_rule_fallback=False)
+
+
+def test_the_retry_budget_failure_reports_the_truncation():
+    """재시도가 막히면(비용 상한 등) 사람이 봐야 할 것은 **잘렸다** 이다."""
+    class _OnceThenDead(_CountingProvider):
+        def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0,
+                     timeout_seconds=None):
+            self.calls += 1
+            self.caps.append(max_tokens)
+            self.timeouts.append(timeout_seconds)
+            if self.calls > 1:
+                raise RuntimeError("cost limit")
+            return LLMResponse(TRUNCATED, spec.model, self.name, 900, 40, 0.0002,
+                               stop_reason="max_tokens")
+
+    p = _OnceThenDead()
+    with pytest.raises(intent.PlanningUnavailable) as err:
+        intent.plan(LONG_COMPARE, _router(p), allow_rule_fallback=False)
+
+    assert isinstance(err.value.__cause__, intent.PlannerOutputTruncated)
+    assert p.calls == 2
+
+
+def test_the_diagnostic_log_carries_no_question_or_answer_body(caplog):
+    """진단 로그에 **질문도 모델 응답 본문도** 남기지 않는다(원칙 5)."""
+    p = _CountingProvider((TRUNCATED, "max_tokens"))
+
+    with caplog.at_level("INFO", logger="tybot.intent"), pytest.raises(
+        intent.PlanningUnavailable
+    ):
+        intent.plan(LONG_COMPARE, _router(p), allow_rule_fallback=False)
+
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "코오롱" not in said, "업무 내용이 로그로 복사됐다"
+    assert "standalone_question" not in said
+    # 대신 계기판은 남는다.
+    assert "code=planner_truncated" in said
+    assert "stop=max_tokens" in said
+    assert f"model={CLASSIFIER_MODEL}" in said
+    assert "in=900" in said and "out=40" in said
+
+
+def test_the_output_cap_fits_the_current_schema():
+    """500 은 지금 스키마에 맞지 않았다. 한 task 의 글자 칸만 그만큼 쓴다."""
+    assert intent.PLANNER_MAX_TOKENS > 500
+    assert intent.PLANNER_RETRY_MAX_TOKENS > intent.PLANNER_MAX_TOKENS
+
+
+def test_the_planner_prompt_asks_for_fewer_repeated_fields():
+    """같은 문장을 세 칸에 쓰면 긴 질문에서 상한을 넘는다."""
+    prompt = intent.PLANNER_PROMPT
+
+    assert "생략한다" in prompt
+    # `confidence` 는 생략하면 전문 봇 선택이 통째로 버려진다(min_confidence).
+    assert "`confidence` 도 **반드시** 넣는다" in prompt
+
+
+def test_an_omitted_standalone_question_falls_back_to_the_question():
+    """생략은 「같다」 는 뜻이다. 비워 두면 이전 턴 질문이 검색어에 섞인다."""
+    p = _CountingProvider((json.dumps(
+        {"tasks": [{"kind": "search", "question": "기성금 얼마야", "terms": ["기성금"]}]},
+        ensure_ascii=False,
+    ), "end_turn"))
+
+    tasks = intent.plan("기성금 얼마야", _router(p), allow_rule_fallback=False)
+
+    assert tasks[0].standalone_question == "기성금 얼마야"
+
+
+def test_a_response_without_a_stop_reason_still_plans():
+    """`stop_reason` 을 안 들고 오는 응답 객체도 있다.
+
+    거기서 AttributeError 가 나면 **분해 전체가 조용히 규칙 폴백으로 떨어진다** —
+    잘림을 고치려다 더 넓게 망가뜨리는 길이다.
+    """
+    class _Bare:
+        def __init__(self, text):
+            self.text, self.model, self.cost_usd = text, "fake", 0.0
+
+    class _BareRouter:
+        def complete(self, messages, **kw):
+            return _Bare(GOOD)
+
+    tasks = intent.plan("핵심 논점", _BareRouter(), allow_rule_fallback=False)
+
+    assert [t.kind for t in tasks] == ["search"]
+    assert tasks[0].source == "llm"
+
+
+# --- Codex 검수 반영 (2026-10-19) ---------------------------------------------
+
+
+def test_a_max_tokens_stop_is_truncated_even_when_the_json_closes():
+    """**종료 사유가 형식 판정보다 먼저다.**
+
+    괄호가 맞아도 모델이 스스로 멈춘 것이 아니다. 세 개를 쓰려다 첫 개를 닫은
+    자리에서 끊겼는지, 다 쓰고 뒤에 설명을 붙이다 끊겼는지는 본문 모양으로
+    구별할 수 없다. 구별할 수 없는 것을 추측해 정상으로 수락하면 **반쪽 계획이
+    완성된 판단처럼 흘러간다.**
+    """
+    with pytest.raises(intent.PlannerOutputTruncated):
+        intent._extract_json(GOOD, stop_reason="max_tokens")
+
+    # 같은 본문이라도 모델이 스스로 멈췄으면 정상이다.
+    assert intent._extract_json(GOOD, stop_reason="end_turn")["tasks"]
+
+
+def test_a_closed_json_cut_at_the_cap_is_retried_not_accepted():
+    """plan() 경로에서도 같다. 수락하지 않고 한 번 더 묻는다."""
+    p = _CountingProvider((GOOD, "max_tokens"), (GOOD, "end_turn"))
+
+    tasks = intent.plan(LONG_COMPARE, _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 2
+    assert [t.kind for t in tasks] == ["search"]
+
+
+def test_the_failure_log_reports_the_response_it_actually_read():
+    """재시도의 파싱이 실패하면 **두 번째** 응답을 찍는다.
+
+    첫 응답을 찍으면 상한을 올린 뒤에도 옛 숫자(max_tokens·1,200)가 남아, 사람이
+    「상한이 아직 모자라다」 로 거꾸로 짚는다.
+    """
+    class _SecondIsGarbage(_CountingProvider):
+        def complete(self, spec, messages, *, max_tokens=1024, temperature=0.0,
+                     timeout_seconds=None):
+            self.calls += 1
+            self.caps.append(max_tokens)
+            self.timeouts.append(timeout_seconds)
+            if self.calls == 1:
+                return LLMResponse(TRUNCATED, spec.model, self.name, 900, 1200,
+                                   0.0002, stop_reason="max_tokens")
+            return LLMResponse("죄송합니다. 못 알아듣겠습니다.", spec.model, self.name,
+                               900, 2400, 0.0004, stop_reason="end_turn")
+
+    p = _SecondIsGarbage()
+    seen: list[str] = []
+    import logging
+
+    class _Catch(logging.Handler):
+        def emit(self, record):
+            seen.append(record.getMessage())
+
+    log = logging.getLogger("tybot.intent")
+    handler = _Catch()
+    log.addHandler(handler)
+    try:
+        with pytest.raises(intent.PlanningUnavailable):
+            intent.plan(LONG_COMPARE, _router(p), allow_rule_fallback=False)
+    finally:
+        log.removeHandler(handler)
+
+    final = [line for line in seen if line.startswith("분해 실패")][-1]
+    assert "code=planner_invalid_json" in final, final
+    assert "stop=end_turn" in final, "첫 응답의 max_tokens 가 찍혔다"
+    assert "out=2400" in final, "첫 응답의 토큰 수가 찍혔다"
+
+
+def test_both_calls_share_one_time_budget():
+    """첫 호출과 재시도가 **같은 시계**를 쓴다. 비용 검사와 시간은 별개다."""
+    p = _CountingProvider((TRUNCATED, "max_tokens"), (GOOD, "end_turn"))
+
+    intent.plan(LONG_COMPARE, _router(p), allow_rule_fallback=False)
+
+    assert len(p.timeouts) == 2
+    assert all(t is not None for t in p.timeouts), "시간 예산을 안 넘겼다"
+    assert p.timeouts[0] <= intent.PLANNER_DEADLINE_SECONDS
+    assert p.timeouts[1] < p.timeouts[0], "재시도는 남은 시간만 쓴다"
+
+
+def test_the_retry_is_skipped_when_the_budget_is_spent(monkeypatch):
+    """2초 남은 상태로 2,400토큰을 부르면 어차피 시간 초과로 끝난다."""
+    ticks = iter([0.0, 0.0, intent.PLANNER_DEADLINE_SECONDS - 1.0])
+    monkeypatch.setattr(intent, "_monotonic", lambda: next(ticks))
+    p = _CountingProvider((TRUNCATED, "max_tokens"), (GOOD, "end_turn"))
+
+    with pytest.raises(intent.PlanningUnavailable):
+        intent.plan(LONG_COMPARE, _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 1, "남은 시간이 없는데 재시도했다"
+
+
+# 2026-10-19 08:19 tyit `C0C9A86JUSJ` 에서 난 **토목현장 비교 질문**의 모양.
+# 사내 질문 원문을 저장소에 넣지 않으므로 같은 성격(현장 둘 + 여러 지표 비교)의
+# 문장으로 세운다 — 길이와 비교 축의 수가 분해 출력 분량을 정한다.
+SITE_COMPARE = (
+    "김해외동 현장이랑 평택고덕 현장 두 군데 공사기간이랑 누적 기성, 공정률, "
+    "그리고 설계변경 건수까지 비교해서 어느 쪽이 더 지연되고 있는지랑 그 원인이 "
+    "뭔지 정리해줘"
+)
+
+
+def test_the_site_comparison_question_survives_a_truncated_first_try():
+    """이번에 터진 모양 그대로 — 긴 현장 비교 질문이 한 번 잘리고 되살아난다."""
+    p = _CountingProvider((TRUNCATED, "max_tokens"), (GOOD, "end_turn"))
+
+    tasks = intent.plan(SITE_COMPARE, _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 2
+    assert p.caps == [intent.PLANNER_MAX_TOKENS, intent.PLANNER_RETRY_MAX_TOKENS]
+    assert [t.kind for t in tasks] == ["search"]

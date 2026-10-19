@@ -93,6 +93,10 @@ class OpenAIProvider:
         text = resp.choices[0].message.content or ""
         in_tok = resp.usage.prompt_tokens
         out_tok = resp.usage.completion_tokens
+        # `finish_reason` 을 Anthropic 쪽 이름으로 맞춘다. 호출부는 「상한에서
+        # 끊겼나」 를 한 가지 값으로만 보게 해야 한다 — 프로바이더마다 다른
+        # 이름을 각자 알아보게 두면, 한쪽만 아는 코드가 잘림을 못 알아본다.
+        finish = str(getattr(resp.choices[0], "finish_reason", "") or "")
         return LLMResponse(
             text=text,
             model=spec.model,
@@ -101,4 +105,5 @@ class OpenAIProvider:
             output_tokens=out_tok,
             cost_usd=spec.cost(in_tok, out_tok),
             raw=resp,
+            stop_reason="max_tokens" if finish == "length" else finish,
         )
