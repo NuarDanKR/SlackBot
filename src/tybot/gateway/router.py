@@ -237,6 +237,17 @@ class Router:
     def default_model(self) -> str:
         return self._default_model
 
+    def restricted_to(self, model: str, *, sensitivity: Sensitivity) -> Router:
+        """Share accounting but expose only one approved model and no fallback."""
+        spec = self.resolve(model, sensitivity)
+        return Router(
+            providers={spec.provider: self._providers[spec.provider]},
+            registry={spec.model: spec},
+            cost_guard=self._cost,
+            default_model=spec.model,
+            fallback_models=(),
+        )
+
     def resolve(self, model: str | None, sensitivity: Sensitivity) -> ModelSpec:
         """모델 선택 + 민감도 검증. 부적합하면 예외."""
         name = model or self._default_model

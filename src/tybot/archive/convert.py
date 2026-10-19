@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from .external_convert import (
     ExternalConversionError,
     ExternalConverterUnavailable,
+    failure_details,
     kordoc_lines,
     office_pdf_lines,
     xlsx_lines,
@@ -656,7 +657,7 @@ def _pdf(data: bytes) -> list[str]:
             ocr_unavailable = str(exc)
             break
         except Exception as exc:  # noqa: BLE001 - 한 쪽 실패가 전체를 막지 않는다
-            logger.warning("PDF %d쪽 OCR 실패: %s", number, exc)
+            logger.warning("PDF %d쪽 OCR 실패 code=%s", number, failure_details(exc)[0])
             continue
         if lines:
             ocr[number] = lines
