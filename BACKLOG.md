@@ -221,7 +221,8 @@ TYIT 정기보고 채널의 XLSX 네 건은 변환·아카이브에 성공했지
 - [x] Codex: 명시적 HWP 로컬 PDF 복구 준비·도구/폰트/렌더링 신원·세대 보존 구현 (발행 미연결).
 - [ ] Codex: 실제 DB 동시성/권한 검증, 서버 카탈로그·요금표·원본/PII 재검증과 worker/API 연결.
 - [x] Claude: 페이지 이미지 전사·표 추출 코어, 구조 검증·실패 코드·독립 시험.
-- [ ] Codex: 혼합 PDF의 이미지 누락 탐지, 페이지 렌더링·기존 coverage/revision 연결.
+- [x] Codex/Claude: 혼합 PDF 이미지 누락 탐지와 coverage 기록, PDF 변환기 판 4로 revision 분리 (운영 실측 대기).
+- [ ] Codex: 미해독 쪽의 페이지 렌더링·Vision 승인 worker 연결. 현재 `partial` 정본은 일반 검색 근거가 아니다.
 - [ ] Claude: HWP 단일 kordoc 실패 경로의 오류 진단, 로컬 추출/검증된 PDF 렌더링 우회.
 - [ ] 콘솔 담당자: WC-21 화면. API는 아직 없으므로 운영 활성화 버튼은 막는다.
 - [ ] 대표 실패 PDF로 로컬 OCR과 Vision 결과·페이지 범위·수치·표를 비교하고 운영 승인.

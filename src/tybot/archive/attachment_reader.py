@@ -17,7 +17,7 @@
 | | 일반 근거 | 감사 |
 |---|---|---|
 | 상태 | **`succeeded` 만** | 전부 |
-| revision | 최신 하나 | 전부 |
+| revision | 최신 판 하나를 고른 뒤 상태 확인 | 전부 |
 | raw 중복 | 뺀다 | 그대로 |
 
 **`partial` 을 뺀다.** 「본문이 나왔다」 와 「다 읽었다」 는 다르다. 절반만 읽힌
@@ -310,12 +310,13 @@ def evidence(root: Path | str, channel_docs) -> list[AttachmentDoc]:
         doc for doc in (load_checked(path, root) for path in source_files(root)) if doc
     ]
     legacy = legacy_index(channel_docs)
-    current = current_by_file(
-        [doc for doc in loaded if doc.conversion_state in GENERAL_EVIDENCE and doc.text.strip()]
-    )
+    # A newer partial/failed revision must not expose an older successful body.
+    current = current_by_file(loaded)
     return [
         doc for doc in current
-        if not legacy.has(doc.workspace, doc.channel_id, doc.name)
+        if doc.conversion_state in GENERAL_EVIDENCE
+        and doc.text.strip()
+        and not legacy.has(doc.workspace, doc.channel_id, doc.name)
     ]
 
 

@@ -86,6 +86,16 @@ def test_only_the_latest_revision_is_evidence(archive):
     assert "8월" not in got[0].text
 
 
+def test_newer_partial_revision_hides_older_succeeded_evidence(archive):
+    _write(archive, _doc(revision="old000000000", text="표까지 모두 읽었습니다",
+                         staged_at="2026-08-01T10:00:00+00:00"))
+    _write(archive, _doc(revision="new000000000", text="그림 안의 표는 미해독",
+                         conversion_state=attachment_doc.PARTIAL,
+                         staged_at="2026-09-22T10:00:00+00:00"))
+
+    assert reader.evidence(archive, []) == []
+
+
 def test_a_revision_without_a_timestamp_does_not_displace_a_known_one(archive):
     """모르는 것으로 아는 것을 덮으면 최신이 옛것으로 밀린다."""
     _write(archive, _doc(revision="known0000000", staged_at="2026-09-22T10:00:00+00:00"))

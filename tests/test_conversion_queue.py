@@ -862,7 +862,8 @@ def test_outdated_backfill_uses_format_versions_and_new_job_keys(tmp_path, monke
     for file_id, kind, version, state in [
         ("FPDFOLD", "pdf", "2", "succeeded"),
         ("FPDFPART", "pdf", "2", "partial"),
-        ("FPDFNEW", "pdf", "3", "succeeded"),
+        ("FPDFMIXED", "pdf", "3", "succeeded"),
+        ("FPDFNEW", "pdf", "4", "succeeded"),
         ("FXLSX", "xlsx", "2", "succeeded"),
     ]:
         _staged_review(tmp_path, file_id, status="converted", conversion_state=state,
@@ -877,8 +878,8 @@ def test_outdated_backfill_uses_format_versions_and_new_job_keys(tmp_path, monke
 
     monkeypatch.setattr(queue, "enqueue", enqueue)
     assert drain.outdated_backfill(str(tmp_path / "archive"), apply=True) == 0
-    assert {item["file_id"] for item in added} == {"FPDFOLD", "FPDFPART"}
-    assert all(item["converter_version"] == "3" for item in added)
+    assert {item["file_id"] for item in added} == {"FPDFOLD", "FPDFPART", "FPDFMIXED"}
+    assert all(item["converter_version"] == "4" for item in added)
     assert all(item["converter"] == "pdf:primary" for item in added)
 
 

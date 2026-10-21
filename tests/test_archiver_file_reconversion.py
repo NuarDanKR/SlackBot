@@ -166,4 +166,4 @@ def test_page_ocr_coverage_flows_through_recovery_without_downloading_again(case
     meta = json.loads((case.base / receipt["metadata_relpath"]).read_text())
     assert meta["coverage_total"] == meta["coverage_converted"] == 3
     assert meta["missing_units"] == []
-    assert meta["converter_version"] == "3"
+    assert meta["converter_version"] == "4"

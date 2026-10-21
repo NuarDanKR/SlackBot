@@ -41,6 +41,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 
+from . import pdf_page_images
 from .external_convert import (
     ExternalConversionError,
     ExternalConverterUnavailable,
@@ -134,7 +135,9 @@ CONVERTER_VERSION = "2"
 #:
 #: - `pdf` 3: 쪽별 OCR 로 처리 범위를 검증한다(2026-10-15). 같은 파일에서 나오는
 #:   줄도 coverage 도 판 2 와 다르므로 **판 2 의 정본을 덮으면 안 된다.**
-_FORMAT_CONVERTER_VERSIONS = {"pdf": "3"}
+#: - `pdf` 4: 글자가 있는 쪽의 큰 이미지도 미해독으로 기록한다. 같은 본문이어도
+#:   완료 여부가 달라져 정본을 같은 revision 에 덮어쓸 수 없다.
+_FORMAT_CONVERTER_VERSIONS = {"pdf": "4"}
 
 
 def converter_version(filetype: str) -> str:
@@ -662,9 +665,22 @@ def _pdf(data: bytes) -> list[str]:
         if lines:
             ocr[number] = lines
 
+    # **글자가 나온 쪽도 그림을 센다.** 문단 두 줄이 나왔다는 이유로 스캔해 붙인
+    # 표가 있는 쪽을 「다 읽음」 으로 닫으면, 그 표는 아무 데도 안 남고 그 쪽은
+    # 다시 보지도 않는다(B-80).
+    #
+    # OCR 을 돌린 쪽은 여기서 빼지 않는다 — OCR 이 그림 안의 글자를 읽었는지는
+    # 그 결과가 비었는지로만 알 수 있고, 표 구조는 어차피 못 살린다.
+    census = pdf_page_images.inspect(data)
+    scan_failed = [
+        number for number in range(1, total_pages + 1)
+        if number not in census or not census[number].inspected
+    ]
+
     out: list[str] = []
     read_pages: list[int] = []
     missing_pages: list[int] = []
+    unverified_pages: list[int] = []
     for number in range(1, total_pages + 1):
         # OCR 을 돌린 쪽은 OCR 결과를 쓴다. 실패했으면 텍스트 레이어가 남는다.
         lines = ocr.get(number) or text.get(number) or []
@@ -677,14 +693,27 @@ def _pdf(data: bytes) -> list[str]:
         verified = _has_body(lines) and (
             number not in required_ocr or _has_body(ocr.get(number) or [])
         )
-        (read_pages if verified else missing_pages).append(number)
+        if not verified:
+            missing_pages.append(number)
+            continue
+        if pdf_page_images.image_heavy(census.get(number) or pdf_page_images.PageImages(number)):
+            # 글자는 읽었다. **그림 안은 모른다** — 읽은 쪽으로 세지 않는다.
+            unverified_pages.append(number)
+            continue
+        read_pages.append(number)
 
     _record(
         "page",
         total=total_pages,
         converted=len(read_pages),
         missing=tuple(missing_pages),
+        unverified=tuple(unverified_pages),
     )
+    if unverified_pages:
+        _record("", flag=IMAGE_CONTENT_UNREAD)
+    if scan_failed:
+        # 조사를 못 한 쪽이 있다. **「그림이 없다」 고 말할 수 없다.**
+        _record("", flag=IMAGE_SCAN_FAILED)
     if ocr_unavailable:
         # 다시 봐야 할 쪽이 있는데 OCR 을 못 썼다. 읽은 것이 원본의 전부라고
         # 말할 수 없다.
@@ -702,6 +731,10 @@ def _pdf(data: bytes) -> list[str]:
         out.insert(0, f"[변환 안내] OCR 상한 {MAX_PDF_OCR_PAGES}쪽 도달 - {len(over_limit)}쪽 미시도")
     if ocr_unavailable:
         out.insert(0, f"[변환 안내] 이미지 본문 OCR 미사용: {ocr_unavailable}")
+    if unverified_pages:
+        shown = ", ".join(str(n) for n in unverified_pages[:8])
+        more = f" 외 {len(unverified_pages) - 8}" if len(unverified_pages) > 8 else ""
+        out.insert(0, f"[변환 안내] 그림 안을 읽지 못한 쪽: {shown}{more}")
     if ocr:
         out.insert(0, OCR_NOTICE)
     return _finish(out)
@@ -831,6 +864,14 @@ OCR_UNAVAILABLE = "ocr_unavailable"
 # 쪽별 OCR 상한에 걸려 **시도조차 못 한 쪽**이 있다. 읽을 수 없는 쪽과 다르다 —
 # 상한을 올리거나 다시 돌리면 읽힐 수 있다.
 OCR_PAGE_LIMIT_REACHED = "ocr_page_limit_reached"
+# 글자는 나왔는데 그 쪽에 **큰 그림이 있어 그 안을 모른다.**
+#
+# 스캔해 붙인 표가 여기 들어온다. 전에는 문단 두 줄이 나왔다는 이유로 그 쪽이
+# 「다 읽음」 이었고, 표는 아무 데도 안 남았다 — 그리고 그 쪽은 닫혀 있어서
+# 다시 보지도 않았다(B-80 혼합 쪽).
+IMAGE_CONTENT_UNREAD = "image_content_unread"
+# 이미지 조사 자체가 실패했다. **「그림이 없다」 와 다르다.**
+IMAGE_SCAN_FAILED = "image_scan_failed"
 TITLE_ONLY = "title_only"
 
 
@@ -847,6 +888,13 @@ class Coverage:
     converted: int | None = None
     # 못 읽은 단위 번호. **본문은 넣지 않는다** — 좌표만이다.
     missing: tuple[int, ...] = ()
+    # 글자는 읽었는데 **그 쪽의 그림 안을 모르는** 단위 번호.
+    #
+    # `missing` 과 다른 갈래다. 저쪽은 「아무것도 못 얻었다」 이고 이쪽은
+    # 「얻은 것이 전부가 아니다」 다. 섞으면 사람이 할 일이 달라지는데 같아
+    # 보이고, 무엇보다 **본문이 나온 쪽을 못 읽은 쪽으로 세면** 그 쪽 내용이
+    # 답변에서 빠진다.
+    unverified: tuple[int, ...] = ()
     flags: tuple[str, ...] = ()
 
     def note(self, flag: str) -> None:
@@ -860,7 +908,7 @@ class Coverage:
         플래그만 있어도 `partial` 이다 — 행 상한에 걸린 시트는 숫자로는 전부
         읽은 것처럼 보이지만 실제로는 잘렸다.
         """
-        if self.missing or self.flags:
+        if self.missing or self.unverified or self.flags:
             return PARTIAL
         if self.total is None or self.converted is None:
             return UNKNOWN
@@ -876,6 +924,10 @@ class Coverage:
             shown = ", ".join(str(n) for n in self.missing[:8])
             more = f" 외 {len(self.missing) - 8}" if len(self.missing) > 8 else ""
             line += f" · 미확인 {shown}{more}{unit}"
+        if self.unverified:
+            shown = ", ".join(str(n) for n in self.unverified[:8])
+            more = f" 외 {len(self.unverified) - 8}" if len(self.unverified) > 8 else ""
+            line += f" · 그림 미해독 {shown}{more}{unit}"
         return line
 
     def to_json(self) -> dict:
@@ -885,6 +937,8 @@ class Coverage:
             "coverage_total": self.total,
             "coverage_converted": self.converted,
             "missing_units": list(self.missing[:50]),
+            # 그림 안을 못 읽은 쪽. 진단용 앞 50개이며 전체 Vision 작업 목록은 아니다.
+            "unverified_units": list(self.unverified[:50]),
             "quality_flags": list(self.flags),
             "coverage_state": self.state,
         }
@@ -896,7 +950,7 @@ def current_coverage() -> Coverage | None:
 
 
 def _record(unit: str, *, total: int | None = None, converted: int | None = None,
-            missing=(), flag: str = "") -> None:
+            missing=(), unverified=(), flag: str = "") -> None:
     """변환 함수들이 부르는 기록 자리. 수집 중이 아니면 아무 일도 안 한다."""
     cov = _coverage.get()
     if cov is None:
@@ -909,6 +963,8 @@ def _record(unit: str, *, total: int | None = None, converted: int | None = None
         cov.converted = converted
     if missing:
         cov.missing = tuple(dict.fromkeys((*cov.missing, *missing)))
+    if unverified:
+        cov.unverified = tuple(dict.fromkeys((*cov.unverified, *unverified)))
     if flag:
         cov.note(flag)
 

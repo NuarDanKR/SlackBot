@@ -47,13 +47,15 @@ def test_a_quality_flag_alone_makes_it_partial():
 
 def test_coverage_carries_no_document_text():
     """추적에 본문이 섞이면 metadata 가 원문 사본이 된다."""
-    cov = cv.Coverage(unit="page", total=2, converted=1, missing=(2,))
+    cov = cv.Coverage(unit="page", total=3, converted=1, missing=(2,), unverified=(3,))
     row = cov.to_json()
     assert set(row) == {
         "coverage_unit", "coverage_total", "coverage_converted",
-        "missing_units", "quality_flags", "coverage_state",
+        "missing_units", "unverified_units", "quality_flags", "coverage_state",
     }
     assert all(isinstance(n, int) for n in row["missing_units"])
+    # 그림 미해독 쪽도 **좌표뿐이다.** 무엇이 그려져 있었는지는 담지 않는다.
+    assert all(isinstance(n, int) for n in row["unverified_units"])
 
 
 def test_missing_units_are_capped():
