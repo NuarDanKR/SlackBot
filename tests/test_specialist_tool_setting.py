@@ -1,5 +1,3 @@
-import os
-
 from tybot.console import env_settings
 from tybot.specialist_tools import ToolBudget
 
@@ -8,7 +6,8 @@ def test_console_setting_changes_active_tool_budget(monkeypatch, tmp_path):
     monkeypatch.setenv("STATE_DIR", str(tmp_path))
     monkeypatch.setenv("ENV_SETTINGS_PATH", str(tmp_path / "managed.env"))
     for key in env_settings.MANAGED_STATIC_KEYS:
-        monkeypatch.setenv(key, os.getenv(key, "90" if key == "TYBOT_SPECIALIST_TOOL_SECONDS" else ""))
+        monkeypatch.setenv(key, "")
+    monkeypatch.setenv("TYBOT_SPECIALIST_TOOL_SECONDS", "90")
     monkeypatch.setattr(env_settings, "request_restart", lambda actor, keys: None)
     payload = {
         "realtimeIngest": True,
