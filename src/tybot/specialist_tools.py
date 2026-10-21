@@ -77,7 +77,27 @@ DOCUMENT_PREFIXES = (
 MAX_TOOL_CALLS = 12
 MAX_TOOL_CALLS_PER_TOOL = 6
 MAX_READ_CHARS = 120_000
-MAX_TOOL_SECONDS = 45.0
+MAX_TOOL_SECONDS = 90.0
+MIN_TOOL_SECONDS = 15
+MAX_CONFIGURED_TOOL_SECONDS = 120
+
+
+def parse_tool_seconds(raw: str | None) -> float:
+    """Parse the bounded active tool-time setting without extending the request deadline."""
+    raw = (raw or "").strip()
+    if not raw:
+        return MAX_TOOL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return MAX_TOOL_SECONDS
+    return float(value) if MIN_TOOL_SECONDS <= value <= MAX_CONFIGURED_TOOL_SECONDS else MAX_TOOL_SECONDS
+
+
+def configured_tool_seconds() -> float:
+    import os
+
+    return parse_tool_seconds(os.getenv("TYBOT_SPECIALIST_TOOL_SECONDS"))
 
 BUDGET_EXHAUSTED = "budget-exhausted"
 
@@ -89,9 +109,10 @@ class ToolBudget:
     max_calls: int = MAX_TOOL_CALLS
     max_per_tool: int = MAX_TOOL_CALLS_PER_TOOL
     max_chars: int = MAX_READ_CHARS
-    max_seconds: float = MAX_TOOL_SECONDS
+    max_seconds: float = field(default_factory=configured_tool_seconds)
     calls: int = 0
     chars: int = 0
+    tool_seconds: float = 0.0
     per_tool: dict = field(default_factory=dict)
     started: float = 0.0
     reason: str = ""
@@ -125,7 +146,7 @@ class ToolBudget:
             )
         elif self.chars >= self.max_chars:
             self.reason = "chars"
-        elif self.elapsed >= self.max_seconds:
+        elif self.tool_seconds >= self.max_seconds:
             self.reason = "time"
         if self.reason:
             return (
@@ -134,17 +155,19 @@ class ToolBudget:
             )
         return ""
 
-    def spend(self, name: str, text: str) -> None:
+    def spend(self, name: str, text: str, *, elapsed_seconds: float = 0.0) -> None:
         self.calls += 1
         self.per_tool[name] = self.per_tool.get(name, 0) + 1
         self.chars += len(text or "")
+        self.tool_seconds += max(0.0, elapsed_seconds)
 
     def summary(self) -> str:
         """로그 한 줄. 업무 내용은 담지 않는다."""
         per = ",".join(f"{k}={v}" for k, v in sorted(self.per_tool.items()))
         return (
             f"tool_calls={self.calls} chars={self.chars} "
-            f"elapsed_ms={int(self.elapsed * 1000)} per_tool={per or '-'} "
+            f"elapsed_ms={int(self.elapsed * 1000)} "
+            f"tool_ms={int(self.tool_seconds * 1000)} per_tool={per or '-'} "
             f"budget={self.reason or 'ok'}"
         )
 
@@ -214,7 +237,8 @@ READ_CHANNEL_DESCRIPTION = (
 
 READ_DOCUMENT_DESCRIPTION = (
     "문서 하나의 본문을 읽는다. 첨부에서 뽑은 표·보고서 본문이 여기 들어 있다. "
-    "검색이 문서 이름을 알려 준 뒤에 쓴다."
+    "검색이 문서 이름을 알려 준 뒤에 쓴다. 같은 이름은 최신 업로드가 기본이다. "
+    "긴 XLSX는 sheet로 시트를 고르고 offset으로 이어 읽는다."
 )
 
 FETCH_RECENT_DESCRIPTION = (
@@ -270,6 +294,9 @@ def specs(*, live: bool) -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "문서 또는 첨부 이름"},
+                    "file_id": {"type": "string", "description": "이전 업로드를 지정할 Slack 파일 ID"},
+                    "sheet": {"type": "string", "description": "XLSX 시트 번호 또는 이름"},
+                    "offset": {"type": "integer", "description": "긴 첨부 이어 읽기 위치"},
                 },
                 "required": ["name"],
             },
@@ -332,8 +359,11 @@ class ToolBox:
             log.info("도구 예산 거절 name=%s %s", name, self.budget.summary())
             return refusal
         self.touched.calls.append(name)
+        import time
+
+        started = time.monotonic()
         out = self._dispatch(name, args)
-        self.budget.spend(name, out)
+        self.budget.spend(name, out, elapsed_seconds=time.monotonic() - started)
         return out
 
     def _dispatch(self, name: str, args: dict) -> str:
@@ -489,9 +519,46 @@ class ToolBox:
         wanted = str(args.get("name") or "").strip()
         if not wanted:
             return "(문서 이름이 비었습니다)"
+        file_id = str(args.get("file_id") or "").strip()
+        visible = self.store.visible_docs(self.ctx)
+        attachments = []
+        for doc in visible:
+            parts = str(getattr(doc, "path", "") or "").replace("\\", "/").split("/")
+            if "attachments" not in parts or not doc.raw_lines:
+                continue
+            index = parts.index("attachments")
+            if index + 1 >= len(parts):
+                continue
+            name = str(doc.raw_lines[0].speaker or "")
+            if wanted in name and (not file_id or parts[index + 1] == file_id):
+                attachments.append((doc, parts[index + 1], name))
+        if file_id and not attachments:
+            return "(해당 파일을 찾지 못했거나 열람 권한이 없습니다)"
+        if attachments:
+            exact = [item for item in attachments if item[2] == wanted]
+            if exact:
+                attachments = exact
+            if len(attachments) > 1 and (
+                not self.ctx.in_channel or len({item[2] for item in attachments}) > 1
+            ) and not file_id:
+                candidates = sorted(
+                    attachments, key=lambda item: str(getattr(item[0], "last_ingested", "") or ""),
+                    reverse=True,
+                )
+                lines = ["첨부 후보가 여러 건입니다. file_id를 지정해 다시 여세요:"]
+                lines.extend(
+                    f"{item_id} · {name} · {getattr(doc, 'last_ingested', '') or '날짜 미상'}"
+                    for doc, item_id, name in candidates[:20]
+                )
+                return _clip("\n".join(lines))
+            selected, selected_id, _ = max(
+                attachments,
+                key=lambda item: str(getattr(item[0], "last_ingested", "") or ""),
+            )
+            return self._read_attachment_chunk(selected, selected_id, args)
         rows: list[str] = []
         used = 0
-        for doc in self.store.visible_docs(self.ctx):
+        for doc in visible:
             # 첨부 정본은 파일명을 speaker에, 변환 본문을 text에 둔다. 본문에서만
             # 이름을 찾으면 파일은 찾았어도 표·숫자는 읽지 못한 채 첨부 참조 줄만
             # 반환한다.
@@ -514,6 +581,55 @@ class ToolBox:
         if not rows:
             return "(그 문서를 찾지 못했거나 열람 권한이 없습니다)"
         return _clip("\n\n".join(rows))
+
+    def _read_attachment_chunk(self, doc, file_id: str, args: dict) -> str:
+        """Return a bounded, resumable slice from one already-authorized attachment."""
+        lines = doc.raw_lines
+        sheet_markers = [
+            (index, line.text.removeprefix("[시트]").strip())
+            for index, line in enumerate(lines) if line.text.startswith("[시트]")
+        ]
+        requested_sheet = str(args.get("sheet") or "").strip()
+        if requested_sheet:
+            matching = [
+                pos for pos, (_, title) in enumerate(sheet_markers)
+                if requested_sheet == str(pos + 1) or requested_sheet in title
+            ]
+            if len(matching) != 1:
+                names = ", ".join(f"{i + 1}:{title}" for i, (_, title) in enumerate(sheet_markers))
+                return f"(시트를 하나로 특정하지 못했습니다. 사용 가능: {names or '없음'})"
+            marker = matching[0]
+            start = sheet_markers[marker][0]
+            stop = sheet_markers[marker + 1][0] if marker + 1 < len(sheet_markers) else len(lines)
+            lines = lines[start:stop]
+        else:
+            body_length = sum(len(line.text) + 1 for line in lines)
+            if sheet_markers and body_length > MAX_TOOL_CHARS - 1000:
+                names = ", ".join(f"{i + 1}:{title}" for i, (_, title) in enumerate(sheet_markers))
+                return _clip(
+                    f"긴 XLSX 첨부입니다. file_id={file_id}. 시트별로 다시 여세요: {names}. "
+                    "read_document에 sheet(번호 또는 이름)를 지정하고, 이어 읽기는 offset을 사용하세요."
+                )
+        try:
+            offset = int(args.get("offset") or 0)
+        except (TypeError, ValueError):
+            return "(offset은 0 이상의 정수여야 합니다)"
+        body = "\n".join(line.text for line in lines)
+        if offset < 0 or (offset >= len(body) and offset != 0):
+            return "(offset이 본문 범위를 벗어났습니다)"
+        header = (
+            f"# {doc.channel} · {lines[0].speaker if lines else file_id} "
+            f"· file_id={file_id} · 저장 {getattr(doc, 'last_ingested', '') or '날짜 미상'}\n"
+        )
+        end = min(len(body), offset + MAX_TOOL_CHARS - 1000)
+        cursor = 0
+        for line in lines:
+            line_end = cursor + len(line.text)
+            if cursor < end and line_end > offset:
+                self.touched.record_line(doc, line)
+            cursor = line_end + 1
+        note = f"\n[본문 일부: 다음 offset={end} / 전체 {len(body)}자]" if end < len(body) else ""
+        return _clip(header + body[offset:end] + note)
 
     # -- 실시간 ----------------------------------------------------------
     def _fetch_recent(self, args: dict) -> str:

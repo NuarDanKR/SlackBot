@@ -28,6 +28,8 @@ class FakeDoc:
     channel_id: str
     raw_lines: list
     workspace: str = "tyit"
+    path: str = ""
+    last_ingested: str = ""
 
 
 @dataclass
@@ -144,6 +146,108 @@ def test_read_document_finds_an_attachment_name_stored_as_the_speaker():
 
     assert "매출액 13,810억원" in got
     assert "세전이익 △815억원" in got
+
+
+def test_tool_budget_counts_tool_work_not_model_wait(monkeypatch):
+    from tybot.specialist_tools import ToolBudget
+
+    monkeypatch.setenv("TYBOT_SPECIALIST_TOOL_SECONDS", "90")
+    budget = ToolBudget(started=1.0)
+    assert budget.refuse("read_document") == ""
+    budget.spend("search", "결과", elapsed_seconds=89)
+    assert budget.refuse("read_document") == ""
+    budget.spend("read_channel", "결과", elapsed_seconds=2)
+    assert budget.refuse("read_document")
+    assert budget.reason == "time"
+    assert "tool_ms=91000" in budget.summary()
+
+
+def test_tool_budget_setting_is_bounded(monkeypatch):
+    for raw, expected in (("120", 120), ("15", 15), ("121", 90), ("broken", 90)):
+        monkeypatch.setenv("TYBOT_SPECIALIST_TOOL_SECONDS", raw)
+        assert tools.ToolBudget().max_seconds == expected
+
+
+def test_toolbox_charges_only_dispatch_time(monkeypatch):
+    import time
+
+    box = _box(_store())
+    box.budget.max_seconds = 0.005
+
+    def slow_dispatch(_name, _args):
+        time.sleep(0.01)
+        return "결과"
+
+    monkeypatch.setattr(box, "_dispatch", slow_dispatch)
+    assert box.run("search", {"query": "x"}) == "결과"
+    assert box.budget.tool_seconds >= 0.005
+    assert "검색 예산" in box.run("read_document", {"name": "x"})
+    assert box.budget.reason == "time"
+
+
+def _attachment(name: str, file_id: str, body: str, stamp: str) -> FakeDoc:
+    return FakeDoc(
+        channel="#회의", channel_id="C1", path=f"/archive/attachments/{file_id}/rev.md",
+        last_ingested=stamp,
+        raw_lines=[FakeLine(stamp, name, line) for line in body.splitlines()],
+    )
+
+
+def test_read_document_prefers_latest_same_name_and_can_select_older():
+    old = _attachment("회의.xlsx", "FOLD", "이전 자료", "2026-10-06")
+    new = _attachment("회의.xlsx", "FNEW", "이번 자료", "2026-10-21")
+    box = tools.ToolBox(
+        store=FakeStore([old, new]),
+        ctx=RequestContext(workspace="tyit", channel_id="C1", channels=frozenset({"C1"})),
+    )
+
+    current = box.run("read_document", {"name": "회의.xlsx"})
+    prior = box.run("read_document", {"name": "회의.xlsx", "file_id": "FOLD"})
+
+    assert "이번 자료" in current and "이전 자료" not in current
+    assert "이전 자료" in prior and "이번 자료" not in prior
+
+
+def test_read_document_in_dm_lists_ambiguous_files_without_body():
+    docs = [
+        _attachment("회의.xlsx", "FOLD", "이전 자료", "2026-10-06"),
+        _attachment("회의.xlsx", "FNEW", "이번 자료", "2026-10-21"),
+    ]
+    box = _box(FakeStore(docs))
+
+    got = box.run("read_document", {"name": "회의.xlsx"})
+
+    assert "FOLD" in got and "FNEW" in got
+    assert "이전 자료" not in got and "이번 자료" not in got
+
+
+def test_long_xlsx_can_be_read_by_sheet_and_offset_without_crossing_sheets():
+    first = "첫시트내용" * 7000
+    second = "둘째시트내용" * 7000
+    doc = _attachment(
+        "회의.xlsx", "FNEW", f"# 회의.xlsx\n[시트] 첫째\n{first}\n[시트] 둘째\n{second}",
+        "2026-10-21",
+    )
+    box = _box(FakeStore([doc]))
+
+    overview = box.run("read_document", {"name": "회의.xlsx"})
+    page = box.run("read_document", {"name": "회의.xlsx", "sheet": "1"})
+    assert "시트별로" in overview and first not in overview
+    assert "둘째시트내용" not in page
+    marker = "다음 offset="
+    offset = int(page.split(marker, 1)[1].split(" ", 1)[0])
+    continuation = box.run("read_document", {"name": "회의.xlsx", "sheet": "1", "offset": offset})
+    assert "첫시트내용" in continuation
+    assert "둘째시트내용" not in continuation
+
+
+def test_file_id_cannot_open_an_attachment_outside_visible_docs():
+    hidden = _attachment("기밀.xlsx", "FHIDDEN", "기밀 자료", "2026-10-21")
+    box = _box(FakeStore([hidden], hidden={"#회의"}))
+
+    got = box.run("read_document", {"name": "기밀.xlsx", "file_id": "FHIDDEN"})
+
+    assert "기밀 자료" not in got
 
 
 def test_the_context_is_not_an_argument():

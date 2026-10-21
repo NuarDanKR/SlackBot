@@ -106,16 +106,22 @@ export function buildRemoteTools({ client, allow, terms: T, trace, signal }) {
     read_document: () => betaTool({
       name: 'read_document',
       description:
-        '문서·첨부 본문을 읽는다. 표와 숫자는 여기 있다 — 검색 결과에 첨부 이름이 보이면 이걸로 연다.',
+        '권한 안의 문서·첨부 본문을 읽는다. 같은 이름의 첨부는 최신본을 우선한다. 긴 XLSX는 sheet를 지정하고 다음 offset으로 이어 읽는다.',
       inputSchema: {
         type: 'object',
         properties: {
           name: { type: 'string', description: '문서·첨부 이름. 일부만 적어도 된다. 예: "잔금수금"' },
+          file_id: { type: 'string', description: '같은 이름의 이전 업로드를 고를 때 지정하는 Slack 파일 ID.' },
+          sheet: { type: 'string', description: '긴 XLSX의 시트 번호(1부터) 또는 시트명.' },
+          offset: { type: 'integer', description: '이어 읽기 위치. 반환된 다음 offset을 그대로 넣는다.' },
         },
         required: ['name'],
       },
       run: wrap('read_document', (input) => run('read_document', {
         name: String(input?.name ?? ''),
+        ...(input?.file_id ? { file_id: String(input.file_id) } : {}),
+        ...(input?.sheet ? { sheet: String(input.sheet) } : {}),
+        ...(Number.isInteger(input?.offset) ? { offset: input.offset } : {}),
       })),
     }),
 

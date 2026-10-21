@@ -23,6 +23,7 @@ MANAGED_STATIC_KEYS = {
     "DEFAULT_MODEL",
     # 보관·삭제된 채널의 원문을 근거로 쓸 것인가(B-51). **기본은 아니다.**
     "INCLUDE_RETIRED_CHANNELS",
+    "TYBOT_SPECIALIST_TOOL_SECONDS",
 }
 
 
@@ -77,6 +78,8 @@ def effective_env() -> dict[str, str]:
 
 def snapshot() -> dict:
     values = _effective_env()
+    from ..specialist_tools import parse_tool_seconds
+
     default_model = values.get("DEFAULT_MODEL", "claude-sonnet-5")
     return {
         "path": str(managed_env_path()),
@@ -90,6 +93,7 @@ def snapshot() -> dict:
         "includeRetiredChannels": _truthy(values.get("INCLUDE_RETIRED_CHANNELS"), False),
         "retiredChannels": _retired_summary(),
         "defaultModel": default_model,
+        "toolBudgetSeconds": int(parse_tool_seconds(values.get("TYBOT_SPECIALIST_TOOL_SECONDS"))),
         "models": [
             {
                 "id": spec.model,
@@ -102,16 +106,33 @@ def snapshot() -> dict:
 
 
 def _validate(payload: dict) -> dict[str, str]:
+    from ..specialist_tools import MAX_CONFIGURED_TOOL_SECONDS, MIN_TOOL_SECONDS, parse_tool_seconds
+
     current = _effective_env()
     model = str(payload.get("defaultModel") or current.get("DEFAULT_MODEL") or "claude-sonnet-5")
     if model not in DEFAULT_REGISTRY:
         raise ValueError(f"지원하지 않는 답변 모델입니다: {model}")
+    supplied = payload.get("toolBudgetSeconds")
+    if supplied is None:
+        tool_seconds = int(parse_tool_seconds(current.get("TYBOT_SPECIALIST_TOOL_SECONDS")))
+    else:
+        try:
+            tool_seconds = int(supplied)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("자료 조회 시간은 정수여야 합니다.") from exc
+    if not MIN_TOOL_SECONDS <= tool_seconds <= MAX_CONFIGURED_TOOL_SECONDS:
+        raise ValueError(f"자료 조회 시간은 {MIN_TOOL_SECONDS}~{MAX_CONFIGURED_TOOL_SECONDS}초여야 합니다.")
     return {
         "REALTIME_INGEST": "1" if payload.get("realtimeIngest") else "0",
         "AUTOJOIN_CHANNELS": "1" if payload.get("autojoinChannels") else "0",
         "REPLY_IN_THREAD": "1" if payload.get("replyInThread") else "0",
-        "INCLUDE_RETIRED_CHANNELS": "1" if payload.get("includeRetiredChannels") else "0",
+        "INCLUDE_RETIRED_CHANNELS": (
+            current.get("INCLUDE_RETIRED_CHANNELS", "0")
+            if payload.get("includeRetiredChannels") is None
+            else "1" if payload["includeRetiredChannels"] else "0"
+        ),
         "DEFAULT_MODEL": model,
+        "TYBOT_SPECIALIST_TOOL_SECONDS": str(tool_seconds),
     }
 
 

@@ -261,6 +261,24 @@ await test('TYBot 이 발급한 근거 ID를 모델에게 보여 준다', async 
   assert.ok(!rendered.includes('channel_line'));
 });
 
+await test('긴 XLSX 이어 읽기 인자를 TYBot 도구에 그대로 전달한다', async () => {
+  let received;
+  const [read] = buildRemoteTools({
+    client: {
+      async call(name, args) {
+        received = { name, args };
+        return { text: '시트 본문 일부', evidence: [], halted: false };
+      },
+    },
+    allow: ['read_document'], terms: TERMS, trace: [],
+  });
+  await read.run({ name: '회의.xlsx', file_id: 'FNEW', sheet: '2', offset: 25000 });
+  assert.deepEqual(received, {
+    name: 'read_document',
+    args: { name: '회의.xlsx', file_id: 'FNEW', sheet: '2', offset: 25000 },
+  });
+});
+
 await test('도구를 돌고 인용한 근거만 담는다', async () => {
   const tools = await bootTools({
     token: 'tok-1', requestId: 'r-1',

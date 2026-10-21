@@ -143,7 +143,9 @@ class EnvSettingsBody(BaseModel):
     realtimeIngest: bool
     autojoinChannels: bool
     replyInThread: bool
+    includeRetiredChannels: bool | None = None
     defaultModel: str | None = None
+    toolBudgetSeconds: int | None = None
 
 
 class ConsoleAccountBody(BaseModel):

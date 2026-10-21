@@ -20,6 +20,7 @@ interface EnvSettingsData {
     items: { workspace: string; channel: string; reason: string; at: string }[]
   }
   defaultModel: string
+  toolBudgetSeconds: number
   models: { id: string; provider: string; maxSensitivity: 'public' | 'internal' | 'confidential' }[]
   changed?: string[]
 }
@@ -35,6 +36,7 @@ function preview(data: EnvSettingsData): string {
     `REPLY_IN_THREAD=${data.replyInThread ? '1' : '0'}`,
     `INCLUDE_RETIRED_CHANNELS=${data.includeRetiredChannels ? '1' : '0'}`,
     `DEFAULT_MODEL=${data.defaultModel}`,
+    `TYBOT_SPECIALIST_TOOL_SECONDS=${data.toolBudgetSeconds}`,
   ].join('\n')
 }
 
@@ -111,6 +113,7 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
         replyInThread: draft.replyInThread,
         includeRetiredChannels: draft.includeRetiredChannels,
         defaultModel: draft.defaultModel,
+        toolBudgetSeconds: draft.toolBudgetSeconds,
       })
       setDraft(copySettings(saved))
       const count = saved.changed?.length ?? 0
@@ -215,6 +218,15 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
           {draft.models.find((model) => model.id === draft.defaultModel)?.maxSensitivity !== 'confidential' &&
             <div className="notice watch model-warning"><div><div className="notice-title">기밀 자료에는 사용할 수 없는 모델입니다</div><div className="notice-detail">이 모델의 최대 허용 범위는 사내 일반 자료입니다. 기밀 질문은 게이트웨이가 차단하므로, 전체 자료에 답하려면 기밀 허용 모델을 선택하세요.</div></div></div>}
         </div>
+        <div className="card card-pad model-setting">
+          <div className="field">
+            <label className="field-label" htmlFor="specialist-tool-seconds">전문봇 자료 조회 시간</label>
+            <input id="specialist-tool-seconds" className="input" type="number" min={15} max={120} step={1}
+              value={draft.toolBudgetSeconds} disabled={!draft.editable}
+              onChange={(event) => setDraft({ ...draft, toolBudgetSeconds: Number(event.target.value) })} />
+            <span className="field-help">15~120초 · 실제 자료 조회에 쓴 누적 시간입니다. 모델 대기 시간은 제외합니다. 전체 답변 제한은 그대로이며, 추가 모델 호출이 생기면 토큰 비용이 늘 수 있습니다.</span>
+          </div>
+        </div>
       </Section>
 
       <Section
@@ -266,7 +278,7 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
       <Section title="저장될 값" lead="시크릿은 포함되지 않습니다. 이 값만 관리 오버레이 파일에 기록됩니다.">
         <pre className="code-block env-preview">{renderedPreview}</pre>
         <div className="form-row">
-          <button className="btn btn-primary" disabled={!draft.editable || saving} onClick={() => setConfirmSave(true)}>
+          <button className="btn btn-primary" disabled={!draft.editable || saving || !Number.isInteger(draft.toolBudgetSeconds) || draft.toolBudgetSeconds < 15 || draft.toolBudgetSeconds > 120} onClick={() => setConfirmSave(true)}>
             {saving ? '저장 중…' : '저장하고 봇 재시작'}
           </button>
           <span className="field-help mono">{draft.path}</span>

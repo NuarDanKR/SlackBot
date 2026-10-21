@@ -894,6 +894,30 @@ def test_owner_saves_validated_env_overlay_and_restart_request(client, env):
     assert "xoxb-" not in audit
 
 
+def test_owner_changes_specialist_tool_time_in_console(client, env):
+    headers = owner(client)
+    payload = _env_payload(client, headers)
+    payload["toolBudgetSeconds"] = 110
+
+    response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["toolBudgetSeconds"] == 110
+    assert "TYBOT_SPECIALIST_TOOL_SECONDS" in response.json()["changed"]
+    managed = (env / "state" / "config" / "managed.env").read_text(encoding="utf-8")
+    assert 'TYBOT_SPECIALIST_TOOL_SECONDS="110"' in managed
+    assert (env / "state" / "restart-request.json").is_file()
+
+
+def test_console_rejects_unbounded_specialist_tool_time(client):
+    headers = owner(client)
+    payload = _env_payload(client, headers)
+    for invalid in (0, 121):
+        payload["toolBudgetSeconds"] = invalid
+        response = client.put("/api/env-settings", json=payload, headers=_write_headers(headers))
+        assert response.status_code == 422
+
+
 def test_owner_can_select_registered_default_model(client, env):
     headers = owner(client)
     payload = _env_payload(client, headers)

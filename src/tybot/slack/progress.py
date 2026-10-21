@@ -32,7 +32,10 @@ class RequestProgress:
             try:
                 self.client.chat_update(
                     channel=self.channel, ts=self.ts,
-                    text="아직 요청을 처리하고 있습니다. 완료되면 이 메시지를 답변으로 갱신하겠습니다.",
+                    text=(
+                        "여러 자료를 확인하고 있어 답변에 시간이 더 걸릴 수 있습니다. "
+                        "완료되면 이 메시지를 답변으로 갱신하겠습니다."
+                    ),
                 )
             except Exception:  # noqa: BLE001 - progress is best effort
                 log.warning("지연 안내 갱신 실패 ch=%s", self.channel)
