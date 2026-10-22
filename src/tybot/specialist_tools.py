@@ -76,7 +76,8 @@ DOCUMENT_PREFIXES = (
 # 내면 "없다" 가 사실이 아닌 경우가 섞이고, 사용자는 그걸 알 방법이 없다.
 MAX_TOOL_CALLS = 12
 MAX_TOOL_CALLS_PER_TOOL = 6
-MAX_READ_CHARS = 120_000
+# Keep room for instructions and a final answer below the observed 120k-character failure.
+MAX_READ_CHARS = 90_000
 MAX_TOOL_SECONDS = 90.0
 MIN_TOOL_SECONDS = 15
 MAX_CONFIGURED_TOOL_SECONDS = 120
@@ -137,6 +138,10 @@ class ToolBudget:
         """이 호출을 거절해야 하면 모델에게 보일 문자열. 통과면 빈 문자열."""
         if self.calls >= self.max_calls:
             self.reason = "calls"
+        elif self.chars >= self.max_chars:
+            self.reason = "chars"
+        elif self.tool_seconds >= self.max_seconds:
+            self.reason = "time"
         elif self.per_tool.get(name, 0) >= self.max_per_tool:
             # 한 도구만 계속 부르는 것은 대개 같은 자리를 맴도는 것이다.
             # 전체 예산을 끝내지는 않는다 — 다른 도구는 아직 쓸 수 있다.
@@ -144,10 +149,6 @@ class ToolBudget:
                 f"({name} 호출 한도 {self.max_per_tool}회에 닿았습니다. "
                 "다른 도구를 쓰거나 지금까지 읽은 것으로 답하세요.)"
             )
-        elif self.chars >= self.max_chars:
-            self.reason = "chars"
-        elif self.tool_seconds >= self.max_seconds:
-            self.reason = "time"
         if self.reason:
             return (
                 "(검색 예산을 다 썼습니다. 더 찾지 말고 지금까지 읽은 것으로 답하세요. "
@@ -215,6 +216,16 @@ def _clip(text: str, limit: int = MAX_TOOL_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n…(이하 생략, {len(text):,}자 중 {limit:,}자)"
+
+
+def _clip_to_budget(text: str, remaining: int) -> str:
+    """Keep both content and truncation notice inside the remaining character budget."""
+    if len(text) <= remaining:
+        return text
+    notice = "\n(도구 응답 예산 도달: 일부만 전달됨. 읽지 못한 부분은 근거로 쓰지 마세요.)"
+    if remaining <= len(notice):
+        return notice[:remaining]
+    return text[: remaining - len(notice)] + notice
 
 
 # --- 설명문 ------------------------------------------------------------------
@@ -362,8 +373,25 @@ class ToolBox:
         import time
 
         started = time.monotonic()
+        before = (
+            len(self.touched.documents),
+            len(self.touched.evidence_hits),
+            len(self.touched.live_permalinks),
+            len(self.touched.live_messages),
+        )
         out = self._dispatch(name, args)
+        remaining = max(0, self.budget.max_chars - self.budget.chars)
+        if len(out) > remaining:
+            out = _clip_to_budget(out, remaining)
+            # The tool may have recorded lines beyond the returned slice. None of
+            # this call's new coordinates may be cited after a budget truncation.
+            del self.touched.documents[before[0]:]
+            del self.touched.evidence_hits[before[1]:]
+            del self.touched.live_permalinks[before[2]:]
+            del self.touched.live_messages[before[3]:]
         self.budget.spend(name, out, elapsed_seconds=time.monotonic() - started)
+        if self.budget.chars >= self.budget.max_chars:
+            self.budget.reason = "chars"
         return out
 
     def _dispatch(self, name: str, args: dict) -> str:

@@ -168,6 +168,46 @@ def test_tool_budget_setting_is_bounded(monkeypatch):
         assert tools.ToolBudget().max_seconds == expected
 
 
+def test_default_tool_text_budget_keeps_headroom_below_failure_threshold():
+    assert tools.ToolBudget().max_chars < 120_000
+
+
+def test_toolbox_never_returns_more_than_remaining_character_budget(monkeypatch):
+    box = _box(_store())
+    box.budget.max_chars = 100
+    box.budget.chars = 80
+    monkeypatch.setattr(box, "_dispatch", lambda _name, _args: "x" * 500)
+
+    got = box.run("search", {"query": "x"})
+
+    assert len(got) == 20
+    assert box.budget.chars == 100
+    assert box.budget.reason == "chars"
+    assert "검색 예산" in box.run("read_document", {"name": "x"})
+    assert box.budget.chars == 100
+
+
+def test_budget_truncation_does_not_cite_unseen_lines_or_live_messages(monkeypatch):
+    box = _box(_store())
+    box.budget.max_chars = 40
+
+    def oversized(_name, _args):
+        doc = box.store._docs[0]
+        box.touched.record_line(doc, doc.raw_lines[0])
+        box.touched.record_live("tyit", "C1", "1")
+        box.touched.live_permalinks.append("https://example.test/1")
+        return "x" * 100
+
+    monkeypatch.setattr(box, "_dispatch", oversized)
+    got = box.run("search", {"query": "x"})
+
+    assert len(got) == 40
+    assert not box.touched.evidence_hits
+    assert not box.touched.documents
+    assert not box.touched.live_messages
+    assert not box.touched.live_permalinks
+
+
 def test_toolbox_charges_only_dispatch_time(monkeypatch):
     import time
 

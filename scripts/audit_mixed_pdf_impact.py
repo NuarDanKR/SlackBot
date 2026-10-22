@@ -6,6 +6,7 @@ it returned, not every file in the archive. No conversion or model call occurs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from collections import Counter
@@ -61,22 +62,28 @@ def _expected_object_dir(item, archive: Path) -> Path | None:
         return None
 
 
-def _candidate(item, pages: dict) -> dict | None:
-    if not (COORDINATE_ID.fullmatch(item.channel_id)
-            and COORDINATE_ID.fullmatch(item.file_id)):
-        return None
+def _candidate(item, pages: dict) -> dict:
+    safe_ids = bool(
+        COORDINATE_ID.fullmatch(item.channel_id)
+        and COORDINATE_ID.fullmatch(item.file_id)
+    )
     heavy = sorted(n for n, page in pages.items() if pdf_page_images.image_heavy(page))
     failed = sorted(n for n, page in pages.items() if not page.inspected)
-    return {
+    candidate = {
         "workspace": item.workspace,
-        "channel_id": item.channel_id,
-        "file_id": item.file_id,
+        "channel_id": item.channel_id if safe_ids else None,
+        "file_id": item.file_id if safe_ids else None,
         "heavy_pages": heavy[:MAX_PAGES_PER_CANDIDATE],
         "heavy_page_count": len(heavy),
         "failed_pages": failed[:MAX_PAGES_PER_CANDIDATE],
         "failed_page_count": len(failed),
         "inspection_unavailable": not bool(pages),
     }
+    if not safe_ids:
+        candidate["candidate_ref"] = hashlib.sha256(
+            str(item.meta_path).encode("utf-8")
+        ).hexdigest()[:16]
+    return candidate
 
 
 def audit_items(
@@ -98,9 +105,9 @@ def audit_items(
         if not candidate_limit:
             return
         candidate = _candidate(item, pages)
-        if candidate is None:
+        if candidate["file_id"] is None:
             candidates_without_safe_ids += 1
-        elif len(candidates) < candidate_limit:
+        if len(candidates) < candidate_limit:
             candidates.append(candidate)
 
     for item in examined:

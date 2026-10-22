@@ -199,19 +199,23 @@ def test_candidate_includes_whole_inspection_failure_but_not_prior_failure(
     assert result["candidates"][0]["file_id"] == "F1"
 
 
-def test_candidate_rejects_unsafe_coordinate_and_caps_page_lists(tmp_path, monkeypatch):
+def test_candidate_masks_unsafe_coordinate_and_caps_page_lists(tmp_path, monkeypatch):
     item = _item(tmp_path, "F-1", b"pdf")
     monkeypatch.setattr(audit.pdf_page_images, "inspect", lambda _: {
         n: PageImages(page_number=n, images=1, area_ratio=0.5)
         for n in range(1, 60)
     })
 
-    rejected = audit.audit_items(
+    masked = audit.audit_items(
         [item], tmp_path, limit=0, max_bytes=100, candidate_limit=10,
     )
-    assert rejected["candidates"] == []
-    assert rejected["candidates_without_safe_ids"] == 1
-    assert rejected["candidates_truncated"] is True
+    assert len(masked["candidates"]) == 1
+    assert masked["candidates_without_safe_ids"] == 1
+    assert masked["candidates_truncated"] is False
+    assert masked["candidates"][0]["channel_id"] is None
+    assert masked["candidates"][0]["file_id"] is None
+    assert len(masked["candidates"][0]["candidate_ref"]) == 16
+    assert "F-1" not in str(masked)
 
     item = _item(tmp_path, "F1", b"pdf")
     accepted = audit.audit_items(

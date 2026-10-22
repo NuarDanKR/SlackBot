@@ -4,8 +4,9 @@ This audit counts PDF metadata records whose retained originals are available in
 the live per-channel object layout or the legacy sibling `objects/workspaces` layout.
 It does not convert, repair, index, call a model, or write to
 the archive. By default it emits aggregate counts only; no document names, IDs,
-paths, or text. An explicit candidate option emits bounded file IDs and page
-numbers, but never names, paths, or extracted content.
+paths, or text. An explicit candidate option emits bounded safe file IDs and page
+numbers. IDs outside the safe coordinate pattern are replaced by opaque references;
+names, paths, and extracted content are never printed.
 Run it after the nested-Form scanner's fail-closed parsing checks are deployed.
 
 ## Server pilot
@@ -72,8 +73,12 @@ sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/archiver.env \
   --limit 0 --max-bytes 20000000 --candidate-limit 30
 ```
 
-`candidates_truncated=false` and `candidates_without_safe_ids=0` are required
-before treating the list as complete. Each entry has `heavy_pages` and
+`candidates_truncated=false` is required before treating the list as complete.
+`candidates_without_safe_ids` counts entries that have null IDs and a
+`candidate_ref` instead; they remain in the list but require private coordinate
+resolution before targeted action. The first candidate run returned 24 entries
+and omitted two unsafe-ID records; rerun with this version to account for all 26.
+Each entry has `heavy_pages` and
 `failed_pages`, capped at 50 numbers each; compare the count fields to detect
 truncation. A whole-document inspection failure has `inspection_unavailable=true`
 and no page coordinates. Compare representative flagged pages with the retained
