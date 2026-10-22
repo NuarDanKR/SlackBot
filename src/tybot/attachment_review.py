@@ -83,6 +83,7 @@ class Attachment:
     coverage_total: int | None = None
     coverage_converted: int | None = None
     missing_units: tuple[int, ...] = ()
+    unverified_units: tuple[int, ...] = ()
     quality_flags: tuple[str, ...] = ()
     # PII 판정 결과(설계 §2.4). **코드만** 담는다 — 본문·번호·이름은 없다.
     # 구형 metadata 에는 아예 없어서 `screen_version` 은 0 이 될 수 있다.
@@ -118,6 +119,10 @@ class Attachment:
             shown = ", ".join(str(n) for n in self.missing_units[:8])
             more = f" 외 {len(self.missing_units) - 8}" if len(self.missing_units) > 8 else ""
             note += f" · 미확인 {shown}{more}{unit}"
+        if self.unverified_units:
+            shown = ", ".join(str(n) for n in self.unverified_units[:8])
+            more = f" 외 {len(self.unverified_units) - 8}" if len(self.unverified_units) > 8 else ""
+            note += f" · 그림 미해독 {shown}{more}{unit}"
         return note
 
     @property
@@ -172,6 +177,9 @@ def _from_meta(meta: dict, meta_path: Path, workspace: str, channel_id: str) -> 
         coverage_converted=_as_count(meta.get("coverage_converted")),
         missing_units=tuple(
             int(n) for n in (meta.get("missing_units") or []) if str(n).isdigit()
+        ),
+        unverified_units=tuple(
+            int(n) for n in (meta.get("unverified_units") or []) if str(n).isdigit()
         ),
         quality_flags=tuple(str(f) for f in (meta.get("quality_flags") or []) if str(f)),
         screen_version=int(meta.get("screen_version") or 0),

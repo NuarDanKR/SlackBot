@@ -195,6 +195,42 @@ def test_an_old_attachment_without_coverage_still_reads(tmp_path):
     assert item.coverage_note == ""
 
 
+def test_mixed_pdf_unverified_pages_are_visible_in_status(tmp_path):
+    """Extracted text does not mean an image on the same page was understood."""
+    from tybot.attachment_review import Attachment, status_line
+
+    item = Attachment(
+        workspace="pilot", channel_id="C1", file_id="F1", name="report.pdf",
+        filetype="pdf", mimetype="application/pdf", size=1, status="converted",
+        object_path=None, meta_path=tmp_path / "m.json", extracted=True,
+        conversion_state="partial", coverage_unit="page", coverage_total=2,
+        coverage_converted=2, unverified_units=(2,),
+    )
+
+    assert item.coverage_note == "확인 2/2쪽 · 그림 미해독 2쪽"
+    assert "부분 변환" in status_line(item)
+    assert "그림 미해독 2쪽" in status_line(item)
+
+
+def test_unverified_pages_survive_metadata_scan(tmp_path):
+    import json
+
+    from tybot.attachment_review import scan, staging_root
+
+    root = tmp_path / "archive"
+    folder = staging_root(root) / "pilot" / "channels" / "C1" / "attachments" / "F1"
+    folder.mkdir(parents=True)
+    (folder / "metadata.json").write_text(json.dumps({
+        "name": "report.pdf", "status": "converted", "conversion_state": "partial",
+        "coverage_unit": "page", "coverage_total": 2, "coverage_converted": 2,
+        "unverified_units": [2],
+    }), encoding="utf-8")
+
+    (item,) = scan(root)
+    assert item.unverified_units == (2,)
+    assert "그림 미해독 2쪽" in item.coverage_note
+
+
 def test_a_page_that_raises_is_counted_as_missing(monkeypatch):
     """손상된 쪽은 **조용히 건너뛰던** 자리다.
 
