@@ -150,3 +150,83 @@ def test_metadata_cannot_read_another_file_id_original(tmp_path, monkeypatch):
 
     assert result["counts"]["scanned_documents"] == 0
     assert result["skipped"] == {"outside_expected_objects": 1}
+
+
+def test_candidate_coordinates_are_opt_in_and_bounded(tmp_path, monkeypatch):
+    items = [_item(tmp_path, f"F{i}", b"private document") for i in range(4)]
+    monkeypatch.setattr(audit.pdf_page_images, "inspect", lambda _: {
+        4: PageImages(page_number=4, images=1, area_ratio=0.5),
+        9: PageImages(page_number=9, error="content_too_large"),
+    })
+
+    default = audit.audit_items(items, tmp_path, limit=0, max_bytes=100)
+    result = audit.audit_items(
+        items, tmp_path, limit=0, max_bytes=100, candidate_limit=2,
+    )
+
+    assert "candidates" not in default
+    assert result["counts"]["previously_succeeded_at_risk"] == 4
+    assert result["candidates_truncated"] is True
+    assert result["candidates_without_safe_ids"] == 0
+    assert result["candidates"] == [
+        {
+            "workspace": "pilot", "channel_id": "C1", "file_id": f"F{i}",
+            "heavy_pages": [4], "heavy_page_count": 1,
+            "failed_pages": [9], "failed_page_count": 1,
+            "inspection_unavailable": False,
+        }
+        for i in range(2)
+    ]
+    assert "private document" not in str(result)
+    assert "source.pdf" not in str(result)
+
+
+def test_candidate_includes_whole_inspection_failure_but_not_prior_failure(
+    tmp_path, monkeypatch,
+):
+    succeeded = _item(tmp_path, "F1", b"one")
+    failed = _item(tmp_path, "F2", b"two", state="failed")
+    monkeypatch.setattr(audit.pdf_page_images, "inspect", lambda _: {})
+
+    result = audit.audit_items(
+        [succeeded, failed], tmp_path, limit=0, max_bytes=100, candidate_limit=10,
+    )
+
+    assert result["counts"]["documents_with_scan_failures"] == 2
+    assert result["counts"]["previously_succeeded_at_risk"] == 1
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["inspection_unavailable"] is True
+    assert result["candidates"][0]["file_id"] == "F1"
+
+
+def test_candidate_rejects_unsafe_coordinate_and_caps_page_lists(tmp_path, monkeypatch):
+    item = _item(tmp_path, "F-1", b"pdf")
+    monkeypatch.setattr(audit.pdf_page_images, "inspect", lambda _: {
+        n: PageImages(page_number=n, images=1, area_ratio=0.5)
+        for n in range(1, 60)
+    })
+
+    rejected = audit.audit_items(
+        [item], tmp_path, limit=0, max_bytes=100, candidate_limit=10,
+    )
+    assert rejected["candidates"] == []
+    assert rejected["candidates_without_safe_ids"] == 1
+    assert rejected["candidates_truncated"] is True
+
+    item = _item(tmp_path, "F1", b"pdf")
+    accepted = audit.audit_items(
+        [item], tmp_path, limit=0, max_bytes=100, candidate_limit=10,
+    )
+    candidate = accepted["candidates"][0]
+    assert candidate["heavy_page_count"] == 59
+    assert len(candidate["heavy_pages"]) == audit.MAX_PAGES_PER_CANDIDATE
+
+
+def test_candidate_limit_validation(tmp_path):
+    for limit in (-1, 101):
+        try:
+            audit.audit_items([], tmp_path, limit=0, max_bytes=100, candidate_limit=limit)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("candidate limit must be bounded")

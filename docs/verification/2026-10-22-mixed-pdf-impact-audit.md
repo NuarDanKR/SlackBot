@@ -3,7 +3,9 @@
 This audit counts PDF metadata records whose retained originals are available in
 the live per-channel object layout or the legacy sibling `objects/workspaces` layout.
 It does not convert, repair, index, call a model, or write to
-the archive. It emits aggregate counts only; no document names, IDs, paths, or text.
+the archive. By default it emits aggregate counts only; no document names, IDs,
+paths, or text. An explicit candidate option emits bounded file IDs and page
+numbers, but never names, paths, or extracted content.
 Run it after the nested-Form scanner's fail-closed parsing checks are deployed.
 
 ## Server pilot
@@ -47,3 +49,34 @@ skip count or `truncated_by_limit=true` means the result must not be presented a
 workspace-wide percentage. Compare representative flagged pages with the original
 before deciding whether to re-convert or request Vision approval. The audit itself
 does not approve or transmit any page image.
+
+## TYIT full scan and review coordinates
+
+The 2026-10-22 run with `--limit 0 --max-bytes 20000000` attempted all 153
+metadata records. It inspected 152 originals and 1,456 pages; one original was
+over the size cap. It flagged 85 documents with large images, including 26
+previously marked `succeeded`. Nine documents contained nested Forms. One page
+reported `content_too_large`, so it remains uninspected. These are metadata
+records, not a distinct-file count, and the 26 are review candidates rather
+than confirmed missing content.
+
+After deploying the coordinate option, rerun the same read-only audit to find
+the 26 candidate records. Do not paste its output into tickets or public logs;
+file IDs and page coordinates can still identify internal documents.
+
+```bash
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/archiver.env \
+  timeout 300s /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/audit_mixed_pdf_impact.py \
+  --archive /var/lib/tybot/archive --workspace tyit \
+  --limit 0 --max-bytes 20000000 --candidate-limit 30
+```
+
+`candidates_truncated=false` and `candidates_without_safe_ids=0` are required
+before treating the list as complete. Each entry has `heavy_pages` and
+`failed_pages`, capped at 50 numbers each; compare the count fields to detect
+truncation. A whole-document inspection failure has `inspection_unavailable=true`
+and no page coordinates. Compare representative flagged pages with the retained
+original before re-conversion or Vision approval. The one original over 20 MB
+and the `content_too_large` page need separate bounded inspection; do not
+silently classify either as image-free.
