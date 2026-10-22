@@ -138,6 +138,25 @@ def test_master_v2_does_not_hide_a_specialist_runtime_failure(engine):
     assert fake.calls == []
 
 
+def test_specialist_budget_failure_is_not_reported_as_missing_data(engine):
+    base, fake = engine
+    routed = AnswerEngine(
+        base._store,
+        base._router,
+        specialist=lambda *args, **kwargs: SpecialistOutcome(
+            UNAVAILABLE, error_code="search-budget-exhausted", attempted=("hermes",)
+        ),
+        allow_master_business_answers=lambda ctx: ctx.workspace == "pilot",
+    )
+
+    answer = routed.answer("기성금 얼마야", _ctx())
+
+    assert answer.reason == "search_budget"
+    assert answer.specialist_error_code == "search-budget-exhausted"
+    assert "자료가 없다는 뜻은 아닙니다" in answer.text
+    assert fake.calls == []
+
+
 def test_zero_hits_and_no_recent_raw_returns_title_list(tmp_path):
     """기간 밖(오래된) 원문뿐이면 LLM 없이 문서 목록만 준다."""
     old = DOC.replace("2026-08-12", "2020-01-05")

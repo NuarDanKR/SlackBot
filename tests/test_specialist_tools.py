@@ -208,6 +208,26 @@ def test_budget_truncation_does_not_cite_unseen_lines_or_live_messages(monkeypat
     assert not box.touched.live_permalinks
 
 
+def test_parallel_tool_calls_share_one_character_budget(monkeypatch):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    box = _box(_store())
+    box.budget.max_chars = 100
+
+    def slow_dispatch(_name, _args):
+        time.sleep(0.02)
+        return "x" * 80
+
+    monkeypatch.setattr(box, "_dispatch", slow_dispatch)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: box.run("search", {"query": "x"}), range(2)))
+
+    assert sorted(map(len, results)) == [20, 80]
+    assert box.budget.chars == 100
+    assert box.budget.reason == "chars"
+
+
 def test_toolbox_charges_only_dispatch_time(monkeypatch):
     import time
 

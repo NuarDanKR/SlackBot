@@ -1181,6 +1181,14 @@ class AnswerEngine:
                 terms=list(terms or []),
                 **trace,
             )
+        if outcome.error_code == "search-budget-exhausted":
+            return Answer(
+                "검색 한도에 닿아 답변 근거를 충분히 확인하지 못했습니다. "
+                "자료가 없다는 뜻은 아닙니다. 채널이나 기간을 좁혀 다시 물어보세요.",
+                [], None, 0.0, hits, "search_budget",
+                terms=list(terms or []),
+                **trace,
+            )
         logger.warning(
             "전문 봇 답변 불가 status=%s code=%s attempted=%s",
             outcome.status, outcome.error_code, trace["attempted_specialists"],

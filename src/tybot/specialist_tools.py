@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from threading import Lock
 
 from .access import RequestContext
 from .gateway.base import ToolSpec
@@ -355,6 +356,7 @@ class ToolBox:
     # 이 요청이 쓸 수 있는 도구 예산. **요청마다 새 것**이라, 앞 질문이 다 쓴
     # 예산이 다음 질문을 막지 않는다.
     budget: ToolBudget = field(default_factory=ToolBudget)
+    _run_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def run(self, name: str, args: dict) -> str:
         """도구 하나 실행. **예외를 밖으로 내지 않는다.**
@@ -365,34 +367,35 @@ class ToolBox:
         예산이 끝났으면 실행하지 않고 그 사실을 돌려준다 — 같은 이유로,
         예외가 아니라 문자열이다.
         """
-        refusal = self.budget.refuse(name)
-        if refusal:
-            log.info("도구 예산 거절 name=%s %s", name, self.budget.summary())
-            return refusal
-        self.touched.calls.append(name)
-        import time
+        with self._run_lock:
+            refusal = self.budget.refuse(name)
+            if refusal:
+                log.info("도구 예산 거절 name=%s %s", name, self.budget.summary())
+                return refusal
+            self.touched.calls.append(name)
+            import time
 
-        started = time.monotonic()
-        before = (
-            len(self.touched.documents),
-            len(self.touched.evidence_hits),
-            len(self.touched.live_permalinks),
-            len(self.touched.live_messages),
-        )
-        out = self._dispatch(name, args)
-        remaining = max(0, self.budget.max_chars - self.budget.chars)
-        if len(out) > remaining:
-            out = _clip_to_budget(out, remaining)
-            # The tool may have recorded lines beyond the returned slice. None of
-            # this call's new coordinates may be cited after a budget truncation.
-            del self.touched.documents[before[0]:]
-            del self.touched.evidence_hits[before[1]:]
-            del self.touched.live_permalinks[before[2]:]
-            del self.touched.live_messages[before[3]:]
-        self.budget.spend(name, out, elapsed_seconds=time.monotonic() - started)
-        if self.budget.chars >= self.budget.max_chars:
-            self.budget.reason = "chars"
-        return out
+            started = time.monotonic()
+            before = (
+                len(self.touched.documents),
+                len(self.touched.evidence_hits),
+                len(self.touched.live_permalinks),
+                len(self.touched.live_messages),
+            )
+            out = self._dispatch(name, args)
+            remaining = max(0, self.budget.max_chars - self.budget.chars)
+            if len(out) > remaining:
+                out = _clip_to_budget(out, remaining)
+                # The tool may have recorded lines beyond the returned slice. None of
+                # this call's new coordinates may be cited after a budget truncation.
+                del self.touched.documents[before[0]:]
+                del self.touched.evidence_hits[before[1]:]
+                del self.touched.live_permalinks[before[2]:]
+                del self.touched.live_messages[before[3]:]
+            self.budget.spend(name, out, elapsed_seconds=time.monotonic() - started)
+            if self.budget.chars >= self.budget.max_chars:
+                self.budget.reason = "chars"
+            return out
 
     def _dispatch(self, name: str, args: dict) -> str:
         try:
