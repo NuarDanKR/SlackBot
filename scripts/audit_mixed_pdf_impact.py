@@ -24,6 +24,13 @@ COUNT_KEYS = (
     "documents_with_scan_failures",
     "previously_succeeded_at_risk",
 )
+SCAN_ERROR_CODES = frozenset({
+    pdf_page_images.ERROR_BUDGET,
+    pdf_page_images.ERROR_FORM_STREAM,
+    pdf_page_images.ERROR_MATRIX,
+    pdf_page_images.ERROR_TOO_LARGE,
+    pdf_page_images.ERROR_XOBJECT,
+})
 
 
 def audit_items(items, archive: Path, *, limit: int, max_bytes: int) -> dict:
@@ -35,6 +42,7 @@ def audit_items(items, archive: Path, *, limit: int, max_bytes: int) -> dict:
     examined = selected[:limit] if limit else selected
     counts: Counter[str] = Counter({key: 0 for key in COUNT_KEYS})
     skipped: Counter[str] = Counter()
+    scan_failure_codes: Counter[str] = Counter()
 
     for item in examined:
         source = item.object_path
@@ -69,10 +77,15 @@ def audit_items(items, archive: Path, *, limit: int, max_bytes: int) -> dict:
         if not pages:
             counts["documents_with_scan_failures"] += 1
             counts["previously_succeeded_at_risk"] += item.conversion_state == "succeeded"
+            scan_failure_codes["inspection_unavailable"] += 1
             continue
         heavy = sum(pdf_page_images.image_heavy(page) for page in pages.values())
         nested = sum(page.max_depth > 0 for page in pages.values())
         failed = sum(not page.inspected for page in pages.values())
+        for page in pages.values():
+            if not page.inspected:
+                code = page.error if page.error in SCAN_ERROR_CODES else "other_inspection_failure"
+                scan_failure_codes[code] += 1
         counts["pages_scanned"] += len(pages)
         counts["pages_with_large_images"] += heavy
         counts["pages_with_nested_forms"] += nested
@@ -92,6 +105,7 @@ def audit_items(items, archive: Path, *, limit: int, max_bytes: int) -> dict:
         "truncated_by_limit": len(examined) < len(selected),
         "max_original_bytes": max_bytes,
         "counts": dict(sorted(counts.items())),
+        "scan_failure_codes": dict(sorted(scan_failure_codes.items())),
         "skipped": dict(sorted(skipped.items())),
     }
 

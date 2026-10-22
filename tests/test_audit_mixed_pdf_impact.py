@@ -26,6 +26,7 @@ def test_counts_nested_heavy_and_uninspected_pages(tmp_path, monkeypatch):
     assert result["counts"]["pages_with_nested_forms"] == 1
     assert result["counts"]["pages_with_scan_failures"] == 1
     assert result["counts"]["previously_succeeded_at_risk"] == 1
+    assert result["scan_failure_codes"] == {"traversal_budget": 1}
     assert "private-name" not in str(result)
     assert "private document" not in str(result)
 
@@ -61,6 +62,7 @@ def test_empty_or_failed_inspection_is_unknown_and_at_risk(tmp_path, monkeypatch
     result = audit.audit_items([_item(source)], tmp_path, limit=0, max_bytes=100)
     assert result["counts"]["documents_with_scan_failures"] == 1
     assert result["counts"]["previously_succeeded_at_risk"] == 1
+    assert result["scan_failure_codes"] == {"inspection_unavailable": 1}
     assert "document contents" not in str(result)
 
 
@@ -83,3 +85,20 @@ def test_limit_and_size_cap_are_reported(tmp_path, monkeypatch):
     assert result["skipped"] == {"over_size_limit": 1}
     assert result["counts"]["scanned_documents"] == 1
     assert result["counts"]["previously_succeeded_at_risk"] == 0
+
+
+def test_unknown_failure_text_is_not_exposed(tmp_path, monkeypatch):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"pdf")
+    monkeypatch.setattr(audit.pdf_page_images, "inspect", lambda _: {
+        1: PageImages(page_number=1, error="secret document text"),
+        2: PageImages(page_number=2, error="matrix_unreadable"),
+    })
+
+    result = audit.audit_items([_item(source)], tmp_path, limit=0, max_bytes=100)
+
+    assert result["scan_failure_codes"] == {
+        "matrix_unreadable": 1,
+        "other_inspection_failure": 1,
+    }
+    assert "secret document text" not in str(result)

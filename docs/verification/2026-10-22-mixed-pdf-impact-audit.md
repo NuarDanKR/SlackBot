@@ -28,6 +28,9 @@ inspection returned; a nonzero `documents_with_scan_failures` means the inspecti
 was incomplete or failed, not that there were no images. `previously_succeeded_at_risk`
 counts prior `conversion_state=succeeded` records with large image regions or an
 inspection failure. It is a review queue estimate, not proof of unread content.
+`scan_failure_codes` counts known page-level reasons; `inspection_unavailable`
+counts whole documents that could not be inspected. Unexpected error strings are
+collapsed into `other_inspection_failure` and never printed verbatim.
 
 The script skips missing originals and paths outside the live archive root. A high
 skip count or `truncated_by_limit=true` means the result must not be presented as a
