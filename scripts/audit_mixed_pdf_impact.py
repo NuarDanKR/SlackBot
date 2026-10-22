@@ -12,6 +12,7 @@ from pathlib import Path
 
 from tybot import attachment_review
 from tybot.archive import pdf_page_images
+from tybot.archive.files import attachment_storage
 
 COUNT_KEYS = (
     "scanned_documents",
@@ -33,11 +34,33 @@ SCAN_ERROR_CODES = frozenset({
 })
 
 
+def _expected_object_dir(item, archive: Path) -> Path | None:
+    """Bind an original to its metadata coordinate in either supported layout."""
+    root = archive.resolve()
+    try:
+        meta = item.meta_path.resolve(strict=True)
+        legacy = attachment_storage(archive, item.workspace, item.channel_id)
+        legacy_meta = (legacy.staging_dir / item.file_id / "metadata.json").resolve()
+        if meta == legacy_meta:
+            allowed_root = (archive.parent / "objects").resolve()
+            expected = (legacy.objects_dir / item.file_id).resolve()
+        else:
+            channel_root = meta.parents[2]
+            if (channel_root.parent != root / item.workspace
+                    or not channel_root.name.startswith(f"{item.channel_id}__")
+                    or meta != channel_root / "staging" / item.file_id / "metadata.json"):
+                return None
+            allowed_root = root
+            expected = (channel_root / "objects" / item.file_id).resolve()
+        return expected if expected.is_relative_to(allowed_root) else None
+    except (AttributeError, IndexError, OSError, ValueError):
+        return None
+
+
 def audit_items(items, archive: Path, *, limit: int, max_bytes: int) -> dict:
     """Count suspect documents without returning paths, names, or document text."""
     if limit < 0 or max_bytes <= 0:
         raise ValueError("limit must be nonnegative and max_bytes must be positive")
-    root = archive.resolve()
     selected = list(items)
     examined = selected[:limit] if limit else selected
     counts: Counter[str] = Counter({key: 0 for key in COUNT_KEYS})
@@ -49,10 +72,14 @@ def audit_items(items, archive: Path, *, limit: int, max_bytes: int) -> dict:
         if source is None:
             skipped["no_original_path"] += 1
             continue
+        expected = _expected_object_dir(item, archive)
+        if expected is None:
+            skipped["metadata_outside_known_layout"] += 1
+            continue
         try:
             path = Path(source).resolve(strict=True)
-            if not path.is_relative_to(root):
-                skipped["outside_archive"] += 1
+            if not path.is_relative_to(expected):
+                skipped["outside_expected_objects"] += 1
                 continue
             if not path.is_file():
                 skipped["unavailable_original"] += 1
@@ -99,7 +126,7 @@ def audit_items(items, archive: Path, *, limit: int, max_bytes: int) -> dict:
 
     return {
         "read_only": True,
-        "scope": "metadata-visible-live-pdf",
+        "scope": "metadata-visible-live-and-legacy-pdf",
         "selected_pdf_metadata": len(selected),
         "attempted": len(examined),
         "truncated_by_limit": len(examined) < len(selected),
