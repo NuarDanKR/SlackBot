@@ -109,8 +109,37 @@ def test_scopes_cut_by_the_cap_are_named_in_the_answer():
     assert plan.dropped, "상한을 넘겨야 시험이 성립한다"
     note = plan.coverage_note()
     assert f"범위 상한({sc.MAX_SCOPES}개)으로 이번 답변에서 제외" in note
-    assert plan.dropped[0].label in note
+    first = plan.dropped[0]
+    assert first.site in note and first.period in note
     assert "나눠서 다시 물어" in note
+
+
+def test_every_cut_scope_stays_identifiable_past_nine():
+    """「외 N개」 로 줄이면 **어느 범위를 다시 물어야 하는지** 모른다.
+
+    현장 일곱 × 달 셋이면 빠지는 범위가 벌써 아홉이다 — 흔한 질문이다.
+    """
+    sites = ", ".join(f"가평{n}" for n in range(1, 8)) + " 현장"
+    plan = sc.plan(f"{sites} 의 1월, 2월, 3월 비교")
+    note = plan.coverage_note()
+
+    assert len(plan.dropped) >= 9
+    assert "외 " not in note.split("제외:")[-1], "제외된 범위를 줄여 적었다"
+    for scope in plan.dropped:
+        assert scope.site in note and scope.period in note, scope.label
+    # 쌍을 전부 나열하지 않는다 — 현장 하나에 기간을 묶는다.
+    assert "가평5(1월, 2월, 3월)" in note
+
+
+def test_the_uncovered_list_is_not_shortened_either():
+    """미확인은 상한 안쪽이라 길어야 12개다. 그 안에서는 **다 적는다.**"""
+    sites = ", ".join(f"가평{n}" for n in range(1, 8)) + " 현장"
+    plan = sc.plan(f"{sites} 의 1월, 2월, 3월 비교")
+
+    head = plan.coverage_note().split("/")[0]
+    assert "외 " not in head
+    for scope in plan.uncovered:
+        assert scope.label in head
 
 
 def test_cut_scopes_are_not_offered_to_the_model_as_next_targets():
@@ -514,6 +543,47 @@ def test_a_year_month_is_not_counted_twice():
     assert [s.label for s in plan.scopes] == ["2026년 9월"]
     assert plan.multi is False
     assert plan.coverage_note() == ""
+
+
+# --- 같은 기간의 다른 표기 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("query", [
+    "김해외동 2026-09 기성",
+    "김해외동 2026.09 기성",
+    "김해외동 2026/09 기성",
+    "김해외동 9월 기성",
+])
+def test_the_same_period_written_differently_is_the_same_scope(query):
+    """질문은 「2026년 9월」, 모델은 `2026-09` 로 찾는다.
+
+    글자만 맞춰 보면 그 검색은 **어느 범위도 아닌 것**이 되고, 범위별 상한이
+    안 걸리면서 그 범위는 찾았는데도 「확인하지 못한 범위」 에 남는다.
+    """
+    plan = sc.plan("김해외동 현장, 평택고덕 현장의 2026년 9월 기성 비교")
+    hit = plan.scope_of(query)
+
+    assert hit is not None and hit.label == "김해외동 2026년 9월"
+
+    plan.spend(query)
+    assert "김해외동 2026년 9월" not in plan.coverage_note()
+    assert "평택고덕 2026년 9월" in plan.coverage_note()
+
+
+def test_a_different_month_is_still_a_different_scope():
+    """표기를 맞춰 본다고 **아무 기간이나 같아지면** 상한이 무의미하다."""
+    plan = sc.plan("김해외동 현장의 2026년 9월, 2026년 10월 기성 비교")
+
+    assert plan.scope_of("김해외동 2026-10").label == "김해외동 2026년 10월"
+    assert plan.scope_of("김해외동 2025-09") is None, "다른 해를 같은 범위로 봤다"
+
+
+def test_an_ambiguous_period_picks_no_scope():
+    """여러 해의 같은 달이 동시에 걸리면 **막지도 세지도 않는다.**"""
+    plan = sc.plan("김해외동 현장의 2025년 9월, 2026년 9월 기성 비교")
+
+    assert plan.scope_of("김해외동 9월 기성") is None
+    assert plan.refuse("김해외동 9월 기성") == ""
 
 
 def test_a_month_list_sharing_one_suffix_is_expanded():

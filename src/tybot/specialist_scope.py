@@ -116,6 +116,74 @@ def _names(scopes, limit: int = 8) -> str:
     return shown + (f" 외 {len(scopes) - limit}개" if len(scopes) > limit else "")
 
 
+def _grouped(scopes) -> str:
+    """현장별로 묶어 **하나도 빠뜨리지 않고** 적는다.
+
+    `_names` 처럼 「외 N개」 로 줄이면 사람이 **어느 범위를 다시 물어야 하는지**
+    모른다. 상한에 걸려 빠진 범위가 아홉 개를 넘는 것은 흔한 일이고(현장 일곱 ×
+    달 셋이면 벌써 아홉이다), 그때 줄이면 안내가 「많이 빠졌다」 밖에 안 된다.
+
+    그렇다고 쌍을 전부 나열하면 길이가 현장 × 기간으로 는다. 빠진 범위는 대개
+    같은 현장의 여러 기간이므로 **현장 하나에 기간을 묶어** 적는다 — 길이는
+    현장 수에 비례하고, 식별은 그대로다.
+    """
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for scope in scopes:
+        key = scope.site
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        if scope.period:
+            groups[key].append(scope.period)
+    parts: list[str] = []
+    for key in order:
+        periods = groups[key]
+        if key and periods:
+            parts.append(f"{key}({', '.join(periods)})")
+        elif key:
+            parts.append(key)
+        else:
+            parts.extend(periods)
+    return ", ".join(parts)
+
+
+# --- 같은 기간의 다른 표기 ------------------------------------------------------
+#
+# 질문이 「2026년 9월」 이라고 적혀 있어도 모델은 `2026-09` 로 찾는다. 글자만
+# 맞춰 보면 그 검색은 **어느 범위도 아닌 것**이 되고, 그러면 범위별 상한이 안
+# 걸리고 그 범위는 찾았는데도 「확인하지 못한 범위」 에 남는다.
+_YEAR_MONTH = re.compile(rf"^20(\d{{2}})\s*[.\-/년]\s*({_MONTH})")
+_BARE_MONTH = re.compile(rf"^({_MONTH})\s*월")
+
+
+def _period_key(period: str) -> tuple:
+    """기간 표기를 **비교할 수 있는 모양**으로. 못 읽으면 글자 그대로."""
+    said = (period or "").strip()
+    year_month = _YEAR_MONTH.match(said)
+    if year_month:
+        return ("ym", int(year_month.group(1)), int(year_month.group(2)))
+    month = _BARE_MONTH.match(said)
+    if month:
+        return ("m", int(month.group(1)))
+    return ("t", said.replace(" ", ""))
+
+
+def _same_period(key: tuple, other: tuple) -> bool:
+    """두 기간 표기가 같은 기간인가.
+
+    연도가 한쪽에만 있으면 **달만 보고 같다고 본다.** 질문이 「9월」 이라고만
+    했는데 모델이 `2026-09` 로 찾은 경우다. 이 때문에 여러 해의 같은 달이
+    동시에 걸릴 수 있지만, 그러면 `scope_of` 가 범위를 못 고르고 **막지도
+    세지도 않는다** — 넘겨 세는 쪽이 아니라 덜 세는 쪽으로 끝난다.
+    """
+    if key[0] == "ym" and other[0] == "ym":
+        return key == other
+    if {key[0], other[0]} <= {"ym", "m"}:
+        return key[-1] == other[-1]
+    return key == other
+
+
 @dataclass(frozen=True)
 class Scope:
     """물어본 범위 하나. **질문에 적힌 말만** 들고 있다."""
@@ -133,10 +201,21 @@ class Scope:
         축 하나만 맞아도 참으로 두면 「김해외동」 한 단어가 그 현장의 모든 기간
         범위에 동시에 걸린다. 그러면 어느 범위를 찾은 것인지 못 고르고, 범위별
         상한이 한 번도 걸리지 않는다.
+
+        현장은 **글자 그대로** 본다 — 이름은 질문에 적힌 말이 전부다. 기간은
+        표기가 갈리므로(`2026년 9월` ↔ `2026-09`) 모양을 맞춰 본다.
         """
         said = text or ""
-        axes = [value for value in (self.site, self.period) if value]
-        return bool(axes) and all(value in said for value in axes)
+        if not (self.site or self.period):
+            return False
+        if self.site and self.site not in said:
+            return False
+        if not self.period:
+            return True
+        if self.period in said:
+            return True
+        key = _period_key(self.period)
+        return any(_same_period(key, _period_key(p)) for p in _periods(said))
 
 
 def _periods(question: str) -> list[str]:
@@ -288,11 +367,12 @@ class ScopePlan:
         """
         parts = []
         if self.uncovered:
-            parts.append(f"확인하지 못한 범위: {_names(self.uncovered)}")
+            # 미확인은 범위 상한 안쪽이라 길어야 `MAX_SCOPES` 개다. **줄이지 않는다.**
+            parts.append(f"확인하지 못한 범위: {_names(self.uncovered, MAX_SCOPES)}")
         if self.dropped:
             parts.append(
                 f"범위 상한({MAX_SCOPES}개)으로 이번 답변에서 제외: "
-                f"{_names(self.dropped)} — 나눠서 다시 물어 주세요"
+                f"{_grouped(self.dropped)} — 나눠서 다시 물어 주세요"
             )
         if not parts:
             return ""
