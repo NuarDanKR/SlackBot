@@ -618,6 +618,7 @@ class SpecialistOutcome:
     selected: str = ""
     decision_id: str = ""
     clarification: str = ""
+    coverage_note: str = ""
 
     @property
     def ok(self) -> bool:
@@ -714,9 +715,10 @@ def serve(
     question = str(getattr(task, "question", "") or getattr(task, "standalone_question", "") or "")
     attempted: list[str] = []
     last_code = ""
+    last_coverage_note = ""
     for chosen in candidates:
         attempted.append(chosen.key)
-        answer, code = _run_one(
+        answer, code, coverage_note = _run_one(
             chosen,
             question=question,
             workspace=workspace,
@@ -745,6 +747,7 @@ def serve(
                 decision_id=decision_id,
             )
         last_code = code or last_code
+        last_coverage_note = coverage_note if code == "search-budget-exhausted" else ""
         if code == EVIDENCE_INSUFFICIENT:
             return SpecialistOutcome(
                 EVIDENCE_INSUFFICIENT,
@@ -758,6 +761,7 @@ def serve(
         error_code=last_code or "specialist-failed",
         attempted=tuple(attempted),
         decision_id=decision_id,
+        coverage_note=last_coverage_note,
     )
 
 
@@ -780,7 +784,7 @@ def preview_rules(
     """
     if variant not in {"current", "draft"}:
         raise ValueError("rule-test variant must be current or draft")
-    answer, code = _run_one(
+    answer, code, coverage_note = _run_one(
         specialist,
         question=question,
         workspace=workspace,
@@ -800,6 +804,7 @@ def preview_rules(
             error_code=code or "specialist-failed",
             attempted=(specialist.key,),
             selected=specialist.key,
+            coverage_note=coverage_note,
         )
     return SpecialistOutcome(
         SUCCESS,
@@ -998,8 +1003,8 @@ def _run_one(
     required_capability: str = "",
     display_hint: str = "",
     external_v3_factory=None,
-) -> tuple[SpecialistAnswer | None, str]:
-    """후보 하나를 실제로 부른다. `(답, 사유코드)`."""
+) -> tuple[SpecialistAnswer | None, str, str]:
+    """후보 하나를 실제로 부른다. `(답, 사유코드, 미확인 범위)`."""
     import time
 
     from . import specialist_adapters
@@ -1201,7 +1206,11 @@ def _run_one(
         log.warning("전문가 호출을 남기지 못했습니다: %s", exc)
 
     if not ok:
-        return None, error_code or "empty-output"
+        coverage_note = ""
+        if error_code == "search-budget-exhausted":
+            scope_plan = getattr(adapter, "scope_plan", None)
+            coverage_note = scope_plan.coverage_note() if scope_plan is not None else ""
+        return None, error_code or "empty-output", coverage_note
     return (
         SpecialistAnswer(
             text=result.text,
@@ -1214,6 +1223,7 @@ def _run_one(
             live_messages=touched_live_messages,
             format_retry_count=format_retry_count,
         ),
+        "",
         "",
     )
 
@@ -1245,7 +1255,7 @@ def ask(
         return None
     if fallback is not None:
         log.info("ask(fallback=...) 은 무시된다 — 마스터 대체 답변은 없다")
-    answer, _code = _run_one(
+    answer, _code, _coverage_note = _run_one(
         decision.specialist,
         question=question,
         workspace=workspace,

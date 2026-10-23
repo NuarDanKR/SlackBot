@@ -439,13 +439,14 @@ class _Outcome:
     봇이 못 답한 것이고, 그러면 우리는 못 답한다고 말한다(설계 §5.2).
     """
 
-    __slots__ = ("_attempted", "answer", "clarification", "error_code", "status")
+    __slots__ = ("_attempted", "answer", "clarification", "coverage_note", "error_code", "status")
 
-    def __init__(self, status, answer=None, error_code="", clarification="", attempted=()):
+    def __init__(self, status, answer=None, error_code="", clarification="", attempted=(), coverage_note=""):
         self.status = status
         self.answer = answer
         self.error_code = error_code
         self.clarification = clarification
+        self.coverage_note = coverage_note
         self._attempted = tuple(attempted or ())
 
     @property
@@ -468,6 +469,7 @@ class _Outcome:
                 str(getattr(value, "error_code", "") or ""),
                 str(getattr(value, "clarification", "") or ""),
                 tuple(getattr(value, "attempted", ()) or ()),
+                str(getattr(value, "coverage_note", "") or ""),
             )
         # 옛 훅: 답 객체를 그대로 준다.
         if str(getattr(value, "text", "") or "").strip():
@@ -1139,9 +1141,11 @@ class AnswerEngine:
                 required_capability=str(getattr(task, "required_capability", "") or ""),
             )
         if outcome.error_code in ("search-budget-exhausted",):
+            coverage_note = str(getattr(outcome, "coverage_note", "") or "")
             return Answer(
                 f"「{q}」 를 찾다가 검색 한도에 닿았습니다. 자료가 없다는 뜻은 아닙니다. "
-                "채널이나 기간을 좁혀 다시 물어보세요.",
+                "채널이나 기간을 좁혀 다시 물어보세요."
+                + (f"\n{coverage_note}" if coverage_note else ""),
                 [], None, 0.0, 0, "search_budget",
                 terms=list(terms or []),
                 specialist_error_code="search-budget-exhausted",
@@ -1182,9 +1186,11 @@ class AnswerEngine:
                 **trace,
             )
         if outcome.error_code == "search-budget-exhausted":
+            coverage_note = str(getattr(outcome, "coverage_note", "") or "")
             return Answer(
                 "검색 한도에 닿아 답변 근거를 충분히 확인하지 못했습니다. "
-                "자료가 없다는 뜻은 아닙니다. 채널이나 기간을 좁혀 다시 물어보세요.",
+                "자료가 없다는 뜻은 아닙니다. 채널이나 기간을 좁혀 다시 물어보세요."
+                + (f"\n{coverage_note}" if coverage_note else ""),
                 [], None, 0.0, hits, "search_budget",
                 terms=list(terms or []),
                 **trace,

@@ -144,7 +144,8 @@ def test_specialist_budget_failure_is_not_reported_as_missing_data(engine):
         base._store,
         base._router,
         specialist=lambda *args, **kwargs: SpecialistOutcome(
-            UNAVAILABLE, error_code="search-budget-exhausted", attempted=("hermes",)
+            UNAVAILABLE, error_code="search-budget-exhausted", attempted=("hermes",),
+            coverage_note="※ 확인하지 못한 범위: 평택고덕 2026년 9월",
         ),
         allow_master_business_answers=lambda ctx: ctx.workspace == "pilot",
     )
@@ -154,7 +155,20 @@ def test_specialist_budget_failure_is_not_reported_as_missing_data(engine):
     assert answer.reason == "search_budget"
     assert answer.specialist_error_code == "search-budget-exhausted"
     assert "자료가 없다는 뜻은 아닙니다" in answer.text
+    assert "확인하지 못한 범위: 평택고덕 2026년 9월" in answer.text
     assert fake.calls == []
+
+
+def test_no_hits_budget_notice_preserves_named_scope(engine):
+    base, _ = engine
+    outcome = SpecialistOutcome(
+        UNAVAILABLE, error_code="search-budget-exhausted",
+        coverage_note="※ 확인하지 못한 범위: 김해외동 2026년 9월",
+    )
+    answer = base._specialist_no_hits(outcome, "기성금", _ctx())
+    assert answer.reason == "search_budget"
+    assert "확인하지 못한 범위: 김해외동 2026년 9월" in answer.text
+    assert not answer.citations
 
 
 def test_zero_hits_and_no_recent_raw_returns_title_list(tmp_path):

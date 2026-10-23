@@ -145,6 +145,70 @@ def test_a_low_confidence_routing_asks_instead_of_answering(tmp_path):
     assert provider.calls == []
 
 
+def test_budget_failure_carries_scope_note_without_becoming_an_answer(monkeypatch):
+    monkeypatch.setattr(specialist_router, "available", lambda workspace: [_row()])
+    monkeypatch.setattr(
+        specialist_router,
+        "_run_one",
+        lambda *args, **kwargs: (
+            None, "search-budget-exhausted", "※ 확인하지 못한 범위: 평택고덕 2026년 9월",
+        ),
+    )
+    outcome = specialist_router.serve(
+        _task(), workspace="pilot", evidence=[], router=None,
+        authorization_id="test", record_call_row=False,
+    )
+    assert not outcome.ok
+    assert outcome.error_code == "search-budget-exhausted"
+    assert "평택고덕 2026년 9월" in outcome.coverage_note
+
+
+def test_later_failure_does_not_inherit_earlier_budget_scope(monkeypatch):
+    candidates = [_row(key="hermes"), _row(key="finance")]
+    monkeypatch.setattr(specialist_router, "available", lambda workspace: candidates)
+    monkeypatch.setattr(specialist_router, "select", lambda *args, **kwargs: candidates)
+    outcomes = iter([
+        (None, "search-budget-exhausted", "※ 확인하지 못한 범위: 평택고덕"),
+        (None, "adapter-error", ""),
+    ])
+    monkeypatch.setattr(specialist_router, "_run_one", lambda *args, **kwargs: next(outcomes))
+
+    outcome = specialist_router.serve(
+        _task(), workspace="pilot", evidence=[], router=None,
+        authorization_id="test", record_call_row=False,
+    )
+    assert outcome.error_code == "adapter-error"
+    assert outcome.coverage_note == ""
+    assert outcome.attempted == ("hermes", "finance")
+
+
+def test_empty_adapter_budget_failure_reads_its_scope_plan(monkeypatch):
+    from tybot import specialist_adapters, specialist_contract
+
+    budget = SimpleNamespace(exhausted=True, summary=lambda: "budget=exhausted")
+    adapter = SimpleNamespace(
+        budget=budget,
+        scope_plan=SimpleNamespace(
+            coverage_note=lambda: "※ 확인하지 못한 범위: 평택고덕 2026년 9월"
+        ),
+    )
+    monkeypatch.setattr(specialist_adapters, "build", lambda *args, **kwargs: adapter)
+    monkeypatch.setattr(
+        specialist_contract, "execute",
+        lambda *args, **kwargs: SimpleNamespace(
+            result="error", text="", error_code="", output_chars=0,
+        ),
+    )
+    answer, code, note = specialist_router._run_one(
+        _row(execution_mode="tools"), question="기성금", workspace="pilot",
+        evidence=[], router=None, authorization_id="test", toolbox_factory=None,
+        live=False, confidence=0.9, record_call_row=False,
+    )
+    assert answer is None
+    assert code == "search-budget-exhausted"
+    assert "평택고덕 2026년 9월" in note
+
+
 def test_zero_confidence_never_becomes_the_minimum_passing_score(monkeypatch):
     """누락·실패를 뜻하는 0은 falsy 우회로 전문 봇에 들어가면 안 된다."""
     monkeypatch.setattr(specialist_router, "available", lambda workspace: [_row()])
