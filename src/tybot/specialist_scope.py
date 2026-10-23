@@ -69,15 +69,26 @@ _MONTH = r"(?:1[0-2]|0?[1-9])"
 #
 # 순서가 곧 우선순위다. **긴 표기가 앞**이다 — `7·8·9월` 을 달 하나로 줄이지
 # 않으려면 목록 패턴이 연-월 패턴보다 앞에 있어야 한다.
+#
+# ## 분기·반기가 **달로 읽히면 안 된다**
+#
+# 연-월 패턴은 `월` 이 없어도 맞으므로 `2026년 3분기` 에서 `2026년 3` 을 가져간다.
+# 그러면 3분기 질문이 **3월** 범위가 되고, 답변 끝의 범위 이름이 질문에 없는
+# 기간을 가리킨다. 분기·반기를 **연-월보다 앞**에 둬 자리를 먼저 가져가게 한다.
+_QUARTER = r"(?:(?<!\d)[1-4]\s*분기|(?<![A-Za-z0-9])(?:Q\s*[1-4]|[1-4]\s*Q)(?![A-Za-z0-9]))"
+_HALF = r"(?:[상하]반기|(?<![A-Za-z0-9])(?:H\s*[12]|[12]\s*H)(?![A-Za-z0-9]))"
+
 _PERIOD_PATTERNS = (
     # 7·8·9월 · 7, 8월 — 하나의 `월` 을 여러 달이 나눠 쓴다
     re.compile(rf"(?<!\d){_MONTH}\s*(?:[,·/]\s*{_MONTH}\s*)+월"),
+    # 2026년 3분기 · 2026 Q3 · 2026-3Q · 2026년 상반기 · 2026 H1
+    re.compile(rf"20\d{{2}}\s*[.\-/년]?\s*(?:{_QUARTER}|{_HALF})"),
     # 2026.09 · 2026-9 · 2026년 9월
-    re.compile(rf"20\d{{2}}\s*[.\-/년]\s*{_MONTH}\s*월?"),
+    re.compile(rf"20\d{{2}}\s*[.\-/년]\s*{_MONTH}(?!\d)\s*월?"),
     # 9월 · 09월 (연도 없이)
     re.compile(rf"(?<!\d){_MONTH}\s*월(?!\s*말까지만)"),
-    # 3분기 · 상반기
-    re.compile(r"[1-4]\s*분기|상반기|하반기"),
+    # 3분기 · Q3 · 상반기 · H1 (연도 없이)
+    re.compile(rf"{_QUARTER}|{_HALF}"),
 )
 
 #: 달 목록 패턴이 잡은 덩어리를 달 하나씩으로 푼다.
@@ -153,35 +164,52 @@ def _grouped(scopes) -> str:
 # 질문이 「2026년 9월」 이라고 적혀 있어도 모델은 `2026-09` 로 찾는다. 글자만
 # 맞춰 보면 그 검색은 **어느 범위도 아닌 것**이 되고, 그러면 범위별 상한이 안
 # 걸리고 그 범위는 찾았는데도 「확인하지 못한 범위」 에 남는다.
-_YEAR_MONTH = re.compile(rf"^20(\d{{2}})\s*[.\-/년]\s*({_MONTH})")
-_BARE_MONTH = re.compile(rf"^({_MONTH})\s*월")
+_YEAR_PREFIX = re.compile(r"^20(\d{2})[.\-/년]?")
+_KEY_PATTERNS = (
+    ("m", re.compile(r"^(\d{1,2})월?$")),
+    ("q", re.compile(r"^(?:([1-4])분기|Q([1-4])|([1-4])Q)$")),
+    ("h", re.compile(r"^(?:([상하])반기|H([12])|([12])H)$")),
+)
+_HALF_INDEX = {"상": 1, "하": 2}
 
 
 def _period_key(period: str) -> tuple:
-    """기간 표기를 **비교할 수 있는 모양**으로. 못 읽으면 글자 그대로."""
-    said = (period or "").strip()
-    year_month = _YEAR_MONTH.match(said)
-    if year_month:
-        return ("ym", int(year_month.group(1)), int(year_month.group(2)))
-    month = _BARE_MONTH.match(said)
-    if month:
-        return ("m", int(month.group(1)))
-    return ("t", said.replace(" ", ""))
+    """기간 표기를 **비교할 수 있는 모양**으로. 못 읽으면 글자 그대로.
+
+    `(종류, 연도|None, 번호)` 다. `2026년 3분기`·`2026 Q3`·`2026-3Q` 가 모두
+    `("q", 26, 3)` 이 된다 — 사람이 쓰는 표기는 여러 가지인데 범위는 하나다.
+    """
+    said = (period or "").strip().upper().replace(" ", "")
+    year: int | None = None
+    prefix = _YEAR_PREFIX.match(said)
+    if prefix:
+        year, said = int(prefix.group(1)), said[prefix.end():]
+    for kind, pattern in _KEY_PATTERNS:
+        hit = pattern.match(said)
+        if not hit:
+            continue
+        value = next(g for g in hit.groups() if g)
+        return (kind, year, _HALF_INDEX.get(value, 0) or int(value))
+    # 연도만 떼고 못 읽었으면 **원문 그대로** 둔다. 모르는 표기를 숫자로
+    # 바꿔 두면 엉뚱한 기간과 같아진다.
+    return ("t", year, (period or "").strip().replace(" ", ""))
 
 
 def _same_period(key: tuple, other: tuple) -> bool:
     """두 기간 표기가 같은 기간인가.
 
-    연도가 한쪽에만 있으면 **달만 보고 같다고 본다.** 질문이 「9월」 이라고만
-    했는데 모델이 `2026-09` 로 찾은 경우다. 이 때문에 여러 해의 같은 달이
+    종류가 다르면 다른 기간이다 — 3분기와 3월은 같지 않다.
+
+    연도가 **한쪽에만** 있으면 번호만 보고 같다고 본다. 질문이 「3분기」 라고만
+    했는데 모델이 `2026 Q3` 로 찾은 경우다. 이 때문에 여러 해의 같은 분기가
     동시에 걸릴 수 있지만, 그러면 `scope_of` 가 범위를 못 고르고 **막지도
     세지도 않는다** — 넘겨 세는 쪽이 아니라 덜 세는 쪽으로 끝난다.
     """
-    if key[0] == "ym" and other[0] == "ym":
-        return key == other
-    if {key[0], other[0]} <= {"ym", "m"}:
-        return key[-1] == other[-1]
-    return key == other
+    if key[0] != other[0]:
+        return False
+    if key[2] != other[2]:
+        return False
+    return key[1] is None or other[1] is None or key[1] == other[1]
 
 
 @dataclass(frozen=True)

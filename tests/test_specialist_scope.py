@@ -570,6 +570,94 @@ def test_the_same_period_written_differently_is_the_same_scope(query):
     assert "평택고덕 2026년 9월" in plan.coverage_note()
 
 
+def test_a_quarter_is_not_read_as_a_month():
+    """연-월 패턴이 `2026년 3분기` 에서 **`2026년 3`** 을 가져가면 3월이 된다.
+
+    답변 끝의 범위 이름이 **질문에 없는 기간**을 가리키고, 사람은 3분기를
+    물었는데 3월 이야기를 받는다.
+    """
+    plan = sc.plan("2026년 3분기 기성 알려줘")
+
+    assert [s.label for s in plan.scopes] == ["2026년 3분기"]
+    assert plan.scope_of("2026년 3월") is None, "분기를 달로 읽었다"
+
+
+@pytest.mark.parametrize("question", [
+    "2026년 13월 기성", "2026.13 기성", "2026년 00월 기성", "13분기 기성",
+])
+def test_invalid_period_numbers_are_not_read_as_valid_scopes(question):
+    assert sc.plan(question).scopes == ()
+
+
+@pytest.mark.parametrize("query", [
+    "김해외동 2026 Q3 기성",
+    "김해외동 2026-3Q 기성",
+    "김해외동 2026년 3분기 기성",
+    "김해외동 Q3 기성",
+    "김해외동 3Q 기성",
+    "김해외동 3분기 기성",
+])
+def test_a_quarter_written_differently_is_the_same_scope(query):
+    """사람이 쓰는 표기는 여러 가지인데 **범위는 하나**다."""
+    plan = sc.plan("김해외동 현장과 평택고덕 현장의 2026년 3분기 기성을 비교해줘")
+    hit = plan.scope_of(query)
+
+    assert hit is not None and hit.label == "김해외동 2026년 3분기"
+
+    plan.spend(query)
+    note = plan.coverage_note()
+    assert "김해외동 2026년 3분기" not in note
+    assert "평택고덕 2026년 3분기" in note
+
+
+@pytest.mark.parametrize("query", [
+    "김해외동 2026 H1 실적",
+    "김해외동 2026년 상반기 실적",
+    "김해외동 1H 실적",
+    "김해외동 상반기 실적",
+])
+def test_a_half_year_written_differently_is_the_same_scope(query):
+    plan = sc.plan("김해외동 현장과 평택고덕 현장의 2026년 상반기 실적을 비교해줘")
+    hit = plan.scope_of(query)
+
+    assert hit is not None and hit.label == "김해외동 2026년 상반기"
+
+
+def test_a_quarter_and_a_half_and_a_month_never_mix():
+    """종류가 다르면 다른 기간이다. 섞으면 **3분기 질문이 3월 답**을 받는다."""
+    plan = sc.plan("김해외동 현장의 2026년 3분기 기성")
+
+    assert plan.scope_of("김해외동 2026년 3월") is None
+    assert plan.scope_of("김해외동 2026 H3") is None
+    assert plan.scope_of("김해외동 2026 Q3") is not None
+
+    halves = sc.plan("김해외동 현장의 2026년 하반기 기성")
+    assert halves.scope_of("김해외동 2026 H2") is not None
+    assert halves.scope_of("김해외동 2026 Q2") is None
+
+
+@pytest.mark.parametrize("said, query", [
+    ("김해외동 현장의 2025년 3분기, 2026년 3분기 기성을 비교해줘", "김해외동 3Q 기성"),
+    ("김해외동 현장의 2025년 상반기, 2026년 상반기 실적", "김해외동 H1 실적"),
+    ("김해외동 현장의 2025년 9월, 2026년 9월 기성", "김해외동 9월 기성"),
+])
+def test_a_period_ambiguous_across_years_is_not_counted_as_covered(said, query):
+    """연도를 안 쓴 검색이 여러 해에 걸리면 **어느 해를 봤는지 모른다.**
+
+    하나로 골라 세면 못 본 해가 확인한 범위로 둔갑한다. 막지도 세지도 않고
+    둘 다 「확인하지 못한 범위」 로 남긴다 — 덜 세는 쪽이 안전하다.
+    """
+    plan = sc.plan(said)
+
+    assert plan.scope_of(query) is None
+    assert plan.refuse(query) == "", "모호하다고 검색을 막지는 않는다"
+
+    plan.spend(query)
+    note = plan.coverage_note()
+    for scope in plan.scopes:
+        assert scope.label in note, f"{scope.label} 를 확인한 범위로 셌다"
+
+
 def test_a_different_month_is_still_a_different_scope():
     """표기를 맞춰 본다고 **아무 기간이나 같아지면** 상한이 무의미하다."""
     plan = sc.plan("김해외동 현장의 2026년 9월, 2026년 10월 기성 비교")
@@ -664,6 +752,44 @@ def test_the_adapter_hands_the_toolbox_the_answers_char_reserve():
     adapter.complete(_request(DOCUMENTED_PHRASING))
 
     assert box.reserve_chars == [FINAL_ANSWER_RESERVE_CHARS]
+
+
+def test_a_real_quarter_question_counts_what_the_model_actually_found():
+    """실제로 오가는 문장 그대로. 질문은 분기, 검색어는 `Q3` 다.
+
+    표기가 갈린다고 못 본 범위로 세면 사람은 **찾은 것을 못 봤다고** 읽는다.
+    반대로 아무 분기나 같다고 세면 **안 본 것을 봤다고** 읽는다.
+    """
+    said = "김해외동 현장과 평택고덕 현장의 2026년 3분기 기성 실적을 비교해 주세요."
+    box = _Toolbox(budget=_Budget(max_per_tool=6))
+    provider = _Provider(
+        ("", (_search("c1", "김해외동 2026 Q3 기성"),)),
+        ("김해외동 3분기 기성은 자료에 있는 대로 정리했습니다.", ()),
+    )
+    adapter = ToolSpecialist("hermes", _router(provider), toolbox=box, rules="규칙")
+
+    text = adapter.complete(_request(said))
+
+    assert adapter.search_ok == 1
+    assert "김해외동 2026년 3분기" not in text.split("※")[-1], "찾은 범위를 미확인에 적었다"
+    assert "평택고덕 2026년 3분기" in text, "안 본 범위가 사라졌다"
+
+
+def test_a_real_half_year_question_across_two_years_stays_uncounted():
+    """두 해의 같은 반기를 물었는데 검색어에 연도가 없다. **둘 다 미확인.**"""
+    said = "송산서측 현장의 2025년 상반기와 2026년 상반기 공정률을 비교해 주세요."
+    box = _Toolbox(budget=_Budget(max_per_tool=6))
+    provider = _Provider(
+        ("", (_search("c1", "송산서측 상반기 공정률"),)),
+        ("찾은 범위에서 정리했습니다.", ()),
+    )
+    adapter = ToolSpecialist("hermes", _router(provider), toolbox=box, rules="규칙")
+
+    text = adapter.complete(_request(said))
+
+    assert box.queries == ["송산서측 상반기 공정률"], "모호하다고 검색을 막지는 않는다"
+    assert "송산서측 2025년 상반기" in text
+    assert "송산서측 2026년 상반기" in text
 
 
 def test_a_toolbox_without_the_status_api_still_works():
