@@ -453,6 +453,34 @@ MAX_SEARCH_ROUNDS = 2
 # 한 라운드에 모델이 search tool_use를 여러 개 낼 수 있다. 라운드만 세면 첫
 # 응답에서 여섯 번을 실행하고도 `1회`로 기록된다. 실제 외부 조회 호출도 묶는다.
 MAX_SEARCH_CALLS = 2
+
+# 도구 예산에서 **최종 답변을 위해 남겨 두는 몫.**
+#
+# 끝까지 긁어 쓰면 `ToolBudget.exhausted` 가 서고, 그 상태의 빈 답은 라우터가
+# `search-budget-exhausted` 로 닫는다 — 사람에게 답이 아예 안 간다. 읽은 것으로
+# 마무리할 자리를 남겨 두는 편이 **덜 찾고 답하는 쪽**이라 낫다.
+FINAL_ANSWER_RESERVE_CALLS = 1
+# 호출 수만 남겨 두는 것으로는 부족하다. `ToolBudget` 은 글자 수로도 소진 표시를
+# 세우고, 둘 중 **아무 하나**만 닿아도 결과는 같다 — 라우터가
+# `search-budget-exhausted` 로 닫아 사람에게 답이 안 간다.
+#
+# 글자는 도구상자가 지켜 준다: `ToolBox.run_with_status(..., reserve_chars=...)` 가
+# 남은 몫을 넘는 출력을 **자르고 그 좌표를 지운다.** 우리는 같은 값을 넘긴다.
+FINAL_ANSWER_RESERVE_CHARS = 8_000
+
+# **이것은 예약이 아니다.** 도구상자에 호출별 시간 제한이 없으므로, 이미 시작한
+# 호출이 얼마를 쓸지는 아무도 못 막는다. 그래서 「10초를 남긴다」 가 아니라
+# 「10초가 안 남았으면 **새 호출을 시작하지 않는다**」 다. 실제 상한은 `deadline`.
+START_NO_TOOL_UNDER_SECONDS = 10.0
+
+#: 근거가 된 실행. 나머지 상태(`refused`·`reserved`·`error`·`truncated`)는
+#: 「그 범위를 봤다」 로 세지 않는다.
+TOOL_OK = "ok"
+
+# 범위가 여럿일 때 허용하는 **최대 라운드 수.** 기본 4 라운드는 검색에 3 라운드만
+# 주는데, 모델이 한 라운드에 검색 하나씩 내면 범위 아홉 개 중 셋만 시도된다.
+# 라운드도 범위 수에 맞춰 늘린다 — 바깥 시계(`deadline`)가 여전히 상한이다.
+MAX_SCOPE_TOOL_ROUNDS = 7
 # 루프 전체 예산. 사고가 켜져 있는 모델은 한 회차가 크다.
 # 도구를 고르는 호출과 답을 쓰는 호출은 **필요한 토큰이 다르다**(인계 §4.3).
 #
@@ -546,8 +574,15 @@ class ToolSpecialist:
         # 그 순간 권한 범위가 넓어지므로, 새 도구를 주지 않고 이 대화만 다시 쓴다.
         self._transcript: list = []
         self.phase = DISCOVERY
+        # 이 질문이 몇 개의 범위를 묻나. **검색 예산을 그 범위에 나눈다**
+        # (`specialist_scope`). 범위를 못 찾으면 지금까지와 같은 예산이다.
+        self.scope_plan = None
         # 새 검색을 **시작한** 라운드 수. 읽기만 한 라운드는 세지 않는다.
         self.search_rounds = 0
+        # **시도한** 검색 중 도구상자가 `ok` 로 돌려준 것. `search_calls` 와
+        # 따로 센다 — 거절·오류·잘림을 성공과 한 숫자에 담으면 「몇 범위를
+        # 실제로 봤나」 를 로그에서도 답에서도 알 수 없다.
+        self.search_ok = 0
         self.search_calls = 0
         self.tool_calls_by_name: dict[str, int] = {}
         self.opened_evidence = 0
@@ -565,13 +600,110 @@ class ToolSpecialist:
         """이 요청이 쓴 도구 예산. **예산 소진과 자료 없음을 구별하는 근거다.**"""
         return getattr(self._toolbox, "budget", None)
 
+    def _search_call_cap(self) -> int:
+        """이 질문이 쓸 수 있는 검색 횟수. 범위가 여럿이면 늘어난다.
+
+        **도구상자가 실행해 주는 수를 넘지 않는다.** 넘기면 거절당한 호출이
+        「찾아본 범위」 로 기록될 자리가 생긴다.
+        """
+        plan = self.scope_plan
+        want = max(MAX_SEARCH_CALLS, plan.total_searches) if plan else MAX_SEARCH_CALLS
+        budget = self.budget
+        cap = getattr(budget, "max_per_tool", 0) if budget is not None else 0
+        return min(want, cap) if cap else want
+
+    def _round_budget(self) -> int:
+        """이 질문이 돌 수 있는 라운드 수. 범위가 여럿이면 늘어난다."""
+        plan = self.scope_plan
+        if not plan or not plan.multi:
+            return self._max_rounds
+        # 검색 한 번에 한 라운드 + 최종 합성 한 라운드.
+        want = self._search_call_cap() + 1
+        return max(self._max_rounds, min(MAX_SCOPE_TOOL_ROUNDS, want))
+
+    def _search_round_cap(self) -> int:
+        """검색을 시작할 수 있는 라운드 수.
+
+        횟수만 늘리고 라운드를 그대로 두면, 한 라운드에 다 못 부른 범위는
+        **다음 기회가 없다.** 범위 수에 맞춰 같이 늘리되 최종화 라운드는 남긴다.
+        """
+        plan = self.scope_plan
+        if not plan or not plan.multi:
+            return MAX_SEARCH_ROUNDS
+        return min(self._round_budget() - 1, max(MAX_SEARCH_ROUNDS, len(plan.scopes)))
+
+    def _run_tool(self, tool_name: str, args) -> tuple[str, str]:
+        """도구 하나 실행하고 **(출력, 상태)** 를 돌려준다.
+
+        상태는 `ToolBox.run_with_status` 가 정한다 — `ok` 만 근거가 된 것이고
+        `refused`·`reserved`·`error`·`truncated` 는 아니다. 특히 `truncated` 는
+        도구상자가 이 호출의 좌표를 **지운** 상태라, 글자가 돌아왔다고 범위를
+        봤다고 적으면 인용할 수 없는 것을 봤다고 적는 것이 된다.
+
+        `run_with_status` 가 없는 구형·대역 도구상자는 `run` 으로 내려간다.
+        그때는 상태를 알 수 없으므로 예산 소진 표시가 **이 호출에서 처음**
+        섰는지로 가른다.
+        """
+        runner = getattr(self._toolbox, "run_with_status", None)
+        if runner is not None:
+            run = runner(tool_name, args, reserve_chars=FINAL_ANSWER_RESERVE_CHARS)
+            return run.text, run.status
+        budget = self.budget
+        before = getattr(budget, "reason", "") if budget is not None else ""
+        output = self._toolbox.run(tool_name, args)
+        after = getattr(budget, "reason", "") if budget is not None else ""
+        return output, TOOL_OK if (before or not after) else "refused"
+
+    def _reserve_left(self) -> bool:
+        """최종 답변용 예산이 남아 있나. **축마다 보장의 세기가 다르다.**
+
+        도구를 끝까지 쓰면 `ToolBudget` 이 소진 표시를 세우고, 그 상태로 빈
+        답이 나오면 라우터가 **`search-budget-exhausted`** 로 닫는다 — 사람에게는
+        답이 아예 안 간다. 마지막 몫을 남겨 두고 멈춰야 **읽은 것으로라도**
+        답이 나온다.
+
+        | 축 | 여기서 하는 일 | 실제로 보장되나 |
+        |---|---|---|
+        | 호출 수 | 남은 몫이 예약분뿐이면 새 호출을 안 낸다 | **된다** — 호출은 세다가 멈추면 그만이다 |
+        | 글자 수 | 임계에 닿으면 안 낸다 | **된다** — 도구상자가 `reserve_chars` 로 잘라 준다 |
+        | 도구 시간 | 남은 시간이 적으면 **새 호출을 시작하지 않는다** | **아니다** |
+
+        시간은 사전 검사뿐이다. 이미 시작한 호출 하나가 얼마나 걸릴지는 여기서
+        못 막는다 — 도구상자에 호출별 시간 제한이 없기 때문이다. 그러므로 이
+        줄은 「10초를 남긴다」 가 아니라 **「10초가 안 남았으면 더 시작하지
+        않는다」** 다. 전체 시간의 실제 상한은 바깥 `deadline` 이 쥔다.
+        """
+        budget = self.budget
+        if budget is None:
+            return True
+        calls_left = getattr(budget, "max_calls", 0) - getattr(budget, "calls", 0)
+        if calls_left <= FINAL_ANSWER_RESERVE_CALLS:
+            return False
+        max_chars = getattr(budget, "max_chars", 0)
+        if max_chars and max_chars - getattr(budget, "chars", 0) <= FINAL_ANSWER_RESERVE_CHARS:
+            return False
+        max_seconds = getattr(budget, "max_seconds", 0.0)
+        seconds_left = max_seconds - getattr(budget, "tool_seconds", 0.0)
+        return not (max_seconds and seconds_left <= START_NO_TOOL_UNDER_SECONDS)
+
     def complete(self, request) -> str:
         from .gateway.base import Message, Sensitivity, ToolSpec
+        from .specialist_scope import plan as plan_scopes
         from .specialist_tools import specs
 
         self.phase = DISCOVERY
         if getattr(request, "editing_text", ""):
             return _edit_answer(self, request)
+        # **범위를 먼저 센다.** 3현장 × 3개월이면 아홉 범위인데 검색 상한이
+        # 질문 하나당 고정이면, 첫 범위가 예산을 다 쓰고 나머지 여덟은 보지도
+        # 못한다 — 그리고 그 사실이 어디에도 안 남는다.
+        # 예산은 **도구상자가 실제로 실행해 주는 수**로 자른다. 안내한 횟수와
+        # 실행되는 횟수가 다르면 모델은 거절만 받고, 거절은 「없었다」 와 섞인다.
+        budget = self.budget
+        self.scope_plan = plan_scopes(
+            getattr(request, "question", "") or "",
+            limit=getattr(budget, "max_per_tool", 0) or None if budget is not None else None,
+        )
         tools = specs(live=self._live)
         search_spec = next((tool for tool in tools if tool.name == "search"), None)
         seed_gate_tools = _read_only(tools)
@@ -597,6 +729,12 @@ class ToolSpecialist:
         self.seed_count = len(chunks)
         seed = "\n\n".join(chunks)[:MAX_EVIDENCE_CHARS]
         opening = _with_display_hint(f"질문: {request.question}", request)
+        briefing = self.scope_plan.briefing()
+        if briefing:
+            # 범위와 예산을 **먼저** 말한다. 뒤에 붙이면 모델은 이미 첫 범위를
+            # 파고든 뒤에 읽는다.
+            opening = f"{briefing}\n\n{opening}"
+
         if seed:
             # **seed 부터 본다**(인계 §4.1). "무엇을 찾든 여기서 시작하라" 는
             # 도구 설명이 앞서면 모델은 이미 받은 근거를 두고 전체 검색부터 한다 —
@@ -617,7 +755,7 @@ class ToolSpecialist:
         # 이 요청 하나의 시계. 없으면 상한 없이 도는 옛 동작이다(테스트·구형 호출부).
         deadline = getattr(request, "deadline", None)
 
-        for _ in range(self._max_rounds):
+        for _ in range(self._round_budget()):
             if deadline is not None:
                 # 전체 시간이 끝났으면 여기서 멈춘다 — 최종화도 못 한다.
                 deadline.require_time(TOTAL)
@@ -640,8 +778,8 @@ class ToolSpecialist:
             else:
                 round_tools = (
                     tools
-                    if self.search_rounds < MAX_SEARCH_ROUNDS
-                    and self.search_calls < MAX_SEARCH_CALLS
+                    if self.search_rounds < self._search_round_cap()
+                    and self.search_calls < self._search_call_cap()
                     else _read_only(tools)
                 )
             response = self._router.complete(
@@ -666,7 +804,10 @@ class ToolSpecialist:
                 # 기회를 준다. 여기서 빈 문자열을 그대로 돌려주면 근거를 다 읽고도
                 # 답이 없는 상태가 된다(장애 §2.3).
                 if response.text.strip():
-                    return response.text
+                    # **여기가 본 경로다.** 도구를 다 쓰고 바로 답하는 회차가
+                    # 가장 흔한데, 전에는 이 반환만 범위 줄을 못 받았다 —
+                    # 부분 결과가 전체 결과로 나가는 자리가 바로 여기였다.
+                    return self._covered(response.text)
                 log.warning(
                     "전문가 응답에 text 블록이 없습니다 key=%s stop_reason=%s",
                     self.key, response.stop_reason or "-",
@@ -703,8 +844,8 @@ class ToolSpecialist:
                 if (
                     call.name in SEARCH_TOOLS
                     and (
-                        self.search_rounds >= MAX_SEARCH_ROUNDS
-                        or self.search_calls >= MAX_SEARCH_CALLS
+                        self.search_rounds >= self._search_round_cap()
+                        or self.search_calls >= self._search_call_cap()
                     )
                 ):
                     # 도구를 안 줬는데도 부른 경우다. **실행하지 않는다** — 주지
@@ -716,16 +857,48 @@ class ToolSpecialist:
                         ),
                     })
                     continue
+                if not self._reserve_left():
+                    # **최종 답변 몫까지 쓰지 않는다.** 여기서 멈춰야 읽은 것으로
+                    # 마무리할 수 있다. 검색뿐 아니라 `read_document` 도 막는다 —
+                    # 글자·시간 예산을 끝내는 것은 대개 읽기 쪽이다.
+                    results.append({
+                        "type": "tool_result", "tool_use_id": call.id,
+                        "content": (
+                            "(답변을 쓸 몫만 남았습니다. 더 찾지 말고 지금까지 "
+                            "읽은 것으로 답하세요.)"
+                        ),
+                    })
+                    continue
+                query = ""
+                if call.name in SEARCH_TOOLS and self.scope_plan is not None:
+                    query = str((call.input or {}).get("query") or "")
+                    refusal = self.scope_plan.refuse(query)
+                    if refusal:
+                        # 한 범위가 예산을 다 먹지 못하게 막는다. **거절 문구가
+                        # 안 본 범위를 이름으로 알려 준다.**
+                        results.append({
+                            "type": "tool_result", "tool_use_id": call.id,
+                            "content": refusal,
+                        })
+                        continue
                 self.tool_calls_by_name[call.name] = (
                     self.tool_calls_by_name.get(call.name, 0) + 1
                 )
-                searched = searched or call.name in SEARCH_TOOLS
-                if call.name in SEARCH_TOOLS:
-                    self.search_calls += 1
                 tool_name = "search" if call.name == REQUEST_SEARCH else call.name
+                output, status = self._run_tool(tool_name, call.input)
+                if call.name in SEARCH_TOOLS:
+                    # **시도와 완료를 따로 센다.** 거절·오류·잘림도 시도는 시도라
+                    # 상한에 들어가지만, 그 범위를 「봤다」 고 적으면 못 본 범위가
+                    # 확인한 범위로 둔갑한다.
+                    searched = True
+                    self.search_calls += 1
+                    if status == TOOL_OK:
+                        self.search_ok += 1
+                        if self.scope_plan is not None:
+                            self.scope_plan.spend(query)
                 results.append({
                     "type": "tool_result", "tool_use_id": call.id,
-                    "content": self._toolbox.run(tool_name, call.input),
+                    "content": output,
                 })
             if searched:
                 # **검색을 실제로 한 라운드만** 센다. 읽기만 한 라운드까지 세면
@@ -768,7 +941,12 @@ class ToolSpecialist:
         self.last_stop_reason = final.stop_reason
         self.input_tokens += final.input_tokens
         self.output_tokens += final.output_tokens
-        return final.text
+        return self._covered(final.text)
+
+    def _covered(self, text: str) -> str:
+        """답변에 **안 본 범위 줄**을 보장한다. 범위가 하나면 아무것도 안 붙는다."""
+        note = self.scope_plan.coverage_note() if self.scope_plan else ""
+        return _with_coverage(text, note)
 
     def _finalize(self, messages: list, deadline) -> str:
         """도구 없이 한 번 더 물어 **지금까지 읽은 것으로** 답하게 한다.
@@ -792,10 +970,17 @@ class ToolSpecialist:
             deadline.enter(FINALIZE)
             # 최종화는 discovery 경계를 넘겨도 된다 — 자기 몫의 시간이 따로 있다.
             deadline.require_time(FINALIZE)
-        messages.append(Message(
-            "user",
-            "더 찾지 말고 지금까지 읽은 것으로 답하세요. 모자라면 모자라다고 쓰세요.",
-        ))
+        note = self.scope_plan.coverage_note() if self.scope_plan else ""
+        closing = "더 찾지 말고 지금까지 읽은 것으로 답하세요. 모자라면 모자라다고 쓰세요."
+        if note:
+            # **안 본 범위를 이름으로 준다.** 「모자라면 모자라다고」 만으로는
+            # 어느 범위가 빠졌는지 모델도 모른다 — 코드가 센 것을 그대로 넘긴다.
+            closing = (
+                f"{closing}\n\n확인하지 못한 범위가 있습니다. "
+                f"답변 끝에 이 줄을 그대로 적으세요:\n{note}\n"
+                "못 본 범위를 「자료가 없다」 고 쓰지 마세요."
+            )
+        messages.append(Message("user", closing))
         final = self._router.complete(
             messages,
             model=self._model or None,
@@ -809,7 +994,24 @@ class ToolSpecialist:
         self.last_stop_reason = final.stop_reason
         self.input_tokens += final.input_tokens
         self.output_tokens += final.output_tokens
-        return final.text
+        return _with_coverage(final.text, note)
+
+
+def _with_coverage(text: str, note: str) -> str:
+    """안 본 범위 줄을 **코드가 보장한다.**
+
+    프롬프트로만 시키면 지켜질 때도 있고 아닐 때도 있다. 안 지켜진 회차는
+    **부분 결과가 전체 결과로 읽히고**, 그게 이 작업이 막으려던 바로 그 일이다.
+
+    본문이 비면 붙이지 않는다. 안내만 남으면 그것이 답으로 보이고, 근거를
+    하나도 못 읽은 회차가 답을 낸 것처럼 된다 — 그 판정은 라우터 몫이다.
+    """
+    body = (text or "").strip()
+    if not note or not body:
+        return text
+    if note in body:
+        return text
+    return f"{body}\n\n{note}"
 
 
 def _assistant_blocks(response) -> list[dict]:

@@ -228,6 +228,66 @@ def test_parallel_tool_calls_share_one_character_budget(monkeypatch):
     assert box.budget.reason == "chars"
 
 
+def test_status_distinguishes_executed_search_from_per_tool_refusal():
+    box = _box(_store())
+    box.budget.max_per_tool = 1
+
+    first = box.run_with_status("search", {"query": "3공구"})
+    second = box.run_with_status("search", {"query": "3공구"})
+
+    assert first.status == "ok"
+    assert second.status == "refused"
+    assert box.budget.calls == 1
+
+
+def test_status_distinguishes_tool_failure_from_a_completed_search():
+    class Boom(FakeStore):
+        def search(self, query, ctx, *, limit=20, channels=None):
+            raise RuntimeError("index down")
+
+    box = _box(Boom([]))
+
+    result = box.run_with_status("search", {"query": "x"})
+
+    assert result.status == "error"
+    assert "도구 오류" in result.text
+
+
+def test_reserved_characters_are_not_spent_by_the_next_tool_call(monkeypatch):
+    box = _box(_store())
+    box.budget.max_chars = 100
+    monkeypatch.setattr(box, "_dispatch", lambda _name, _args: "x" * 90)
+
+    first = box.run_with_status("search", {"query": "x"}, reserve_chars=20)
+    second = box.run_with_status("search", {"query": "x"}, reserve_chars=20)
+
+    assert first.status == "truncated"
+    assert len(first.text) == 80
+    assert second.status == "reserved"
+    assert box.budget.chars == 80
+    assert box.budget.reason == ""
+    assert box.budget.calls == 1
+
+
+def test_budget_diagnostics_do_not_log_query_or_tool_output(monkeypatch, caplog):
+    box = _box(_store())
+    box.budget.max_chars = 100
+    monkeypatch.setattr(box, "_dispatch", lambda _name, _args: "PRIVATE_OUTPUT" * 10)
+
+    with caplog.at_level("INFO", logger="tybot.specialist_tools"):
+        first = box.run_with_status("search", {"query": "PRIVATE_QUERY"}, reserve_chars=20)
+        second = box.run_with_status("search", {"query": "PRIVATE_QUERY"}, reserve_chars=20)
+
+    assert first.status == "truncated"
+    assert second.status == "reserved"
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "tool output truncated" in messages
+    assert "tool reserve blocked" in messages
+    assert "reserve_chars=20" in messages
+    assert "PRIVATE_QUERY" not in messages
+    assert "PRIVATE_OUTPUT" not in messages
+
+
 def test_toolbox_charges_only_dispatch_time(monkeypatch):
     import time
 

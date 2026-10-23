@@ -229,6 +229,14 @@ def _clip_to_budget(text: str, remaining: int) -> str:
     return text[: remaining - len(notice)] + notice
 
 
+@dataclass(frozen=True)
+class ToolRun:
+    """Result of a tool call, including whether its output can establish coverage."""
+
+    text: str
+    status: str  # ok | truncated | error | refused | reserved
+
+
 # --- 설명문 ------------------------------------------------------------------
 #
 # `ref/hermes` 의 도구 설명을 옮겼다. 검색 규칙(부분 일치 폴백, 낱말별 건수를
@@ -357,8 +365,14 @@ class ToolBox:
     # 예산이 다음 질문을 막지 않는다.
     budget: ToolBudget = field(default_factory=ToolBudget)
     _run_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _dispatch_failed: bool = field(default=False, init=False, repr=False)
 
     def run(self, name: str, args: dict) -> str:
+        return self.run_with_status(name, args).text
+
+    def run_with_status(
+        self, name: str, args: dict, *, reserve_chars: int = 0,
+    ) -> ToolRun:
         """도구 하나 실행. **예외를 밖으로 내지 않는다.**
 
         도구가 터지면 모델은 그것을 모른 채 답을 만든다. 오류도 문자열로
@@ -367,11 +381,23 @@ class ToolBox:
         예산이 끝났으면 실행하지 않고 그 사실을 돌려준다 — 같은 이유로,
         예외가 아니라 문자열이다.
         """
+        if reserve_chars < 0:
+            raise ValueError("reserve_chars must not be negative")
         with self._run_lock:
             refusal = self.budget.refuse(name)
             if refusal:
                 log.info("도구 예산 거절 name=%s %s", name, self.budget.summary())
-                return refusal
+                return ToolRun(refusal, "refused")
+            remaining = max(0, self.budget.max_chars - self.budget.chars - reserve_chars)
+            if not remaining:
+                log.info(
+                    "tool reserve blocked name=%s reserve_chars=%d %s",
+                    name, reserve_chars, self.budget.summary(),
+                )
+                return ToolRun(
+                    "(답변용 글자 예산을 남겨야 합니다. 더 찾지 말고 지금까지 읽은 것으로 답하세요.)",
+                    "reserved",
+                )
             self.touched.calls.append(name)
             import time
 
@@ -382,9 +408,14 @@ class ToolBox:
                 len(self.touched.live_permalinks),
                 len(self.touched.live_messages),
             )
+            self._dispatch_failed = False
             out = self._dispatch(name, args)
-            remaining = max(0, self.budget.max_chars - self.budget.chars)
-            if len(out) > remaining:
+            truncated = len(out) > remaining
+            if truncated:
+                log.warning(
+                    "tool output truncated name=%s original_chars=%d allowed_chars=%d reserve_chars=%d",
+                    name, len(out), remaining, reserve_chars,
+                )
                 out = _clip_to_budget(out, remaining)
                 # The tool may have recorded lines beyond the returned slice. None of
                 # this call's new coordinates may be cited after a budget truncation.
@@ -395,7 +426,8 @@ class ToolBox:
             self.budget.spend(name, out, elapsed_seconds=time.monotonic() - started)
             if self.budget.chars >= self.budget.max_chars:
                 self.budget.reason = "chars"
-            return out
+            status = "error" if self._dispatch_failed else "truncated" if truncated else "ok"
+            return ToolRun(out, status)
 
     def _dispatch(self, name: str, args: dict) -> str:
         try:
@@ -408,8 +440,10 @@ class ToolBox:
             if name == "fetch_recent_slack":
                 return self._fetch_recent(args)
         except Exception as exc:  # noqa: BLE001 - 도구 실패가 답변을 끊으면 안 된다
+            self._dispatch_failed = True
             log.warning("도구 실패 name=%s: %s", name, type(exc).__name__)
             return f"(도구 오류: {name})"
+        self._dispatch_failed = True
         return f"(알 수 없는 도구: {name})"
 
     # -- 검색 ------------------------------------------------------------
@@ -717,6 +751,7 @@ __all__ = [
     "MAX_SEARCH_HITS",
     "MAX_TOOL_CHARS",
     "ToolBox",
+    "ToolRun",
     "Touched",
     "specs",
 ]
