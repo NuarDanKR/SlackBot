@@ -254,6 +254,9 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] Claude+Codex: Archiver 정본에서 이미지 후보를 고르는 selector와 사람 업로드
       provenance를 연결하고, 파생 revision 좌표 조회로 이미 처리한 원본의 자동
       재전송을 막음 (2026-10-27, 과거 provenance 없는 파일은 fail-closed).
+- [x] Codex: 현재 ACL·PII·봇 생성 여부를 원본 열기 전에 재검사하고, 기존 승인에
+      한해서만 예약한 뒤 one-shot worker를 부르는 배치 coordinator 구현
+      (2026-10-27, 자동 승인·자동 재시도·서비스 스케줄러 없음).
 
 ---
 
