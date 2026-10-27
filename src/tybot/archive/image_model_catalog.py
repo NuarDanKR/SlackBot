@@ -18,6 +18,7 @@ class FreeQuotaState(StrEnum):
 
     AVAILABLE = "available"
     EXHAUSTED = "exhausted"
+    UNLIMITED = "unlimited"
     UNKNOWN = "unknown"
 
 
@@ -108,6 +109,8 @@ def evaluate_free_vision_model(
         blockers.append("quota_unknown")
     elif entry.quota_state is FreeQuotaState.EXHAUSTED or entry.quota_remaining == 0:
         blockers.append("quota_exhausted")
+    elif entry.quota_state is FreeQuotaState.AVAILABLE and entry.quota_remaining is None:
+        blockers.append("quota_unknown")
 
     return ImageModelDecision(entry=entry, blockers=tuple(blockers))
 

@@ -24,6 +24,15 @@ def test_only_exact_vision_tables_have_a_different_owner(drift):
     ]
 
 
+def test_image_description_tables_are_also_isolated_vision_tables(drift):
+    tables = drift['VISION_TABLES']
+    assert tables['archiver_image_model_catalog'] == 'archiver_image_description_schema.sql'
+    assert tables['archiver_image_description_revision'] == 'archiver_image_description_schema.sql'
+    required = drift['VISION_REQUIRED']
+    assert required['archiver_image_description_job'] == {'SELECT', 'INSERT', 'UPDATE'}
+    assert required['archiver_image_description_revision'] == {'SELECT', 'INSERT'}
+
+
 def run_check(drift, monkeypatch, *, absent=(), denied=(), problems=(), worker=False, columns=(), have_columns=()):
     main = drift['main']
     globals_ = main.__globals__

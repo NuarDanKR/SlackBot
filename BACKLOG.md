@@ -233,6 +233,24 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] Codex: 호출 직전에 정책·현재 ACL·PII·봇 생성 여부·원본 해시·prompt/model·
       외부 전송 승인·1회 dispatch 영수증을 다시 대조하는 순수 preflight 구현
       (2026-10-27, 영속 원장·worker 미연결).
+- [x] Codex: 기본 OFF인 무료 모델 카탈로그·전역/workspace 정책·승인·1회 작업·
+      불변 파생 revision 스키마와 `tybot_vision` 전용 권한·드리프트 검사를 추가
+      (2026-10-27, 저장소·API·worker 미연결, 운영 DB 미적용).
+- [x] Claude: 모델 응답의 식별자·숫자·민감 uncertainty를 결정론적으로 다시 검사해
+      `allow`/`withhold_description`/`block`으로 가르는 저장 전 안전 게이트 구현
+      (2026-10-27, 40건 및 전체 회귀 통과).
+- [x] Codex: 정책·카탈로그 revision, 승인, 무료 quota·일일/동시 상한, 1회 dispatch,
+      안전 게이트 뒤 파생 revision 발행을 잇는 영속 저장소 구현
+      (2026-10-27, 74건 검토 통과 · 실제 DB 시험 대기, worker·API 미연결).
+- [x] Codex: 저장소 리뷰의 withhold 상태 불일치·과금 후 연속 호출·`available+NULL`
+      무제한 해석을 수정. 비용 미확정도 무료로 보지 않고 모델을 자동 차단
+      (2026-10-27, 실제 DB 31건은 격리 DSN 대기).
+- [x] Codex: 예약 commit 뒤 정확히 한 번 코어를 호출하고, 호출 전 거절·안전 게이트
+      발행·결과 미확정을 각각 영속 상태로 닫는 one-shot worker 연결
+      (2026-10-27, 큐 소비·원본 로더·서비스/API 미연결).
+- [x] Codex: worker 반환·재던지기에서 설명/DB 행 본문을 제거하고, 오래 남은
+      `dispatching`을 재시도 불가 `unknown`으로 닫는 reconciliation 경계 추가
+      (2026-10-27, 주기 실행 서비스 미연결).
 
 ---
 

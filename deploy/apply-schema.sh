@@ -50,6 +50,7 @@ FILES=(
   specialist_runtime_schema.sql
   conversion_queue_schema.sql
   archiver_vision_schema.sql  # B-80 dormant policy/approval/budget ledger, default OFF
+  archiver_image_description_schema.sql  # B-81 dormant catalog/policy/derived index, default OFF
   conversion_alert_schema.sql
   archiving_schema.sql        # Archiving Bot. 채널 모드·수집 상태·revision·감사
   workspace_service_schema.sql  # workspace 하나에 서비스 여럿. workspace 를 참조한다

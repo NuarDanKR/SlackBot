@@ -58,6 +58,7 @@ def test_every_verified_condition_is_required() -> None:
         (_entry(credential_ready=False), "credential_not_ready"),
         (_entry(quota_state=FreeQuotaState.UNKNOWN), "quota_unknown"),
         (_entry(quota_state=FreeQuotaState.EXHAUSTED), "quota_exhausted"),
+        (_entry(quota_remaining=None), "quota_unknown"),
         (_entry(quota_remaining=0), "quota_exhausted"),
     ]
     for entry, blocker in cases:
@@ -68,6 +69,13 @@ def test_a_fully_verified_entry_is_eligible() -> None:
     decision = _decision(_entry())
     assert decision.eligible
     assert decision.blockers == ()
+
+
+def test_verified_unlimited_free_service_needs_no_numeric_quota() -> None:
+    decision = _decision(
+        _entry(quota_state=FreeQuotaState.UNLIMITED, quota_remaining=None)
+    )
+    assert decision.eligible
 
 
 def test_the_requested_identity_is_selected_exactly() -> None:

@@ -51,9 +51,18 @@ VISION_TABLES = {
         "archiver_vision_policy", "archiver_vision_policy_audit",
     )
 }
+VISION_TABLES.update({
+    name: "archiver_image_description_schema.sql" for name in (
+        "archiver_image_model_catalog", "archiver_image_description_approval",
+        "archiver_image_description_job", "archiver_image_description_policy",
+        "archiver_image_description_policy_audit", "archiver_image_description_revision",
+    )
+})
 VISION_ROLE = "tybot_vision"
 VISION_REQUIRED = {
-    table: {"SELECT", "INSERT"} | (set() if table.endswith("_audit") else {"UPDATE"})
+    table: {"SELECT", "INSERT"} | (
+        set() if table.endswith(("_audit", "_revision")) else {"UPDATE"}
+    )
     for table in VISION_TABLES
 }
 
@@ -248,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nVision 역할별 권한 불일치 {len(access_problems)}개:")
         for role, table, code in access_problems:
             print(f"   {role}: {table} ({code})")
-        print("   archiver_vision_schema.sql의 전용 역할 권한을 대조하세요.")
+        print("   Archiver Vision 스키마의 전용 역할 권한을 대조하세요.")
         print("   Master/수집기 권한을 넓혀 해결하지 마세요.")
     if any(table in want_tables for table in VISION_TABLES) and not vision_role_exists:
         print("\nVision 전용 역할 미생성: 구조만 배포된 준비 상태입니다.")
