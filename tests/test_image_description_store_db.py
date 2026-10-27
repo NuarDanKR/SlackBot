@@ -181,24 +181,38 @@ def test_a_withhold_row_must_be_uncertain(conn, job):
 
 
 def test_the_description_cap_matches_the_core(conn, job):
-    from tybot.archive.image_description import MAX_DESCRIPTION_CHARS
-
+    core = pytest.importorskip(
+        "tybot.archive.image_description",
+        reason="tybot 패키지를 import 할 수 없어 SQL 상한과 코어 상수를 대조하지 못했습니다",
+    )
     psycopg = pytest.importorskip("psycopg")
-    with conn.cursor() as cur:
-        _insert_revision(cur, job, description="가" * MAX_DESCRIPTION_CHARS)
+    cap = core.MAX_DESCRIPTION_CHARS
+    # **넘는 것을 먼저** 건다. 한 작업에 파생은 하나뿐(`job_id` UNIQUE)이라
+    # 정상 행을 먼저 넣으면 다음 INSERT 가 UniqueViolation 으로 터져,
+    # 상한이 실제로 걸렸는지 구분할 수 없다.
     with pytest.raises(psycopg.errors.CheckViolation), conn.cursor() as cur:
-        _insert_revision(cur, job, description="가" * (MAX_DESCRIPTION_CHARS + 1))
+        _insert_revision(cur, job, description="가" * (cap + 1))
+    with conn.cursor() as cur:
+        _insert_revision(cur, job, description="가" * cap)
 
 
 def test_the_ai_label_cannot_be_changed(conn, job):
     """파생 색인은 **사람 원문이 아니라는 표시**를 달고만 존재한다(원칙 1)."""
     psycopg = pytest.importorskip("psycopg")
+    # 먼저 행이 있어야 한다. 없으면 UPDATE 가 0행에 걸려 아무것도 안 터지고,
+    # 시험은 초록인데 CHECK 는 한 번도 안 돈다(2026-10-28 실측).
+    with conn.cursor() as cur:
+        _insert_revision(cur, job)
+        cur.execute(
+            "SELECT count(*) FROM archiver_image_description_revision WHERE job_id=%s",
+            (job,),
+        )
+        assert cur.fetchone()[0] == 1
     with pytest.raises(psycopg.errors.CheckViolation), conn.cursor() as cur:
         cur.execute(
             "UPDATE archiver_image_description_revision SET label=%s WHERE job_id=%s",
             ("현장 기록", job),
         )
-        _insert_revision(cur, job)
 
 
 def test_one_revision_per_job(conn, job):

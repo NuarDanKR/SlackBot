@@ -328,3 +328,26 @@ CHECK ((quota_state = 'available' AND quota_remaining > 0) OR
 - 운영 DB 에는 `tybot_vision` 역할이 **없다** → 운영에 지금 스키마를 걸면
   GRANT 가 건너뛰어지고 아무도 이 표를 못 쓴다. 배포 절차가 역할을 먼저
   만들어야 한다
+
+### 2차 실행 (픽스처 수정 후) — 내 시험 둘이 더 틀렸다
+
+`1 failed, 15 passed, 15 errors` → `3 failed, 28 passed`. 픽스처가 터져 **한 번도
+돌지 않았던** 시험들이 드디어 돌면서 둘이 빨개졌다. 둘 다 스키마가 아니라 시험 탓.
+
+**`test_the_ai_label_cannot_be_changed`** — `job` 픽스처는 파생 색인 행을 만들지
+않는다. 그래서 `UPDATE … WHERE job_id=…` 가 **0행**에 걸리고 아무것도 안 터졌다.
+행을 먼저 넣고(1건인지 확인한 뒤) UPDATE 하도록 고쳤다. 이 결함이 제일 고약하다 —
+픽스처만 고쳤다면 시험은 **초록인데 label CHECK 는 한 번도 안 도는** 상태로
+남았을 것이다.
+
+**`test_the_description_cap_matches_the_core`** — 정상 행을 먼저 넣고 초과 행을
+나중에 넣었다. 한 작업에 파생은 하나뿐(`job_id` UNIQUE)이라 두 번째가
+`UniqueViolation` 으로 터질 수 있어 **상한이 실제로 걸렸는지 구분되지 않는다.**
+초과를 먼저 걸도록 순서를 뒤집었다.
+
+이 시험은 `tybot.archive.image_description` 의 상수를 읽어 SQL 상한과 대조한다.
+검증을 `/tmp` 사본에서 `postgres` 로 돌리느라 패키지를 import 할 수 없어
+**이번에도 건너뛴다**(사유 출력). `tests/test_image_description_schema.py` 의
+대조는 문자열 `char_length(description) <= 200` 리터럴이라 **코어 상수가 바뀌면
+같이 어긋난다** — 이 대조는 여기서만 산다. 패키지를 읽을 수 있는 환경에서
+한 번은 돌려야 한다.
