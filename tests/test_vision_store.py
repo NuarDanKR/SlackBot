@@ -166,8 +166,12 @@ def test_rejected_reservation_never_inserts_or_commits(extra_replies, code):
 
 def test_dispatch_rechecks_then_commits_and_does_not_call_a_model():
     conn = ScriptedConnection([GLOBAL, job_row(), LOCAL, APPROVAL_ROW])
-    VisionStore(conn).begin_dispatch('job', PAGE, checks=CHECKS)
+    grant = VisionStore(conn).begin_dispatch('job', PAGE, checks=CHECKS)
     assert conn.events[-1] == 'commit'
+    assert grant.reservation.reservation_id == 'job'
+    assert (grant.model, grant.provider) == (POLICY.model, POLICY.provider)
+    assert grant.max_output_tokens == CONFIG['max_output_tokens']
+    assert grant.timeout_seconds == CONFIG['timeout_seconds']
     update = next(e for e in conn.events if isinstance(e, tuple) and e[0].lstrip().startswith('UPDATE'))
     assert "state='dispatching'" in update[0]
     assert update[1] == ('job',)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -25,6 +25,17 @@ CONFIG_KEYS = frozenset({
 
 class VisionDenied(RuntimeError):
     """A safe, content-free control code; DB exceptions are not swallowed."""
+
+
+@dataclass(frozen=True)
+class VisionDispatch:
+    """Committed permission and immutable settings for exactly one model call."""
+
+    reservation: PageReservation
+    model: str
+    provider: str
+    max_output_tokens: int
+    timeout_seconds: float
 
 
 def money(value) -> Decimal:
@@ -243,7 +254,7 @@ class VisionStore:
             'source_verified', 'rendering_verified', 'access_verified', 'pii_blocked'
         )}
 
-    def begin_dispatch(self, job_id: str, page, *, checks: dict) -> PageReservation:
+    def begin_dispatch(self, job_id: str, page, *, checks: dict) -> VisionDispatch:
         """Commit before I/O; crash after this point is NOT automatically retried.
 
         Revocation after this commit cannot recall an already authorized send.
@@ -264,7 +275,13 @@ class VisionStore:
                 raise VisionDenied(verdict.code)
             cur.execute("UPDATE archiver_vision_job SET state='dispatching', dispatched_at=now() WHERE id=%s",
                         (job_id,))
-            return receipt
+            return VisionDispatch(
+                reservation=receipt,
+                model=policy.model,
+                provider=policy.provider,
+                max_output_tokens=policy.max_output_tokens,
+                timeout_seconds=float(policy.timeout_seconds),
+            )
 
     def finish(self, job_id: str, *, actual_usd: Decimal | None):
         """None means unknown charge, not zero. No response/body is stored here."""
