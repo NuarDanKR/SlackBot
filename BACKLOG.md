@@ -233,6 +233,14 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] Codex: 호출 직전에 정책·현재 ACL·PII·봇 생성 여부·원본 해시·prompt/model·
       외부 전송 승인·1회 dispatch 영수증을 다시 대조하는 순수 preflight 구현
       (2026-10-27, 영속 원장·worker 미연결).
+- [x] Claude: 관리 objects 저장소에서 PNG/JPEG/WebP 원본을 다시 열어 좌표·사람 업로드
+      provenance·SHA-256·MIME·크기·symlink 경계를 확인하는 fail-closed 로더 구현
+      (2026-10-28, 모델·DB·네트워크 호출 없음).
+- [x] Claude: 승인 한 건을 원본 로드 → 예약 → one-shot worker → 파생 revision으로
+      잇는 runner 구현. ACL·PII는 호출자가 실행 직전에 명시하지 않으면 닫힌다
+      (2026-10-28, 서비스/API 미연결).
+- [x] Codex: PostgreSQL에서 `available + quota_remaining NULL`이 CHECK의 NULL 판정으로
+      통과하는 문을 닫고 실제 DB 회귀시험을 정상 시험으로 전환 (2026-10-28).
 - [x] Codex: 기본 OFF인 무료 모델 카탈로그·전역/workspace 정책·승인·1회 작업·
       불변 파생 revision 스키마와 `tybot_vision` 전용 권한·드리프트 검사를 추가
       (2026-10-27, 저장소·API·worker 미연결, 운영 DB 미적용).

@@ -76,7 +76,9 @@ def job(conn):
              expires_at,dispatched_at)
             VALUES (%s,%s,%s,'tyit','g:l','p1','{}'::jsonb,'{}'::jsonb,'{}'::jsonb,
                     256,'dispatching', now() + interval '1 hour', now())""",
-            (job_id, "c" * 64, approval_id),
+            # identity 는 UNIQUE 다. 고정값을 쓰면 **두 번째 시험부터** 픽스처가
+            # 터지고, 그 15건은 스키마가 아니라 시험 탓으로 빨개진다(실측).
+            (job_id, _rid() + _rid(), approval_id),
         )
     return job_id
 
@@ -286,20 +288,26 @@ def test_a_zero_quota_must_be_marked_exhausted(conn):
 
 def test_available_quota_needs_a_known_positive_remaining_count(conn):
     psycopg = pytest.importorskip("psycopg")
+    name = _rid()
     with pytest.raises(psycopg.errors.CheckViolation), conn.cursor() as cur:
         cur.execute(
             """INSERT INTO archiver_image_model_catalog
             (provider,model,max_sensitivity,quota_state,quota_remaining,updated_by)
-            VALUES ('p-null','m-null','confidential','available',NULL,'tester')"""
+            VALUES (%s,%s,'confidential','available',NULL,'tester')""",
+            (name, name),
         )
 
 
 def test_verified_unlimited_quota_is_explicit(conn):
+    # 이 행은 **실제로 남는다.** 고정 이름이면 재실행이 PK 충돌로 빨개져,
+    # 스키마 결함과 구분되지 않는다.
+    name = _rid()
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO archiver_image_model_catalog
             (provider,model,max_sensitivity,quota_state,quota_remaining,updated_by)
-            VALUES ('p-unlimited','m-unlimited','confidential','unlimited',NULL,'tester')"""
+            VALUES (%s,%s,'confidential','unlimited',NULL,'tester')""",
+            (name, name),
         )
 
 

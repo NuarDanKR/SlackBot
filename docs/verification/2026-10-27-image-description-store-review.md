@@ -263,3 +263,68 @@ DSN 은 출력·문서에 남기지 않는다.
 - 실제 DB 시험에 `available + NULL` 거절과 명시적 `unlimited` 허용을 추가했다.
 
 실제 PostgreSQL 31건은 여전히 전용 격리 DB에서 실행해야 한다. 운영 DB로 시험하지 않는다.
+
+---
+
+## 실제 DB 검증 (2026-10-28, PostgreSQL 18.6)
+
+격리 DB `tybot_image_test`, 소켓 `/run/postgresql` 포트 55432, 역할 `postgres`.
+`tybot_vision` 을 `NOLOGIN` 으로 만들어 GRANT 가 실제로 걸리게 했다 — 없으면
+스키마가 `IF EXISTS` 로 GRANT 를 통째로 건너뛰어 **권한 시험 3건이 공허하게
+통과**한다(부여된 게 없으니 0건).
+
+### 찾은 것 — 스키마: `available` + NULL 이 통과했다 (수정 완료)
+
+```sql
+CHECK ((quota_state = 'available' AND quota_remaining > 0) OR
+       (quota_state = 'exhausted' AND quota_remaining = 0) OR
+       (quota_state IN ('unlimited','unknown') AND quota_remaining IS NULL))
+```
+
+`quota_state='available'`, `quota_remaining=NULL` 이면
+
+| 가지 | 값 |
+|---|---|
+| `'available'='available' AND NULL > 0` | `TRUE AND NULL` = **NULL** |
+| `'available'='exhausted' AND …` | FALSE |
+| `'available' IN ('unlimited','unknown') AND …` | FALSE |
+
+`NULL OR FALSE OR FALSE = NULL`. CHECK 는 **FALSE 만** 거절하므로 행이 들어간다.
+`0` 은 같은 CHECK 가 막는다(실측) — **NULL 문만 열려 있다.**
+
+**영향은 심층방어 한 겹이다.** `image_model_catalog.evaluate` 가
+`AVAILABLE` + `None` 을 `quota_unknown` 으로 막으므로 선별 경로는 닫혀 있다.
+다만 그 함수를 거치지 않고 카탈로그에 직접 쓰는 경로(콘솔·운영 SQL)에서는
+「남은 수량을 모르는데 available」 인 행이 남고, `reserve` 의
+`if catalog.quota_remaining is not None:` 때문에 **모델별 사용량 대조가 통째로
+건너뛰어진다**(일일 상한은 그대로 걸린다).
+
+2026-10-28 Codex가 첫 가지를
+`quota_remaining IS NOT NULL AND quota_remaining > 0` 로 고쳤다. 실제 DB 시험도
+`xfail`이 아닌 정상 회귀시험으로 되돌렸다. 격리 DB에서 수정된 스키마를 다시
+적용해 전체 31건을 재실행해야 운영 검증이 닫힌다.
+
+### 찾은 것 — 내 시험 결함
+
+`job` 픽스처가 `identity_sha256` 에 고정값 `"c"*64` 를 썼다. 그 칸은 UNIQUE 라
+**두 번째 시험부터 15건이 픽스처에서 터졌다.** 스키마가 아니라 시험 탓이다.
+건마다 새 값으로 고쳤다. 카탈로그 시험 중 **행이 실제로 남는 두 건**도 고정
+이름이어서 재실행이 PK 충돌로 빨개졌다 — 이것도 고쳤다.
+
+### 검증된 것
+
+첫 실행 `1 failed, 15 passed, 15 errors`. 통과한 15건이 실제로 건 것:
+
+- 작업 상태·종료시각 CHECK, identity UNIQUE(중복 예약 거절)
+- 파생 색인의 외래키·`job_id` UNIQUE(작업당 1건)
+- `quota_state='available'` + `0` 거절, `zero_cost_verified` + 미검증 거절
+- 표 6개 모두 PUBLIC 권한 0건
+- `archiver_image%` 의 grantee ⊆ {소유자, `tybot_vision`}
+- `tybot_vision` 은 파생 색인에 DELETE·UPDATE 없음
+
+### 미검증
+
+- 수정 스키마와 고친 픽스처를 함께 적용한 전체 31건 재실행 필요
+- 운영 DB 에는 `tybot_vision` 역할이 **없다** → 운영에 지금 스키마를 걸면
+  GRANT 가 건너뛰어지고 아무도 이 표를 못 쓴다. 배포 절차가 역할을 먼저
+  만들어야 한다

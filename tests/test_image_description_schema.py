@@ -26,7 +26,8 @@ def test_free_status_needs_a_timestamp_and_revision() -> None:
     assert "NOT zero_cost_verified" in sql
     assert "verified_at IS NOT NULL" in sql
     assert "verification_revision <> ''" in sql
-    assert "quota_state = 'available' AND quota_remaining > 0" in sql
+    assert "quota_state = 'available' AND quota_remaining IS NOT NULL" in sql
+    assert "AND quota_remaining > 0" in sql
     assert "quota_state IN ('unlimited','unknown') AND quota_remaining IS NULL" in sql
 
 

@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS archiver_image_model_catalog (
     PRIMARY KEY (provider, model),
     CHECK (NOT zero_cost_verified OR
            (verified_at IS NOT NULL AND verification_revision <> '')),
-    CHECK ((quota_state = 'available' AND quota_remaining > 0) OR
+    CHECK ((quota_state = 'available' AND quota_remaining IS NOT NULL
+                                      AND quota_remaining > 0) OR
            (quota_state = 'exhausted' AND quota_remaining = 0) OR
            (quota_state IN ('unlimited','unknown') AND quota_remaining IS NULL))
 );
