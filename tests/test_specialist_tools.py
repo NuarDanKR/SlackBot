@@ -361,6 +361,40 @@ def test_long_xlsx_can_be_read_by_sheet_and_offset_without_crossing_sheets():
     assert "둘째시트내용" not in continuation
 
 
+def test_xlsx_offset_never_skips_text_hidden_by_the_output_limit(monkeypatch):
+    monkeypatch.setattr(tools, "MAX_TOOL_CHARS", 1200)
+    body = "[시트] 첫째\n" + "가" * 100 + "\n" + "나" * 100
+    doc = _attachment("회의.xlsx", "FNEW", f"# 회의.xlsx\n{body}", "2026-10-21")
+    doc.channel = "#" + "c" * 1040
+    box = _box(FakeStore([doc]))
+
+    offset = 0
+    seen = ""
+    for _ in range(10):
+        page = box._read_attachment_chunk(doc, "FNEW", {"sheet": "1", "offset": offset})
+        assert len(page) <= tools.MAX_TOOL_CHARS
+        payload = page.split("\n", 1)[1].split("\n[본문 일부:", 1)[0]
+        seen += payload
+        if "다음 offset=" not in page:
+            break
+        offset = int(page.split("다음 offset=", 1)[1].split(" ", 1)[0])
+
+    assert seen == body
+
+
+def test_xlsx_header_with_no_body_room_is_an_error_without_evidence(monkeypatch):
+    monkeypatch.setattr(tools, "MAX_TOOL_CHARS", 1200)
+    doc = _attachment("회의.xlsx", "FNEW", "[시트] 첫째\n내용", "2026-10-21")
+    doc.channel = "#" + "c" * 1200
+    box = _box(FakeStore([doc]))
+
+    result = box.run_with_status("read_document", {"name": "회의.xlsx", "sheet": "1"})
+
+    assert result.status == "error"
+    assert "본문을 전달할 수 없습니다" in result.text
+    assert box.touched.evidence_hits == []
+
+
 def test_file_id_cannot_open_an_attachment_outside_visible_docs():
     hidden = _attachment("기밀.xlsx", "FHIDDEN", "기밀 자료", "2026-10-21")
     box = _box(FakeStore([hidden], hidden={"#회의"}))

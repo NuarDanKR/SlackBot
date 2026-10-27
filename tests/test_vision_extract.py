@@ -26,7 +26,9 @@ import pytest
 from tybot.archive import vision_extract as vx
 
 # gateway 가 실제로 던지는 것. `TimeoutError` 하위다.
-from tybot.gateway.base import ProviderTimeout
+from tybot.gateway.base import ModelSpec, ProviderTimeout, Sensitivity
+from tybot.gateway.cost import CostGuard
+from tybot.gateway.router import Router
 
 # 합성 페이지. **내용이 없는 바이트다** — 모델 대역은 이것을 보지 않는다.
 PAGE_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-page" * 8
@@ -66,6 +68,14 @@ class FakeRouter:
     def __init__(self, *responses):
         self.responses = list(responses)
         self.calls: list[dict] = []
+        self.restricted = False
+
+    def resolve(self, model, sensitivity):
+        return ModelSpec(model, "anthropic", 1.0, 1.0, Sensitivity.CONFIDENTIAL)
+
+    def restricted_to(self, model, *, sensitivity):
+        self.restricted = True
+        return self
 
     def complete(self, messages, *, model=None, sensitivity=None,
                  max_tokens=1024, timeout_seconds=None, **kw):
@@ -99,7 +109,7 @@ def _payload(**over) -> str:
 
 
 def _run(router, page=None, **kw):
-    opts = {"model": "claude-sonnet-5-5", "max_output_tokens": 4000,
+    opts = {"model": "claude-sonnet-5-5", "provider": "anthropic", "max_output_tokens": 4000,
             "timeout_seconds": 60.0}
     opts.update(kw)
     return vx.extract_page(page or _page(), router=router, **opts)
@@ -411,6 +421,59 @@ def test_a_model_we_did_not_ask_for_is_refused():
     assert got.error_code == vx.ERROR_NOT_APPROVED
     assert got.markdown == "", "승인 밖 모델의 전사를 쓰지 않는다"
     assert got.usage.model == "gpt-5-mini", "무엇이 불렸는지는 원장에 남는다"
+
+
+def test_provider_mismatch_is_rejected_before_sending_the_page():
+    router = FakeRouter(_Resp(_payload()))
+    with pytest.raises(vx.VisionInputError):
+        _run(router, provider="openai")
+    assert router.calls == []
+
+
+@pytest.mark.parametrize("model, provider", [
+    ("", "anthropic"), ("claude-sonnet-5-5", ""),
+    ("claude-sonnet-5-5", "openai"),
+])
+def test_unknown_or_changed_response_identity_is_not_accepted(model, provider):
+    got = _run(FakeRouter(_Resp(_payload(), model=model, provider=provider)))
+    assert got.status == vx.STATUS_FAILED
+    assert got.error_code == vx.ERROR_NOT_APPROVED
+    assert got.markdown == ""
+
+
+def test_vision_page_never_uses_the_general_router_fallback():
+    class Fails:
+        name = "anthropic"
+
+        def complete(self, spec, messages, **kwargs):
+            raise RuntimeError("approved model unavailable")
+
+    class Fallback:
+        name = "openai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, spec, messages, **kwargs):
+            self.calls += 1
+            return _Resp(_payload(), model="fallback", provider="openai")
+
+    fallback = Fallback()
+    router = Router(
+        providers={"anthropic": Fails(), "openai": fallback},
+        registry={
+            "claude-sonnet-5-5": ModelSpec(
+                "claude-sonnet-5-5", "anthropic", 1, 1, Sensitivity.CONFIDENTIAL,
+            ),
+            "fallback": ModelSpec("fallback", "openai", 1, 1, Sensitivity.CONFIDENTIAL),
+        },
+        cost_guard=CostGuard(10.0),
+        default_model="claude-sonnet-5-5",
+        fallback_models=("fallback",),
+    )
+    got = _run(router)
+    assert got.status == vx.STATUS_FAILED
+    assert fallback.calls == 0, "승인하지 않은 provider에 이미지가 이미 전송됐다"
 
 
 def test_the_sensitivity_is_pinned_to_confidential():

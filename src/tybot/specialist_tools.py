@@ -686,7 +686,15 @@ class ToolBox:
             f"# {doc.channel} · {lines[0].speaker if lines else file_id} "
             f"· file_id={file_id} · 저장 {getattr(doc, 'last_ingested', '') or '날짜 미상'}\n"
         )
-        end = min(len(body), offset + MAX_TOOL_CHARS - 1000)
+        # Reserve the full header and the largest possible continuation marker.
+        # Clipping after calculating `end` would advertise an offset past text
+        # that was never returned to the model.
+        marker = f"\n[본문 일부: 다음 offset={len(body)} / 전체 {len(body)}자]"
+        room = MAX_TOOL_CHARS - len(header) - len(marker)
+        if room <= 0:
+            self._dispatch_failed = True
+            return "(문서 머리말이 길어 본문을 전달할 수 없습니다)"
+        end = min(len(body), offset + room)
         cursor = 0
         for line in lines:
             line_end = cursor + len(line.text)
@@ -694,7 +702,7 @@ class ToolBox:
                 self.touched.record_line(doc, line)
             cursor = line_end + 1
         note = f"\n[본문 일부: 다음 offset={end} / 전체 {len(body)}자]" if end < len(body) else ""
-        return _clip(header + body[offset:end] + note)
+        return header + body[offset:end] + note
 
     # -- 실시간 ----------------------------------------------------------
     def _fetch_recent(self, args: dict) -> str:

@@ -391,7 +391,7 @@ def _result(page: VisionPageInput, status: str, *, markdown: str = "",
     )
 
 
-def _usage(resp, *, model: str, elapsed_ms: int) -> VisionUsage:
+def _usage(resp, *, elapsed_ms: int) -> VisionUsage:
     """응답의 계기판. **모르는 값은 `None` 으로 남긴다.**"""
     def _tokens(name: str) -> int | None:
         value = getattr(resp, name, None)
@@ -406,7 +406,7 @@ def _usage(resp, *, model: str, elapsed_ms: int) -> VisionUsage:
         else None
     )
     return VisionUsage(
-        model=str(getattr(resp, "model", "") or model),
+        model=str(getattr(resp, "model", "") or ""),
         provider=str(getattr(resp, "provider", "") or ""),
         stop_reason=str(getattr(resp, "stop_reason", "") or ""),
         input_tokens=got_in,
@@ -434,6 +434,7 @@ def extract_page(
     *,
     router,
     model: str,
+    provider: str,
     max_output_tokens: int,
     timeout_seconds: float,
 ) -> VisionPageResult:
@@ -448,6 +449,19 @@ def extract_page(
     from ..gateway.base import Message, Sensitivity
 
     _check_input(page)
+    if (not isinstance(model, str) or not model.strip()
+            or not isinstance(provider, str) or not provider.strip()
+            or type(max_output_tokens) is not int or max_output_tokens <= 0
+            or type(timeout_seconds) not in (int, float)
+            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+        raise VisionInputError("승인 모델 또는 호출 상한이 올바르지 않습니다")
+    try:
+        spec = router.resolve(model, Sensitivity.CONFIDENTIAL)
+        scoped_router = router.restricted_to(model, sensitivity=Sensitivity.CONFIDENTIAL)
+    except Exception:  # noqa: BLE001 - 조회 실패는 외부 호출 전에 닫는다
+        raise VisionInputError("승인 모델을 준비할 수 없습니다") from None
+    if spec.provider != provider:
+        raise VisionInputError("승인 provider와 모델 등록 정보가 다릅니다")
 
     messages = [
         Message("system", SYSTEM_PROMPT),
@@ -455,7 +469,7 @@ def extract_page(
     ]
     started = time.monotonic()
     try:
-        resp = router.complete(
+        resp = scoped_router.complete(
             messages,
             model=model,
             # 사내 문서 원본이다. 기밀 이하만 처리하는 모델로 제한한다.
@@ -479,16 +493,16 @@ def extract_page(
                        usage=VisionUsage(model=model, elapsed_ms=elapsed))
 
     elapsed = int((time.monotonic() - started) * 1000)
-    usage = _usage(resp, model=model, elapsed_ms=elapsed)
+    usage = _usage(resp, elapsed_ms=elapsed)
 
-    # **승인은 provider 에 묶여 있다.** gateway 가 다른 모델로 넘겼으면 그 결과는
-    # 승인 범위 밖이다(WC-21 §3). 지금 gateway 에는 호출 단위로 폴백을 끄는 수단이
-    # 없어 여기서 **사후에** 막는다 — 전송 자체를 막으려면 gateway 변경이 필요하다
-    # (인계 §「Codex 에게 필요한 것」).
-    if usage.model and usage.model != model:
+    # The restricted router prevents fallback before transmission; response
+    # identity is checked again because an empty or mismatched receipt is not
+    # proof that the approved model/provider handled the page.
+    if usage.model != model or usage.provider != provider:
         logger.warning(
-            "vision_page 승인 밖 모델 ws=%s file=%s page=%d asked=%s used=%s",
-            page.workspace, page.file_id, page.page_number, model, usage.model,
+            "vision_page 승인 밖 모델 ws=%s file=%s page=%d asked=%s/%s used=%s/%s",
+            page.workspace, page.file_id, page.page_number,
+            provider, model, usage.provider, usage.model,
         )
         return _result(page, STATUS_FAILED, error_code=ERROR_NOT_APPROVED, usage=usage)
 
