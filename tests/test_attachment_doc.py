@@ -200,6 +200,16 @@ def test_a_staged_attachment_becomes_a_canonical_document(tmp_path):
     assert got.file_id == "F1"
     assert got.text == "금액은 1,200만원"
     assert got.message_ts == "1758600000.000100"
+    assert got.human_upload_confirmed is False
+
+
+def test_confirmed_human_upload_round_trips_from_staging(tmp_path):
+    staged = _stage(tmp_path / "F1", human_upload_confirmed=True)
+    got = _from(staged)
+
+    assert got is not None
+    assert got.human_upload_confirmed is True
+    assert "human_upload_confirmed: true" in ad.render(got)
 
 
 def test_the_local_header_and_title_are_stripped():

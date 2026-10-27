@@ -283,6 +283,36 @@ class ImageDescriptionStore:
             }
             return policy, config, sources
 
+    def indexed_sources(
+        self, workspace: str, *, channel_id: str = ""
+    ) -> frozenset[tuple[str, str, str]]:
+        """이미 파생 revision이 생긴 원본 좌표.
+
+        설명 본문을 보류한 revision도 포함한다. 사람 검토 대상으로 이미 기록된
+        사진을 자동 배치가 다시 모델에 보내면 보류가 재전송 통로가 된다.
+        """
+        if not workspace:
+            raise ImageDescriptionDenied("workspace_required")
+        with self._transaction(), self.connection.cursor() as cur:
+            params: tuple[str, ...] = (workspace,)
+            where = "workspace=%s"
+            if channel_id:
+                where += " AND channel_id=%s"
+                params = (workspace, channel_id)
+            cur.execute(
+                "SELECT DISTINCT workspace,channel_id,original_sha256 "
+                "FROM archiver_image_description_revision WHERE " + where,
+                params,
+            )
+            return frozenset(
+                (
+                    str(row["workspace"]),
+                    str(row["channel_id"]),
+                    str(row["original_sha256"]),
+                )
+                for row in cur.fetchall()
+            )
+
     def approve(self, approval: ImageDescriptionApproval, *, actor: str) -> None:
         if not actor or approval.revoked or not approval.approval_id:
             raise ImageDescriptionDenied("approval_invalid")

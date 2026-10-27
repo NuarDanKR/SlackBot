@@ -251,6 +251,9 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] Codex: worker 반환·재던지기에서 설명/DB 행 본문을 제거하고, 오래 남은
       `dispatching`을 재시도 불가 `unknown`으로 닫는 reconciliation 경계 추가
       (2026-10-27, 주기 실행 서비스 미연결).
+- [x] Claude+Codex: Archiver 정본에서 이미지 후보를 고르는 selector와 사람 업로드
+      provenance를 연결하고, 파생 revision 좌표 조회로 이미 처리한 원본의 자동
+      재전송을 막음 (2026-10-27, 과거 provenance 없는 파일은 fail-closed).
 
 ---
 

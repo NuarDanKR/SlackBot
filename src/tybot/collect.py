@@ -83,6 +83,11 @@ def _messages_from(
                 channel_id=channel_id,
                 message_ts=str(event.get("ts") or ""),
                 thread_ts=str(event.get("thread_ts") or ""),
+                human_upload_confirmed=bool(
+                    event.get("user")
+                    and not event.get("bot_id")
+                    and not event.get("app_id")
+                ),
             ),
             separate_attachments=separate_attachments,
         )
@@ -167,7 +172,11 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
         msgs = []
         staged: list = []
         for m in reversed(res.get("messages", [])):
-            if m.get("bot_id") or m.get("subtype") not in (None, "file_share"):
+            if (
+                m.get("bot_id")
+                or m.get("app_id")
+                or m.get("subtype") not in (None, "file_share")
+            ):
                 continue
             msgs.extend(_messages_from(
                 client, m, cfg.bot_token, name_cache, storage,

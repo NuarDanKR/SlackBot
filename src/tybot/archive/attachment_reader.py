@@ -226,6 +226,8 @@ def load(path: Path) -> AttachmentDoc | None:
         converter_name=str(front.get("converter_name") or ""),
         converter_version=str(front.get("converter_version") or ""),
         error_code=str(front.get("error_code") or ""),
+        human_upload_confirmed=str(front.get("human_upload_confirmed") or "").lower()
+        == "true",
         source_path=path,
     )
 

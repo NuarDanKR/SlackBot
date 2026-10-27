@@ -131,6 +131,8 @@ class AttachmentDoc:
     coverage_total: int | None = None
     # PII·변환 실패 사유. **코드만** 남긴다(본문·번호 일부를 복제하지 않는다).
     error_code: str = ""
+    # 수집 입구에서 사람 업로드임을 확인한 경우만 참. 없는 옛 문서는 거짓이다.
+    human_upload_confirmed: bool = False
     # Reader-only coordinate. It is not serialized into the canonical document.
     source_path: Path | None = field(default=None, compare=False, repr=False)
 
@@ -286,6 +288,7 @@ def from_staged(
         coverage_read=_int_or_none(meta.get("coverage_read")),
         coverage_total=_int_or_none(meta.get("coverage_total")),
         error_code=str(meta.get("error_code") or ""),
+        human_upload_confirmed=meta.get("human_upload_confirmed") is True,
     )
 
 
@@ -363,6 +366,8 @@ def render(doc: AttachmentDoc) -> str:
         head.append(f"coverage_total: {doc.coverage_total}")
     if doc.error_code:
         head.append(f"error_code: {doc.error_code}")
+    if doc.human_upload_confirmed:
+        head.append("human_upload_confirmed: true")
     head.append("---")
 
     body = [f"# {doc.name or doc.file_id}", ""]

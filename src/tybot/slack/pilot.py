@@ -3357,6 +3357,11 @@ class WorkspaceBot:
                     channel_id=channel_id,
                     message_ts=str(event.get("ts") or ""),
                     thread_ts=str(event.get("thread_ts") or ""),
+                    human_upload_confirmed=bool(
+                        event.get("user")
+                        and not event.get("bot_id")
+                        and not event.get("app_id")
+                    ),
                 ),
             )
             # 파일↔줄 연결을 들고 있어야 writer 뒤에 반영을 확인할 수 있다.

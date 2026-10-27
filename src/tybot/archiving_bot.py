@@ -256,7 +256,7 @@ class ShadowCollector:
 
         if subtype in ("message_changed", "message_deleted"):
             return self._ingest_revision(client, event, channel, channel_id)
-        if event.get("bot_id") or subtype not in ("", "file_share"):
+        if event.get("bot_id") or event.get("app_id") or subtype not in ("", "file_share"):
             return "skipped-bot-or-system"
         if not event.get("user") or not event.get("ts"):
             return "skipped-identity"

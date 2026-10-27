@@ -43,6 +43,7 @@ from tybot.archive.image_description_source import (
     SKIP_OVER_LIMIT,
     SKIP_PENDING,
     SKIP_PII_BLOCKED,
+    confirmed_human_file_ids,
     select_image_candidates,
 )
 
@@ -155,6 +156,15 @@ def test_an_unknown_uploader_is_not_a_candidate():
 
     assert out.candidates == ()
     assert _reasons(out) == {SKIP_NOT_HUMAN}
+
+
+def test_only_canonical_provenance_supplies_human_file_ids():
+    docs = [
+        _doc(file_id="F1", human_upload_confirmed=True),
+        _doc(file_id="F2", sha256="b" * 64),
+    ]
+
+    assert confirmed_human_file_ids(docs) == frozenset({"F1"})
 
 
 def test_only_the_named_files_become_candidates():

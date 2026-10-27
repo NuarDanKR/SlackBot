@@ -291,6 +291,15 @@ def select_image_candidates(
     return Selection(candidates=tuple(candidates), skipped=tuple(skipped))
 
 
+def confirmed_human_file_ids(docs) -> frozenset[str]:
+    """정본 provenance가 확인된 파일 ID만 돌려준다. 없는 옛 값은 허용하지 않는다."""
+    return frozenset(
+        doc.file_id
+        for doc in docs
+        if doc.human_upload_confirmed is True and doc.file_id
+    )
+
+
 __all__ = [
     "DEFAULT_LIMIT",
     "FILETYPE_MIME",
@@ -309,5 +318,6 @@ __all__ = [
     "ImageCandidate",
     "Selection",
     "SkippedSource",
+    "confirmed_human_file_ids",
     "select_image_candidates",
 ]

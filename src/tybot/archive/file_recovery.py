@@ -193,9 +193,17 @@ def recover(client, repo, owner, cfg, file_ids: list[str], *, live_root: Path,
                 if records:
                     item["status"] = "incomplete-needs-review"
                     continue
-                stage_attachments([raw], cfg.bot_token, storage,
-                                  origin=AttachmentOrigin(workspace=cfg.key, channel_id=channel_id),
-                                  separate_attachments=True)
+                stage_attachments(
+                    [raw],
+                    cfg.bot_token,
+                    storage,
+                    origin=AttachmentOrigin(
+                        workspace=cfg.key,
+                        channel_id=channel_id,
+                        human_upload_confirmed=True,
+                    ),
+                    separate_attachments=True,
+                )
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("slack_file_id") != file_id or meta.get("origin_message_ts"):
                 raise ValueError("staging provenance does not match file-only recovery")

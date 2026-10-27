@@ -505,7 +505,11 @@ def test_staging_records_the_origin(tmp_path):
         None,  # 토큰 없음 — 다운로드는 실패하지만 metadata 는 남는다
         storage,
         origin=AttachmentOrigin(
-            workspace=WS, channel_id=CH, message_ts="1789.1", thread_ts="1789.0",
+            workspace=WS,
+            channel_id=CH,
+            message_ts="1789.1",
+            thread_ts="1789.0",
+            human_upload_confirmed=True,
         ),
     )
     (item,) = got
@@ -513,6 +517,7 @@ def test_staging_records_the_origin(tmp_path):
     meta = at.read_metadata(item.metadata_path)
     assert meta["origin_message_ts"] == "1789.1"
     assert meta["origin_thread_ts"] == "1789.0"
+    assert meta["human_upload_confirmed"] is True
     assert meta["archive_state"] == at.ARCHIVE_PENDING
 
 
@@ -527,6 +532,7 @@ def test_staging_without_origin_omits_the_fields(tmp_path):
     meta = at.read_metadata(item.metadata_path)
     assert "origin_message_ts" not in meta
     assert "origin_thread_ts" not in meta
+    assert "human_upload_confirmed" not in meta
     assert meta["original_state"] == "missing"
 
 

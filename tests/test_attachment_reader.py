@@ -263,6 +263,18 @@ def test_the_frontmatter_round_trips(archive):
     assert got.acl == written.acl
 
 
+def test_confirmed_human_upload_round_trips_but_missing_is_false(archive):
+    confirmed = _doc(human_upload_confirmed=True)
+    path = _write(archive, confirmed)
+    assert reader.load(path).human_upload_confirmed is True
+
+    text = path.read_text(encoding="utf-8").replace(
+        "human_upload_confirmed: true\n", ""
+    )
+    path.write_text(text, encoding="utf-8")
+    assert reader.load(path).human_upload_confirmed is False
+
+
 def test_a_non_attachment_document_is_ignored(archive):
     """원문 문서가 이 경로에 섞여 들어와도 첨부로 읽지 않는다."""
     path = archive / "workspaces" / WS / "channels" / CH / "attachments" / "F1" / "x.md"

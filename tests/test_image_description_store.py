@@ -143,6 +143,29 @@ def test_missing_fresh_checks_are_fail_closed() -> None:
     }
 
 
+def test_indexed_sources_include_withheld_revisions_and_can_be_channel_scoped() -> None:
+    rows = [
+        {"workspace": "tyit", "channel_id": "C1", "original_sha256": "a" * 64},
+        {"workspace": "tyit", "channel_id": "C1", "original_sha256": "b" * 64},
+    ]
+    connection = ScriptedConnection([rows])
+
+    got = ImageDescriptionStore(connection).indexed_sources("tyit", channel_id="C1")
+
+    assert got == frozenset(
+        {("tyit", "C1", "a" * 64), ("tyit", "C1", "b" * 64)}
+    )
+    query = next(event for event in connection.events if isinstance(event, tuple))
+    assert "archiver_image_description_revision" in query[0]
+    assert "status" not in query[0]
+    assert query[1] == ("tyit", "C1")
+
+
+def test_indexed_sources_require_a_workspace() -> None:
+    with pytest.raises(ImageDescriptionDenied, match="workspace_required"):
+        ImageDescriptionStore(ScriptedConnection([])).indexed_sources("")
+
+
 def test_catalog_snapshot_keeps_regions_and_times_structured() -> None:
     entry = ImageModelCatalogEntry(
         model="free-vision-v1",

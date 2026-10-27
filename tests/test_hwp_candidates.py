@@ -35,11 +35,11 @@ PY = Path(sys.executable).as_posix()
 # 경로로 들어온 봇 PDF 가 근거가 된다.
 
 
-def test_realtime_ingest_drops_bot_messages():
-    """실시간 수집. `archiving_bot` 이 `bot_id` 를 보고 버린다."""
+def test_realtime_ingest_drops_bot_and_app_messages():
+    """실시간 수집. `bot_id`·`app_id` 어느 쪽도 사람 원본이 아니다."""
     source = Path("src/tybot/archiving_bot.py").read_text(encoding="utf-8")
 
-    assert 'if event.get("bot_id") or subtype not in ("", "file_share"):' in source
+    assert 'event.get("bot_id") or event.get("app_id")' in source
     assert '"skipped-bot-or-system"' in source
 
 
@@ -50,10 +50,11 @@ def test_backfill_drops_bot_messages():
     assert 'if message.get("bot_id") or message.get("app_id"):' in source
 
 
-def test_history_collection_drops_bot_messages():
+def test_history_collection_drops_bot_and_app_messages():
     source = Path("src/tybot/collect.py").read_text(encoding="utf-8")
 
-    assert 'if m.get("bot_id") or m.get("subtype") not in (None, "file_share"):' in source
+    assert 'm.get("bot_id")' in source
+    assert 'm.get("app_id")' in source
 
 
 def test_file_recovery_refuses_bot_generated_files():

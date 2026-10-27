@@ -139,6 +139,9 @@ class AttachmentOrigin:
     channel_id: str = ""
     message_ts: str = ""
     thread_ts: str = ""
+    # 수집 입구가 bot_id/app_id 를 배제하고 사람 user 좌표를 확인했을 때만 참이다.
+    # 파일 목록이나 옛 metadata 에서 추측하지 않는다.
+    human_upload_confirmed: bool = False
 
 
 def _epoch(value) -> int:
@@ -545,6 +548,11 @@ def stage_attachments(
                    if origin and origin.message_ts else {}),
                 **({"origin_thread_ts": origin.thread_ts}
                    if origin and origin.thread_ts else {}),
+                **(
+                    {"human_upload_confirmed": True}
+                    if origin and origin.human_upload_confirmed is True
+                    else {}
+                ),
                 # 원문 반영은 writer 이후에야 알 수 있다. 여기서는 아직 모른다.
                 "archive_state": "pending",
                 "archive_line_hashes": [],

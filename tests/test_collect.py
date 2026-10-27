@@ -1,8 +1,10 @@
 """정기 백필 잡 — 페이싱·멱등·실패 격리."""
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
+from tybot.archive.files import attachment_storage
 from tybot.collect import collect_workspace
 from tybot.workspaces import WorkspaceConfig
 
@@ -111,6 +113,7 @@ def test_bot_and_system_messages_excluded(tmp_path):
             "C1": [
                 _msg("1755000000.0", "사람 발언"),
                 _msg("1755000001.0", "봇 답변", bot_id="B1"),
+                _msg("1755000001.5", "앱 답변", app_id="A1"),
                 _msg("1755000002.0", "입장", subtype="channel_join"),
                 _msg("1755000003.0", "파일 올림", subtype="file_share"),
             ]
@@ -139,6 +142,9 @@ def test_attachments_recorded(tmp_path):
     )
     assert "[첨부:처리실패] 도면.dwg" in md
     assert "도면 공유" in md
+    metadata_path = attachment_storage(tmp_path, "pilot", "C1").staging_dir / "F1/metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["human_upload_confirmed"] is True
 
 
 def test_periodic_collect_captures_canvas_idempotently(tmp_path):

@@ -277,6 +277,7 @@ def test_shadow_collector_rejects_bot_and_dm(tmp_path):
         "text": "ignore",
     }
     assert collector.ingest_event(Client(), {**event, "bot_id": "B123"}) == "skipped-bot-or-system"
+    assert collector.ingest_event(Client(), {**event, "app_id": "A123"}) == "skipped-bot-or-system"
     assert collector.ingest_event(Client(), {**event, "channel_type": "im"}) == "skipped-scope"
     assert collector.ingest_event(Client(), {**event, "channel": "C99999999"}) == "skipped-membership"
     assert not (tmp_path / "shadow").exists()
