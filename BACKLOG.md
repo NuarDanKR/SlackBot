@@ -244,7 +244,10 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] Codex: 사진 한 장의 원본 해시·provider/model·정책 revision·당시 ACL과 명시적
       PII 확인을 결속하는 별도 clearance 원장 스키마 구현. 전송 승인이 clearance를
       대신하지 않으며, 런타임은 scope를 수정하지 못하고 철회 칸만 갱신한다
-      (2026-10-28, 저장소 API·운영 DB 적용 미완료).
+      (2026-10-28).
+- [x] Codex: clearance 생성·정확 범위 조회·사유 있는 철회 저장소와 시크릿 없는
+      `tybot_vision NOLOGIN` 권한 그룹의 선행 설치 구현. 실제 worker LOGIN 계정과
+      관리자 API는 아직 만들지 않음 (2026-10-28).
 - [x] Codex: 기본 OFF인 무료 모델 카탈로그·전역/workspace 정책·승인·1회 작업·
       불변 파생 revision 스키마와 `tybot_vision` 전용 권한·드리프트 검사를 추가
       (2026-10-27, 저장소·API·worker 미연결, 운영 DB 미적용).

@@ -15,6 +15,7 @@ from tybot.archive.image_description import (
     ImageDescription,
     ImageUsage,
 )
+from tybot.archive.image_description_clearance import SafetyAssessment
 from tybot.archive.image_description_policy import ImageDescriptionDispatch
 from tybot.archive.image_description_store import (
     ImageDescriptionDenied,
@@ -51,6 +52,26 @@ JOB = {
     "expires_at": NOW + timedelta(minutes=10),
 }
 GLOBAL = {"workspace": "", "revision": "global", "enabled": True, "config": {}}
+
+
+def _assessment(**changes) -> SafetyAssessment:
+    values = {
+        "workspace": SCOPE["workspace"],
+        "channel_id": SCOPE["channel"],
+        "file_id": SCOPE["file_id"],
+        "original_sha256": SCOPE["original_sha256"],
+        "provider": SCOPE["provider"],
+        "model": SCOPE["model"],
+        "policy_revision": SCOPE["policy_revision"],
+        "visibility": "private",
+        "acl": frozenset({"U2", "U1"}),
+        "assessed_by": "reviewer",
+        "assessed_at": NOW,
+        "expires_at": NOW + timedelta(hours=1),
+        "pii_cleared": True,
+    }
+    values.update(changes)
+    return SafetyAssessment(**values)
 
 
 class ScriptedConnection:
@@ -197,6 +218,111 @@ def test_receipt_is_bound_to_the_saved_scope() -> None:
         active=True,
         **SCOPE,
     )
+
+
+def test_clearance_is_appended_with_a_stable_acl_and_authenticated_actor() -> None:
+    connection = ScriptedConnection([GLOBAL])
+    ImageDescriptionStore(connection).save_clearance(
+        "clearance-1",
+        _assessment(),
+        reason="사진을 직접 확인함",
+        actor="reviewer",
+    )
+
+    insert = next(
+        event for event in _inserts(connection)
+        if "archiver_image_description_clearance" in event[0]
+    )
+    assert insert[1][0] == "clearance-1"
+    assert insert[1][9] == ["U1", "U2"]
+    assert insert[1][11] == "reviewer"
+    assert insert[1][14] == "사진을 직접 확인함"
+
+
+@pytest.mark.parametrize(
+    "assessment,actor,reason",
+    [
+        (_assessment(assessed_by="someone-else"), "reviewer", "확인"),
+        (_assessment(acl=frozenset()), "reviewer", "확인"),
+        (_assessment(original_sha256="A" * 64), "reviewer", "확인"),
+        (_assessment(), "", "확인"),
+        (_assessment(), "reviewer", " "),
+    ],
+)
+def test_invalid_clearance_never_reaches_the_database(assessment, actor, reason) -> None:
+    connection = ScriptedConnection([])
+    with pytest.raises(ImageDescriptionDenied, match="clearance_invalid"):
+        ImageDescriptionStore(connection).save_clearance(
+            "clearance-1", assessment, reason=reason, actor=actor
+        )
+    assert connection.events == []
+
+
+def test_only_an_exact_active_clearance_is_loaded() -> None:
+    row = {
+        "workspace": SCOPE["workspace"],
+        "channel_id": SCOPE["channel"],
+        "file_id": SCOPE["file_id"],
+        "original_sha256": SCOPE["original_sha256"],
+        "provider": SCOPE["provider"],
+        "model": SCOPE["model"],
+        "policy_revision": SCOPE["policy_revision"],
+        "visibility": "private",
+        "acl": ["U1", "U2"],
+        "assessed_by": "reviewer",
+        "assessed_at": NOW,
+        "expires_at": NOW + timedelta(hours=1),
+        "pii_cleared": True,
+    }
+    connection = ScriptedConnection([GLOBAL, row])
+    found = ImageDescriptionStore(connection).active_clearance(
+        workspace=SCOPE["workspace"],
+        channel_id=SCOPE["channel"],
+        file_id=SCOPE["file_id"],
+        original_sha256=SCOPE["original_sha256"],
+        provider=SCOPE["provider"],
+        model=SCOPE["model"],
+        policy_revision=SCOPE["policy_revision"],
+    )
+
+    assert found == _assessment()
+    select = next(
+        event for event in connection.events
+        if isinstance(event, tuple) and "image_description_clearance" in event[0]
+    )
+    assert "revoked_at IS NULL" in select[0]
+    assert "expires_at > clock_timestamp()" in select[0]
+    assert select[1] == (
+        SCOPE["workspace"], SCOPE["channel"], SCOPE["file_id"],
+        SCOPE["original_sha256"], SCOPE["provider"], SCOPE["model"],
+        SCOPE["policy_revision"],
+    )
+
+
+def test_missing_active_clearance_is_not_guessed() -> None:
+    connection = ScriptedConnection([GLOBAL, None])
+    assert ImageDescriptionStore(connection).active_clearance(
+        workspace="tyit", channel_id="C12345678", file_id="F12345678",
+        original_sha256="a" * 64, provider="p", model="m", policy_revision="g:l",
+    ) is None
+
+
+def test_clearance_revocation_needs_an_actor_and_reason() -> None:
+    connection = ScriptedConnection([GLOBAL, {"id": "clearance-1"}])
+    ImageDescriptionStore(connection).revoke_clearance(
+        "clearance-1", actor="reviewer", reason="승인 철회"
+    )
+    update = _updates(connection)[0]
+    assert update[1] == ("reviewer", "승인 철회", "clearance-1")
+    assert "revoked_at IS NULL" in update[0]
+
+
+def test_an_inactive_clearance_cannot_be_revoked_twice() -> None:
+    connection = ScriptedConnection([GLOBAL, None])
+    with pytest.raises(ImageDescriptionDenied, match="clearance_not_active"):
+        ImageDescriptionStore(connection).revoke_clearance(
+            "clearance-1", actor="reviewer", reason="승인 철회"
+        )
 
 
 def test_safe_description_is_published_only_after_the_guard() -> None:

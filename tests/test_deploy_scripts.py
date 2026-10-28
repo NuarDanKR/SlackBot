@@ -275,6 +275,16 @@ def test_docs_never_call_psql_without_the_port():
     assert not bad, f"psql 호출에 포트가 없다: {bad}"
 
 
+def test_schema_apply_creates_the_secretless_vision_group_before_grants():
+    script = (ROOT / "deploy" / "apply-schema.sh").read_text(encoding="utf-8")
+    role = script.index("CREATE ROLE tybot_vision NOLOGIN")
+    schemas = script.rindex('for name in "${FILES[@]}"')
+    assert role < schemas
+    assert "CREATE ROLE tybot_vision LOGIN" not in script
+    assert "PASSWORD" not in script[role:schemas]
+    assert "-p \"$PORT\" -d \"$DB\"" in script[role - 300:schemas]
+
+
 # 운영 절차가 적히는 곳. 여기 적힌 명령은 **서버에 그대로 붙여 넣는다.**
 # 설계 문서(`docs/design/`)는 개발 PC 기준이라 제외한다.
 OPERATIONAL_DOCS = ("docs/deploy", "docs/verification")

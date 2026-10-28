@@ -17,6 +17,7 @@ from uuid import uuid4
 from tybot.gateway.base import Sensitivity
 
 from .image_description import ImageDescription, ImageInput
+from .image_description_clearance import SafetyAssessment
 from .image_description_output_guard import guard_index_write
 from .image_description_policy import (
     ImageDescriptionApproval,
@@ -354,6 +355,161 @@ class ImageDescriptionStore:
                 WHERE approval_id=%s AND state='reserved'""",
                 (approval_id,),
             )
+
+    def save_clearance(
+        self,
+        clearance_id: str,
+        assessment: SafetyAssessment,
+        *,
+        reason: str,
+        actor: str,
+    ) -> None:
+        """사진 하나의 사람 안전 판정을 append-only 원장에 남긴다."""
+        scope = (
+            assessment.workspace,
+            assessment.channel_id,
+            assessment.file_id,
+            assessment.provider,
+            assessment.model,
+            assessment.policy_revision,
+            assessment.visibility,
+        )
+        if (
+            not isinstance(clearance_id, str)
+            or not clearance_id.strip()
+            or clearance_id != clearance_id.strip()
+            or not isinstance(actor, str)
+            or not actor.strip()
+            or actor != actor.strip()
+            or not isinstance(reason, str)
+            or not reason.strip()
+            or any(
+                not isinstance(value, str) or not value.strip() or value != value.strip()
+                for value in scope
+            )
+            or not isinstance(assessment.original_sha256, str)
+            or re.fullmatch(r"[a-f0-9]{64}", assessment.original_sha256) is None
+            or not isinstance(assessment.acl, (set, frozenset))
+            or assessment.assessed_by != actor
+            or assessment.revoked is not False
+            or type(assessment.pii_cleared) is not bool
+            or not isinstance(assessment.assessed_at, datetime)
+            or not isinstance(assessment.expires_at, datetime)
+            or assessment.assessed_at.utcoffset() is None
+            or assessment.expires_at.utcoffset() is None
+            or assessment.expires_at <= assessment.assessed_at
+            or not assessment.acl
+        ):
+            raise ImageDescriptionDenied("clearance_invalid")
+        with self._transaction(), self.connection.cursor() as cur:
+            self._lock(cur)
+            cur.execute(
+                """INSERT INTO archiver_image_description_clearance
+                (id,workspace,channel_id,file_id,original_sha256,provider,model,
+                 policy_revision,visibility,acl,pii_cleared,assessed_by,assessed_at,
+                 expires_at,reason)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    clearance_id,
+                    assessment.workspace,
+                    assessment.channel_id,
+                    assessment.file_id,
+                    assessment.original_sha256,
+                    assessment.provider,
+                    assessment.model,
+                    assessment.policy_revision,
+                    assessment.visibility,
+                    sorted(assessment.acl),
+                    assessment.pii_cleared,
+                    actor,
+                    assessment.assessed_at,
+                    assessment.expires_at,
+                    reason.strip(),
+                ),
+            )
+
+    def active_clearance(
+        self,
+        *,
+        workspace: str,
+        channel_id: str,
+        file_id: str,
+        original_sha256: str,
+        provider: str,
+        model: str,
+        policy_revision: str,
+    ) -> SafetyAssessment | None:
+        """정확한 원본·외부 경로·정책에 묶인 현재 판정만 읽는다."""
+        values = (
+            workspace,
+            channel_id,
+            file_id,
+            original_sha256,
+            provider,
+            model,
+            policy_revision,
+        )
+        if any(not isinstance(value, str) or not value for value in values):
+            raise ImageDescriptionDenied("clearance_scope_invalid")
+        with self._transaction(), self.connection.cursor() as cur:
+            self._lock(cur)
+            cur.execute(
+                """SELECT * FROM archiver_image_description_clearance
+                WHERE workspace=%s AND channel_id=%s AND file_id=%s
+                  AND original_sha256=%s AND provider=%s AND model=%s
+                  AND policy_revision=%s AND revoked_at IS NULL
+                  AND expires_at > clock_timestamp()
+                ORDER BY assessed_at DESC,created_at DESC LIMIT 1""",
+                values,
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return SafetyAssessment(
+                workspace=row["workspace"],
+                channel_id=row["channel_id"],
+                file_id=row["file_id"],
+                original_sha256=row["original_sha256"],
+                provider=row["provider"],
+                model=row["model"],
+                policy_revision=row["policy_revision"],
+                visibility=row["visibility"],
+                acl=frozenset(row["acl"]),
+                assessed_by=row["assessed_by"],
+                assessed_at=row["assessed_at"],
+                expires_at=row["expires_at"],
+                pii_cleared=row["pii_cleared"],
+                revoked=False,
+            )
+
+    def revoke_clearance(
+        self,
+        clearance_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> None:
+        if (
+            not isinstance(clearance_id, str)
+            or not clearance_id.strip()
+            or clearance_id != clearance_id.strip()
+            or not isinstance(actor, str)
+            or not actor.strip()
+            or actor != actor.strip()
+            or not isinstance(reason, str)
+            or not reason.strip()
+        ):
+            raise ImageDescriptionDenied("clearance_revoke_invalid")
+        with self._transaction(), self.connection.cursor() as cur:
+            self._lock(cur)
+            cur.execute(
+                """UPDATE archiver_image_description_clearance
+                SET revoked_at=now(),revoked_by=%s,revoke_reason=%s
+                WHERE id=%s AND revoked_at IS NULL RETURNING id""",
+                (actor, reason.strip(), clearance_id),
+            )
+            if not cur.fetchone():
+                raise ImageDescriptionDenied("clearance_not_active")
 
     @staticmethod
     def _approval(cur, approval_id: str) -> ImageDescriptionApproval:

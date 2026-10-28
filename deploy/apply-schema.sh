@@ -93,6 +93,18 @@ if ((!DRY_RUN)); then
     /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_schema_drift.py \
     --target-only --expected-db "$DB" --expected-port "$PORT"
 fi
+
+# B-80/B-81의 표는 Master·수집기와 분리된 권한 그룹만 읽는다. 이 역할이 없으면
+# 두 스키마의 조건부 GRANT가 조용히 건너뛰어져 표는 생기지만 아무도 쓸 수 없다.
+# NOLOGIN 그룹에는 시크릿이 없다. 실제 worker LOGIN 역할과 멤버십은 별도 승인
+# 절차에서 만든다.
+if ((DRY_RUN)); then
+  echo "   [dry-run] ensure PostgreSQL role tybot_vision NOLOGIN"
+else
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -p "$PORT" -d "$DB" -c \
+    "DO \$vision_role\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='tybot_vision') THEN EXECUTE 'CREATE ROLE tybot_vision NOLOGIN'; END IF; END \$vision_role\$;"
+fi
+
 for name in "${FILES[@]}"; do
   if ((DRY_RUN)); then
     echo "   [dry-run] $name"
