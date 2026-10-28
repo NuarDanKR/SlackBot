@@ -16,7 +16,10 @@ from tybot.archive.image_description import (
     ImageUsage,
 )
 from tybot.archive.image_description_clearance import SafetyAssessment
-from tybot.archive.image_description_policy import ImageDescriptionDispatch
+from tybot.archive.image_description_policy import (
+    ImageDescriptionApproval,
+    ImageDescriptionDispatch,
+)
 from tybot.archive.image_description_store import (
     ImageDescriptionDenied,
     ImageDescriptionStore,
@@ -340,6 +343,53 @@ def test_missing_active_approval_is_not_guessed() -> None:
         original_sha256="a" * 64, provider="p", model="m",
         policy_revision="policy-1", prompt_revision="prompt-1",
     ) == ""
+
+
+def test_approval_records_an_explicit_reason() -> None:
+    approval = ImageDescriptionApproval(
+        approval_id="approval-1",
+        workspace="tyit",
+        channel="C12345678",
+        file_id="F12345678",
+        original_sha256="a" * 64,
+        policy_revision="global:local",
+        prompt_revision=PROMPT_REVISION,
+        model="free-vision-v1",
+        provider="approved-provider",
+        expires_at=NOW + timedelta(hours=1),
+    )
+    effective = SimpleNamespace(
+        revision="global:local",
+        model="free-vision-v1",
+        provider="approved-provider",
+    )
+    connection = ScriptedConnection([GLOBAL, effective])
+    store = ImageDescriptionStore(connection)
+    store._effective = lambda *_args: (effective, {}, {})
+
+    store.approve(approval, actor="reviewer", reason="외부 전송 범위 확인")
+
+    insert = next(
+        event for event in _inserts(connection)
+        if "archiver_image_description_approval" in event[0]
+    )
+    assert insert[1][-2:] == ("reviewer", "외부 전송 범위 확인")
+
+
+def test_approval_revocation_is_scoped_and_requires_a_reason() -> None:
+    connection = ScriptedConnection([GLOBAL, {"id": "approval-1"}])
+    ImageDescriptionStore(connection).revoke(
+        "approval-1",
+        workspace="tyit",
+        actor="reviewer",
+        reason="전송 승인 철회",
+    )
+    updates = _updates(connection)
+    assert updates[0][1] == (
+        "reviewer", "전송 승인 철회", "approval-1", "tyit"
+    )
+    assert "workspace=%s" in updates[0][0]
+    assert updates[1][1] == ("approval-1", "tyit")
 
 
 def test_clearance_revocation_needs_an_actor_and_reason() -> None:

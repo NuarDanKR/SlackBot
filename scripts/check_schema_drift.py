@@ -69,7 +69,11 @@ VISION_REQUIRED = {
 # Clearance rows are scope-bound evidence. The worker may only append and revoke;
 # a table-wide UPDATE grant would let it rewrite the reviewed image or route.
 VISION_REQUIRED["archiver_image_description_clearance"] = {"SELECT", "INSERT"}
+VISION_REQUIRED["archiver_image_description_approval"] = {"SELECT", "INSERT"}
 VISION_COLUMN_REQUIRED = {
+    "archiver_image_description_approval": {
+        "UPDATE": {"revoked_at", "revoked_by", "revoke_reason"},
+    },
     "archiver_image_description_clearance": {
         "UPDATE": {"revoked_at", "revoked_by", "revoke_reason"},
     },

@@ -32,6 +32,10 @@ def test_image_description_tables_are_also_isolated_vision_tables(drift):
     assert required['archiver_image_description_job'] == {'SELECT', 'INSERT', 'UPDATE'}
     assert required['archiver_image_description_revision'] == {'SELECT', 'INSERT'}
     assert required['archiver_image_description_clearance'] == {'SELECT', 'INSERT'}
+    assert required['archiver_image_description_approval'] == {'SELECT', 'INSERT'}
+    assert drift['VISION_COLUMN_REQUIRED']['archiver_image_description_approval'] == {
+        'UPDATE': {'revoked_at', 'revoked_by', 'revoke_reason'},
+    }
     assert drift['VISION_COLUMN_REQUIRED']['archiver_image_description_clearance'] == {
         'UPDATE': {'revoked_at', 'revoked_by', 'revoke_reason'},
     }

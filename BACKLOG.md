@@ -280,6 +280,10 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
       `DATABASE_URL` 폴백이 없는 전용 DSN 해석, 속성·멤버십·상속 권한·철회 3칸을
       대조하는 읽기 전용 검사기 구현 (2026-10-28, 운영 DB 미적용·계획 모드와
       단위시험만 실행).
+- [x] Codex: 현재 원본 SHA와 실효 provider/model·policy/prompt revision을 서버가
+      직접 결속하는 외부 전송 approval 생성·사유 있는 workspace별 철회 API 구현.
+      approval 원장은 생성·철회 사유를 필수로 남기고 런타임은 철회 3개 컬럼만
+      갱신한다 (2026-10-28, 정책 변경·서비스 기동은 별도).
 
 > **「LOGIN 계정 준비」 와 「worker 활성화」 는 같은 완료가 아니다.**
 >

@@ -34,6 +34,10 @@ post_clearance = _endpoint("/api/archiver/image-description/clearances")
 post_revoke_clearance = _endpoint(
     "/api/archiver/image-description/clearances/{clearance_id}/revoke"
 )
+post_approval = _endpoint("/api/archiver/image-description/approvals")
+post_revoke_approval = _endpoint(
+    "/api/archiver/image-description/approvals/{approval_id}/revoke"
+)
 
 NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
 
@@ -76,6 +80,19 @@ def _body(**changes) -> routes.ClearanceBody:
     }
     values.update(changes)
     return routes.ClearanceBody(**values)
+
+
+def _approval_body(**changes) -> routes.ApprovalBody:
+    values = {
+        "workspace": "tyit",
+        "channelId": "C12345678",
+        "fileId": "F12345678",
+        "expectedOriginalSha256": "a" * 64,
+        "expiresAt": NOW + timedelta(hours=1),
+        "reason": "approve transmission",
+    }
+    values.update(changes)
+    return routes.ApprovalBody(**values)
 
 
 def test_create_route_requires_admin_before_calling_service(monkeypatch) -> None:
@@ -172,6 +189,89 @@ def test_revoke_route_passes_the_scoped_workspace_and_omits_reason_from_audit(
     assert calls == [
         (
             "clearance-1",
+            {
+                "workspace": "tyit",
+                "actor": "owner@example.com",
+                "reason": "sensitive revoke note",
+            },
+        )
+    ]
+    assert "sensitive revoke note" not in repr(audits)
+
+
+def test_approval_route_requires_admin_csrf_and_workspace_scope(monkeypatch) -> None:
+    monkeypatch.setattr(
+        routes.approval_admin,
+        "create_approval",
+        lambda *_a, **_k: pytest.fail("service must not be called"),
+    )
+    with pytest.raises(HTTPException) as role:
+        post_approval(_approval_body(), _request(), _user(role="guest"))
+    assert role.value.status_code == 403
+    with pytest.raises(HTTPException) as csrf:
+        post_approval(_approval_body(), _request(csrf=""), _user())
+    assert csrf.value.status_code == 403
+    with pytest.raises(HTTPException) as scope:
+        post_approval(_approval_body(), _request(), _user(workspaces=("mgmt",)))
+    assert scope.value.status_code == 403
+
+
+def test_approval_route_audits_scope_without_the_reason(monkeypatch) -> None:
+    calls = []
+    audits = []
+
+    def create(request):
+        calls.append(request)
+        return {
+            "id": "approval-1",
+            "channelId": request.channel_id,
+            "fileId": request.file_id,
+            "policyRevision": "policy-1",
+            "promptRevision": "prompt-1",
+        }
+
+    monkeypatch.setattr(routes.approval_admin, "create_approval", create)
+    endpoint = _router_endpoints(audit_event=lambda **values: audits.append(values))[
+        "/api/archiver/image-description/approvals"
+    ]
+    result = endpoint(
+        _approval_body(reason="sensitive approval note"), _request(), _user()
+    )
+
+    assert result["id"] == "approval-1"
+    assert calls[0].reason == "sensitive approval note"
+    assert "sensitive approval note" not in repr(audits)
+    assert audits[0]["metadata"] == {
+        "channel_id": "C12345678",
+        "file_id": "F12345678",
+        "policy_revision": "policy-1",
+        "prompt_revision": "prompt-1",
+    }
+
+
+def test_approval_revoke_route_is_workspace_bound_and_hides_reason(monkeypatch) -> None:
+    calls = []
+    audits = []
+
+    def revoke(approval_id, **values):
+        calls.append((approval_id, values))
+        return {"ok": True, "id": approval_id}
+
+    monkeypatch.setattr(routes.approval_admin, "revoke_approval", revoke)
+    endpoint = _router_endpoints(audit_event=lambda **values: audits.append(values))[
+        "/api/archiver/image-description/approvals/{approval_id}/revoke"
+    ]
+    result = endpoint(
+        "approval-1",
+        routes.RevokeBody(workspace="tyit", reason="sensitive revoke note"),
+        _request(),
+        _user(),
+    )
+
+    assert result == {"ok": True, "id": "approval-1"}
+    assert calls == [
+        (
+            "approval-1",
             {
                 "workspace": "tyit",
                 "actor": "owner@example.com",

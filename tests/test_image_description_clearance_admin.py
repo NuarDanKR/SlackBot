@@ -178,6 +178,15 @@ def test_write_routes_are_registered_before_the_static_mount() -> None:
         for path, methods in paths
     )
     assert any(
+        path == "/api/archiver/image-description/approvals" and "POST" in methods
+        for path, methods in paths
+    )
+    assert any(
+        path == "/api/archiver/image-description/approvals/{approval_id}/revoke"
+        and "POST" in methods
+        for path, methods in paths
+    )
+    assert any(
         getattr(route, "original_router", None) is image_description_clearance_router
         for route in app.routes
     )

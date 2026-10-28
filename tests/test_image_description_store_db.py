@@ -65,8 +65,8 @@ def job(conn):
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO archiver_image_description_approval
-            (id,workspace,scope,expires_at,approved_by)
-            VALUES (%s,'tyit','{}'::jsonb, now() + interval '1 hour','tester')""",
+            (id,workspace,scope,expires_at,approved_by,reason)
+            VALUES (%s,'tyit','{}'::jsonb, now() + interval '1 hour','tester','test')""",
             (approval_id,),
         )
         cur.execute(
@@ -238,8 +238,8 @@ def test_a_finished_state_requires_a_finish_time(conn):
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO archiver_image_description_approval
-            (id,workspace,scope,expires_at,approved_by)
-            VALUES (%s,'tyit','{}'::jsonb, now() + interval '1 hour','tester')""",
+            (id,workspace,scope,expires_at,approved_by,reason)
+            VALUES (%s,'tyit','{}'::jsonb, now() + interval '1 hour','tester','test')""",
             (approval_id,),
         )
     with pytest.raises(psycopg.errors.CheckViolation), conn.cursor() as cur:
@@ -264,8 +264,8 @@ def test_an_identity_can_only_hold_one_job(conn):
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO archiver_image_description_approval
-                (id,workspace,scope,expires_at,approved_by)
-                VALUES (%s,'tyit','{}'::jsonb, now() + interval '1 hour','tester')""",
+                (id,workspace,scope,expires_at,approved_by,reason)
+                VALUES (%s,'tyit','{}'::jsonb, now() + interval '1 hour','tester','test')""",
                 (approval_id,),
             )
         ids.append(approval_id)

@@ -54,10 +54,70 @@ CREATE TABLE IF NOT EXISTS archiver_image_description_approval (
     scope jsonb NOT NULL CHECK (jsonb_typeof(scope) = 'object'),
     expires_at timestamptz NOT NULL,
     approved_by text NOT NULL CHECK (approved_by <> ''),
+    reason text NOT NULL CONSTRAINT image_description_approval_reason_nonempty
+        CHECK (reason <> ''),
     revoked_at timestamptz,
     revoked_by text,
-    created_at timestamptz NOT NULL DEFAULT now()
+    revoke_reason text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT image_description_approval_revoke_consistent CHECK (
+        (revoked_at IS NULL AND revoked_by IS NULL AND revoke_reason IS NULL) OR
+        (revoked_at IS NOT NULL AND revoked_by IS NOT NULL AND revoked_by <> '' AND
+         revoke_reason IS NOT NULL AND revoke_reason <> '')
+    ),
+    CONSTRAINT image_description_approval_revoke_after_create CHECK (
+        revoked_at IS NULL OR revoked_at >= created_at
+    )
 );
+
+-- Existing dormant installations may already have the table. Do not invent a
+-- reason for an old approval: fail the transaction and require an operator to
+-- inspect it before this schema can become the new contract.
+ALTER TABLE archiver_image_description_approval
+    ADD COLUMN IF NOT EXISTS reason text;
+ALTER TABLE archiver_image_description_approval
+    ADD COLUMN IF NOT EXISTS revoke_reason text;
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM archiver_image_description_approval
+        WHERE reason IS NULL OR btrim(reason) = ''
+    ) THEN
+        RAISE EXCEPTION 'image description approvals need an explicit reason';
+    END IF;
+END $$;
+ALTER TABLE archiver_image_description_approval ALTER COLUMN reason SET NOT NULL;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'image_description_approval_reason_nonempty'
+          AND conrelid = 'archiver_image_description_approval'::regclass
+    ) THEN
+        ALTER TABLE archiver_image_description_approval
+            ADD CONSTRAINT image_description_approval_reason_nonempty
+            CHECK (reason <> '');
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'image_description_approval_revoke_consistent'
+          AND conrelid = 'archiver_image_description_approval'::regclass
+    ) THEN
+        ALTER TABLE archiver_image_description_approval
+            ADD CONSTRAINT image_description_approval_revoke_consistent CHECK (
+                (revoked_at IS NULL AND revoked_by IS NULL AND revoke_reason IS NULL) OR
+                (revoked_at IS NOT NULL AND revoked_by IS NOT NULL AND revoked_by <> '' AND
+                 revoke_reason IS NOT NULL AND revoke_reason <> '')
+            );
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'image_description_approval_revoke_after_create'
+          AND conrelid = 'archiver_image_description_approval'::regclass
+    ) THEN
+        ALTER TABLE archiver_image_description_approval
+            ADD CONSTRAINT image_description_approval_revoke_after_create
+            CHECK (revoked_at IS NULL OR revoked_at >= created_at);
+    END IF;
+END $$;
 
 -- Human review of one immutable original for one exact external route.
 -- This is separate from transmission approval: neither row implies the other.
@@ -167,8 +227,16 @@ REVOKE ALL ON archiver_image_model_catalog,
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tybot_vision') THEN
         GRANT SELECT, INSERT, UPDATE ON TABLE archiver_image_model_catalog,
-            archiver_image_description_policy, archiver_image_description_approval,
-            archiver_image_description_job TO tybot_vision;
+            archiver_image_description_policy, archiver_image_description_job
+            TO tybot_vision;
+        -- Earlier revisions granted table-wide UPDATE here. A narrower GRANT
+        -- does not remove that privilege, so revoke it before adding columns.
+        REVOKE UPDATE ON TABLE archiver_image_description_approval
+            FROM tybot_vision;
+        GRANT SELECT, INSERT ON TABLE archiver_image_description_approval
+            TO tybot_vision;
+        GRANT UPDATE (revoked_at, revoked_by, revoke_reason)
+            ON TABLE archiver_image_description_approval TO tybot_vision;
         GRANT SELECT, INSERT ON TABLE archiver_image_description_clearance
             TO tybot_vision;
         GRANT UPDATE (revoked_at, revoked_by, revoke_reason)

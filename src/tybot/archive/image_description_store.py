@@ -314,8 +314,22 @@ class ImageDescriptionStore:
                 for row in cur.fetchall()
             )
 
-    def approve(self, approval: ImageDescriptionApproval, *, actor: str) -> None:
-        if not actor or approval.revoked or not approval.approval_id:
+    def approve(
+        self,
+        approval: ImageDescriptionApproval,
+        *,
+        actor: str,
+        reason: str,
+    ) -> None:
+        if (
+            not actor
+            or not actor.strip()
+            or actor != actor.strip()
+            or not reason
+            or not reason.strip()
+            or approval.revoked
+            or not approval.approval_id
+        ):
             raise ImageDescriptionDenied("approval_invalid")
         with self._transaction(), self.connection.cursor() as cur:
             global_row = self._lock(cur)
@@ -328,13 +342,15 @@ class ImageDescriptionStore:
                 raise ImageDescriptionDenied("approval_scope_mismatch")
             cur.execute(
                 """INSERT INTO archiver_image_description_approval
-                (id,workspace,scope,expires_at,approved_by) VALUES (%s,%s,%s::jsonb,%s,%s)""",
+                (id,workspace,scope,expires_at,approved_by,reason)
+                VALUES (%s,%s,%s::jsonb,%s,%s,%s)""",
                 (
                     approval.approval_id,
                     approval.workspace,
                     _json(approval_scope(approval)),
                     approval.expires_at,
                     actor,
+                    reason.strip(),
                 ),
             )
 
@@ -379,22 +395,35 @@ class ImageDescriptionStore:
             row = cur.fetchone()
             return str(row["id"]) if row else ""
 
-    def revoke(self, approval_id: str, *, actor: str) -> None:
-        if not actor:
-            raise ImageDescriptionDenied("actor_required")
+    def revoke(
+        self,
+        approval_id: str,
+        *,
+        workspace: str,
+        actor: str,
+        reason: str,
+    ) -> None:
+        if any(
+            not isinstance(value, str) or not value.strip() or value != value.strip()
+            for value in (approval_id, workspace, actor, reason)
+        ):
+            raise ImageDescriptionDenied("approval_revoke_invalid")
         with self._transaction(), self.connection.cursor() as cur:
             self._lock(cur)
             cur.execute(
                 """UPDATE archiver_image_description_approval
-                SET revoked_at=now(),revoked_by=%s WHERE id=%s AND revoked_at IS NULL""",
-                (actor, approval_id),
+                SET revoked_at=now(),revoked_by=%s,revoke_reason=%s
+                WHERE id=%s AND workspace=%s AND revoked_at IS NULL RETURNING id""",
+                (actor, reason, approval_id, workspace),
             )
+            if not cur.fetchone():
+                raise ImageDescriptionDenied("approval_not_active")
             # 전송 여부가 모호한 dispatching/unknown은 취소하거나 quota를 돌려주지 않는다.
             cur.execute(
                 """UPDATE archiver_image_description_job
                 SET state='cancelled',finished_at=now()
-                WHERE approval_id=%s AND state='reserved'""",
-                (approval_id,),
+                WHERE approval_id=%s AND workspace=%s AND state='reserved'""",
+                (approval_id, workspace),
             )
 
     def save_clearance(

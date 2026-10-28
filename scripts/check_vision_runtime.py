@@ -55,6 +55,7 @@ EXIT_INPUT = 2
 
 RUNTIME_ROLE = "tybot_vision_runtime"
 CLEARANCE = "archiver_image_description_clearance"
+APPROVAL = "archiver_image_description_approval"
 
 #: 접속 계정이 가져서는 안 되는 속성. 하나라도 서 있으면 「전용 계정」 이 아니다.
 FORBIDDEN = ("super", "createdb", "createrole", "replication", "bypassrls")
@@ -76,6 +77,8 @@ class Facts:
     inherited: dict[tuple[str, str], bool] = field(default_factory=dict)
     clearance_table_update: bool = True
     clearance_update_columns: tuple[str, ...] = ()
+    approval_table_update: bool = True
+    approval_update_columns: tuple[str, ...] = ()
     public_grants: int = 0
 
 
@@ -132,6 +135,14 @@ def evaluate(facts: Facts, *, require_login: bool) -> tuple[list[str], str]:
         problems.append("clearance_update_columns_too_wide")
     elif actual != expected:
         problems.append("clearance_update_columns_missing")
+    if facts.approval_table_update:
+        problems.append("approval_table_update_granted")
+    expected = VISION_COLUMN_REQUIRED[APPROVAL]["UPDATE"]
+    actual = set(facts.approval_update_columns)
+    if actual - expected:
+        problems.append("approval_update_columns_too_wide")
+    elif actual != expected:
+        problems.append("approval_update_columns_missing")
 
     return problems, "blocked" if problems else "ready"
 
@@ -202,6 +213,8 @@ def collect(conn) -> Facts:
         inherited: dict[tuple[str, str], bool] = {}
         clearance_table_update = False
         clearance_columns: tuple[str, ...] = ()
+        approval_table_update = False
+        approval_columns: tuple[str, ...] = ()
         if runtime is not None:
             wanted = [
                 (table, privilege)
@@ -236,6 +249,20 @@ def collect(conn) -> Facts:
                 (CLEARANCE, RUNTIME_ROLE),
             )
             clearance_columns = tuple(str(row["attname"]) for row in cur.fetchall())
+            cur.execute(
+                "SELECT has_table_privilege(%s,%s,'UPDATE') AS allowed",
+                (RUNTIME_ROLE, APPROVAL),
+            )
+            approval_table_update = bool(cur.fetchone()["allowed"])
+            cur.execute(
+                """SELECT a.attname
+                     FROM pg_attribute a
+                    WHERE a.attrelid=%s::regclass AND a.attnum>0 AND NOT a.attisdropped
+                      AND has_column_privilege(%s, a.attrelid, a.attname, 'UPDATE')
+                    ORDER BY a.attnum""",
+                (APPROVAL, RUNTIME_ROLE),
+            )
+            approval_columns = tuple(str(row["attname"]) for row in cur.fetchall())
 
     return Facts(
         group_exists=group is not None,
@@ -246,6 +273,8 @@ def collect(conn) -> Facts:
         inherited=inherited,
         clearance_table_update=clearance_table_update,
         clearance_update_columns=clearance_columns,
+        approval_table_update=approval_table_update,
+        approval_update_columns=approval_columns,
         public_grants=public_grants,
     )
 

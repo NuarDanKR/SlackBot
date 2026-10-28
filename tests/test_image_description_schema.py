@@ -72,6 +72,22 @@ def test_clearance_is_a_separate_immutable_scope_bound_ledger() -> None:
     assert "SELECT, INSERT, UPDATE ON TABLE archiver_image_description_clearance" not in grants
 
 
+def test_transmission_approval_records_reasons_and_only_allows_revocation_updates() -> None:
+    sql = _sql()
+    table = sql[
+        sql.index("CREATE TABLE IF NOT EXISTS archiver_image_description_approval") :
+        sql.index("CREATE TABLE IF NOT EXISTS archiver_image_description_clearance")
+    ]
+    assert "reason text NOT NULL" in table
+    assert "revoke_reason text" in table
+    assert "image_description_approval_revoke_consistent" in table
+    grants = sql[sql.index("DO $$ BEGIN") :]
+    assert "SELECT, INSERT ON TABLE archiver_image_description_approval" in grants
+    assert "REVOKE UPDATE ON TABLE archiver_image_description_approval" in grants
+    assert "UPDATE (revoked_at, revoked_by, revoke_reason)" in grants
+    assert "archiver_image_description_policy, archiver_image_description_approval" not in grants
+
+
 def test_derived_descriptions_are_labeled_bounded_and_immutable_to_the_role() -> None:
     sql = _sql()
     assert "[AI 이미지 설명·검색용]" in sql

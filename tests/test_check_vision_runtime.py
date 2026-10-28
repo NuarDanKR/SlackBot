@@ -54,6 +54,10 @@ def facts(**over) -> check.Facts:
         "clearance_update_columns": tuple(
             sorted(check.VISION_COLUMN_REQUIRED[check.CLEARANCE]["UPDATE"])
         ),
+        "approval_table_update": False,
+        "approval_update_columns": tuple(
+            sorted(check.VISION_COLUMN_REQUIRED[check.APPROVAL]["UPDATE"])
+        ),
         "public_grants": 0,
     }
     return check.Facts(**(base | over))
@@ -74,6 +78,8 @@ def test_a_correct_runtime_is_ready():
 def test_the_column_order_does_not_matter():
     columns = tuple(reversed(facts().clearance_update_columns))
     assert judge(facts(clearance_update_columns=columns))[0] == []
+    columns = tuple(reversed(facts().approval_update_columns))
+    assert judge(facts(approval_update_columns=columns))[0] == []
 
 
 # --- 준비 상태 ↔ 실패 --------------------------------------------------------
@@ -181,6 +187,7 @@ def test_ready_is_never_returned_with_a_problem():
         facts(public_grants=3),
         facts(group_login=True),
         facts(clearance_table_update=True),
+        facts(approval_table_update=True),
     ):
         problems, state = judge(broken)
         assert problems and state == "blocked"
@@ -265,6 +272,21 @@ def test_the_revoke_columns_are_exactly_the_three():
     assert check.VISION_COLUMN_REQUIRED[check.CLEARANCE]["UPDATE"] == {
         "revoked_at", "revoked_by", "revoke_reason",
     }
+
+
+def test_approval_revoke_columns_are_also_exact_and_not_table_wide():
+    assert check.VISION_COLUMN_REQUIRED[check.APPROVAL]["UPDATE"] == {
+        "revoked_at", "revoked_by", "revoke_reason",
+    }
+    assert "approval_table_update_granted" in judge(
+        facts(approval_table_update=True)
+    )[0]
+    assert "approval_update_columns_too_wide" in judge(
+        facts(approval_update_columns=(*facts().approval_update_columns, "scope"))
+    )[0]
+    assert "approval_update_columns_missing" in judge(
+        facts(approval_update_columns=facts().approval_update_columns[:-1])
+    )[0]
 
 
 # --- 보고 --------------------------------------------------------------------
