@@ -32,7 +32,7 @@
 | **WC-22** | 높음 | 계약 시험이 WC-01 과 반대를 강제한다 | 봇개발 | 🔴 요청됨 — 배포 게이트가 주석 한 줄에 매여 있음 | [열기](#wc-22) |
 | **WC-24** | 높음 | 소급 「회차 상한」 을 받는 칸 | 봇개발 | 🔴 요청됨 — API 에 받을 자리가 없어 화면이 못 붙임 | [열기](#wc-24) |
 | **WC-25** | 높음 | `archiving` 의 `services` 가 옛 표를 읽는다 | 봇개발 | 🔴 요청됨 — 오류가 아니라 빈 목록이 나온다 | [열기](#wc-25) |
-| **WC-30** | 높음 | Archiver 이미지 설명·무료 Vision LLM 라우팅 | 양쪽 | 🟠 진행중 — 원본 runner·안전 승인 원장 구현 · API·서비스 기동 미구현 | [열기](#wc-30) |
+| **WC-30** | 높음 | Archiver 이미지 설명·무료 Vision LLM 라우팅 | 양쪽 | 🟠 진행중 — 읽기 API 구현 · 변경 API·전용 LOGIN·서비스 기동 남음 | [열기](#wc-30) |
 | **WC-02** | 보통 | 봇 배포와 콘솔 배포를 끝까지 가른다 | 봇개발 | 🟠 진행중 — 배포 감지·health 완료 · 조건부 재시작 남음 | [열기](#wc-02) |
 | **WC-04** | 보통 | 콘솔 TLS — 평문 HTTP 로 운영 중 | 봇개발 | 🟠 진행중 — 화면 몫 완료 · 8787 TLS·쿠키 플래그 남음 | [열기](#wc-04) |
 | **WC-05** | 보통 | 보존 기간과 명시적 영구 보관 | 양쪽 | 🟠 진행중 — 화면 일부 완료 · 미리보기·영구보관 API 대기 | [열기](#wc-05) |
@@ -2737,7 +2737,7 @@ Master DM 인계만 비활성화한다. Archiver 자체 토큰/신원 검증과 
 
 | | |
 |---|---|
-| 상태 | 🟠 진행중 — 원본 runner·안전 승인 원장 구현 · API·서비스 기동 미구현 |
+| 상태 | 🟠 진행중 — 읽기 API 구현 · 변경 API·전용 LOGIN·서비스 기동 남음 |
 | 우선 | 높음 |
 | 담당 | 양쪽 |
 | 등록 | 2026-10-27 |
@@ -2789,17 +2789,23 @@ HWP는 rhwp가 PDF로 변환하는 운영 경로를 사용하므로 WC-30의 선
   인용하지 않으며 검색 후보를 찾은 뒤 현재 권한으로 원본 사진을 다시 연다.
 - 얼굴 신원·차량 번호, 공정률·치수·수량, 하자·안전 여부를 확정한 것처럼 표시하지 않는다.
 
-## 서버 API 초안 — 아직 호출 가능한 기능이 아니다
+## 서버 API
 
 | 동작 | 제안 API |
 |---|---|
-| 실효 정책·상속·worker revision | `GET /api/archiver/image-description/policy?workspace=...` |
+| 실효 정책·상속·worker revision·무료 모델·최근 작업 | `GET /api/archiver/image-description/policy?workspace=...` — **구현됨** |
 | 정책 변경(`expectedRevision`·사유 필수) | `PUT /api/archiver/image-description/policy` |
 | 선택 가능한 무료 Vision 모델 | `GET /api/archiver/image-description/models?workspace=...` |
 | 작업 목록·상세 | `GET /api/archiver/image-description/jobs` 및 `GET .../jobs/{id}` |
 | 승인된 재처리·취소 | `POST .../jobs`, `POST .../jobs/{id}/cancel` |
 
-API·worker가 없으면 화면은 `미구현`으로 표시하고 조작을 비활성화한다. 정책 저장만으로
+구현된 GET은 관리자 전용이며 워크스페이스 범위를 서버에서 검사한다. 원본 bytes·경로,
+설명 본문, provider 응답, 승인 사유, 정책/카탈로그 snapshot JSON은 반환하지 않는다.
+전용 `TYBOT_VISION_DATABASE_URL`이 없거나 읽지 못하면 빈 목록이나 정상으로 바꾸지 않고
+`503`과 고정 코드를 반환한다. `workerAppliedRevision=null`은 **미적용 확인 전**이며
+`applicationState=not_configured`를 함께 표시한다.
+
+아직 없는 변경 API·worker는 화면에서 `미구현`으로 표시하고 조작을 비활성화한다. 정책 저장만으로
 기존 파일을 일괄 전송하지 않는다. 재처리는 원본 해시·현재 ACL·PII·봇 생성 여부·무료
 조건을 실행 직전에 다시 검사하며 기존 원본과 파생 revision을 덮어쓰지 않는다.
 
@@ -2825,9 +2831,10 @@ PII 차단, 봇 생성 파일, 원본 해시 변경에서 외부 호출 0회다.
 > 외부 전송 승인과 별도로 사진·모델·정책·당시 ACL·PII 확인을 묶는 안전 승인 원장
 > 스키마와 생성·정확 범위 조회·사유 있는 철회 저장소를 추가했다. 스키마 적용은
 > 시크릿 없는 `tybot_vision NOLOGIN` 그룹을 먼저 만들어 조건부 GRANT 누락을 막는다.
-> 아직 운영 DB 적용, 실제 worker LOGIN 역할·credential, 실행 서비스 유닛,
-> 관리자 API와 콘솔 화면은
-> 미구현이다. 따라서 현재 배포만으로 외부 호출은 일어나지 않는다.
+> 운영 DB 스키마와 `tybot_vision NOLOGIN` 권한 그룹은 적용됐다. 정책·무료 모델·최근
+> 작업을 본문 없이 내리는 관리자 GET API도 구현했다. 실제 worker LOGIN 역할·credential,
+> 실행 서비스 유닛, 정책 변경·clearance 승인/철회 API와 콘솔 화면은 미구현이다.
+> 따라서 현재 배포만으로 외부 호출은 일어나지 않는다.
 
 
 # 100. 완료 항목

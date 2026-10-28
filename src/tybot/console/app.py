@@ -41,6 +41,7 @@ from . import (
     deploy_approval_store,
     env_settings,
     health,
+    image_description_admin,
     llm_secret_store,
     reader,
     review_jobs,
@@ -2141,6 +2142,23 @@ class WorkspaceServiceBody(BaseModel):
 
 class WorkspaceServiceVerifyBody(BaseModel):
     reason: str = Field(min_length=1)
+
+
+@app.get("/api/archiver/image-description/policy")
+def get_image_description_policy(
+    workspace: Annotated[str, Query(min_length=1, max_length=40)],
+    user: User,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict:
+    """이미지 설명 정책·무료 모델·작업 상태. 원본과 설명 본문은 반환하지 않는다."""
+    _require_admin(user)
+    key = workspace.strip().lower()
+    if not user.may_see(key):
+        raise HTTPException(status_code=403, detail="이 워크스페이스를 볼 수 없습니다.")
+    try:
+        return image_description_admin.snapshot(key, limit=limit)
+    except image_description_admin.ImageDescriptionAdminError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/workspaces/{key}/archiving")
