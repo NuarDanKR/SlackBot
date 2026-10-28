@@ -338,6 +338,47 @@ class ImageDescriptionStore:
                 ),
             )
 
+    def active_approval_id(
+        self,
+        *,
+        workspace: str,
+        channel: str,
+        file_id: str,
+        original_sha256: str,
+        provider: str,
+        model: str,
+        policy_revision: str,
+        prompt_revision: str,
+    ) -> str:
+        """현재 외부 전송 경로와 정확히 결속된 유효 승인 ID."""
+        values = (
+            workspace,
+            channel,
+            file_id,
+            original_sha256,
+            provider,
+            model,
+            policy_revision,
+            prompt_revision,
+        )
+        if any(not isinstance(value, str) or not value for value in values):
+            raise ImageDescriptionDenied("approval_scope_invalid")
+        with self._transaction(), self.connection.cursor() as cur:
+            self._lock(cur)
+            cur.execute(
+                """SELECT id FROM archiver_image_description_approval
+                WHERE workspace=%s AND scope->>'channel'=%s
+                  AND scope->>'file_id'=%s AND scope->>'original_sha256'=%s
+                  AND scope->>'provider'=%s AND scope->>'model'=%s
+                  AND scope->>'policy_revision'=%s
+                  AND scope->>'prompt_revision'=%s
+                  AND revoked_at IS NULL AND expires_at > clock_timestamp()
+                ORDER BY created_at DESC,id DESC LIMIT 1""",
+                values,
+            )
+            row = cur.fetchone()
+            return str(row["id"]) if row else ""
+
     def revoke(self, approval_id: str, *, actor: str) -> None:
         if not actor:
             raise ImageDescriptionDenied("actor_required")

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .image_description import PROMPT_REVISION, ImageInput
+from .image_description_clearance import clear_for_dispatch
+from .image_description_original import load_original
 from .image_description_source import (
     ImageCandidate,
     confirmed_human_file_ids,
@@ -71,6 +73,13 @@ def _item(
 def _fresh_check_blocker(checks: object) -> str:
     if not isinstance(checks, dict):
         return "checks_invalid"
+    clearance_code = checks.get("clearance_code", "")
+    if clearance_code:
+        return (
+            clearance_code
+            if isinstance(clearance_code, str) and _CODE.fullmatch(clearance_code)
+            else "checks_invalid"
+        )
     if checks.get("access_verified") is not True:
         return "access_unverified"
     if checks.get("pii_blocked") is not False:
@@ -78,6 +87,12 @@ def _fresh_check_blocker(checks: object) -> str:
     if checks.get("bot_generated") is not False:
         return "bot_generated"
     return ""
+
+
+class _OriginalDenied(RuntimeError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def run_approved_batch(
@@ -118,10 +133,6 @@ def run_approved_batch(
         if doc is None:
             items.append(_item(candidate, "blocked", code="source_changed"))
             continue
-        approval_id = approval_id_for(candidate)
-        if not approval_id:
-            items.append(_item(candidate, "approval_required", code="approval_missing"))
-            continue
         try:
             checks = checks_for(candidate, doc)
         except Exception:  # noqa: BLE001 - ACL/PII 조회의 본문을 내보내지 않는다
@@ -130,6 +141,14 @@ def run_approved_batch(
         blocker = _fresh_check_blocker(checks)
         if blocker:
             items.append(_item(candidate, "blocked", code=blocker))
+            continue
+        try:
+            approval_id = approval_id_for(candidate)
+        except Exception:  # noqa: BLE001 - DB/provider 본문 없이 고정 코드만 보낸다.
+            items.append(_item(candidate, "blocked", code="approval_lookup_failed"))
+            continue
+        if not approval_id:
+            items.append(_item(candidate, "approval_required", code="approval_missing"))
             continue
         try:
             image = load_image(candidate, doc)
@@ -189,8 +208,96 @@ def run_approved_batch(
     )
 
 
+def run_cleared_batch(
+    docs,
+    *,
+    workspace: str,
+    store,
+    router,
+    archive_root,
+    dispatch_expires_at: datetime,
+    now: datetime,
+    limit: int = 50,
+) -> ImageDescriptionBatch:
+    """DB 정책과 사람 안전 판정을 다시 읽어 승인된 원본만 실행한다.
+
+    정책·clearance는 모델 호출 권한의 서로 다른 축이다. 이 함수는 현재 정책을 한 번
+    읽고, 후보마다 그 정책과 정확히 결속된 active clearance를 조회한 뒤에만 원본을
+    연다. :func:`run_approved_batch`와 저장소가 예약 시 같은 사실을 다시 검사하므로,
+    중간에 정책이나 승인이 바뀌면 호출은 닫히는 쪽으로 끝난다.
+    """
+    policy, _config, _sources = store.effective_policy(workspace)
+
+    def approval_id_for(candidate) -> str:
+        return store.active_approval_id(
+            workspace=candidate.workspace,
+            channel=candidate.channel_id,
+            file_id=candidate.file_id,
+            original_sha256=candidate.original_sha256,
+            provider=policy.provider,
+            model=policy.model,
+            policy_revision=policy.revision,
+            prompt_revision=PROMPT_REVISION,
+        )
+
+    def checks_for(candidate, doc) -> dict:
+        if policy.enabled is not True or policy.workspace_enabled is not True:
+            return {
+                "access_verified": False,
+                "pii_blocked": True,
+                "bot_generated": False,
+                "clearance_code": "image_description_disabled",
+            }
+        assessment = store.active_clearance(
+            workspace=candidate.workspace,
+            channel_id=candidate.channel_id,
+            file_id=candidate.file_id,
+            original_sha256=candidate.original_sha256,
+            provider=policy.provider,
+            model=policy.model,
+            policy_revision=policy.revision,
+        )
+        clearance = clear_for_dispatch(
+            candidate,
+            doc=doc,
+            assessment=assessment,
+            provider=policy.provider,
+            model=policy.model,
+            policy_revision=policy.revision,
+            now=now,
+        )
+        return clearance.as_checks() | {
+            "bot_generated": False,
+            "clearance_code": clearance.code,
+        }
+
+    def open_original(candidate, doc) -> ImageInput:
+        loaded = load_original(
+            candidate,
+            archive_root=archive_root,
+            doc=doc,
+            max_image_bytes=policy.max_image_bytes,
+        )
+        if not loaded.ok:
+            raise _OriginalDenied(loaded.error_code or "source_load_failed")
+        return loaded.image
+
+    return run_approved_batch(
+        docs,
+        workspace=workspace,
+        store=store,
+        router=router,
+        load_image=open_original,
+        approval_id_for=approval_id_for,
+        checks_for=checks_for,
+        dispatch_expires_at=dispatch_expires_at,
+        limit=limit,
+    )
+
+
 __all__ = [
     "ImageDescriptionBatch",
     "ImageDescriptionBatchItem",
     "run_approved_batch",
+    "run_cleared_batch",
 ]

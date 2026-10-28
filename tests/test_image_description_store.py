@@ -307,6 +307,41 @@ def test_missing_active_clearance_is_not_guessed() -> None:
     ) is None
 
 
+def test_only_an_exact_active_approval_id_is_selected() -> None:
+    connection = ScriptedConnection([GLOBAL, {"id": "approval-1"}])
+    found = ImageDescriptionStore(connection).active_approval_id(
+        workspace="tyit",
+        channel="C12345678",
+        file_id="F12345678",
+        original_sha256="a" * 64,
+        provider="provider",
+        model="free-vision",
+        policy_revision="policy-1",
+        prompt_revision="image-description-v1",
+    )
+
+    assert found == "approval-1"
+    select = next(
+        event for event in connection.events
+        if isinstance(event, tuple) and "image_description_approval" in event[0]
+    )
+    assert "revoked_at IS NULL" in select[0]
+    assert "expires_at > clock_timestamp()" in select[0]
+    assert select[1] == (
+        "tyit", "C12345678", "F12345678", "a" * 64, "provider",
+        "free-vision", "policy-1", "image-description-v1",
+    )
+
+
+def test_missing_active_approval_is_not_guessed() -> None:
+    connection = ScriptedConnection([GLOBAL, None])
+    assert ImageDescriptionStore(connection).active_approval_id(
+        workspace="tyit", channel="C12345678", file_id="F12345678",
+        original_sha256="a" * 64, provider="p", model="m",
+        policy_revision="policy-1", prompt_revision="prompt-1",
+    ) == ""
+
+
 def test_clearance_revocation_needs_an_actor_and_reason() -> None:
     connection = ScriptedConnection([GLOBAL, {"id": "clearance-1"}])
     ImageDescriptionStore(connection).revoke_clearance(

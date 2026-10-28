@@ -5,8 +5,13 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from tybot.archive.attachment_doc import AttachmentDoc
-from tybot.archive.image_description import ImageInput
-from tybot.archive.image_description_coordinator import run_approved_batch
+from tybot.archive.image_description import PROMPT_REVISION, ImageInput
+from tybot.archive.image_description_clearance import SafetyAssessment
+from tybot.archive.image_description_coordinator import (
+    run_approved_batch,
+    run_cleared_batch,
+)
+from tybot.archive.image_description_policy import ImageDescriptionPolicy
 from tybot.archive.image_description_store import ImageDescriptionDenied
 from tybot.archive.image_description_worker import ImageDescriptionRun
 
@@ -56,6 +61,58 @@ class Store:
     def reserve(self, image, **kwargs):
         self.reserved.append((image, kwargs))
         return SimpleNamespace(dispatch_id="job-1")
+
+
+class ManagedStore(Store):
+    def __init__(self, *, enabled=True, assessment=True, approval=True):
+        super().__init__()
+        self.policy = ImageDescriptionPolicy(
+            workspace="tyit",
+            revision="policy-1",
+            enabled=enabled,
+            workspace_enabled=enabled,
+            model="free-vision",
+            provider="provider",
+            region="kr",
+            max_image_bytes=1024,
+            max_output_tokens=100,
+            timeout_seconds=10,
+            catalog_verification_ttl_seconds=60,
+        )
+        self.assessment = (
+            SafetyAssessment(
+                workspace="tyit",
+                channel_id="C12345678",
+                file_id="F12345678",
+                original_sha256=SHA,
+                provider="provider",
+                model="free-vision",
+                policy_revision="policy-1",
+                visibility="private",
+                acl=frozenset({"#현장"}),
+                assessed_by="admin",
+                assessed_at=NOW - timedelta(minutes=1),
+                expires_at=NOW + timedelta(hours=1),
+                pii_cleared=True,
+            )
+            if assessment
+            else None
+        )
+        self.clearance_queries = []
+        self.approval_queries = []
+        self.approval = approval
+
+    def effective_policy(self, workspace):
+        assert workspace == "tyit"
+        return self.policy, {}, {}
+
+    def active_clearance(self, **scope):
+        self.clearance_queries.append(scope)
+        return self.assessment
+
+    def active_approval_id(self, **scope):
+        self.approval_queries.append(scope)
+        return "approval-1" if self.approval else ""
 
 
 def _run(monkeypatch, docs=None, store=None, **over):
@@ -131,6 +188,21 @@ def test_missing_approval_does_not_open_the_original(monkeypatch):
 
     assert batch.items[0].state == "approval_required"
     assert batch.items[0].code == "approval_missing"
+    assert not loaded
+
+
+def test_failed_approval_lookup_does_not_open_the_original_or_leak(monkeypatch):
+    loaded = []
+    batch = _run(
+        monkeypatch,
+        approval_id_for=lambda _candidate: (_ for _ in ()).throw(
+            RuntimeError("private approval row")
+        ),
+        load_image=lambda *_args: loaded.append(True),
+    )
+
+    assert batch.items[0].code == "approval_lookup_failed"
+    assert "private" not in repr(batch)
     assert not loaded
 
 
@@ -294,3 +366,121 @@ def test_other_workspaces_are_not_selected(monkeypatch):
 
     assert batch.selected == 1
     assert batch.items[0].file_id == "F99999999"
+
+
+def _run_cleared(monkeypatch, *, store=None, doc=None, loaded=None):
+    store = store or ManagedStore()
+    opened = []
+    result = loaded or SimpleNamespace(ok=True, image=_image(SimpleNamespace(
+        workspace="tyit",
+        channel_id="C12345678",
+        file_id="F12345678",
+        original_sha256=SHA,
+        mime="image/png",
+    ), None), error_code="")
+
+    def fake_load(candidate, **kwargs):
+        opened.append((candidate, kwargs))
+        return result
+
+    monkeypatch.setattr(
+        "tybot.archive.image_description_coordinator.load_original", fake_load
+    )
+    monkeypatch.setattr(
+        "tybot.archive.image_description_coordinator.dispatch_reserved_image",
+        lambda *_args, **_kwargs: ImageDescriptionRun(
+            "job-1", "published", revision_id="revision-1"
+        ),
+    )
+    batch = run_cleared_batch(
+        [doc or _doc()],
+        workspace="tyit",
+        store=store,
+        router=object(),
+        archive_root="archive-root",
+        dispatch_expires_at=NOW + timedelta(minutes=5),
+        now=NOW,
+    )
+    return batch, store, opened
+
+
+def test_managed_batch_binds_current_policy_clearance_and_original(monkeypatch):
+    batch, store, opened = _run_cleared(monkeypatch)
+
+    assert batch.items[0].state == "published"
+    assert store.approval_queries == [{
+        "workspace": "tyit",
+        "channel": "C12345678",
+        "file_id": "F12345678",
+        "original_sha256": SHA,
+        "provider": "provider",
+        "model": "free-vision",
+        "policy_revision": "policy-1",
+        "prompt_revision": PROMPT_REVISION,
+    }]
+    assert store.clearance_queries == [{
+        "workspace": "tyit",
+        "channel_id": "C12345678",
+        "file_id": "F12345678",
+        "original_sha256": SHA,
+        "provider": "provider",
+        "model": "free-vision",
+        "policy_revision": "policy-1",
+    }]
+    assert opened[0][1]["max_image_bytes"] == 1024
+    assert store.reserved[0][1]["checks"] == {
+        "access_verified": True,
+        "pii_blocked": False,
+        "bot_generated": False,
+        "clearance_code": "",
+        "source_verified": True,
+    }
+
+
+def test_missing_clearance_never_opens_the_original(monkeypatch):
+    batch, _store, opened = _run_cleared(
+        monkeypatch, store=ManagedStore(assessment=False)
+    )
+
+    assert batch.items[0].code == "assessment_missing"
+    assert not opened
+
+
+def test_missing_exact_approval_never_opens_the_original(monkeypatch):
+    batch, _store, opened = _run_cleared(
+        monkeypatch, store=ManagedStore(approval=False)
+    )
+
+    assert batch.items[0].state == "approval_required"
+    assert batch.items[0].code == "approval_missing"
+    assert not opened
+
+
+def test_disabled_policy_does_not_query_clearance_or_open_original(monkeypatch):
+    batch, store, opened = _run_cleared(
+        monkeypatch, store=ManagedStore(enabled=False)
+    )
+
+    assert batch.items[0].code == "image_description_disabled"
+    assert not store.clearance_queries
+    assert not opened
+
+
+def test_changed_acl_never_opens_the_original(monkeypatch):
+    batch, _store, opened = _run_cleared(
+        monkeypatch, doc=_doc(acl=frozenset({"#다른채널"}))
+    )
+
+    assert batch.items[0].code == "acl_changed"
+    assert not opened
+
+
+def test_managed_original_failure_keeps_only_the_safe_code(monkeypatch):
+    batch, _store, _opened = _run_cleared(
+        monkeypatch,
+        loaded=SimpleNamespace(
+            ok=False, image=None, error_code="original_hash_mismatch"
+        ),
+    )
+
+    assert batch.items[0].code == "original_hash_mismatch"
