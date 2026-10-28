@@ -31,6 +31,7 @@ def test_image_description_tables_are_also_isolated_vision_tables(drift):
     required = drift['VISION_REQUIRED']
     assert required['archiver_image_description_job'] == {'SELECT', 'INSERT', 'UPDATE'}
     assert required['archiver_image_description_revision'] == {'SELECT', 'INSERT'}
+    assert required['archiver_image_description_clearance'] == {'SELECT', 'INSERT'}
 
 
 def run_check(drift, monkeypatch, *, absent=(), denied=(), problems=(), worker=False, columns=(), have_columns=()):

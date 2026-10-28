@@ -54,7 +54,8 @@ VISION_TABLES = {
 VISION_TABLES.update({
     name: "archiver_image_description_schema.sql" for name in (
         "archiver_image_model_catalog", "archiver_image_description_approval",
-        "archiver_image_description_job", "archiver_image_description_policy",
+        "archiver_image_description_clearance", "archiver_image_description_job",
+        "archiver_image_description_policy",
         "archiver_image_description_policy_audit", "archiver_image_description_revision",
     )
 })
@@ -65,6 +66,9 @@ VISION_REQUIRED = {
     )
     for table in VISION_TABLES
 }
+# Clearance rows are scope-bound evidence. The worker may only append and revoke;
+# a table-wide UPDATE grant would let it rewrite the reviewed image or route.
+VISION_REQUIRED["archiver_image_description_clearance"] = {"SELECT", "INSERT"}
 
 # 스키마 파일이 선언하는 것들. **주석 처리된 줄은 제외한다** — 예시로 적어 둔 GRANT 나
 # 롤백 안내가 요구사항으로 잡히면 없는 고장을 매번 보고한다.

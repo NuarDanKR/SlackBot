@@ -39,6 +39,39 @@ def test_jobs_keep_policy_and_catalog_snapshots_separate() -> None:
     assert "identity_sha256 text NOT NULL UNIQUE" in sql
 
 
+def test_clearance_is_a_separate_immutable_scope_bound_ledger() -> None:
+    sql = _sql()
+    table = sql[
+        sql.index("CREATE TABLE IF NOT EXISTS archiver_image_description_clearance") :
+        sql.index("CREATE TABLE IF NOT EXISTS archiver_image_description_job")
+    ]
+    for field in (
+        "workspace text NOT NULL",
+        "channel_id text NOT NULL",
+        "file_id text NOT NULL",
+        "original_sha256 text NOT NULL",
+        "provider text NOT NULL",
+        "model text NOT NULL",
+        "policy_revision text NOT NULL",
+        "visibility text NOT NULL",
+        "acl text[] NOT NULL",
+        "pii_cleared boolean NOT NULL DEFAULT false",
+        "assessed_by text NOT NULL",
+        "expires_at timestamptz NOT NULL",
+        "reason text NOT NULL",
+    ):
+        assert field in table
+    assert "CHECK (expires_at > assessed_at)" in table
+    assert "revoked_by IS NOT NULL AND revoked_by <> ''" in table
+    assert "revoke_reason IS NOT NULL AND revoke_reason <> ''" in table
+    assert "revoked_at IS NULL OR revoked_at >= assessed_at" in table
+    assert "archiver_image_description_approval" not in table
+    grants = sql[sql.index("DO $$ BEGIN") :]
+    assert "SELECT, INSERT ON TABLE archiver_image_description_clearance" in grants
+    assert "UPDATE (revoked_at, revoked_by, revoke_reason)" in grants
+    assert "SELECT, INSERT, UPDATE ON TABLE archiver_image_description_clearance" not in grants
+
+
 def test_derived_descriptions_are_labeled_bounded_and_immutable_to_the_role() -> None:
     sql = _sql()
     assert "[AI 이미지 설명·검색용]" in sql
@@ -55,6 +88,7 @@ def test_derived_descriptions_are_labeled_bounded_and_immutable_to_the_role() ->
 def test_master_collector_and_public_receive_no_access() -> None:
     sql = _sql()
     assert "REVOKE ALL ON archiver_image_model_catalog" in sql
+    assert "archiver_image_description_clearance" in sql
     assert "FROM PUBLIC" in sql
     assert "TO tyslackai" not in sql
     assert "TO tybot_archiver" not in sql

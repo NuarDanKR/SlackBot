@@ -59,6 +59,42 @@ CREATE TABLE IF NOT EXISTS archiver_image_description_approval (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Human review of one immutable original for one exact external route.
+-- This is separate from transmission approval: neither row implies the other.
+CREATE TABLE IF NOT EXISTS archiver_image_description_clearance (
+    id text PRIMARY KEY CHECK (id <> ''),
+    workspace text NOT NULL CHECK (workspace <> ''),
+    channel_id text NOT NULL CHECK (channel_id <> ''),
+    file_id text NOT NULL CHECK (file_id <> ''),
+    original_sha256 text NOT NULL CHECK (original_sha256 ~ '^[a-f0-9]{64}$'),
+    provider text NOT NULL CHECK (provider <> ''),
+    model text NOT NULL CHECK (model <> ''),
+    policy_revision text NOT NULL CHECK (policy_revision <> ''),
+    visibility text NOT NULL CHECK (visibility IN ('public','private','internal')),
+    acl text[] NOT NULL CHECK (cardinality(acl) > 0),
+    pii_cleared boolean NOT NULL DEFAULT false,
+    assessed_by text NOT NULL CHECK (assessed_by <> ''),
+    assessed_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL,
+    reason text NOT NULL CHECK (reason <> ''),
+    revoked_at timestamptz,
+    revoked_by text,
+    revoke_reason text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (expires_at > assessed_at),
+    CHECK ((revoked_at IS NULL AND revoked_by IS NULL AND revoke_reason IS NULL) OR
+           (revoked_at IS NOT NULL AND revoked_by IS NOT NULL AND revoked_by <> '' AND
+            revoke_reason IS NOT NULL AND revoke_reason <> '')),
+    CHECK (revoked_at IS NULL OR revoked_at >= assessed_at),
+    UNIQUE (workspace, channel_id, file_id, original_sha256, provider, model,
+            policy_revision, visibility, acl, assessed_at)
+);
+CREATE INDEX IF NOT EXISTS archiver_image_description_clearance_lookup
+    ON archiver_image_description_clearance(
+        workspace, channel_id, file_id, original_sha256, provider, model,
+        policy_revision, expires_at
+    );
+
 CREATE TABLE IF NOT EXISTS archiver_image_description_job (
     id text PRIMARY KEY,
     identity_sha256 text NOT NULL UNIQUE CHECK (identity_sha256 ~ '^[a-f0-9]{64}$'),
@@ -122,7 +158,8 @@ CREATE INDEX IF NOT EXISTS archiver_image_description_revision_source
 
 REVOKE ALL ON archiver_image_model_catalog,
     archiver_image_description_policy, archiver_image_description_policy_audit,
-    archiver_image_description_approval, archiver_image_description_job,
+    archiver_image_description_approval, archiver_image_description_clearance,
+    archiver_image_description_job,
     archiver_image_description_revision FROM PUBLIC;
 
 -- Optional Vision service role shared with B-80. Policies/tables remain purpose-specific.
@@ -132,6 +169,10 @@ DO $$ BEGIN
         GRANT SELECT, INSERT, UPDATE ON TABLE archiver_image_model_catalog,
             archiver_image_description_policy, archiver_image_description_approval,
             archiver_image_description_job TO tybot_vision;
+        GRANT SELECT, INSERT ON TABLE archiver_image_description_clearance
+            TO tybot_vision;
+        GRANT UPDATE (revoked_at, revoked_by, revoke_reason)
+            ON TABLE archiver_image_description_clearance TO tybot_vision;
         GRANT SELECT, INSERT ON TABLE archiver_image_description_policy_audit,
             archiver_image_description_revision TO tybot_vision;
     END IF;

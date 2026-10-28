@@ -343,6 +343,7 @@ def test_zero_cost_needs_a_verification(conn):
     "archiver_image_description_policy",
     "archiver_image_description_policy_audit",
     "archiver_image_description_approval",
+    "archiver_image_description_clearance",
     "archiver_image_description_job",
     "archiver_image_description_revision",
 ])
@@ -379,3 +380,22 @@ def test_the_vision_role_cannot_delete_a_revision(conn):
               AND grantee='tybot_vision' AND privilege_type IN ('DELETE','UPDATE')"""
         )
         assert cur.fetchone()[0] == 0
+
+
+def test_clearance_scope_is_not_mutable_by_the_vision_role(conn):
+    """런타임은 새 평가를 쓰고 철회만 한다. 기존 좌표를 다른 사진으로 못 바꾼다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT privilege_type FROM information_schema.role_table_grants
+            WHERE table_name='archiver_image_description_clearance'
+              AND grantee='tybot_vision'"""
+        )
+        table_privileges = {row[0] for row in cur.fetchall()}
+        cur.execute(
+            """SELECT column_name FROM information_schema.column_privileges
+            WHERE table_name='archiver_image_description_clearance'
+              AND grantee='tybot_vision' AND privilege_type='UPDATE'"""
+        )
+        update_columns = {row[0] for row in cur.fetchall()}
+    assert "UPDATE" not in table_privileges
+    assert update_columns == {"revoked_at", "revoked_by", "revoke_reason"}
