@@ -1,10 +1,10 @@
 """B-81 이미지 설명 운영 현황의 본문 없는 콘솔 조회 경계."""
 from __future__ import annotations
 
-import os
 import re
 
 from ..archive.image_description_store import ImageDescriptionDenied, ImageDescriptionStore
+from .vision_dsn import VisionDsnError, resolve_vision_database_url
 
 _CODE = re.compile(r"^[a-z0-9_]*$")
 
@@ -14,9 +14,13 @@ class ImageDescriptionAdminError(RuntimeError):
 
 
 def _connect():
-    url = os.getenv("TYBOT_VISION_DATABASE_URL", "").strip()
-    if not url:
-        raise ImageDescriptionAdminError("vision_database_unconfigured")
+    # 일반 `DATABASE_URL` 로 내려가지 않는다. 폴백이 있으면 전용 계정을 만든
+    # 의미가 없고, 그 사실은 화면이 정상으로 보이는 동안 드러나지 않는다.
+    try:
+        url = resolve_vision_database_url()
+    except VisionDsnError as exc:
+        # 원인 예외를 끊는다 — 그 문자열에 경로가 들어 있다.
+        raise ImageDescriptionAdminError(exc.code) from None
     try:
         import psycopg
 

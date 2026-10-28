@@ -3255,6 +3255,17 @@ from . import bot_routes  # noqa: E402 - 위 함수들이 정의된 뒤에 불�
 
 app.include_router(bot_routes.router)
 
+# B-81 image safety decisions are isolated from the read-only status route.
+from . import image_description_clearance_routes  # noqa: E402
+
+image_description_clearance_router = image_description_clearance_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(image_description_clearance_router)
+
 # 정적 `/` 마운트는 모든 `/api/*` 라우트보다 반드시 뒤에 둔다. Starlette는 등록
 # 순서대로 라우트를 찾으므로 앞에 두면 이후 API가 정적 파일의 404로 가로채진다.
 mount_frontend()

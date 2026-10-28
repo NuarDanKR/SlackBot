@@ -432,9 +432,25 @@ def test_managed_batch_binds_current_policy_clearance_and_original(monkeypatch):
         "access_verified": True,
         "pii_blocked": False,
         "bot_generated": False,
-        "clearance_code": "",
         "source_verified": True,
     }
+
+
+def test_unknown_fresh_check_is_rejected_instead_of_silently_dropped(monkeypatch):
+    store = Store()
+    batch = _run(
+        monkeypatch,
+        store=store,
+        checks_for=lambda *_args: {
+            "access_verified": True,
+            "pii_blocked": False,
+            "bot_generated": False,
+            "unexpected": True,
+        },
+    )
+
+    assert batch.items[0].code == "checks_invalid"
+    assert store.reserved == []
 
 
 def test_missing_clearance_never_opens_the_original(monkeypatch):

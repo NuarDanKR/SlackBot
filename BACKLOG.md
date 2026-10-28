@@ -275,6 +275,21 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] Codex: 현재 정책·exact clearance·exact 전송 승인을 원본 접근 전에 결속하고,
       정책·무료 모델 카탈로그·최근 작업을 원문/설명 없이 내리는 관리자 읽기 API 구현
       (2026-10-28, 전용 LOGIN DSN 미설정은 빈 목록이 아니라 503).
+- [x] Claude: `tybot_vision` NOLOGIN 그룹은 그대로 두고 접속 주체
+      `tybot_vision_runtime` 을 멱등하게 세우는 프로비저닝 스크립트, Master/Archiver
+      `DATABASE_URL` 폴백이 없는 전용 DSN 해석, 속성·멤버십·상속 권한·철회 3칸을
+      대조하는 읽기 전용 검사기 구현 (2026-10-28, 운영 DB 미적용·계획 모드와
+      단위시험만 실행).
+
+> **「LOGIN 계정 준비」 와 「worker 활성화」 는 같은 완료가 아니다.**
+>
+> 접속 계정이 서고 자격이 설치돼도 정책은 OFF 이고 worker 서비스는 없다.
+> 둘을 한 줄로 적으면 계정을 만든 날 기능이 켜진 것으로 읽힌다. 활성화는
+> 정책·카탈로그·worker 를 각각 따로 확인한 뒤의 **다른 항목**이다.
+>
+> 지금 상태를 가르는 명령: `check_vision_runtime.py` 는 계정이 없으면
+> 「준비 상태」 로 `exit 0`, `--require-login` 을 붙이면 같은 상태를 실패로 본다.
+> 절차와 서버 명령은 `docs/verification/2026-10-28-vision-runtime-login-handback.md`.
 
 ---
 

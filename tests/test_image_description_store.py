@@ -345,10 +345,11 @@ def test_missing_active_approval_is_not_guessed() -> None:
 def test_clearance_revocation_needs_an_actor_and_reason() -> None:
     connection = ScriptedConnection([GLOBAL, {"id": "clearance-1"}])
     ImageDescriptionStore(connection).revoke_clearance(
-        "clearance-1", actor="reviewer", reason="승인 철회"
+        "clearance-1", workspace="tyit", actor="reviewer", reason="승인 철회"
     )
     update = _updates(connection)[0]
-    assert update[1] == ("reviewer", "승인 철회", "clearance-1")
+    assert update[1] == ("reviewer", "승인 철회", "clearance-1", "tyit")
+    assert "workspace=%s" in update[0]
     assert "revoked_at IS NULL" in update[0]
 
 
@@ -356,7 +357,7 @@ def test_an_inactive_clearance_cannot_be_revoked_twice() -> None:
     connection = ScriptedConnection([GLOBAL, None])
     with pytest.raises(ImageDescriptionDenied, match="clearance_not_active"):
         ImageDescriptionStore(connection).revoke_clearance(
-            "clearance-1", actor="reviewer", reason="승인 철회"
+            "clearance-1", workspace="tyit", actor="reviewer", reason="승인 철회"
         )
 
 

@@ -32,7 +32,7 @@
 | **WC-22** | 높음 | 계약 시험이 WC-01 과 반대를 강제한다 | 봇개발 | 🔴 요청됨 — 배포 게이트가 주석 한 줄에 매여 있음 | [열기](#wc-22) |
 | **WC-24** | 높음 | 소급 「회차 상한」 을 받는 칸 | 봇개발 | 🔴 요청됨 — API 에 받을 자리가 없어 화면이 못 붙임 | [열기](#wc-24) |
 | **WC-25** | 높음 | `archiving` 의 `services` 가 옛 표를 읽는다 | 봇개발 | 🔴 요청됨 — 오류가 아니라 빈 목록이 나온다 | [열기](#wc-25) |
-| **WC-30** | 높음 | Archiver 이미지 설명·무료 Vision LLM 라우팅 | 양쪽 | 🟠 진행중 — 읽기 API 구현 · 변경 API·전용 LOGIN·서비스 기동 남음 | [열기](#wc-30) |
+| **WC-30** | 높음 | Archiver 이미지 설명·무료 Vision LLM 라우팅 | 양쪽 | 🟠 진행중 — 읽기 API·전용 LOGIN 준비 구현 · 변경 API·자격 설치·서비스 기동 남음 | [열기](#wc-30) |
 | **WC-02** | 보통 | 봇 배포와 콘솔 배포를 끝까지 가른다 | 봇개발 | 🟠 진행중 — 배포 감지·health 완료 · 조건부 재시작 남음 | [열기](#wc-02) |
 | **WC-04** | 보통 | 콘솔 TLS — 평문 HTTP 로 운영 중 | 봇개발 | 🟠 진행중 — 화면 몫 완료 · 8787 TLS·쿠키 플래그 남음 | [열기](#wc-04) |
 | **WC-05** | 보통 | 보존 기간과 명시적 영구 보관 | 양쪽 | 🟠 진행중 — 화면 일부 완료 · 미리보기·영구보관 API 대기 | [열기](#wc-05) |
@@ -2737,7 +2737,7 @@ Master DM 인계만 비활성화한다. Archiver 자체 토큰/신원 검증과 
 
 | | |
 |---|---|
-| 상태 | 🟠 진행중 — 읽기 API 구현 · 변경 API·전용 LOGIN·서비스 기동 남음 |
+| 상태 | 🟠 진행중 — 읽기 API·전용 LOGIN 준비 구현 · 변경 API·자격 설치·서비스 기동 남음 |
 | 우선 | 높음 |
 | 담당 | 양쪽 |
 | 등록 | 2026-10-27 |
@@ -2801,9 +2801,46 @@ HWP는 rhwp가 PDF로 변환하는 운영 경로를 사용하므로 WC-30의 선
 
 구현된 GET은 관리자 전용이며 워크스페이스 범위를 서버에서 검사한다. 원본 bytes·경로,
 설명 본문, provider 응답, 승인 사유, 정책/카탈로그 snapshot JSON은 반환하지 않는다.
-전용 `TYBOT_VISION_DATABASE_URL`이 없거나 읽지 못하면 빈 목록이나 정상으로 바꾸지 않고
+전용 Vision DSN이 없거나 읽지 못하면 빈 목록이나 정상으로 바꾸지 않고
 `503`과 고정 코드를 반환한다. `workerAppliedRevision=null`은 **미적용 확인 전**이며
 `applicationState=not_configured`를 함께 표시한다.
+
+## 접속 자격 — 일반 `DATABASE_URL`로 내려가지 않는다 (2026-10-28)
+
+이 화면이 읽는 B-81 표는 `tybot_vision` 전용이다. 콘솔이 들고 있는 일반
+`DATABASE_URL`로 폴백하면 화면은 정상으로 보이면서 **Master 권한으로 Vision 표를
+만지는 길**이 생기고, 권한을 분리한 이유가 사라진다. 그래서 폴백을 코드에서
+없앴다(`src/tybot/console/vision_dsn.py`).
+
+| 찾는 순서 | |
+|---|---|
+| `TYBOT_VISION_DATABASE_URL` | 값 직접 |
+| `TYBOT_VISION_DATABASE_URL_FILE` | 경로 명시 |
+| `CREDENTIALS_DIRECTORY`/`tybot-vision-database-url` | systemd `LoadCredential` |
+
+파일은 POSIX에서 group/other 권한이 있으면 읽지 않는다. 값·경로·DB 예외 본문은
+응답에도 로그에도 싣지 않고 아래 코드만 내려간다. 모두 `503`이다.
+
+| 코드 | 운영자가 고칠 자리 |
+|---|---|
+| `vision_database_unconfigured` | 설정이 없다 |
+| `vision_database_credential_mode` | 자격 파일 권한이 넓다(`0600` 필요) |
+| `vision_database_credential_unreadable` | 명시한 경로를 못 읽거나 내용이 비었다 |
+| `vision_database_shared_credential` | Master/Archiver와 **같은 DSN**이다 |
+| `vision_database_wrong_role` | 접속 user가 `tybot_vision_runtime`이 아니다 |
+| `vision_database_unavailable` | 값은 있는데 접속하지 못했다 |
+
+DSN은 **URI 형식**이어야 하고 접속 user를 구조로 검사한다. 글자가 `DATABASE_URL`과
+달라도 관리자 계정으로 붙으면 권한 분리가 사라지기 때문이다. libpq는 URI 질의
+문자열의 `user=`로 userinfo를 덮어쓰므로 `…//tybot_vision_runtime@host/db?user=postgres`
+같은 DSN도 거절한다. `host=… user=…` 키워드 형식은 받지 않는다.
+
+화면은 이 코드를 그대로 보여 주고 **값은 보여 주지 않는다.** 접속 계정 자체의
+준비 여부는 서버에서 `scripts/check_vision_runtime.py`로 본다. 절차와 명령은
+`docs/verification/2026-10-28-vision-runtime-login-handback.md`.
+
+> 자격이 준비된 것과 worker가 도는 것은 **다른 상태**다. 자격 코드가 사라져도
+> 정책은 OFF이고 worker 서비스는 아직 없다. 화면에서 둘을 한 칸에 합치지 않는다.
 
 아직 없는 변경 API·worker는 화면에서 `미구현`으로 표시하고 조작을 비활성화한다. 정책 저장만으로
 기존 파일을 일괄 전송하지 않는다. 재처리는 원본 해시·현재 ACL·PII·봇 생성 여부·무료

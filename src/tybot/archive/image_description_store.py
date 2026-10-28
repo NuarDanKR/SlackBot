@@ -527,6 +527,7 @@ class ImageDescriptionStore:
         self,
         clearance_id: str,
         *,
+        workspace: str,
         actor: str,
         reason: str,
     ) -> None:
@@ -534,6 +535,9 @@ class ImageDescriptionStore:
             not isinstance(clearance_id, str)
             or not clearance_id.strip()
             or clearance_id != clearance_id.strip()
+            or not isinstance(workspace, str)
+            or not workspace.strip()
+            or workspace != workspace.strip()
             or not isinstance(actor, str)
             or not actor.strip()
             or actor != actor.strip()
@@ -546,8 +550,8 @@ class ImageDescriptionStore:
             cur.execute(
                 """UPDATE archiver_image_description_clearance
                 SET revoked_at=now(),revoked_by=%s,revoke_reason=%s
-                WHERE id=%s AND revoked_at IS NULL RETURNING id""",
-                (actor, reason.strip(), clearance_id),
+                WHERE id=%s AND workspace=%s AND revoked_at IS NULL RETURNING id""",
+                (actor, reason.strip(), clearance_id, workspace),
             )
             if not cur.fetchone():
                 raise ImageDescriptionDenied("clearance_not_active")

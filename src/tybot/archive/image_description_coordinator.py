@@ -13,6 +13,7 @@ from datetime import datetime
 from .image_description import PROMPT_REVISION, ImageInput
 from .image_description_clearance import clear_for_dispatch
 from .image_description_original import load_original
+from .image_description_runner import CALLER_CHECKS
 from .image_description_source import (
     ImageCandidate,
     confirmed_human_file_ids,
@@ -22,6 +23,9 @@ from .image_description_store import ImageDescriptionDenied
 from .image_description_worker import dispatch_reserved_image
 
 _CODE = re.compile(r"^[a-z0-9_]+$")
+_TRUSTED_CHECKS = ("source_verified", "bot_generated")
+_FRESH_CHECKS = frozenset((*CALLER_CHECKS, *_TRUSTED_CHECKS, "clearance_code"))
+_STORE_CHECKS = (*CALLER_CHECKS, *_TRUSTED_CHECKS)
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,8 @@ def _item(
 
 def _fresh_check_blocker(checks: object) -> str:
     if not isinstance(checks, dict):
+        return "checks_invalid"
+    if set(checks) - _FRESH_CHECKS:
         return "checks_invalid"
     clearance_code = checks.get("clearance_code", "")
     if clearance_code:
@@ -142,6 +148,9 @@ def run_approved_batch(
         if blocker:
             items.append(_item(candidate, "blocked", code=blocker))
             continue
+        # `clearance_code` is a coordinator decision aid, not a dispatch fact.
+        # Keep the two caller facts and two loader-derived facts only.
+        checks = {key: checks.get(key) for key in _STORE_CHECKS}
         try:
             approval_id = approval_id_for(candidate)
         except Exception:  # noqa: BLE001 - DB/provider 본문 없이 고정 코드만 보낸다.
