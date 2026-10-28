@@ -32,6 +32,9 @@ def test_image_description_tables_are_also_isolated_vision_tables(drift):
     assert required['archiver_image_description_job'] == {'SELECT', 'INSERT', 'UPDATE'}
     assert required['archiver_image_description_revision'] == {'SELECT', 'INSERT'}
     assert required['archiver_image_description_clearance'] == {'SELECT', 'INSERT'}
+    assert drift['VISION_COLUMN_REQUIRED']['archiver_image_description_clearance'] == {
+        'UPDATE': {'revoked_at', 'revoked_by', 'revoke_reason'},
+    }
 
 
 def run_check(drift, monkeypatch, *, absent=(), denied=(), problems=(), worker=False, columns=(), have_columns=()):
@@ -97,6 +100,7 @@ def check_access(drift, rows, roles=('tybot_vision', 'tyslackai', 'tybot_archive
     assert 'current_user' in cursor.execute.call_args_list[0][0][0]
     query = cursor.execute.call_args[0][0]
     assert 'has_table_privilege' in query and 'has_any_column_privilege' in query
+    assert 'has_column_privilege' in query and 'allowed_columns' in query
     assert 'pg_roles' in query  # effective privileges, not textual ACL parsing
     return result
 
@@ -121,6 +125,47 @@ def test_worker_must_have_complete_required_table_permissions(drift):
     problems, _ = check_access(drift, [dict(role_name='tybot_vision', table_name='archiver_vision_job',
                                            privilege='UPDATE', allowed=False, column_allowed=True)])
     assert problems == [('tybot_vision', 'archiver_vision_job', 'missing_update')]
+
+
+def test_clearance_exact_revocation_column_grants_are_valid(drift):
+    row = dict(
+        role_name='tybot_vision',
+        table_name='archiver_image_description_clearance',
+        privilege='UPDATE',
+        allowed=False,
+        column_allowed=True,
+        allowed_columns=['revoked_at', 'revoked_by', 'revoke_reason'],
+    )
+    assert check_access(drift, [row]) == ([], True)
+
+
+@pytest.mark.parametrize(
+    ('allowed', 'columns', 'code'),
+    [
+        (True, ['revoked_at', 'revoked_by', 'revoke_reason'], 'unexpected_update'),
+        (False, ['revoked_at', 'revoked_by'], 'missing_update'),
+        (
+            False,
+            ['revoked_at', 'revoked_by', 'revoke_reason', 'pii_cleared'],
+            'unexpected_update',
+        ),
+    ],
+)
+def test_clearance_broad_or_incomplete_update_grants_are_rejected(
+    drift, allowed, columns, code
+):
+    row = dict(
+        role_name='tybot_vision',
+        table_name='archiver_image_description_clearance',
+        privilege='UPDATE',
+        allowed=allowed,
+        column_allowed=True,
+        allowed_columns=columns,
+    )
+    problems, _ = check_access(drift, [row])
+    assert problems == [
+        ('tybot_vision', 'archiver_image_description_clearance', code)
+    ]
 
 
 def test_missing_optional_role_is_reported_not_created(drift):

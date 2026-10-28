@@ -69,6 +69,11 @@ VISION_REQUIRED = {
 # Clearance rows are scope-bound evidence. The worker may only append and revoke;
 # a table-wide UPDATE grant would let it rewrite the reviewed image or route.
 VISION_REQUIRED["archiver_image_description_clearance"] = {"SELECT", "INSERT"}
+VISION_COLUMN_REQUIRED = {
+    "archiver_image_description_clearance": {
+        "UPDATE": {"revoked_at", "revoked_by", "revoke_reason"},
+    },
+}
 
 # 스키마 파일이 선언하는 것들. **주석 처리된 줄은 제외한다** — 예시로 적어 둔 GRANT 나
 # 롤백 안내가 요구사항으로 잡히면 없는 고장을 매번 보고한다.
@@ -159,7 +164,19 @@ def vision_access(conn) -> tuple[list[tuple[str, str, str]], bool]:
                    has_table_privilege(r.oid, c.oid, p.privilege) AS allowed,
                    CASE WHEN p.privilege IN ('SELECT','INSERT','UPDATE','REFERENCES')
                         THEN has_any_column_privilege(r.oid, c.oid, p.privilege)
-                        ELSE false END AS column_allowed
+                        ELSE false END AS column_allowed,
+                   ARRAY(
+                       SELECT a.attname
+                         FROM pg_attribute a
+                        WHERE a.attrelid=c.oid AND a.attnum > 0
+                          AND NOT a.attisdropped
+                          AND CASE WHEN p.privilege IN
+                               ('SELECT','INSERT','UPDATE','REFERENCES')
+                              THEN has_column_privilege(
+                                  r.oid,c.oid,a.attname,p.privilege
+                              ) ELSE false END
+                        ORDER BY a.attnum
+                   ) AS allowed_columns
               FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
               CROSS JOIN pg_roles r
               CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE',
@@ -171,12 +188,29 @@ def vision_access(conn) -> tuple[list[tuple[str, str, str]], bool]:
     problems = []
     for row in rows:
         role, table, privilege = row['role_name'], row['table_name'], row['privilege']
-        allowed = bool(row['allowed'] or row['column_allowed'])
+        table_allowed = bool(row['allowed'])
+        allowed_columns = set(row.get('allowed_columns') or ())
+        column_allowed = bool(row['column_allowed'] or allowed_columns)
         required = role == VISION_ROLE and privilege in VISION_REQUIRED[table]
+        expected_columns = (
+            VISION_COLUMN_REQUIRED.get(table, {}).get(privilege, set())
+            if role == VISION_ROLE else set()
+        )
         # Required table privileges cannot be replaced with partial column grants.
-        if required and not row['allowed']:
+        if required and not table_allowed:
             problems.append((role, table, f"missing_{privilege.lower()}"))
-        elif not required and allowed:
+        elif required:
+            continue
+        elif table_allowed:
+            problems.append((role, table, f"unexpected_{privilege.lower()}"))
+        elif expected_columns:
+            # Exact column grants are intentional. A table grant or one extra
+            # mutable column would allow reviewed scope evidence to be rewritten.
+            if allowed_columns - expected_columns:
+                problems.append((role, table, f"unexpected_{privilege.lower()}"))
+            elif allowed_columns != expected_columns:
+                problems.append((role, table, f"missing_{privilege.lower()}"))
+        elif column_allowed:
             problems.append((role, table, f"unexpected_{privilege.lower()}"))
     return sorted(problems), VISION_ROLE in roles
 
