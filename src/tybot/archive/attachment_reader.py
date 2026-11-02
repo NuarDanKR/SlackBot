@@ -43,6 +43,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,6 +86,193 @@ def is_attachment_doc(doc) -> bool:
     """
     parts = Path(str(getattr(doc, "path", "") or "")).parts
     return "attachments" in parts
+
+
+#: 첨부 캐시가 들고 있을 **원본 파일 바이트** 상한.
+#:
+#: 메모리에 올라간 모양은 파일보다 두 배 남짓 크다 — 본문 한 줄이 `RawLine`
+#: 객체 하나가 되기 때문이다. 그래서 상한을 「파일 바이트」로 세고 배수는 여기
+#: 적어 둔다. 바꿀 일이 생기면 `TYBOT_ATTACHMENT_CACHE_MB` 로 올린다.
+DEFAULT_CACHE_MB = 192
+
+#: 상한 초과 경고의 중복 억제도 캐시다. 본문을 안 들고 있어도 경로를 무한히
+#: 기억하면 오래 도는 프로세스에서 다른 형태의 누수가 된다.
+OVERSIZE_NOTICE_LIMIT = 1024
+
+
+def _cache_bytes() -> int:
+    raw = (os.getenv("TYBOT_ATTACHMENT_CACHE_MB") or "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_CACHE_MB
+    except ValueError:
+        value = DEFAULT_CACHE_MB
+    return max(0, value) * 1024 * 1024
+
+
+class DocCache:
+    """첨부 정본 한 장의 파싱 결과를 **파일 지문**으로 기억한다.
+
+    ## 왜 필요했나 (2026-11-02 OOM)
+
+    `evidence()` 는 부를 때마다 정본을 **전부 다시 읽었다.** 한 질문이
+    `visible_docs()` 를 2~7 번 부르고(`_channels_matching` · `search` · 0건일 때의
+    낱말별 재검색), 그 질문은 검색을 42 번 했다. 첨부 본문은 한 줄이 `RawLine`
+    객체 하나가 되므로 파일의 두 배 남짓으로 부풀고, 그것이 **한 질문 안에서
+    수십 번** 새로 만들어졌다 버려지기를 반복했다. 합성 86MB 아카이브로 재니
+    `visible_docs()` 한 번이 195MB 를 찍었고, 첨부를 빼면 2.5MB 였다.
+
+    원문 MD 는 이미 `ArchiveStore._load` 가 같은 방식으로 캐시한다. 첨부만
+    빠져 있었다.
+
+    ## 낡은 내용을 답하지 않는다
+
+    열쇠는 경로이고 값에는 `(mtime_ns, st_size)` 지문이 붙는다. 변환 워커가
+    정본을 다시 쓰면 지문이 달라져 그 자리에서 다시 읽는다. **캐시 때문에
+    옛 변환본이 근거가 되는 일은 없다.**
+
+    ## 상한은 바이트로 둔다 — 한 장도 예외가 아니다
+
+    개수로 막으면 큰 PDF 변환본 몇 장이 상한을 통과하면서 메모리를 다 쓴다.
+    넘치면 **오래 안 쓴 것부터 버린다.**
+
+    **상한보다 큰 파일 한 장은 아예 들고 있지 않는다.** 「마지막 한 장은
+    남긴다」 로 두면 그 한 장이 상한을 무시하고 상주한다 — 상한을 둔 이유가
+    바로 큰 변환본이었는데, 그 경우에만 상한이 꺼지는 꼴이 된다. 버려도
+    근거가 사라지지는 않는다. 다음 호출이 그 파일만 다시 읽을 뿐이고, 그건
+    고치기 전과 같은 비용이지 더 나쁜 비용이 아니다.
+
+    ## 같은 파일을 둘이 동시에 파싱하지 않는다
+
+    `visible_docs()` 는 워크스페이스 봇들이 공유하는 인스턴스에서 불린다.
+    두 요청이 같은 큰 정본을 동시에 만나면, 캐시가 채워지기 **전**이라 둘 다
+    헛걸음하고 **같은 본문이 메모리에 두 벌** 올라간다. 한 벌이 200MB 면 그
+    순간 400MB 다 — 고치려던 것과 같은 모양이다.
+
+    그래서 경로마다 문을 하나 둔다. 먼저 들어간 쪽이 만들고, 뒤에 온 쪽은
+    기다렸다가 **만들어진 것을 받는다.** 문은 경로별이라 서로 다른 파일은
+    그대로 나란히 간다.
+    """
+
+    def __init__(self, max_bytes: int | None = None) -> None:
+        self._max = _cache_bytes() if max_bytes is None else max(0, max_bytes)
+        self._lock = threading.Lock()
+        # path -> (지문, 파일 바이트, AttachmentDoc | None, ArchiveDoc | None)
+        self._items: dict[Path, tuple[tuple[int, int], int, object, object]] = {}
+        self._bytes = 0
+        # 만드는 중인 경로의 문. `(Lock, 기다리는 수)` — 아무도 안 쓰면 치운다.
+        self._gates: dict[Path, list] = {}
+        #: 상한보다 커서 캐시에 못 넣은 경로. **지문만** 둔다(본문은 안 들고 있다).
+        self.oversize: dict[Path, tuple[int, int]] = {}
+
+    @property
+    def held_bytes(self) -> int:
+        with self._lock:
+            return self._bytes
+
+    # -- 상한 ------------------------------------------------------------
+    def _put(self, path: Path, fingerprint, size: int, doc, archive) -> None:
+        with self._lock:
+            old = self._items.pop(path, None)
+            if old is not None:
+                self._bytes -= old[1]
+            if self._max <= 0 or size > self._max:
+                if self._max > 0 and self.oversize.get(path) != fingerprint:
+                    self.oversize[path] = fingerprint
+                    while len(self.oversize) > OVERSIZE_NOTICE_LIMIT:
+                        self.oversize.pop(next(iter(self.oversize)))
+                    log.warning(
+                        "첨부 정본이 캐시 상한보다 커서 들고 있지 않는다 "
+                        "(%d bytes > %d): %s — 상한은 TYBOT_ATTACHMENT_CACHE_MB",
+                        size, self._max, path,
+                    )
+                return
+            self.oversize.pop(path, None)
+            self._items[path] = (fingerprint, size, doc, archive)
+            self._bytes += size
+            # dict 는 삽입 순서를 지키므로 맨 앞이 가장 오래 안 쓴 것이다.
+            # 방금 넣은 것 자체가 상한 안이므로 이 고리는 반드시 멈춘다.
+            while self._bytes > self._max and self._items:
+                oldest = next(iter(self._items))
+                if oldest == path:
+                    break
+                self._bytes -= self._items.pop(oldest)[1]
+
+    def _peek(self, path: Path, fingerprint: tuple[int, int]):
+        with self._lock:
+            entry = self._items.get(path)
+            if entry is None or entry[0] != fingerprint:
+                return None
+            # 가장 최근에 쓴 것을 뒤로 보낸다(삽입 순서 = 사용 순서).
+            self._items[path] = self._items.pop(path)
+            return entry
+
+    # -- 경로별 문 --------------------------------------------------------
+    @contextmanager
+    def _gate(self, path: Path):
+        with self._lock:
+            gate = self._gates.get(path)
+            if gate is None:
+                gate = self._gates[path] = [threading.Lock(), 0]
+            gate[1] += 1
+        gate[0].acquire()
+        try:
+            yield
+        finally:
+            gate[0].release()
+            with self._lock:
+                gate[1] -= 1
+                if gate[1] <= 0:
+                    self._gates.pop(path, None)
+
+    @property
+    def gates_open(self) -> int:
+        """아직 치우지 않은 문의 수. 샌다면 여기가 자란다."""
+        with self._lock:
+            return len(self._gates)
+
+    # -- 읽기 -------------------------------------------------------------
+    def loaded(self, path: Path, build):
+        """검증까지 끝난 `AttachmentDoc` (또는 `None`). 캐시에 없으면 `build()`."""
+        fingerprint = _fingerprint(path)
+        if fingerprint is None:
+            return build()
+        entry = self._peek(path, fingerprint)
+        if entry is not None:
+            return entry[2]
+        with self._gate(path):
+            # 문 앞에서 기다리는 동안 앞사람이 채웠을 수 있다. 다시 본다 —
+            # 이 재확인이 없으면 문은 순서만 세울 뿐 중복 파싱을 못 막는다.
+            entry = self._peek(path, fingerprint)
+            if entry is not None:
+                return entry[2]
+            doc = build()
+            self._put(path, fingerprint, fingerprint[1], doc, None)
+            return doc
+
+    def as_archive(self, path: Path, doc: AttachmentDoc, build):
+        """검색이 쓰는 `ArchiveDoc`. 줄 객체를 질문마다 다시 만들지 않는다."""
+        fingerprint = _fingerprint(path)
+        if fingerprint is None:
+            return build()
+        entry = self._peek(path, fingerprint)
+        if entry is not None and entry[3] is not None:
+            return entry[3]
+        with self._gate(path):
+            entry = self._peek(path, fingerprint)
+            if entry is not None and entry[3] is not None:
+                return entry[3]
+            archive = build()
+            kept = entry[2] if entry is not None else doc
+            self._put(path, fingerprint, fingerprint[1], kept, archive)
+            return archive
+
+
+def _fingerprint(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
 
 def source_files(root: Path | str) -> list[Path]:
@@ -232,20 +422,29 @@ def load(path: Path) -> AttachmentDoc | None:
     )
 
 
-def load_checked(path: Path, root: Path | str) -> AttachmentDoc | None:
+def load_checked(
+    path: Path, root: Path | str, *, cache: DocCache | None = None
+) -> AttachmentDoc | None:
     """검증까지 통과한 문서만. 깨졌으면 `None` 이고 **로그가 남는다.**
 
     조용히 건너뛰지 않는 이유: 정본이 안 읽히면 그 자료는 답변에서 사라지는데,
     사라진 것과 없는 것은 화면에서 구분되지 않는다.
+
+    `cache` 를 주면 파일 지문이 같은 동안 다시 읽지 않는다(`DocCache`).
+    거절도 함께 기억한다 — 안 그러면 깨진 정본이 호출마다 경고를 다시 찍는다.
     """
-    doc = load(path)
-    if doc is None:
-        return None
-    problem = validate(doc, path, root)
-    if problem is not None:
-        log.warning("첨부 정본을 근거로 쓰지 않는다 (%s): %s", problem.message, path)
-        return None
-    return doc
+
+    def build() -> AttachmentDoc | None:
+        doc = load(path)
+        if doc is None:
+            return None
+        problem = validate(doc, path, root)
+        if problem is not None:
+            log.warning("첨부 정본을 근거로 쓰지 않는다 (%s): %s", problem.message, path)
+            return None
+        return doc
+
+    return build() if cache is None else cache.loaded(path, build)
 
 
 def _body(text: str) -> str:
@@ -306,10 +505,16 @@ def _newer(candidate: AttachmentDoc, current: AttachmentDoc) -> bool:
     return mine > theirs
 
 
-def evidence(root: Path | str, channel_docs) -> list[AttachmentDoc]:
+def evidence(
+    root: Path | str, channel_docs, *, cache: DocCache | None = None
+) -> list[AttachmentDoc]:
     """일반 근거로 쓸 첨부. 상태·revision·중복 셋 다 거른다."""
     loaded = [
-        doc for doc in (load_checked(path, root) for path in source_files(root)) if doc
+        doc
+        for doc in (
+            load_checked(path, root, cache=cache) for path in source_files(root)
+        )
+        if doc
     ]
     legacy = legacy_index(channel_docs)
     # A newer partial/failed revision must not expose an older successful body.
@@ -372,9 +577,25 @@ def as_archive_doc(doc: AttachmentDoc, root: Path | str) -> ArchiveDoc:
     )
 
 
-def archive_docs(root: Path | str, channel_docs) -> list[ArchiveDoc]:
-    """`ArchiveStore.docs()` 가 채널 문서 뒤에 붙이는 것."""
-    return [as_archive_doc(doc, root) for doc in evidence(root, channel_docs)]
+def archive_docs(
+    root: Path | str, channel_docs, *, cache: DocCache | None = None
+) -> list[ArchiveDoc]:
+    """`ArchiveStore.docs()` 가 채널 문서 뒤에 붙이는 것.
+
+    `cache` 가 있으면 **줄 객체까지** 재사용한다. 첨부 본문은 한 줄이 `RawLine`
+    하나가 되므로, 여기서 다시 만들면 한 질문이 같은 것을 수십 번 만든다.
+    """
+    docs = evidence(root, channel_docs, cache=cache)
+    if cache is None:
+        return [as_archive_doc(doc, root) for doc in docs]
+    return [
+        cache.as_archive(
+            doc.source_path or Path(root) / doc.relative_path(),
+            doc,
+            lambda doc=doc: as_archive_doc(doc, root),
+        )
+        for doc in docs
+    ]
 
 
 def audit_archive_docs(root: Path | str) -> list[ArchiveDoc]:

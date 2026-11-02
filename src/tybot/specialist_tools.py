@@ -35,6 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import Lock
 
+from . import rss_probe
 from .access import RequestContext
 from .gateway.base import ToolSpec
 
@@ -409,7 +410,9 @@ class ToolBox:
                 len(self.touched.live_messages),
             )
             self._dispatch_failed = False
-            out = self._dispatch(name, args)
+            # 도구 이름만 남는다 — 질문·검색어는 넣지 않는다(`rss_probe` 머리말).
+            with rss_probe.observe(name):
+                out = self._dispatch(name, args)
             truncated = len(out) > remaining
             if truncated:
                 log.warning(

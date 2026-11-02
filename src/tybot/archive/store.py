@@ -296,6 +296,35 @@ def load_doc(path: Path) -> ArchiveDoc:
     )
 
 
+#: `_scan` 이 중간에 들고 있을 후보 배수. 최종 상한의 몇 배까지 쥐고 있다가
+#: `_rank` 로 추린다. 넉넉히 두는 이유는 추리는 비용을 자주 치르지 않기 위해서고,
+#: 묶어 두는 이유는 흔한 낱말 하나가 아카이브 전체를 객체로 만들기 때문이다.
+SCAN_KEEP_FACTOR = 64
+
+
+class _RelPaths:
+    """한 번의 조회 안에서 쓰는 경로 변환 표.
+
+    줄마다 `rel_path()` 를 부르면 **같은 파일 경로 문자열이 줄 수만큼 새로
+    만들어진다.** 한 질문이 검색을 수십 번 하면 그 쓰레기도 수십 배가 된다
+    (2026-11-02 OOM). 파일 수는 줄 수보다 훨씬 적으므로 파일 단위로 기억한다.
+    """
+
+    __slots__ = ("_root", "_seen")
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._seen: dict[Path, str] = {}
+
+    def of(self, path: Path) -> str:
+        from ..search_index import rel_path
+
+        got = self._seen.get(path)
+        if got is None:
+            got = self._seen[path] = rel_path(path, self._root)
+        return got
+
+
 class ArchiveStore:
     """v1/v2 원문 MD 파일을 논리 채널 단위로 합쳐 제공한다.
 
@@ -312,6 +341,12 @@ class ArchiveStore:
         # path -> (stat 지문, 파싱 결과 또는 SchemaError 메시지)
         self._cache: dict[Path, tuple[tuple[int, int], ArchiveDoc | str]] = {}
         self._lock = threading.Lock()
+        # 첨부 정본도 같은 방식으로 캐시한다. 2026-11-02 OOM 전까지 여기만
+        # 빠져 있어서, 한 질문이 첨부 전체를 수십 번 다시 읽고 다시 줄 객체로
+        # 만들었다(`attachment_reader.DocCache` 머리말).
+        from . import attachment_reader
+
+        self._attachments = attachment_reader.DocCache()
 
     def _files(self, *, dm_scope: str = "") -> list[Path]:
         """원문 파일 목록. **DM 은 기본으로 빼고 센다.**
@@ -499,7 +534,9 @@ class ArchiveStore:
         # 같은 본문이 raw 에도 있기 때문이다.
         from . import attachment_reader
 
-        attachments = attachment_reader.archive_docs(self.root, channels)
+        attachments = attachment_reader.archive_docs(
+            self.root, channels, cache=self._attachments
+        )
         if predicate is not None:
             attachments = [doc for doc in attachments if predicate(doc)]
         return channels + attachments
@@ -833,13 +870,22 @@ class ArchiveStore:
 
         # 색인이 넣은 것과 같은 실제 파일 좌표로 찾는다. 병합 문서의 `doc.path`는
         # 최신 일자 파일 하나뿐이지만 line_no는 일자 파일마다 다시 시작한다.
+        #
+        # **후보로 나온 좌표만 담는다.** 예전에는 보이는 모든 줄을 담았는데, 그
+        # 표는 쓰이는 줄이 최대 `CANDIDATE_LIMIT` 개인데도 아카이브 전체 크기로
+        # 커졌고 검색마다 새로 만들어졌다(2026-11-02 OOM). 건수(`expected_counts`)는
+        # 여전히 전부 세야 하지만, 그건 파일당 정수 하나다.
+        wanted = {(cand.doc_path, cand.line_no) for cand in found}
+        rels = _RelPaths(self.root)
         indexed_lines: dict[tuple[str, int], tuple[ArchiveDoc, RawLine]] = {}
         expected_counts: dict[str, int] = {}
         for doc in docs:
             for line in doc.raw_lines:
-                path = search_index.rel_path(line.source_path or doc.path, self.root)
-                indexed_lines[(path, line.lineno)] = (doc, line)
+                path = rels.of(line.source_path or doc.path)
                 expected_counts[path] = expected_counts.get(path, 0) + 1
+                key = (path, line.lineno)
+                if key in wanted:
+                    indexed_lines[key] = (doc, line)
         hits: list[SearchHit] = []
         for cand in found:
             entry = indexed_lines.get((cand.doc_path, cand.line_no))
@@ -884,12 +930,12 @@ class ArchiveStore:
             # 이전의 숨김 행이 남으면 DB 쪽 수가 더 많아지는 경우도 있다.
             if counts.get(path, 0) != expected
         }
+        rels = _RelPaths(self.root)
         stale = [
             doc
             for doc in docs
             if any(
-                search_index.rel_path(line.source_path or doc.path, self.root)
-                in stale_paths
+                rels.of(line.source_path or doc.path) in stale_paths
                 for line in doc.raw_lines
             )
         ]
@@ -903,15 +949,32 @@ class ArchiveStore:
     def _scan(
         self, query: str, tokens: list[str], docs: list[ArchiveDoc], limit: int
     ) -> list[SearchHit]:
-        """파일 스캔 폴백. 색인 경로와 **같은 점수 함수**를 쓴다."""
+        """파일 스캔 폴백. 색인 경로와 **같은 점수 함수**를 쓴다.
+
+        **중간 결과를 쌓아 두지 않는다.** 예전에는 맞은 줄 전부를 `SearchHit` 으로
+        만들어 리스트에 담고 마지막에 잘랐다. 흔한 낱말 하나면 아카이브의 거의
+        모든 줄이 맞으므로, 30 줄을 돌려주려고 수십만 개를 만들었다 — 합성 86MB
+        아카이브에서 한 번에 121MB 였다(2026-11-02 OOM).
+
+        대신 `_rank` 로 **중간에 추려 낸다.** 자르는 함수가 최종 순서를 정하는
+        함수와 같으므로, 여기서 빠진 줄은 어차피 마지막에도 못 남는다. 순서를
+        바꾸지 않고 메모리만 묶는 유일한 방법이다 — 점수나 파일 순서로 대충
+        자르면 같은 점수 줄 중 **어느 것이 근거가 되는지**가 조용히 달라진다.
+        """
         from .. import search_index
 
-        hits = [
-            SearchHit(doc=doc, line=line, score=score)
-            for doc in docs
-            for line in doc.raw_lines
-            if (score := search_index.score_line(tokens, query, line.speaker, line.text))
-        ]
+        keep = max(limit, 1) * SCAN_KEEP_FACTOR
+        hits: list[SearchHit] = []
+        for doc in docs:
+            for line in doc.raw_lines:
+                score = search_index.score_line(
+                    tokens, query, line.speaker, line.text
+                )
+                if not score:
+                    continue
+                hits.append(SearchHit(doc=doc, line=line, score=score))
+                if len(hits) >= keep * 2:
+                    hits = self._rank(hits, keep)
         return self._rank(hits, limit)
 
     @staticmethod
