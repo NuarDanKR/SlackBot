@@ -2794,7 +2794,8 @@ HWP는 rhwp가 PDF로 변환하는 운영 경로를 사용하므로 WC-30의 선
 | 동작 | 제안 API |
 |---|---|
 | 실효 정책·상속·worker revision·무료 모델·최근 작업 | `GET /api/archiver/image-description/policy?workspace=...` — **구현됨** |
-| 정책 변경(`expectedRevision`·사유 필수) | `PUT /api/archiver/image-description/policy` |
+| 정책 변경(`expectedRevision`·사유 필수) | `PUT /api/archiver/image-description/policy` — **구현됨** |
+| 저장하면 어떻게 되는지 미리 보기 | `POST /api/archiver/image-description/policy/preview` — **구현됨** |
 | 사진 안전 판정 생성·철회 | `POST /api/archiver/image-description/clearances`, `POST .../clearances/{id}/revoke` — **구현됨** |
 | 외부 전송 승인 생성·철회 | `POST /api/archiver/image-description/approvals`, `POST .../approvals/{id}/revoke` — **구현됨** |
 | 선택 가능한 무료 Vision 모델 | `GET /api/archiver/image-description/models?workspace=...` |
@@ -2842,9 +2843,56 @@ DSN은 **URI 형식**이어야 하고 접속 user를 구조로 검사한다. 글
 `docs/verification/2026-10-28-vision-runtime-login-handback.md`.
 
 > 자격이 준비된 것과 worker가 도는 것은 **다른 상태**다. 자격 코드가 사라져도
-> 정책은 OFF이고 worker 서비스는 아직 없다. 화면에서 둘을 한 칸에 합치지 않는다.
+> 정책은 OFF이고 worker timer는 설치 후에도 비활성이다. 화면에서 둘을 한 칸에 합치지 않는다.
 
-아직 없는 정책 변경 API·worker는 화면에서 `미구현`으로 표시하고 조작을 비활성화한다. 정책 저장만으로
+## 정책 변경 — 화면이 알아야 할 것 (2026-11-02 라우트 연결)
+
+```
+POST /api/archiver/image-description/policy/preview
+PUT  /api/archiver/image-description/policy
+```
+
+본문은 둘 다 같다. `{workspace, expectedRevision, enabled, config, reason}`.
+**모르는 칸을 보내면 422다.** `actor`도 보내지 말 것 — 실행자는 서버가 로그인
+세션에서 정한다. 쓰기와 미리보기 **둘 다** `x-tybot-csrf: 1`과 같은 출처를
+요구한다. 미리보기는 쓰지 않지만 설정과 차단 사유를 읽기 때문이다.
+
+`workspace: ""`는 전역 기본값이고 **모든 워크스페이스를 보는 관리자만** 고칠 수
+있다. 전역은 모든 워크스페이스에 걸리기 때문이다.
+
+오류 `detail`은 언제나 `{"code": "...", "blockers": [...]}`다. 차단 사유가 없을
+때도 빈 목록이 온다. 설계와 거절 코드는
+`docs/verification/2026-10-28-image-description-policy-change-handback.md`.
+
+저장 응답의 `audited: false`는 **저장은 됐는데 감사 기록이 실패했다**는 뜻이다.
+다시 누르지 말 것 — 같은 변경이 revision 두 개로 남는다. 운영자에게 알린다.
+
+**`expectedRevision`은 읽기 API가 내려 준 `revision`을 그대로 돌려주면 된다.**
+그 값은 `전역:워크스페이스` 합성이고 경계가 갈라 쓴다. 갈라 쓰지 않으면 저장이
+항상 `policy_conflict`로 떨어지므로 화면에서 가공하지 말 것.
+
+저장 전에 `preview`를 부르면 차단 사유를 목록으로 받는다. 저장 단추를 막고 그
+목록을 보여 준다 — 저장해 보고 실패로 배우게 하면 그 실패가 감사에 남는다.
+
+| 거절 코드 | 화면이 보여 줄 것 |
+|---|---|
+| `reason_required` · `reason_too_long` | 변경 사유는 필수다(500자) |
+| `config_key_unknown` · `config_invalid_<키>` | 어느 칸이 틀렸는지 |
+| `activation_requires_<키>` | 켜려면 그 상한이 필요하다 |
+| `activation_requires_global_<키>` · `…_workspace_<키>` | 전역/워크스페이스 **각각** 필요하다 |
+| `model_<blocker>` | 카탈로그가 막은 이유(무료 미검증·quota 소진 등) |
+| `policy_conflict` (409) | 다른 사람이 먼저 저장했다. 입력이 아니라 **화면을 다시 읽어야** 한다 |
+| `vision_database_*` (503) | 전용 Vision 자격 문제. 요청을 고쳐도 안 된다 |
+
+끄는 저장은 상한이 비어 있어도 언제나 통과한다. 사고 때 못 끄면 안 되기 때문이다.
+`max_concurrency`·`daily_calls`는 전역 행과 워크스페이스 행이 **각자** 들고 있어야
+한다 — 서버가 전체 상한과 워크스페이스 상한으로 따로 읽는다.
+
+저장은 모델을 부르지도, 기존 파일을 소급해 돌리지도 않는다. 화면에서 저장 성공을
+적용·호출 성공으로 표시하지 않는다.
+
+정책 변경 API와 one-shot worker 유닛은 구현됐지만 timer는 자동 활성화하지 않는다.
+화면이 없는 상태에서 서비스가 설치됐다는 이유만으로 `동작 중`으로 표시하지 않는다. 정책 저장만으로
 기존 파일을 일괄 전송하지 않는다. 재처리는 원본 해시·현재 ACL·PII·봇 생성 여부·무료
 조건을 실행 직전에 다시 검사하며 기존 원본과 파생 revision을 덮어쓰지 않는다.
 
@@ -2873,8 +2921,9 @@ PII 차단, 봇 생성 파일, 원본 해시 변경에서 외부 호출 0회다.
 > 운영 DB 스키마와 `tybot_vision NOLOGIN` 권한 그룹은 적용됐다. 정책·무료 모델·최근
 > 작업을 본문 없이 내리는 관리자 GET API도 구현했다. 안전 clearance와 별도의 외부
 > 전송 approval 생성·사유 있는 철회 API도 관리자·workspace·CSRF 경계로 구현했다.
-> 실제 worker LOGIN 자격 설치, 실행 서비스 유닛, 정책 변경 API와 콘솔 화면은 미구현이다.
-> 따라서 현재 배포만으로 외부 호출은 일어나지 않는다.
+> worker LOGIN 자격 절차, 비활성 기본의 one-shot/timer 유닛, 정책 변경·미리보기 API까지
+> 구현했다. 콘솔 화면 연결과 운영 자격 설치·timer 활성화·합성 이미지 실호출 검증은
+> 남아 있다. 따라서 현재 배포만으로 외부 호출은 일어나지 않는다.
 
 
 # 100. 완료 항목

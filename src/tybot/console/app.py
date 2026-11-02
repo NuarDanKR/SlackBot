@@ -3270,6 +3270,18 @@ image_description_clearance_router = image_description_clearance_routes.build_ro
 )
 app.include_router(image_description_clearance_router)
 
+# B-81 정책 변경도 같은 이유로 분리한다. 읽기 전용 상태 라우트와 한 파일에 두면
+# 쓰기 보호를 한 군데 빠뜨렸을 때 읽기 경로를 보며 검사한다고 믿게 된다.
+from . import image_description_policy_routes  # noqa: E402
+
+image_description_policy_router = image_description_policy_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(image_description_policy_router)
+
 # 정적 `/` 마운트는 모든 `/api/*` 라우트보다 반드시 뒤에 둔다. Starlette는 등록
 # 순서대로 라우트를 찾으므로 앞에 두면 이후 API가 정적 파일의 404로 가로채진다.
 mount_frontend()

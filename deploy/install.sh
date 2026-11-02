@@ -509,6 +509,11 @@ done
 install -m 0644 "$APP_DIR/deploy/hermes-archiver@.service" /etc/systemd/system/hermes-archiver@.service
 install -m 0644 "$APP_DIR/deploy/hermes-privacy-manifest@.service" /etc/systemd/system/hermes-privacy-manifest@.service
 install -m 0644 "$APP_DIR/deploy/hermes-privacy-manifest@.timer" /etc/systemd/system/hermes-privacy-manifest@.timer
+# B-81 is installed disabled. Enabling an instance requires a dedicated DB
+# credential, an approved workspace policy, catalog verification and approvals.
+install -d -o tybot -g tybot -m 0700 "$DATA_DIR/image-description"
+install -m 0644 "$APP_DIR/deploy/tybot-image-description@.service" /etc/systemd/system/tybot-image-description@.service
+install -m 0644 "$APP_DIR/deploy/tybot-image-description@.timer" /etc/systemd/system/tybot-image-description@.timer
 install -d -m 0755 /usr/local/libexec
 install -o root -g root -m 0755 "$APP_DIR/deploy/hermes-archiver-run" /usr/local/libexec/hermes-archiver-run
 install -o root -g root -m 0644 "$APP_DIR/deploy/hermes-bot-locks.conf" /etc/tmpfiles.d/hermes-bot-locks.conf

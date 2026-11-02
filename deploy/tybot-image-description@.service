@@ -1,0 +1,29 @@
+[Unit]
+Description=TYBot Archiver image description worker for %i
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=TYBOT_ENV_FILE=/etc/tybot/archiver.env
+Environment=STATE_DIR=/var/lib/tybot
+EnvironmentFile=/etc/tybot/archiver.env
+LoadCredential=tybot-vision-database-url:/etc/tybot/tybot-vision-database-url
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.archive.image_description_job --workspace %i
+TimeoutStartSec=900
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-image-description-%i
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadOnlyPaths=/var/lib/tybot/archive
+ReadWritePaths=/var/lib/tybot/image-description
+

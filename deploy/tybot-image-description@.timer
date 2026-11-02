@@ -1,0 +1,11 @@
+[Unit]
+Description=TYBot periodic Archiver image description worker for %i
+
+[Timer]
+OnCalendar=*:0/15
+RandomizedDelaySec=120
+Persistent=true
+Unit=tybot-image-description@%i.service
+
+[Install]
+WantedBy=timers.target
