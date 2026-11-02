@@ -115,6 +115,8 @@ export interface AnswerRecordSummary {
   costUsd: number
   ms: number
   qualityReasons: string[]
+  resultStatus: 'answered' | 'needs_review' | 'failed'
+  failureCode: string
   hasFeedback: boolean
 }
 
@@ -200,6 +202,8 @@ export interface AnswerRecordDetail extends AnswerRecordSummary {
   responseTs: string
   decisionId: string
   plannerModel: string
+  finalResponder: string
+  specialistErrorCode: string
   taskTraces: {
     task_index: number
     task_kind: string

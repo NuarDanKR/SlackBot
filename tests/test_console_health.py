@@ -138,6 +138,22 @@ def test_single_error_is_warn_not_bad():
     assert health.answer_section(records)["level"] == "warn"
 
 
+def test_specialist_failure_with_hits_is_an_error_not_a_grounded_answer():
+    failed = _qa(hits=42, reason="specialist_unavailable")
+    failed.update({
+        "final_responder": "none",
+        "specialist_error_code": "specialist-timeout:external-v3",
+    })
+    section = health.answer_section([failed] + [_qa() for _ in range(19)])
+
+    assert section["errors"] == 1
+    assert section["grounded"] == 19
+    assert section["noHits"] == 0
+    assert section["topErrors"] == [
+        {"kind": "specialist-timeout:external-v3", "count": 1}
+    ]
+
+
 def test_slow_answers_are_flagged():
     records = [_qa(ms=30_000)] + [_qa() for _ in range(19)]
     section = health.answer_section(records)

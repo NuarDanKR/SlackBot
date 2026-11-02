@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass
 from datetime import date
 
+from ..answer_status import answer_failed, failure_code
 from ..feedback import event_id
 from . import health, reader
 from .auth import ConsoleUser
@@ -129,6 +130,10 @@ def visible_records(
         rows = [row for row in rows if str(row.get("workspace") or "") == workspace]
     if result == "slow":
         rows = [row for row in rows if int(row.get("elapsed_ms") or 0) > health.SLOW_MS]
+    elif result == "error":
+        rows = [row for row in rows if answer_result(row) == "failed"]
+    elif result == "answered":
+        rows = [row for row in rows if answer_result(row) == "answered"]
     elif result and result != "feedback":
         rows = [
             row
@@ -153,8 +158,17 @@ def visible_records(
 NOT_A_DATA_PROBLEM = {"permission_unverified"}
 
 
-def quality_reasons(row: dict) -> list[str]:
+def answer_result(row: dict) -> str:
+    """Separate successful Slack delivery from successful answer generation."""
+    if answer_failed(row):
+        return "failed"
+    return "needs_review" if quality_reasons(row, include_failure=False) else "answered"
+
+
+def quality_reasons(row: dict, *, include_failure: bool = True) -> list[str]:
     reasons: list[str] = []
+    if include_failure and answer_result(row) == "failed":
+        reasons.append("answer_failed")
     if str(row.get("error") or "").strip():
         reasons.append("error")
     reason = str(row.get("reason") or "")
@@ -162,6 +176,10 @@ def quality_reasons(row: dict) -> list[str]:
         reasons.append(reason)
     elif int(row.get("hits") or 0) == 0:
         reasons.append("no_hits")
+    specialist_error = str(row.get("specialist_error_code") or "").strip()
+    responder = str(row.get("final_responder") or "").strip()
+    if specialist_error and responder not in {"", "none"}:
+        reasons.append("specialist_fallback")
     if int(row.get("elapsed_ms") or 0) > health.SLOW_MS:
         reasons.append("slow")
     return reasons
@@ -192,6 +210,8 @@ def summaries(rows: list[dict], feedback: list[dict]) -> list[dict]:
             "costUsd": float(row.get("cost_usd") or 0),
             "ms": int(row.get("elapsed_ms") or 0),
             "qualityReasons": quality_reasons(row),
+            "resultStatus": answer_result(row),
+            "failureCode": failure_code(row),
             "hasFeedback": str(row.get("record_id") or "") in feedback_ids,
         }
         for row in rows
@@ -203,14 +223,14 @@ def summary(rows: list[dict]) -> dict:
     grounded = sum(
         1
         for row in rows
-        if int(row.get("hits") or 0) > 0 and not str(row.get("error") or "").strip()
+        if int(row.get("hits") or 0) > 0 and not answer_failed(row)
     )
     return {
         "questions": count,
         "grounded": grounded,
         "noHits": sum(1 for row in rows if int(row.get("hits") or 0) == 0),
         "groundedRate": grounded / count if count else None,
-        "errors": sum(1 for row in rows if str(row.get("error") or "").strip()),
+        "errors": sum(1 for row in rows if answer_failed(row)),
         "slowAnswers": sum(
             1 for row in rows if int(row.get("elapsed_ms") or 0) > health.SLOW_MS
         ),
@@ -278,5 +298,9 @@ def detail(row: dict, feedback: list[dict]) -> dict:
         "plannerModel": str(row.get("planner_model") or ""),
         "taskTraces": list(row.get("task_traces") or []),
         "qualityReasons": quality_reasons(row),
+        "resultStatus": answer_result(row),
+        "failureCode": failure_code(row),
+        "finalResponder": str(row.get("final_responder") or ""),
+        "specialistErrorCode": str(row.get("specialist_error_code") or ""),
         "feedback": visible_feedback,
     }

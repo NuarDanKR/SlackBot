@@ -11,11 +11,17 @@ from dataclasses import dataclass
 
 from . import specialist_wire as signing
 from . import specialist_wire_v3 as wire
-from .specialist_http import Transport, TransportError, UnixSocketTransport
+from .specialist_http import (
+    Transport,
+    TransportError,
+    TransportTimeout,
+    UnixSocketTransport,
+)
 from .specialist_v3_broker import ToolSessionRegistry
 
 log = logging.getLogger("tybot.specialist_v3_client")
 _KEY = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+RETURN_RESERVE_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -84,7 +90,8 @@ def call(
         except TransportError as exc:
             log.warning("v3 specialist transport failed: %s", type(exc).__name__)
             _cancel(transport, request_id=request_id, secret=secret)
-            return CallOutcome(None, "transport", _elapsed_ms(started))
+            code = "timeout" if isinstance(exc, TransportTimeout) else "transport"
+            return CallOutcome(None, code, _elapsed_ms(started))
 
         if reply.status != 200:
             return CallOutcome(None, f"http-{reply.status}", _elapsed_ms(started))
@@ -182,6 +189,10 @@ class ExternalV3Adapter:
             if getattr(self.toolbox, "live_fetch", None) is not None
             else wire.DEFAULT_TOOLS
         )
+        remaining = float(request.deadline.remaining())
+        if remaining <= RETURN_RESERVE_SECONDS:
+            self.last_error_code = "specialist-timeout:external-v3"
+            return ""
         outcome = call(
             self.transport,
             workspace=self.workspace,
@@ -192,10 +203,16 @@ class ExternalV3Adapter:
             credential_id=self.credential_id,
             registry=self.registry,
             allow=allow,
-            deadline_ms=int(request.deadline.remaining() * 1000),
+            # Return before execute() reaches the same outer deadline. This
+            # leaves time for result propagation and best-effort cancellation.
+            deadline_ms=max(1, int((remaining - RETURN_RESERVE_SECONDS) * 1000)),
         )
         if outcome.answer is None:
-            self.last_error_code = outcome.error_code or "external-failed"
+            self.last_error_code = (
+                "specialist-timeout:external-v3"
+                if outcome.error_code == "timeout"
+                else outcome.error_code or "external-failed"
+            )
             return ""
         answer = outcome.answer
         self.last_cost_usd = float(answer.usage.get("cost_usd", 0.0) or 0.0)

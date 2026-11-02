@@ -50,6 +50,10 @@ class TransportError(RuntimeError):
     """소켓·시간 초과·프로토콜 오류. 호출부는 마스터로 간다."""
 
 
+class TransportTimeout(TransportError):
+    """The specialist transport exceeded its explicit deadline."""
+
+
 @dataclass(frozen=True)
 class HttpReply:
     status: int
@@ -89,7 +93,7 @@ class UnixSocketTransport:
                 sock.sendall(_http_request(path, body, headers))
                 raw = _read_all(sock, timeout_s)
         except TimeoutError as exc:
-            raise TransportError("전문 봇이 시간 안에 답하지 않았습니다.") from exc
+            raise TransportTimeout("전문 봇이 시간 안에 답하지 않았습니다.") from exc
         except OSError as exc:
             # 오류 문자열에 소켓 경로가 들어가지 않게 종류만 남긴다.
             raise TransportError(f"소켓 오류: {type(exc).__name__}") from exc
@@ -262,7 +266,11 @@ def call(
         )
     except TransportError as exc:
         elapsed = _ms(started)
-        code = "timeout" if "시간" in str(exc) else "transport"
+        # Older/custom transports raised TransportError with the established
+        # Korean timeout message. Keep that contract while new transports use
+        # the explicit subtype.
+        timed_out = isinstance(exc, TransportTimeout) or "시간" in str(exc)
+        code = "timeout" if timed_out else "transport"
         log.warning("전문가 전송 실패 code=%s", code)
         if breaker is not None:
             breaker.record(ok=False, now=now)

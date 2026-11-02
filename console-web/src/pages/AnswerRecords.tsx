@@ -5,13 +5,11 @@ import { Chip, Empty, Failed, Loading, PageHead, Section, fmt } from '../compone
 import { withQuery } from '../navigation'
 import type { AnswerRecordDetail, AnswerRecordsResponse, ConsoleUser } from '../types'
 
-const RESULT_LABEL: Record<string, string> = {
-  answered: '답변 완료', no_hits: '근거 없음', no_access: '열람 근거 없음',
-  error: '오류', blocked: '권한 차단', slow: '15초 초과',
-}
 const FEEDBACK_LABEL: Record<string, string> = {
   positive: '정확했다', negative: '틀렸다', missing: '근거를 못 찾았다', correction: '정정',
 }
+const STATUS_LABEL = { answered: '답변 완료', needs_review: '확인 필요', failed: '답변 실패' } as const
+const STATUS_TONE = { answered: 'ok', needs_review: 'watch', failed: 'bad' } as const
 
 export function AnswerRecords({
   user,
@@ -73,7 +71,7 @@ export function AnswerRecords({
       <div className="answer-browser">
         <div className="answer-record-list" aria-label="질문·답변 기록">
           {data.records.map((row) => <button key={row.recordKey} type="button" className={`answer-record-item ${selected === row.recordKey ? 'is-active' : ''}`} onClick={() => move({ record: row.recordKey })}>
-            <span className="answer-record-title">{row.asker} · {RESULT_LABEL[row.reason] ?? row.reason}</span>
+            <span className="answer-record-title">{row.asker} · {STATUS_LABEL[row.resultStatus]}</span>
             <span className="answer-record-meta">{fmt.dayClock(row.at)} · {row.workspace} · {row.channel || '채널 미기록'}</span>
             <span className="answer-record-meta">{row.model} · 근거 {row.hits}건{row.hasFeedback ? ' · 피드백 있음' : ''}</span>
           </button>)}
@@ -90,7 +88,8 @@ export function AnswerRecords({
 
 function RecordDetail({ item }: { item: AnswerRecordDetail }) {
   return <article className="answer-original">
-    <div className="answer-original-head"><div><strong>{item.asker}</strong><div className="answer-record-meta">{item.userId || '사용자 ID 미기록'} · {item.workspace} · {item.channel || item.channelId || '채널 미기록'}</div></div><Chip tone={item.error ? 'bad' : item.qualityReasons.length ? 'watch' : 'ok'}>{item.error ? '오류' : item.qualityReasons.length ? '확인 필요' : '답변 완료'}</Chip></div>
+    <div className="answer-original-head"><div><strong>{item.asker}</strong><div className="answer-record-meta">{item.userId || '사용자 ID 미기록'} · {item.workspace} · {item.channel || item.channelId || '채널 미기록'}</div></div><Chip tone={STATUS_TONE[item.resultStatus]}>{STATUS_LABEL[item.resultStatus]}</Chip></div>
+    {item.resultStatus === 'failed' && <div className="notice bad"><div><div className="notice-title">업무 답변을 생성하지 못했습니다</div><div className="notice-detail">Slack 전달 여부와 별개인 답변 생성 실패입니다. 사유 코드: <span className="mono">{item.failureCode || item.specialistErrorCode || 'answer_failed'}</span></div></div></div>}
     <div className="original-block"><div className="original-label">질문 원본 · {item.at ? new Date(item.at).toLocaleString('ko-KR') : '-'}</div><div className="original-text">{item.question || '질문 본문이 기록되지 않았습니다.'}</div></div>
     <div className="original-block"><div className="original-label">전달된 답변</div><div className="original-text">{item.answer || '답변 본문이 기록되지 않았습니다.'}</div></div>
     <dl className="answer-trace"><div><dt>분류·라우팅</dt><dd>{item.intent || '-'} · {item.source || '-'}{item.plannerModel ? ` · ${item.plannerModel}` : ''}</dd></div><div><dt>권한·근거</dt><dd>{item.scope || '범위 미기록'} · 검색 {item.hits}건</dd></div><div><dt>모델 실행</dt><dd>{item.model} · {fmt.ms(item.ms)} · {item.costUsd ? fmt.usd(item.costUsd) : '-'}</dd></div><div><dt>전달</dt><dd>{item.responseTs || '응답 시각 미기록'}</dd></div></dl>

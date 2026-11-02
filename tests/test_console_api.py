@@ -338,6 +338,28 @@ def test_status_marks_today_answer_errors(client, env):
     assert fin["errorHealth"] == "bad"
 
 
+def test_status_marks_a_delivered_specialist_failure_as_bad(client, env):
+    day = datetime.now(KST).date().isoformat()
+    path = env / "qa-log" / f"qa-{day[:7]}.jsonl"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "ts": f"{day}T15:54:35+09:00",
+            "workspace": "fin",
+            "reason": "specialist_unavailable",
+            "hits": 42,
+            "elapsed_ms": 318_700,
+            "final_responder": "none",
+            "specialist_error_code": "specialist-timeout:external-v3",
+        }, ensure_ascii=False) + "\n")
+
+    rows = client.get("/api/status", headers=owner(client)).json()["workspaces"]
+    fin = next(row for row in rows if row["key"] == "fin")
+    assert fin["answerErrorsToday"] == 1
+    assert fin["noHitAnswersToday"] == 0
+    assert fin["answerHealth"] == "bad"
+    assert fin["errorHealth"] == "bad"
+
+
 def test_status_marks_broken_documents(client):
     rows = client.get("/api/status", headers=owner(client)).json()["workspaces"]
     safety = next(r for r in rows if r["key"] == "safety")

@@ -27,6 +27,7 @@ from collections import Counter
 from datetime import timedelta
 from pathlib import Path
 
+from ..answer_status import answer_failed, failure_code
 from . import reader
 
 logger = logging.getLogger("tybot.console.health")
@@ -264,8 +265,10 @@ def answer_section(records: list[dict]) -> dict:
             "problems": [],
         }
 
-    errors = sum(1 for r in records if str(r.get("error") or "").strip())
-    grounded = sum(1 for r in records if int(r.get("hits") or 0) > 0)
+    errors = sum(1 for r in records if answer_failed(r))
+    grounded = sum(
+        1 for r in records if int(r.get("hits") or 0) > 0 and not answer_failed(r)
+    )
     slow = sum(1 for r in records if int(r.get("elapsed_ms") or 0) > SLOW_MS)
 
     # **근거를 못 찾은 것이 아니라 찾아보지도 못한 질문.** 열람 범위를 확인하지
@@ -276,7 +279,12 @@ def answer_section(records: list[dict]) -> dict:
         1 for r in records if str(r.get("reason") or "") == "permission_unverified"
     )
     searched = total - unverified
-    no_hits = searched - grounded
+    no_hits = sum(
+        1
+        for r in records
+        if str(r.get("reason") or "") != "permission_unverified"
+        and int(r.get("hits") or 0) == 0
+    )
 
     grounded_rate = grounded / searched if searched else None
     error_rate = errors / total
@@ -297,11 +305,7 @@ def answer_section(records: list[dict]) -> dict:
     # 어떤 예외였는지 함께 낸다. 비율만 있으면 고칠 수 없다 —
     # "22% 가 실패" 는 볼 때마다 같은 조사를 처음부터 다시 하게 만든다.
     # qa-log 의 `error` 는 예외 클래스명뿐이라(업무 내용이 없다) 그대로 보여도 된다.
-    error_kinds = Counter(
-        str(r.get("error") or "").strip()
-        for r in records
-        if str(r.get("error") or "").strip()
-    )
+    error_kinds = Counter(failure_code(r) for r in records if answer_failed(r))
     top_error = error_kinds.most_common(1)
     detail = f" — 가장 많은 것은 {top_error[0][0]} {top_error[0][1]}건" if top_error else ""
     if error_rate >= ERROR_BAD:

@@ -27,7 +27,7 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import answer_issues, deploy_request, heartbeat
+from .. import answer_issues, answer_status, deploy_request, heartbeat
 from ..archive.store import ArchiveStore
 from ..feedback import FeedbackLog
 from ..managed_env import request_restart
@@ -419,8 +419,12 @@ def _workspace_runtime_status(user: ConsoleUser) -> list[dict]:
     enriched: list[dict] = []
     for workspace in workspaces:
         records = by_workspace[str(workspace["key"])]
-        errors = sum(1 for row in records if str(row.get("error") or "").strip())
-        no_hits = sum(1 for row in records if int(row.get("hits") or 0) == 0)
+        errors = sum(1 for row in records if answer_status.answer_failed(row))
+        no_hits = sum(
+            1
+            for row in records
+            if int(row.get("hits") or 0) == 0 and not answer_status.answer_failed(row)
+        )
         slow = sum(1 for row in records if int(row.get("elapsed_ms") or 0) > health.SLOW_MS)
         if not records:
             answer_health = "unknown"

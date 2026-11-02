@@ -43,10 +43,12 @@ class Hermes:
         self.bad_signature = bad_signature
         self.answer = answer
         self.calls = []
+        self.timeouts = []
         self.requests = []
 
     def post(self, path, body, headers, *, timeout_s):
         self.calls.append(path)
+        self.timeouts.append(timeout_s)
         if path == wire.CANCEL_ENDPOINT:
             return HttpReply(200, b"{}")
         request = json.loads(body)
@@ -154,6 +156,27 @@ def test_transport_failure_is_not_retried_and_sends_best_effort_cancel():
     assert transport.paths == [wire.ANSWER_ENDPOINT, wire.CANCEL_ENDPOINT]
 
 
+def test_transport_timeout_has_a_distinct_failure_code():
+    class TimedOut:
+        def post(self, path, body, headers, *, timeout_s):
+            if path == wire.ANSWER_ENDPOINT:
+                raise client.TransportTimeout("late")
+            return HttpReply(200, b"{}")
+
+    outcome = client.call(
+        TimedOut(),
+        workspace="tyit",
+        authorization_id="tyit:member",
+        question="summarize",
+        toolbox=Box(),
+        secret=SECRET,
+        credential_id=CREDENTIAL_ID,
+        registry=ToolSessionRegistry(),
+    )
+
+    assert outcome.error_code == "timeout"
+
+
 def test_socket_path_is_derived_and_rejects_path_input():
     assert client.socket_path("hermes", "tyit") == (
         "/run/tybot-subbots/hermes-tyit/http.sock"
@@ -220,6 +243,51 @@ def test_external_adapter_exposes_sanitized_rpc_runtime_metrics():
     assert adapter.search_calls == 1
     assert adapter.search_rounds == 1
     assert adapter.tool_calls_by_name == {"search": 1}
+
+
+def test_external_adapter_reserves_time_to_return_before_the_outer_deadline():
+    registry = ToolSessionRegistry()
+    hermes = Hermes(registry)
+    adapter = client.ExternalV3Adapter(
+        "hermes",
+        workspace="tyit",
+        authorization_id="tyit:member",
+        toolbox=Box(),
+        secret=SECRET,
+        credential_id=CREDENTIAL_ID,
+        registry=registry,
+        transport=hermes,
+    )
+
+    answer = adapter.complete(
+        SimpleNamespace(question="summarize", deadline=SimpleNamespace(remaining=lambda: 30))
+    )
+
+    assert answer == "grounded answer"
+    assert hermes.timeouts[0] == pytest.approx(28.0)
+
+
+def test_external_adapter_does_not_start_when_only_return_reserve_remains():
+    registry = ToolSessionRegistry()
+    hermes = Hermes(registry)
+    adapter = client.ExternalV3Adapter(
+        "hermes",
+        workspace="tyit",
+        authorization_id="tyit:member",
+        toolbox=Box(),
+        secret=SECRET,
+        credential_id=CREDENTIAL_ID,
+        registry=registry,
+        transport=hermes,
+    )
+
+    answer = adapter.complete(
+        SimpleNamespace(question="summarize", deadline=SimpleNamespace(remaining=lambda: 2))
+    )
+
+    assert answer == ""
+    assert adapter.last_error_code == "specialist-timeout:external-v3"
+    assert hermes.calls == []
 
 
 @pytest.mark.parametrize("layout", ["auto", "report", "table", "calendar_grid", "timeline"])
