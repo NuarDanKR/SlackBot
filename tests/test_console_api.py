@@ -332,7 +332,9 @@ def test_status_marks_today_answer_errors(client, env):
     fin = next(r for r in rows if r["key"] == "fin")
     assert fin["answersToday"] == 2
     assert fin["answerErrorsToday"] == 1
-    assert fin["noHitAnswersToday"] == 1
+    # A failed answer with zero recorded hits is not a successful no-hit answer.
+    # Counting it in both buckets makes one incident look like two conditions.
+    assert fin["noHitAnswersToday"] == 0
     assert fin["slowAnswersToday"] == 1
     assert fin["answerHealth"] == "bad"
     assert fin["errorHealth"] == "bad"
