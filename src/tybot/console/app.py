@@ -3282,6 +3282,17 @@ image_description_policy_router = image_description_policy_routes.build_router(
 )
 app.include_router(image_description_policy_router)
 
+# 사용자 목록 · 봇 사용 권한(vipbot 등). admin 전용.
+from . import user_access_routes  # noqa: E402
+
+user_access_router = user_access_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(user_access_router)
+
 # 정적 `/` 마운트는 모든 `/api/*` 라우트보다 반드시 뒤에 둔다. Starlette는 등록
 # 순서대로 라우트를 찾으므로 앞에 두면 이후 API가 정적 파일의 404로 가로채진다.
 mount_frontend()
