@@ -33,6 +33,12 @@ RuntimeDirectoryMode=0750
 Restart=always
 RestartSec=10
 
+# 2026-11-02: unbounded attachment search grew the main process past 3 GiB and
+# triggered the host-wide OOM killer. Keep enough headroom above the normal
+# 600-1100 MiB working set, but contain a regression to this restartable unit.
+MemoryHigh=1536M
+MemoryMax=2048M
+
 # 로그는 journald 로 (파일 로테이션 불필요)
 StandardOutput=journal
 StandardError=journal

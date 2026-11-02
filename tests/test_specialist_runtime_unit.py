@@ -269,3 +269,12 @@ def test_master_service_can_serve_the_external_specialist_tool_socket():
     assert "RuntimeDirectory=tybot" in unit
     assert "RuntimeDirectoryMode=0750" in unit
     assert "ReadWritePaths=/var/lib/tybot /run/tybot" in unit
+
+
+def test_master_memory_regressions_are_contained_to_the_service():
+    """A runaway search must not invoke the host-wide OOM killer again."""
+    unit = (ROOT / "deploy" / "tybot.service").read_text(encoding="utf-8")
+
+    assert "MemoryHigh=1536M" in unit
+    assert "MemoryMax=2048M" in unit
+    assert unit.index("MemoryHigh=1536M") < unit.index("MemoryMax=2048M")
