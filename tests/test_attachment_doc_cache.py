@@ -407,14 +407,19 @@ def _run_searches(store, rounds: int) -> list[int]:
     gc.collect()
     tracemalloc.start()
     try:
-        base, _ = tracemalloc.get_traced_memory()
         for i in range(rounds):
+            # 라운드마다 **그 라운드가 쓴 양**을 잰다. 시작 시점 하나를 기준으로
+            # 빼면, 같이 도는 다른 시험이 프로세스 수준에서 한 번 올려놓은 양이
+            # 그대로 섞인다 — 혼자 돌리면 통과하고 모아 돌리면 깨지는 거짓 실패가
+            # 거기서 났다(2026-11-03, 30번째 라운드에서 1.9MB 계단).
+            gc.collect()
+            before, _ = tracemalloc.get_traced_memory()
             tracemalloc.reset_peak()
             names = {d.channel for d in store.visible_docs(CTX) if d.channel}
             where = frozenset(sorted(names)[:1])
             store.search(f"합성 {i}", CTX, limit=30, channels=where)
             _, high = tracemalloc.get_traced_memory()
-            peaks.append(high - base)
+            peaks.append(high - before)
         assert search_index.tokens_of("합성")
     finally:
         tracemalloc.stop()
@@ -440,17 +445,30 @@ def test_forty_two_searches_stay_flat(tmp_path):
     _assert_flat(peaks)
 
 
-def test_forty_two_searches_stay_flat_while_the_cache_thrashes(tmp_path, monkeypatch):
-    """상한이 작아 **축출이 계속 도는** 상태가 더 어렵다 — 여기서도 평탄해야 한다."""
-    monkeypatch.setenv("TYBOT_ATTACHMENT_CACHE_MB", "1")
+def test_forty_two_searches_stay_flat_while_the_cache_thrashes(tmp_path):
+    """상한이 작아 **축출이 계속 도는** 상태가 더 어렵다 — 여기서도 평탄해야 한다.
+
+    상한은 작업 집합보다 **작게** 잡아야 한다. 넉넉하면 축출이 한 번도 안 돌고,
+    그러면 이 시험은 이름만 thrash 이고 앞 시험과 같은 것을 잰다.
+    `evidence()` 는 파일을 정렬 순서로 한 바퀴 돌기 때문에, 작업 집합보다 작은
+    LRU 에서는 적중률이 0 에 수렴한다 — 가장 나쁜 조합이고 그래서 여기서 본다.
+    """
     _channel(tmp_path, 0, days=2, lines=50)
     for i in range(20):
         _attachment(tmp_path, i, body_lines=300)
 
     store = ArchiveStore(tmp_path)
+    working_set = sum(
+        p.stat().st_size for p in attachment_reader.source_files(tmp_path)
+    )
+    cap = working_set // 4
+    store._attachments = attachment_reader.DocCache(max_bytes=cap)
+
     peaks = _run_searches(store, 42)
 
-    assert store._attachments.held_bytes <= 1024 * 1024
+    assert store._attachments.held_bytes <= cap
+    # 상한이 실제로 걸렸나 — 안 걸렸으면 축출이 한 번도 안 돈 것이다.
+    assert store._attachments.held_bytes < working_set
     _assert_flat(peaks)
 
 

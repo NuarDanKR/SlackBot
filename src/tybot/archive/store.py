@@ -6,8 +6,10 @@ v1 평면 파일과 v2 ``workspaces/<ws>/channels/<id>__<name>/raw/<date>.md``�
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -296,6 +298,218 @@ def load_doc(path: Path) -> ArchiveDoc:
     )
 
 
+#: 원문 MD 캐시가 들고 있을 **원본 파일 바이트** 상한의 기본값.
+#:
+#: 메모리에 올라간 모양은 파일보다 크다 — 실측 **2.43 배**(합성 7MB → 상주 16.9MB).
+#: 줄 하나가 `RawLine` 객체 하나가 되기 때문이다. 그래서 상한을 「파일 바이트」로
+#: 세고 배수는 여기 적어 둔다. 128MiB 면 상주 약 **311MiB** 다.
+#:
+#: 첨부 캐시(`attachment_reader.DEFAULT_CACHE_MB`, 192MiB → 상주 약 478MiB)와
+#: `MemoryHigh` 를 **같이** 봐야 한다. 둘을 따로 올리면 유닛 상한에 먼저 닿아
+#: 조용히 느려진다(회수 압력). 계산은 검증 문서에 적었다.
+DEFAULT_ARCHIVE_CACHE_MB = 128
+
+#: 파일 바이트 → 상주 바이트 실측 배수. 상한을 고를 때 쓰라고 남긴다.
+ARCHIVE_RESIDENT_RATIO = 2.43
+
+#: 없어진 파일을 치우려고 존재 확인을 도는 주기(넣은 횟수 기준).
+#: 바이트 상한이 이미 무한 증가를 막으므로 이건 **빨리 돌려주기** 용이다.
+SWEEP_EVERY = 512
+
+#: 「상한보다 크다」 를 기억해 둘 경로 수. 이력도 무한히 쌓이면 안 된다.
+OVERSIZE_HISTORY = 256
+
+
+def _archive_cache_bytes() -> int:
+    raw = (os.getenv("TYBOT_ARCHIVE_CACHE_MB") or "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_ARCHIVE_CACHE_MB
+    except ValueError:
+        value = DEFAULT_ARCHIVE_CACHE_MB
+    return max(0, value) * 1024 * 1024
+
+
+class RawCache:
+    """원문 MD 파싱 결과를 **파일 지문**으로 기억한다. 상한은 바이트다.
+
+    ## 왜 바꿨나 (2026-11-02 OOM 후속)
+
+    예전 상한은 **개수 4096** 이었고, 넘쳤을 때 치우는 것은 **없어진 파일뿐**이었다.
+    살아 있는 원문이 4096개 이하면 **파일이 아무리 커도 전부 상주**한다. 이번
+    OOM 의 직접 원인은 첨부였지만 같은 계열의 위험이 여기 남아 있었다.
+
+    개수로 막으면 「몇 개인가」 를 세는데 메모리는 「몇 바이트인가」 로 쓰인다.
+    둘이 어긋나는 쪽이 늘 사고다.
+
+    ## 상한보다 큰 파일 한 장은 들고 있지 않는다
+
+    「마지막 한 장은 남긴다」 로 두면 그 한 장이 상한을 무시하고 상주한다 —
+    상한을 둔 이유가 큰 파일인데 그 경우에만 상한이 꺼지는 꼴이다. 돌려주기는
+    한다. **근거는 사라지지 않고**, 다음 호출이 그 파일만 다시 읽을 뿐이다.
+
+    ## 형식 위반은 사유 문자열로 계속 캐시한다
+
+    문자열은 길이가 곧 비용이라 따로 센다. 큰 파일이 깨졌을 때도 **사유는
+    캐시된다** — 안 그러면 호출마다 그 큰 파일을 다시 열어 다시 거절한다.
+
+    ## 같은 파일을 둘이 동시에 파싱하지 않는다
+
+    캐시가 채워지기 전에 두 요청이 같은 파일을 만나면 둘 다 헛걸음하고 같은
+    본문이 **두 벌** 올라간다. 경로마다 문을 두어 먼저 온 쪽만 만든다.
+
+    ## 경로를 로그에 넣지 않는다
+
+    상한 초과는 **건수와 바이트만** 남긴다. 아카이브 경로에는 채널명이 들어 있고,
+    채널명은 조직 이름이다. 어느 파일인지는 `oversize` 로 **메모리에서만** 본다 —
+    로그는 장애 때 통째로 퍼 날라지는 자리다.
+    """
+
+    def __init__(self, max_bytes: int | None = None) -> None:
+        self._max = _archive_cache_bytes() if max_bytes is None else max(0, max_bytes)
+        self._lock = threading.Lock()
+        # path -> (지문, 비용 바이트, ArchiveDoc | str)
+        self._items: dict[Path, tuple[tuple[int, int], int, object]] = {}
+        self._bytes = 0
+        self._puts = 0
+        self._gates: dict[Path, list] = {}
+        #: 상한보다 커서 못 넣은 경로 → 지문. **지문만** 둔다(본문은 없다).
+        self.oversize: dict[Path, tuple[int, int]] = {}
+        self._oversize_logged = 0
+
+    @property
+    def held_bytes(self) -> int:
+        with self._lock:
+            return self._bytes
+
+    @property
+    def held_files(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    @property
+    def gates_open(self) -> int:
+        with self._lock:
+            return len(self._gates)
+
+    # -- 상한 ------------------------------------------------------------
+    @staticmethod
+    def _cost(result: object, size: int) -> int:
+        """이 항목이 쥐는 비용. 파싱 결과는 파일 크기, 사유 문자열은 길이."""
+        return len(result) if isinstance(result, str) else size
+
+    def _put(self, path: Path, fingerprint: tuple[int, int], result: object) -> None:
+        cost = self._cost(result, fingerprint[1])
+        sweep = False
+        with self._lock:
+            old = self._items.pop(path, None)
+            if old is not None:
+                self._bytes -= old[1]
+            if self._max <= 0 or cost > self._max:
+                if self._max > 0 and self.oversize.get(path) != fingerprint:
+                    self.oversize[path] = fingerprint
+                    self._note_oversize(cost)
+                return
+            self.oversize.pop(path, None)
+            self._items[path] = (fingerprint, cost, result)
+            self._bytes += cost
+            self._puts += 1
+            # dict 는 삽입 순서를 지키므로 맨 앞이 가장 오래 안 쓴 것이다.
+            # 방금 넣은 것 자체가 상한 안이라 이 고리는 반드시 멈춘다.
+            while self._bytes > self._max and self._items:
+                oldest = next(iter(self._items))
+                if oldest == path:
+                    break
+                self._bytes -= self._items.pop(oldest)[1]
+            sweep = self._puts % SWEEP_EVERY == 0
+        if sweep:
+            self._sweep_missing()
+
+    def _note_oversize(self, cost: int) -> None:
+        """상한 초과를 **건수와 바이트로만** 알린다. 경로는 넣지 않는다."""
+        while len(self.oversize) > OVERSIZE_HISTORY:
+            self.oversize.pop(next(iter(self.oversize)))
+        self._oversize_logged += 1
+        logger.warning(
+            "원문 %d개가 캐시 상한보다 커서 캐시되지 않는다 "
+            "(이번 %d bytes > 상한 %d) — TYBOT_ARCHIVE_CACHE_MB 로 올린다",
+            self._oversize_logged, cost, self._max,
+        )
+
+    def _drop(self, paths) -> None:
+        with self._lock:
+            for path in paths:
+                entry = self._items.pop(path, None)
+                if entry is not None:
+                    self._bytes -= entry[1]
+                self.oversize.pop(path, None)
+
+    def _sweep_missing(self) -> None:
+        """없어진 파일의 자리를 돌려준다. 바이트 상한과 별개로 **빨리** 치운다."""
+        with self._lock:
+            paths = list(self._items)
+        gone = [p for p in paths if not p.exists()]
+        if gone:
+            self._drop(gone)
+
+    def prune(self, keep) -> None:
+        """지금 보이는 파일 밖의 항목 중 **없어진 것**을 치운다.
+
+        보이지 않는다고 지우지 않는다 — DM 은 요청마다 범위가 달라서, 안 보이는
+        것을 지우면 매 호출이 서로의 캐시를 무효로 만든다.
+        """
+        keep = set(keep)
+        with self._lock:
+            extra = [p for p in self._items if p not in keep]
+        gone = [p for p in extra if not p.exists()]
+        if gone:
+            self._drop(gone)
+
+    # -- 경로별 문 --------------------------------------------------------
+    @contextmanager
+    def _gate(self, path: Path):
+        with self._lock:
+            gate = self._gates.get(path)
+            if gate is None:
+                gate = self._gates[path] = [threading.Lock(), 0]
+            gate[1] += 1
+        gate[0].acquire()
+        try:
+            yield
+        finally:
+            gate[0].release()
+            with self._lock:
+                gate[1] -= 1
+                if gate[1] <= 0:
+                    self._gates.pop(path, None)
+
+    def _peek(self, path: Path, fingerprint: tuple[int, int]):
+        with self._lock:
+            entry = self._items.get(path)
+            if entry is None:
+                return None
+            if entry[0] != fingerprint:
+                # 지문이 달라졌다. 자리를 바로 돌려준다 — 어차피 못 쓴다.
+                self._bytes -= self._items.pop(path)[1]
+                return None
+            self._items[path] = self._items.pop(path)
+            return entry
+
+    def get(self, path: Path, fingerprint: tuple[int, int], build):
+        """캐시된 파싱 결과. 없으면 `build()` — 같은 경로는 한 번만 만든다."""
+        entry = self._peek(path, fingerprint)
+        if entry is not None:
+            return entry[2]
+        with self._gate(path):
+            # 문 앞에서 기다리는 동안 앞사람이 채웠을 수 있다. 다시 본다 —
+            # 이 재확인이 없으면 문은 순서만 세울 뿐 중복 파싱을 못 막는다.
+            entry = self._peek(path, fingerprint)
+            if entry is not None:
+                return entry[2]
+            result = build()
+            self._put(path, fingerprint, result)
+            return result
+
+
 #: `_scan` 이 중간에 들고 있을 후보 배수. 최종 상한의 몇 배까지 쥐고 있다가
 #: `_rank` 로 추린다. 넉넉히 두는 이유는 추리는 비용을 자주 치르지 않기 위해서고,
 #: 묶어 두는 이유는 흔한 낱말 하나가 아카이브 전체를 객체로 만들기 때문이다.
@@ -338,9 +552,8 @@ class ArchiveStore:
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
-        # path -> (stat 지문, 파싱 결과 또는 SchemaError 메시지)
-        self._cache: dict[Path, tuple[tuple[int, int], ArchiveDoc | str]] = {}
-        self._lock = threading.Lock()
+        # 원문 MD 파싱 결과. **개수가 아니라 바이트**로 묶인다(`RawCache`).
+        self._cache = RawCache()
         # 첨부 정본도 같은 방식으로 캐시한다. 2026-11-02 OOM 전까지 여기만
         # 빠져 있어서, 한 질문이 첨부 전체를 수십 번 다시 읽고 다시 줄 객체로
         # 만들었다(`attachment_reader.DocCache` 머리말).
@@ -448,21 +661,14 @@ class ArchiveStore:
             st = path.stat()
         except OSError as e:
             return f"{path}: 읽을 수 없다 ({e})"
-        fingerprint = (st.st_mtime_ns, st.st_size)
-        with self._lock:
-            cached = self._cache.get(path)
-            if cached and cached[0] == fingerprint:
-                return cached[1]
-        try:
-            result: ArchiveDoc | str = load_doc(path)
-        except SchemaError as e:
-            result = str(e)
-        with self._lock:
-            self._cache[path] = (fingerprint, result)
-            # 삭제된 파일의 캐시는 흘려두지 않는다.
-            if len(self._cache) > 4096:
-                self._cache = {p: v for p, v in self._cache.items() if p.exists()}
-        return result
+
+        def build() -> ArchiveDoc | str:
+            try:
+                return load_doc(path)
+            except SchemaError as e:
+                return str(e)
+
+        return self._cache.get(path, (st.st_mtime_ns, st.st_size), build)
 
     def docs(self, *, dm_scope: str = "") -> list[ArchiveDoc]:
         """일반 근거 문서. 내부에서 항상 ``revision_reader.apply`` 를 거친다."""
@@ -564,12 +770,16 @@ class ArchiveStore:
 
         DM 은 기본으로 빠진다(`_files`). 켜는 곳은 답변 권한 필터와 색인뿐이다.
         """
+        files = self._files(dm_scope=dm_scope)
         loaded: list[ArchiveDoc] = []
-        for p in self._files(dm_scope=dm_scope):
+        for p in files:
             got = self._load(p)
             # 조용한 0건이 가장 위험 — 형식 위반은 건너뛰되 broken() 으로 감지 가능하게 남긴다.
             if isinstance(got, ArchiveDoc):
                 loaded.append(got)
+        # 없어진 파일의 자리를 돌려준다. 바이트 상한이 이미 무한 증가를 막지만,
+        # 지운 원문이 살아 있는 원문의 자리를 차지하고 있을 이유는 없다.
+        self._cache.prune(files)
         return loaded
 
     @staticmethod
