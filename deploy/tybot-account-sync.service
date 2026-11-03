@@ -1,0 +1,25 @@
+[Unit]
+Description=TYBot 콘솔 계정 자동 관리 (Slack 사용자 → 게스트 계정, 퇴직·Slack 삭제 시 멈춤)
+Documentation=file:///opt/tybot/deploy/sql/console_account_sync_schema.sql
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.console.account_sync --apply
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-account-sync
+# 워크스페이스 7개 × users.list 페이지. 넉넉히 두고, 넘으면 다음 회차에 맡긴다.
+TimeoutStartSec=600
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

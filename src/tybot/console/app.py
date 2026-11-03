@@ -3290,6 +3290,7 @@ user_access_router = user_access_routes.build_router(
     require_admin=_require_admin,
     check_write_request=_check_write_request,
     audit_event=_audit_event,
+    reload_accounts=lambda: authenticator().reload(),
 )
 app.include_router(user_access_router)
 
