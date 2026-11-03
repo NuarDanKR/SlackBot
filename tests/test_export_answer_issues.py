@@ -135,3 +135,101 @@ def test_main_writes_report_to_requested_path(tmp_path, monkeypatch):
 
     assert reporter.main() == 0
     assert "TYBot 답변 문제 검토 패킷" in output.read_text(encoding="utf-8")
+
+
+def test_distribution_counts_every_issue_even_when_details_are_limited():
+    records = [
+        {
+            "record_id": f"q{index}",
+            "ts": f"2026-09-16T09:{index:02d}:00+09:00",
+            "workspace": "tyit",
+            "question": "질문",
+            "answer": "근거를 찾지 못했습니다.",
+            "reason": "no_hits",
+            "hits": 0,
+            "citations": [],
+        }
+        for index in range(3)
+    ]
+
+    got = reporter.render_report(
+        records,
+        [],
+        since=date(2026, 9, 10),
+        generated_at=datetime(2026, 9, 16, tzinfo=UTC),
+        limit=1,
+    )
+
+    assert "문제 후보: 3건 (상세 표시 1건 · 상한 1건)" in got
+    assert "| 근거 없음/권한 범위 없음 | 3 |" in got
+
+
+def test_operational_failure_codes_are_classified_from_the_shared_status_rule():
+    row = {
+        "answer": "요청한 문서 답변을 생성할 수 없습니다.",
+        "reason": "specialist_unavailable",
+        "hits": 42,
+        "citations": [],
+        "final_responder": "none",
+        "specialist_error_code": "specialist-timeout:external-v3",
+        "scope": "채널 7개 · 검색 42건",
+        "elapsed_ms": 318_700,
+    }
+
+    codes = reporter.issue_codes(row, [])
+
+    assert codes == [
+        "error",
+        "timeout",
+        "missing_citations",
+        "slow",
+        "high_search_volume",
+    ]
+    assert reporter.recorded_search_count(row) == 42
+
+
+def test_empty_and_partial_answers_are_distinct_findings():
+    assert "empty_answer" in reporter.issue_codes(
+        {"answer": "", "reason": "answered", "hits": 1, "citations": ["#채널"]},
+        [],
+    )
+    partial = {
+        "answer": "요약입니다.\n※ 확인하지 못한 범위: 3공구 9월",
+        "reason": "answered",
+        "hits": 3,
+        "citations": ["#현장"],
+    }
+    assert "partial_scope" in reporter.issue_codes(partial, [])
+
+
+def test_resource_exhaustion_is_only_claimed_when_the_record_contains_a_code():
+    assert "resource_exhaustion" in reporter.issue_codes(
+        {"answer": "실패", "error": "MemoryError", "reason": "error"}, []
+    )
+    assert "resource_exhaustion" not in reporter.issue_codes(
+        {"answer": "실패", "error": "RuntimeError", "reason": "error"}, []
+    )
+
+
+def test_grounded_successes_are_included_as_a_human_review_sample():
+    record = {
+        "record_id": "ok-grounded",
+        "ts": "2026-09-16T09:00:00+09:00",
+        "workspace": "tyit",
+        "question": "오늘 주요 내용을 알려줘",
+        "answer": "확인된 내용입니다.",
+        "reason": "answered",
+        "hits": 2,
+        "citations": ["#현장, 문서(2026-09-16)"],
+    }
+
+    got = reporter.render_report(
+        [record],
+        [],
+        since=date(2026, 9, 10),
+        generated_at=datetime(2026, 9, 16, tzinfo=UTC),
+    )
+
+    assert "근거 있는 성공 답변: 1건 (표본 1건" in got
+    assert "## 성공 답변 근거 충실도 표본" in got
+    assert "QA `ok-grounded`" in got

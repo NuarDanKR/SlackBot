@@ -20,17 +20,36 @@ CLI(`scripts/export_answer_issues.py`)와 콘솔 다운로드가 **같은 보고
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections import Counter
 from collections.abc import Collection
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from .answer_status import answer_failed, failure_code
 from .feedback import event_id
 
 KST = timezone(timedelta(hours=9))
 SLOW_MS = 15_000
+HIGH_SEARCH_COUNT = 20
+SUCCESS_SAMPLE_LIMIT = 20
 PROBLEM_FEEDBACK = {"negative", "missing", "correction"}
+
+_SEARCH_COUNT_RE = re.compile(r"검색\s*([0-9][0-9,]*)\s*건")
+_PARTIAL_SCOPE_MARKERS = (
+    "※ 확인하지 못한 범위:",
+    "범위 상한(",
+    "이번 답변에서 제외:",
+)
+_RESOURCE_ERROR_MARKERS = (
+    "oom",
+    "out_of_memory",
+    "out-of-memory",
+    "out of memory",
+    "memoryerror",
+    "resource_exhausted",
+)
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -127,14 +146,82 @@ def feedback_by_record(rows: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+def recorded_search_count(row: dict) -> int | None:
+    """Return the largest search count that the QA record actually exposes.
+
+    Older records only have the human-readable ``scope`` value. Newer or test
+    records may carry a numeric field. Missing is unknown, not zero.
+    """
+    counts: list[int] = []
+    for key in ("search_calls", "search_count", "searches"):
+        value = row.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            counts.append(value)
+    match = _SEARCH_COUNT_RE.search(str(row.get("scope") or ""))
+    if match:
+        counts.append(int(match.group(1).replace(",", "")))
+    for trace in row.get("task_traces") or []:
+        if not isinstance(trace, dict):
+            continue
+        for key in ("search_calls", "search_count", "searches"):
+            value = trace.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                counts.append(value)
+    return max(counts) if counts else None
+
+
+def _partial_scope(row: dict) -> bool:
+    answer = str(row.get("answer") or "")
+    if any(marker in answer for marker in _PARTIAL_SCOPE_MARKERS):
+        return True
+    if str(row.get("reason") or "") == "search_budget":
+        return True
+    if str(row.get("specialist_error_code") or "") == "search-budget-exhausted":
+        return True
+    return any(
+        isinstance(trace, dict)
+        and (
+            str(trace.get("status") or trace.get("result") or "").lower()
+            == "partial"
+            or bool(str(trace.get("coverage_note") or "").strip())
+        )
+        for trace in (row.get("task_traces") or [])
+    )
+
+
+def _resource_exhausted(row: dict) -> bool:
+    values = [
+        failure_code(row),
+        str(row.get("error") or ""),
+        str(row.get("specialist_error_code") or ""),
+    ]
+    values.extend(
+        str(trace.get("error_code") or trace.get("result") or "")
+        for trace in (row.get("task_traces") or [])
+        if isinstance(trace, dict)
+    )
+    joined = " ".join(values).casefold()
+    return any(marker in joined for marker in _RESOURCE_ERROR_MARKERS)
+
+
 def issue_codes(row: dict, feedback: list[dict]) -> list[str]:
     codes: list[str] = []
     reason = str(row.get("reason") or "")
-    error = str(row.get("error") or "").strip()
-    if error or reason in {
-        "error", "unavailable", "invalid-output", "timeout", "specialist_unavailable",
-    }:
+    if answer_failed(row):
         codes.append("error")
+    code = failure_code(row).casefold()
+    if "timeout" in code:
+        codes.append("timeout")
+    if _resource_exhausted(row):
+        codes.append("resource_exhaustion")
+    if (
+        "answer" in row
+        and not str(row.get("answer") or "").strip()
+        and not str(row.get("artifact_operation") or "").strip()
+    ):
+        codes.append("empty_answer")
+    if "citations" in row and not (row.get("citations") or []):
+        codes.append("missing_citations")
     if reason == "permission_unverified":
         # **자료 없음으로 세지 않는다.** 권한 조회가 실패한 것이라 사람이 할 일이
         # 다르고, 자료 없음에 섞으면 운영 지표에서 영원히 안 보인다.
@@ -145,6 +232,11 @@ def issue_codes(row: dict, feedback: list[dict]) -> list[str]:
         codes.append("no_evidence")
     if int(row.get("elapsed_ms") or 0) > SLOW_MS:
         codes.append("slow")
+    searches = recorded_search_count(row)
+    if searches is not None and searches > HIGH_SEARCH_COUNT:
+        codes.append("high_search_volume")
+    if _partial_scope(row):
+        codes.append("partial_scope")
     traces = row.get("task_traces") or []
     if any(
         str(trace.get("status") or trace.get("result") or "").lower()
@@ -182,14 +274,23 @@ def render_report(
     limit: int = 200,
 ) -> str:
     grouped = feedback_by_record(feedback_rows)
-    selected: list[tuple[dict, list[dict], list[str]]] = []
+    candidates: list[tuple[dict, list[dict], list[str]]] = []
     for row in records:
         linked = grouped.get(str(row.get("record_id") or ""), [])
         codes = issue_codes(row, linked)
         if codes:
-            selected.append((row, linked, codes))
-    selected = selected[:limit]
-    counts = Counter(code for _row, _feedback, codes in selected for code in codes)
+            candidates.append((row, linked, codes))
+    selected = candidates[:limit]
+    counts = Counter(code for _row, _feedback, codes in candidates for code in codes)
+    grounded_successes = [
+        row
+        for row in records
+        if not answer_failed(row)
+        and int(row.get("hits") or 0) > 0
+        and bool(str(row.get("answer") or "").strip())
+        and bool(row.get("citations") or [])
+    ]
+    success_sample = grounded_successes[:SUCCESS_SAMPLE_LIMIT]
     positive = sum(
         1 for row in active_feedback(feedback_rows) if row.get("kind") == "positive"
     )
@@ -206,7 +307,9 @@ def render_report(
         f"- 조회 시작일: {since.isoformat()}",
         f"- 워크스페이스: {workspace or '전체'}",
         f"- 조회 답변: {len(records)}건",
-        f"- 문제 후보: {len(selected)}건 (표시 상한 {limit}건)",
+        f"- 문제 후보: {len(candidates)}건 (상세 표시 {len(selected)}건 · 상한 {limit}건)",
+        f"- 근거 있는 성공 답변: {len(grounded_successes)}건 "
+        f"(표본 {len(success_sample)}건 · 상한 {SUCCESS_SAMPLE_LIMIT}건)",
         f"- 피드백: 긍정 {positive}건 / 문제·정정 {negative}건",
         "",
         "## 문제 분포",
@@ -216,13 +319,26 @@ def render_report(
     ]
     labels = {
         "error": "처리 오류",
+        "timeout": "타임아웃",
+        "resource_exhaustion": "기록된 메모리·자원 고갈",
+        "empty_answer": "빈 답변",
+        "missing_citations": "출처 없음",
         "no_evidence": "근거 없음/권한 범위 없음",
         "permission_unverified": "권한 범위 확인 실패",
         "slow": "15초 초과",
+        "high_search_volume": f"검색 {HIGH_SEARCH_COUNT}건 초과",
+        "partial_scope": "일부 범위 미확인·상한 제외",
         "specialist_failure": "전문 봇 실패·폴백",
         "feedback": "사용자 문제·정정 피드백",
     }
     out.extend(f"| {labels[code]} | {counts.get(code, 0)} |" for code in labels)
+    out.extend([
+        "",
+        "> OOM으로 프로세스가 QA 기록을 쓰기 전에 종료되면 이 파일만으로는 잡히지 않습니다. "
+        "서비스 재시작·커널 OOM 기록과 별도로 대조해야 합니다.",
+        "> `no_evidence`에는 수집·권한·검색어 불일치가 섞일 수 있습니다. "
+        "그 수를 곧바로 벡터 검색이 해결할 건수로 해석하지 않습니다.",
+    ])
 
     known_ids = {str(row.get("record_id") or "") for row in records}
     orphan = [
@@ -257,6 +373,7 @@ def render_report(
             f"- 의도: `{row.get('intent_kind') or '-'}` / 출처: `{row.get('intent_source') or '-'}`",
             f"- 결과: `{row.get('reason') or '-'}` · 근거 {int(row.get('hits') or 0)}건 "
             f"· {int(row.get('elapsed_ms') or 0)}ms",
+            f"- 기록된 검색: {recorded_search_count(row) if recorded_search_count(row) is not None else '모름'}건",
             f"- 모델: `{row.get('model') or '-'}` · 전문 봇 시도: "
             f"`{row.get('specialists_attempted') or row.get('attempted_specialists') or '-'}`",
             f"- 오류: `{_text(row.get('error'), 1000) or '-'}`",
@@ -289,6 +406,28 @@ def render_report(
                     out.append(
                         f"  처리 메모: {_text(resolved.get('text'), 1000) or '(없음)'}"
                     )
+    out.extend([
+        "",
+        "## 성공 답변 근거 충실도 표본",
+        "",
+        f"> 근거와 출처가 기록된 성공 답변 중 최신 {len(success_sample)}건입니다. "
+        "문장 정확성은 자동 판정하지 않고 사람이 원문 좌표와 대조합니다.",
+    ])
+    for index, row in enumerate(success_sample, start=1):
+        out.extend([
+            "",
+            f"### S{index}. {row.get('ts') or '-'} · {row.get('workspace') or '-'} "
+            f"· QA `{row.get('record_id') or '-'}`",
+            "",
+            "**질문**",
+            _block(row.get("question")),
+            "",
+            "**실제 답변**",
+            _block(row.get("answer")),
+            "",
+            "**출처**",
+            _block("\n".join(str(item) for item in (row.get("citations") or []))),
+        ])
     out.extend([
         "",
         "## Claude 작업 규칙",

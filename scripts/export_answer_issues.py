@@ -20,9 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from tybot.answer_issues import (  # noqa: E402
+    HIGH_SEARCH_COUNT,
     KST,
     PROBLEM_FEEDBACK,
     SLOW_MS,
+    SUCCESS_SAMPLE_LIMIT,
     active_feedback,
     build_report,
     feedback_by_record,
@@ -30,15 +32,18 @@ from tybot.answer_issues import (  # noqa: E402
     load_feedback,
     load_records,
     read_jsonl,
+    recorded_search_count,
     render_report,
     report_filename,
 )
 from tybot.envfile import load_env_file  # noqa: E402
 
 __all__ = [
+    "HIGH_SEARCH_COUNT",
     "KST",
     "PROBLEM_FEEDBACK",
     "SLOW_MS",
+    "SUCCESS_SAMPLE_LIMIT",
     "active_feedback",
     "build_report",
     "feedback_by_record",
@@ -46,6 +51,7 @@ __all__ = [
     "load_feedback",
     "load_records",
     "read_jsonl",
+    "recorded_search_count",
     "render_report",
     "report_filename",
 ]
