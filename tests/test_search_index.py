@@ -295,7 +295,7 @@ def test_index_candidate_uses_path_and_line_number_together(monkeypatch, tmp_pat
         ],
     )
     archive = ArchiveStore(tmp_path)
-    monkeypatch.setattr(archive, "visible_docs", lambda _ctx: [doc])
+    monkeypatch.setattr(archive, "_visible_channel_docs", lambda _ctx: [doc])
     monkeypatch.setattr(
         search_index, "candidates",
         lambda *_: [_candidate("raw/2026-09-26.md", 10)],

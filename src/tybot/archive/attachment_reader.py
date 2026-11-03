@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -283,6 +284,28 @@ def source_files(root: Path | str) -> list[Path]:
     return sorted(legacy + shadow)
 
 
+def _family_key(path: Path, root: Path | str) -> tuple[str, str, str] | tuple[str]:
+    """Identity available from canonical and transition paths without opening files."""
+    try:
+        parts = path.resolve().relative_to(Path(root).resolve()).parts
+    except ValueError:
+        return (str(path.resolve().parent),)
+    if (
+        len(parts) == 7
+        and parts[0] == "workspaces"
+        and parts[2] == "channels"
+        and parts[4] == "attachments"
+    ):
+        return (parts[1], parts[3].split("__", 1)[0], parts[5])
+    if (
+        len(parts) == 6
+        and parts[2] == "archive"
+        and parts[3] == "attachments"
+    ):
+        return (parts[0], parts[1].split("__", 1)[0], parts[4])
+    return (str(path.resolve().parent),)
+
+
 #: 없으면 문서로 세지 않는 칸. 하나라도 비면 그 문서는 **좌표가 없는 본문**이다 —
 #: 출처를 붙일 수도, 권한을 판정할 수도, 중복을 막을 수도 없다.
 REQUIRED_FIELDS = ("workspace", "channel_id", "file_id", "revision", "conversion_state")
@@ -506,25 +529,61 @@ def _newer(candidate: AttachmentDoc, current: AttachmentDoc) -> bool:
 
 
 def evidence(
-    root: Path | str, channel_docs, *, cache: DocCache | None = None
+    root: Path | str, channel_docs, *, cache: DocCache | None = None,
+    paths: set[str] | None = None,
 ) -> list[AttachmentDoc]:
     """일반 근거로 쓸 첨부. 상태·revision·중복 셋 다 거른다."""
-    loaded = [
-        doc
-        for doc in (
-            load_checked(path, root, cache=cache) for path in source_files(root)
-        )
-        if doc
-    ]
+    return list(iter_evidence(root, channel_docs, cache=cache, paths=paths))
+
+
+def iter_evidence(
+    root: Path | str, channel_docs, *, cache: DocCache | None = None,
+    paths: set[str] | None = None,
+) -> Iterator[AttachmentDoc]:
+    """Yield current evidence one file-id family at a time."""
+    files = source_files(root)
+    requested: set[Path] | None = None
+    if paths is not None:
+        base = Path(root).resolve()
+        requested = set()
+        families: set[tuple[str, ...]] = set()
+        for value in paths:
+            relative = Path(str(value or ""))
+            if relative.is_absolute():
+                continue
+            candidate = (base / relative).resolve()
+            if not candidate.is_relative_to(base):
+                continue
+            requested.add(candidate)
+            families.add(_family_key(candidate, root))
+        # converted_at, not the filename, selects the current revision. Read only
+        # siblings of DB candidates so an old indexed revision cannot revive.
+        files = [path for path in files if _family_key(path, root) in families]
     legacy = legacy_index(channel_docs)
-    # A newer partial/failed revision must not expose an older successful body.
-    current = current_by_file(loaded)
-    return [
-        doc for doc in current
-        if doc.conversion_state in GENERAL_EVIDENCE
-        and doc.text.strip()
-        and not legacy.has(doc.workspace, doc.channel_id, doc.name)
-    ]
+    grouped: dict[tuple[str, ...], list[Path]] = {}
+    for path in files:
+        grouped.setdefault(_family_key(path, root), []).append(path)
+    for siblings in grouped.values():
+        loaded = [
+            doc
+            for doc in (
+                load_checked(path, root, cache=cache) for path in siblings
+            )
+            if doc
+        ]
+        # A newer partial/failed revision must not expose an older successful body.
+        for doc in current_by_file(loaded):
+            if (
+                doc.conversion_state not in GENERAL_EVIDENCE
+                or not doc.text.strip()
+                or legacy.has(doc.workspace, doc.channel_id, doc.name)
+            ):
+                continue
+            if requested is not None and (
+                doc.source_path is None or doc.source_path.resolve() not in requested
+            ):
+                continue
+            yield doc
 
 
 def all_revisions(root: Path | str) -> list[AttachmentDoc]:
@@ -578,14 +637,15 @@ def as_archive_doc(doc: AttachmentDoc, root: Path | str) -> ArchiveDoc:
 
 
 def archive_docs(
-    root: Path | str, channel_docs, *, cache: DocCache | None = None
+    root: Path | str, channel_docs, *, cache: DocCache | None = None,
+    paths: set[str] | None = None,
 ) -> list[ArchiveDoc]:
     """`ArchiveStore.docs()` 가 채널 문서 뒤에 붙이는 것.
 
     `cache` 가 있으면 **줄 객체까지** 재사용한다. 첨부 본문은 한 줄이 `RawLine`
     하나가 되므로, 여기서 다시 만들면 한 질문이 같은 것을 수십 번 만든다.
     """
-    docs = evidence(root, channel_docs, cache=cache)
+    docs = evidence(root, channel_docs, cache=cache, paths=paths)
     if cache is None:
         return [as_archive_doc(doc, root) for doc in docs]
     return [
@@ -596,6 +656,22 @@ def archive_docs(
         )
         for doc in docs
     ]
+
+
+def iter_archive_docs(
+    root: Path | str, channel_docs, *, cache: DocCache | None = None,
+    paths: set[str] | None = None,
+) -> Iterator[ArchiveDoc]:
+    """Yield searchable attachments without retaining the full archive list."""
+    for doc in iter_evidence(root, channel_docs, cache=cache, paths=paths):
+        if cache is None:
+            yield as_archive_doc(doc, root)
+            continue
+        yield cache.as_archive(
+            doc.source_path or Path(root) / doc.relative_path(),
+            doc,
+            lambda doc=doc: as_archive_doc(doc, root),
+        )
 
 
 def audit_archive_docs(root: Path | str) -> list[ArchiveDoc]:

@@ -674,7 +674,13 @@ class ArchiveStore:
         """일반 근거 문서. 내부에서 항상 ``revision_reader.apply`` 를 거친다."""
         return self._docs(dm_scope=dm_scope)
 
-    def _docs(self, *, dm_scope: str = "", predicate=None) -> list[ArchiveDoc]:
+    def _docs(
+        self,
+        *,
+        dm_scope: str = "",
+        predicate=None,
+        include_attachments: bool = True,
+    ) -> list[ArchiveDoc]:
         loaded = self.source_docs(dm_scope=dm_scope)
 
         # 같은 이름의 문서에 **진짜 Slack ID** 가 있으면 그 ID 로 묶는다.
@@ -732,6 +738,8 @@ class ArchiveStore:
         # 감사 조회는 `audit_docs()` 로 간다. 같은 함수에 플래그를 두면 호출부
         # 하나가 기본값을 잘못 줘서 지워진 문장이 답변에 나간다.
         channels = [revision_reader.apply(doc) for doc in merged]
+        if not include_attachments:
+            return channels
         # 첨부 정본은 **별도 문서**로 붙인다. 채널 문서에 합치면 사람 발언과
         # 문서 본문이 한 줄기가 되고, 문서의 8월 금액과 사람이 9월에 정정한
         # 금액이 같은 목록에 오른다(절대 원칙 7 이 막으려던 것).
@@ -884,6 +892,13 @@ class ArchiveStore:
         설정을 **문서마다 읽지 않는다.** 한 요청에서 값이 바뀌면 같은 답 안에서
         어떤 문서는 들어오고 어떤 문서는 빠진다.
         """
+        return self._docs(
+            dm_scope=str(getattr(ctx, "user_id", "") or ""),
+            predicate=self._visible_predicate(ctx),
+        )
+
+    def _visible_predicate(self, ctx: RequestContext):
+        """The permission check shared by eager and candidate-only reads."""
         from ..channel_lifecycle import include_retired, keep
 
         allow_retired = include_retired()
@@ -902,9 +917,14 @@ class ArchiveStore:
                 dm_user=d.dm_user,
             )
 
+        return permitted
+
+    def _visible_channel_docs(self, ctx: RequestContext) -> list[ArchiveDoc]:
+        """Visible channel originals without materializing attachment bodies."""
         return self._docs(
             dm_scope=str(getattr(ctx, "user_id", "") or ""),
-            predicate=permitted,
+            predicate=self._visible_predicate(ctx),
+            include_attachments=False,
         )
 
     def titles(self, ctx: RequestContext) -> list[str]:
@@ -1068,7 +1088,7 @@ class ArchiveStore:
         if not tokens:
             return []
 
-        docs = self.visible_docs(ctx)
+        docs = self._visible_channel_docs(ctx)
         if channels is not None:
             # 전문 봇의 `where`는 검색 결과를 받은 뒤 자르는 조건이 아니다.
             # 먼저 권한을 적용한 문서에서 범위를 더 좁힌다. 반대로 이 인자로
@@ -1076,7 +1096,30 @@ class ArchiveStore:
             docs = [doc for doc in docs if doc.channel in channels]
         found = search_index.candidates(query, sorted({d.channel for d in docs if d.channel}))
         if found is None:
-            return self._scan(query, tokens, docs, limit)
+            return self._scan_attachment_fallback(
+                query, tokens, docs, ctx, limit, channels
+            )
+
+        # Candidate coordinates narrow attachment bodies before they become Python
+        # objects. Channel originals stay eager because the bounded raw cache owns
+        # them. If these candidates prove unusable, the existing full scan below
+        # preserves the fail-safe behavior for a stale index.
+        from . import attachment_reader
+
+        attachment_paths = {
+            cand.doc_path
+            for cand in found
+            if "attachments" in Path(cand.doc_path).parts
+        }
+        if attachment_paths:
+            attachments = attachment_reader.archive_docs(
+                self.root,
+                docs,
+                cache=self._attachments,
+                paths=attachment_paths,
+            )
+            permitted = self._visible_predicate(ctx)
+            docs += [doc for doc in attachments if permitted(doc)]
 
         # 색인이 넣은 것과 같은 실제 파일 좌표로 찾는다. 병합 문서의 `doc.path`는
         # 최신 일자 파일 하나뿐이지만 line_no는 일자 파일마다 다시 시작한다.
@@ -1110,7 +1153,9 @@ class ArchiveStore:
         if not hits:
             # 색인이 아직 안 돌았을 수 있다. 0건으로 답하기 전에 파일을 한 번 본다 —
             # 「색인 없음」이 「자료 없음」으로 보이는 것이 이 기능의 가장 나쁜 실패다.
-            return self._scan(query, tokens, docs, limit)
+            return self._scan_attachment_fallback(
+                query, tokens, docs, ctx, limit, channels
+            )
 
         # 색인에 **일부** 결과가 있으면 예전에는 여기서 끝났다. 그래서 방금 들어온
         # 줄(예: 재변환한 첨부)이 조용히 검색에서 빠졌다 — 오류도 0건도 아니라
@@ -1118,6 +1163,25 @@ class ArchiveStore:
         #
         # 낡은 문서만 파일에서 보완한다. 전체 아카이브를 매번 훑지 않는다.
         hits += self._stale_hits(query, tokens, docs, expected_counts)
+        return self._rank(hits, limit)
+
+    def _scan_attachment_fallback(
+        self, query, tokens, channel_docs, ctx, limit, channels
+    ) -> list[SearchHit]:
+        """Scan attachments one file family at a time when the index cannot help."""
+        from . import attachment_reader
+
+        keep = max(limit, 1) * SCAN_KEEP_FACTOR
+        hits = self._scan(query, tokens, channel_docs, keep)
+        permitted = self._visible_predicate(ctx)
+        for doc in attachment_reader.iter_archive_docs(
+            self.root, channel_docs, cache=self._attachments
+        ):
+            if not permitted(doc) or (channels is not None and doc.channel not in channels):
+                continue
+            hits.extend(self._scan(query, tokens, [doc], keep))
+            if len(hits) >= keep * 2:
+                hits = self._rank(hits, keep)
         return self._rank(hits, limit)
 
     def _stale_hits(self, query, tokens, docs, expected_counts) -> list[SearchHit]:
