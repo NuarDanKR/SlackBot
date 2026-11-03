@@ -45,6 +45,8 @@ MIN_PASSWORD_LENGTH = 8
 SESSION_COOKIE = "tybot_console"
 # 세션 유효 시간. 업무 중 다시 로그인하지 않을 만큼 길고, 자리를 비운 사이에는 끊길 만큼 짧게.
 SESSION_HOURS = 12
+#: 계정 목록을 DB 에서 다시 읽는 간격(초). 계정 동기화가 멈춘 계정은 늦어도 이만큼 뒤에 끊긴다.
+RELOAD_SECONDS = 300
 
 # scrypt 파라미터. 표준 라이브러리만 쓴다.
 _SCRYPT_N = 2**14
@@ -185,6 +187,8 @@ def load_accounts() -> list[Account]:
                  WHERE u.active
                    AND u.password_hash IS NOT NULL
                    AND u.password_hash <> ''
+                   -- 임시 비밀번호 계정은 세션을 받지 못한다. 먼저 바꿔야 한다(password_issue).
+                   AND NOT u.must_change_password
                  GROUP BY u.email, u.name, u.role, u.password_hash
                  ORDER BY u.email
                 """
@@ -228,6 +232,7 @@ class Authenticator:
     ) -> None:
         self._db_backed = accounts is None
         self.accounts = list(accounts) if accounts is not None else load_accounts()
+        self._loaded_at = time.monotonic()
         if not self.accounts:
             raise AuthConfigurationError(
                 "활성 콘솔 계정이 없습니다. set-password 명령으로 DB 계정을 먼저 만드세요."
@@ -252,6 +257,22 @@ class Authenticator:
             if not accounts:
                 raise AuthConfigurationError("활성 콘솔 계정이 없습니다.")
             self.accounts = accounts
+            self._loaded_at = time.monotonic()
+
+    def refresh_if_stale(self, max_age: float | None = None) -> None:
+        """다른 프로세스(계정 동기화 타이머)가 바꾼 계정을 늦어도 `max_age` 안에 반영한다.
+
+        멈춘 계정의 세션이 콘솔 재시작 때까지 살아 있으면 「퇴직하면 막힌다」 가 거짓이 된다.
+        DB 가 잠깐 안 되면 지금 목록으로 계속 간다 — 그 순간 전원이 로그아웃되면 안 된다.
+        """
+        limit = RELOAD_SECONDS if max_age is None else max_age
+        if not self._db_backed or time.monotonic() - self._loaded_at < limit:
+            return
+        try:
+            self.reload()
+        except AuthConfigurationError as exc:
+            self._loaded_at = time.monotonic()
+            logger.warning("콘솔 계정 재조회 실패 — 이전 목록으로 계속합니다: %s", exc)
 
     # --- 계정 조회 --------------------------------------------------------
     def account_by_email(self, email: str) -> Account | None:
@@ -325,6 +346,7 @@ class Authenticator:
 
         if not session:
             raise AuthError("로그인이 필요합니다.")
+        self.refresh_if_stale()
         return self.verify(session)
 
 

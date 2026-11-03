@@ -351,6 +351,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(("적용" if args.apply else "미리 보기"), result["counts"],
           "읽지 못함:", result["unreadWorkspaces"] or "없음")
+    if args.apply:
+        # 임시 비밀번호: 기한 지난 발급을 닫고, 닫힌 발급의 DM 을 Slack 에서 지운다.
+        from . import password_issue
+
+        try:
+            print("임시 비밀번호 정리:", password_issue.cleanup())
+        except Exception as exc:  # noqa: BLE001 - 정리 실패로 동기화 결과를 무르지 않는다
+            print(f"임시 비밀번호 정리 실패: {type(exc).__name__}")
     return 0
 
 

@@ -111,7 +111,12 @@ SELECT p.*,
        (SELECT json_build_object('email', cu.email, 'role', cu.role,
                                  'active', cu.active, 'lastSeen', cu.last_seen,
                                  'managed', cu.managed_by IS NOT NULL,
-                                 'stoppedAt', cu.stopped_at, 'stopReason', cu.stop_reason)
+                                 'stoppedAt', cu.stopped_at, 'stopReason', cu.stop_reason,
+                                 -- none: 비밀번호 미발급 · temp: 임시 발급(변경 전) · set: 사용 중
+                                 'password', CASE WHEN cu.must_change_password THEN 'temp'
+                                                  WHEN coalesce(cu.password_hash, '') <> '' THEN 'set'
+                                                  ELSE 'none' END,
+                                 'tempExpiresAt', cu.temp_expires_at)
           FROM console_user cu
          WHERE p.email IS NOT NULL AND lower(cu.email) = lower(btrim(p.email))
          LIMIT 1) AS console,

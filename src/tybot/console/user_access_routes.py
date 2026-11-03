@@ -15,6 +15,8 @@
 | POST | `/api/bot-access/{id}/revoke` | 회수 |
 | POST | `/api/account-sync` | 콘솔 계정 동기화(apply=false 면 미리 보기) |
 | GET  | `/api/account-sync/runs` | 동기화 회차 기록 |
+| POST | `/api/console-users/password-reset` | 한 사람에게 임시 비밀번호 재발급(TYBot DM) |
+| POST | `/api/password-issue/initial` | 비밀번호를 받은 적 없는 계정에 초기 임시 비밀번호(apply=false 면 미리 보기) |
 
 오류 본문(`detail`)은 코드다(`user_directory.CODES`). 화면이 문구로 바꾼다.
 """
@@ -27,7 +29,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import account_sync
+from . import account_sync, password_issue
 from . import user_directory as store
 from .auth import ConsoleUser
 
@@ -44,6 +46,14 @@ class RevokeBody(BaseModel):
 
 
 class AccountSyncBody(BaseModel):
+    apply: bool = False
+
+
+class PasswordResetBody(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+
+
+class InitialPasswordBody(BaseModel):
     apply: bool = False
 
 
@@ -182,6 +192,51 @@ def build_router(
             )
         return result
 
+    @router.post("/api/console-users/password-reset")
+    def post_password_reset(
+        body: PasswordResetBody,
+        request: Request,
+        user: ConsoleUser = user_dependency,
+    ) -> dict:
+        """임시 비밀번호를 다시 발급해 본인 DM 으로 보낸다. 기존 비밀번호는 바로 못 쓴다."""
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = password_issue.issue(body.email, kind="reset", actor=user.email)
+        except password_issue.PasswordError as exc:
+            code = str(exc)
+            raise HTTPException(status_code=password_issue.CODES.get(code, 422),
+                                detail=code) from exc
+        with contextlib.suppress(Exception):
+            reload_accounts()   # 기존 비밀번호 세션 목록에서 바로 뺀다
+        audit_event(
+            actor=user.email, category="console-user", action="password-reset",
+            target_type="console-user", target_id=result["email"], outcome="succeeded",
+            metadata={"workspace": result["workspace"]},
+        )
+        return {"email": result["email"], "expiresAt": result["expiresAt"],
+                "workspace": result["workspace"]}
+
+    @router.post("/api/password-issue/initial")
+    def post_initial_passwords(
+        body: InitialPasswordBody,
+        request: Request,
+        user: ConsoleUser = user_dependency,
+    ) -> dict:
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = password_issue.initial(actor=user.email, apply=body.apply)
+        except password_issue.PasswordError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if body.apply:
+            audit_event(
+                actor=user.email, category="console-user", action="password-initial",
+                target_type="console-user", target_id="bulk", outcome="succeeded",
+                metadata={"sent": len(result["sent"]), "failed": len(result["failed"])},
+            )
+        return result
+
     @router.get("/api/account-sync/runs")
     def get_account_sync_runs(user: ConsoleUser = user_dependency) -> dict:
         require_admin(user)
@@ -193,4 +248,5 @@ def build_router(
     return router
 
 
-__all__ = ["AccountSyncBody", "GrantBody", "RevokeBody", "build_router"]
+__all__ = ["AccountSyncBody", "GrantBody", "InitialPasswordBody", "PasswordResetBody",
+           "RevokeBody", "build_router"]
