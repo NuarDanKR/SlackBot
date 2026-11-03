@@ -122,6 +122,30 @@ def may_use_bot(conn, *, bot: str, workspace: str, slack_user: str) -> Decision:
     return decision
 
 
+SOURCE_SQL = """
+SELECT workspace, channel_id FROM bot_source_channel
+ WHERE bot = %(bot)s AND removed_at IS NULL
+"""
+
+
+def source_channels(conn, *, bot: str) -> frozenset[tuple[str, str]]:
+    """이 봇이 근거로 쓸 수 있는 (워크스페이스, 채널 ID). **이 밖의 채널은 보지 않는다.**
+
+    비어 있거나 읽지 못하면 빈 집합 — 근거 없음(막는 쪽이 기본값). 봇은 검색 결과를
+    이 집합으로 거른 뒤에만 답을 만든다.
+    """
+    if bot not in BOTS:
+        return frozenset()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(SOURCE_SQL, {"bot": bot})
+            return frozenset((str(_row(r, "workspace", 0)), str(_row(r, "channel_id", 1)))
+                             for r in cur.fetchall())
+    except Exception as exc:  # noqa: BLE001 - 못 읽으면 근거 없음
+        logger.warning("봇 근거 채널 조회 실패 bot=%s err=%s", bot, exc.__class__.__name__)
+        return frozenset()
+
+
 __all__ = [
     "ALLOWED",
     "BOTS",
@@ -136,4 +160,5 @@ __all__ = [
     "Decision",
     "decide_for_emp",
     "may_use_bot",
+    "source_channels",
 ]

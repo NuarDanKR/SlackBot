@@ -15,6 +15,9 @@
 | POST | `/api/bot-access/{id}/revoke` | 회수 |
 | POST | `/api/account-sync` | 콘솔 계정 동기화(apply=false 면 미리 보기) |
 | GET  | `/api/account-sync/runs` | 동기화 회차 기록 |
+| GET  | `/api/bot-sources` | 봇 근거 채널(열린 것)과 등록·해제 이력 |
+| POST | `/api/bot-sources` | 채널을 근거로 등록(여러 개) |
+| POST | `/api/bot-sources/remove` | 근거에서 해제(여러 개) |
 | POST | `/api/console-users/password-reset` | 한 사람에게 임시 비밀번호 재발급(TYBot DM) |
 | POST | `/api/password-issue/initial` | 비밀번호를 받은 적 없는 계정에 초기 임시 비밀번호(apply=false 면 미리 보기) |
 
@@ -47,6 +50,18 @@ class RevokeBody(BaseModel):
 
 class AccountSyncBody(BaseModel):
     apply: bool = False
+
+
+class SourceChannel(BaseModel):
+    workspace: str = Field(min_length=1, max_length=40)
+    channelId: str = Field(min_length=1, max_length=40)
+    name: str = Field(default="", max_length=200)
+
+
+class SourcesBody(BaseModel):
+    bot: str = Field(min_length=1, max_length=40)
+    channels: list[SourceChannel] = Field(min_length=1, max_length=300)
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class PasswordResetBody(BaseModel):
@@ -192,6 +207,48 @@ def build_router(
             )
         return result
 
+    @router.get("/api/bot-sources")
+    def get_bot_sources(bot: str, user: ConsoleUser = user_dependency) -> dict:
+        require_admin(user)
+        try:
+            return store.list_sources(bot=bot)
+        except store.UserDirectoryError as exc:
+            raise _refused(exc) from exc
+
+    @router.post("/api/bot-sources")
+    def post_bot_sources(body: SourcesBody, request: Request,
+                         user: ConsoleUser = user_dependency) -> dict:
+        """채널을 봇 근거로 등록한다. 임원이 멤버가 아닌 채널을 여는 일이라 사유를 받는다."""
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = store.add_sources(bot=body.bot, channels=[c.model_dump() for c in body.channels],
+                                       reason=body.reason, actor=user.email)
+        except store.UserDirectoryError as exc:
+            raise _refused(exc) from exc
+        audit_event(actor=user.email, category="bot-access", action="source-add",
+                    target_type="bot_source_channel", target_id=result["bot"],
+                    outcome="succeeded",
+                    metadata={"added": result["added"], "already": len(result["already"])})
+        return result
+
+    @router.post("/api/bot-sources/remove")
+    def post_bot_sources_remove(body: SourcesBody, request: Request,
+                                user: ConsoleUser = user_dependency) -> dict:
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = store.remove_sources(bot=body.bot,
+                                          channels=[c.model_dump() for c in body.channels],
+                                          reason=body.reason, actor=user.email)
+        except store.UserDirectoryError as exc:
+            raise _refused(exc) from exc
+        audit_event(actor=user.email, category="bot-access", action="source-remove",
+                    target_type="bot_source_channel", target_id=result["bot"],
+                    outcome="succeeded",
+                    metadata={"removed": result["removed"], "missing": len(result["missing"])})
+        return result
+
     @router.post("/api/console-users/password-reset")
     def post_password_reset(
         body: PasswordResetBody,
@@ -249,4 +306,4 @@ def build_router(
 
 
 __all__ = ["AccountSyncBody", "GrantBody", "InitialPasswordBody", "PasswordResetBody",
-           "RevokeBody", "build_router"]
+           "RevokeBody", "SourceChannel", "SourcesBody", "build_router"]

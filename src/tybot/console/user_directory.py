@@ -16,6 +16,7 @@ DB 메시지를 싣지 않는다 — 접속 문자열이 섞일 수 있다.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -413,14 +414,123 @@ def check(*, bot: str, emp_no: str | None = None, workspace: str | None = None,
     }
 
 
+# ---------------------------------------------------------------------------
+# 근거 채널 — 봇이 어느 채널 자료로 답하나
+# ---------------------------------------------------------------------------
+
+_CHANNEL_ID = re.compile(r"^[CG][A-Z0-9]{6,}$")
+_WORKSPACE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
+
+
+def _channels(items: list[dict], *, limit: int = 300) -> list[tuple[str, str, str]]:
+    out: list[tuple[str, str, str]] = []
+    seen = set()
+    for item in items or []:
+        ws = str(item.get("workspace") or "").strip().lower()
+        ch = str(item.get("channelId") or "").strip().upper()
+        name = str(item.get("name") or "").strip()[:200]
+        if not _WORKSPACE.fullmatch(ws) or not _CHANNEL_ID.fullmatch(ch):
+            raise UserDirectoryError("invalid_request")
+        if (ws, ch) not in seen:
+            seen.add((ws, ch))
+            out.append((ws, ch, name))
+    if not out or len(out) > limit:
+        raise UserDirectoryError("invalid_request")
+    return out
+
+
+def _source(row: dict) -> dict:
+    return {
+        "id": row["id"], "bot": row["bot"], "workspace": row["workspace"],
+        "channelId": row["channel_id"], "name": row["channel_name"], "reason": row["reason"],
+        "addedBy": row["added_by"], "addedAt": row["added_at"],
+        "removedAt": row["removed_at"], "removedBy": row["removed_by"],
+        "removeReason": row["remove_reason"],
+    }
+
+
+def list_sources(*, bot: str, connect=None) -> dict:
+    """근거 채널(지금 열린 것)과 등록·해제 이력(최근 순)."""
+    bot = _bot(bot)
+    try:
+        with (connect or _connect)() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT * FROM bot_source_channel WHERE bot = %s
+                            ORDER BY coalesce(removed_at, added_at) DESC, id DESC LIMIT 500""",
+                        (bot,))
+            rows = [_source(dict(r)) for r in cur.fetchall()]
+    except UserDirectoryError:
+        raise
+    except Exception as exc:
+        raise UserDirectoryError("database_unavailable") from exc
+    active = sorted((r for r in rows if r["removedAt"] is None),
+                    key=lambda r: (r["workspace"], r["name"] or r["channelId"]))
+    return {"bot": bot, "channels": active, "history": rows}
+
+
+def add_sources(*, bot: str, channels: list[dict], reason: str, actor: str,
+                connect=None) -> dict:
+    """채널을 근거로 등록한다. 이미 등록된 채널은 건너뛰고 센다."""
+    bot = _bot(bot)
+    items = _channels(channels)
+    reason = _text(reason, limit=500)
+    actor = _text(actor, limit=200).lower()
+    added, already = [], []
+    try:
+        with (connect or _connect)() as conn, conn.cursor() as cur:
+            for ws, ch, name in items:
+                cur.execute(
+                    """INSERT INTO bot_source_channel (bot, workspace, channel_id, channel_name,
+                                                       reason, added_by)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (bot, workspace, channel_id) WHERE removed_at IS NULL
+                       DO NOTHING RETURNING id""",
+                    (bot, ws, ch, name, reason, actor),
+                )
+                (added if cur.fetchone() else already).append(f"{ws}:{ch}")
+    except UserDirectoryError:
+        raise
+    except Exception as exc:
+        raise UserDirectoryError("database_unavailable") from exc
+    return {"bot": bot, "added": added, "already": already}
+
+
+def remove_sources(*, bot: str, channels: list[dict], reason: str, actor: str,
+                   connect=None) -> dict:
+    """채널을 근거에서 해제한다. 줄은 남는다. 등록되지 않은 채널은 건너뛰고 센다."""
+    bot = _bot(bot)
+    items = _channels(channels)
+    reason = _text(reason, limit=500)
+    actor = _text(actor, limit=200).lower()
+    removed, missing = [], []
+    try:
+        with (connect or _connect)() as conn, conn.cursor() as cur:
+            for ws, ch, _name in items:
+                cur.execute(
+                    """UPDATE bot_source_channel
+                          SET removed_at = now(), removed_by = %s, remove_reason = %s
+                        WHERE bot = %s AND workspace = %s AND channel_id = %s
+                          AND removed_at IS NULL RETURNING id""",
+                    (actor, reason, bot, ws, ch),
+                )
+                (removed if cur.fetchone() else missing).append(f"{ws}:{ch}")
+    except UserDirectoryError:
+        raise
+    except Exception as exc:
+        raise UserDirectoryError("database_unavailable") from exc
+    return {"bot": bot, "removed": removed, "missing": missing}
+
+
 __all__ = [
     "CODES",
     "VIEWS",
     "GrantRequest",
     "UserDirectoryError",
+    "add_sources",
     "check",
     "grant",
     "list_grants",
     "list_people",
+    "list_sources",
+    "remove_sources",
     "revoke",
 ]
