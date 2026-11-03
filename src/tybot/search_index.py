@@ -31,6 +31,8 @@ import os
 import re
 from dataclasses import dataclass
 
+from .archive.text_normalize import remove_nul
+
 log = logging.getLogger("tybot.search_index")
 
 # 검색어 토큰: **2자 이상** 한글/영숫자.
@@ -217,26 +219,40 @@ def reindex(docs, root=None, *, batch: int = 1000) -> dict:
     written = 0
     seen_lines = 0
     seen_docs = 0
+    nul_lines = 0
+    nul_chars = 0
     try:
         with conn, conn.cursor() as cur:
             rows: list[tuple] = []
             for doc in docs:
                 seen_docs += 1
                 for line in doc.raw_lines:
-                    if not line.text.strip():
+                    body, n5 = remove_nul(str(line.text or ""))
+                    if not body.strip():
+                        if n5:
+                            nul_lines += 1
+                            nul_chars += n5
                         continue
+                    workspace, n1 = remove_nul(str(doc.workspace or ""))
+                    channel, n2 = remove_nul(str(doc.channel or ""))
+                    spoken_at, n3 = remove_nul(str(line.ts or ""))
+                    speaker, n4 = remove_nul(str(line.speaker or ""))
+                    removed = n1 + n2 + n3 + n4 + n5
+                    if removed:
+                        nul_lines += 1
+                        nul_chars += removed
                     rows.append((
-                        doc.workspace,
-                        doc.channel,
+                        workspace,
+                        channel,
                         # 합쳐진 채널 문서의 대표 경로가 아니라 줄이 실제로 있는
                         # 일자 파일 경로다. 일자 파일마다 line_no가 다시 시작하므로
                         # 대표 경로를 쓰면 서로 다른 날의 같은 번호가 충돌한다.
                         rel_path(line.source_path or doc.path, root),
                         line.lineno,
-                        line.ts,
-                        line.speaker,
-                        line.text,
-                        content_sha(doc.channel, line.lineno, line.text),
+                        spoken_at,
+                        speaker,
+                        body,
+                        content_sha(channel, line.lineno, body),
                     ))
                     seen_lines += 1
                     if len(rows) >= batch:
@@ -248,6 +264,12 @@ def reindex(docs, root=None, *, batch: int = 1000) -> dict:
     except Exception as exc:
         raise IndexError_(f"색인 실패: {exc}") from exc
 
+    if nul_chars:
+        log.warning(
+            "검색 색인 파생 텍스트에서 NUL 제거 lines=%d chars=%d",
+            nul_lines,
+            nul_chars,
+        )
     log.info("검색 색인 문서=%d 보낸 줄=%d 새 줄=%d", seen_docs, seen_lines, written)
     return {"docs": seen_docs, "lines": written, "seen_lines": seen_lines}
 

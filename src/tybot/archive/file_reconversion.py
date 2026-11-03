@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from uuid import uuid4
 
 from ..pii_screen import ScreenMetadata, screen_document
 from .convert import conversion_stamp, convert_with_coverage
+from .text_normalize import remove_nul
+
+log = logging.getLogger("tybot.archive.file_reconversion")
 
 
 def reconvert(meta: dict, destination: Path, *, render_hwp: bool = False, actor: str = '') -> Path:
@@ -34,6 +38,13 @@ def reconvert(meta: dict, destination: Path, *, render_hwp: bool = False, actor:
     else:
         body, coverage = convert_with_coverage(str(meta.get("filetype") or ""), raw)
     text = "\n".join(body)
+    text, removed_nuls = remove_nul(text)
+    if removed_nuls:
+        log.warning(
+            "첨부 재변환 결과에서 NUL 제거 file_id=%s count=%d",
+            str(meta.get("file_id") or ""),
+            removed_nuls,
+        )
     if not text.strip():
         raise ValueError("empty conversion output")
     screen = screen_document(text, filename=str(meta.get("name") or ""),

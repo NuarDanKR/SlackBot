@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 
 from ..pii_screen import ScreenMetadata
 from .convert import ConvertError, can_convert, convert
+from .text_normalize import remove_nul
 
 logger = logging.getLogger("tybot.files")
 
@@ -456,6 +457,15 @@ def stage_attachments(
                 with collect_coverage() as coverage:
                     extracted = "\n".join(convert(f.filetype, raw))
             if extracted is not None:
+                extracted, removed_nuls = remove_nul(extracted)
+                if removed_nuls:
+                    logger.warning(
+                        "첨부 변환 결과에서 NUL 제거 file_id=%s count=%d",
+                        file_id,
+                        removed_nuls,
+                    )
+                if not extracted.strip():
+                    raise ConvertError("변환 결과에 검색 가능한 텍스트가 없습니다")
                 state = "converted"
         except (DownloadError, ConvertError, OSError) as exc:
             state = "download_or_extract_failed"
