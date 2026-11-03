@@ -1,0 +1,12 @@
+[Unit]
+Description=TYBot 콘솔 계정 자동 관리 주기 실행
+
+[Timer]
+# 하루 두 번(출근 전·점심). 입·퇴사와 Slack 계정 변경은 하루 단위로 충분하고,
+# users.list 는 Tier 2(분당 20회)라 자주 돌 이유가 없다.
+OnCalendar=*-*-* 07:10,12:40
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

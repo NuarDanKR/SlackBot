@@ -100,11 +100,18 @@ SELECT p.*,
        coalesce((
            SELECT json_agg(json_build_object(
                       'workspace', ui.workspace, 'slackUser', ui.slack_user,
-                      'verifiedBy', ui.verified_by, 'verifiedAt', ui.verified_at)
+                      'verifiedBy', ui.verified_by, 'verifiedAt', ui.verified_at,
+                      -- NULL: 아직 계정 동기화가 읽지 않음. false: Slack 에서 지워짐
+                      'live', sp.active)
                   ORDER BY ui.workspace)
-             FROM user_identity ui WHERE ui.emp_no = p.emp_no), '[]') AS slack,
+             FROM user_identity ui
+             LEFT JOIN slack_presence sp
+                    ON sp.workspace = ui.workspace AND sp.slack_user = ui.slack_user
+            WHERE ui.emp_no = p.emp_no), '[]') AS slack,
        (SELECT json_build_object('email', cu.email, 'role', cu.role,
-                                 'active', cu.active, 'lastSeen', cu.last_seen)
+                                 'active', cu.active, 'lastSeen', cu.last_seen,
+                                 'managed', cu.managed_by IS NOT NULL,
+                                 'stoppedAt', cu.stopped_at, 'stopReason', cu.stop_reason)
           FROM console_user cu
          WHERE p.email IS NOT NULL AND lower(cu.email) = lower(btrim(p.email))
          LIMIT 1) AS console,

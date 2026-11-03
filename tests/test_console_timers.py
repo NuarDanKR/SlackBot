@@ -11,6 +11,7 @@ from tybot.console import timer_manager
 def _helper_output() -> str:
     return "\n".join(
         [
+            "tybot-account-sync.timer\tdisabled\tinactive\tdead\t-\t-\tunknown\tdefault",
             "tybot-collect.timer\tdisabled\tinactive\tdead\t-\t-\tunknown\tdefault",
             "tybot-schedule-dm.timer\tdisabled\tinactive\tdead\t-\t-\tunknown\tdefault",
             "tybot-schedule-sync.timer\tdisabled\tinactive\tdead\t-\t-\tunknown\tdefault",
@@ -29,7 +30,9 @@ def test_timer_snapshot_reports_real_systemd_state(monkeypatch):
 
     rows = timer_manager.snapshot()
 
-    assert len(rows) == 5
+    assert len(rows) == 6
+    sync = next(row for row in rows if row["unit"] == "tybot-account-sync.timer")
+    assert sync["scheduleLabel"] == "매일 07:10·12:40(고정)" and sync["scheduleEditable"] is False
     tidy = next(row for row in rows if row["unit"] == "tybot-tidy.timer")
     assert tidy["enabled"] is True
     assert tidy["active"] is True
@@ -66,7 +69,7 @@ def test_timer_action_uses_fixed_helper_arguments(monkeypatch):
 
     assert calls[0][-3:] == ["schedule", "tybot-tidy.timer", "30m"]
     assert calls[1][-1] == "list"
-    assert len(rows) == 5
+    assert len(rows) == 6
 
 
 def test_timer_action_audit_contains_no_command_or_secret(monkeypatch, tmp_path):

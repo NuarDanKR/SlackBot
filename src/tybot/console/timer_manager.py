@@ -14,6 +14,12 @@ HELPER_DEFAULT = "/usr/local/libexec/tybot-console-timers"
 ALLOWED_ACTIONS = frozenset({"enable", "disable", "run", "schedule"})
 
 TIMERS = {
+    "tybot-account-sync.timer": {
+        "label": "콘솔 계정 동기화",
+        "description": "Slack 을 쓰는 재직자에게 게스트 계정을 주고, 퇴직·Slack 삭제 시 멈춥니다.",
+        "default": "fixed-twice-daily",
+        "presets": {},
+    },
     "tybot-collect.timer": {
         "label": "정기 백필",
         "description": "실시간 수집에서 빠진 업무시간 대화를 보충합니다.",
@@ -55,6 +61,10 @@ TIMERS = {
 }
 
 
+#: 바꿀 수 없는 주기의 표시 이름
+FIXED_LABELS = {"fixed-1m": "매분(고정)", "fixed-twice-daily": "매일 07:10·12:40(고정)"}
+
+
 class TimerManagerError(RuntimeError):
     """허용되지 않았거나 systemd에서 처리하지 못한 타이머 작업."""
 
@@ -92,7 +102,7 @@ def snapshot() -> list[dict]:
         parts = rows[unit]
         preset = parts[7] if parts[7] != "default" else str(meta["default"])
         presets = meta["presets"]
-        schedule_label = "매분(고정)" if preset == "fixed-1m" else presets.get(preset, preset)
+        schedule_label = FIXED_LABELS.get(preset) or presets.get(preset, preset)
         result.append(
             {
                 "unit": unit,

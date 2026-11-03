@@ -13,17 +13,21 @@
 | GET  | `/api/bot-access/check` | 봇이 내릴 판정 그대로(사번 또는 워크스페이스+Slack 사용자) |
 | POST | `/api/bot-access` | 부여 |
 | POST | `/api/bot-access/{id}/revoke` | 회수 |
+| POST | `/api/account-sync` | 콘솔 계정 동기화(apply=false 면 미리 보기) |
+| GET  | `/api/account-sync/runs` | 동기화 회차 기록 |
 
 오류 본문(`detail`)은 코드다(`user_directory.CODES`). 화면이 문구로 바꾼다.
 """
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from . import account_sync
 from . import user_directory as store
 from .auth import ConsoleUser
 
@@ -39,6 +43,14 @@ class RevokeBody(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class AccountSyncBody(BaseModel):
+    apply: bool = False
+
+
+#: 계정 동기화 실패 코드 → HTTP 상태
+SYNC_CODES = {"slack_unavailable": 503, "database_unavailable": 503}
+
+
 def _refused(exc: store.UserDirectoryError) -> HTTPException:
     code = str(exc)
     return HTTPException(status_code=store.CODES.get(code, 422), detail=code)
@@ -50,6 +62,7 @@ def build_router(
     require_admin: Callable[[ConsoleUser], None],
     check_write_request: Callable[[Request], None],
     audit_event: Callable[..., None],
+    reload_accounts: Callable[[], None] = lambda: None,
 ) -> APIRouter:
     router = APIRouter()
     user_dependency = Depends(current_user)
@@ -144,7 +157,40 @@ def build_router(
         )
         return result
 
+    @router.post("/api/account-sync")
+    def post_account_sync(
+        body: AccountSyncBody,
+        request: Request,
+        user: ConsoleUser = user_dependency,
+    ) -> dict:
+        """Slack 을 읽어 게스트 계정을 맞춘다. 미리 보기도 Slack 을 읽으므로 POST 다."""
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = account_sync.run(actor=user.email, dry_run=not body.apply)
+        except account_sync.AccountSyncError as exc:
+            code = str(exc)
+            raise HTTPException(status_code=SYNC_CODES.get(code, 503), detail=code) from exc
+        if body.apply:
+            # 멈춘 계정의 로그인을 지금 프로세스에서도 끊는다. 재조회 실패는 결과를 무르지 않는다.
+            with contextlib.suppress(Exception):
+                reload_accounts()
+            audit_event(
+                actor=user.email, category="console-user", action="account-sync",
+                target_type="account_sync_run", target_id=str(result.get("runId", "")),
+                outcome="succeeded", metadata=result["counts"],
+            )
+        return result
+
+    @router.get("/api/account-sync/runs")
+    def get_account_sync_runs(user: ConsoleUser = user_dependency) -> dict:
+        require_admin(user)
+        try:
+            return {"runs": account_sync.recent_runs()}
+        except account_sync.AccountSyncError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     return router
 
 
-__all__ = ["GrantBody", "RevokeBody", "build_router"]
+__all__ = ["AccountSyncBody", "GrantBody", "RevokeBody", "build_router"]
