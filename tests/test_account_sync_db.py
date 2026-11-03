@@ -119,7 +119,8 @@ def connect():
         try:
             with _connect() as conn:
                 for f in ("index_schema.sql", "console_schema.sql",
-                          "console_account_sync_schema.sql", "console_account_sync_schema.sql"):
+                          "console_account_sync_schema.sql", "console_account_sync_schema.sql",
+                          "console_password_schema.sql"):
                     conn.execute((ROOT / "deploy/sql" / f).read_text(encoding="utf-8"))
                 conn.execute(SEED)
             yield _connect

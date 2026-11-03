@@ -15,6 +15,11 @@
 | POST | `/api/bot-access/{id}/revoke` | 회수 |
 | POST | `/api/account-sync` | 콘솔 계정 동기화(apply=false 면 미리 보기) |
 | GET  | `/api/account-sync/runs` | 동기화 회차 기록 |
+| GET  | `/api/bot-sources` | 봇 근거 채널(열린 것)과 등록·해제 이력 |
+| POST | `/api/bot-sources` | 채널을 근거로 등록(여러 개) |
+| POST | `/api/bot-sources/remove` | 근거에서 해제(여러 개) |
+| POST | `/api/console-users/password-reset` | 한 사람에게 임시 비밀번호 재발급(TYBot DM) |
+| POST | `/api/password-issue/initial` | 비밀번호를 받은 적 없는 계정에 초기 임시 비밀번호(apply=false 면 미리 보기) |
 
 오류 본문(`detail`)은 코드다(`user_directory.CODES`). 화면이 문구로 바꾼다.
 """
@@ -27,7 +32,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import account_sync
+from . import account_sync, password_issue
 from . import user_directory as store
 from .auth import ConsoleUser
 
@@ -44,6 +49,26 @@ class RevokeBody(BaseModel):
 
 
 class AccountSyncBody(BaseModel):
+    apply: bool = False
+
+
+class SourceChannel(BaseModel):
+    workspace: str = Field(min_length=1, max_length=40)
+    channelId: str = Field(min_length=1, max_length=40)
+    name: str = Field(default="", max_length=200)
+
+
+class SourcesBody(BaseModel):
+    bot: str = Field(min_length=1, max_length=40)
+    channels: list[SourceChannel] = Field(min_length=1, max_length=300)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class PasswordResetBody(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+
+
+class InitialPasswordBody(BaseModel):
     apply: bool = False
 
 
@@ -182,6 +207,93 @@ def build_router(
             )
         return result
 
+    @router.get("/api/bot-sources")
+    def get_bot_sources(bot: str, user: ConsoleUser = user_dependency) -> dict:
+        require_admin(user)
+        try:
+            return store.list_sources(bot=bot)
+        except store.UserDirectoryError as exc:
+            raise _refused(exc) from exc
+
+    @router.post("/api/bot-sources")
+    def post_bot_sources(body: SourcesBody, request: Request,
+                         user: ConsoleUser = user_dependency) -> dict:
+        """채널을 봇 근거로 등록한다. 임원이 멤버가 아닌 채널을 여는 일이라 사유를 받는다."""
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = store.add_sources(bot=body.bot, channels=[c.model_dump() for c in body.channels],
+                                       reason=body.reason, actor=user.email)
+        except store.UserDirectoryError as exc:
+            raise _refused(exc) from exc
+        audit_event(actor=user.email, category="bot-access", action="source-add",
+                    target_type="bot_source_channel", target_id=result["bot"],
+                    outcome="succeeded",
+                    metadata={"added": result["added"], "already": len(result["already"])})
+        return result
+
+    @router.post("/api/bot-sources/remove")
+    def post_bot_sources_remove(body: SourcesBody, request: Request,
+                                user: ConsoleUser = user_dependency) -> dict:
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = store.remove_sources(bot=body.bot,
+                                          channels=[c.model_dump() for c in body.channels],
+                                          reason=body.reason, actor=user.email)
+        except store.UserDirectoryError as exc:
+            raise _refused(exc) from exc
+        audit_event(actor=user.email, category="bot-access", action="source-remove",
+                    target_type="bot_source_channel", target_id=result["bot"],
+                    outcome="succeeded",
+                    metadata={"removed": result["removed"], "missing": len(result["missing"])})
+        return result
+
+    @router.post("/api/console-users/password-reset")
+    def post_password_reset(
+        body: PasswordResetBody,
+        request: Request,
+        user: ConsoleUser = user_dependency,
+    ) -> dict:
+        """임시 비밀번호를 다시 발급해 본인 DM 으로 보낸다. 기존 비밀번호는 바로 못 쓴다."""
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = password_issue.issue(body.email, kind="reset", actor=user.email)
+        except password_issue.PasswordError as exc:
+            code = str(exc)
+            raise HTTPException(status_code=password_issue.CODES.get(code, 422),
+                                detail=code) from exc
+        with contextlib.suppress(Exception):
+            reload_accounts()   # 기존 비밀번호 세션 목록에서 바로 뺀다
+        audit_event(
+            actor=user.email, category="console-user", action="password-reset",
+            target_type="console-user", target_id=result["email"], outcome="succeeded",
+            metadata={"workspace": result["workspace"]},
+        )
+        return {"email": result["email"], "expiresAt": result["expiresAt"],
+                "workspace": result["workspace"]}
+
+    @router.post("/api/password-issue/initial")
+    def post_initial_passwords(
+        body: InitialPasswordBody,
+        request: Request,
+        user: ConsoleUser = user_dependency,
+    ) -> dict:
+        require_admin(user)
+        check_write_request(request)
+        try:
+            result = password_issue.initial(actor=user.email, apply=body.apply)
+        except password_issue.PasswordError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if body.apply:
+            audit_event(
+                actor=user.email, category="console-user", action="password-initial",
+                target_type="console-user", target_id="bulk", outcome="succeeded",
+                metadata={"sent": len(result["sent"]), "failed": len(result["failed"])},
+            )
+        return result
+
     @router.get("/api/account-sync/runs")
     def get_account_sync_runs(user: ConsoleUser = user_dependency) -> dict:
         require_admin(user)
@@ -193,4 +305,5 @@ def build_router(
     return router
 
 
-__all__ = ["AccountSyncBody", "GrantBody", "RevokeBody", "build_router"]
+__all__ = ["AccountSyncBody", "GrantBody", "InitialPasswordBody", "PasswordResetBody",
+           "RevokeBody", "SourceChannel", "SourcesBody", "build_router"]

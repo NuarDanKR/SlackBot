@@ -63,7 +63,8 @@ def connect():
             with _connect() as conn:
                 for f in ("index_schema.sql", "console_schema.sql",
                           "bot_access_schema.sql", "bot_access_schema.sql",
-                          "console_account_sync_schema.sql"):
+                          "console_account_sync_schema.sql", "console_password_schema.sql",
+                          "bot_source_schema.sql", "bot_source_schema.sql"):
                     conn.execute((ROOT / "deploy/sql" / f).read_text(encoding="utf-8"))
                 conn.execute(SEED)
             yield _connect
@@ -169,3 +170,41 @@ def test_check_by_slack_user_matches_bot(connect):
     _grant(connect)
     result = store.check(bot="vipbot", workspace="tyit", slack_user="UE1B", connect=connect)
     assert result["allowed"] and result["empNo"] == "E1"
+
+
+CH = [{"workspace": "mgmt", "channelId": "C0AAA1111", "name": "#팀-기획_이사회관리"},
+      {"workspace": "invest", "channelId": "C0BBB2222", "name": "#팀-자금_공통"}]
+
+
+def test_sources_add_remove_and_decision(connect):
+    with connect() as conn:
+        assert bot_access.source_channels(conn, bot="vipbot") == frozenset()   # 비면 근거 없음
+    added = store.add_sources(bot="vipbot", channels=CH, reason="경영진 채널 선정",
+                              actor="Admin@ty.co.kr", connect=connect)
+    assert added["added"] == ["mgmt:C0AAA1111", "invest:C0BBB2222"] and added["already"] == []
+    again = store.add_sources(bot="vipbot", channels=CH[:1], reason="중복", actor="a",
+                              connect=connect)
+    assert again["added"] == [] and again["already"] == ["mgmt:C0AAA1111"]
+    with connect() as conn:
+        assert bot_access.source_channels(conn, bot="vipbot") == {
+            ("mgmt", "C0AAA1111"), ("invest", "C0BBB2222")}
+    gone = store.remove_sources(bot="vipbot", channels=CH[1:], reason="대상 제외", actor="a",
+                                connect=connect)
+    assert gone["removed"] == ["invest:C0BBB2222"]
+    listed = store.list_sources(bot="vipbot", connect=connect)
+    assert [c["channelId"] for c in listed["channels"]] == ["C0AAA1111"]
+    assert listed["channels"][0]["addedBy"] == "admin@ty.co.kr"
+    assert {h["channelId"] for h in listed["history"]} == {"C0AAA1111", "C0BBB2222"}
+    # 해제 후 다시 등록하면 새 줄 — 이력은 둘 다 남는다
+    store.add_sources(bot="vipbot", channels=CH[1:], reason="재선정", actor="a", connect=connect)
+    assert len(store.list_sources(bot="vipbot", connect=connect)["history"]) == 3
+
+
+@pytest.mark.parametrize("bad", [
+    [{"workspace": "mgmt", "channelId": "not-an-id"}],
+    [{"workspace": "MG MT", "channelId": "C0AAA1111"}],
+    [],
+])
+def test_sources_reject_bad_channels(connect, bad):
+    with pytest.raises(store.UserDirectoryError, match="invalid_request"):
+        store.add_sources(bot="vipbot", channels=bad, reason="x", actor="a", connect=connect)

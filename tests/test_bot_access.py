@@ -226,3 +226,23 @@ def test_grant_is_audited_and_errors_map_to_status(monkeypatch):
             5, RevokeBody(reason="r"), object(), user=_user("admin"))
     assert info.value.status_code == 409 and info.value.detail == "already_revoked"
     assert len(audits) == 1                       # 실패는 감사에 「성공」 으로 남기지 않는다
+
+
+@pytest.mark.parametrize("role", ["guest", "developer"])
+def test_source_routes_are_admin_only(role):
+    from fastapi import HTTPException
+
+    from tybot.console.user_access_routes import SourcesBody
+
+    ep = _endpoints(lambda **kw: None)
+    body = SourcesBody(bot="vipbot", channels=[{"workspace": "mgmt", "channelId": "C0AAA1111"}],
+                       reason="r")
+    calls = [
+        lambda: ep[("GET", "/api/bot-sources")](bot="vipbot", user=_user(role)),
+        lambda: ep[("POST", "/api/bot-sources")](body, object(), user=_user(role)),
+        lambda: ep[("POST", "/api/bot-sources/remove")](body, object(), user=_user(role)),
+    ]
+    for call in calls:
+        with pytest.raises(HTTPException) as info:
+            call()
+        assert info.value.status_code == 403

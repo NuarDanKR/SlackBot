@@ -43,6 +43,7 @@ from . import (
     health,
     image_description_admin,
     llm_secret_store,
+    password_issue,
     reader,
     review_jobs,
     rule_test,
@@ -288,6 +289,21 @@ def login(
     읽을 수 있는 값이 된다. HttpOnly 쿠키는 스크립트가 읽지 못한다.
     `SameSite=strict` 로 두어 다른 사이트에서 이 콘솔로 요청을 보낼 수 없게 한다.
     """
+    # 임시 비밀번호 계정은 세션을 주지 않고 「먼저 바꾸라」 를 돌려준다(password_issue).
+    # DB 를 못 보면 보통 로그인으로 간다 — 임시 계정은 인증 목록에 없으므로 열리지 않는다.
+    try:
+        password_issue.temp_login(body.email, body.password)
+    except password_issue.PasswordError as e:
+        code = str(e)
+        if code == "bad_password":
+            logger.warning("로그인 실패(임시 비밀번호) — 이메일 %r", body.email)
+            raise HTTPException(status_code=401,
+                                detail="이메일 또는 비밀번호가 맞지 않습니다.") from e
+        if code != "database_unavailable":
+            raise HTTPException(status_code=password_issue.CODES.get(code, 401),
+                                detail=code) from e
+    except Exception:
+        logger.exception("임시 비밀번호 상태 확인 실패 — 보통 로그인으로 진행")
     try:
         session = auth.login(body.email, body.password)
     except AuthError as e:
@@ -314,6 +330,42 @@ def login(
 @app.post("/api/logout")
 def logout(response: Response) -> dict:
     response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+class PasswordChangeBody(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    currentPassword: str = Field(min_length=1, max_length=200)
+    newPassword: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/password/change")
+def change_password(
+    body: PasswordChangeBody,
+    request: Request,
+    auth: Annotated[Authenticator, Depends(authenticator)],
+) -> dict:
+    """지금 비밀번호(임시 포함)로 새 비밀번호를 정한다. 로그인 전에도 부른다(첫 로그인).
+
+    세션이 없어도 되는 대신 지금 비밀번호를 반드시 받는다. 임시 비밀번호는 틀린 횟수가
+    쌓이고 5번이면 잠긴다.
+    """
+    _check_write_request(request)
+    try:
+        result = password_issue.change(body.email, body.currentPassword, body.newPassword)
+    except password_issue.PasswordError as e:
+        code = str(e)
+        if code == "bad_password":
+            raise HTTPException(status_code=401,
+                                detail="이메일 또는 비밀번호가 맞지 않습니다.") from e
+        raise HTTPException(status_code=password_issue.CODES.get(code, 422), detail=code) from e
+    try:
+        auth.reload()
+    except AuthConfigurationError:
+        logger.exception("비밀번호 변경 후 계정 재조회 실패")
+    _audit_event(actor=result["email"], category="console-user", action="password-change",
+                 target_type="console-user", target_id=result["email"], outcome="succeeded",
+                 metadata={})
     return {"ok": True}
 
 
