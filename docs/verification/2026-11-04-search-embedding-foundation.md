@@ -83,3 +83,14 @@
 revision ledger는 설정 여부가 아니라 실제 DB 연결과 표 존재까지 확인한다. 이 probe가
 실패하면 색인을 시작하지 않는다. channel ID 변경 감지·실제 DB writer 검증·검색 점수
 결합은 여전히 남아 있다.
+
+## 정본에서 모델 입력까지의 계획 경계
+
+`tybot.embedding_index_plan.plan_source`는 정본과 writer 사이의 마지막 순수 검증
+경계다. channel·attachment만 받고 DM과 알 수 없는 종류는 거절한다. NUL·CRLF가 남은
+본문, 정본 SHA 불일치, 비정규 문서 좌표, 청크의 본문·좌표·상한·덮임·복원 불일치도
+모델 호출 전에 고정 코드로 거절한다.
+
+통과한 계획만 정본 판·청커 판·모델 revision이 묶인 `DocumentKey`와 청크별 SHA-256을
+내보낸다. 원문과 청크 본문은 dataclass 표현에서 제외했다. 이 계층은 모델을 호출하거나
+DB를 열지 않으며, 검색 결합이나 운영 활성화를 뜻하지 않는다.

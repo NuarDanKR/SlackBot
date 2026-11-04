@@ -2074,6 +2074,8 @@ TYBot 수집 계층에서 사전 설치된 kordoc/LibreOffice를 호출한다
 - [x] channel·attachment 정본 창구와 현재 ACL opener. KST 오늘 자 raw는 제외하고,
       DM 색인은 `kind` 분리 스키마 전까지 거절한다. 정본 판과 청커 판은
       `source-v1:chunk-v1:max=1200:ov=120`처럼 한 revision으로 묶는다.
+- [x] 정본 SHA·종류·정규화와 청크의 좌표·본문·덮임을 다시 검증한 뒤에만
+      모델 입력과 writer 발행값을 만드는 색인 계획 경계. 본문은 객체 표현에 노출하지 않는다.
 - [ ] 진짜 Slack channel ID가 뒤늦게 붙거나 v1 채널명이 바뀐 문서의 옛 좌표를
       감지·retire하고 새 좌표로 재색인
 - [ ] 검증된 벡터 후보를 기존 키워드 검색 점수와 결합
