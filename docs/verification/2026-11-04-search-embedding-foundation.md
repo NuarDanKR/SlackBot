@@ -106,3 +106,14 @@ DB를 열지 않으며, 검색 결합이나 운영 활성화를 뜻하지 않는
 옛 행 retire는 새 좌표가 같은 source/chunker/model revision으로 `ready/current`가 된
 것을 트랜잭션 안에서 다시 확인한 뒤에만 실행한다. 현재는 계획·DB 경계까지만 있으며
 색인 잡 호출 배선은 남아 있다.
+
+## Shadow 순위 결합
+
+`tybot.hybrid_search_rank`는 이미 순위가 정해진 키워드 `SearchHit`과 현재 ACL로 다시
+연 벡터 `SearchHit`을 reciprocal-rank fusion으로 비교한다. 기존 `SearchHit.score`는
+바꾸지 않고 별도 `fusion_score`만 만들므로 키워드 점수 계약을 침범하지 않는다.
+벡터 조회 불가와 0건은 구분하되 두 경우 모두 기존 키워드 객체와 순서를 그대로 돌린다.
+겹침 청크가 만든 같은 원문 줄도 한 번만 센다.
+
+이 모듈은 shadow 평가용 순수 코어다. 답변 검색 경로에는 연결하지 않았으며, 실제 질문
+기준선에서 재현율·오탐·지연·비용을 비교하기 전에는 운영 순위를 바꾸지 않는다.
