@@ -27,6 +27,32 @@ EXTERNAL = "external"
 MAX_DOCUMENTS = 1_000
 MAX_CHARS = 100_000_000
 MAX_CHUNKS = 100_000
+EMBEDDING_FAILURE_OUTCOMES = frozenset(
+    {
+        "embedding_request_invalid",
+        "embedding_model_unsupported",
+        "embedding_provider_unsupported",
+        "embedding_call_timeout",
+        "embedding_call_failed",
+        "embedding_identity_mismatch",
+        "embedding_result_incomplete",
+        "embedding_dimension_mismatch",
+        "embedding_vector_invalid",
+    }
+)
+
+
+class EmbeddingFailure(RuntimeError):
+    """A body-free embedding failure that is safe to expose as a counter."""
+
+    def __init__(self, code: str) -> None:
+        if code not in EMBEDDING_FAILURE_OUTCOMES:
+            raise ValueError("unknown embedding failure code")
+        super().__init__(code)
+
+    @property
+    def code(self) -> str:
+        return str(self)
 
 
 @dataclass(frozen=True)
@@ -264,6 +290,10 @@ def run_index_batch(
                 model_revision=revision,
                 policy_revision=approval.policy_revision,
             )
+        except EmbeddingFailure as exc:
+            costs.append(None)
+            counts[exc.code] += 1
+            continue
         except Exception:  # noqa: BLE001 - provider response/body must not escape
             costs.append(None)
             counts["embedding_failed"] += 1

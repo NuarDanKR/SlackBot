@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS search_embedding_model_revision (
                       CHECK (revision ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
     provider          text NOT NULL CHECK (btrim(provider) <> ''),
     model             text NOT NULL CHECK (btrim(model) <> ''),
+    input_price_per_mtok numeric CHECK (input_price_per_mtok >= 0),
     dimensions        integer NOT NULL CHECK (dimensions BETWEEN 1 AND 16000),
     normalized        boolean NOT NULL DEFAULT true,
     state             text NOT NULL DEFAULT 'draft'
@@ -21,6 +22,10 @@ CREATE TABLE IF NOT EXISTS search_embedding_model_revision (
     created_at        timestamptz NOT NULL DEFAULT now(),
     created_by        text NOT NULL CHECK (btrim(created_by) <> '')
 );
+
+ALTER TABLE search_embedding_model_revision
+    ADD COLUMN IF NOT EXISTS input_price_per_mtok numeric
+    CHECK (input_price_per_mtok >= 0);
 
 CREATE TABLE IF NOT EXISTS search_embedding_workspace_policy (
     workspace                  text PRIMARY KEY CHECK (btrim(workspace) <> ''),

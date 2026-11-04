@@ -62,6 +62,13 @@ def test_model_chunker_and_source_revisions_are_all_bound():
     assert "A-Za-z0-9._:=-" in body
 
 
+def test_model_price_is_nullable_but_cannot_be_negative():
+    body = sql()
+    assert "input_price_per_mtok numeric" in body
+    assert "CHECK (input_price_per_mtok >= 0)" in body
+    assert "ADD COLUMN IF NOT EXISTS input_price_per_mtok" in body
+
+
 def test_database_rejects_wrong_dimensions_and_incomplete_current_revisions():
     body = sql()
     assert "vector_dims(NEW.embedding) <> expected_dimensions" in body

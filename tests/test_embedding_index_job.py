@@ -9,6 +9,7 @@ from tybot.embedding_index_job import (
     EXTERNAL,
     LOCAL,
     EmbeddingBatch,
+    EmbeddingFailure,
     IndexAuthorization,
     IndexLimits,
     run_index_batch,
@@ -177,6 +178,28 @@ def test_provider_and_database_errors_are_fixed_codes_without_bodies():
     assert outcomes(database) == {"publish_failed": 1}
     assert "private provider response" not in repr(provider)
     assert "private DB row" not in repr(database)
+
+
+def test_safe_embedding_failure_codes_remain_distinct_in_batch_outcomes():
+    class Refused:
+        def embed(self, *_args, **_kwargs):
+            raise EmbeddingFailure("embedding_call_timeout")
+
+    result = run_index_batch(
+        [source()],
+        model_revision="model-v1",
+        authorize=allow,
+        embedder=Refused(),
+        writer=Writer(),
+        expected_current={},
+    )
+
+    assert outcomes(result) == {"embedding_call_timeout": 1}
+
+
+def test_unregistered_failure_codes_cannot_escape_as_outcomes():
+    with pytest.raises(ValueError, match="unknown embedding failure code"):
+        EmbeddingFailure("embedding_private_provider_body")
 
 
 def test_unknown_cost_makes_batch_cost_unknown_not_zero():
