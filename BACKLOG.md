@@ -2081,7 +2081,8 @@ TYBot 수집 계층에서 사전 설치된 kordoc/LibreOffice를 호출한다
       조정 경계. provider 선택·운영 스케줄러·자동 재시도는 아직 연결하지 않는다.
 - [ ] 진짜 Slack channel ID가 뒤늦게 붙거나 v1 채널명이 바뀐 문서의 옛 좌표를
       감지·retire하고 새 좌표로 재색인. 1:1 좌표 이동 탐지와 새 좌표 발행 후 retire
-      경계는 구현했으며, 색인 잡 배선은 남아 있다.
+      경계 및 DB `ready/current`를 재개 지점으로 쓰는 재실행 runner는 구현했다.
+      운영 source inventory·DB·provider adapter와 스케줄러 연결은 남아 있다.
 - [ ] 검증된 벡터 후보를 기존 키워드 검색 점수와 결합. 원점수를 섞지 않는 shadow RRF
       코어는 구현했으며, 실제 답변 연결과 기준선 대조·가중치 결정은 남아 있다.
 - [ ] `answer_issues` 전수 구조 감사에서 `no_evidence`를 기준선으로 고정하되,
