@@ -35,6 +35,7 @@ DRY_RUN=0
 FILES=(
   # 구조. 뒤 파일들이 이 표들을 참조한다.
   index_schema.sql            # org_unit · employee · user_identity · raw_line
+  search_embedding_schema.sql # B-12 revisioned pgvector candidate cache, default unused
   console_schema.sql          # console_user · workspace · usage_* · specialist_*
   # 기능별
   schedule_schema.sql
