@@ -33,6 +33,8 @@ class _Publisher(Protocol):
         source_text: str,
         chunks: list[chunking.Chunk],
         embeddings: list[list[float] | tuple[float, ...]],
+        *,
+        expected_current: int | None,
     ) -> PublishResult: ...
 
 
@@ -70,13 +72,23 @@ class IndexPlan:
         self,
         writer: _Publisher,
         embeddings: list[list[float] | tuple[float, ...]],
+        *,
+        expected_current: int | None,
     ) -> PublishResult:
-        """Publish exactly the source and coordinates that were planned."""
+        """Publish exactly the source and coordinates that were planned.
+
+        ``expected_current`` travels through untouched.  The plan does not read
+        the database and so cannot discover it; the caller that opened the
+        canonical source is the one that knows which revision it was replacing.
+        It is required here for the same reason it is required in the writer --
+        a default would let a caller publish without saying what it replaced.
+        """
         return writer.publish(
             self.key,
             self._source_text,
             list(self._chunks),
             embeddings,
+            expected_current=expected_current,
         )
 
 

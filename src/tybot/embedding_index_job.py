@@ -9,14 +9,18 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from tybot.archive import chunking
 from tybot.archive.embedding_source import VectorSource
 from tybot.embedding_index_plan import EmbeddingInput, IndexPlanError, plan_source
-from tybot.embedding_index_store import MAX_DIMENSIONS, PublishResult
+from tybot.embedding_index_store import (
+    MAX_DIMENSIONS,
+    IndexPublishError,
+    PublishResult,
+)
 
 LOCAL = "local"
 EXTERNAL = "external"
@@ -113,7 +117,9 @@ class Embedder(Protocol):
 
 
 class Publisher(Protocol):
-    def publish(self, key, source_text, chunks, embeddings) -> PublishResult: ...
+    def publish(
+        self, key, source_text, chunks, embeddings, *, expected_current: int | None
+    ) -> PublishResult: ...
 
 
 @dataclass(frozen=True)
@@ -153,13 +159,45 @@ def run_index_batch(
     authorize: Callable[[IndexRequest], IndexAuthorization],
     embedder: Embedder,
     writer: Publisher,
+    expected_current: Mapping[tuple[str, str, str], int],
     limits: IndexLimits | None = None,
     spec: chunking.ChunkSpec = chunking.DEFAULT_SPEC,
 ) -> IndexBatchResult:
-    """Index a bounded source stream once, with no retries or model fallback."""
+    """Index a bounded source stream once, with no retries or model fallback.
+
+    ``expected_current`` maps ``(workspace, channel_id, doc_path)`` to the
+    ``document_revision_id`` that was current when this run's inventory was
+    taken.  A document that is absent from the map is published as a first
+    indexing, so a caller that passes an empty map can only create documents --
+    never replace one.  That is the closed direction, and it is why the argument
+    is required rather than defaulted.
+
+    A publication refused as ``embedding_source_superseded`` is **not** retried
+    here, with these vectors or any others.  Something newer became current
+    while this run was embedding, which means the text these vectors describe is
+    no longer the canonical source.  Recovery is the next run: it reopens the
+    canonical source, re-chunks, and embeds again.  Retrying in place would
+    publish vectors for text that no longer exists.
+    """
     revision = str(model_revision or "")
     if not revision or revision != revision.strip():
         raise ValueError("model_revision must be non-empty and trimmed")
+    if not isinstance(expected_current, Mapping):
+        raise ValueError("expected_current must be a mapping")
+    observed: dict[tuple[str, str, str], int] = {}
+    for coordinate, value in expected_current.items():
+        if (
+            not isinstance(coordinate, tuple)
+            or len(coordinate) != 3
+            or any(
+                not isinstance(part, str) or not part or part != part.strip()
+                for part in coordinate
+            )
+        ):
+            raise ValueError("expected_current coordinates must be exact strings")
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("expected_current ids must be positive integers")
+        observed[coordinate] = value
     limits = limits or IndexLimits()
     counts: Counter[str] = Counter()
     scanned = planned = published = current = calls = chars = chunks = 0
@@ -236,7 +274,25 @@ def run_index_batch(
             continue
         costs.append(batch.cost_usd)
         try:
-            result = plan.publish(writer, [list(vector) for vector in batch.vectors])
+            result = plan.publish(
+                writer,
+                [list(vector) for vector in batch.vectors],
+                expected_current=observed.get(
+                    (source.workspace, source.channel_id, source.doc_path)
+                ),
+            )
+        except IndexPublishError as exc:
+            # Separated from other publication failures on purpose.  This one is
+            # not a fault: a newer source won the document while we embedded.
+            # It must be visible as its own number, because a run full of these
+            # means the reconciliation snapshot is too old, not that the writer
+            # is broken.
+            counts[
+                "publish_superseded"
+                if str(exc) == "embedding_source_superseded"
+                else "publish_failed"
+            ] += 1
+            continue
         except Exception:  # noqa: BLE001 - DB details and source coordinates stay private
             counts["publish_failed"] += 1
             continue

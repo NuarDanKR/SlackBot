@@ -47,8 +47,8 @@ class Writer:
         self.calls = []
         self.current = current
 
-    def publish(self, key, text, chunks, vectors):
-        self.calls.append((key, text, chunks, vectors))
+    def publish(self, key, text, chunks, vectors, *, expected_current):
+        self.calls.append((key, text, chunks, vectors, expected_current))
         return PublishResult(10 + len(self.calls), len(chunks), self.current)
 
 
@@ -56,10 +56,27 @@ def allow(_request):
     return IndexAuthorization(True, MODEL, "policy-1", "local")
 
 
-def install_current(monkeypatch, rows):
+def install_current(monkeypatch, rows, *, ids=None):
+    """Install the two readings the runner takes of the same table.
+
+    ``current_documents`` is narrowed to this chunker revision and answers
+    "what is already indexed".  ``current_document_ids`` is not narrowed and
+    answers "what would a publication retire".  They are different questions,
+    so the tests may set them apart; by default the ids follow the rows.
+    """
     monkeypatch.setattr(
         "tybot.embedding_index_runner.current_documents",
         lambda *_args, **_kwargs: tuple(rows),
+    )
+    observed = (
+        {(row.workspace, row.channel_id, row.doc_path): row.document_revision_id
+         for row in rows}
+        if ids is None
+        else dict(ids)
+    )
+    monkeypatch.setattr(
+        "tybot.embedding_index_runner.current_document_ids",
+        lambda *_args, **_kwargs: dict(observed),
     )
 
 
@@ -121,9 +138,9 @@ def test_coordinate_migration_retires_only_after_publish(monkeypatch):
     writer = Writer()
     original_publish = writer.publish
 
-    def publish(*args):
+    def publish(*args, **kwargs):
         events.append("publish")
-        return original_publish(*args)
+        return original_publish(*args, **kwargs)
 
     writer.publish = publish
 
@@ -229,3 +246,82 @@ def test_result_repr_contains_counts_not_paths_or_text(monkeypatch):
     rendered = repr(result)
     assert path not in rendered
     assert item.text not in rendered
+
+
+def test_each_request_carries_the_current_id_read_at_the_start(monkeypatch):
+    changed = "workspaces/sample/channels/C2/raw/2026-01-01.md"
+    fresh = "workspaces/sample/channels/C3/raw/2026-01-01.md"
+    install_current(monkeypatch, [current(2, "C2", changed, "old\n")])
+    writer = Writer()
+    run_reconciled_index(
+        object(),
+        [source("C2", changed, "new\n"), source("C3", fresh)],
+        scan_complete=True,
+        model_revision=MODEL,
+        authorize=allow,
+        embedder=Embedder(),
+        writer=writer,
+    )
+
+    sent = {call[0].doc_path: call[4] for call in writer.calls}
+    assert sent[changed] == 2
+    assert sent[fresh] is None
+
+
+def test_a_document_current_under_another_chunker_is_still_replaceable(monkeypatch):
+    """The two readings disagree here, and the run must follow the wider one.
+
+    After a chunker change ``current_documents`` returns nothing -- no document
+    is indexed under the new chunker yet -- so every source looks new.  But the
+    old rows are still current, and a publication retires them.  If the run
+    expected ``None`` for those documents, the writer would refuse every one of
+    them and the chunker could never be rolled forward.
+    """
+    path = "workspaces/sample/channels/C1/raw/2026-01-01.md"
+    install_current(monkeypatch, [], ids={("sample", "C1", path): 5})
+    writer = Writer()
+    result = run_reconciled_index(
+        object(),
+        [source("C1", path)],
+        scan_complete=True,
+        model_revision=MODEL,
+        authorize=allow,
+        embedder=Embedder(),
+        writer=writer,
+    )
+
+    assert result.requested_count == 1
+    assert [call[4] for call in writer.calls] == [5]
+
+
+def test_the_expected_ids_are_read_before_any_model_call(monkeypatch):
+    """Read it late and it reflects writes this very run made -- the check dies."""
+    path = "workspaces/sample/channels/C1/raw/2026-01-01.md"
+    events = []
+    monkeypatch.setattr(
+        "tybot.embedding_index_runner.current_documents",
+        lambda *_a, **_k: (),
+    )
+    monkeypatch.setattr(
+        "tybot.embedding_index_runner.current_document_ids",
+        lambda *_a, **_k: (events.append("read"), {})[1],
+    )
+
+    class Watching(Embedder):
+        def embed(self, inputs, *, model_revision, policy_revision):
+            events.append("embed")
+            return super().embed(
+                inputs, model_revision=model_revision, policy_revision=policy_revision
+            )
+
+    run_reconciled_index(
+        object(),
+        [source("C1", path)],
+        scan_complete=True,
+        model_revision=MODEL,
+        authorize=allow,
+        embedder=Watching(),
+        writer=Writer(),
+    )
+
+    assert events == ["read", "embed"]

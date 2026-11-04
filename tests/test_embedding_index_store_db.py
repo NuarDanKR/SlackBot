@@ -149,7 +149,7 @@ def _key(text: str, model: str, *, doc: str | None = None) -> DocumentKey:
 
 
 def test_writer_publishes_only_a_complete_current_revision(conn, model):
-    result = EmbeddingIndexWriter(conn).publish(
+    result = _publish(EmbeddingIndexWriter(conn), conn,
         _key("alpha", model), "alpha", [_chunk("alpha")], [[0.1, 0.2]]
     )
 
@@ -172,7 +172,7 @@ def test_a_failed_chunk_insert_rolls_back_the_manifest(conn, model):
     psycopg = pytest.importorskip("psycopg")
     key = _key("alpha", model)
     with pytest.raises(psycopg.errors.UniqueViolation):
-        EmbeddingIndexWriter(conn).publish(
+        _publish(EmbeddingIndexWriter(conn), conn,
             key,
             "alpha",
             [_chunk("alpha"), _chunk("alpha")],
@@ -199,8 +199,8 @@ def test_a_failed_chunk_insert_rolls_back_the_manifest(conn, model):
 def test_publishing_a_new_source_retires_the_previous_current(conn, model):
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     writer = EmbeddingIndexWriter(conn)
-    old = writer.publish(_key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
-    new = writer.publish(_key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]])
+    old = _publish(writer, conn, _key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
+    new = _publish(writer, conn, _key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]])
 
     with conn.cursor() as cur:
         cur.execute(
@@ -332,6 +332,22 @@ def _advisory_waiters(connection, classid: int, objid: int) -> int:
         return int(cur.fetchone()[0])
 
 
+_SNAPSHOT = object()
+
+
+def _publish(writer, connection, key, text, chunks, vectors, *, expected=_SNAPSHOT):
+    """올바른 호출자와 같은 모양으로 발행한다.
+
+    writer 는 이제 **무엇을 대체하는지**를 받아야 발행한다. 기본값은
+    지금 현역인 판을 읽어 넣는다 — 색인 잡이 시작할 때 보는 것과 같다.
+    거절을 보려는 시험만 `expected` 를 명시한다.
+    """
+    if expected is _SNAPSHOT:
+        found = _current_ids(connection, key)
+        expected = found[0] if found else None
+    return _publish(writer, conn, key, text, chunks, vectors, expected_current=expected)
+
+
 def _manifest(connection, key: DocumentKey, *, state: str = "building") -> int:
     """writer 를 거치지 않고 매니페스트 한 줄을 만든다."""
     with connection.cursor() as cur:
@@ -454,7 +470,7 @@ def test_changing_a_chunk_to_a_wrong_dimension_is_refused(conn, model):
 def test_the_writer_refuses_a_wrong_dimension_before_the_database_does(conn, model):
     """문이 둘이다. 파이썬 쪽이 먼저 막고, 못 막으면 DB 가 막는다."""
     with pytest.raises(IndexPublishError) as caught:
-        EmbeddingIndexWriter(conn).publish(
+        _publish(EmbeddingIndexWriter(conn), conn,
             _key("alpha", model), "alpha", [_chunk("alpha")], [[0.1, 0.2, 0.3]]
         )
 
@@ -526,9 +542,9 @@ def test_republishing_the_same_revision_changes_nothing(conn, model):
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     key = _key("alpha", model, doc=doc)
     writer = EmbeddingIndexWriter(conn)
-    first = writer.publish(key, "alpha", [_chunk("alpha")], [[0.1, 0.2]])
+    first = _publish(writer, conn, key, "alpha", [_chunk("alpha")], [[0.1, 0.2]])
 
-    second = writer.publish(key, "alpha", [_chunk("alpha")], [[0.9, 0.8]])
+    second = _publish(writer, conn, key, "alpha", [_chunk("alpha")], [[0.9, 0.8]])
 
     assert second.document_revision_id == first.document_revision_id
     assert second.already_current is True
@@ -553,12 +569,12 @@ def test_the_same_revision_with_other_coordinates_is_refused(conn, model):
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     key = _key("alphabeta", model, doc=doc)
     writer = EmbeddingIndexWriter(conn)
-    first = writer.publish(
+    first = _publish(writer, conn,
         key, "alphabeta", [_chunk("alphabeta")], [[0.1, 0.2]]
     )
 
     with pytest.raises(IndexPublishError) as caught:
-        writer.publish(
+        _publish(writer, conn,
             key,
             "alphabeta",
             [_chunk("alpha"), _chunk("beta", start=5)],
@@ -581,10 +597,10 @@ def test_the_same_revision_with_a_shifted_offset_is_refused(conn, model):
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     key = _key("alphabeta", model, doc=doc)
     writer = EmbeddingIndexWriter(conn)
-    writer.publish(key, "alphabeta", [_chunk("alphabeta")], [[0.1, 0.2]])
+    _publish(writer, conn, key, "alphabeta", [_chunk("alphabeta")], [[0.1, 0.2]])
 
     with pytest.raises(IndexPublishError) as caught:
-        writer.publish(
+        _publish(writer, conn,
             key, "alphabeta", [_chunk("lphabeta", start=1)], [[0.1, 0.2]]
         )
 
@@ -604,7 +620,7 @@ def test_two_connections_publishing_the_same_document_leave_one_current(conn, mo
         try:
             with _second_connection() as own:
                 start.wait(timeout=10)
-                result = EmbeddingIndexWriter(own).publish(
+                result = _publish(EmbeddingIndexWriter(own), own,
                     _key(text, model, doc=doc), text, [_chunk(text)], [[0.1, 0.2]]
                 )
             outcome[label] = result.document_revision_id
@@ -624,15 +640,26 @@ def test_two_connections_publishing_the_same_document_leave_one_current(conn, mo
     key = _key("alpha", model, doc=doc)
     current = _current_ids(conn, key)
     assert len(current) == 1, outcome
-    # 끝까지 간 쪽이 하나라도 있어야 한다. 둘 다 예외면 current 가 0 이라
-    # 위 단언에서 이미 걸리지만, 사유를 남겨 두는 편이 읽기 쉽다.
-    assert any(isinstance(value, int) for value in outcome.values()), outcome
+    # **CAS 가 생긴 뒤로는 하나만 끝까지 간다.** 둘 다 「현역 없음」 을 보고
+    # 출발했으므로, 뒤에 락을 받은 쪽은 자기가 본 것과 다른 현역을 만난다.
+    # 전에는 둘 다 성공하고 나중 것이 앞의 것을 은퇴시켰다 — 그게 늦은 색인이
+    # 새 색인을 덮던 바로 그 경로다.
+    done = [value for value in outcome.values() if isinstance(value, int)]
+    refused = [value for value in outcome.values() if isinstance(value, BaseException)]
+    assert len(done) == 1, outcome
+    assert done == current, outcome
+    assert [str(exc) for exc in refused] == ["embedding_source_superseded"], outcome
 
 
 def test_two_connections_publishing_the_same_revision_make_one_row(conn, model):
     """같은 판을 둘이 동시에 올린다. **둘 다 성공하되 행은 하나**여야 한다.
 
     여기서 걸리면 재색인 잡을 두 번 돌린 날 같은 문서가 두 벌이 된다.
+
+    CAS 가 이것까지 막으면 안 된다. 뒤에 온 쪽이 본 현역은 분명히 자기가 아는
+    것과 다르지만, **그 현역이 바로 자기가 올리려던 판**이다. 쓸 것이 없으므로
+    거절할 것도 없다 — 거절하면 같은 원문을 집어 든 두 잡이 평범하게 겹쳤을 뿐인
+    날에 오류가 난다.
     """
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     start = threading.Barrier(2)
@@ -642,7 +669,7 @@ def test_two_connections_publishing_the_same_revision_make_one_row(conn, model):
         try:
             with _second_connection() as own:
                 start.wait(timeout=10)
-                outcome[label] = EmbeddingIndexWriter(own).publish(
+                outcome[label] = _publish(EmbeddingIndexWriter(own), own,
                     _key("alpha", model, doc=doc), "alpha", [_chunk("alpha")], [[0.1, 0.2]]
                 )
         except BaseException as exc:
@@ -674,8 +701,8 @@ def test_a_second_current_row_cannot_be_forced_in(conn, model):
     psycopg = pytest.importorskip("psycopg")
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     writer = EmbeddingIndexWriter(conn)
-    old = writer.publish(_key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
-    writer.publish(_key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]])
+    old = _publish(writer, conn, _key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
+    _publish(writer, conn, _key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]])
 
     with pytest.raises(psycopg.errors.UniqueViolation):
         with conn.cursor() as cur:
@@ -700,7 +727,7 @@ def test_a_failure_after_the_retire_rolls_everything_back(conn, model):
     psycopg = pytest.importorskip("psycopg")
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     writer = EmbeddingIndexWriter(conn)
-    old = writer.publish(_key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
+    old = _publish(writer, conn, _key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
 
     with _injected_trigger(
         conn,
@@ -711,7 +738,7 @@ def test_a_failure_after_the_retire_rolls_everything_back(conn, model):
         (doc,),
     ):
         with pytest.raises(psycopg.errors.RaiseException):
-            writer.publish(
+            _publish(writer, conn,
                 _key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]]
             )
 
@@ -735,7 +762,7 @@ def test_a_failed_publication_leaves_no_orphan_chunks(conn, model):
         before = int(cur.fetchone()[0])
 
     with pytest.raises(psycopg.errors.UniqueViolation):
-        EmbeddingIndexWriter(conn).publish(
+        _publish(EmbeddingIndexWriter(conn), conn,
             key, "alpha", [_chunk("alpha"), _chunk("alpha")], [[0.1, 0.2], [0.3, 0.4]]
         )
 
@@ -777,7 +804,7 @@ def test_the_old_revision_stays_current_until_the_new_one_commits(conn, model):
     """
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     writer = EmbeddingIndexWriter(conn)
-    old = writer.publish(_key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
+    old = _publish(writer, conn, _key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
     key = _key("old", model, doc=doc)
     gate_a, gate_b = _lock_pair()
     seen: list[list[int]] = []
@@ -786,7 +813,7 @@ def test_the_old_revision_stays_current_until_the_new_one_commits(conn, model):
     def publish_through_the_gate() -> None:
         try:
             with _second_connection() as own:
-                EmbeddingIndexWriter(own).publish(
+                _publish(EmbeddingIndexWriter(own), own,
                     _key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]]
                 )
         except BaseException as exc:  # 스레드 밖으로 그대로 나른다
@@ -857,7 +884,7 @@ def test_the_injected_trigger_recovers_from_an_aborted_run(conn, model):
     psycopg = pytest.importorskip("psycopg")
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     writer = EmbeddingIndexWriter(conn)
-    old = writer.publish(_key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
+    old = _publish(writer, conn, _key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
 
     with conn.cursor() as cur:
         cur.execute(
@@ -881,7 +908,7 @@ def test_the_injected_trigger_recovers_from_an_aborted_run(conn, model):
             (doc,),
         ):
             with pytest.raises(psycopg.errors.RaiseException) as caught:
-                writer.publish(
+                _publish(writer, conn,
                     _key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]]
                 )
             # 남은 몸통이 아니라 **이번에 심은 몸통**이 돌았다.
@@ -908,7 +935,7 @@ def indexed(conn, model):
     """한 워크스페이스에 후보 하나. 조회 범위 시험의 기준점."""
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     key = _key("alpha", model, doc=doc)
-    EmbeddingIndexWriter(conn).publish(key, "alpha", [_chunk("alpha")], [[0.1, 0.2]])
+    _publish(EmbeddingIndexWriter(conn), conn, key, "alpha", [_chunk("alpha")], [[0.1, 0.2]])
     return key
 
 
@@ -986,8 +1013,8 @@ def test_a_retired_revision_is_not_a_candidate(conn, model):
     """새 판이 서면 옛 판은 후보에서 빠진다 — 지운 뜻이 뒤집히지 않는다."""
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     writer = EmbeddingIndexWriter(conn)
-    writer.publish(_key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
-    writer.publish(_key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]])
+    _publish(writer, conn, _key("old", model, doc=doc), "old", [_chunk("old")], [[0.1, 0.2]])
+    _publish(writer, conn, _key("new", model, doc=doc), "new", [_chunk("new")], [[0.2, 0.3]])
 
     found = candidates(
         [0.1, 0.2],
@@ -1040,68 +1067,150 @@ def test_a_query_of_the_wrong_dimension_yields_no_candidate(indexed):
     assert found == []
 
 
-# --- 별도 조사: 늦게 끝난 옛 색인이 새 색인을 밀어낸다 ---------------------------
+
+# --- 8. 늦게 끝난 옛 색인은 새 current 를 못 밀어낸다 ---------------------------
 #
-# 아래 두 건은 **오늘의 동작을 고정한다.** 결함을 가리지 않고 글로 박아 두는 쪽을
-# 골랐다 — 설계가 정해지기 전에 제품 코드를 고치지 않기로 했고, 그동안 이 동작이
-# 조용히 바뀌는 것도 막아야 하기 때문이다. 스키마에 신선도 칸이 생기면 이 두
-# 단언은 **뒤집어야 한다.**
-#
-# 대안과 근거: docs/verification/2026-11-04-stale-index-overwrites-current.md
+# 전에는 이 자리에 **결함을 고정하는** 시험 두 건이 있었다(옛 판이 그냥 현역이
+# 됐다). CAS 가 들어오면서 단언을 안전한 쪽으로 뒤집었다.
+# 설계: docs/verification/2026-11-04-stale-index-overwrites-current.md
 
 
-def test_a_never_indexed_stale_revision_takes_over_current_today(conn, model):
-    """옛 원문을 읽은 색인이 **나중에** 끝나면 그 판이 현역이 된다.
+def _chunks_under(connection, doc: str) -> int:
+    with connection.cursor() as cur:
+        cur.execute(
+            """SELECT count(*) FROM archive_search_chunk c
+                 JOIN archive_search_document_revision d
+                   ON d.id = c.document_revision_id
+                WHERE d.doc_path=%s""",
+            (doc,),
+        )
+        return int(cur.fetchone()[0])
+
+
+def test_a_never_indexed_stale_revision_is_refused(conn, model):
+    """옛 원문을 읽은 색인이 **나중에** 끝나도 현역을 못 가져간다.
 
     스레드도 경주도 필요 없다. 두 색인 잡이 겹쳐 도는 동안 DB 안에서는
     `pg_advisory_xact_lock(doc)` 이 둘을 **줄 세우므로** 트랜잭션은 안 겹친다.
     위험한 구간은 그 바깥이다 — **원문을 읽은 시점부터 발행까지.** 그 구간을
     접으면 남는 것이 이것이고, 그래서 결정론적으로 재현된다.
 
-    표에는 「어느 쪽이 더 최신 원문인가」 를 보는 칸이 없다. `source_revision` 은
-    해시라 순서가 없고, `indexed_at` 은 **읽은 때가 아니라 쓴 때**다. 그래서
-    늦게 쓴 쪽이 이긴다.
+    늦게 끝난 잡이 들고 있는 것은 **자기가 출발할 때 본 현역**(여기서는 없음)
+    이다. 락을 받고 보니 그 사이 다른 판이 서 있다 — 그러면 손에 든 벡터는 이미
+    정본이 아닌 글을 가리킨다. 그대로 올리면 **없는 글이 색인된다.**
     """
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     key = _key("v1", model, doc=doc)
     writer = EmbeddingIndexWriter(conn)
 
+    # 옛 원문을 읽은 잡이 출발한다 — 그때 이 문서에는 현역이 없었다.
+    observed_by_the_stale_job = None
+
     # 새 원문을 읽은 잡이 먼저 끝난다.
-    fresh = writer.publish(_key("v2", model, doc=doc), "v2", [_chunk("v2")], [[0.2, 0.3]])
+    fresh = _publish(writer, conn, _key("v2", model, doc=doc), "v2", [_chunk("v2")], [[0.2, 0.3]])
     assert _current_ids(conn, key) == [fresh.document_revision_id]
+    chunks_before = _chunks_under(conn, doc)
 
-    # 옛 원문을 읽은 잡이 뒤늦게 끝난다. 이 판은 **한 번도 색인된 적이 없어서**
-    # 멱등 판정에 안 걸리고, 그대로 새 행으로 들어간다.
-    stale = writer.publish(_key("v1", model, doc=doc), "v1", [_chunk("v1")], [[0.1, 0.2]])
+    with pytest.raises(IndexPublishError) as caught:
+        _publish(
+            writer,
+            conn,
+            _key("v1", model, doc=doc),
+            "v1",
+            [_chunk("v1")],
+            [[0.1, 0.2]],
+            expected=observed_by_the_stale_job,
+        )
 
-    # 오늘은 이게 통과한다. 고쳐지면 뒤집어야 한다.
-    assert _current_ids(conn, key) == [stale.document_revision_id]
+    assert str(caught.value) == "embedding_source_superseded"
+    # 새 판이 그대로 현역이다.
+    assert _current_ids(conn, key) == [fresh.document_revision_id]
     with conn.cursor() as cur:
         cur.execute(
             "SELECT state,is_current FROM archive_search_document_revision WHERE id=%s",
             (fresh.document_revision_id,),
         )
-        assert cur.fetchone() == ("retired", False)
+        assert cur.fetchone() == ("ready", True)
+        # 거절된 판은 **행도 안 남긴다.**
+        cur.execute(
+            """SELECT count(*) FROM archive_search_document_revision
+                WHERE doc_path=%s AND source_revision=%s""",
+            (doc, _key("v1", model, doc=doc).source_revision),
+        )
+        assert int(cur.fetchone()[0]) == 0
+    assert _chunks_under(conn, doc) == chunks_before
 
 
-def test_a_returning_retired_revision_is_refused(conn, model):
-    """같은 결함인데 **한 번 색인됐던** 판이면 거절된다 — 비대칭이 여기 있다.
+def test_an_expectation_of_a_document_that_lost_its_current_is_refused(conn, model):
+    """반대 방향도 막는다 — 대체하려던 것이 이미 사라진 경우.
 
-    은퇴한 행이 이미 있으면 writer 는 멱등 가지로 들어가고,
-    `state<>'ready'` 라서 `embedding_revision_conflict` 을 던진다. 즉 막아 주는
-    것은 「옛 원문이라서」 가 아니라 **「전에 본 적이 있어서」** 다. 그래서
-    v0 → v1 → v0 은 막히고, v1 → v0 은 안 막힌다. 신선도를 보는 칸이 없다는
-    말을 이 두 건이 같이 증명한다.
+    여기서 통과시키면 「내가 본 것」 이 아무 뜻도 없는 값이 되고, 검사는 한
+    방향에만 서 있게 된다.
     """
     doc = f"synthetic/{uuid.uuid4().hex}.md"
     writer = EmbeddingIndexWriter(conn)
-    first = writer.publish(_key("v0", model, doc=doc), "v0", [_chunk("v0")], [[0.1, 0.2]])
-    writer.publish(_key("v1", model, doc=doc), "v1", [_chunk("v1")], [[0.2, 0.3]])
+    gone = _publish(writer, conn, _key("v0", model, doc=doc), "v0", [_chunk("v0")], [[0.1, 0.2]])
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE archive_search_document_revision "
+            "SET is_current=false, state='retired' WHERE id=%s",
+            (gone.document_revision_id,),
+        )
 
     with pytest.raises(IndexPublishError) as caught:
-        writer.publish(_key("v0", model, doc=doc), "v0", [_chunk("v0")], [[0.1, 0.2]])
+        _publish(
+            writer,
+            conn,
+            _key("v1", model, doc=doc),
+            "v1",
+            [_chunk("v1")],
+            [[0.2, 0.3]],
+            expected=gone.document_revision_id,
+        )
+
+    assert str(caught.value) == "embedding_source_superseded"
+    assert _current_ids(conn, _key("v1", model, doc=doc)) == []
+
+
+def test_the_fresh_job_publishes_over_what_it_actually_saw(conn, model):
+    """막는 쪽만 보면 「전부 막는 검사」 도 통과한다. 정상 경로를 같이 둔다."""
+    doc = f"synthetic/{uuid.uuid4().hex}.md"
+    writer = EmbeddingIndexWriter(conn)
+    first = _publish(writer, conn, _key("v1", model, doc=doc), "v1", [_chunk("v1")], [[0.1, 0.2]])
+    second = _publish(
+        writer,
+        conn,
+        _key("v2", model, doc=doc),
+        "v2",
+        [_chunk("v2")],
+        [[0.2, 0.3]],
+        expected=first.document_revision_id,
+    )
+
+    assert not second.already_current
+    assert _current_ids(conn, _key("v2", model, doc=doc)) == [second.document_revision_id]
+
+
+def test_a_returning_retired_revision_is_still_refused(conn, model):
+    """CAS 를 통과해도 **전에 본 판**은 멱등 판정에서 막힌다 — 문이 둘이다.
+
+    v0 → v1 을 거친 뒤 v0 을 다시 올린다. 이 잡은 현역(v1)을 제대로 보고
+    출발했으므로 CAS 는 통과한다. 그 다음 writer 가 v0 행을 찾고,
+    `state<>'ready'` 라서 `embedding_revision_conflict` 을 던진다.
+
+    두 검사가 막는 것이 다르다 — CAS 는 **내가 본 것이 아직 맞는가**, 멱등
+    판정은 **이 판이 온전한가**. 한쪽만 두면 나머지 자리가 열린다.
+    """
+    doc = f"synthetic/{uuid.uuid4().hex}.md"
+    writer = EmbeddingIndexWriter(conn)
+    first = _publish(writer, conn, _key("v0", model, doc=doc), "v0", [_chunk("v0")], [[0.1, 0.2]])
+    second = _publish(writer, conn, _key("v1", model, doc=doc), "v1", [_chunk("v1")], [[0.2, 0.3]])
+
+    with pytest.raises(IndexPublishError) as caught:
+        _publish(writer, conn, _key("v0", model, doc=doc), "v0", [_chunk("v0")], [[0.1, 0.2]])
 
     assert str(caught.value) == "embedding_revision_conflict"
+    assert _current_ids(conn, _key("v0", model, doc=doc)) == [second.document_revision_id]
     with conn.cursor() as cur:
         cur.execute(
             "SELECT state,is_current FROM archive_search_document_revision WHERE id=%s",

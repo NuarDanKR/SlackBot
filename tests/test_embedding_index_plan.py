@@ -127,18 +127,32 @@ def test_publish_hands_the_writer_exactly_the_planned_source_and_chunks():
         def __init__(self):
             self.calls = []
 
-        def publish(self, key, source_text, chunks, embeddings):
-            self.calls.append((key, source_text, chunks, embeddings))
+        def publish(self, key, source_text, chunks, embeddings, *, expected_current):
+            self.calls.append((key, source_text, chunks, embeddings, expected_current))
             return PublishResult(17, len(chunks), False)
 
     writer = Writer()
     embeddings = [[0.1, 0.2] for _ in plan.inputs()]
-    result = plan.publish(writer, embeddings)
+    result = plan.publish(writer, embeddings, expected_current=31)
 
     assert result == PublishResult(17, plan.chunk_count, False)
     assert len(writer.calls) == 1
-    key, body, chunks, sent_embeddings = writer.calls[0]
+    key, body, chunks, sent_embeddings, expected = writer.calls[0]
+    # The plan never reads the database, so it must hand this through unchanged.
+    assert expected == 31
     assert key is plan.key
     assert body == source().text
     assert [chunk.text for chunk in chunks] == [item.text for item in plan.inputs()]
     assert sent_embeddings is embeddings
+
+
+def test_a_plan_cannot_publish_without_naming_what_it_replaces():
+    """The requirement is carried, not softened, at every layer it passes."""
+    plan = plan_source(source(), model_revision="model-v1")
+
+    class Writer:
+        def publish(self, key, source_text, chunks, embeddings, *, expected_current):
+            raise AssertionError("must not be reached")
+
+    with pytest.raises(TypeError):
+        plan.publish(Writer(), [[0.1, 0.2] for _ in plan.inputs()])

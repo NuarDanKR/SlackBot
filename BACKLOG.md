@@ -2068,7 +2068,9 @@ TYBot 수집 계층에서 사전 설치된 kordoc/LibreOffice를 호출한다
       결과는 본문이 아니라 원문 경로·revision·offset·hash만 반환한다.
 - [x] 청커 결과의 원문 좌표·본문 hash·벡터를 검증하고, 완성 revision만 원자적으로
       현재 상태로 발행하는 writer. 동일 revision은 저장 좌표까지 같을 때만 멱등 성공한다.
-- [ ] writer 실제 PostgreSQL 격리 시험 — CHECK·trigger·동시 발행·rollback 검증
+- [ ] writer 실제 PostgreSQL 격리 시험 — CHECK·trigger·동시 발행·rollback 기본
+      31건은 PostgreSQL 18.6·pgvector 0.8.6에서 통과(2026-11-04). CAS 경쟁 조건
+      추가 2건은 해당 커밋 배포 뒤 실제 DB 재검증 대기.
 - [x] 현재 ACL·revision을 통과한 source opener만 입력으로 받는 후보 resolver.
       workspace/channel/path·source revision·offset·본문 hash가 모두 같을 때만 본문을 돌려준다.
 - [x] channel·attachment 정본 창구와 현재 ACL opener. KST 오늘 자 raw는 제외하고,

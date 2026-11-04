@@ -29,6 +29,7 @@ from tybot.embedding_index_job import (
     Publisher,
     run_index_batch,
 )
+from tybot.embedding_index_store import current_document_ids
 
 
 @dataclass(frozen=True)
@@ -94,12 +95,18 @@ def run_reconciled_index(
             raise ReconciliationError("reindex_source_missing")
         requested.append(source)
 
+    # Read what is current **before** embedding starts, and in the full scope
+    # publication replaces -- `current_documents` above is narrowed to this
+    # chunker revision, so it cannot answer "what will this publication retire"
+    # when the chunker itself changed.
+    observed = current_document_ids(connection, model_revision=model_revision)
     batch = run_index_batch(
         requested,
         model_revision=model_revision,
         authorize=authorize,
         embedder=embedder,
         writer=writer,
+        expected_current=observed,
         limits=limits,
         spec=spec,
     )
