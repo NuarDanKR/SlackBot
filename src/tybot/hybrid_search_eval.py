@@ -125,8 +125,10 @@ def compare_rankings(
     _nonnegative_finite("keyword_latency_ms", keyword_latency_ms)
     _nonnegative_finite("fusion_latency_ms", fusion_latency_ms)
     if hybrid.vector_state == "unavailable":
-        if vector_latency_ms is not None or embedding_cost_usd is not None:
-            raise ValueError("unavailable vectors cannot report latency or cost")
+        if embedding_cost_usd is not None:
+            raise ValueError("unavailable vectors cannot report a verified cost")
+        if vector_latency_ms is not None:
+            _nonnegative_finite("vector_latency_ms", vector_latency_ms)
     else:
         if vector_latency_ms is None:
             raise ValueError("vector latency is required when vector lookup ran")

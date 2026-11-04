@@ -108,10 +108,21 @@ def test_comparison_reports_gain_displacement_recall_latency_and_cost():
     assert got.embedding_cost_usd == 0.001
 
 
-def test_unavailable_vectors_require_unknown_vector_latency_and_cost():
+def test_unavailable_vectors_keep_failure_latency_but_not_a_verified_cost():
     a = hit("a")
     ranking = fuse([a], None, limit=1)
-    with pytest.raises(ValueError, match="cannot report latency or cost"):
+    got = compare_rankings(
+        [a],
+        ranking,
+        contract=ReplayContract(True, True, True),
+        top_k=1,
+        keyword_latency_ms=1,
+        vector_latency_ms=2,
+        fusion_latency_ms=0,
+        embedding_cost_usd=None,
+    )
+    assert got.vector_latency_ms == 2
+    with pytest.raises(ValueError, match="verified cost"):
         compare_rankings(
             [a],
             ranking,
@@ -120,7 +131,7 @@ def test_unavailable_vectors_require_unknown_vector_latency_and_cost():
             keyword_latency_ms=1,
             vector_latency_ms=2,
             fusion_latency_ms=0,
-            embedding_cost_usd=0,
+            embedding_cost_usd=0.1,
         )
 
 
