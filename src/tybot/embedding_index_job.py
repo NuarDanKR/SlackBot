@@ -55,7 +55,11 @@ class IndexAuthorization:
             raise ValueError("authorization_policy_invalid")
         if self.transport not in {LOCAL, EXTERNAL}:
             raise ValueError("authorization_transport_invalid")
-        if self.transport == EXTERNAL and not self.external_transfer_approved:
+        if (
+            self.allowed
+            and self.transport == EXTERNAL
+            and not self.external_transfer_approved
+        ):
             raise ValueError("external_transfer_not_approved")
         return self
 

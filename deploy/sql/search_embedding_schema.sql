@@ -22,6 +22,24 @@ CREATE TABLE IF NOT EXISTS search_embedding_model_revision (
     created_by        text NOT NULL CHECK (btrim(created_by) <> '')
 );
 
+CREATE TABLE IF NOT EXISTS search_embedding_workspace_policy (
+    workspace                  text PRIMARY KEY CHECK (btrim(workspace) <> ''),
+    enabled                    boolean NOT NULL DEFAULT false,
+    model_revision             text REFERENCES search_embedding_model_revision(revision),
+    transport                  text NOT NULL DEFAULT 'local'
+                               CHECK (transport IN ('local', 'external')),
+    allow_channel              boolean NOT NULL DEFAULT true,
+    allow_attachment           boolean NOT NULL DEFAULT true,
+    allow_dm                   boolean NOT NULL DEFAULT false,
+    external_transfer_approved boolean NOT NULL DEFAULT false,
+    revision                   bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    reason                     text NOT NULL DEFAULT '' CHECK (length(reason) <= 500),
+    updated_at                 timestamptz NOT NULL DEFAULT now(),
+    updated_by                 text NOT NULL CHECK (btrim(updated_by) <> ''),
+    CHECK (NOT enabled OR model_revision IS NOT NULL),
+    CHECK (NOT external_transfer_approved OR transport = 'external')
+);
+
 CREATE TABLE IF NOT EXISTS archive_search_document_revision (
     id                bigserial PRIMARY KEY,
     workspace         text NOT NULL CHECK (btrim(workspace) <> ''),
@@ -127,12 +145,15 @@ FOR EACH ROW EXECUTE FUNCTION check_archive_search_current_revision();
 
 COMMENT ON TABLE search_embedding_model_revision IS
     'Embedding model contract only; no credentials. Draft by default and never calls a provider.';
+COMMENT ON TABLE search_embedding_workspace_policy IS
+    'Workspace embedding authorization. Disabled by default; external transfer requires this and model approval.';
 COMMENT ON TABLE archive_search_document_revision IS
     'Rebuildable vector-index manifest. Markdown remains authoritative; current ACL is rechecked.';
 COMMENT ON TABLE archive_search_chunk IS
     'Embedding plus immutable source offsets/hash. Source text and answers are intentionally absent.';
 
 REVOKE ALL ON TABLE search_embedding_model_revision FROM PUBLIC;
+REVOKE ALL ON TABLE search_embedding_workspace_policy FROM PUBLIC;
 REVOKE ALL ON TABLE archive_search_document_revision FROM PUBLIC;
 REVOKE ALL ON TABLE archive_search_chunk FROM PUBLIC;
 REVOKE ALL ON FUNCTION check_archive_search_chunk_dimensions() FROM PUBLIC;
@@ -145,6 +166,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
         GRANT SELECT, INSERT, UPDATE, DELETE
             ON TABLE search_embedding_model_revision,
+                     search_embedding_workspace_policy,
                      archive_search_document_revision,
                      archive_search_chunk
             TO tyslackai;

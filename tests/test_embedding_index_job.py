@@ -116,6 +116,15 @@ def test_policy_denial_calls_no_model():
     assert embedder.calls == writer.calls == []
 
 
+def test_unapproved_external_policy_can_be_reported_as_a_denial():
+    denied = IndexAuthorization(False, "model-v1", "policy-7", EXTERNAL)
+    assert denied.checked("model-v1") is denied
+    with pytest.raises(ValueError, match="external_transfer_not_approved"):
+        IndexAuthorization(True, "model-v1", "policy-7", EXTERNAL).checked(
+            "model-v1"
+        )
+
+
 def test_authorizer_receives_coordinates_but_not_in_result_repr():
     requests = []
     item = source()

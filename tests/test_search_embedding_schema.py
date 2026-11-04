@@ -30,6 +30,7 @@ def test_pgvector_and_all_revision_tables_are_declared():
     assert "CREATE EXTENSION IF NOT EXISTS vector" in body
     for table in (
         "search_embedding_model_revision",
+        "search_embedding_workspace_policy",
         "archive_search_document_revision",
         "archive_search_chunk",
     ):
@@ -75,12 +76,24 @@ def test_public_has_no_access_and_only_the_existing_app_role_is_granted_access()
     body = sql()
     for table in (
         "search_embedding_model_revision",
+        "search_embedding_workspace_policy",
         "archive_search_document_revision",
         "archive_search_chunk",
     ):
         assert f"REVOKE ALL ON TABLE {table} FROM PUBLIC" in body
     assert "TO tyslackai" in body
     assert "TO tybot_archiver" not in body
+
+
+def test_workspace_policy_is_off_by_default_and_external_transfer_needs_two_approvals():
+    body = sql()
+    policy = body[body.index("CREATE TABLE IF NOT EXISTS search_embedding_workspace_policy") :]
+    policy = policy[: policy.index(");")]
+    assert "enabled                    boolean NOT NULL DEFAULT false" in policy
+    assert "allow_dm                   boolean NOT NULL DEFAULT false" in policy
+    assert "NOT enabled OR model_revision IS NOT NULL" in policy
+    assert "NOT external_transfer_approved OR transport = 'external'" in policy
+    assert "external_approved boolean NOT NULL DEFAULT false" in body
 
 
 def test_schema_does_not_create_an_ann_index_before_a_model_dimension_is_chosen():
