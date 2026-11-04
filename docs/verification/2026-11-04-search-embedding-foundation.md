@@ -72,3 +72,14 @@
 `ArchiveStore` adapter는 아직 없다. `visible_docs()`가 적용한 수정·삭제 revision을
 보존하는 canonical text 계약 없이 원본 MD 파일을 직접 다시 열면 삭제된 문장이 벡터
 근거로 되살아날 수 있기 때문이다. 이 계약과 회귀시험이 다음 선행 작업이다.
+
+### Canonical source 연결 완료
+
+`tybot.archive.embedding_source`가 channel·attachment의 색인 본문과 요청별 opener를
+같은 정본 함수로 만든다. 현재 ACL과 revision ledger를 통과한 줄만 사용하며 후보 하나가
+첨부 전체를 깨우지 않는다. KST 오늘 자 channel raw와 모든 DM 색인은 아직 제외한다.
+정본 판은 청커 판과 합쳐 `source-v1:chunk-v1:max=1200:ov=120`으로 기록한다.
+
+revision ledger는 설정 여부가 아니라 실제 DB 연결과 표 존재까지 확인한다. 이 probe가
+실패하면 색인을 시작하지 않는다. channel ID 변경 감지·실제 DB writer 검증·검색 점수
+결합은 여전히 남아 있다.

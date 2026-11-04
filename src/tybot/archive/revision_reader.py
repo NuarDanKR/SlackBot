@@ -203,6 +203,26 @@ def enabled() -> bool:
     return bool(os.getenv("DATABASE_URL"))
 
 
+def available() -> bool:
+    """The revision ledger can actually be read, not merely configured."""
+    if not enabled():
+        return False
+    try:
+        from ..console.workspace_store import _connect
+
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT to_regclass('public.archive_message_revision') IS NOT NULL AS available"
+            )
+            row = cur.fetchone()
+    except Exception:  # noqa: BLE001 - callers must fail closed
+        log.warning("revision 표 가용성을 확인하지 못했다")
+        return False
+    if isinstance(row, dict):
+        return bool(row.get("available"))
+    return bool(row and row[0])
+
+
 def latest_revision(workspace: str, channel_id: str, message_ts: str):
     """좌표 하나의 최신 revision. 못 보면 `UNKNOWN`."""
     got = latest_revisions(workspace, [(channel_id, message_ts)])

@@ -19,9 +19,71 @@ import pytest
 
 from tybot.archive import revision_reader as reader
 from tybot.archive.store import ArchiveDoc, RawLine
+from tybot.console import workspace_store
 
 WS, CH = "tyit", "C0FUND"
 TS = "1790070000.000001"
+
+
+class _AvailabilityCursor:
+    def __init__(self, row):
+        self.row = row
+        self.sql = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def execute(self, sql):
+        self.sql = str(sql)
+
+    def fetchone(self):
+        return self.row
+
+
+class _AvailabilityConnection:
+    def __init__(self, row):
+        self.cur = _AvailabilityCursor(row)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def cursor(self):
+        return self.cur
+
+
+def test_available_requires_a_real_connection_and_revision_table(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://synthetic/test")
+    conn = _AvailabilityConnection({"available": True})
+    monkeypatch.setattr(workspace_store, "_connect", lambda: conn)
+
+    assert reader.available()
+    assert "to_regclass('public.archive_message_revision')" in conn.cur.sql
+
+    monkeypatch.setattr(
+        workspace_store,
+        "_connect",
+        lambda: _AvailabilityConnection({"available": False}),
+    )
+    assert not reader.available()
+
+
+def test_available_fails_closed_on_missing_config_or_connection_error(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert not reader.available()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://synthetic/test")
+    monkeypatch.setattr(
+        workspace_store,
+        "_connect",
+        lambda: (_ for _ in ()).throw(RuntimeError("secret body must not escape")),
+    )
+    assert not reader.available()
 
 
 def _line(text: str, lineno: int, *, message_ts: str = TS) -> RawLine:

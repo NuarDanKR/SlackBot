@@ -897,7 +897,7 @@ class ArchiveStore:
             predicate=self._visible_predicate(ctx),
         )
 
-    def _visible_predicate(self, ctx: RequestContext):
+    def visible_predicate(self, ctx: RequestContext):
         """The permission check shared by eager and candidate-only reads."""
         from ..channel_lifecycle import include_retired, keep
 
@@ -919,13 +919,21 @@ class ArchiveStore:
 
         return permitted
 
-    def _visible_channel_docs(self, ctx: RequestContext) -> list[ArchiveDoc]:
+    def _visible_predicate(self, ctx: RequestContext):
+        """Compatibility wrapper; new candidate readers use the public API."""
+        return self.visible_predicate(ctx)
+
+    def visible_channel_docs(self, ctx: RequestContext) -> list[ArchiveDoc]:
         """Visible channel originals without materializing attachment bodies."""
         return self._docs(
             dm_scope=str(getattr(ctx, "user_id", "") or ""),
-            predicate=self._visible_predicate(ctx),
+            predicate=self.visible_predicate(ctx),
             include_attachments=False,
         )
+
+    def _visible_channel_docs(self, ctx: RequestContext) -> list[ArchiveDoc]:
+        """Compatibility wrapper; new candidate readers use the public API."""
+        return self.visible_channel_docs(ctx)
 
     def titles(self, ctx: RequestContext) -> list[str]:
         """검색 0건 폴백 — 권한 내 문서 제목 목록."""

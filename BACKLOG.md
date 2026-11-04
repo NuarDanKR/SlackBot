@@ -2071,8 +2071,11 @@ TYBot 수집 계층에서 사전 설치된 kordoc/LibreOffice를 호출한다
 - [ ] writer 실제 PostgreSQL 격리 시험 — CHECK·trigger·동시 발행·rollback 검증
 - [x] 현재 ACL·revision을 통과한 source opener만 입력으로 받는 후보 resolver.
       workspace/channel/path·source revision·offset·본문 hash가 모두 같을 때만 본문을 돌려준다.
-- [ ] `ArchiveStore`의 수정·삭제 반영 결과를 보존하는 canonical source opener 연결.
-      원본 MD를 직접 다시 열어 삭제된 문장을 되살리지 않는다.
+- [x] channel·attachment 정본 창구와 현재 ACL opener. KST 오늘 자 raw는 제외하고,
+      DM 색인은 `kind` 분리 스키마 전까지 거절한다. 정본 판과 청커 판은
+      `source-v1:chunk-v1:max=1200:ov=120`처럼 한 revision으로 묶는다.
+- [ ] 진짜 Slack channel ID가 뒤늦게 붙거나 v1 채널명이 바뀐 문서의 옛 좌표를
+      감지·retire하고 새 좌표로 재색인
 - [ ] 검증된 벡터 후보를 기존 키워드 검색 점수와 결합
 - [ ] `answer_issues` 전수 구조 감사에서 `no_evidence`를 기준선으로 고정하되,
       수집 없음·권한 확인 실패·검색 실패를 분리한다. **`no_evidence` 전체를 벡터 검색이
