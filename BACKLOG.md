@@ -2069,7 +2069,11 @@ TYBot 수집 계층에서 사전 설치된 kordoc/LibreOffice를 호출한다
 - [x] 청커 결과의 원문 좌표·본문 hash·벡터를 검증하고, 완성 revision만 원자적으로
       현재 상태로 발행하는 writer. 동일 revision은 저장 좌표까지 같을 때만 멱등 성공한다.
 - [ ] writer 실제 PostgreSQL 격리 시험 — CHECK·trigger·동시 발행·rollback 검증
-- [ ] 후보 좌표를 현재 ACL로 다시 열고 source revision/hash를 검증한 뒤 기존 검색과 결합
+- [x] 현재 ACL·revision을 통과한 source opener만 입력으로 받는 후보 resolver.
+      workspace/channel/path·source revision·offset·본문 hash가 모두 같을 때만 본문을 돌려준다.
+- [ ] `ArchiveStore`의 수정·삭제 반영 결과를 보존하는 canonical source opener 연결.
+      원본 MD를 직접 다시 열어 삭제된 문장을 되살리지 않는다.
+- [ ] 검증된 벡터 후보를 기존 키워드 검색 점수와 결합
 - [ ] `answer_issues` 전수 구조 감사에서 `no_evidence`를 기준선으로 고정하되,
       수집 없음·권한 확인 실패·검색 실패를 분리한다. **`no_evidence` 전체를 벡터 검색이
       해결할 건수로 간주하지 않는다.**

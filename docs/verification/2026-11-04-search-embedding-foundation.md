@@ -54,3 +54,21 @@
 
 단위 계약 시험은 통과했지만 실제 PostgreSQL의 trigger·rollback·동시 발행은 아직
 검증하지 않았다. 모델 호출, 검색 결합, 운영 활성화도 여전히 없다.
+
+## 후보 재검증 resolver
+
+`tybot.embedding_resolver.resolve_candidates`는 DB 후보를 근거로 바로 쓰지 않는다.
+호출자가 **현재 ACL과 revision을 이미 적용한** source opener를 제공해야 하며, 아래가
+전부 같을 때만 해당 원문 조각을 반환한다.
+
+- workspace, channel ID, 상대 doc path
+- 전체 source SHA-256
+- offset 범위와 해당 조각 SHA-256
+
+권한 거절과 파일 부재는 모두 `source_not_visible`로 합쳐 권한 밖 문서의 존재 여부를
+노출하지 않는다. 절대 경로·상위 경로·Windows 경로·NUL·비정규 상대 경로는 opener를
+호출하기 전에 거절한다.
+
+`ArchiveStore` adapter는 아직 없다. `visible_docs()`가 적용한 수정·삭제 revision을
+보존하는 canonical text 계약 없이 원본 MD 파일을 직접 다시 열면 삭제된 문장이 벡터
+근거로 되살아날 수 있기 때문이다. 이 계약과 회귀시험이 다음 선행 작업이다.
