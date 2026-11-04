@@ -94,3 +94,15 @@ revision ledger는 설정 여부가 아니라 실제 DB 연결과 표 존재까�
 통과한 계획만 정본 판·청커 판·모델 revision이 묶인 `DocumentKey`와 청크별 SHA-256을
 내보낸다. 원문과 청크 본문은 dataclass 표현에서 제외했다. 이 계층은 모델을 호출하거나
 DB를 열지 않으며, 검색 결합이나 운영 활성화를 뜻하지 않는다.
+
+## 좌표 변경 재조정 경계
+
+`tybot.embedding_coordinate_reconcile`은 전체 정본 스캔과 현재 manifest를 비교한다.
+같은 workspace·원문 SHA·원문 종류별 안정 좌표가 옛 행과 새 정본에서 각각 정확히
+하나일 때만 좌표 이동으로 판정한다. 동일 본문이 여러 채널에 있거나 스캔이 미완료면
+자동 retire하지 않는다. KST 오늘 자 제외처럼 현재 inventory에 없는 문서도 단순 누락만으로
+지우지 않는다.
+
+옛 행 retire는 새 좌표가 같은 source/chunker/model revision으로 `ready/current`가 된
+것을 트랜잭션 안에서 다시 확인한 뒤에만 실행한다. 현재는 계획·DB 경계까지만 있으며
+색인 잡 호출 배선은 남아 있다.
