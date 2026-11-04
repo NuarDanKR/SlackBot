@@ -295,9 +295,9 @@ class Authenticator:
         if found is None:
             # 이메일이 없어도 같은 시간이 걸리게 해 존재 여부를 유추하지 못하게 한다.
             verify_password(password, _DUMMY_PASSWORD_HASH)
-            raise AuthError("이메일 또는 비밀번호가 맞지 않습니다.")
+            raise AuthError("아이디 또는 비밀번호가 맞지 않습니다.")
         if not verify_password(password, found.password_hash):
-            raise AuthError("이메일 또는 비밀번호가 맞지 않습니다.")
+            raise AuthError("아이디 또는 비밀번호가 맞지 않습니다.")
         return self.issue(found.email)
 
     def issue(self, email: str, *, now: float | None = None) -> str:

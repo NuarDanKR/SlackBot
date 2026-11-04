@@ -100,11 +100,11 @@ def validate_new(new: str, *, email: str, current: str) -> None:
         raise PasswordError("same_as_current")
 
 
-def dm_text(email: str, temp: str, expires_at: datetime) -> str:
+def dm_text(email: str, temp: str, expires_at: datetime, emp_no: str | None = None) -> str:
     until = expires_at.astimezone(KST).strftime("%m/%d %H:%M")
     return (
         ":closed_lock_with_key: *TYBot 관리 콘솔 임시 비밀번호가 발급되었습니다.*\n"
-        f"아이디: {email}\n"
+        f"{f'아이디(사번): {emp_no}' if emp_no else f'아이디: {email}'}\n"
         f"임시 비밀번호: `{temp}`  (유효기간 {until} 까지)\n\n"
         "최초 로그인 시 새로운 비밀번호를 설정해야 합니다. 발급된 임시 비밀번호는 "
         "발급일로부터 72시간 동안 유효하므로, 유효기간 내에 로그인하여 비밀번호를 변경해 "
@@ -190,6 +190,48 @@ def _target(cur, email: str, tokens: dict[str, str]) -> tuple[str, str] | None:
     return None
 
 
+_EMP_SQL = """
+SELECT e.emp_no FROM console_user u
+  JOIN employee e ON e.emp_no = u.emp_no
+                  OR (u.emp_no IS NULL AND lower(btrim(e.email)) = lower(u.email))
+ WHERE u.email = %s AND e.active
+"""
+
+_RESOLVE_SQL = """
+SELECT DISTINCT u.email FROM console_user u
+  JOIN employee e ON e.emp_no = u.emp_no
+                  OR (u.emp_no IS NULL AND lower(btrim(e.email)) = lower(u.email))
+ WHERE upper(e.emp_no) = upper(%s)
+"""
+
+
+def _emp_no(cur, email: str) -> str | None:
+    cur.execute(_EMP_SQL, (email,))
+    rows = cur.fetchall()
+    return str(rows[0]["emp_no"]) if len(rows) == 1 else None
+
+
+def login_email(identifier: str | None, *, connect=None) -> str:
+    """로그인 아이디(사번 또는 회사 이메일) → 계정 이메일.
+
+    계정의 열쇠는 이메일 그대로다(감사 기록·담당 범위가 이메일을 가리킨다). 사번은 입구일 뿐이다.
+    `@` 가 있으면 이메일로 본다. 사번이 한 계정으로 딱 이어지지 않으면 받은 값을 그대로 돌려준다 —
+    그러면 로그인은 「아이디 또는 비밀번호가 맞지 않습니다」 로 끝나고, 계정 유무가 드러나지 않는다.
+    """
+    ident = (identifier or "").strip()
+    if not ident or "@" in ident or len(ident) > 40:
+        return ident.lower()
+    try:
+        with (connect or _connect)() as conn, conn.cursor() as cur:
+            cur.execute(_RESOLVE_SQL, (ident,))
+            rows = cur.fetchall()
+            conn.rollback()
+    except Exception:  # noqa: BLE001 - 못 찾으면 그대로 — 로그인이 거절한다
+        logger.warning("사번 로그인 아이디 조회 실패")
+        return ident
+    return str(rows[0]["email"]).lower() if len(rows) == 1 else ident
+
+
 def _delete_dms(deps: _Deps, ids: list[int]) -> None:
     """닫힌 발급의 DM 을 지운다. 실패는 기록만 하고 다음 정리 때 다시 시도한다."""
     if not ids:
@@ -260,7 +302,7 @@ def issue(email: str, *, kind: str, actor: str, connect=None, tokens=None, sende
             replaced = [r["id"] for r in cur.fetchall()]
             try:
                 channel, ts = deps.sender.send(deps.tokens[workspace], slack_user,
-                                               dm_text(email, temp, expires))
+                                               dm_text(email, temp, expires, _emp_no(cur, email)))
             except Exception as exc:  # noqa: BLE001 - 어떤 Slack 실패든 발급을 되돌린다
                 logger.warning("임시 비밀번호 DM 실패 — %s ws=%s err=%s", email, workspace,
                                type(exc).__name__)
@@ -442,6 +484,7 @@ __all__ = [
     "generate_temp",
     "initial",
     "issue",
+    "login_email",
     "temp_login",
     "validate_new",
 ]

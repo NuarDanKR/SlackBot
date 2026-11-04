@@ -188,7 +188,7 @@ def test_non_admin_is_refused_everywhere(role):
 
     ep = _endpoints(lambda **kw: None)
     calls = [
-        lambda: ep[("GET", "/api/people")](view="slack", q=None, workspace=None, bot=None,
+        lambda: ep[("GET", "/api/people")](view="slack", q=None, workspace=None, bot=None, org=None, account=None, vip=None,
                                            limit=50, offset=0, user=_user(role)),
         lambda: ep[("GET", "/api/bot-access")](bot="vipbot", empNo=None, user=_user(role)),
         lambda: ep[("GET", "/api/bot-access/check")](bot="vipbot", empNo="1", workspace=None,

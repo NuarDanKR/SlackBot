@@ -98,6 +98,9 @@ def build_router(
         q: str | None = Query(default=None, max_length=80),
         workspace: str | None = Query(default=None, max_length=40),
         bot: str | None = Query(default=None, max_length=40),
+        org: str | None = Query(default=None, max_length=40),
+        account: str | None = Query(default=None, max_length=20),
+        vip: str | None = Query(default=None, max_length=5),
         limit: int = 50,
         offset: int = 0,
         user: ConsoleUser = user_dependency,
@@ -105,6 +108,7 @@ def build_router(
         require_admin(user)
         try:
             return store.list_people(view=view, q=q, workspace=workspace, bot=bot,
+                                     org=org, account=account, vip=vip,
                                      limit=limit, offset=offset)
         except store.UserDirectoryError as exc:
             raise _refused(exc) from exc

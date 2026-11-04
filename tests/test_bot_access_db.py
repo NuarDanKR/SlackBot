@@ -208,3 +208,23 @@ def test_sources_add_remove_and_decision(connect):
 def test_sources_reject_bad_channels(connect, bad):
     with pytest.raises(store.UserDirectoryError, match="invalid_request"):
         store.add_sources(bot="vipbot", channels=bad, reason="x", actor="a", connect=connect)
+
+
+def test_people_filters_and_facets(connect):
+    _grant(connect)                                            # E1 VIP
+    with connect() as conn:
+        conn.execute("UPDATE console_user SET must_change_password = true WHERE email = 'staff@ty.co.kr'")
+    base = store.list_people(connect=connect)
+    assert {o["code"] for o in base["facets"]["orgs"]} == {"EXEC", "IT"}
+    assert {w["key"] for w in base["facets"]["workspaces"]} == {"mgmt", "tyit"}
+    assert [p["empNo"] for p in store.list_people(org="IT", connect=connect)["people"]] == ["S1"]
+    assert [p["empNo"] for p in store.list_people(vip="yes", connect=connect)["people"]] == ["E1"]
+    assert "E1" not in [p["empNo"] for p in store.list_people(vip="no", connect=connect)["people"]]
+    assert [p["empNo"] for p in store.list_people(account="temp", connect=connect)["people"]] == ["S1"]
+    assert {p["empNo"] for p in store.list_people(account="none", connect=connect)["people"]} == {"E1", "E3"}
+    assert [p["empNo"] for p in store.list_people(view="all", workspace="tyit", org="EXEC",
+                                                  connect=connect)["people"]] == ["E1"]
+    # 조직을 골라도 조직 선택지는 그대로(바탕으로 센다)
+    assert len(store.list_people(org="IT", connect=connect)["facets"]["orgs"]) == 2
+    with pytest.raises(store.UserDirectoryError, match="invalid_request"):
+        store.list_people(account="weird", connect=connect)

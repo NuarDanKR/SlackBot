@@ -289,25 +289,27 @@ def login(
     읽을 수 있는 값이 된다. HttpOnly 쿠키는 스크립트가 읽지 못한다.
     `SameSite=strict` 로 두어 다른 사이트에서 이 콘솔로 요청을 보낼 수 없게 한다.
     """
+    # 아이디는 사번 또는 회사 이메일. 계정의 열쇠는 이메일이므로 먼저 이메일로 바꾼다.
+    email = password_issue.login_email(body.email)
     # 임시 비밀번호 계정은 세션을 주지 않고 「먼저 바꾸라」 를 돌려준다(password_issue).
     # DB 를 못 보면 보통 로그인으로 간다 — 임시 계정은 인증 목록에 없으므로 열리지 않는다.
     try:
-        password_issue.temp_login(body.email, body.password)
+        password_issue.temp_login(email, body.password)
     except password_issue.PasswordError as e:
         code = str(e)
         if code == "bad_password":
             logger.warning("로그인 실패(임시 비밀번호) — 이메일 %r", body.email)
             raise HTTPException(status_code=401,
-                                detail="이메일 또는 비밀번호가 맞지 않습니다.") from e
+                                detail="아이디 또는 비밀번호가 맞지 않습니다.") from e
         if code != "database_unavailable":
             raise HTTPException(status_code=password_issue.CODES.get(code, 401),
                                 detail=code) from e
     except Exception:
         logger.exception("임시 비밀번호 상태 확인 실패 — 보통 로그인으로 진행")
     try:
-        session = auth.login(body.email, body.password)
+        session = auth.login(email, body.password)
     except AuthError as e:
-        logger.warning("로그인 실패 — 이메일 %r", body.email)
+        logger.warning("로그인 실패 — 아이디 %r", body.email)
         raise HTTPException(status_code=401, detail=str(e)) from e
 
     response.set_cookie(
@@ -321,7 +323,7 @@ def login(
         secure=os.getenv("CONSOLE_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes"),
         path="/",
     )
-    user = auth.account_by_email(body.email)
+    user = auth.account_by_email(email)
     assert user is not None  # login() 이 성공했으면 반드시 있다
     logger.info("로그인 — %s", user.user.email)
     return _me(user.user)
@@ -352,12 +354,13 @@ def change_password(
     """
     _check_write_request(request)
     try:
-        result = password_issue.change(body.email, body.currentPassword, body.newPassword)
+        result = password_issue.change(password_issue.login_email(body.email),
+                                         body.currentPassword, body.newPassword)
     except password_issue.PasswordError as e:
         code = str(e)
         if code == "bad_password":
             raise HTTPException(status_code=401,
-                                detail="이메일 또는 비밀번호가 맞지 않습니다.") from e
+                                detail="아이디 또는 비밀번호가 맞지 않습니다.") from e
         raise HTTPException(status_code=password_issue.CODES.get(code, 422), detail=code) from e
     try:
         auth.reload()

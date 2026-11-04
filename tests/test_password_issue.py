@@ -308,7 +308,7 @@ def test_login_wrong_temp_looks_like_any_wrong_password(http, monkeypatch):
     client, app = http
     monkeypatch.setattr(app.password_issue, "temp_login", _raise("bad_password"))
     r = client.post("/api/login", json={"email": "a@ty.co.kr", "password": "x"})
-    assert r.status_code == 401 and r.json()["detail"] == "이메일 또는 비밀번호가 맞지 않습니다."
+    assert r.status_code == 401 and r.json()["detail"] == "아이디 또는 비밀번호가 맞지 않습니다."
 
 
 def test_login_falls_back_when_temp_state_unreadable(http, monkeypatch):
@@ -328,3 +328,27 @@ def test_change_needs_csrf_and_maps_codes(http, monkeypatch):
     monkeypatch.setattr(app.password_issue, "change", lambda *a, **kw: {"email": "a@ty.co.kr"})
     r = client.post("/api/password/change", json=body, headers={"X-TYBot-CSRF": "1", "Origin": "http://testserver"})
     assert r.status_code == 200
+
+
+@needs_db
+def test_login_email_accepts_emp_no(db):
+    assert pi.login_email("E1", connect=db) == "a@ty.co.kr"
+    assert pi.login_email("e1", connect=db) == "a@ty.co.kr"          # 대소문자 무시
+    assert pi.login_email(" A@TY.co.kr ", connect=db) == "a@ty.co.kr"
+    assert pi.login_email("NOPE", connect=db) == "NOPE"               # 모르면 그대로 → 로그인 거절
+
+
+@needs_db
+def test_dm_shows_emp_no_as_login_id(db):
+    slack = FakeSlack()
+    _issue(db, slack)
+    assert "아이디(사번): E1" in slack.sent[-1][2]
+
+
+def test_login_with_emp_no_resolves_before_checks(http, monkeypatch):
+    client, app = http
+    seen = {}
+    monkeypatch.setattr(app.password_issue, "login_email", lambda ident: "admin@ty.co.kr" if ident == "9318-F" else ident)
+    monkeypatch.setattr(app.password_issue, "temp_login", lambda email, pw: seen.setdefault("email", email) and False)
+    r = client.post("/api/login", json={"email": "9318-F", "password": "Admin#pass1"})
+    assert r.status_code == 200 and seen["email"] == "admin@ty.co.kr"
