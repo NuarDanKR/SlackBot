@@ -237,13 +237,13 @@ def test_wrong_password_is_rejected(client):
     )
     assert r.status_code == 401
     # 이메일이 등록됐는지 알려 주지 않는다.
-    assert r.json()["detail"] == "이메일 또는 비밀번호가 맞지 않습니다."
+    assert r.json()["detail"] == "아이디 또는 비밀번호가 맞지 않습니다."
 
 
 def test_unknown_user_gives_same_message(client):
     r = client.post("/api/login", json={"email": "nobody@example.com", "password": "아무거나"})
     assert r.status_code == 401
-    assert r.json()["detail"] == "이메일 또는 비밀번호가 맞지 않습니다."
+    assert r.json()["detail"] == "아이디 또는 비밀번호가 맞지 않습니다."
 
 
 def test_login_sets_httponly_cookie(client):

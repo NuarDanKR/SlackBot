@@ -84,18 +84,50 @@ _PEOPLE_FILTER = {
     "all": "e.active",
 }
 
+#: 콘솔 계정 상태 — 화면 필터와 같은 말
+ACCOUNT_STATES = ("none", "unissued", "temp", "set", "stopped")
+
+# 탭(view) + 워크스페이스까지가 「바탕」, 조직·계정 상태·VIP·검색어는 그 위의 거르기다.
+# 거르기 목록(조직 선택지)은 바탕으로만 센다 — 조직을 고르면 다른 조직이 선택지에서 사라지면 안 된다.
+_BASE_SQL = """
+SELECT e.emp_no, e.name, e.email, e.position, e.active, e.org_code,
+       o.name AS org_name,
+       CASE WHEN acc.email IS NULL THEN 'none'
+            WHEN NOT acc.active THEN 'stopped'
+            WHEN acc.must_change_password THEN 'temp'
+            WHEN coalesce(acc.password_hash, '') <> '' THEN 'set'
+            ELSE 'unissued' END AS account_state,
+       EXISTS (SELECT 1 FROM bot_access a
+                WHERE a.emp_no = e.emp_no AND a.revoked_at IS NULL
+                  AND a.bot = coalesce(%(bot)s::text, 'vipbot')
+                  AND (a.expires_at IS NULL OR a.expires_at > now())) AS has_bot
+  FROM employee e
+  LEFT JOIN org_unit o ON o.code = e.org_code
+  LEFT JOIN LATERAL (
+       SELECT cu.email, cu.active, cu.must_change_password, cu.password_hash
+         FROM console_user cu
+        WHERE e.email IS NOT NULL AND lower(cu.email) = lower(btrim(e.email))
+        LIMIT 1) acc ON true
+ WHERE {filter}
+   AND (%(ws)s::text IS NULL OR EXISTS (SELECT 1 FROM user_identity ui
+                                          WHERE ui.emp_no = e.emp_no AND ui.workspace = %(ws)s))
+"""
+
+_FACETS_SQL = """
+WITH base AS (""" + _BASE_SQL + """)
+SELECT org_code, org_name, count(*) AS n FROM base
+ GROUP BY org_code, org_name ORDER BY org_name NULLS LAST
+"""
+
+_WORKSPACES_SQL = """
+SELECT ui.workspace, coalesce(w.label, ui.workspace) AS label, count(DISTINCT ui.emp_no) AS n
+  FROM user_identity ui LEFT JOIN workspace w ON w.key = ui.workspace
+ WHERE ui.emp_no IS NOT NULL
+ GROUP BY ui.workspace, w.label ORDER BY ui.workspace
+"""
+
 _PEOPLE_SQL = """
-WITH people AS (
-    SELECT e.emp_no, e.name, e.email, e.position, e.active, e.org_code,
-           o.name AS org_name
-      FROM employee e
-      LEFT JOIN org_unit o ON o.code = e.org_code
-     WHERE {filter}
-       AND (%(q)s::text IS NULL
-            OR e.name ILIKE %(like)s OR e.emp_no ILIKE %(like)s
-            OR coalesce(e.email, '') ILIKE %(like)s
-            OR coalesce(o.name, '') ILIKE %(like)s)
-)
+WITH people AS (""" + _BASE_SQL + """)
 SELECT p.*,
        count(*) OVER () AS total,
        coalesce((
@@ -131,6 +163,13 @@ SELECT p.*,
              FROM bot_access a
             WHERE a.emp_no = p.emp_no AND a.revoked_at IS NULL), '[]') AS grants
   FROM people p
+ WHERE (%(org)s::text IS NULL OR p.org_code = %(org)s)
+   AND (%(acct)s::text IS NULL OR p.account_state = %(acct)s)
+   AND (%(vip)s::text IS NULL OR p.has_bot = (%(vip)s = 'yes'))
+   AND (%(q)s::text IS NULL
+        OR p.name ILIKE %(like)s OR p.emp_no ILIKE %(like)s
+        OR coalesce(p.email, '') ILIKE %(like)s
+        OR coalesce(p.org_name, '') ILIKE %(like)s)
  ORDER BY p.active DESC, p.org_name NULLS LAST, p.name, p.emp_no
  LIMIT %(limit)s OFFSET %(offset)s
 """
@@ -162,12 +201,26 @@ def list_people(
     q: str | None = None,
     workspace: str | None = None,
     bot: str | None = None,
+    org: str | None = None,
+    account: str | None = None,
+    vip: str | None = None,
     limit: int = 50,
     offset: int = 0,
     connect=None,
 ) -> dict:
-    """사람 목록. `view`: slack(Slack 사용자) · granted(권한 있는 사람) · all(재직자 전체)."""
-    if view not in VIEWS or not 1 <= limit <= MAX_LIMIT or offset < 0:
+    """사람 목록. `view`: slack(Slack 사용자) · granted(권한 있는 사람) · all(재직자 전체).
+
+    거르기: `workspace` · `org`(조직 코드) · `account`(콘솔 계정 상태 `ACCOUNT_STATES`) ·
+    `vip`(yes·no — `bot` 권한이 살아 있나) · `q`(이름·사번·이메일·조직 글자).
+    응답의 `facets` 는 화면 선택지(워크스페이스·조직)다.
+    """
+    org = (org or "").strip() or None
+    account = (account or "").strip() or None
+    vip = (vip or "").strip() or None
+    if (view not in VIEWS or not 1 <= limit <= MAX_LIMIT or offset < 0
+            or (account is not None and account not in ACCOUNT_STATES)
+            or (vip is not None and vip not in ("yes", "no"))
+            or (org is not None and len(org) > 40)):
         raise UserDirectoryError("invalid_request")
     q = (q or "").strip() or None
     if q is not None and len(q) > 80:
@@ -180,6 +233,9 @@ def list_people(
         "like": f"%{q}%" if q else None,
         "ws": workspace,
         "bot": bot,
+        "org": org,
+        "acct": account,
+        "vip": vip,
         "limit": limit,
         "offset": offset,
     }
@@ -189,6 +245,12 @@ def list_people(
             rows = [dict(r) for r in cur.fetchall()]
             cur.execute(_UNMAPPED_SQL, params)
             unmapped = int(cur.fetchone()["n"])
+            cur.execute(_FACETS_SQL.format(filter=_PEOPLE_FILTER[view]), params)
+            orgs = [{"code": r["org_code"], "name": r["org_name"], "count": int(r["n"])}
+                    for r in cur.fetchall() if r["org_code"]]
+            cur.execute(_WORKSPACES_SQL)
+            workspaces = [{"key": r["workspace"], "label": r["label"], "count": int(r["n"])}
+                          for r in cur.fetchall()]
     except UserDirectoryError:
         raise
     except Exception as exc:
@@ -202,6 +264,7 @@ def list_people(
         # 사번을 못 찾은 Slack 계정 수. 이 사람들은 목록에 없고, 권한도 받을 수 없다.
         "unmappedSlack": unmapped,
         "bots": [{"key": k, "label": v} for k, v in bot_access.BOTS.items()],
+        "facets": {"workspaces": workspaces, "orgs": orgs},
     }
 
 

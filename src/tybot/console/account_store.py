@@ -33,12 +33,16 @@ def list_users() -> list[dict]:
             cur.execute(
                 """
                 SELECT u.email, u.name, u.role, u.active, u.created_at, u.last_seen,
+                       -- 로그인 아이디(사번). 계정에 적힌 사번이 우선, 없으면 인사 이메일로 찾는다.
+                       coalesce(u.emp_no, (SELECT e.emp_no FROM employee e
+                                            WHERE lower(btrim(e.email)) = lower(u.email)
+                                            ORDER BY e.active DESC LIMIT 1)) AS emp_no,
                        coalesce(array_agg(cuw.workspace ORDER BY cuw.workspace) FILTER (
                            WHERE cuw.workspace IS NOT NULL
                        ), '{}') AS workspaces
                   FROM console_user u
                   LEFT JOIN console_user_workspace cuw ON cuw.email = u.email
-                 GROUP BY u.email, u.name, u.role, u.active, u.created_at, u.last_seen
+                 GROUP BY u.email, u.name, u.role, u.active, u.created_at, u.last_seen, u.emp_no
                  ORDER BY u.active DESC, u.role, u.email
                 """
             )
