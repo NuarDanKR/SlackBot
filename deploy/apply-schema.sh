@@ -59,6 +59,7 @@ FILES=(
   archiver_supervisor_schema.sql  # Archiver 운영 상태·cursor·소급 작업
   pf_console_schema.sql       # /pf/ 콘솔. console_user 를 참조한다
   slack_license_schema.sql    # [라이선스 현황 추가] 할당 수. 목록에 있어야 서버에 표가 생긴다
+  license_member_schema.sql   # 라이선스 보유자 명단(직접 입력). employee · slack_license_manual 을 참조한다
   bot_access_schema.sql       # 봇 사용 권한(사번 단위). employee 를 참조한다
   bot_source_schema.sql       # 봇 근거 채널(채널 ID 단위)
   console_account_sync_schema.sql  # 콘솔 계정 자동 관리. console_user 에 열을 더한다

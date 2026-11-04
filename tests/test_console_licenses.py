@@ -152,6 +152,7 @@ def test_manual_rows_use_the_typed_active_count():
     assert row == {
         "kind": "manual", "id": 7, "workspace": None, "label": "토목",
         "allocated": 80, "active": 3, "guests": 0, "fetchedAt": None, "error": None,
+        "uid": "id:7", "activeSource": "typed", "listEditable": True, "listed": 0,
     }
     assert report["linkedCount"] == 1           # 직접 추가한 곳은 연동 수에 들지 않는다
 
@@ -276,3 +277,52 @@ def test_removed_ids_must_be_positive_integers(client, stub, bad_id):
     )
 
     assert response.status_code == 422
+
+
+# --- 보유자 명단 --------------------------------------------------------------
+
+def test_active_members_keep_who_and_skip_the_same_accounts():
+    slack = FakeSlack([{"members": [
+        _member("U1", profile={"real_name": "최수연", "email": "SYChoi@taeyoung.com"}),
+        _member("U2", is_restricted=True, profile={"real_name": "외부"}),
+        _member("U3", is_ultra_restricted=True),
+        _member("B1", is_bot=True),
+        _member("U4", deleted=True),
+    ]}])
+    members = license_store.active_members(slack)
+    assert [(m.slack_user, m.name, m.email, m.guest) for m in members] == [
+        ("U1", "최수연", "sychoi@taeyoung.com", False), ("U2", "외부", "", True)]
+
+
+def test_tokenless_workspace_without_list_stays_unknown():
+    report = license_store.build_report({"pf": ("프로젝트금융", None)}, {}, {}, [], {})
+    row = report["rows"][0]
+    assert row["active"] is None and row["listEditable"] is True and "직접 추가" in row["error"]
+
+
+def test_people_and_member_routes_are_admin_only_and_need_csrf(client, stub, monkeypatch):
+    from tybot.console import license_people
+
+    holder = {"uid": "ws:pf", "memberId": 3, "slackUser": None, "source": "manual", "empNo": "1"}
+    monkeypatch.setattr(license_people, "holders",
+                        lambda *a, **k: {"holders": [holder], "unread": [], "releases": []})
+    calls = []
+    monkeypatch.setattr(license_people, "add", lambda *a, **k: calls.append(a) or
+                        {"added": ["1"], "already": [], "notFound": [], "inactive": []})
+    monkeypatch.setattr(license_people, "release", lambda h, **k: {"id": 9, "source": h["source"]})
+    assert client.get("/api/licenses/people", headers=member(client)).status_code == 403
+    assert client.get("/api/licenses/people", headers=owner(client)).status_code == 200
+    body = {"target": "ws:pf", "empNos": ["1"]}
+    assert client.post("/api/licenses/members", json=body, headers=guest(client) | CSRF).status_code == 403
+    assert client.post("/api/licenses/members", json=body, headers=owner(client)).status_code == 403
+    assert client.post("/api/licenses/members", json=body, headers=owner(client) | CSRF).status_code == 200
+    assert calls[0][0] == "ws:pf"
+    url = "/api/licenses/release"
+    ok = {"target": "ws:pf", "memberId": 3, "reason": "퇴사"}
+    assert client.post(url, json=ok, headers=member(client) | CSRF).status_code == 403
+    assert client.post(url, json=ok, headers=owner(client)).status_code == 403
+    assert client.post(url, json={**ok, "reason": ""}, headers=owner(client) | CSRF).status_code == 422
+    assert client.post(url, json={**ok, "slackUser": "U1"}, headers=owner(client) | CSRF).status_code == 422
+    assert client.post(url, json={**ok, "memberId": 4}, headers=owner(client) | CSRF).status_code == 404
+    gone = client.post(url, json=ok, headers=owner(client) | CSRF)
+    assert gone.status_code == 200 and gone.json() == {"id": 9, "source": "manual"}

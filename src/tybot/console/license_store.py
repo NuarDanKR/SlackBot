@@ -63,21 +63,32 @@ class LicenseStoreError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Member:
+    """라이선스를 차지하는 Slack 계정 하나. 이메일은 사번을 잇는 데만 쓴다."""
+
+    slack_user: str
+    name: str
+    email: str
+    guest: bool
+
+
+@dataclass(frozen=True)
 class ActiveCount:
     active: int
     guests: int
     fetched_at: str
     error: str | None = None
+    #: 활성으로 센 계정들. 「누구에게 부여됐나」 명단이 이것을 쓴다.
+    members: tuple[Member, ...] = ()
 
 
 # ---------------------------------------------------------------------------
 # Slack 활성 수
 # ---------------------------------------------------------------------------
 
-def count_active_members(client) -> tuple[int, int]:
-    """(활성 수, 그중 다중 채널 게스트 수). 페이지를 끝까지 넘긴다."""
-    active = 0
-    guests = 0
+def active_members(client) -> list[Member]:
+    """라이선스를 차지하는 계정 목록. 페이지를 끝까지 넘긴다."""
+    out: list[Member] = []
     cursor = None
     while True:
         response = client.users_list(limit=200, cursor=cursor) if cursor else client.users_list(limit=200)
@@ -88,12 +99,23 @@ def count_active_members(client) -> tuple[int, int]:
                 continue
             if member.get("is_ultra_restricted"):
                 continue  # 단일 채널 게스트 — 요금이 붙지 않는다
-            active += 1
-            if member.get("is_restricted"):
-                guests += 1
+            profile = member.get("profile") or {}
+            out.append(Member(
+                slack_user=str(member.get("id") or ""),
+                name=str(profile.get("real_name") or member.get("real_name")
+                         or profile.get("display_name") or member.get("name") or ""),
+                email=str(profile.get("email") or "").strip().lower(),
+                guest=bool(member.get("is_restricted")),
+            ))
         cursor = ((response.get("response_metadata") or {}).get("next_cursor") or "").strip()
         if not cursor:
-            return active, guests
+            return out
+
+
+def count_active_members(client) -> tuple[int, int]:
+    """(활성 수, 그중 다중 채널 게스트 수)."""
+    members = active_members(client)
+    return len(members), sum(1 for member in members if member.guest)
 
 
 _cache: dict[str, tuple[float, ActiveCount]] = {}
@@ -111,8 +133,9 @@ def _now_iso() -> str:
 
 def _fetch_one(key: str, token: str, client_factory) -> ActiveCount:
     try:
-        active, guests = count_active_members(client_factory(token=token, timeout=15))
-        return ActiveCount(active=active, guests=guests, fetched_at=_now_iso())
+        members = tuple(active_members(client_factory(token=token, timeout=15)))
+        return ActiveCount(active=len(members), guests=sum(1 for m in members if m.guest),
+                           fetched_at=_now_iso(), members=members)
     except Exception as exc:  # noqa: BLE001 - Slack 오류는 그 워크스페이스 칸에만 적는다
         response = getattr(exc, "response", None)
         detail = str(response.get("error") or "") if isinstance(response, dict) or hasattr(response, "get") else ""
@@ -342,41 +365,57 @@ def build_report(
     stored: dict[str, int],
     counts: dict[str, ActiveCount],
     manual: list[dict] | None = None,
+    listed: dict[str, int] | None = None,
 ) -> dict:
     """연동 목록 · 저장된 할당 · Slack 조회 결과 · 직접 추가한 행을 한 표로 합친다.
+
+    `listed` 는 직접 입력한 보유자 명단 인원(키 `ws:<키>` · `id:<번호>`). 봇 토큰이 없는
+    연동 워크스페이스와 직접 추가한 워크스페이스는 명단이 있으면 활성을 그 인원으로 센다.
 
     DB·Slack 없이 시험한다. 연동이 끊긴 워크스페이스의 할당은 보이지 않는다 —
     활성 수를 알 수 없는 줄은 비교가 안 된다.
     """
+    listed = listed or {}
     rows: list[dict] = []
     for key, (label, token) in without_excluded(linked).items():
         count = counts.get(key)
-        error = None if token else "봇 토큰이 없어 Slack 에서 조회하지 못했습니다."
+        error = None if token else "봇 토큰이 없어 Slack 에서 명단을 읽지 못합니다. 명단을 직접 추가할 수 있습니다."
         if count and count.error:
             error = count.error
         ok = count is not None and count.error is None
+        listed_count = 0 if token else int(listed.get(f"ws:{key}", 0))
+        source = "slack" if ok else "list" if listed_count else None
         rows.append({
             "kind": "slack",
             "id": None,
             "workspace": key,
+            "uid": f"ws:{key}",
             "label": label,
             "allocated": int(stored.get(key, 0)),
-            "active": count.active if ok else None,
+            "active": count.active if ok else listed_count if listed_count else None,
             "guests": count.guests if ok else 0,
             "fetchedAt": count.fetched_at if ok else None,
-            "error": error,
+            "error": None if source == "list" else error,
+            "activeSource": source,
+            "listEditable": not token,
+            "listed": listed_count,
         })
     for row in manual or []:
+        listed_count = int(listed.get(f"id:{int(row['id'])}", 0))
         rows.append({
             "kind": "manual",
             "id": int(row["id"]),
             "workspace": None,
+            "uid": f"id:{int(row['id'])}",
             "label": str(row["label"]),
             "allocated": int(row.get("allocated") or 0),
-            "active": int(row.get("active") or 0),
+            "active": listed_count if listed_count else int(row.get("active") or 0),
             "guests": 0,
             "fetchedAt": None,
             "error": None,
+            "activeSource": "list" if listed_count else "typed",
+            "listEditable": True,
+            "listed": listed_count,
         })
     rows.sort(key=lambda row: row["label"])
     synced = [row for row in rows if row["kind"] == "slack" and row["active"] is not None]
