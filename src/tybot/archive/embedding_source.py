@@ -104,6 +104,19 @@ class VectorSource:
     source_revision: str
 
 
+@dataclass(frozen=True)
+class LineSpan:
+    """정본 본문 안에서 원문 한 줄이 차지한 자리. `end` 는 줄바꿈을 포함한다."""
+
+    start: int
+    end: int
+    line: object
+
+    def touches(self, start: int, end: int) -> bool:
+        """`[start, end)` 구간과 한 글자라도 겹치나."""
+        return self.start < end and self.end > start
+
+
 def source_revision(text: str) -> str:
     """정본 본문의 지문. `embedding_index_store.source_revision` 과 같은 규칙이다."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -130,8 +143,15 @@ def normalize(text: str) -> str:
     return cleaned
 
 
-def canonical_text(doc: ArchiveDoc, lines: Iterable, *, kind: str) -> str:
-    """한 파일의 정본 본문. **색인과 복원이 둘 다 이 함수를 부른다.**
+def canonical_lines(
+    doc: ArchiveDoc, lines: Iterable, *, kind: str
+) -> tuple[str, tuple[LineSpan, ...]]:
+    """정본 본문과 **그 본문 안에서 각 원문 줄이 차지한 자리**.
+
+    둘을 한 함수가 같이 만드는 이유는 출처 때문이다(원칙 2). 벡터가 돌려주는
+    것은 문자 offset 구간뿐인데, 답변에 붙일 출처는 **원문 한 줄**이라야 한다.
+    자리를 따로 계산하면 정본을 만드는 규칙과 자리를 세는 규칙이 갈리고, 갈려도
+    오류가 안 난다 — 사람이 출처를 눌러 가면 그 자리에 그 문장이 없다.
 
     줄 순서는 파일 안 줄 번호다. 병합 문서의 정렬(시각 우선)을 그대로 쓰면 같은
     파일의 정본이 다른 파일의 내용에 따라 달라진다 — 좌표가 흔들린다.
@@ -140,16 +160,34 @@ def canonical_text(doc: ArchiveDoc, lines: Iterable, *, kind: str) -> str:
     if kind == ATTACHMENT:
         # 첨부는 본문 그대로다. 줄마다 파일명을 붙이면 표·제목이 깨지고,
         # 청크 분할이 경계를 못 본다(`chunking` 의 표·제목 규칙).
-        rows = [str(line.text or "") for line in ordered]
+        rows = [(line, str(line.text or "")) for line in ordered]
     else:
         rows = [
-            f"[{line.ts}] {line.speaker}: {line.text}" for line in ordered
+            (line, f"[{line.ts}] {line.speaker}: {line.text}") for line in ordered
         ]
-    rows = [row for row in rows if row.strip()]
+    rows = [(line, row) for line, row in rows if row.strip()]
     if not rows:
-        return ""
+        return "", ()
     _ = doc  # 서명을 좌표와 함께 읽히게 둔다. 본문은 줄에서만 나온다.
-    return normalize("\n".join(rows) + "\n")
+    parts: list[str] = []
+    spans: list[LineSpan] = []
+    at = 0
+    for line, row in rows:
+        # 줄마다 고른 뒤 이어 붙인다. 다 이어 붙인 뒤 고르면 같은 글자가 나오지만
+        # **자리를 셀 수 없다** — NUL 하나가 빠질 때마다 뒤쪽 offset 이 통째로 밀린다.
+        # 기존 계약은 `normalize("\n".join(rows) + "\n")` 이다. 경계의
+        # 줄바꿈까지 함께 정규화해야 단독 CR 로 끝나는 줄이 CRLF 가 되어 줄바꿈
+        # 하나로 남는다. `normalize(row) + "\n"` 이면 그 경우 두 줄이 된다.
+        piece = normalize(row + "\n")
+        parts.append(piece)
+        spans.append(LineSpan(start=at, end=at + len(piece), line=line))
+        at += len(piece)
+    return "".join(parts), tuple(spans)
+
+
+def canonical_text(doc: ArchiveDoc, lines: Iterable, *, kind: str) -> str:
+    """한 파일의 정본 본문. **색인과 복원이 둘 다 이 함수를 부른다.**"""
+    return canonical_lines(doc, lines, kind=kind)[0]
 
 
 def doc_kind(doc: ArchiveDoc) -> str:
@@ -195,7 +233,20 @@ def _by_file(doc: ArchiveDoc, root: Path) -> dict[str, list]:
     return grouped
 
 
-def _sources_of(doc: ArchiveDoc, root: Path) -> Iterator[VectorSource]:
+@dataclass(frozen=True)
+class SourceEntry:
+    """정본 하나와 그것을 만든 문서·줄자리. **출처를 붙이려면 셋이 다 필요하다.**"""
+
+    source: VectorSource
+    doc: ArchiveDoc
+    spans: tuple[LineSpan, ...]
+
+    def lines_in(self, start: int, end: int) -> list[LineSpan]:
+        """`[start, end)` 에 걸친 원문 줄들. 청크 하나가 여러 줄을 덮는다."""
+        return [span for span in self.spans if span.touches(start, end)]
+
+
+def _entries_of(doc: ArchiveDoc, root: Path) -> Iterator[SourceEntry]:
     kind = doc_kind(doc)
     channel = channel_key(doc)
     workspace = str(doc.workspace or "").strip()
@@ -204,17 +255,26 @@ def _sources_of(doc: ArchiveDoc, root: Path) -> Iterator[VectorSource]:
         # 사람들이 본 적 없는 자료가 그 채널 근거가 된다.
         return
     for doc_path, lines in _by_file(doc, root).items():
-        text = canonical_text(doc, lines, kind=kind)
+        text, spans = canonical_lines(doc, lines, kind=kind)
         if not text:
             continue
-        yield VectorSource(
-            workspace=workspace,
-            channel_id=channel,
-            doc_path=doc_path,
-            kind=kind,
-            text=text,
-            source_revision=source_revision(text),
+        yield SourceEntry(
+            source=VectorSource(
+                workspace=workspace,
+                channel_id=channel,
+                doc_path=doc_path,
+                kind=kind,
+                text=text,
+                source_revision=source_revision(text),
+            ),
+            doc=doc,
+            spans=spans,
         )
+
+
+def _sources_of(doc: ArchiveDoc, root: Path) -> Iterator[VectorSource]:
+    for entry in _entries_of(doc, root):
+        yield entry.source
 
 
 def iter_index_sources(
@@ -273,6 +333,9 @@ class VisibleSources:
         self._map: dict[tuple[str, str, str], VectorSource] | None = None
         self._channel_scope: frozenset[tuple[str, str]] = frozenset()
         self._attachments: dict[tuple[str, str, str], VectorSource | None] = {}
+        # 연 좌표의 **문서와 줄자리**. 출처를 붙일 때 쓴다 — 다시 열지 않는다.
+        # 줄 객체는 `ArchiveStore` 가 이미 들고 있는 것이라 사본이 아니다.
+        self._entries: dict[tuple[str, str, str], SourceEntry] = {}
 
     # -- 채널·DM 원문 --------------------------------------------------------
 
@@ -296,8 +359,11 @@ class VisibleSources:
                 # 무너져도 다른 하나가 남아야 한다.
                 log.warning("DM 원문이 본인 범위 밖에서 올라왔다 — 연결하지 않는다")
                 continue
-            for source in _sources_of(doc, self._root):
-                found[(source.workspace, source.channel_id, source.doc_path)] = source
+            for entry in _entries_of(doc, self._root):
+                source = entry.source
+                key = (source.workspace, source.channel_id, source.doc_path)
+                found[key] = source
+                self._entries[key] = entry
                 if kind != DM:
                     scope.add((source.workspace, source.channel_id))
         self._channel_scope = frozenset(scope)
@@ -332,12 +398,14 @@ class VisibleSources:
         for doc in docs:
             if not permitted(doc):
                 continue
-            for source in _sources_of(doc, self._root):
+            for entry in _entries_of(doc, self._root):
+                source = entry.source
                 if (source.workspace, source.channel_id, source.doc_path) != key:
                     # 같은 가족의 **다른 판**이다. 첨부가 교체되면 지금 정본은
                     # 새 파일이고, 옛 경로는 더 이상 근거가 아니다.
                     continue
                 self._attachments[key] = source
+                self._entries[key] = entry
                 return source
         return None
 
@@ -364,3 +432,15 @@ class VisibleSources:
         if found is not None:
             return found
         return self._open_attachment(key)
+
+    def entry(
+        self, workspace: str, channel_id: str, doc_path: str
+    ) -> SourceEntry | None:
+        """`open()` 과 **같은 문을 지난** 정본 + 문서 + 줄자리.
+
+        출처를 붙이는 쪽이 쓴다. `open()` 을 먼저 부르므로 권한 판정이 한 번 더
+        돌지 않고, 판정을 건너뛰지도 않는다 — 안 열린 좌표는 여기에도 없다.
+        """
+        if self.open(workspace, channel_id, doc_path) is None:
+            return None
+        return self._entries.get((workspace.strip(), channel_id.strip(), doc_path))
