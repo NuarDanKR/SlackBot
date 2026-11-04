@@ -186,8 +186,20 @@ def test_write_routes_are_registered_before_the_static_mount() -> None:
         and "POST" in methods
         for path, methods in paths
     )
-    assert any(
-        getattr(route, "original_router", None) is image_description_clearance_router
-        for route in app.routes
+    deferred = any(
+        getattr(included, "original_router", None)
+        is image_description_clearance_router
+        for included in app.routes
     )
+    flattened = all(
+        any(
+            getattr(included, "path", "") == route.path
+            and set(getattr(included, "methods", ()) or ())
+            == set(route.methods or ())
+            and getattr(included, "endpoint", None) is route.endpoint
+            for included in app.routes
+        )
+        for route in image_description_clearance_router.routes
+    )
+    assert deferred or flattened
     assert routes.build_router

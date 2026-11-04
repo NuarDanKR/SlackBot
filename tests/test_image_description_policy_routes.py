@@ -130,11 +130,22 @@ def test_both_routes_are_registered_on_the_app():
     }
     assert (SAVE, ("PUT",)) in found
     assert (PREVIEW, ("POST",)) in found
-    assert any(
-        getattr(route, "original_router", None)
+    deferred = any(
+        getattr(included, "original_router", None)
         is console_app.image_description_policy_router
-        for route in console_app.app.routes
+        for included in console_app.app.routes
     )
+    flattened = all(
+        any(
+            getattr(included, "path", "") == route.path
+            and set(getattr(included, "methods", ()) or ())
+            == set(route.methods or ())
+            and getattr(included, "endpoint", None) is route.endpoint
+            for included in console_app.app.routes
+        )
+        for route in console_app.image_description_policy_router.routes
+    )
+    assert deferred or flattened
 
 
 def test_the_read_contract_still_stands():
@@ -159,11 +170,21 @@ def test_the_write_routes_come_before_the_static_mount():
     「앞에 있다」 가 자동으로 참이다 — 그래서 **있을 때만** 잰다.
     """
     app_routes = list(console_app.app.routes)
+    policy_route = next(
+        route
+        for route in console_app.image_description_policy_router.routes
+        if route.path == SAVE and "PUT" in (route.methods or ())
+    )
     included = next(
         route
         for route in app_routes
         if getattr(route, "original_router", None)
         is console_app.image_description_policy_router
+        or (
+            getattr(route, "path", "") == policy_route.path
+            and "PUT" in (getattr(route, "methods", ()) or ())
+            and getattr(route, "endpoint", None) is policy_route.endpoint
+        )
     )
     static = next(
         (route for route in app_routes if getattr(route, "path", "") == "/"),
