@@ -2861,3 +2861,31 @@ def test_a_missing_origin_is_told_apart_from_a_wrong_one(client):
     assert "CONSOLE_ALLOWED_ORIGINS" not in body["detail"], (
         "Origin 이 없는 것은 허용 목록 문제가 아닙니다"
     )
+
+
+def test_channel_grid_period_is_passed_and_checked(client, monkeypatch):
+    """기간 버튼(7·30일). 다른 값은 받지 않는다 — 화면에 없는 기간이 숫자로 나오면 안 된다."""
+    seen = []
+    _channel_rows(monkeypatch)
+    rows_fn = console_app.channel_admin.snapshot
+    monkeypatch.setattr(console_app.channel_admin, "snapshot",
+                        lambda *a, **k: seen.append(k.get("period")) or rows_fn())
+    assert client.get("/api/channels?period=7", headers=owner(client)).json()["period"] == 7
+    assert client.get("/api/channels", headers=owner(client)).json()["period"] is None
+    assert seen == [7, None]
+    assert client.get("/api/channels?period=5", headers=owner(client)).status_code == 422
+
+
+def test_collected_docs_counts_only_lines_inside_the_period(env):
+    from tybot.console import reader
+
+    full = {d["channel"]: d for d in reader.collected_docs()}
+    week = {d["channel"]: d for d in reader.collected_docs(since=reader.period_cutoff(7))}
+    later = {d["channel"]: d for d in reader.collected_docs(since="2999-01-01 00:00")}
+    fin = "#팀_자금(ABB540)_주간보고"
+    assert full[fin]["lines"] == 3 and full[fin]["attachmentLines"] == 1
+    assert week[fin]["lines"] == 3 and week[fin]["attachmentLines"] == 1 and week[fin]["documents"] == 1
+    assert later[fin]["lines"] == 0 and later[fin]["attachmentLines"] == 0 and later[fin]["documents"] == 0
+    assert reader._in_period("2026-11-05 09:12", "2026-11-01 00:00")
+    assert not reader._in_period("", "2026-11-01 00:00")
+    assert not reader._in_period("11/05 09:12", "2026-11-01 00:00")

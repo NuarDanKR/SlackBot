@@ -322,11 +322,23 @@ def owner_store():
     return ChannelOwnerStore(state_dir() / "channel-owners.json")
 
 
-def snapshot(days: int = 365) -> tuple[list[ChannelRow], dict]:
-    """화면이 쓰는 표와 머리글 숫자."""
+#: 채널 표 「기간」 버튼이 고를 수 있는 일수. None 은 전체.
+PERIODS = (7, 30)
+
+
+def snapshot(days: int = 365, *, period: int | None = None) -> tuple[list[ChannelRow], dict]:
+    """화면이 쓰는 표와 머리글 숫자.
+
+    `period` 를 주면 수집량(문서·줄)과 답변 수를 최근 그 일수만 센다. 채널 목록·담당자·
+    마지막 수집 시각은 기간과 무관하다 — 기간 안에 아무것도 없는 채널도 표에 남는다.
+    """
     from . import reader
 
-    docs = reader.collected_docs()
+    if period is not None:
+        docs = reader.collected_docs(since=reader.period_cutoff(period))
+        days = period
+    else:
+        docs = reader.collected_docs()
     docs.extend(heartbeat_channel_rows())
     rows = build_rows(
         docs,

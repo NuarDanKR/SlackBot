@@ -643,8 +643,24 @@ def usage_snapshot(
 # 수집 문서
 # ---------------------------------------------------------------------------
 
-def collected_docs(store: ArchiveStore | None = None) -> list[dict]:
-    """문서 목록. **본문은 담지 않는다** — 열람은 별도 함수로, 기록을 남기며 한다."""
+def period_cutoff(days: int) -> str:
+    """원문 줄 시각(`2026-09-16 14:23`, KST)과 문자열로 비교할 기준 시각."""
+    return (_now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+
+
+def _in_period(stamp: str, since: str) -> bool:
+    """시각이 없거나 모양이 다른 옛 줄은 기간에 넣지 않는다 — 「전체」 에서만 센다."""
+    head = (stamp or "")[:16]
+    return len(head) == 16 and head[4] == "-" and head >= since
+
+
+def collected_docs(store: ArchiveStore | None = None, *, since: str | None = None) -> list[dict]:
+    """문서 목록. **본문은 담지 않는다** — 열람은 별도 함수로, 기록을 남기며 한다.
+
+    `since` 를 주면 줄 수(`lines`·`attachmentLines`)를 그 시각 이후 메시지만 센다. 그 기간에
+    한 줄도 없는 문서는 `documents` 가 0 이다. 기준은 메시지가 올라온 시각이지 수집 시각이
+    아니다 — 소급 수집한 옛 메시지는 「전체」 에서만 잡힌다.
+    """
     store = store or ArchiveStore(archive_dir())
     labels = _workspace_labels()
     root = archive_dir()
@@ -655,7 +671,8 @@ def collected_docs(store: ArchiveStore | None = None) -> list[dict]:
             size = d.path.stat().st_size
         except OSError:
             size = 0
-        attachment = sum(1 for ln in d.raw_lines if ln.text.startswith("[첨부"))
+        raw = d.raw_lines if since is None else [ln for ln in d.raw_lines if _in_period(ln.ts, since)]
+        attachment = sum(1 for ln in raw if ln.text.startswith("[첨부"))
         out.append(
             {
                 "workspace": d.workspace,
@@ -666,7 +683,8 @@ def collected_docs(store: ArchiveStore | None = None) -> list[dict]:
                 # v1 문서에는 없다(빈 문자열).
                 "channelId": d.channel_id or "",
                 "path": d.path.relative_to(root).as_posix(),
-                "lines": len(d.raw_lines),
+                "lines": len(raw),
+                "documents": 1 if since is None or raw else 0,
                 "bytes": size,
                 "attachmentLines": attachment,
                 "lastIngestedAt": d.last_ingested,
