@@ -93,6 +93,16 @@ INTERIM_ADVICE_PROMPT = """너는 TYBot 마스터다. 판단 전문 봇이 도�
 
 출력은 코멘트 본문만 작성한다."""
 
+
+@dataclass(frozen=True)
+class AnswerPrompts:
+    """Prompt bundle selected by the runtime, not by the requester."""
+
+    answer: str = SYSTEM_PROMPT
+    summary: str = SUMMARY_PROMPT
+    advice: str = ADVICE_PROMPT
+    interim_advice: str = INTERIM_ADVICE_PROMPT
+
 MODEL_FLAG_RE = re.compile(r"--model=([A-Za-z0-9._\-]+)")
 # 아카이브 범위 자체를 묻는 표현. 분류기가 out_of_scope 로 잘못 보내도 여기서 되돌린다.
 ARCHIVE_SCOPE_RE = re.compile(
@@ -954,6 +964,8 @@ class AnswerEngine:
         max_lines_per_channel: int = 60,
         specialist=None,
         allow_master_business_answers=False,
+        prompts: AnswerPrompts | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
         self._store = store
         self._router = router
@@ -963,6 +975,18 @@ class AnswerEngine:
         # 넣어 준다. 그래야 엔진 테스트가 DB 없이 돌고, 전문가가 없는 설치에서도
         # 이 파일이 그대로 쓰인다.
         self._specialist = specialist
+        self._prompts = prompts or AnswerPrompts()
+        if (
+            isinstance(max_output_tokens, bool)
+            or (
+                max_output_tokens is not None
+                and not isinstance(max_output_tokens, int)
+            )
+        ):
+            raise TypeError("max_output_tokens must be an integer")
+        if max_output_tokens is not None and max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        self._max_output_tokens = max_output_tokens
         self._master_answer_policy = allow_master_business_answers
         if specialist is None and allow_master_business_answers is True:
             # 비교 측정과 구형 단위 테스트에서만 명시적으로 여는 호환 경로다.
@@ -973,6 +997,12 @@ class AnswerEngine:
         self._sensitivity = sensitivity
         self._max_hits = max_hits
         self._max_lines_per_channel = max_lines_per_channel
+
+    def _output_limit(self, default: int) -> int:
+        configured = self._max_output_tokens
+        if configured is None:
+            return default
+        return configured
 
     def _master_answers_allowed(self, ctx: RequestContext) -> bool:
         policy = self._master_answer_policy
@@ -1486,12 +1516,15 @@ class AnswerEngine:
             + f"\n</원문>\n\n질문: {question or f'최근 {days}일 진행 상황을 정리해 주세요.'}"
         )
         messages = [
-            Message("system", SUMMARY_PROMPT),
+            Message("system", self._prompts.summary),
             Message("user", summary_prompt),
         ]
         try:
             resp = self._router.complete(
-                messages, model=model, sensitivity=self._sensitivity, max_tokens=2048
+                messages,
+                model=model,
+                sensitivity=self._sensitivity,
+                max_tokens=self._output_limit(2048),
             )
         except (UnknownModel, ModelNotAllowed) as e:
             return Answer(f"모델 선택 오류: {e}", [], model, 0.0, total, "error")
@@ -1559,12 +1592,12 @@ class AnswerEngine:
                     try:
                         comment = self._router.complete(
                             [
-                                Message("system", INTERIM_ADVICE_PROMPT),
+                                Message("system", self._prompts.interim_advice),
                                 Message("user", f"{evidence}질문: {q}"),
                             ],
                             model=model,
                             sensitivity=self._sensitivity,
-                            max_tokens=1000,
+                            max_tokens=self._output_limit(1000),
                         )
                     except Exception as exc:  # noqa: BLE001 - Hermes 요약은 보존한다
                         logger.warning("마스터 임시 판단 생성 실패: %s", exc)
@@ -1625,12 +1658,15 @@ class AnswerEngine:
             else "<원문>\n(관련 원문 없음)\n</원문>\n\n"
         )
         messages = [
-            Message("system", ADVICE_PROMPT),
+            Message("system", self._prompts.advice),
             Message("user", f"{evidence}질문: {q}"),
         ]
         try:
             resp = self._router.complete(
-                messages, model=model, sensitivity=self._sensitivity, max_tokens=1500
+                messages,
+                model=model,
+                sensitivity=self._sensitivity,
+                max_tokens=self._output_limit(1500),
             )
         except (UnknownModel, ModelNotAllowed) as e:
             return Answer(f"모델 선택 오류: {e}", [], model, 0.0, len(hits), "error")
@@ -2174,12 +2210,15 @@ class AnswerEngine:
         if visual.any:
             user_content = [{"type": "text", "text": prompt}, *visual.blocks]
         messages = [
-            Message("system", SYSTEM_PROMPT),
+            Message("system", self._prompts.answer),
             Message("user", user_content),
         ]
         try:
             resp = self._router.complete(
-                messages, model=model, sensitivity=self._sensitivity, max_tokens=1024
+                messages,
+                model=model,
+                sensitivity=self._sensitivity,
+                max_tokens=self._output_limit(1024),
             )
         except (UnknownModel, ModelNotAllowed) as e:
             return Answer(f"모델 선택 오류: {e}", [], model, 0.0, len(hits), "error")

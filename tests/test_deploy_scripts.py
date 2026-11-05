@@ -332,6 +332,18 @@ def test_schema_apply_refuses_privileges_inherited_by_the_vipbot_group():
     assert "child_role.rolname='tybot_vipbot'" in window
 
 
+def test_schema_apply_creates_a_closed_vipbot_function_owner():
+    script = (ROOT / "deploy" / "apply-schema.sh").read_text(encoding="utf-8")
+    schemas = script.rindex('for name in "${FILES[@]}"')
+    role = script.index("CREATE ROLE tybot_vipbot_definer NOLOGIN")
+    review = script.index("tybot_vipbot_definer has unsafe role attributes")
+
+    assert role < review < schemas
+    assert "CREATE ROLE tybot_vipbot_definer LOGIN" not in script
+    assert "tybot_vipbot_definer must have no role memberships" in script
+    assert "PASSWORD" not in script[role:schemas]
+
+
 # 운영 절차가 적히는 곳. 여기 적힌 명령은 **서버에 그대로 붙여 넣는다.**
 # 설계 문서(`docs/design/`)는 개발 PC 기준이라 제외한다.
 OPERATIONAL_DOCS = ("docs/deploy", "docs/verification")

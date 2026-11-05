@@ -11,6 +11,7 @@ VIPBot 은 묻는 사람 한 명에게 답하는 봇이다. 수집·백필·첨�
 그리고 매니페스트 자체 — 스코프는 설치된 뒤에 좁히기 어렵다. 한 번 승인되면
 워크스페이스마다 다시 받아야 하고, 그 사이 토큰은 넓은 권한을 들고 돌아다닌다.
 """
+
 from __future__ import annotations
 
 import ast
@@ -24,6 +25,7 @@ TYBOT_MANIFEST = ROOT / "docs" / "pilot" / "slack-app-manifest.yaml"
 
 #: VIPBot 이 소유한 파일. 늘어나면 여기 적고, 적는 순간 아래 계약이 전부 적용된다.
 VIPBOT_SOURCES = ("src/tybot/vipbot_delivery.py",)
+VIPBOT_EVENT_SOURCES = ("src/tybot/vipbot_event.py",)
 
 #: VIPBot 이 들여올 수 있는 전부. **목록이 곧 경계다.**
 ALLOWED_IMPORTS = {
@@ -32,6 +34,18 @@ ALLOWED_IMPORTS = {
     "dataclasses",
     "logging",
     "tybot.bot_access",
+}
+
+EVENT_ALLOWED_IMPORTS = {
+    "__future__",
+    "collections.abc",
+    "dataclasses",
+    "re",
+    "typing",
+    "tybot.access",
+    "tybot.bot_access",
+    "tybot.vip_access",
+    "tybot.vipbot_delivery",
 }
 
 #: 쓰는 길. 하나라도 import 되면 계약 위반이다.
@@ -171,9 +185,21 @@ def test_no_tybot_module_reaches_into_the_vip_path_yet():
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "src").rglob("*.py")
         if path.relative_to(ROOT).as_posix() not in VIPBOT_SOURCES
+        and path.relative_to(ROOT).as_posix() not in VIPBOT_EVENT_SOURCES
         and "vipbot_delivery" in path.read_text(encoding="utf-8")
     ]
     assert callers == [], f"기존 코드가 VIP 경로를 물었다: {callers}"
+
+
+@pytest.mark.parametrize("relative", VIPBOT_EVENT_SOURCES)
+def test_the_event_coordinator_imports_no_writer_or_collector(relative):
+    assert imported(relative) == EVENT_ALLOWED_IMPORTS
+    assert not imported(relative) & FORBIDDEN_IMPORTS
+
+
+@pytest.mark.parametrize("relative", VIPBOT_EVENT_SOURCES)
+def test_the_event_coordinator_never_calls_slack_directly(relative):
+    assert client_calls(relative) == set()
 
 
 # --- 2. 매니페스트: 따로 설치되는 별도 앱 --------------------------------------

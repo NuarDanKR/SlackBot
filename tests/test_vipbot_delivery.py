@@ -9,6 +9,7 @@
 3. 거절은 채널에 안 적는다 — 누가 거절당했는지가 방에 남지 않는다
 4. 결과·로그에 질문·답변·근거가 없다
 """
+
 from __future__ import annotations
 
 import logging
@@ -23,6 +24,7 @@ from tybot.vipbot_delivery import (
     CHANNEL_NOTICES,
     DeliveryResult,
     deliver_channel_answer,
+    deliver_dm_answer,
 )
 
 WS = "pilot"
@@ -206,9 +208,7 @@ def test_no_registered_source_is_its_own_reason_not_a_missing_grant():
     from tybot import vip_access
 
     client = Slack()
-    refusal = vip_access.Authorization(
-        False, vip_access.NO_SOURCES, WS, USER, emp_no="E1"
-    )
+    refusal = vip_access.Authorization(False, vip_access.NO_SOURCES, WS, USER, emp_no="E1")
     got = deliver(client, decision=refusal)
     assert (got.outcome, got.reason) == ("permission_denied", "no_sources")
     assert got.reason != NO_GRANT
@@ -239,13 +239,59 @@ def test_a_refused_caller_gets_no_answer_anywhere():
     assert all(ANSWER not in payload["text"] for payload in client.posts_to(DM))
 
 
+def test_a_refusal_does_not_require_an_answer_to_have_been_generated():
+    client = Slack()
+    got = deliver(client, decision=deny(), answer=None)
+    assert (got.outcome, got.reason) == ("permission_denied", NO_GRANT)
+    assert [payload["text"] for payload in client.posts_to(DM)] == [DENY_MESSAGE]
+
+
+def test_a_dm_event_replies_in_the_existing_dm_without_opening_another_one():
+    client = Slack()
+    got = deliver_dm_answer(
+        client,
+        workspace=WS,
+        channel=DM,
+        slack_user=USER,
+        answer=ANSWER,
+        check_access=allow,
+    )
+    assert got == DeliveryResult(outcome="delivered", dm_sent=True)
+    assert client.names == ["chat_postMessage"]
+    assert [payload["text"] for payload in client.posts_to(DM)] == [ANSWER]
+
+
+def test_a_denied_dm_event_needs_no_generated_answer():
+    client = Slack()
+    got = deliver_dm_answer(
+        client,
+        workspace=WS,
+        channel=DM,
+        slack_user=USER,
+        answer=None,
+        check_access=deny,
+    )
+    assert (got.outcome, got.reason) == ("permission_denied", NO_GRANT)
+    assert [payload["text"] for payload in client.posts_to(DM)] == [DENY_MESSAGE]
+
+
+def test_a_dm_delivery_rejects_a_non_dm_destination_before_access_check():
+    with pytest.raises(ValueError, match="DM channel"):
+        deliver_dm_answer(
+            Slack(),
+            workspace=WS,
+            channel=CHANNEL,
+            slack_user=USER,
+            answer=ANSWER,
+            check_access=lambda: (_ for _ in ()).throw(AssertionError()),
+        )
+
+
 @pytest.mark.parametrize(
     ("decision", "raises"),
     [(Decision(False, CHECK_FAILED), None), (None, RuntimeError("db is down"))],
 )
-def test_a_failed_check_is_told_apart_from_a_refusal_and_sends_nothing(
-    decision, raises
-):
+def test_a_failed_check_is_told_apart_from_a_refusal_and_sends_nothing(decision, raises):
     client = Slack()
     got = deliver(client, decision=decision, raises=raises)
     assert (got.outcome, got.reason) == ("access_check_failed", CHECK_FAILED)

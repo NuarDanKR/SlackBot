@@ -5,6 +5,7 @@
 읽히고, 틀려도 조용하다 — 자격증명 이름 한 글자가 어긋나면 런타임은
 「설정이 없다」 로 멎고, 사람은 DSN 파일을 몇 번이고 다시 적는다.
 """
+
 from __future__ import annotations
 
 import re
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tybot import vipbot_dsn
+from tybot import vipbot_anthropic_credential, vipbot_dsn
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "deploy" / "setup-tybot-vipbot-runtime.sh"
@@ -22,7 +23,8 @@ RUNTIME_MODULE = ROOT / "src" / "tybot" / "vipbot_runtime.py"
 
 GROUP = "tybot_vipbot"
 RUNTIME = "tybot_vipbot_runtime"
-CONFIG_FN = "vipbot_connection_config(text)"
+CONFIG_FN = "public.vipbot_connection_config(text)"
+ACCESS_FN = "public.vipbot_authorization(text,text)"
 
 
 def setup() -> str:
@@ -32,9 +34,7 @@ def setup() -> str:
 def code() -> str:
     """주석을 뺀 스크립트. 머리말은 **안 하는 것**을 설명하므로, 그대로 훑으면
     설명문이 금지어 검사에 걸린다. 서버에서 도는 것은 코드뿐이다."""
-    return "\n".join(
-        raw for raw in setup().splitlines() if not raw.lstrip().startswith("#")
-    )
+    return "\n".join(raw for raw in setup().splitlines() if not raw.lstrip().startswith("#"))
 
 
 def unit() -> str:
@@ -44,11 +44,7 @@ def unit() -> str:
 def directives() -> list[str]:
     """주석을 뺀 유닛 지시어들. 주석은 **안 넣은 것**을 설명하므로 그대로
     훑으면 설명문에 걸린다. 설치되는 것은 지시어뿐이다."""
-    return [
-        line.strip()
-        for raw in unit().splitlines()
-        if (line := raw.split("#", 1)[0]).strip()
-    ]
+    return [line.strip() for raw in unit().splitlines() if (line := raw.split("#", 1)[0]).strip()]
 
 
 # --- 1. 두 역할과 그 사이 ----------------------------------------------------
@@ -112,8 +108,11 @@ def test_nothing_is_altered_before_the_preflight_has_passed():
     """순서가 뒤집히면 **검증이 실패하는 동안 로그인할 수 있는 창**이 열린다."""
     body = setup()
     preflight = body.index("기존 역할 사전 검토 —")
-    for statement in ('psql_run "$SQL_CREATE"', 'psql_run "$SQL_ENFORCE"',
-                      'psql_run "$SQL_MEMBER"'):
+    for statement in (
+        'psql_run "$SQL_CREATE"',
+        'psql_run "$SQL_ENFORCE"',
+        'psql_run "$SQL_MEMBER"',
+    ):
         assert body.index(statement) > preflight
 
 
@@ -145,22 +144,45 @@ def test_plan_mode_contacts_nothing_so_it_can_be_read_before_any_change():
 
 def test_verify_asserts_the_function_is_executable_through_the_group():
     body = setup()
-    assert f"CONFIG_FN=\"{CONFIG_FN}\"" in body
+    assert f'CONFIG_FN="{CONFIG_FN}"' in body
     assert "has_function_privilege('$ROLE_RUNTIME','$CONFIG_FN','EXECUTE')" in body
+    assert f'ACCESS_FN="{ACCESS_FN}"' in body
+    assert "has_function_privilege('$ROLE_RUNTIME','$ACCESS_FN','EXECUTE')" in body
 
 
-@pytest.mark.parametrize("table", ["bot_connection", "bot_connection_secret"])
-def test_verify_asserts_the_token_tables_stay_closed(table):
+@pytest.mark.parametrize(
+    "table",
+    [
+        "bot_connection",
+        "bot_connection_secret",
+        "employee",
+        "user_identity",
+        "bot_access",
+        "bot_source_channel",
+    ],
+)
+def test_verify_asserts_the_vipbot_base_tables_stay_closed(table):
     body = setup()
     assert table in body
-    assert "has_table_privilege('$ROLE_RUNTIME','$table','$privilege')" in body
-    assert "for privilege in SELECT INSERT UPDATE DELETE" in body
+    assert "has_table_privilege('$ROLE_RUNTIME','public.$table','$privilege')" in body
+    assert "for privilege in SELECT INSERT UPDATE DELETE TRUNCATE REFERENCES TRIGGER" in body
 
 
 def test_verify_asserts_public_and_other_bots_are_closed():
     body = setup()
     assert "has_function_privilege('public','$CONFIG_FN','EXECUTE')" in body
+    assert "has_function_privilege('public','$ACCESS_FN','EXECUTE')" in body
     assert "archiver_connection_config(text)" in body
+
+
+def test_verify_checks_every_table_privilege_and_other_definer_function():
+    body = setup()
+
+    assert "SELECT INSERT UPDATE DELETE TRUNCATE REFERENCES TRIGGER" in body
+    assert "p.prosecdef" in body
+    assert "other_definers" in body
+    assert "ROLE_DEFINER=tybot_vipbot_definer" in body
+    assert "pg_get_function_identity_arguments" in body
 
 
 # --- 4. 스키마 쪽 계약 --------------------------------------------------------
@@ -172,7 +194,7 @@ def test_the_schema_gives_the_group_the_function_and_takes_the_tables_away():
     block = block[: block.index("END")]
     assert "REVOKE ALL PRIVILEGES ON TABLE bot_connection_secret" in block
     assert re.search(r"REVOKE ALL PRIVILEGES ON TABLE bot_connection\b", block)
-    assert "GRANT EXECUTE ON FUNCTION vipbot_connection_config(text)" in block
+    assert "GRANT EXECUTE ON FUNCTION public.vipbot_connection_config(text)" in block
     assert "GRANT SELECT" not in block
 
 
@@ -187,7 +209,8 @@ def test_the_window_pins_the_bot_key_so_the_caller_cannot_choose_it():
     window = window[: window.index("$$;")]
     assert "v.bot_key = 'vipbot'" in window
     assert "SECURITY DEFINER" in window
-    assert "SET search_path = public, pg_temp" in window
+    assert "SET search_path = pg_catalog" in window
+    assert "FROM public.bot_connection v" in window
 
 
 # --- 5. systemd 유닛 ----------------------------------------------------------
@@ -195,9 +218,16 @@ def test_the_window_pins_the_bot_key_so_the_caller_cannot_choose_it():
 
 def test_the_dsn_arrives_as_a_credential_under_the_name_the_code_looks_for():
     assert (
-        f"LoadCredential={vipbot_dsn.CREDENTIAL_NAME}:"
-        f"/etc/tybot/{vipbot_dsn.CREDENTIAL_NAME}"
+        f"LoadCredential={vipbot_dsn.CREDENTIAL_NAME}:/etc/tybot/{vipbot_dsn.CREDENTIAL_NAME}"
     ) in unit()
+
+
+def test_the_model_key_arrives_as_a_dedicated_credential():
+    assert (
+        f"LoadCredential={vipbot_anthropic_credential.CREDENTIAL_NAME}:"
+        f"/etc/tybot/{vipbot_anthropic_credential.CREDENTIAL_NAME}"
+    ) in unit()
+    assert "Environment=ANTHROPIC_API_KEY" not in unit()
 
 
 def test_the_unit_never_hands_the_process_the_master_database_url():
@@ -218,9 +248,7 @@ def test_no_secret_value_is_written_into_the_unit_itself():
 
 def test_the_encryption_key_also_arrives_as_a_credential():
     lines = directives()
-    assert any(
-        line.startswith("LoadCredential=tybot-workspace-secret-key:") for line in lines
-    )
+    assert any(line.startswith("LoadCredential=tybot-workspace-secret-key:") for line in lines)
     assert "Environment=WORKSPACE_SECRET_KEY_FILE=%d/tybot-workspace-secret-key" in lines
 
 
@@ -255,9 +283,7 @@ def test_the_unit_opens_no_inbound_port_and_never_writes_the_archive():
     lines = directives()
     assert "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" in lines
     assert "ReadOnlyPaths=/var/lib/tybot/archive" in lines
-    assert not any(
-        line.startswith("ReadWritePaths=") and "archive" in line for line in lines
-    )
+    assert not any(line.startswith("ReadWritePaths=") and "archive" in line for line in lines)
     assert not any(line.startswith("ListenStream=") for line in lines)
 
 

@@ -35,15 +35,47 @@ def _connect():
                 """SELECT current_user AS role,
                           has_function_privilege(
                             current_user,
-                            'vipbot_connection_config(text)',
+                            'public.vipbot_connection_config(text)',
                             'EXECUTE'
                           ) AS may_execute,
-                          has_table_privilege(
-                            current_user, 'bot_connection', 'SELECT'
-                          ) AS may_read_connection,
-                          has_table_privilege(
-                            current_user, 'bot_connection_secret', 'SELECT'
-                          ) AS may_read_secret"""
+                          has_function_privilege(
+                            current_user,
+                            'public.vipbot_authorization(text,text)',
+                            'EXECUTE'
+                          ) AS may_authorize,
+                          EXISTS (
+                            SELECT 1
+                              FROM unnest(ARRAY[
+                                'public.bot_connection',
+                                'public.bot_connection_secret',
+                                'public.employee',
+                                'public.user_identity',
+                                'public.bot_access',
+                                'public.bot_source_channel'
+                              ]) AS tables(name)
+                              CROSS JOIN unnest(ARRAY[
+                                'SELECT', 'INSERT', 'UPDATE', 'DELETE',
+                                'TRUNCATE', 'REFERENCES', 'TRIGGER'
+                              ]) AS privileges(name)
+                             WHERE has_table_privilege(
+                               current_user, tables.name, privileges.name
+                             )
+                          ) AS may_access_base_tables,
+                          EXISTS (
+                            SELECT 1
+                              FROM pg_catalog.pg_proc p
+                              JOIN pg_catalog.pg_namespace n
+                                ON n.oid = p.pronamespace
+                             WHERE n.nspname = 'public'
+                               AND p.prosecdef
+                               AND p.oid NOT IN (
+                                 'public.vipbot_connection_config(text)'::regprocedure,
+                                 'public.vipbot_authorization(text,text)'::regprocedure
+                               )
+                               AND has_function_privilege(
+                                 current_user, p.oid, 'EXECUTE'
+                               )
+                          ) AS may_execute_other_definers"""
             )
             identity = cur.fetchone()
     except psycopg.Error as exc:
@@ -52,21 +84,29 @@ def _connect():
         connection.close()
         raise VipbotRuntimeStoreError(error) from None
     if (
-        not identity
-        or identity["role"] != "tybot_vipbot_runtime"
-        or identity["may_execute"] is not True
-        or identity["may_read_connection"] is not False
-        or identity["may_read_secret"] is not False
+        not isinstance(identity, dict)
+        or identity.get("role") != "tybot_vipbot_runtime"
+        or identity.get("may_execute") is not True
+        or identity.get("may_authorize") is not True
+        or identity.get("may_access_base_tables") is not False
+        or identity.get("may_execute_other_definers") is not False
     ):
         connection.close()
         raise VipbotRuntimeStoreError("vipbot_database_privilege_mismatch")
     return connection
 
 
+def connect_runtime():
+    """Open a connection only after verifying the dedicated runtime capability."""
+    return _connect()
+
+
 def _try_load_runtime_config(workspace: str) -> tuple[dict | None, str]:
     try:
         with _connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT * FROM vipbot_connection_config(%s)", (workspace,))
+            cur.execute(
+                "SELECT * FROM public.vipbot_connection_config(%s)", (workspace,)
+            )
             row = cur.fetchone()
         if not row:
             raise VipbotRuntimeStoreError(

@@ -22,6 +22,7 @@
 (`tests/test_vipbot_boundary.py` 가 import 목록째로 고정한다). Slack 호출도
 `chat_postMessage` · `conversations_open` 둘뿐이다.
 """
+
 from __future__ import annotations
 
 import logging
@@ -121,7 +122,7 @@ def deliver_channel_answer(
     workspace: str,
     channel: str,
     slack_user: str,
-    answer: str,
+    answer: str | None,
     check_access: Callable[[], object],
     thread_ts: str | None = None,
 ) -> DeliveryResult:
@@ -135,17 +136,15 @@ def deliver_channel_answer(
     """
     if not str(channel or "").strip() or not str(slack_user or "").strip():
         raise ValueError("channel and slack_user are required")
-    if not str(answer or "").strip():
-        raise ValueError("answer is required")
-
     try:
         decision = check_access()
         allowed = bool(getattr(decision, "allowed", False))
         code = str(getattr(decision, "code", "") or "")
     except Exception as exc:  # noqa: BLE001 - 판정을 못 했으면 거절이다
         # 예외 본문은 남기지 않는다. 판정 SQL 에는 사번이 들어 있다.
-        log.warning("[%s] VIP 권한 판정 실패 user=%s err=%s",
-                    workspace, slack_user, type(exc).__name__)
+        log.warning(
+            "[%s] VIP 권한 판정 실패 user=%s err=%s", workspace, slack_user, type(exc).__name__
+        )
         return _done("access_check_failed", CHECK_FAILED, workspace, slack_user)
 
     if code == CHECK_FAILED:
@@ -155,10 +154,10 @@ def deliver_channel_answer(
         # 사람에 대한 정보다. 사유도 사람에게는 안 밝힌다.
         failure = _dm(client, slack_user, DENY_MESSAGE)
         reason = code if code in DELIVERY_REASONS and code else NO_GRANT
-        return _done(
-            "permission_denied", reason, workspace, slack_user, dm_sent=not failure
-        )
+        return _done("permission_denied", reason, workspace, slack_user, dm_sent=not failure)
 
+    if not str(answer or "").strip():
+        raise ValueError("answer is required for an allowed request")
     failure = _dm(client, slack_user, answer)
     if failure:
         # **폴백 없음.** 못 보낸 답을 채널에 떨어뜨리지 않는다.
@@ -172,9 +171,48 @@ def deliver_channel_answer(
             slack_user,
             dm_sent=True,
         )
-    return _done(
-        "delivered", "", workspace, slack_user, dm_sent=True, notice_posted=True
-    )
+    return _done("delivered", "", workspace, slack_user, dm_sent=True, notice_posted=True)
+
+
+def deliver_dm_answer(
+    client,
+    *,
+    workspace: str,
+    channel: str,
+    slack_user: str,
+    answer: str | None,
+    check_access: Callable[[], object],
+) -> DeliveryResult:
+    """Reply to a DM event without opening another conversation or posting a notice."""
+    if not str(channel or "").startswith("D") or not str(slack_user or "").strip():
+        raise ValueError("a DM channel and slack_user are required")
+
+    try:
+        decision = check_access()
+        allowed = bool(getattr(decision, "allowed", False))
+        code = str(getattr(decision, "code", "") or "")
+    except Exception as exc:  # noqa: BLE001 - an unknown decision denies the request
+        log.warning(
+            "[%s] VIP 권한 판정 실패 user=%s err=%s",
+            workspace,
+            slack_user,
+            type(exc).__name__,
+        )
+        return _done("access_check_failed", CHECK_FAILED, workspace, slack_user)
+
+    if code == CHECK_FAILED:
+        return _done("access_check_failed", CHECK_FAILED, workspace, slack_user)
+    if not allowed:
+        reason = code if code in DELIVERY_REASONS and code else NO_GRANT
+        failure = _post_dm_channel(client, channel, DENY_MESSAGE)
+        return _done("permission_denied", reason, workspace, slack_user, dm_sent=not failure)
+
+    if not str(answer or "").strip():
+        raise ValueError("answer is required for an allowed request")
+    failure = _post_dm_channel(client, channel, answer)
+    if failure:
+        return _done("dm_delivery_failed", failure, workspace, slack_user)
+    return _done("delivered", "", workspace, slack_user, dm_sent=True)
 
 
 def _dm(client, slack_user: str, text: str) -> str:
@@ -193,6 +231,18 @@ def _dm(client, slack_user: str, text: str) -> str:
     try:
         client.chat_postMessage(channel=dm_channel, text=text)
     except Exception as exc:  # noqa: BLE001 - Slack 장애로 호출 전체를 죽이지 않는다
+        log.warning("VIP DM 전송 실패 err=%s", type(exc).__name__)
+        return "dm_post_failed"
+    return ""
+
+
+def _post_dm_channel(client, channel: str, text: str) -> str:
+    """Post only to a DM channel already supplied by a verified Slack event."""
+    if not str(channel or "").startswith("D"):
+        return "dm_channel_invalid"
+    try:
+        client.chat_postMessage(channel=channel, text=text)
+    except Exception as exc:  # noqa: BLE001 - Slack failure is a fixed outcome
         log.warning("VIP DM 전송 실패 err=%s", type(exc).__name__)
         return "dm_post_failed"
     return ""
@@ -249,4 +299,5 @@ __all__ = [
     "ChannelLeak",
     "DeliveryResult",
     "deliver_channel_answer",
+    "deliver_dm_answer",
 ]

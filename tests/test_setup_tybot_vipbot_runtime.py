@@ -74,8 +74,17 @@ def test_verification_denies_direct_secret_table_access():
     text = source()
 
     assert "role_table_grants" in text
-    assert "bot_connection','bot_connection_secret" in text
-    assert "vipbot_connection_config(text)" in text
+    for table in (
+        "bot_connection",
+        "bot_connection_secret",
+        "employee",
+        "user_identity",
+        "bot_access",
+        "bot_source_channel",
+    ):
+        assert table in text
+    assert "public.vipbot_connection_config(text)" in text
+    assert "public.vipbot_authorization(text,text)" in text
     assert "acl.grantee = 0" in text
 
 

@@ -16,9 +16,9 @@
 # 바꾸거나 계정을 끊는 일이 **권한 구조를 건드리는 일**이 되고, 운영 중에
 # 그것을 하기 어려워진다. 둘로 나누면 계정은 끊어도 권한 선언은 그대로다.
 #
-# ## 이 계정이 할 수 있는 일은 함수 하나뿐이다
+# ## 이 계정의 특권 창구는 전용 함수 두 개뿐이다
 #
-# `vipbot_connection_config(text)` **실행**. 그게 전부다.
+# 두 VIPBot SECURITY DEFINER 함수 외의 특권 함수와 기반 표는 열지 않는다.
 # `bot_connection` 과 `bot_connection_secret` 을 직접 SELECT 할 수 없다.
 #
 # 그 두 표에는 **모든 봇의 토큰 암호문**이 들어 있다. VIPBot 런타임이 표를 읽을
@@ -49,8 +49,10 @@ set -euo pipefail
 
 ROLE_GROUP=tybot_vipbot
 ROLE_RUNTIME=tybot_vipbot_runtime
+ROLE_DEFINER=tybot_vipbot_definer
 CREDENTIAL=tybot-vipbot-database-url
-CONFIG_FN="vipbot_connection_config(text)"
+CONFIG_FN="public.vipbot_connection_config(text)"
+ACCESS_FN="public.vipbot_authorization(text,text)"
 PORT="${TYBOT_DB_PORT:-55432}"
 DB="${TYBOT_DB_NAME:-tyslackai}"
 HOST="${TYBOT_DB_HOST:-/run/postgresql}"
@@ -95,8 +97,8 @@ if [[ "$MODE" == plan ]]; then
 그룹        : $ROLE_GROUP   — NOLOGIN 이어야 한다. 아니면 중단
 접속 계정   : $ROLE_RUNTIME — $ATTRS
 멤버십      : $ROLE_GROUP 하나뿐. ADMIN OPTION 없음
-할 수 있는 일: $CONFIG_FN 실행 하나.
-              bot_connection · bot_connection_secret 직접 SELECT 불가
+특권 창구    : $CONFIG_FN · $ACCESS_FN 실행.
+              연결·권한·사용자·근거 기반 표 직접 SELECT 불가
 사전 검토   : 역할이 이미 있으면 **바꾸기 전에** 멤버십·과한 속성을 본다.
               걸리면 거절한다 — 자동으로 떼거나 낮추지 않는다
 
@@ -173,6 +175,18 @@ group_parents="$(psql_q "SELECT coalesce(string_agg(g.rolname, ',' ORDER BY g.ro
                           WHERE m.rolname='$ROLE_GROUP'")"
 [[ -z "$group_parents" ]] || fail "$ROLE_GROUP 이 다른 역할의 멤버입니다: $group_parents"
 log "$ROLE_GROUP: 다른 역할을 상속하지 않음"
+
+definer_state="$(psql_q "SELECT coalesce(
+    (SELECT rolcanlogin||rolsuper||rolcreatedb||rolcreaterole||rolreplication||rolbypassrls
+       FROM pg_roles WHERE rolname='$ROLE_DEFINER'), 'absent')")"
+[[ "$definer_state" == ffffff ]] || fail "$ROLE_DEFINER 속성이 다릅니다(기대 ffffff · 실제 $definer_state)"
+definer_memberships="$(psql_q "SELECT count(*)
+  FROM pg_auth_members a
+  JOIN pg_roles parent_role ON parent_role.oid=a.roleid
+  JOIN pg_roles child_role ON child_role.oid=a.member
+ WHERE child_role.rolname='$ROLE_DEFINER' OR parent_role.rolname='$ROLE_DEFINER'")"
+[[ "$definer_memberships" == 0 ]] || fail "$ROLE_DEFINER 에 멤버 또는 상속 역할이 있습니다"
+log "$ROLE_DEFINER: NOLOGIN · 과한 속성/멤버십 없음"
 
 # ---------------------------------------------------------------------------
 # 기존 역할 사전 검토 — **아무것도 바꾸기 전에** 본다
@@ -270,26 +284,50 @@ can_exec="$(psql_q "SELECT coalesce(has_function_privilege('$ROLE_RUNTIME','$CON
 [[ "$can_exec" == t ]] || fail "$ROLE_RUNTIME 이 $CONFIG_FN 을 실행할 수 없습니다(실제 $can_exec). apply-schema.sh 를 먼저 돌리세요"
 log "실행 권한 확인: $CONFIG_FN"
 
-for table in bot_connection bot_connection_secret; do
-  for privilege in SELECT INSERT UPDATE DELETE; do
-    got="$(psql_q "SELECT has_table_privilege('$ROLE_RUNTIME','$table','$privilege')")"
-    [[ "$got" == f ]] || fail "$ROLE_RUNTIME 이 $table 에 $privilege 권한을 갖고 있습니다. 함수 하나만 허용해야 합니다"
+can_authorize="$(psql_q "SELECT coalesce(has_function_privilege('$ROLE_RUNTIME','$ACCESS_FN','EXECUTE')::text,'absent')")"
+[[ "$can_authorize" == t ]] || fail "$ROLE_RUNTIME 이 $ACCESS_FN 을 실행할 수 없습니다(실제 $can_authorize). apply-schema.sh 를 먼저 돌리세요"
+log "실행 권한 확인: $ACCESS_FN"
+
+for table in bot_connection bot_connection_secret employee user_identity bot_access bot_source_channel; do
+  for privilege in SELECT INSERT UPDATE DELETE TRUNCATE REFERENCES TRIGGER; do
+    got="$(psql_q "SELECT has_table_privilege('$ROLE_RUNTIME','public.$table','$privilege')")"
+    [[ "$got" == f ]] || fail "$ROLE_RUNTIME 이 $table 에 $privilege 권한을 갖고 있습니다. 전용 함수만 허용해야 합니다"
   done
 done
-log "표 직접 접근 없음: bot_connection · bot_connection_secret"
+log "연결·권한·사용자·근거 표 직접 접근 없음"
 
 # 위는 **쓸 수 있는가**(상속 포함), 아래는 **직접 준 적이 있는가**다. 둘 다 본다 —
 # 직접 GRANT 가 남아 있으면 그룹에서 떼어 내도 권한은 그대로 남는다.
 direct_grants="$(psql_q "SELECT coalesce(string_agg(grantee||':'||table_name||':'||privilege_type, ',' ORDER BY grantee),'')
                            FROM information_schema.role_table_grants
-                          WHERE table_name IN ('bot_connection','bot_connection_secret')
+                          WHERE table_name IN ('bot_connection','bot_connection_secret','employee','user_identity','bot_access','bot_source_channel')
                             AND grantee IN ('$ROLE_RUNTIME','$ROLE_GROUP','PUBLIC')")"
-[[ -z "$direct_grants" ]] || fail "토큰 표에 직접 GRANT 가 남아 있습니다: $direct_grants"
-log "토큰 표 직접 GRANT 없음 (role_table_grants)"
+[[ -z "$direct_grants" ]] || fail "VIPBot 기반 표에 직접 GRANT 가 남아 있습니다: $direct_grants"
+log "VIPBot 기반 표 직접 GRANT 없음 (role_table_grants)"
+
+function_owners="$(psql_q "SELECT string_agg(n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||r.rolname, ',' ORDER BY p.proname)
+  FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner
+  JOIN pg_namespace n ON n.oid=p.pronamespace
+ WHERE p.oid IN ('$CONFIG_FN'::regprocedure, '$ACCESS_FN'::regprocedure)")"
+expected_owners="public.vipbot_authorization(text, text):$ROLE_DEFINER,public.vipbot_connection_config(text):$ROLE_DEFINER"
+[[ "$function_owners" == "$expected_owners" ]] || fail "VIPBot 함수 소유자가 다릅니다: $function_owners"
+log "함수 소유자: $ROLE_DEFINER"
+
+other_definers="$(psql_q "SELECT coalesce(string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text),'')
+  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+ WHERE n.nspname='public' AND p.prosecdef
+   AND p.oid NOT IN ('$CONFIG_FN'::regprocedure, '$ACCESS_FN'::regprocedure)
+   AND has_function_privilege('$ROLE_RUNTIME', p.oid, 'EXECUTE')")"
+[[ -z "$other_definers" ]] || fail "$ROLE_RUNTIME 이 다른 SECURITY DEFINER 함수를 실행할 수 있습니다: $other_definers"
+log "다른 SECURITY DEFINER 함수 실행 권한 없음"
 
 public_exec="$(psql_q "SELECT has_function_privilege('public','$CONFIG_FN','EXECUTE')")"
 [[ "$public_exec" == f ]] || fail "PUBLIC 이 $CONFIG_FN 을 실행할 수 있습니다"
 log "PUBLIC: $CONFIG_FN 실행 불가"
+
+public_authorize="$(psql_q "SELECT has_function_privilege('public','$ACCESS_FN','EXECUTE')")"
+[[ "$public_authorize" == f ]] || fail "PUBLIC 이 $ACCESS_FN 을 실행할 수 있습니다"
+log "PUBLIC: $ACCESS_FN 실행 불가"
 
 # 함수 ACL 을 직접 본다. PUBLIC 은 grantee oid **0** 이다.
 #
@@ -304,6 +342,14 @@ public_acl="$(psql_q "SELECT CASE WHEN p.proacl IS NULL THEN 1
                         FROM pg_proc p WHERE p.oid = '$CONFIG_FN'::regprocedure")"
 [[ "$public_acl" == 0 ]] || fail "$CONFIG_FN ACL 이 PUBLIC 에 열려 있습니다(proacl NULL 이면 기본값=PUBLIC)"
 log "함수 ACL: PUBLIC 줄 없음"
+
+access_public_acl="$(psql_q "SELECT CASE WHEN p.proacl IS NULL THEN 1
+                                         ELSE (SELECT count(*) FROM aclexplode(p.proacl) acl
+                                                WHERE acl.grantee = 0)
+                                    END
+                               FROM pg_proc p WHERE p.oid = '$ACCESS_FN'::regprocedure")"
+[[ "$access_public_acl" == 0 ]] || fail "$ACCESS_FN ACL 이 PUBLIC 에 열려 있습니다(proacl NULL 이면 기본값=PUBLIC)"
+log "권한 함수 ACL: PUBLIC 줄 없음"
 
 # 다른 봇의 창구도 열려 있으면 안 된다. VIPBot 런타임이 Archiver 의 연결을 읽을
 # 이유가 없고, 읽을 수 있으면 그 자체가 분리가 깨진 상태다.

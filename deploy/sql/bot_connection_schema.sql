@@ -247,17 +247,17 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = pg_catalog
 AS $$
     SELECT v.state,
            v.team_id,
            v.bot_user_id,
            bot.ciphertext,
            app.ciphertext
-      FROM bot_connection v
-      JOIN bot_connection_secret bot
+      FROM public.bot_connection v
+      JOIN public.bot_connection_secret bot
         ON bot.connection_id = v.id AND bot.kind = 'bot'
-      JOIN bot_connection_secret app
+      JOIN public.bot_connection_secret app
         ON app.connection_id = v.id AND app.kind = 'app'
      WHERE v.workspace = requested_workspace
        AND v.bot_key = 'vipbot'
@@ -268,7 +268,7 @@ AS $$
        AND v.bot_user_id <> ''
 $$;
 
-REVOKE ALL ON FUNCTION vipbot_connection_config(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.vipbot_connection_config(text) FROM PUBLIC;
 
 
 -- ---------------------------------------------------------------------------
@@ -429,7 +429,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tybot_vipbot') THEN
         REVOKE ALL PRIVILEGES ON TABLE bot_connection_secret FROM tybot_vipbot;
         REVOKE ALL PRIVILEGES ON TABLE bot_connection FROM tybot_vipbot;
-        EXECUTE 'GRANT EXECUTE ON FUNCTION vipbot_connection_config(text)'
+        EXECUTE 'GRANT EXECUTE ON FUNCTION public.vipbot_connection_config(text)'
                 ' TO tybot_vipbot';
     END IF;
 END

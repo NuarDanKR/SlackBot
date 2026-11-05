@@ -84,13 +84,35 @@ def test_connect_verifies_the_effective_runtime_identity_and_acl(monkeypatch):
         {
             "role": "tybot_vipbot_runtime",
             "may_execute": True,
-            "may_read_connection": False,
-            "may_read_secret": False,
+            "may_authorize": True,
+            "may_access_base_tables": False,
+            "may_execute_other_definers": False,
         },
     )
 
     assert runtime._connect() is connection
-    assert "current_user AS role" in connection.cursor_value.query
+    query = connection.cursor_value.query
+    assert "current_user AS role" in query
+    for table in (
+        "public.bot_connection",
+        "public.bot_connection_secret",
+        "public.employee",
+        "public.user_identity",
+        "public.bot_access",
+        "public.bot_source_channel",
+    ):
+        assert table in query
+    for privilege in (
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+    ):
+        assert f"'{privilege}'" in query
+    assert "p.prosecdef" in query
 
 
 @pytest.mark.parametrize(
@@ -98,8 +120,9 @@ def test_connect_verifies_the_effective_runtime_identity_and_acl(monkeypatch):
     [
         ("role", "tyslackai"),
         ("may_execute", False),
-        ("may_read_connection", True),
-        ("may_read_secret", True),
+        ("may_authorize", False),
+        ("may_access_base_tables", True),
+        ("may_execute_other_definers", True),
     ],
 )
 def test_connect_rejects_the_wrong_identity_or_effective_acl(
@@ -108,11 +131,27 @@ def test_connect_rejects_the_wrong_identity_or_effective_acl(
     identity = {
         "role": "tybot_vipbot_runtime",
         "may_execute": True,
-        "may_read_connection": False,
-        "may_read_secret": False,
+        "may_authorize": True,
+        "may_access_base_tables": False,
+        "may_execute_other_definers": False,
     }
     identity[field] = value
     connection = _install_driver(monkeypatch, identity)
+
+    with pytest.raises(
+        runtime.VipbotRuntimeStoreError,
+        match="vipbot_database_privilege_mismatch",
+    ):
+        runtime._connect()
+
+    assert connection.closed is True
+
+
+def test_connect_rejects_an_incomplete_privilege_report(monkeypatch):
+    connection = _install_driver(
+        monkeypatch,
+        {"role": "tybot_vipbot_runtime", "may_execute": True},
+    )
 
     with pytest.raises(
         runtime.VipbotRuntimeStoreError,
@@ -141,7 +180,7 @@ def test_runtime_config_uses_only_the_restricted_function(monkeypatch):
     runtime.load_runtime_config("tyit")
 
     cursor = connection.cursor_value
-    assert cursor.query == "SELECT * FROM vipbot_connection_config(%s)"
+    assert cursor.query == "SELECT * FROM public.vipbot_connection_config(%s)"
     assert cursor.params == ("tyit",)
 
 

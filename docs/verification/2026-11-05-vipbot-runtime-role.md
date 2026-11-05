@@ -20,7 +20,7 @@ Codex 의 `vipbot_dsn.py` · `vipbot_runtime_store.py` · `bot_connection_schema
 > (`acl.grantee = 0`). 두 시험 파일은 겹치지만 보는 각도가 달라 그대로 둔다 —
 > 합치는 것은 한 사람이 할 일이다.
 
-## 역할이 둘인 이유
+## 역할을 나눈 이유
 
 `tybot_vipbot` 은 **NOLOGIN 그룹**이다. 권한만 들고 접속하지 않는다. 접속하는
 주체는 `tybot_vipbot_runtime` 이고 그룹의 멤버로서 권한을 상속받는다.
@@ -28,11 +28,23 @@ Codex 의 `vipbot_dsn.py` · `vipbot_runtime_store.py` · `bot_connection_schema
 하나로 합치면 권한을 쥔 역할이 곧 접속 자격을 갖는다. 그러면 비밀번호를 바꾸거나
 계정을 끊는 일이 **권한 구조를 건드리는 일**이 되고, 운영 중에 그것을 하기 어렵다.
 
-## 이 계정이 할 수 있는 일
+`tybot_vipbot_definer` 는 두 `SECURITY DEFINER` 함수만 소유하는 세 번째 NOLOGIN
+역할이다. 로그인할 수 없고 멤버도 없으며, 여섯 기반 표의 SELECT만 갖는다. 함수
+소유자를 `postgres`로 두지 않아 함수가 불필요하게 superuser 권한으로 실행되지 않게
+한다. 함수 소유자와 역할 속성·멤버십은 설치 검증에서 다시 대조한다.
 
-`vipbot_connection_config(text)` **실행**. 그게 전부다.
+## 이 계정의 특권 창구
 
-`bot_connection` · `bot_connection_secret` 직접 SELECT 는 안 된다. 그 두 표에는
+`vipbot_connection_config(text)`와 `vipbot_authorization(text,text)` 두
+`SECURITY DEFINER` 함수만 허용한다. 다른 `public` 보안 정의자 함수의 실효 실행
+권한과 기반 표의 일곱 권한은 모두 설치·기동 때 거절한다.
+
+첫 함수는 검증된 VIPBot 토큰 쌍만 반환한다. 두 번째 함수는 기존 `user_identity`
+매핑, 살아 있는 개인 권한, 등록된 VIP 근거 채널 좌표만 반환한다. 거절된 요청에는
+근거 채널 좌표를 반환하지 않는다.
+
+`bot_connection` · `bot_connection_secret` · `employee` · `user_identity` ·
+`bot_access` · `bot_source_channel` 직접 접근은 안 된다. 앞의 두 표에는
 **모든 봇의 토큰 암호문**이 있다. VIPBot 런타임이 표를 읽을 수 있으면 VIPBot 한
 줄의 버그가 Master·Archiver·전문봇 토큰까지 꺼낸다. 함수는 `SECURITY DEFINER` 로
 그 한 줄만 돌려주고 조건(`bot_key='vipbot'` · `state='enabled'` · `identity_ok`)은
@@ -61,11 +73,13 @@ Codex 의 `vipbot_dsn.py` · `vipbot_runtime_store.py` · `bot_connection_schema
 맞는데 런타임이 기동에서 실패하고, 그 실패는 「권한 정상」 보고 **뒤에** 온다.
 
 ```
-has_function_privilege(runtime, vipbot_connection_config(text), EXECUTE)  → t
-has_table_privilege(runtime, bot_connection{,_secret}, SELECT/INSERT/UPDATE/DELETE) → f
-has_function_privilege(public, vipbot_connection_config(text), EXECUTE)   → f
+has_function_privilege(runtime, public.vipbot_connection_config(text), EXECUTE)  → t
+has_function_privilege(runtime, public.vipbot_authorization(text,text), EXECUTE) → t
+has_table_privilege(runtime, 여섯 기반 표, 7개 표 권한)                    → f
+has_function_privilege(public, 두 VIPBot 함수, EXECUTE)                    → f
 has_function_privilege(runtime, archiver_connection_config(text), EXECUTE) → f
-information_schema.role_table_grants (두 표 · runtime·group·PUBLIC)        → 0행
+다른 public SECURITY DEFINER 함수의 실효 EXECUTE                           → 0건
+information_schema.role_table_grants (여섯 표 · runtime·group·PUBLIC)      → 0행
 pg_proc.proacl 의 grantee = 0 (PUBLIC)                                     → 0건
 ```
 

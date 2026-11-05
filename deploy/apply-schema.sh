@@ -64,6 +64,7 @@ FILES=(
   license_member_schema.sql   # 라이선스 보유자 명단(직접 입력). employee · slack_license_manual 을 참조한다
   bot_access_schema.sql       # 봇 사용 권한(사번 단위). employee 를 참조한다
   bot_source_schema.sql       # 봇 근거 채널(채널 ID 단위)
+  vipbot_access_schema.sql    # VIPBot 전용 권한·근거 읽기 창구
   console_account_sync_schema.sql  # 콘솔 계정 자동 관리. console_user 에 열을 더한다
   console_password_schema.sql  # 임시 비밀번호(TYBot DM 발급). console_user 에 열을 더한다
   # 데이터 보정(멱등). 구조가 다 선 뒤에 돌린다.
@@ -107,7 +108,7 @@ fi
 # NOLOGIN 그룹에는 시크릿이 없다. 실제 worker LOGIN 역할과 멤버십은 별도 승인
 # 절차에서 만든다.
 if ((DRY_RUN)); then
-  echo "   [dry-run] ensure PostgreSQL roles tybot_vision, tybot_vipbot NOLOGIN"
+  echo "   [dry-run] ensure PostgreSQL roles tybot_vision, tybot_vipbot, tybot_vipbot_definer NOLOGIN"
 else
   sudo -u postgres psql -v ON_ERROR_STOP=1 -h "$HOST" -p "$PORT" -d "$DB" -c \
     "DO \$runtime_roles\$ BEGIN
@@ -116,6 +117,9 @@ else
        END IF;
        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='tybot_vipbot') THEN
          EXECUTE 'CREATE ROLE tybot_vipbot NOLOGIN';
+       END IF;
+       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='tybot_vipbot_definer') THEN
+         EXECUTE 'CREATE ROLE tybot_vipbot_definer NOLOGIN';
        END IF;
        IF EXISTS (
          SELECT 1 FROM pg_roles
@@ -126,6 +130,14 @@ else
          RAISE EXCEPTION 'tybot_vipbot has unsafe role attributes';
        END IF;
        IF EXISTS (
+         SELECT 1 FROM pg_roles
+          WHERE rolname='tybot_vipbot_definer'
+            AND (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole
+                 OR rolreplication OR rolbypassrls)
+       ) THEN
+         RAISE EXCEPTION 'tybot_vipbot_definer has unsafe role attributes';
+       END IF;
+       IF EXISTS (
          SELECT 1
            FROM pg_auth_members a
            JOIN pg_roles parent_role ON parent_role.oid=a.roleid
@@ -133,6 +145,16 @@ else
           WHERE child_role.rolname='tybot_vipbot'
        ) THEN
          RAISE EXCEPTION 'tybot_vipbot inherits an unexpected role';
+       END IF;
+       IF EXISTS (
+         SELECT 1
+           FROM pg_auth_members a
+           JOIN pg_roles parent_role ON parent_role.oid=a.roleid
+           JOIN pg_roles child_role ON child_role.oid=a.member
+          WHERE child_role.rolname='tybot_vipbot_definer'
+             OR parent_role.rolname='tybot_vipbot_definer'
+       ) THEN
+         RAISE EXCEPTION 'tybot_vipbot_definer must have no role memberships';
        END IF;
        IF EXISTS (
          SELECT 1

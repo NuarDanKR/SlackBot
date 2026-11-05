@@ -340,15 +340,22 @@ def test_vipbot_reads_only_its_verified_token_pair(sql):
     )
 
     assert "SECURITY DEFINER" in body
+    assert "SET search_path = pg_catalog" in body
+    assert "FROM public.bot_connection v" in body
+    assert "JOIN public.bot_connection_secret bot" in body
+    assert "JOIN public.bot_connection_secret app" in body
     assert "v.bot_key = 'vipbot'" in body
     assert "v.connector_type = 'slack_socket'" in body
     assert "v.state = 'enabled'" in body
     assert "v.identity_ok IS TRUE" in body
     assert "bot.kind = 'bot'" in body
     assert "app.kind = 'app'" in body
-    assert "REVOKE ALL ON FUNCTION vipbot_connection_config(text) FROM PUBLIC" in sql
+    assert (
+        "REVOKE ALL ON FUNCTION public.vipbot_connection_config(text) FROM PUBLIC"
+        in sql
+    )
     assert "REVOKE ALL PRIVILEGES ON TABLE bot_connection_secret FROM tybot_vipbot" in sql
-    assert "GRANT EXECUTE ON FUNCTION vipbot_connection_config(text)" in sql
+    assert "GRANT EXECUTE ON FUNCTION public.vipbot_connection_config(text)" in sql
     assert "TO tybot_vipbot" in sql
 
 
