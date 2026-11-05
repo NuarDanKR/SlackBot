@@ -128,6 +128,15 @@ else
        IF EXISTS (
          SELECT 1
            FROM pg_auth_members a
+           JOIN pg_roles parent_role ON parent_role.oid=a.roleid
+           JOIN pg_roles child_role ON child_role.oid=a.member
+          WHERE child_role.rolname='tybot_vipbot'
+       ) THEN
+         RAISE EXCEPTION 'tybot_vipbot inherits an unexpected role';
+       END IF;
+       IF EXISTS (
+         SELECT 1
+           FROM pg_auth_members a
            JOIN pg_roles g ON g.oid=a.roleid
            JOIN pg_roles m ON m.oid=a.member
           WHERE g.rolname='tybot_vipbot'

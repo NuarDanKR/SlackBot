@@ -319,6 +319,19 @@ def test_schema_apply_refuses_an_unsafe_or_shared_vipbot_group():
     assert "a.admin_option" in script[review:schemas]
 
 
+def test_schema_apply_refuses_privileges_inherited_by_the_vipbot_group():
+    script = (ROOT / "deploy" / "apply-schema.sh").read_text(encoding="utf-8")
+    schemas = script.rindex('for name in "${FILES[@]}"')
+    review = script.index("tybot_vipbot inherits an unexpected role")
+    window = script[review - 500 : schemas]
+
+    assert review < schemas
+    assert "FROM pg_auth_members a" in window
+    assert "parent_role.oid=a.roleid" in window
+    assert "child_role.oid=a.member" in window
+    assert "child_role.rolname='tybot_vipbot'" in window
+
+
 # 운영 절차가 적히는 곳. 여기 적힌 명령은 **서버에 그대로 붙여 넣는다.**
 # 설계 문서(`docs/design/`)는 개발 PC 기준이라 제외한다.
 OPERATIONAL_DOCS = ("docs/deploy", "docs/verification")
