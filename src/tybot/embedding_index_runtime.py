@@ -39,7 +39,7 @@ def run_embedding_index(
     )
     return run_reconciled_index(
         connection,
-        iter_index_sources(store),
+        lambda: iter_index_sources(store),
         scan_complete=scan_complete,
         model_revision=model_revision,
         authorize=lambda request: authorize_index_request(connection, request),

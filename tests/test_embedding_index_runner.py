@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gc
 import hashlib
+import weakref
 
 import pytest
 
@@ -56,6 +58,10 @@ def allow(_request):
     return IndexAuthorization(True, MODEL, "policy-1", "local")
 
 
+def sources(*items):
+    return lambda: iter(items)
+
+
 def install_current(monkeypatch, rows, *, ids=None):
     """Install the two readings the runner takes of the same table.
 
@@ -87,7 +93,7 @@ def test_rerun_uses_current_manifest_as_checkpoint(monkeypatch):
     embedder, writer = Embedder(), Writer()
     result = run_reconciled_index(
         object(),
-        [item],
+        sources(item),
         scan_complete=True,
         model_revision=MODEL,
         authorize=allow,
@@ -114,11 +120,11 @@ def test_new_and_changed_sources_are_the_only_embedding_requests(monkeypatch):
     embedder, writer = Embedder(), Writer()
     result = run_reconciled_index(
         object(),
-        [
+        sources(
             source("C1", same_path),
             source("C2", changed_path, "new\n"),
             source("C3", new_path),
-        ],
+        ),
         scan_complete=True,
         model_revision=MODEL,
         authorize=allow,
@@ -151,7 +157,7 @@ def test_coordinate_migration_retires_only_after_publish(monkeypatch):
     monkeypatch.setattr("tybot.embedding_index_runner.retire_migration", retire)
     result = run_reconciled_index(
         object(),
-        [source("C123", new)],
+        sources(source("C123", new)),
         scan_complete=True,
         model_revision=MODEL,
         authorize=allow,
@@ -174,7 +180,7 @@ def test_unpublished_migration_is_deferred_not_retired(monkeypatch):
     )
     result = run_reconciled_index(
         object(),
-        [source("C123", new)],
+        sources(source("C123", new)),
         scan_complete=True,
         model_revision=MODEL,
         authorize=lambda _request: IndexAuthorization(
@@ -202,7 +208,7 @@ def test_missing_old_source_stays_unresolved_and_is_never_retired(monkeypatch):
     monkeypatch.setattr("tybot.embedding_index_runner.retire_migration", retire)
     result = run_reconciled_index(
         object(),
-        [],
+        sources(),
         scan_complete=True,
         model_revision=MODEL,
         authorize=allow,
@@ -220,7 +226,7 @@ def test_incomplete_inventory_fails_before_embedding_or_retirement(monkeypatch):
     with pytest.raises(ReconciliationError, match="scan_incomplete"):
         run_reconciled_index(
             object(),
-            [source("C1", "sample/C1/raw/a.md")],
+            sources(source("C1", "sample/C1/raw/a.md")),
             scan_complete=False,
             model_revision=MODEL,
             authorize=allow,
@@ -236,7 +242,7 @@ def test_result_repr_contains_counts_not_paths_or_text(monkeypatch):
     install_current(monkeypatch, [])
     result = run_reconciled_index(
         object(),
-        [item],
+        sources(item),
         scan_complete=True,
         model_revision=MODEL,
         authorize=allow,
@@ -255,7 +261,7 @@ def test_each_request_carries_the_current_id_read_at_the_start(monkeypatch):
     writer = Writer()
     run_reconciled_index(
         object(),
-        [source("C2", changed, "new\n"), source("C3", fresh)],
+        sources(source("C2", changed, "new\n"), source("C3", fresh)),
         scan_complete=True,
         model_revision=MODEL,
         authorize=allow,
@@ -282,7 +288,7 @@ def test_a_document_current_under_another_chunker_is_still_replaceable(monkeypat
     writer = Writer()
     result = run_reconciled_index(
         object(),
-        [source("C1", path)],
+        sources(source("C1", path)),
         scan_complete=True,
         model_revision=MODEL,
         authorize=allow,
@@ -316,7 +322,7 @@ def test_the_expected_ids_are_read_before_any_model_call(monkeypatch):
 
     run_reconciled_index(
         object(),
-        [source("C1", path)],
+        sources(source("C1", path)),
         scan_complete=True,
         model_revision=MODEL,
         authorize=allow,
@@ -325,3 +331,60 @@ def test_the_expected_ids_are_read_before_any_model_call(monkeypatch):
     )
 
     assert events == ["read", "embed"]
+
+
+def test_first_scan_does_not_retain_canonical_bodies(monkeypatch):
+    path = "workspaces/sample/channels/C1/raw/2026-01-01.md"
+    seed = "large canonical body " * 10_000
+    install_current(monkeypatch, [current(1, "C1", path, seed)])
+    source_references = []
+    body_references = []
+    calls = 0
+
+    class Body(str):
+        pass
+
+    def source_factory():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            gc.collect()
+            assert source_references[0]() is None
+            assert body_references[0]() is None
+        body = Body(seed)
+        item = source("C1", path, body)
+        source_references.append(weakref.ref(item))
+        body_references.append(weakref.ref(body))
+        return iter((item,))
+
+    result = run_reconciled_index(
+        object(),
+        source_factory,
+        scan_complete=True,
+        model_revision=MODEL,
+        authorize=allow,
+        embedder=Embedder(),
+        writer=Writer(),
+    )
+
+    assert calls == 2
+    assert result.unchanged_count == 1
+    assert result.batch.embed_calls == 0
+
+
+def test_one_shot_source_iterables_are_refused_before_database_reads(monkeypatch):
+    monkeypatch.setattr(
+        "tybot.embedding_index_runner.current_documents",
+        lambda *_args, **_kwargs: pytest.fail("database must not be read"),
+    )
+
+    with pytest.raises(TypeError, match="source_factory"):
+        run_reconciled_index(
+            object(),
+            iter(()),
+            scan_complete=True,
+            model_revision=MODEL,
+            authorize=allow,
+            embedder=Embedder(),
+            writer=Writer(),
+        )

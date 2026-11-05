@@ -13,8 +13,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Protocol
 
-from tybot.archive.embedding_source import VectorSource
 from tybot.embedding_index_store import DocumentKey
 
 _REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -24,6 +24,15 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 class ReconciliationError(ValueError):
     """The inventory is not safe enough to plan destructive retirement."""
+
+
+class SourceIdentity(Protocol):
+    """Body-free canonical source identity used during reconciliation."""
+
+    workspace: str
+    channel_id: str
+    doc_path: str
+    source_revision: str
 
 
 @dataclass(frozen=True)
@@ -106,7 +115,7 @@ def current_documents(
 
 def plan_reconciliation(
     current: Iterable[CurrentDocument],
-    sources: Iterable[VectorSource],
+    sources: Iterable[SourceIdentity],
     *,
     model_revision: str,
     chunker_revision: str,
@@ -127,7 +136,7 @@ def plan_reconciliation(
             raise ReconciliationError("duplicate_current_coordinate")
         by_coordinate[coordinate] = row
 
-    source_by_coordinate: dict[tuple[str, str, str], VectorSource] = {}
+    source_by_coordinate: dict[tuple[str, str, str], SourceIdentity] = {}
     for source in source_rows:
         target = _target(source, model_revision, chunker_revision)
         coordinate = (target.workspace, target.channel_id, target.doc_path)
@@ -138,7 +147,7 @@ def plan_reconciliation(
     unchanged: list[int] = []
     reindex: dict[tuple[str, str, str], TargetDocument] = {}
     stale: list[CurrentDocument] = []
-    new_sources: list[VectorSource] = []
+    new_sources: list[SourceIdentity] = []
 
     for coordinate, row in by_coordinate.items():
         source = source_by_coordinate.get(coordinate)
@@ -155,7 +164,7 @@ def plan_reconciliation(
             reindex[coordinate] = _target(source, model_revision, chunker_revision)
 
     stale_groups: dict[tuple[str, str, str, str], list[CurrentDocument]] = defaultdict(list)
-    source_groups: dict[tuple[str, str, str, str], list[VectorSource]] = defaultdict(list)
+    source_groups: dict[tuple[str, str, str, str], list[SourceIdentity]] = defaultdict(list)
     for row in stale:
         fingerprint = _fingerprint(row.workspace, row.doc_path, row.source_revision)
         if fingerprint is not None:
@@ -245,7 +254,7 @@ def retire_migration(connection, migration: CoordinateMigration) -> bool:
 
 
 def _target(
-    source: VectorSource, model_revision: str, chunker_revision: str
+    source: SourceIdentity, model_revision: str, chunker_revision: str
 ) -> TargetDocument:
     target = TargetDocument(
         workspace=source.workspace,

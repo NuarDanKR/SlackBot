@@ -45,9 +45,17 @@ class ReconciledIndexResult:
     batch: IndexBatchResult
 
 
+@dataclass(frozen=True)
+class _SourceIdentity:
+    workspace: str
+    channel_id: str
+    doc_path: str
+    source_revision: str
+
+
 def run_reconciled_index(
     connection,
-    sources: Iterable[VectorSource],
+    source_factory: Callable[[], Iterable[VectorSource]],
     *,
     scan_complete: bool,
     model_revision: str,
@@ -57,8 +65,16 @@ def run_reconciled_index(
     limits: IndexLimits | None = None,
     spec: chunking.ChunkSpec = chunking.DEFAULT_SPEC,
 ) -> ReconciledIndexResult:
-    """Reconcile, publish missing revisions, then retire safe migrations."""
-    inventory = tuple(sources)
+    """Reconcile metadata, then stream requested bodies in a second scan.
+
+    A factory is required rather than a one-shot iterable because retaining all
+    canonical bodies made peak memory proportional to the whole archive.  The
+    first scan keeps only identity metadata; the bounded coordinator consumes
+    requested bodies directly from a fresh second scan.
+    """
+    if not callable(source_factory):
+        raise TypeError("source_factory must be callable")
+    inventory = tuple(_source_identity(source) for source in source_factory())
     chunker_revision = source_chunker_revision(spec.plan)
     current = current_documents(
         connection,
@@ -72,28 +88,15 @@ def run_reconciled_index(
         chunker_revision=chunker_revision,
         scan_complete=scan_complete,
     )
-    by_identity = {
+    requested_identities = {
         (
-            source.workspace,
-            source.channel_id,
-            source.doc_path,
-            source.source_revision,
-        ): source
-        for source in inventory
-    }
-    requested: list[VectorSource] = []
-    for target in plan.reindex:
-        source = by_identity.get(
-            (
-                target.workspace,
-                target.channel_id,
-                target.doc_path,
-                target.source_revision,
-            )
+            target.workspace,
+            target.channel_id,
+            target.doc_path,
+            target.source_revision,
         )
-        if source is None:
-            raise ReconciliationError("reindex_source_missing")
-        requested.append(source)
+        for target in plan.reindex
+    }
 
     # Read what is current **before** embedding starts, and in the full scope
     # publication replaces -- `current_documents` above is narrowed to this
@@ -101,7 +104,7 @@ def run_reconciled_index(
     # when the chunker itself changed.
     observed = current_document_ids(connection, model_revision=model_revision)
     batch = run_index_batch(
-        requested,
+        _requested_sources(source_factory, requested_identities),
         model_revision=model_revision,
         authorize=authorize,
         embedder=embedder,
@@ -126,7 +129,7 @@ def run_reconciled_index(
     return ReconciledIndexResult(
         inventory_count=len(inventory),
         unchanged_count=len(plan.unchanged_document_ids),
-        requested_count=len(requested),
+        requested_count=len(requested_identities),
         unresolved_count=len(plan.unresolved_document_ids),
         migration_count=len(plan.migrations),
         migrations_retired=retired,
@@ -134,6 +137,38 @@ def run_reconciled_index(
         migrations_failed=failed,
         batch=batch,
     )
+
+
+def _source_identity(source: VectorSource) -> _SourceIdentity:
+    if not isinstance(source, VectorSource):
+        raise ReconciliationError("source_invalid")
+    return _SourceIdentity(
+        workspace=source.workspace,
+        channel_id=source.channel_id,
+        doc_path=source.doc_path,
+        source_revision=source.source_revision,
+    )
+
+
+def _requested_sources(
+    source_factory: Callable[[], Iterable[VectorSource]],
+    requested: set[tuple[str, str, str, str]],
+) -> Iterable[VectorSource]:
+    seen: set[tuple[str, str, str, str]] = set()
+    for source in source_factory():
+        identity = _source_identity(source)
+        key = (
+            identity.workspace,
+            identity.channel_id,
+            identity.doc_path,
+            identity.source_revision,
+        )
+        if key not in requested:
+            continue
+        if key in seen:
+            raise ReconciliationError("duplicate_source_identity")
+        seen.add(key)
+        yield source
 
 
 __all__ = [

@@ -61,7 +61,8 @@ def test_runtime_assembles_only_injected_boundaries(monkeypatch):
         "timeout_seconds": 7,
     }
     got_connection, got_sources, kwargs = seen["reconcile"]
-    assert got_connection is connection and got_sources is sources
+    assert got_connection is connection and callable(got_sources)
+    assert got_sources() is sources
     assert kwargs["scan_complete"] is True
     assert kwargs["model_revision"] == "embed-v1"
     assert kwargs["embedder"] is embedder
