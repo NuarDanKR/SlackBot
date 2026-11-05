@@ -450,6 +450,7 @@ def test_the_hook_binds_the_request_context_into_the_toolbox():
 
     def fake_serve(task, **kw):
         captured["factory"] = kw["toolbox_factory"]
+        captured["live"] = kw["live"]
         from tybot.specialist_router import UNAVAILABLE, SpecialistOutcome
 
         return SpecialistOutcome(UNAVAILABLE, error_code="테스트")
@@ -468,6 +469,46 @@ def test_the_hook_binds_the_request_context_into_the_toolbox():
     box = captured["factory"]()
     assert box.ctx is ctx, "권한 컨텍스트를 안 묶었다"
     assert box.store is store
+
+
+def test_managed_cross_workspace_scope_does_not_use_workspace_bound_live_fetch():
+    from types import SimpleNamespace
+
+    from tybot.slack import pilot
+
+    captured = {}
+
+    def fake_serve(task, **kw):
+        captured["factory"] = kw["toolbox_factory"]
+        captured["live"] = kw["live"]
+        from tybot.specialist_router import UNAVAILABLE, SpecialistOutcome
+
+        return SpecialistOutcome(UNAVAILABLE, error_code="test")
+
+    live_calls = []
+    ctx = SimpleNamespace(
+        workspace="tyit",
+        role="member",
+        channel="",
+        evidence_sources=frozenset({("mgmt", "C0EXEC001")}),
+    )
+    hook = pilot.specialist_hook(
+        router=None,
+        store=object(),
+        live_fetch=lambda *args: live_calls.append(args),
+    )
+    import tybot.specialist_router as sr
+
+    original, sr.serve = sr.serve, fake_serve
+    try:
+        hook("질문", ctx, "원문")
+    finally:
+        sr.serve = original
+
+    box = captured["factory"]()
+    assert box.live_fetch is None
+    assert captured["live"] is False
+    assert live_calls == []
 
 
 def test_the_answer_cites_what_the_specialist_read():

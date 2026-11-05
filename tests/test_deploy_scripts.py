@@ -285,6 +285,38 @@ def test_schema_apply_creates_the_secretless_vision_group_before_grants():
     assert "-p \"$PORT\" -d \"$DB\"" in script[role - 300:schemas]
 
 
+def test_schema_apply_creates_the_secretless_vipbot_group_before_grants():
+    script = (ROOT / "deploy" / "apply-schema.sh").read_text(encoding="utf-8")
+    role = script.index("CREATE ROLE tybot_vipbot NOLOGIN")
+    schemas = script.rindex('for name in "${FILES[@]}"')
+
+    assert role < schemas
+    assert "CREATE ROLE tybot_vipbot LOGIN" not in script
+    assert "PASSWORD" not in script[role:schemas]
+    assert 'HOST="${TYBOT_DB_HOST:-/run/postgresql}"' in script
+    assert '-h "$HOST" -p "$PORT" -d "$DB"' in script[role:schemas]
+
+
+def test_schema_apply_refuses_an_unsafe_or_shared_vipbot_group():
+    script = (ROOT / "deploy" / "apply-schema.sh").read_text(encoding="utf-8")
+    schemas = script.rindex('for name in "${FILES[@]}"')
+    review = script.index("tybot_vipbot has unsafe role attributes")
+
+    assert review < schemas
+    for attribute in (
+        "rolcanlogin",
+        "rolsuper",
+        "rolcreatedb",
+        "rolcreaterole",
+        "rolreplication",
+        "rolbypassrls",
+    ):
+        assert attribute in script[review - 700 : schemas]
+    assert "g.rolname='tybot_vipbot'" in script[review:schemas]
+    assert "m.rolname <> 'tybot_vipbot_runtime'" in script[review:schemas]
+    assert "a.admin_option" in script[review:schemas]
+
+
 # 운영 절차가 적히는 곳. 여기 적힌 명령은 **서버에 그대로 붙여 넣는다.**
 # 설계 문서(`docs/design/`)는 개발 PC 기준이라 제외한다.
 OPERATIONAL_DOCS = ("docs/deploy", "docs/verification")

@@ -201,13 +201,13 @@ def test_the_catalog_has_no_closed_key_check(sql):
 
 # --- 봇은 하나다 --------------------------------------------------------------
 
-def test_the_seed_has_four_bots_and_no_hermes_direct(sql):
+def test_the_seed_has_vipbot_and_no_hermes_direct(sql):
     """`Hermes Direct` 행을 만들면 콘솔에서 Hermes 가 다시 둘이 된다(§13)."""
     found = re.search(r"INSERT INTO bot_catalog(.*?)ON CONFLICT", sql, re.S)
 
     assert found
     keys = set(re.findall(r"\('([a-z-]+)',", found.group(1)))
-    assert keys == {"master", "archiver", "hermes", "clio"}
+    assert keys == {"master", "vipbot", "archiver", "hermes", "clio"}
     assert "hermes_direct" not in found.group(1)
 
 
@@ -223,6 +223,14 @@ def test_master_is_not_internally_invokable(sql):
     found = re.search(r"\('master',.*?\)", sql)
 
     assert found and found.group(0).endswith("true,  false)")
+
+
+def test_vipbot_is_a_slack_orchestrator_not_an_internal_specialist(sql):
+    found = re.search(r"\('vipbot',.*?\)", sql)
+
+    assert found
+    assert "'orchestrator'" in found.group(0)
+    assert found.group(0).endswith("true,  false)")
 
 
 # --- 이관 --------------------------------------------------------------------
@@ -326,6 +334,24 @@ def test_the_function_allows_absent_master_but_validates_present_master(sql):
     assert "m.bot_user_id <> a.bot_user_id" in body
 
 
+def test_vipbot_reads_only_its_verified_token_pair(sql):
+    body = " ".join(
+        _section(sql, "CREATE OR REPLACE FUNCTION vipbot_connection_config", "$$;").split()
+    )
+
+    assert "SECURITY DEFINER" in body
+    assert "v.bot_key = 'vipbot'" in body
+    assert "v.connector_type = 'slack_socket'" in body
+    assert "v.state = 'enabled'" in body
+    assert "v.identity_ok IS TRUE" in body
+    assert "bot.kind = 'bot'" in body
+    assert "app.kind = 'app'" in body
+    assert "REVOKE ALL ON FUNCTION vipbot_connection_config(text) FROM PUBLIC" in sql
+    assert "REVOKE ALL PRIVILEGES ON TABLE bot_connection_secret FROM tybot_vipbot" in sql
+    assert "GRANT EXECUTE ON FUNCTION vipbot_connection_config(text)" in sql
+    assert "TO tybot_vipbot" in sql
+
+
 def test_the_console_role_can_manage_connections(sql):
     """권한이 없으면 콘솔에게는 그 표가 **없는 것과 같다**(2026-09-14 실측)."""
     assert re.search(
@@ -356,7 +382,7 @@ def test_the_console_role_cannot_delete_rows(sql):
 def _backfill_block(sql: str) -> str:
     """`specialist_bot` 에서 들여오는 INSERT **하나만**.
 
-    첫 `INSERT INTO bot_catalog` 부터 훑으면 네 봇 seed 까지 함께 잡힌다. 그러면
+    첫 `INSERT INTO bot_catalog` 부터 훑으면 초기 봇 seed 까지 함께 잡힌다. 그러면
     seed 에 있는 값이 backfill 의 값으로 세어져, backfill 이 무엇을 넣든 통과한다.
     """
     found = re.search(
@@ -368,7 +394,7 @@ def _backfill_block(sql: str) -> str:
 
 
 def test_existing_specialist_bots_enter_the_catalog(sql):
-    """네 봇만 seed 하면 **이미 승인받아 쓰던 전문 봇이 카탈로그에 없다.**
+    """초기 봇만 seed 하면 **이미 승인받아 쓰던 전문 봇이 카탈로그에 없다.**
 
     그 상태로 라우트를 backfill 하면 「어느 봇의 라우트인지 모르는 행」 이 생긴다.
     """

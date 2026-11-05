@@ -57,12 +57,13 @@ COMMENT ON TABLE bot_catalog IS
     '논리 봇 정체성. specialist runtime 상태를 여기 복제하지 않는다 — 그쪽 정본은 '
     'specialist_bot 과 specialist_deployment 다.';
 
--- 초기 네 봇. **멱등하다** — 이미 있으면 사람이 고친 값을 덮지 않는다.
+-- 초기 봇. **멱등하다** — 이미 있으면 사람이 고친 값을 덮지 않는다.
 -- `Hermes Direct` 행은 만들지 않는다(§13).
 INSERT INTO bot_catalog
     (key, display_name, category, owner_team, slack_connectable, internally_invokable)
 VALUES
     ('master',   'TYBot Master', 'orchestrator', 'Slack AI TFT', true,  false),
+    ('vipbot',   'VIPBot',       'orchestrator', 'Slack AI TFT', true,  false),
     ('archiver', 'Archiving Bot', 'collector',   'Slack AI TFT', true,  false),
     ('hermes',   'Hermes',        'specialist',  'Slack AI TFT', true,  true),
     ('clio',     'Clio',          'specialist',  'Slack AI TFT', false, true)
@@ -70,7 +71,7 @@ ON CONFLICT (key) DO NOTHING;
 
 -- 이미 등록된 **다른 전문 봇**도 들여온다.
 --
--- 네 봇만 seed 하면, 승인받아 쓰고 있던 전문 봇이 카탈로그에 없다. 그 상태에서
+-- 초기 봇만 seed 하면, 승인받아 쓰고 있던 전문 봇이 카탈로그에 없다. 그 상태에서
 -- `specialist_route` 는 배정을 backfill 하는데 화면은 그 봇을 모른다 — 「어느 봇의
 -- 라우트인지 모르는 행」 이 생기고, 그건 사람이 지우기도 어렵다.
 --
@@ -234,6 +235,41 @@ $$;
 
 REVOKE ALL ON FUNCTION archiver_connection_config(text) FROM PUBLIC;
 
+-- VIPBot 은 Master 와 토큰·Socket Mode 연결을 공유하지 않는다. 전용 런타임은
+-- 활성화되고 신원이 확인된 VIPBot 한 행의 토큰 쌍만 읽는다.
+CREATE OR REPLACE FUNCTION vipbot_connection_config(requested_workspace text)
+RETURNS TABLE (
+    state text,
+    team_id text,
+    bot_user_id text,
+    bot_ciphertext bytea,
+    app_ciphertext bytea
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT v.state,
+           v.team_id,
+           v.bot_user_id,
+           bot.ciphertext,
+           app.ciphertext
+      FROM bot_connection v
+      JOIN bot_connection_secret bot
+        ON bot.connection_id = v.id AND bot.kind = 'bot'
+      JOIN bot_connection_secret app
+        ON app.connection_id = v.id AND app.kind = 'app'
+     WHERE v.workspace = requested_workspace
+       AND v.bot_key = 'vipbot'
+       AND v.connector_type = 'slack_socket'
+       AND v.state = 'enabled'
+       AND v.identity_ok IS TRUE
+       AND v.team_id <> ''
+       AND v.bot_user_id <> ''
+$$;
+
+REVOKE ALL ON FUNCTION vipbot_connection_config(text) FROM PUBLIC;
+
 
 -- ---------------------------------------------------------------------------
 -- 4. Master 내부 호출 라우트
@@ -386,6 +422,15 @@ BEGIN
         EXECUTE 'GRANT SELECT ON TABLE bot_connection, bot_catalog TO tybot_archiver';
         EXECUTE 'GRANT EXECUTE ON FUNCTION archiver_connection_config(text)'
                 ' TO tybot_archiver';
+    END IF;
+
+    -- VIPBot 런타임은 연결 표를 직접 읽지 않는다. NOLOGIN 권한 그룹을 통해
+    -- 검증된 자기 토큰 쌍만 받는다. 실제 LOGIN 역할과 멤버십은 별도 설치 절차다.
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tybot_vipbot') THEN
+        REVOKE ALL PRIVILEGES ON TABLE bot_connection_secret FROM tybot_vipbot;
+        REVOKE ALL PRIVILEGES ON TABLE bot_connection FROM tybot_vipbot;
+        EXECUTE 'GRANT EXECUTE ON FUNCTION vipbot_connection_config(text)'
+                ' TO tybot_vipbot';
     END IF;
 END
 $$;

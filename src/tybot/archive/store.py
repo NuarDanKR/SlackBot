@@ -999,7 +999,18 @@ class ArchiveStore:
                 # 계층의 몫이라, 여기서는 조용히 빼고 사유만 남긴다.
                 drop("live_not_archived")
                 continue
-            if ref.workspace and ref.workspace != ctx.workspace and not (
+            if ctx.evidence_sources is not None:
+                # VIPBot 같은 관리형 근거 범위는 후속 질문에서도 정확한 좌표를
+                # 다시 확인한다. 첫 검색만 열고 EvidenceRef 복원에서 기존
+                # readable_workspaces 규칙으로 되돌아가면 다른 워크스페이스의
+                # 등록 채널을 다음 질문부터 잃는다. 반대로 이 검사가 없으면 같은
+                # 워크스페이스의 미등록 채널 참조가 경로 대조까지 진행된다.
+                if not ref.workspace or not ref.channel_id or (
+                    ref.workspace, ref.channel_id
+                ) not in ctx.evidence_sources:
+                    drop("bot_source_scope")
+                    continue
+            elif ref.workspace and ref.workspace != ctx.workspace and not (
                 ctx.is_root or ref.workspace in ctx.readable_workspaces
             ):
                 drop("workspace_scope")
@@ -1025,6 +1036,9 @@ class ArchiveStore:
                 drop("source_missing" if path not in known else "permission_changed")
                 continue
             doc, lines = entry
+            if ref.workspace and ref.workspace != doc.workspace:
+                drop("workspace_coordinate")
+                continue
             if ref.channel_id and (doc.channel_id or "") and ref.channel_id != doc.channel_id:
                 drop("channel_scope")
                 continue

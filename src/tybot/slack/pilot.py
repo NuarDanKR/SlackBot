@@ -580,6 +580,7 @@ class WorkspaceBot:
             permission_unverified=bool(
                 getattr(base, "permission_unverified", False)
             ),
+            evidence_sources=getattr(base, "evidence_sources", None),
         )
 
     def _specialist_roster(self) -> list:
@@ -4313,6 +4314,8 @@ def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=Non
                 required_capability=INTERNAL_QA,
             )
 
+        managed_sources = getattr(ctx, "evidence_sources", None)
+
         def make_toolbox():
             """도구를 쓰는 전문가에게 줄 **요청마다 새로운** 묶음.
 
@@ -4326,7 +4329,15 @@ def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=Non
 
             # `live_fetch` 는 워크스페이스를 받아야 한다 — 엔진은 전체에 하나지만
             # Slack 클라이언트는 워크스페이스마다 다르다.
-            bound = (lambda cid, n: live_fetch(workspace, cid, n)) if live_fetch else None
+            # VIP의 근거 채널은 여러 workspace에 걸칠 수 있다. 기존 live_fetch는
+            # 현재 요청 workspace에만 결속되므로, 그 좌표로 다른 workspace 채널을
+            # 물으면 잘못된 Slack 조직에서 조회한다. workspace를 인자로 받는 계약이
+            # 생기기 전에는 관리형 근거 컨텍스트의 실시간 조회를 닫고 아카이브만 쓴다.
+            bound = (
+                (lambda cid, n: live_fetch(workspace, cid, n))
+                if live_fetch and managed_sources is None
+                else None
+            )
             return ToolBox(
                 store=store, ctx=ctx, live_fetch=bound,
                 here=getattr(ctx, "channel", "") or "",
@@ -4339,7 +4350,7 @@ def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=Non
                 evidence=[evidence] if evidence and evidence.strip() else [],
                 router=router,
                 toolbox_factory=make_toolbox,
-                live=bool(live_fetch),
+                live=bool(live_fetch) and managed_sources is None,
                 visual=visual,
                 authorization_id=f"{workspace}:{getattr(ctx, 'role', '-') or '-'}",
                 decision_id=str(getattr(task, "decision_id", "") or ""),

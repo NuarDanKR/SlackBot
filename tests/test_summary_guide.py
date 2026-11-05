@@ -228,6 +228,87 @@ def test_root_dm_can_use_a_guide_from_another_readable_workspace(tmp_path):
     assert [hit.line.text for hit in hits] == [RAW]
 
 
+def test_a_managed_source_list_guides_across_workspaces_but_only_where_registered(
+    tmp_path,
+):
+    """VIPBot 처럼 **관리형 근거 범위**로 묻는 요청.
+
+    길잡이는 등록된 다른 워크스페이스까지 넓어져야 하고, 같은 워크스페이스라도
+    **등록되지 않은 채널**은 승인 요약이 있어도 원문을 열지 못해야 한다. 둘 중
+    하나만 맞으면 경영진 질문이 반쪽 근거로 답해지거나, 등록하지 않은 채널이
+    요약을 타고 새어 나온다.
+    """
+    store = _archive(tmp_path)  # pilot / C1 — 등록하지 않은 채널
+    writer.ingest(
+        tmp_path,
+        workspace="mgmt",
+        channel="#팀-경영_ZZZ000-근거",
+        channel_id="C0EXEC001",
+        acl=["#팀-경영_ZZZ000-근거"],
+        messages=[writer.IncomingMessage(
+            ts=datetime(2026, 9, 16, 2, 0, tzinfo=UTC),
+            speaker="담당자",
+            text="미회수 채권 34억원 잔액이 남았습니다",
+            source_ts="1758012345.654321",
+        )],
+    )
+    writer.ingest(
+        tmp_path,
+        workspace="mgmt",
+        channel="#팀-경영_ZZZ000-미등록",
+        channel_id="C0OTHER1",
+        acl=["#팀-경영_ZZZ000-미등록"],
+        messages=[writer.IncomingMessage(
+            ts=datetime(2026, 9, 16, 3, 0, tzinfo=UTC),
+            speaker="담당자",
+            text="미회수 채권 99억원 잔액이 남았습니다",
+            source_ts="1758012345.999999",
+        )],
+    )
+    store = ArchiveStore(tmp_path)
+    registered = next(
+        doc for doc in store.source_docs() if doc.channel_id == "C0EXEC001"
+    )
+    unregistered = next(
+        doc for doc in store.source_docs() if doc.channel_id == "C0OTHER1"
+    )
+    other = unregistered.raw_lines[0]
+    sibling_row = _row(
+        store,
+        candidate_id="33333333-3333-3333-3333-333333333333",
+        workspace="mgmt",
+        channel_id="C0OTHER1",
+        evidence_quote=other.text,
+        evidence_at=other.ts,
+        evidence_author=other.speaker,
+        evidence_locator=f"{unregistered.path.name}:{other.lineno}",
+        evidence_hash=content_hash(other.ts, other.speaker, other.text),
+    )
+    line = registered.raw_lines[0]
+    managed_row = _row(
+        store,
+        candidate_id="22222222-2222-2222-2222-222222222222",
+        workspace="mgmt",
+        channel_id="C0EXEC001",
+        evidence_quote=line.text,
+        evidence_at=line.ts,
+        evidence_author=line.speaker,
+        evidence_locator=f"{registered.path.name}:{line.lineno}",
+        evidence_hash=content_hash(line.ts, line.speaker, line.text),
+    )
+    ctx = RequestContext(
+        workspace="tyit",
+        evidence_sources=frozenset({("mgmt", "C0EXEC001")}),
+    )
+
+    hits = summary_guide.expand(
+        store, ctx, "미수금", conn=_Conn([_row(store), managed_row, sibling_row])
+    )
+
+    assert [hit.line.text for hit in hits] == [line.text]
+    assert all(other.text not in hit.line.text for hit in hits)
+
+
 def test_a_missing_source_file_is_marked_for_review(tmp_path):
     store = _archive(tmp_path)
     conn = _Conn([_row(store, evidence_locator="2001-01-01.md:12")])

@@ -75,6 +75,7 @@ HEALTHY = "ok"
 RUNTIME_READER_STATUS = {
     "master_connection": True,
     "archiver_connection": True,
+    "vipbot_connection": False,
     "specialist_route": False,
 }
 RUNTIME_READS_NEW_TABLES = all(RUNTIME_READER_STATUS.values())
@@ -85,6 +86,8 @@ RUNTIME_EFFECT_NOW = (
     " 프로세스를 자동 재시작하지 않으며, 연결을 꺼도 실행 중인 수집이 멈추지 않는다.",
     "Master 연결도 **다음 기동에 적용**된다. 연결을 끄면 그 워크스페이스의 Master 는"
     " 다음에 시작할 때 뜨지 않는다 — 지금 돌고 있는 프로세스는 그대로다.",
+    "VIPBot 연결은 전용 설정 로더까지만 준비됐고 **별도 Socket Mode 런타임에는 아직"
+    " 연결되지 않았다**. TYBot 과 토큰이나 Socket Mode 연결을 공유하지 않는다.",
     "라우트 모드는 **v2 를 켠 워크스페이스에서만** 읽힌다. 켜지 않은 곳에서는 Master 가"
     " 배정(`specialist_workspace`)만 보고 라우팅하므로 이 화면의 변경이 반영되지 않는다.",
 )
@@ -99,7 +102,7 @@ def runtime_effect() -> dict:
     return {
         "appliesNow": RUNTIME_READS_NEW_TABLES,
         "summary": (
-            "연결은 다음 기동에 적용됩니다. 전문 봇 라우팅은 v2 를 켠 워크스페이스에서만 적용됩니다."
+            "연결별 런타임 적용 상태가 다릅니다. 아래 상세를 확인하세요."
             if not RUNTIME_READS_NEW_TABLES
             else "저장 즉시 런타임에 반영됩니다."
         ),

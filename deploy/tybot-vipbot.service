@@ -1,0 +1,79 @@
+[Unit]
+# B-83 VIPBot — TYBot 과 **다른 Slack 앱 · 다른 DB 계정**으로 도는 별도 프로세스.
+#
+# 이 유닛은 **초안이다.** `[Install]` 섹션이 일부러 없어서 `systemctl enable` 이
+# 거부된다. 런타임 모듈이 서기 전에 부팅에 걸어 두면, 없는 모듈로 재시작을
+# 반복하며 journal 만 채우고 「켜 두었다」 는 기억만 남는다.
+# 가동할 때 아래 두 줄을 파일 끝에 더한다:
+#     [Install]
+#     WantedBy=multi-user.target
+Description=VIPBot — 임원 전용 Slack 봇 (Socket Mode, 아웃바운드 전용)
+After=network-online.target postgresql-16.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+
+# --- 시크릿: 자격증명으로만 넣는다 ------------------------------------------
+#
+# **`/etc/tybot/tybot.env` 를 읽지 않는다.** 그 파일에는 Master 의 `DATABASE_URL`
+# 이 들어 있다. 이 프로세스가 그 값을 들고 있으면 전용 계정을 만든 의미가
+# 사라진다 — VIPBot 코드 한 줄이면 모든 봇의 토큰 표를 열 수 있고, 그때
+# `tybot_vipbot_runtime` 은 그냥 쓰이지 않는 역할이 된다.
+#
+# systemd 가 아래 둘을 0400 tybot 소유로 `$CREDENTIALS_DIRECTORY` 에 풀어 둔다.
+# 디렉터리는 이 유닛의 프로세스만 볼 수 있고, 유닛이 멎으면 사라진다.
+#
+#   tybot-vipbot-database-url  — tybot.vipbot_dsn 이 CREDENTIALS_DIRECTORY 에서
+#                                이 이름 그대로 찾는다. 환경변수로 넘기지 않는다
+#   tybot-workspace-secret-key — 토큰 복호화 키(Fernet)
+LoadCredential=tybot-vipbot-database-url:/etc/tybot/tybot-vipbot-database-url
+LoadCredential=tybot-workspace-secret-key:/etc/tybot/workspace-secret.key
+Environment=WORKSPACE_SECRET_KEY_FILE=%d/tybot-workspace-secret-key
+
+# 런타임 모듈은 아직 없다. 없는 모듈로 조용히 도는 일이 없도록 먼저 확인한다 —
+# ExecStartPre 가 실패하면 유닛은 기동하지 않고 이유가 journal 에 남는다.
+ExecStartPre=/opt/tybot/.venv/bin/python -c "import tybot.vipbot_runtime"
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.vipbot_runtime
+
+# 봇은 반드시 단일 인스턴스. systemd 가 중복 기동을 막는다(중복 답변·비용 2배).
+Restart=always
+RestartSec=10
+
+MemoryHigh=1024M
+MemoryMax=1536M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-vipbot
+
+# --- 샌드박싱 ---------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+# 아카이브는 **읽기만** 한다. VIPBot 은 수집·백필·첨부 보관 주체가 아니다(B-83).
+ReadOnlyPaths=/var/lib/tybot/archive
+RuntimeDirectory=tybot-vipbot
+RuntimeDirectoryMode=0750
+ReadWritePaths=/run/tybot-vipbot
+# 인바운드 소켓 불필요(Socket Mode 는 아웃바운드 WebSocket).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# [Install] 없음 — 위 머리말 참고.

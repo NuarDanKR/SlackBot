@@ -1,0 +1,274 @@
+"""B-83 VIPBot 전용 DB 계정과 서비스 경계 — **DB 없이 도는** 계약 시험.
+
+실제 권한은 `tests/test_vipbot_runtime_role_db.py` 가 PostgreSQL 에 물어본다.
+여기서 붙드는 것은 **설치 절차와 유닛의 모양**이다. 그 둘은 서버에서 한 번만
+읽히고, 틀려도 조용하다 — 자격증명 이름 한 글자가 어긋나면 런타임은
+「설정이 없다」 로 멎고, 사람은 DSN 파일을 몇 번이고 다시 적는다.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from tybot import vipbot_dsn
+
+ROOT = Path(__file__).resolve().parents[1]
+SETUP = ROOT / "deploy" / "setup-tybot-vipbot-runtime.sh"
+UNIT = ROOT / "deploy" / "tybot-vipbot.service"
+SCHEMA = ROOT / "deploy" / "sql" / "bot_connection_schema.sql"
+RUNTIME_MODULE = ROOT / "src" / "tybot" / "vipbot_runtime.py"
+
+GROUP = "tybot_vipbot"
+RUNTIME = "tybot_vipbot_runtime"
+CONFIG_FN = "vipbot_connection_config(text)"
+
+
+def setup() -> str:
+    return SETUP.read_text(encoding="utf-8")
+
+
+def code() -> str:
+    """주석을 뺀 스크립트. 머리말은 **안 하는 것**을 설명하므로, 그대로 훑으면
+    설명문이 금지어 검사에 걸린다. 서버에서 도는 것은 코드뿐이다."""
+    return "\n".join(
+        raw for raw in setup().splitlines() if not raw.lstrip().startswith("#")
+    )
+
+
+def unit() -> str:
+    return UNIT.read_text(encoding="utf-8")
+
+
+def directives() -> list[str]:
+    """주석을 뺀 유닛 지시어들. 주석은 **안 넣은 것**을 설명하므로 그대로
+    훑으면 설명문에 걸린다. 설치되는 것은 지시어뿐이다."""
+    return [
+        line.strip()
+        for raw in unit().splitlines()
+        if (line := raw.split("#", 1)[0]).strip()
+    ]
+
+
+# --- 1. 두 역할과 그 사이 ----------------------------------------------------
+
+
+def test_the_group_is_the_one_that_holds_the_grant_and_never_logs_in():
+    body = setup()
+    assert f"ROLE_GROUP={GROUP}" in body
+    assert f"ROLE_RUNTIME={RUNTIME}" in body
+    # 그룹이 LOGIN 이면 권한을 쥔 역할이 곧 접속 자격을 갖는다.
+    assert 'fail "$ROLE_GROUP 이 LOGIN 입니다' in body
+
+
+def test_the_runtime_role_name_matches_the_one_the_code_demands():
+    # 이름이 갈리면 DSN 은 멀쩡해 보이는데 런타임이 `wrong_role` 로 거절한다.
+    assert vipbot_dsn.RUNTIME_ROLE == RUNTIME
+    assert RUNTIME in setup()
+
+
+def test_the_login_role_gets_exactly_the_least_privilege_attributes():
+    attrs = re.search(r'^ATTRS="([^"]+)"', setup(), re.M).group(1).split()
+    assert attrs == [
+        "LOGIN",
+        "INHERIT",
+        "NOSUPERUSER",
+        "NOCREATEDB",
+        "NOCREATEROLE",
+        "NOREPLICATION",
+        "NOBYPASSRLS",
+    ]
+
+
+def test_membership_is_granted_without_admin_option():
+    body = setup()
+    assert 'SQL_MEMBER="GRANT $ROLE_GROUP TO $ROLE_RUNTIME;"' in body
+    # ADMIN OPTION 을 주면 접속 계정이 그룹을 **남에게 줄 수 있다.**
+    assert "WITH ADMIN OPTION" not in code()
+    assert "ADMIN OPTION" in body  # 거절 사유로는 이름이 나와야 한다
+
+
+def test_the_script_grants_nothing_to_public():
+    assert not re.search(r"GRANT[^;]*TO\s+PUBLIC", code(), re.I)
+
+
+# --- 2. 남의 역할을 넘겨받지 않는다 -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "의 기존 멤버십이 계약과 다릅니다",
+        "에 과한 속성이 있습니다",
+        "이 스크립트는 남이 만든 역할을 넘겨받지 않습니다",
+    ],
+)
+def test_a_role_that_is_already_something_else_is_refused_not_repaired(marker):
+    assert marker in setup()
+
+
+def test_nothing_is_altered_before_the_preflight_has_passed():
+    """순서가 뒤집히면 **검증이 실패하는 동안 로그인할 수 있는 창**이 열린다."""
+    body = setup()
+    preflight = body.index("기존 역할 사전 검토 —")
+    for statement in ('psql_run "$SQL_CREATE"', 'psql_run "$SQL_ENFORCE"',
+                      'psql_run "$SQL_MEMBER"'):
+        assert body.index(statement) > preflight
+
+
+def test_the_preflight_never_strips_a_membership_or_lowers_an_attribute():
+    body = code()
+    preflight = body[body.index("runtime_exists=") : body.index('if [[ "$MODE" == apply')]
+    assert "REVOKE" not in preflight
+    assert "ALTER ROLE" not in preflight
+    assert "DROP ROLE" not in preflight
+    assert preflight.count("exit 1") == 2
+
+
+def test_the_password_never_travels_as_an_argument():
+    body = setup()
+    assert "\\\\password $ROLE_RUNTIME" in body or "\\password $ROLE_RUNTIME" in body
+    assert "--set-password" in body
+    assert "PGPASSWORD" not in body
+
+
+def test_plan_mode_contacts_nothing_so_it_can_be_read_before_any_change():
+    body = setup()
+    # 계획은 root 검사와 psql 검사보다 **앞에서** 끝난다.
+    assert body.index('if [[ "$MODE" == plan ]]') < body.index("[[ $EUID -eq 0 ]]")
+    assert body.index("PLAN\n  exit 0") < body.index("command -v psql")
+
+
+# --- 3. 확인은 「실제로 무엇을 할 수 있나」 를 본다 -----------------------------
+
+
+def test_verify_asserts_the_function_is_executable_through_the_group():
+    body = setup()
+    assert f"CONFIG_FN=\"{CONFIG_FN}\"" in body
+    assert "has_function_privilege('$ROLE_RUNTIME','$CONFIG_FN','EXECUTE')" in body
+
+
+@pytest.mark.parametrize("table", ["bot_connection", "bot_connection_secret"])
+def test_verify_asserts_the_token_tables_stay_closed(table):
+    body = setup()
+    assert table in body
+    assert "has_table_privilege('$ROLE_RUNTIME','$table','$privilege')" in body
+    assert "for privilege in SELECT INSERT UPDATE DELETE" in body
+
+
+def test_verify_asserts_public_and_other_bots_are_closed():
+    body = setup()
+    assert "has_function_privilege('public','$CONFIG_FN','EXECUTE')" in body
+    assert "archiver_connection_config(text)" in body
+
+
+# --- 4. 스키마 쪽 계약 --------------------------------------------------------
+
+
+def test_the_schema_gives_the_group_the_function_and_takes_the_tables_away():
+    body = SCHEMA.read_text(encoding="utf-8")
+    block = body[body.index(f"rolname = '{GROUP}'") :]
+    block = block[: block.index("END")]
+    assert "REVOKE ALL PRIVILEGES ON TABLE bot_connection_secret" in block
+    assert re.search(r"REVOKE ALL PRIVILEGES ON TABLE bot_connection\b", block)
+    assert "GRANT EXECUTE ON FUNCTION vipbot_connection_config(text)" in block
+    assert "GRANT SELECT" not in block
+
+
+def test_the_window_is_revoked_from_public_where_it_is_defined():
+    body = SCHEMA.read_text(encoding="utf-8")
+    assert f"REVOKE ALL ON FUNCTION {CONFIG_FN} FROM PUBLIC" in body
+
+
+def test_the_window_pins_the_bot_key_so_the_caller_cannot_choose_it():
+    body = SCHEMA.read_text(encoding="utf-8")
+    window = body[body.index("CREATE OR REPLACE FUNCTION vipbot_connection_config(") :]
+    window = window[: window.index("$$;")]
+    assert "v.bot_key = 'vipbot'" in window
+    assert "SECURITY DEFINER" in window
+    assert "SET search_path = public, pg_temp" in window
+
+
+# --- 5. systemd 유닛 ----------------------------------------------------------
+
+
+def test_the_dsn_arrives_as_a_credential_under_the_name_the_code_looks_for():
+    assert (
+        f"LoadCredential={vipbot_dsn.CREDENTIAL_NAME}:"
+        f"/etc/tybot/{vipbot_dsn.CREDENTIAL_NAME}"
+    ) in unit()
+
+
+def test_the_unit_never_hands_the_process_the_master_database_url():
+    """`/etc/tybot/tybot.env` 를 읽으면 전용 계정을 만든 의미가 사라진다."""
+    lines = directives()
+    assert not any(line.startswith("EnvironmentFile=") for line in lines)
+    assert not any("tybot.env" in line for line in lines)
+    assert not any(line.startswith("Environment=DATABASE_URL") for line in lines)
+    assert not any("TYBOT_ENV_FILE" in line for line in lines)
+
+
+def test_no_secret_value_is_written_into_the_unit_itself():
+    for line in directives():
+        assert "postgresql://" not in line
+        assert "xoxb-" not in line
+        assert "xapp-" not in line
+
+
+def test_the_encryption_key_also_arrives_as_a_credential():
+    lines = directives()
+    assert any(
+        line.startswith("LoadCredential=tybot-workspace-secret-key:") for line in lines
+    )
+    assert "Environment=WORKSPACE_SECRET_KEY_FILE=%d/tybot-workspace-secret-key" in lines
+
+
+def test_the_draft_cannot_be_enabled_until_the_runtime_module_exists():
+    """`[Install]` 이 없으면 `systemctl enable` 이 거부된다.
+
+    없는 모듈을 부팅에 걸어 두면 재시작만 반복하고, 남는 것은 「켜 두었다」 는
+    기억뿐이다. 모듈이 서는 날 이 시험이 먼저 깨져서 알려 준다.
+    """
+    if RUNTIME_MODULE.exists():
+        pytest.skip("런타임 모듈이 생겼다 — [Install] 을 더하고 이 시험을 고친다")
+    assert "[Install]" not in directives()
+    assert not any(line.startswith("WantedBy=") for line in directives())
+    assert 'ExecStartPre=/opt/tybot/.venv/bin/python -c "import tybot.vipbot_runtime"' in unit()
+
+
+def test_the_unit_runs_as_the_service_account_in_a_sandbox():
+    lines = directives()
+    assert "User=tybot" in lines
+    assert "Group=tybot" in lines
+    for directive in (
+        "NoNewPrivileges=true",
+        "ProtectSystem=strict",
+        "ProtectHome=true",
+        "PrivateTmp=true",
+        "UMask=0077",
+    ):
+        assert directive in lines
+
+
+def test_the_unit_opens_no_inbound_port_and_never_writes_the_archive():
+    lines = directives()
+    assert "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" in lines
+    assert "ReadOnlyPaths=/var/lib/tybot/archive" in lines
+    assert not any(
+        line.startswith("ReadWritePaths=") and "archive" in line for line in lines
+    )
+    assert not any(line.startswith("ListenStream=") for line in lines)
+
+
+def test_only_one_vipbot_process_can_run():
+    lines = directives()
+    assert "Type=simple" in lines
+    assert "Restart=always" in lines
+    assert not any(line.startswith("ExecStart=") and "&" in line for line in lines)
+
+
+def test_the_installer_does_not_put_this_draft_on_the_server_by_itself():
+    # 초안이 자동으로 깔리면 「아직 없다」 와 「꺼져 있다」 를 구분할 수 없다.
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    assert "tybot-vipbot.service" not in install

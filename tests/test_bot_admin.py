@@ -565,10 +565,12 @@ def test_the_module_never_reads_ciphertext():
 RUNTIME_READERS = {
     "Master 워크스페이스·토큰": ROOT / "src" / "tybot" / "workspaces.py",
     "Archiver 기동 설정": ROOT / "src" / "tybot" / "archiver_runtime_store.py",
+    "VIPBot 기동 설정": ROOT / "src" / "tybot" / "vipbot_runtime_store.py",
     "Master 의 전문 봇 라우팅": ROOT / "src" / "tybot" / "specialist_router.py",
 }
 NEW_TABLES = (
     "bot_connection", "bot_catalog", "specialist_route", "archiver_connection_config",
+    "vipbot_connection_config",
 )
 
 
@@ -619,7 +621,8 @@ def test_a_reader_that_adopts_a_new_table_is_caught():
 def test_the_scan_covers_every_runtime_reader():
     """훑는 파일이 비면 「아무도 안 읽는다」 가 **아무것도 안 봤다** 가 된다."""
     assert set(RUNTIME_READERS) == {
-        "Master 워크스페이스·토큰", "Archiver 기동 설정", "Master 의 전문 봇 라우팅",
+        "Master 워크스페이스·토큰", "Archiver 기동 설정", "VIPBot 기동 설정",
+        "Master 의 전문 봇 라우팅",
     }
     for name, path in RUNTIME_READERS.items():
         assert path.is_file(), f"{name} 파일이 없다: {path}"
@@ -640,11 +643,13 @@ def test_runtime_reader_status_matches_the_actual_contracts():
 
     assert touched == {
         "Archiver 기동 설정": ["archiver_connection_config"],
+        "VIPBot 기동 설정": ["bot_connection", "vipbot_connection_config"],
         "Master 의 전문 봇 라우팅": ["specialist_route"],
     }
     assert admin.RUNTIME_READER_STATUS == {
         "master_connection": True,
         "archiver_connection": True,
+        "vipbot_connection": False,
         "specialist_route": False,
     }
     # 라우팅이 전 워크스페이스에서 전환되기 전까지는 **전부 적용**이 아니다.
@@ -660,7 +665,8 @@ def test_the_read_model_says_it_does_not_apply_now(repo):
     ):
         effect = payload["runtimeEffect"]
         assert effect["appliesNow"] is False
-        assert "다음 기동에 적용" in effect["summary"]
+        assert effect["summary"] == "연결별 런타임 적용 상태가 다릅니다. 아래 상세를 확인하세요."
+        assert any("런타임에는 아직" in detail for detail in effect["details"])
         assert len(effect["details"]) >= 3
 
 

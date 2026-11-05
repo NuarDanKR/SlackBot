@@ -27,6 +27,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SQL_DIR="$HERE/sql"
 PORT="${TYBOT_DB_PORT:-55432}"
 DB="${TYBOT_DB_NAME:-tyslackai}"
+HOST="${TYBOT_DB_HOST:-/run/postgresql}"
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 
@@ -106,10 +107,35 @@ fi
 # NOLOGIN 그룹에는 시크릿이 없다. 실제 worker LOGIN 역할과 멤버십은 별도 승인
 # 절차에서 만든다.
 if ((DRY_RUN)); then
-  echo "   [dry-run] ensure PostgreSQL role tybot_vision NOLOGIN"
+  echo "   [dry-run] ensure PostgreSQL roles tybot_vision, tybot_vipbot NOLOGIN"
 else
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -p "$PORT" -d "$DB" -c \
-    "DO \$vision_role\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='tybot_vision') THEN EXECUTE 'CREATE ROLE tybot_vision NOLOGIN'; END IF; END \$vision_role\$;"
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -h "$HOST" -p "$PORT" -d "$DB" -c \
+    "DO \$runtime_roles\$ BEGIN
+       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='tybot_vision') THEN
+         EXECUTE 'CREATE ROLE tybot_vision NOLOGIN';
+       END IF;
+       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='tybot_vipbot') THEN
+         EXECUTE 'CREATE ROLE tybot_vipbot NOLOGIN';
+       END IF;
+       IF EXISTS (
+         SELECT 1 FROM pg_roles
+          WHERE rolname='tybot_vipbot'
+            AND (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole
+                 OR rolreplication OR rolbypassrls)
+       ) THEN
+         RAISE EXCEPTION 'tybot_vipbot has unsafe role attributes';
+       END IF;
+       IF EXISTS (
+         SELECT 1
+           FROM pg_auth_members a
+           JOIN pg_roles g ON g.oid=a.roleid
+           JOIN pg_roles m ON m.oid=a.member
+          WHERE g.rolname='tybot_vipbot'
+            AND (m.rolname <> 'tybot_vipbot_runtime' OR a.admin_option)
+       ) THEN
+         RAISE EXCEPTION 'tybot_vipbot has an unexpected member';
+       END IF;
+     END \$runtime_roles\$;"
 fi
 
 for name in "${FILES[@]}"; do
@@ -120,7 +146,7 @@ for name in "${FILES[@]}"; do
   echo "-- $name"
   # ON_ERROR_STOP: 한 파일이 실패하면 거기서 멈춘다. 계속 돌리면 뒤 파일이 앞 파일의
   # 표를 못 찾아 오류가 줄줄이 나고, 진짜 원인이 스크롤 위로 사라진다.
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -p "$PORT" -d "$DB" < "$SQL_DIR/$name"
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -h "$HOST" -p "$PORT" -d "$DB" < "$SQL_DIR/$name"
 done
 
 if ((DRY_RUN)); then

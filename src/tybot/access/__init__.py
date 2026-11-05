@@ -57,6 +57,11 @@ class RequestContext:
     # 모른다」 일 수 있는데, 둘을 같은 문장으로 말하면 사람은 없는 자료를 찾으러
     # 간다. 판정이 아니라 사유 표시에만 쓴다.
     permission_unverified: bool = False
+    # 봇 전용 근거 채널. ``None`` 은 일반 사용자 권한 판정을 뜻하고, 빈 집합은
+    # 명시적으로 아무 자료도 열지 못한다는 뜻이다. VIPBot처럼 사람의 Slack
+    # 멤버십 대신 관리자가 고른 정확한 ``(workspace, channel_id)``만 읽는 경로가
+    # 사용한다. 일반 ``role=exec``/``is_root``와 섞지 않는다.
+    evidence_sources: frozenset[tuple[str, str]] | None = None
 
     @property
     def in_channel(self) -> bool:
@@ -69,6 +74,8 @@ class RequestContext:
 
     def may_reach(self, owner_workspace: str) -> bool:
         """워크스페이스 경계 판정. 답변 생성 이전 1차 필터."""
+        if self.evidence_sources is not None:
+            return any(ws == owner_workspace for ws, _ in self.evidence_sources)
         if self.role == "exec" or self.is_root:
             return True
         return owner_workspace == self.workspace or owner_workspace in self.readable_workspaces
@@ -93,6 +100,19 @@ def can_access(
     3. 다른 워크스페이스 자료: root 는 전량, 동등 워크스페이스는 `share_with` 명시분만.
     4. 자기 워크스페이스 자료: root 는 전량, 그 외는 **채널 멤버십**(또는 명시적 public).
     """
+    if ctx.evidence_sources is not None:
+        # 봇 전용 근거 범위는 사람의 DM을 절대 열지 않는다. 등록 표도 C/G 채널만
+        # 받지만 여기서 다시 막아, 잘못된 행이나 테스트 대역이 개인 공간을 여는
+        # 일이 없게 한다.
+        if dm_user:
+            return False
+        # 표시명은 바뀌고 워크스페이스마다 같은 채널 ID 문자열이 있을 수 있다.
+        # 따라서 두 좌표가 모두 정확히 맞을 때만 허용한다. visibility/acl과 사람의
+        # 멤버십은 이 관리형 화이트리스트를 대신하거나 넓히지 않는다.
+        return bool(channel_id) and (
+            str(owner_workspace), str(channel_id)
+        ) in ctx.evidence_sources
+
     if dm_user:
         # **맨 앞이어야 한다.** 뒤에 두면 `role == "exec"` 와 `is_root` 의 조기
         # 반환에 걸려 남의 개인 공간이 통합조회로 열린다. 통합조회 권한은 조직의
