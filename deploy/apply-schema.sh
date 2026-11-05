@@ -36,6 +36,7 @@ FILES=(
   # 구조. 뒤 파일들이 이 표들을 참조한다.
   index_schema.sql            # org_unit · employee · user_identity · raw_line
   search_embedding_schema.sql # B-12 revisioned pgvector candidate cache, default unused
+  search_embedding_query_schema.sql # B-12 질의 임베딩 승인. 색인 승인과 별개, 기본 OFF
   console_schema.sql          # console_user · workspace · usage_* · specialist_*
   # 기능별
   schedule_schema.sql
