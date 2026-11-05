@@ -53,13 +53,7 @@
 
 ## 돌리는 법
 
-개발 PC:
-
-```bash
-python scripts/kpi_resolution_rate.py --days 90
-```
-
-운영 서버 — **venv 의 인터프리터를 절대 경로로, 서비스 계정으로**:
+**venv 의 인터프리터를 절대 경로로, 서비스 계정으로** 부른다.
 
 ```bash
 sudo -u tybot /opt/tybot/.venv/bin/python \
