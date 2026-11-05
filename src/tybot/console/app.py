@@ -3114,11 +3114,16 @@ def _auth_error(_request, exc: AuthError) -> JSONResponse:
 # 못 정하고, 그러면 요약 검토 DM도 안 간다. Slack 에서 채널마다 명령을 치게 하면
 # 수십 개를 하나씩 돌아야 해서 아무도 안 한다.
 @app.get("/api/channels")
-def channel_admin_rows(user: User) -> dict:
-    """채널 표. 관리자만 본다 — 채널 목록 자체가 조직 구조를 드러낸다(원칙 3)."""
+def channel_admin_rows(user: User, period: int | None = None) -> dict:
+    """채널 표. 관리자만 본다 — 채널 목록 자체가 조직 구조를 드러낸다(원칙 3).
+
+    `period`(7·30)를 주면 수집량·답변 수를 최근 그 일수로 센다. 없으면 전체.
+    """
     _require_admin(user)
+    if period is not None and period not in channel_admin.PERIODS:
+        raise HTTPException(status_code=422, detail="period 는 7 또는 30 입니다.")
     try:
-        rows, totals = channel_admin.snapshot()
+        rows, totals = channel_admin.snapshot(period=period)
     except Exception as exc:  # 어느 조각이 없는지 사람에게 말한다
         raise HTTPException(
             status_code=503,
@@ -3127,6 +3132,7 @@ def channel_admin_rows(user: User) -> dict:
     return {
         "summary": totals,
         "rows": [row.to_json() for row in rows],
+        "period": period,
         # 담당자로 고를 수 있는 사람. 아무 문자열이나 받으면 오타가 그대로 저장되고,
         # 그 채널은 계속 아무도 못 고친다.
         "candidates": channel_admin.owner_candidates(),
