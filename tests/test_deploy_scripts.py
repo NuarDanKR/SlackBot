@@ -289,12 +289,14 @@ def test_schema_apply_creates_the_secretless_vipbot_group_before_grants():
     script = (ROOT / "deploy" / "apply-schema.sh").read_text(encoding="utf-8")
     role = script.index("CREATE ROLE tybot_vipbot NOLOGIN")
     schemas = script.rindex('for name in "${FILES[@]}"')
+    psql = script.rfind("sudo -u postgres psql", 0, role)
 
     assert role < schemas
+    assert psql >= 0
     assert "CREATE ROLE tybot_vipbot LOGIN" not in script
     assert "PASSWORD" not in script[role:schemas]
     assert 'HOST="${TYBOT_DB_HOST:-/run/postgresql}"' in script
-    assert '-h "$HOST" -p "$PORT" -d "$DB"' in script[role:schemas]
+    assert '-h "$HOST" -p "$PORT" -d "$DB"' in script[psql:role]
 
 
 def test_schema_apply_refuses_an_unsafe_or_shared_vipbot_group():
