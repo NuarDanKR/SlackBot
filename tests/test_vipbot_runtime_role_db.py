@@ -524,7 +524,7 @@ def test_the_runtime_role_cannot_open_another_bots_window(conn):
 def test_the_window_refuses_a_disabled_or_unverified_vipbot_row(conn, connections):
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE bot_connection SET identity_ok = false"
+            "UPDATE bot_connection SET state = 'draft', identity_ok = false"
             " WHERE workspace=%s AND bot_key='vipbot'",
             (connections,),
         )
