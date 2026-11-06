@@ -229,6 +229,9 @@ def test_only_the_scopes_an_answer_and_a_dm_need_are_declared():
     assert set(declared("bot")) == {
         "app_mentions:read",
         "chat:write",
+        # 2026-11-06: 질문에 붙인 파일을 **이번 답변 한 번만** 읽는다. 연결이
+        # 끝난 뒤에 더했고, `files:write` 는 여전히 없다.
+        "files:read",
         "im:history",
         "im:write",
         "users:read",
@@ -249,7 +252,6 @@ def test_only_the_two_events_it_answers_are_subscribed():
         "channels:manage",
         "channels:read",
         "groups:read",
-        "files:read",
         "files:write",
         "canvases:write",
         "canvases:read",

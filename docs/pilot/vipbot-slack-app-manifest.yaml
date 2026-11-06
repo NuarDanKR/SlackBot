@@ -32,6 +32,10 @@ oauth_config:
       - im:history
       # 요청자와의 DM 을 연다(conversations.open).
       - im:write
+      # 질문에 **붙여 올린 파일 한 번**을 읽는다. 아카이브에 쓰지 않는다 —
+      # 읽고, 답하고, 버린다(`question_files` · `vipbot_runtime.answer_with_files`).
+      # 2026-11-06 연결 완료 뒤에 더했다. 쓰는 권한(`files:write`)은 **없다.**
+      - files:read
       # Slack 사용자 ↔ 사번 매핑(identity.ensure). 권한 판정의 입구다.
       - users:read
       - users:read.email
@@ -54,8 +58,9 @@ settings:
 #         어느 쪽이 쓴 줄인지 알 수 없고, 되돌릴 때 한쪽만 되돌아간다
 #   channels:join · channels:manage · channels:write.invites
 #       → 자동 참여 금지. 봇이 스스로 들어간 채널은 아무도 승인하지 않았다
-#   files:read · files:write
-#       → 첨부를 읽지도 보관하지도 않는다
+#   files:write
+#       → 첨부를 **보관하지 않는다.** 질문에 붙인 파일은 이번 답변의 입력일 뿐
+#         이고, 아카이브에 쌓는 것은 Archiver 의 일이다(B-83 읽기 전용)
 #   canvases:write · canvases:read
 #       → Canvas 는 요약 검토의 창구다. VIPBot 은 검토에 끼지 않는다
 #   commands

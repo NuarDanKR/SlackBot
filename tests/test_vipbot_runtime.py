@@ -45,6 +45,7 @@ ALLOWED_IMPORTS = {
     "logging",
     "os",
     "pathlib",
+    "tybot.question_files",
     "tybot.vip_profile",
     "tybot.vipbot_anthropic_credential",
     "tybot.vipbot_engine",
@@ -732,3 +733,128 @@ def test_the_history_directory_is_vip_only(tmp_path, monkeypatch):
     )
     runtime.build_history(runtime.claims_root())(WS, USER)
     assert asked == [tmp_path / "qa"]
+
+
+# --- 9. 질문에 붙인 파일 -------------------------------------------------------
+
+
+PERMALINK = "https://taeyoung.slack.com/files/U0VIP0001/F0FILE001/report.md"
+FILE_TEXT = "합성 첨부 본문 ZZZATTACHEDZZZ"
+
+
+class Attached:
+    """`question_files.read_question_files()` 결과 대역."""
+
+    def __init__(self, lines=(FILE_TEXT,), citations=(PERMALINK,), codes=()):
+        self.lines = tuple(lines)
+        self.citations = tuple(citations)
+        self.codes = tuple(codes)
+        self.files_read = len(self.citations)
+
+
+class Replying(Engine):
+    """프롬프트와 검색어를 적고, 정해 둔 Answer 를 돌려준다."""
+
+    def __init__(self, reason="ok", citations=("[전산팀]공지, 📄문서(2026-11-06)",)):
+        super().__init__()
+        self.prompts: list[str] = []
+        self.terms: list[object] = []
+        self._reason = reason
+        self._citations = list(citations)
+
+    def answer(self, question, ctx, **kwargs):
+        self.prompts.append(question)
+        self.terms.append(kwargs.get("terms"))
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class Reply:
+            text: str = "합성 답변"
+            citations: list = field(default_factory=lambda: list(self._citations))
+            reason: str = self._reason
+
+            def to_slack(self):
+                return self.text
+
+        return Reply()
+
+
+def test_a_question_without_files_keeps_the_prompt_untouched():
+    engine = Replying()
+    got = runtime.answer_with_files(engine, "질문", object(), Attached(lines=()))
+    assert engine.prompts == ["질문"]
+    assert engine.terms == [None]
+    assert PERMALINK not in got.citations
+
+
+def test_an_attached_file_becomes_evidence_for_this_answer_only():
+    engine = Replying()
+    got = runtime.answer_with_files(engine, "질문", object(), Attached())
+
+    assert FILE_TEXT in engine.prompts[0]
+    assert "<질문에 첨부한 파일>" in engine.prompts[0]
+    # 출처 맨 앞이 Slack permalink 다 — 아카이브에 없는 자료를 아카이브 문서로
+    # 인용하면 사람이 눌러 갔을 때 그 자리에 아무것도 없다.
+    assert got.citations[0] == PERMALINK
+
+
+def test_the_search_query_stays_the_question_not_the_file_body():
+    """파일 본문이 검색어가 되면 **옆에 둔 아카이브 문서를 못 찾는다.**"""
+    engine = Replying()
+    runtime.answer_with_files(engine, "미수금 현황", object(), Attached())
+    assert engine.terms[0] == ["미수금 현황"]
+
+
+@pytest.mark.parametrize(
+    "reason", ["no_hits", "no_access", "permission_unverified", "error"]
+)
+def test_a_refusal_never_gets_a_file_permalink_stapled_to_it(reason):
+    """출처를 붙이면 거절이 **출처 달린 답변**처럼 보인다."""
+    engine = Replying(reason=reason, citations=())
+    got = runtime.answer_with_files(engine, "질문", object(), Attached())
+    assert got.citations == []
+
+
+def test_the_archive_citation_still_follows_the_permalink():
+    engine = Replying(citations=["[전산팀]공지, 📄문서(2026-11-06)"])
+    got = runtime.answer_with_files(engine, "질문", object(), Attached())
+    assert got.citations == [PERMALINK, "[전산팀]공지, 📄문서(2026-11-06)"]
+
+
+def test_duplicate_permalinks_are_not_repeated():
+    engine = Replying(citations=[PERMALINK])
+    got = runtime.answer_with_files(engine, "질문", object(), Attached())
+    assert got.citations == [PERMALINK]
+
+
+def test_the_runtime_never_writes_an_attached_file_to_the_archive():
+    source = Path(runtime.__file__).read_text(encoding="utf-8")
+    for forbidden in ("writer.ingest", "attachment_writer", "archive.writer", "ingest("):
+        assert forbidden not in source
+
+
+def test_files_are_read_only_after_the_caller_is_authorized(tmp_path):
+    """거절당한 사람이 붙인 파일은 **내려받지도 않는다.**"""
+    read: list = []
+    monkey = runtime.read_question_files
+    runtime.read_question_files = lambda files, token: read.append(files) or Attached(
+        lines=()
+    )
+    original = runtime.authorize_runtime
+    runtime.authorize_runtime = lambda _connect, **kwargs: _denied()
+    try:
+        payload = body()
+        payload["event"]["files"] = [{"id": "F0FILE001"}]
+        result = runtime.handle_body(
+            payload,
+            Client(),
+            settings=settings(tmp_path),
+            config=connection(),
+            claims=Claims(),
+            engine=Engine(),
+        )
+    finally:
+        runtime.authorize_runtime = original
+        runtime.read_question_files = monkey
+    assert result.delivery.outcome == "permission_denied"
+    assert read == [], "권한 거절인데 파일을 읽었다"

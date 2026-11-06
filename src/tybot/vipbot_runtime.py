@@ -42,9 +42,10 @@ import logging
 import os
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .question_files import read_question_files
 from .vip_profile import VipProfile, load_profile, question_for_engine
 from .vipbot_anthropic_credential import resolve_anthropic_api_key
 from .vipbot_engine import (
@@ -65,6 +66,12 @@ WORKSPACE_UNCONFIGURED = "vipbot_workspace_unconfigured"
 IDENTITY_UNVERIFIED = "vipbot_identity_unverified"
 IDENTITY_MISMATCH = "vipbot_identity_mismatch"
 CONNECTION_INCOMPLETE = "vipbot_connection_incomplete"
+
+#: 근거가 없다고 답한 것에는 **출처를 붙이지 않는다.** 붙이면 거절이 출처 달린
+#: 답변처럼 보이고, 사람은 그 파일이 읽혔다고 읽는다.
+NO_SOURCE_REASONS = frozenset(
+    {"error", "no_hits", "no_access", "permission_unverified"}
+)
 ALREADY_RUNNING = "vipbot_already_running"
 LOCK_UNAVAILABLE = "vipbot_lock_unavailable"
 
@@ -191,6 +198,45 @@ def verify_identity(client, config: Mapping[str, object]) -> dict:
     return {"team_id": team_id, "bot_user_id": user_id}
 
 
+def answer_with_files(engine, question: str, ctx, attached, **kwargs):
+    """질문에 붙인 파일을 **이번 답변 한 번의 근거**로 넣는다.
+
+    ## 아카이브에 쓰지 않는다
+
+    VIPBot 은 수집 주체가 아니다(B-83). 이 파일은 저장되지 않고, 다음 질문에서
+    다시 열리지도 않는다 — 읽고, 답하고, 버린다. 그래서 「임시」 다.
+
+    ## 출처는 Slack permalink 다
+
+    아카이브에 없는 자료를 아카이브 문서로 인용하면, 사람이 출처를 눌러 갔을 때
+    **그 자리에 아무것도 없다**(원칙 2). 붙인 파일의 출처는 그 파일 자신이다.
+
+    ## 검색어는 질문 그대로 둔다
+
+    파일 본문을 질문에 이어 붙이면 그 글자가 검색어가 되어, 바로 옆에 둔 아카이브
+    문서를 못 찾는다. `terms` 로 원래 질문을 넘겨 검색 범위를 지킨다.
+    """
+    lines = tuple(getattr(attached, "lines", ()) or ())
+    if not lines:
+        return engine.answer(question, ctx, **kwargs)
+    block = "\n".join(lines)
+    prompt = (
+        f"{question}\n\n"
+        "<질문에 첨부한 파일>\n"
+        f"{block}\n"
+        "</질문에 첨부한 파일>"
+    )
+    answer = engine.answer(prompt, ctx, terms=[question], **kwargs)
+    if str(getattr(answer, "reason", "") or "") in NO_SOURCE_REASONS:
+        # 근거를 못 찾았다고 답한 것에 출처를 붙이지 않는다.
+        return answer
+    citations = [
+        *(getattr(attached, "citations", ()) or ()),
+        *(getattr(answer, "citations", ()) or ()),
+    ]
+    return replace(answer, citations=list(dict.fromkeys(citations)))
+
+
 def handle_body(
     body: Mapping[str, object],
     client,
@@ -228,9 +274,15 @@ def handle_body(
         # **사용자 모델 지정은 여기서 사라진다.** 승인된 프로필이 모델을 정하고,
         # `--model=` 은 그 결정을 사용자에게 넘겨주는 길이다.
         cleaned = question_for_engine(question)
+        # **권한 판정을 통과한 뒤에만** 파일을 읽는다. `generate` 는
+        # `handle_event` 가 `_bound(authorization)` 을 확인한 다음에만 불린다 —
+        # 거절당한 사람이 붙인 파일은 내려받지도 않는다.
+        attached = read_question_files(
+            event.get("files"), str(config.get("bot_token") or "")
+        )
         if resolver is None or history is None:
             # 후속 좌표 경로가 안 꽂힌 설치다. 평범한 새 질문처럼 답한다.
-            return engine.answer(cleaned, ctx)
+            return answer_with_files(engine, cleaned, ctx, attached)
         plan = plan_followup(
             cleaned,
             ctx,
@@ -241,12 +293,14 @@ def handle_body(
         )
         if not plan.applied:
             # 후속 지시가 아니다 — **기존 경로 그대로.**
-            return engine.answer(cleaned, ctx)
+            return answer_with_files(engine, cleaned, ctx, attached)
         # 후속이면 되살린 좌표 **밖으로 나가지 않는다.** 빈 목록도 그대로
         # 넘긴다(`evidence_hits=[]`): 엔진은 그때 검색을 **하지 않는다.**
         # 못 연 좌표를 채널 전체 검색으로 메우면, 사용자는 자기가 물은 것과
         # 다른 자료를 답으로 받고 그 사실을 알 방법이 없다.
-        return engine.answer(cleaned, ctx, evidence_hits=list(plan.hits))
+        return answer_with_files(
+            engine, cleaned, ctx, attached, evidence_hits=list(plan.hits)
+        )
 
     return handle_event(
         event,
