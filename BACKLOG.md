@@ -207,8 +207,12 @@ Claude는 최소 Slack manifest·읽기 전용 이벤트/전달 경계와 시험
 - [x] 거절·DB 오류·근거 0건이면 검색·분류·LLM 호출 전에 종료하는 요청 게이트
 - [x] 별도 Slack manifest와 채널 호출의 상세 답변 DM 전달 경계(Claude 제출, 통합 검토 중)
 - [x] `bot_catalog` 등록과 검증된 VIPBot 토큰 쌍만 읽는 전용 런타임 설정 경계
-- [ ] 별도 Socket Mode 런타임에서 요청 게이트 → 공통 TYBot 답변 → DM 전달 연결
-- [ ] VIP 전용 모델·경영진 프롬프트 revision과 비용 상한 확정
+- [x] 별도 Socket Mode 런타임에서 요청 게이트 → 공통 TYBot 답변 → DM 전달 연결
+      (2026-11-06, 단일 인스턴스 잠금·신원 결속·이벤트 중복 제거 포함)
+- [x] VIP 전용 모델·경영진 프롬프트 revision과 비용 상한 확정
+      (2026-11-06, 승인 모델 고정·전용 일일 비용 상태·사용자 model override 제거)
+- [x] 전용 PostgreSQL 역할·SECURITY DEFINER 창구의 실제 권한 격리 시험
+      (2026-11-06, PostgreSQL 18 격리 클러스터 65/65 통과)
 - [ ] 실제 Slack 앱 설치·허용/거절/교차 워크스페이스 근거 운영 시험
 
 ---
