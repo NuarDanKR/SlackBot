@@ -151,9 +151,10 @@ def connections(conn):
     workspace = "vip-" + uuid.uuid4().hex[:8]
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO workspace (key, name) VALUES (%s, %s)"
+            "INSERT INTO workspace (key, label, archive_path, created_by)"
+            " VALUES (%s, %s, %s, 'pytest')"
             " ON CONFLICT (key) DO NOTHING",
-            (workspace, "시험 워크스페이스"),
+            (workspace, "VIPBot test workspace", f"/pytest/{workspace}"),
         )
         for bot_key, suffix in (("vipbot", "VIP"), ("master", "MASTER")):
             cur.execute(
@@ -410,9 +411,41 @@ def test_the_runtime_cannot_execute_another_security_definer(conn):
 # --- 3. PUBLIC ---------------------------------------------------------------
 
 
+def _public_can_execute(connection, function: str) -> bool:
+    """Read PUBLIC's effective function ACL; PUBLIC is not a pg_roles row."""
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(bool_or(acl.grantee = 0"
+            " AND acl.privilege_type = 'EXECUTE'), false)"
+            " FROM pg_proc p"
+            " CROSS JOIN LATERAL aclexplode("
+            " COALESCE(p.proacl, acldefault('f', p.proowner))) AS acl"
+            " WHERE p.oid = %s::regprocedure",
+            (function,),
+        )
+        return bool(cur.fetchone()[0])
+
+
+def _public_has_table_privilege(
+    connection, table: str, privilege: str
+) -> bool:
+    """Read PUBLIC's effective table ACL without pretending it is a role."""
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(bool_or(acl.grantee = 0"
+            " AND acl.privilege_type = %s), false)"
+            " FROM pg_class c"
+            " CROSS JOIN LATERAL aclexplode("
+            " COALESCE(c.relacl, acldefault('r', c.relowner))) AS acl"
+            " WHERE c.oid = %s::regclass",
+            (privilege, table),
+        )
+        return bool(cur.fetchone()[0])
+
+
 def test_public_cannot_execute_the_vipbot_function(conn):
-    assert verify.has_function_privilege(conn, "public", CONFIG_FN, "EXECUTE") is False
-    assert verify.has_function_privilege(conn, "public", ACCESS_FN, "EXECUTE") is False
+    assert _public_can_execute(conn, CONFIG_FN) is False
+    assert _public_can_execute(conn, ACCESS_FN) is False
 
 
 def test_a_role_outside_the_group_cannot_execute_it_either(conn):
@@ -513,14 +546,27 @@ def _privilege_snapshot(connection) -> dict:
             connection, role, function, "EXECUTE"
         )
         for function in (CONFIG_FN, ACCESS_FN)
-        for role in (GROUP, RUNTIME, "public")
+        for role in (GROUP, RUNTIME)
     }
-    for role in (GROUP, RUNTIME, "public"):
+    snapshot.update(
+        {
+            ("function", function, "public"): _public_can_execute(
+                connection, function
+            )
+            for function in (CONFIG_FN, ACCESS_FN)
+        }
+    )
+    for role in (GROUP, RUNTIME):
         for table in SECRET_TABLES:
             for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
                 snapshot[(role, table, privilege)] = verify.has_privilege(
                     connection, role, table, privilege
                 )
+    for table in SECRET_TABLES:
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+            snapshot[("public", table, privilege)] = _public_has_table_privilege(
+                connection, table, privilege
+            )
     return snapshot
 
 

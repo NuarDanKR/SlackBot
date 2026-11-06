@@ -26,6 +26,9 @@ TYBOT_MANIFEST = ROOT / "docs" / "pilot" / "slack-app-manifest.yaml"
 #: VIPBot 이 소유한 파일. 늘어나면 여기 적고, 적는 순간 아래 계약이 전부 적용된다.
 VIPBOT_SOURCES = ("src/tybot/vipbot_delivery.py",)
 VIPBOT_EVENT_SOURCES = ("src/tybot/vipbot_event.py",)
+#: VIPBot 이 소유한 기동 모듈. TYBot 코드가 아니므로 아래 「물지 않는다」
+#: 검사의 대상이 아니다 — 자기 조각을 잇는 것이 이 파일의 일이다.
+VIPBOT_RUNTIME_SOURCES = ("src/tybot/vipbot_runtime.py",)
 
 #: VIPBot 이 들여올 수 있는 전부. **목록이 곧 경계다.**
 ALLOWED_IMPORTS = {
@@ -186,6 +189,7 @@ def test_no_tybot_module_reaches_into_the_vip_path_yet():
         for path in (ROOT / "src").rglob("*.py")
         if path.relative_to(ROOT).as_posix() not in VIPBOT_SOURCES
         and path.relative_to(ROOT).as_posix() not in VIPBOT_EVENT_SOURCES
+        and path.relative_to(ROOT).as_posix() not in VIPBOT_RUNTIME_SOURCES
         and "vipbot_delivery" in path.read_text(encoding="utf-8")
     ]
     assert callers == [], f"기존 코드가 VIP 경로를 물었다: {callers}"

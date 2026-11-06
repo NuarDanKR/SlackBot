@@ -260,11 +260,12 @@ def test_the_encryption_key_also_arrives_as_a_credential():
 def test_the_draft_cannot_be_enabled_until_the_runtime_module_exists():
     """`[Install]` 이 없으면 `systemctl enable` 이 거부된다.
 
-    없는 모듈을 부팅에 걸어 두면 재시작만 반복하고, 남는 것은 「켜 두었다」 는
-    기억뿐이다. 모듈이 서는 날 이 시험이 먼저 깨져서 알려 준다.
+    2026-11-06: 런타임 모듈(`tybot.vipbot_runtime`)이 생겼다. 그래도 `[Install]`
+    은 **여전히 없다** — 「모듈이 섰다」 와 「켜도 된다」 는 다른 완료다. 실제
+    Slack 앱 설치와 운영 승인이 끝난 날 이 시험을 고치는 것이, 그 결정을
+    저장소에 남기는 방법이다.
     """
-    if RUNTIME_MODULE.exists():
-        pytest.skip("런타임 모듈이 생겼다 — [Install] 을 더하고 이 시험을 고친다")
+    assert RUNTIME_MODULE.exists(), "런타임 모듈이 사라졌다 — ExecStartPre 가 깨진다"
     assert "[Install]" not in directives()
     assert not any(line.startswith("WantedBy=") for line in directives())
     assert 'ExecStartPre=/opt/tybot/.venv/bin/python -c "import tybot.vipbot_runtime"' in unit()
