@@ -20,6 +20,7 @@ SETUP = ROOT / "deploy" / "setup-tybot-vipbot-runtime.sh"
 UNIT = ROOT / "deploy" / "tybot-vipbot.service"
 SCHEMA = ROOT / "deploy" / "sql" / "bot_connection_schema.sql"
 RUNTIME_MODULE = ROOT / "src" / "tybot" / "vipbot_runtime.py"
+ROLE_DB_TEST = ROOT / "tests" / "test_vipbot_runtime_role_db.py"
 
 GROUP = "tybot_vipbot"
 RUNTIME = "tybot_vipbot_runtime"
@@ -39,6 +40,10 @@ def code() -> str:
 
 def unit() -> str:
     return UNIT.read_text(encoding="utf-8")
+
+
+def role_db_test() -> str:
+    return ROLE_DB_TEST.read_text(encoding="utf-8")
 
 
 def directives() -> list[str]:
@@ -298,3 +303,12 @@ def test_the_installer_does_not_put_this_draft_on_the_server_by_itself():
     # 초안이 자동으로 깔리면 「아직 없다」 와 「꺼져 있다」 를 구분할 수 없다.
     install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
     assert "tybot-vipbot.service" not in install
+
+
+def test_the_database_test_refuses_an_operational_cluster_before_any_grant():
+    body = role_db_test()
+    refusal = body.index("refusing a PostgreSQL cluster with pre-existing VIPBot roles")
+    first_grant = body.index('cur.execute(f"GRANT {GROUP} TO {RUNTIME}")')
+    assert refusal < first_grant
+    assert "if granted_runtime:" in body
+    assert 'cur.execute(f"REVOKE {RUNTIME} FROM CURRENT_USER")' in body

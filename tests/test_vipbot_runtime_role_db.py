@@ -75,8 +75,20 @@ def conn():
     psycopg = pytest.importorskip("psycopg")
     connection = psycopg.connect(DSN, autocommit=True)
     created: list[str] = []
+    granted_definer = False
+    granted_runtime = False
     try:
         with connection.cursor() as cur:
+            cur.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s) ORDER BY rolname",
+                ([GROUP, RUNTIME, DEFINER],),
+            )
+            existing = [str(row[0]) for row in cur.fetchall()]
+            if existing:
+                pytest.fail(
+                    "refusing a PostgreSQL cluster with pre-existing VIPBot roles: "
+                    + ", ".join(existing)
+                )
             # 그룹은 스키마가 **있을 때만** 권한을 준다. 그래서 스키마보다 먼저
             # 만든다 — 순서가 뒤집히면 GRANT 가 통째로 건너뛰어지고, 그 결과는
             # 「권한 없음」 이라 시험이 통과한 것처럼 보인다.
@@ -91,18 +103,24 @@ def conn():
                     created.append(role)
             cur.execute(f"GRANT {GROUP} TO {RUNTIME}")
             cur.execute(f"GRANT {DEFINER} TO CURRENT_USER")
+            granted_definer = True
             # `SET ROLE` 로 실제 계정이 되어 보려면 멤버여야 한다. 비밀번호 없이
             # **진짜 거부**를 받아 보는 유일한 길이다.
             cur.execute("SELECT current_user")
             cur.execute(f"GRANT {RUNTIME} TO CURRENT_USER")
+            granted_runtime = True
         verify.apply_files(connection, _ordered_files())
         with connection.cursor() as cur:
             cur.execute(f"REVOKE {DEFINER} FROM CURRENT_USER")
+            granted_definer = False
         yield connection
     finally:
         try:
             with connection.cursor() as cur:
-                cur.execute(f"REVOKE {DEFINER} FROM CURRENT_USER")
+                if granted_definer:
+                    cur.execute(f"REVOKE {DEFINER} FROM CURRENT_USER")
+                if granted_runtime:
+                    cur.execute(f"REVOKE {RUNTIME} FROM CURRENT_USER")
                 for role in reversed(created):
                     cur.execute(f"DROP OWNED BY {role}")
                     cur.execute(f"DROP ROLE {role}")
