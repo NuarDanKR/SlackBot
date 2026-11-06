@@ -50,6 +50,8 @@ ALLOWED_IMPORTS = {
     "tybot.vipbot_engine",
     "tybot.vipbot_event",
     "tybot.vipbot_event_claims",
+    "tybot.vipbot_followup",
+    "tybot.vipbot_history",
     "tybot.vipbot_runtime_access",
     "tybot.vipbot_runtime_store",
 }
@@ -568,3 +570,165 @@ def test_the_unit_precheck_names_the_module_that_now_exists():
         'ExecStartPre=/opt/tybot/.venv/bin/python -c "import tybot.vipbot_runtime"'
         in UNIT.read_text(encoding="utf-8")
     )
+
+
+# --- 8. 30일 좌표 연결 ---------------------------------------------------------
+
+
+class Recording(Engine):
+    """`engine.answer()` 가 어떤 범위로 불렸는지 적는다."""
+
+    def __init__(self, answer=None):
+        super().__init__(answer)
+        self.scopes: list[object] = []
+
+    def answer(self, question, ctx, **kwargs):
+        self.scopes.append(kwargs.get("evidence_hits", "검색"))
+        return super().answer(question, ctx)
+
+
+class Reopened:
+    def __init__(self, hits=(), dropped=()):
+        self.calls = 0
+        self._hits = list(hits)
+        self._dropped = list(dropped)
+
+    def resolve(self, intent, ctx, *, turns, channel_id=""):
+        self.calls += 1
+        return type(
+            "R",
+            (),
+            {
+                "evidence_hits": self._hits,
+                "dropped_codes": self._dropped,
+                "parent_record_ids": ["rec-0001"],
+                "refs_requested": 1,
+            },
+        )()
+
+
+def _turn():
+    from tybot.evidence_refs import ARCHIVE_LINE, EvidenceRef
+
+    return {
+        "record_id": "rec-0001",
+        "ts": "2026-11-01T09:00:00+09:00",
+        "question": "미수금 현황",
+        "subject_terms": ["미수금"],
+        "evidence_refs": [
+            EvidenceRef(
+                kind=ARCHIVE_LINE,
+                workspace=WS,
+                channel_id="C0SRC0001",
+                document_path="workspaces/pilot/channels/C0SRC0001/raw/2026-11-01.md",
+                line_no=3,
+            )
+        ],
+        "attachment_refs": [],
+    }
+
+
+def _ask(tmp_path, text, *, engine, resolver=None, history=None):
+    payload = body(
+        event={
+            "type": "message",
+            "channel_type": "im",
+            "user": USER,
+            "channel": DM,
+            "ts": "1.1",
+            "text": text,
+        }
+    )
+    original = runtime.authorize_runtime
+    runtime.authorize_runtime = lambda _connect, **kwargs: _authorized()
+    try:
+        return runtime.handle_body(
+            payload,
+            Client(),
+            settings=settings(tmp_path),
+            config=connection(),
+            claims=Claims(),
+            engine=engine,
+            resolver=resolver,
+            history=history,
+        )
+    finally:
+        runtime.authorize_runtime = original
+
+
+def test_a_plain_question_keeps_the_existing_answer_path(tmp_path):
+    engine = Recording()
+    resolver = Reopened(hits=["재개방한 줄"])
+    _ask(
+        tmp_path,
+        "이번 달 미수금 현황 알려줘",
+        engine=engine,
+        resolver=resolver,
+        history=lambda _ws, _user: [_turn()],
+    )
+    # 범위를 안 준다 = 엔진이 평소처럼 검색한다. 해석기는 불리지 않는다.
+    assert engine.scopes == ["검색"]
+    assert resolver.calls == 0
+
+
+def test_a_followup_answers_inside_the_reopened_coordinates(tmp_path):
+    engine = Recording()
+    resolver = Reopened(hits=["재개방한 줄"])
+    _ask(
+        tmp_path,
+        "방금 그 문서 다시 정리해줘",
+        engine=engine,
+        resolver=resolver,
+        history=lambda _ws, _user: [_turn()],
+    )
+    assert engine.scopes == [["재개방한 줄"]]
+    assert resolver.calls == 1
+
+
+def test_a_followup_whose_coordinates_closed_never_widens(tmp_path):
+    """권한이 바뀌었거나 지워졌다. **빈 범위**를 주고 검색으로 돌아가지 않는다."""
+    engine = Recording()
+    resolver = Reopened(hits=[], dropped=["permission_changed"])
+    _ask(
+        tmp_path,
+        "방금 그 문서 다시 정리해줘",
+        engine=engine,
+        resolver=resolver,
+        history=lambda _ws, _user: [_turn()],
+    )
+    assert engine.scopes == [[]]
+    assert "검색" not in engine.scopes
+
+
+def test_the_history_is_asked_for_this_caller_only(tmp_path):
+    asked: list[tuple] = []
+    engine = Recording()
+    _ask(
+        tmp_path,
+        "방금 그 문서 다시 정리해줘",
+        engine=engine,
+        resolver=Reopened(hits=["줄"]),
+        history=lambda ws, user: asked.append((ws, user)) or [_turn()],
+    )
+    assert asked == [(WS, USER)]
+
+
+def test_without_a_history_source_the_runtime_behaves_as_before(tmp_path):
+    engine = Recording()
+    _ask(tmp_path, "방금 그 문서 다시 정리해줘", engine=engine)
+    assert engine.scopes == ["검색"]
+
+
+def test_the_history_directory_is_vip_only(tmp_path, monkeypatch):
+    """TYBot 기록을 읽으면 **다른 ACL 로 답한 회차**의 좌표가 섞인다."""
+    monkeypatch.setattr(
+        runtime, "state_path", lambda: tmp_path / "slack-events.sqlite3"
+    )
+    asked: list = []
+    monkeypatch.setattr(
+        runtime,
+        "load_vip_history",
+        lambda root, **kwargs: asked.append(root) or [],
+    )
+    runtime.build_history(runtime.claims_root())(WS, USER)
+    assert asked == [tmp_path / "qa"]

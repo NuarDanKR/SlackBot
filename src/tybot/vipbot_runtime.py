@@ -54,6 +54,8 @@ from .vipbot_engine import (
 )
 from .vipbot_event import EventResult, handle_event
 from .vipbot_event_claims import EventClaims, state_path
+from .vipbot_followup import plan_followup
+from .vipbot_history import load_vip_history
 from .vipbot_runtime_access import authorize_runtime
 from .vipbot_runtime_store import connect_runtime, load_runtime_config
 
@@ -197,6 +199,8 @@ def handle_body(
     config: Mapping[str, object],
     claims: EventClaims,
     engine,
+    resolver=None,
+    history=None,
 ) -> EventResult:
     """Slack 이벤트 봉투 하나를 검사하고 이벤트 코어에 넘긴다.
 
@@ -223,7 +227,26 @@ def handle_body(
     def generate(question: str, ctx):
         # **사용자 모델 지정은 여기서 사라진다.** 승인된 프로필이 모델을 정하고,
         # `--model=` 은 그 결정을 사용자에게 넘겨주는 길이다.
-        return engine.answer(question_for_engine(question), ctx)
+        cleaned = question_for_engine(question)
+        if resolver is None or history is None:
+            # 후속 좌표 경로가 안 꽂힌 설치다. 평범한 새 질문처럼 답한다.
+            return engine.answer(cleaned, ctx)
+        plan = plan_followup(
+            cleaned,
+            ctx,
+            history=history(
+                settings.workspace, str(getattr(ctx, "user_id", "") or "")
+            ),
+            resolver=resolver,
+        )
+        if not plan.applied:
+            # 후속 지시가 아니다 — **기존 경로 그대로.**
+            return engine.answer(cleaned, ctx)
+        # 후속이면 되살린 좌표 **밖으로 나가지 않는다.** 빈 목록도 그대로
+        # 넘긴다(`evidence_hits=[]`): 엔진은 그때 검색을 **하지 않는다.**
+        # 못 연 좌표를 채널 전체 검색으로 메우면, 사용자는 자기가 물은 것과
+        # 다른 자료를 답으로 받고 그 사실을 알 방법이 없다.
+        return engine.answer(cleaned, ctx, evidence_hits=list(plan.hits))
 
     return handle_event(
         event,
@@ -247,7 +270,49 @@ def build_app(config: Mapping[str, object], *, app_factory=None):
     return app_factory(token=config["bot_token"])
 
 
-def register(app, *, settings: RuntimeSettings, config, claims, engine) -> None:
+def claims_root() -> Path:
+    """VIP 전용 상태 디렉터리. 비용 원장·이벤트 중복 제거와 같은 자리다."""
+    return state_path().parent
+
+
+def build_resolver(archive_dir: Path | str):
+    """좌표를 **지금 권한으로** 다시 여는 해석기.
+
+    읽기 전용 창구 하나만 연다. 되살린 좌표는 `ArchiveStore.resolve_refs()` 를
+    통과해야 근거가 되고, 그 판정은 요청의 `evidence_sources`(관리형 근거 채널)
+    로 이뤄진다 — 지난번에 보였다는 사실은 지금 보여도 된다는 뜻이 아니다.
+    """
+    from .archive.store import ArchiveStore
+    from .thread_followup import ThreadFollowupResolver
+
+    return ThreadFollowupResolver(ArchiveStore(Path(archive_dir)))
+
+
+def build_history(root: Path):
+    """VIP **전용** QA 기록에서 30일 좌표를 읽는다.
+
+    디렉터리가 곧 경계다 — TYBot 의 기록을 읽으면 다른 ACL 로 답한 회차의
+    좌표가 VIP 후속 질문에 섞인다. 같은 사람·같은 워크스페이스라도 그 둘은
+    **다른 봇의 근거**다.
+    """
+    qa_root = Path(root) / "qa"
+
+    def load(workspace: str, slack_user: str) -> list[dict]:
+        return load_vip_history(qa_root, workspace=workspace, slack_user=slack_user)
+
+    return load
+
+
+def register(
+    app,
+    *,
+    settings: RuntimeSettings,
+    config,
+    claims,
+    engine,
+    resolver=None,
+    history=None,
+) -> None:
     """멘션과 DM 둘만 받는다. 매니페스트가 구독하는 것도 그 둘뿐이다."""
 
     def on_event(body, client):
@@ -258,6 +323,8 @@ def register(app, *, settings: RuntimeSettings, config, claims, engine) -> None:
             config=config,
             claims=claims,
             engine=engine,
+            resolver=resolver,
+            history=history,
         )
         # 수와 고정 낱말만. 질문·답변·근거는 여기 없다.
         log.info(
@@ -385,7 +452,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         app = build_app(config)
         verify_identity(app.client, config)
-        register(app, settings=settings, config=config, claims=claims, engine=engine)
+        register(
+            app,
+            settings=settings,
+            config=config,
+            claims=claims,
+            engine=engine,
+            resolver=build_resolver(settings.archive_dir),
+            history=build_history(claims_root()),
+        )
 
         log.info(
             "VIPBot 기동 ws=%s team=%s bot=%s model=%s",
