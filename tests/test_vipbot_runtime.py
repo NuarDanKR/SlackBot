@@ -40,6 +40,7 @@ ANSWER = "합성 상세 답변 ZZZANSWERZZZ"
 ALLOWED_IMPORTS = {
     "__future__",
     "collections.abc",
+    "contextlib",
     "dataclasses",
     "logging",
     "os",
