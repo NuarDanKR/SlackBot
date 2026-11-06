@@ -392,6 +392,11 @@ def test_scripts_that_need_the_database_load_the_env_file():
         # 색인에 쓰는 일). "DB 를 쓴다" 와 "DB 이름을 언급한다" 는 다르다.
         if "operational_db_refusal" in code:
             continue
+        # **공용 설정 자체를 거부하는 스크립트도 반대 경우다.** VIPBot 준비
+        # 점검은 `/etc/tybot/tybot.env` 를 읽으면 안 된다 — 그 파일에 Master 의
+        # DSN 이 있고, 그걸 들고 있는 상태가 바로 그 점검이 찾는 오염이다.
+        if "REFUSES_SHARED_ENV" in code:
+            continue
         if "load_env_file()" not in code:
             offenders.append(path.name)
     assert not offenders, (

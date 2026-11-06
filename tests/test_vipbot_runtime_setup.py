@@ -236,9 +236,15 @@ def test_the_model_key_arrives_as_a_dedicated_credential():
 
 
 def test_the_unit_never_hands_the_process_the_master_database_url():
-    """`/etc/tybot/tybot.env` 를 읽으면 전용 계정을 만든 의미가 사라진다."""
+    """`/etc/tybot/tybot.env` 를 읽으면 전용 계정을 만든 의미가 사라진다.
+
+    2026-11-06: `EnvironmentFile=` 자체는 이제 하나 있다 — VIPBot 전용 설정
+    파일이다. 금지는 **그 파일이 아니라 공용 파일**이고, 허용되는 경로는 하나뿐.
+    """
     lines = directives()
-    assert not any(line.startswith("EnvironmentFile=") for line in lines)
+    assert [
+        line for line in lines if line.startswith("EnvironmentFile=")
+    ] == ["EnvironmentFile=/etc/tybot/tybot-vipbot.conf"]
     assert not any("tybot.env" in line for line in lines)
     assert not any(line.startswith("Environment=DATABASE_URL") for line in lines)
     assert not any("TYBOT_ENV_FILE" in line for line in lines)
