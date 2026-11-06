@@ -169,9 +169,14 @@ def connections(conn):
             for kind in ("bot", "app"):
                 cur.execute(
                     """INSERT INTO bot_connection_secret
-                           (connection_id, kind, ciphertext)
-                       VALUES (%s, %s, %s)""",
-                    (connection_id, kind, f"cipher-{suffix}-{kind}".encode()),
+                           (connection_id, kind, ciphertext, mask, updated_by)
+                       VALUES (%s, %s, %s, %s, 'pytest')""",
+                    (
+                        connection_id,
+                        kind,
+                        f"cipher-{suffix}-{kind}".encode(),
+                        f"synthetic-{suffix}-{kind}",
+                    ),
                 )
     return workspace
 
