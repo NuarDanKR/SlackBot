@@ -318,6 +318,7 @@ def test_a_world_readable_credential_is_reported():
 def test_credential_facts_read_the_paths_the_unit_declares(tmp_path):
     dsn = tmp_path / "tybot-vipbot-database-url"
     dsn.write_text(DSN, encoding="utf-8")
+    os.chmod(dsn, 0o600)
     unit = {
         "credential_paths": {
             "tybot-vipbot-database-url": str(dsn),
@@ -333,6 +334,7 @@ def test_credential_facts_read_the_paths_the_unit_declares(tmp_path):
 def test_a_malformed_credential_is_invalid_without_echoing_it(tmp_path):
     dsn = tmp_path / "tybot-vipbot-database-url"
     dsn.write_text("postgresql://tyslackai:pw@/tyslackai", encoding="utf-8")
+    os.chmod(dsn, 0o600)
     unit = {"credential_paths": {"tybot-vipbot-database-url": str(dsn)}}
     got = check.credential_facts(unit)[0]
     assert got["invalid"] is True
@@ -527,7 +529,15 @@ EXAMPLE = ROOT / "deploy" / "tybot-vipbot.conf.example"
 def conf(tmp_path, body: str):
     path = tmp_path / "tybot-vipbot.conf"
     path.write_text(body, encoding="utf-8")
+    os.chmod(path, 0o600)
     return path
+
+
+def root_owned_conf_facts(tmp_path, body: str) -> dict:
+    """Exercise config parsing without conflating it with the owner check."""
+    got = check.settings_file_facts(conf(tmp_path, body))
+    got.pop("owner", None)
+    return got
 
 
 GOOD = (
@@ -539,16 +549,14 @@ GOOD = (
 
 
 def test_a_complete_settings_file_has_nothing_to_report(tmp_path):
-    got = check.settings_file_facts(conf(tmp_path, GOOD))
+    got = root_owned_conf_facts(tmp_path, GOOD)
     assert got["present"] is True
     assert got["missing"] == () and got["forbidden"] == ()
     assert check.evaluate(facts(settings_file=got)) == []
 
 
 def test_the_optional_model_key_is_allowed(tmp_path):
-    got = check.settings_file_facts(
-        conf(tmp_path, GOOD + "VIPBOT_MODEL=claude-opus-5-5\n")
-    )
+    got = root_owned_conf_facts(tmp_path, GOOD + "VIPBOT_MODEL=claude-opus-5-5\n")
     assert got["forbidden"] == ()
 
 
@@ -567,7 +575,7 @@ def test_a_missing_settings_file_is_reported(tmp_path):
 @pytest.mark.parametrize("key", check.REQUIRED_SETTINGS)
 def test_a_missing_required_key_is_reported_by_name(tmp_path, key):
     body = "\n".join(line for line in GOOD.splitlines() if not line.startswith(key))
-    got = check.settings_file_facts(conf(tmp_path, body + "\n"))
+    got = root_owned_conf_facts(tmp_path, body + "\n")
     assert got["missing"] == (key,)
     found = check.evaluate(facts(settings_file=got))
     assert codes(found) == ["settings_key_missing"]
@@ -595,7 +603,7 @@ def test_any_key_outside_the_allowlist_is_refused(tmp_path, key):
     이 파일의 모든 줄을 환경변수로 만들므로, 모르는 줄 하나가 곧 프로세스의
     환경 하나다.
     """
-    got = check.settings_file_facts(conf(tmp_path, GOOD + f"{key}=값\n"))
+    got = root_owned_conf_facts(tmp_path, GOOD + f"{key}=값\n")
     assert got["forbidden"] == (key,)
     found = check.evaluate(facts(settings_file=got))
     assert codes(found) == ["settings_key_forbidden"]
@@ -604,23 +612,21 @@ def test_any_key_outside_the_allowlist_is_refused(tmp_path, key):
 
 def test_a_forbidden_key_is_reported_by_name_without_its_value(tmp_path):
     secret = "postgresql://tyslackai:SUPERSECRET@/tyslackai"
-    got = check.settings_file_facts(
-        conf(tmp_path, GOOD + f"DATABASE_URL={secret}\n")
-    )
+    got = root_owned_conf_facts(tmp_path, GOOD + f"DATABASE_URL={secret}\n")
     blob = repr(got) + "".join(str(item) for item in check.evaluate(facts(settings_file=got)))
     assert "SUPERSECRET" not in blob and secret not in blob
     assert "DATABASE_URL" in blob
 
 
 def test_the_settings_file_values_never_enter_the_facts(tmp_path):
-    got = check.settings_file_facts(conf(tmp_path, GOOD))
+    got = root_owned_conf_facts(tmp_path, GOOD)
     assert "pilot" not in repr(got)
     assert "/var/lib/tybot/archive" not in repr(got)
     assert "5.00" not in repr(got)
 
 
 def test_a_line_that_is_not_a_key_value_pair_is_counted(tmp_path):
-    got = check.settings_file_facts(conf(tmp_path, GOOD + "잘못된줄\n= 값만\n"))
+    got = root_owned_conf_facts(tmp_path, GOOD + "잘못된줄\n= 값만\n")
     assert got["invalid_lines"] == 2
     assert "settings_file_invalid" in codes(check.evaluate(facts(settings_file=got)))
 
@@ -783,6 +789,7 @@ def _real_credentials(tmp_path) -> tuple[dict, dict]:
     }
     for path, value in files.values():
         path.write_text(value, encoding="utf-8")
+        os.chmod(path, 0o600)
     unit = {
         "present": True,
         "path": str(UNIT),
@@ -888,6 +895,7 @@ def test_the_report_counts_the_credentials_instead_of_printing_them(tmp_path):
 def test_the_rendered_report_carries_no_secret(tmp_path):
     dsn = tmp_path / "tybot-vipbot-database-url"
     dsn.write_text(DSN, encoding="utf-8")
+    os.chmod(dsn, 0o600)
     unit = check.unit_facts(UNIT)
     unit["credential_paths"] = {"tybot-vipbot-database-url": str(dsn)}
     got = check.Facts(
