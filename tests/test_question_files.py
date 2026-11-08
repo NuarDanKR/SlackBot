@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import pytest
 
+from tybot import question_files
+from tybot.archive.files import BoundedFileLines
 from tybot.question_files import (
     MAX_FILE_BYTES,
     MAX_QUESTION_CHARS,
     MAX_QUESTION_FILES,
     MAX_TOTAL_BYTES,
     read_question_files,
+    validate_question_files,
 )
 
 
@@ -182,3 +185,58 @@ def test_duplicate_file_identity_is_rejected_before_download():
 
     assert got.codes == ("file_identity_duplicate",)
     assert loader.calls == []
+
+
+def test_production_reader_cites_only_files_whose_bodies_were_read(monkeypatch):
+    def bounded(files, token, **limits):
+        assert token == "x"
+        assert limits == {
+            "max_file_bytes": MAX_FILE_BYTES,
+            "max_total_bytes": MAX_TOTAL_BYTES,
+        }
+        return BoundedFileLines(
+            lines=("[첨부본문:report-2.pdf] 확인됨",),
+            warnings=("F01234561",),
+            file_ids=("F01234562",),
+            bytes_read=12,
+        )
+
+    monkeypatch.setattr(question_files, "bounded_file_lines", bounded)
+
+    got = read_question_files([_file(1), _file(2)], "x")
+
+    assert got.files_read == 1
+    assert got.codes == ("file_read_partial",)
+    assert got.citations == ("https://tyit.slack.com/files/U1/F01234562",)
+
+
+def test_actual_download_limit_failure_discards_all_evidence(monkeypatch):
+    monkeypatch.setattr(
+        question_files,
+        "bounded_file_lines",
+        lambda *args, **kwargs: BoundedFileLines(
+            lines=("must not survive",),
+            file_ids=("F01234561",),
+            limit_code="file_size_exceeded",
+        ),
+    )
+
+    got = read_question_files([_file()], "x")
+
+    assert got.lines == ()
+    assert got.citations == ()
+    assert got.files_read == 0
+    assert got.codes == ("file_size_exceeded",)
+
+
+def test_preflight_validates_urls_without_downloading(monkeypatch):
+    monkeypatch.setattr(
+        question_files,
+        "bounded_file_lines",
+        lambda *args, **kwargs: pytest.fail("preflight downloaded file bytes"),
+    )
+
+    assert validate_question_files([_file()], "x") == ()
+    assert validate_question_files(
+        [_file(url_private_download="https://example.com/file")], "x"
+    ) == ("file_url_invalid",)

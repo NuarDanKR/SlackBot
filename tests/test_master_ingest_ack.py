@@ -29,6 +29,7 @@ from tybot.answer import Answer
 from tybot.archive import ingest_ack
 from tybot.archive.archiving_state import IngestProgress, IngestState
 from tybot.intent import Intent
+from tybot.question_files import QuestionFileEvidence
 
 ANSWER = Answer(
     "지난주 기성 청구는 15억입니다.",
@@ -49,7 +50,14 @@ def _ask(bot, *, files=None, in_channel=True) -> str:
 
 @pytest.fixture
 def bot():
-    return _bot([Intent("search", question="기성 얼마야", terms=["기성"])], [ANSWER])
+    made = _bot([Intent("search", question="기성 얼마야", terms=["기성"])], [ANSWER])
+    made._question_file_evidence = lambda event: QuestionFileEvidence(
+        lines=("수집 상태 시험용 첨부 본문",),
+        citations=("https://tyit.slack.com/files/U1/F01234561",),
+        files_read=1,
+    )
+    made._question_file_hits = lambda attached, event: []
+    return made
 
 
 @pytest.fixture
@@ -192,8 +200,8 @@ def test_a_dm_attachment_is_not_reported_as_archived(bot, ack):
 
     reply = _ask(bot, files=FILES, in_channel=False)
 
-    assert "현재 요청 처리에만 사용" in reply
-    assert "아카이브하지 않습니다" in reply
+    assert "이번 답변에 사용했고" in reply
+    assert "DM 밖에는 공개하지 않습니다" in reply
     assert "검색할 수 있습니다" not in reply
 
 

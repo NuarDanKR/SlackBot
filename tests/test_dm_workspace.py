@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -213,6 +214,7 @@ def _bare_bot():
     bot = WorkspaceBot.__new__(WorkspaceBot)
     bot.workspace = "tyit"
     bot.realtime = True
+    bot.cfg = SimpleNamespace(bot_token="xoxb-fixture")
     return bot
 
 
@@ -220,8 +222,20 @@ def test_dm_is_collected_before_the_answer_is_made(monkeypatch):
     """순서가 뒤집히면 질문에 붙인 파일은 이번 답변의 근거가 될 수 없다."""
     bot = _bare_bot()
     order: list[str] = []
+    from tybot.slack import pilot
+
     monkeypatch.setattr(type(bot), "_is_human_request", lambda self, e, c: True)
     monkeypatch.setattr(type(bot), "_handle_correction", lambda self, e, s: False)
+    monkeypatch.setattr(
+        type(bot),
+        "_request_context",
+        lambda self, c, u, **kwargs: order.append("context") or "ctx",
+    )
+    monkeypatch.setattr(
+        pilot,
+        "validate_question_files",
+        lambda files, token: order.append("preflight") or (),
+    )
     monkeypatch.setattr(
         type(bot), "_ingest_dm", lambda self, c, e: order.append("collect") or ["staged"]
     )
@@ -229,10 +243,17 @@ def test_dm_is_collected_before_the_answer_is_made(monkeypatch):
         type(bot), "_handle", lambda self, e, c, s, *, in_channel: order.append("answer")
     )
 
-    event = {"channel_type": "im", "channel": "D1", "user": MINE, "ts": "1.0"}
+    event = {
+        "channel_type": "im",
+        "channel": "D1",
+        "user": MINE,
+        "ts": "1.0",
+        "files": [{"id": "F01234561"}],
+    }
     assert bot.route_message(event, None, None) == "answered"
 
-    assert order == ["collect", "answer"]
+    assert order == ["context", "preflight", "collect", "answer"]
+    assert event["_tybot_request_context"] == "ctx"
     assert event["_tybot_dm_attachments"] == ["staged"]
 
 

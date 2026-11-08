@@ -6,7 +6,14 @@ from unittest.mock import patch
 
 import pytest
 
-from tybot.archive.files import DownloadError, SlackFile, download_bytes, download_text, file_lines
+from tybot.archive.files import (
+    DownloadError,
+    SlackFile,
+    bounded_file_lines,
+    download_bytes,
+    download_text,
+    file_lines,
+)
 
 
 def _f(name, filetype, size=2048, mime=""):
@@ -118,6 +125,38 @@ def test_document_download_without_a_limit_reads_the_complete_response():
 
     with patch("tybot.archive.files.urlopen", return_value=_Resp(payload)):
         assert download_bytes(file, "xoxb-t") == payload
+
+
+def test_bounded_question_reader_enforces_actual_response_bytes():
+    payload = b"x" * 6
+
+    with patch("tybot.archive.files.urlopen", return_value=_Resp(payload)):
+        got = bounded_file_lines(
+            [_f("report.txt", "txt", size=1)],
+            "xoxb-t",
+            max_file_bytes=4,
+            max_total_bytes=8,
+        )
+
+    assert got.lines == ()
+    assert got.file_ids == ()
+    assert got.limit_code == "file_size_exceeded"
+
+
+def test_bounded_question_reader_counts_actual_bytes_across_files():
+    payloads = [_Resp(b"abc"), _Resp(b"def")]
+
+    with patch("tybot.archive.files.urlopen", side_effect=payloads):
+        got = bounded_file_lines(
+            [_f("one.txt", "txt", size=1), _f("two.txt", "txt", size=1)],
+            "xoxb-t",
+            max_file_bytes=5,
+            max_total_bytes=5,
+        )
+
+    assert got.lines == ()
+    assert got.file_ids == ()
+    assert got.limit_code == "file_total_exceeded"
 
 
 def test_limited_download_still_protects_non_document_callers():

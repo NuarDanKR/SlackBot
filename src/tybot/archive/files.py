@@ -65,6 +65,10 @@ class DownloadError(RuntimeError):
     """파일을 받지 못했거나 받은 것이 파일이 아니다."""
 
 
+class DownloadLimitExceeded(DownloadError):
+    """The response body exceeded a caller-supplied byte limit."""
+
+
 @dataclass(frozen=True)
 class SlackFile:
     id: str
@@ -365,7 +369,9 @@ def download_bytes(f: SlackFile, bot_token: str, limit: int | None = None) -> by
     with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:
         raw = resp.read() if limit is None else resp.read(limit + 1)
     if limit is not None and len(raw) > limit:
-        raise DownloadError(f"{f.name}: {limit // 1024 // 1024}MB 제한 초과")
+        raise DownloadLimitExceeded(
+            f"{f.name}: {limit // 1024 // 1024}MB 제한 초과"
+        )
     if raw[:15].lstrip().lower().startswith(b"<!doctype html"):
         raise DownloadError(f"{f.name}: 로그인 페이지가 내려왔다 - files:read 스코프 확인")
     return raw
@@ -405,6 +411,8 @@ def stage_attachments(
     *,
     origin: AttachmentOrigin | None = None,
     separate_attachments: bool | None = None,
+    max_file_bytes: int | None = None,
+    max_total_bytes: int | None = None,
 ) -> list[StagedAttachmentResult]:
     """원본을 격리 저장하고 **파일별로** 원문 줄과 줄 지문을 돌려준다.
 
@@ -416,6 +424,7 @@ def stage_attachments(
     연결이 사라지고, 그때부터 `converted` 를 「답변 가능」 으로 오해하게 된다(§6).
     """
     results: list[StagedAttachmentResult] = []
+    downloaded_bytes = 0
     for item in files or []:
         f = SlackFile.from_event(item)
         # 경고도 파일별로 모은다. 한 리스트에 섞으면 어느 파일의 경고인지 사라진다.
@@ -434,11 +443,25 @@ def stage_attachments(
         error_code = ""
         retryable = False
         coverage = None
+        stop_after_file = False
 
         try:
             if not bot_token:
                 raise DownloadError(f"{f.name}: 토큰이 없어 원본을 가져오지 못했습니다")
-            raw = download_bytes(f, bot_token)
+            remaining = (
+                None
+                if max_total_bytes is None
+                else max_total_bytes - downloaded_bytes
+            )
+            if remaining is not None and remaining <= 0:
+                raise DownloadLimitExceeded(f"{f.name}: total byte limit exceeded")
+            limits = [value for value in (max_file_bytes, remaining) if value is not None]
+            raw = (
+                download_bytes(f, bot_token, limit=min(limits))
+                if limits
+                else download_bytes(f, bot_token)
+            )
+            downloaded_bytes += len(raw)
 
             digest = hashlib.sha256(raw).hexdigest()
             objects.mkdir(parents=True, exist_ok=True)
@@ -470,6 +493,7 @@ def stage_attachments(
         except (DownloadError, ConvertError, OSError) as exc:
             state = "download_or_extract_failed"
             error = str(exc)
+            stop_after_file = isinstance(exc, DownloadLimitExceeded)
             from .external_convert import failure_details
 
             error_code, retryable = failure_details(
@@ -637,6 +661,8 @@ def stage_attachments(
             extracted=extracted is not None,
             created=f.created,
         ))
+        if stop_after_file:
+            break
     return results
 
 
@@ -700,3 +726,76 @@ def file_lines(files: list[dict], bot_token: str | None) -> tuple[list[str], lis
             if ln.strip():
                 lines.append(f"[{tag}:{f.name}] {ln.strip()}")
     return lines, warnings
+
+
+@dataclass(frozen=True)
+class BoundedFileLines:
+    """Successfully read question-file text and its actual byte usage."""
+
+    lines: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    file_ids: tuple[str, ...] = ()
+    bytes_read: int = 0
+    limit_code: str = ""
+
+
+def bounded_file_lines(
+    files: list[dict],
+    bot_token: str,
+    *,
+    max_file_bytes: int,
+    max_total_bytes: int,
+) -> BoundedFileLines:
+    """Read question attachments with limits on bytes actually received.
+
+    Unlike ``file_lines``, failed conversions do not emit descriptive lines:
+    those lines are metadata, not evidence that the file body was read.
+    """
+    lines: list[str] = []
+    warnings: list[str] = []
+    file_ids: list[str] = []
+    total = 0
+    for raw in files or []:
+        f = SlackFile.from_event(raw)
+        remaining = max_total_bytes - total
+        if remaining <= 0:
+            return BoundedFileLines(
+                bytes_read=total, limit_code="file_total_exceeded"
+            )
+        limit = min(max_file_bytes, remaining)
+        try:
+            data = download_bytes(f, bot_token, limit=limit)
+            total += len(data)
+            if f.is_text:
+                body = _decode_text(data, f.size).splitlines()
+                tag = "첨부본문"
+            else:
+                body = convert(f.filetype, data)
+                tag = "첨부추출"
+        except DownloadLimitExceeded:
+            code = (
+                "file_total_exceeded"
+                if remaining < max_file_bytes
+                else "file_size_exceeded"
+            )
+            return BoundedFileLines(
+                bytes_read=total, limit_code=code
+            )
+        except DownloadError:
+            # Do not expose downloader details to the question pipeline.
+            warnings.append(f.id)
+            continue
+        except Exception:  # noqa: BLE001 - converter details stay local
+            warnings.append(f.id)
+            continue
+
+        useful = [ln.strip() for ln in body if isinstance(ln, str) and ln.strip()]
+        if not useful:
+            warnings.append(f.id)
+            continue
+        file_ids.append(f.id)
+        lines.append(f.describe("본문 수집" if f.is_text else "변환"))
+        lines.extend(f"[{tag}:{f.name}] {line}" for line in useful)
+    return BoundedFileLines(
+        tuple(lines), tuple(warnings), tuple(file_ids), total
+    )

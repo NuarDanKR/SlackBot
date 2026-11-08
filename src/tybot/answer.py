@@ -1552,6 +1552,7 @@ class AnswerEngine:
         *,
         terms: list[str] | None = None,
         task=None,
+        extra_hits=(),
     ) -> Answer:
         """판단·권고 요청 — 사내 사실은 원문만, 일반 판단은 LLM 지식 허용(라벨 부착).
 
@@ -1564,7 +1565,8 @@ class AnswerEngine:
         """
         model, q = parse_model_flag(question)
         query = " ".join(terms) if terms else q
-        hits = self._store.search(query, ctx, limit=self._max_hits) if query else []
+        found = self._store.search(query, ctx, limit=self._max_hits) if query else []
+        hits = self._with_seed(extra_hits, found)
 
         if self._specialist is not None:
             outcome = self._ask_specialist(task, q, ctx, _evidence_block(hits))
@@ -1750,12 +1752,14 @@ class AnswerEngine:
             return Answer("질문 내용이 없습니다.", [], None, 0.0, 0, "error")
         intent = intent or classify(q, self._router)
 
-        if followup is not None and getattr(followup, "applied", False):
-            return self._respond_scoped(q, ctx, intent, followup, model=model, task=task)
-
         # 사람이 **이번 질문에 붙여 올린 원문**(B-57). 「찾아야 하는 자료」가 아니라
         # 「이 질문의 입력」이라, 검색이 낱말을 못 맞혀도 빠지면 안 된다.
         seed = list(seed_hits or ())
+
+        if followup is not None and getattr(followup, "applied", False):
+            return self._respond_scoped(
+                q, ctx, intent, followup, model=model, task=task, seed_hits=seed
+            )
 
         if intent.kind == "summary":
             if seed:
@@ -1788,7 +1792,9 @@ class AnswerEngine:
                 task=task,
             )
         if intent.kind == "advice":
-            return self.advise(question, ctx, terms=intent.terms, task=task)
+            return self.advise(
+                question, ctx, terms=intent.terms, task=task, extra_hits=seed
+            )
         if intent.kind == "smalltalk":
             return Answer(
                 "네, 대기 중입니다. 아카이브에 쌓인 원문으로 답할 수 있는 걸 물어보세요. "
@@ -1848,6 +1854,7 @@ class AnswerEngine:
         *,
         model: str | None = None,
         task=None,
+        seed_hits=(),
     ) -> Answer:
         """후속 질문 — 되살린 좌표 안에서만 답한다(설계 §9·§10·§13).
 
@@ -1864,7 +1871,7 @@ class AnswerEngine:
                 context_resolution=followup.resolution,
             )
 
-        hits = list(followup.evidence_hits)
+        hits = self._with_seed(seed_hits, followup.evidence_hits)
         if intent.format_only:
             from dataclasses import replace
 

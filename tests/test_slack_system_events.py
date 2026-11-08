@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -132,6 +133,8 @@ def _routing_bot(**kw) -> WorkspaceBot:
     made.workspace = "tyit"
     made._bot_users = {}
     made.realtime = True
+    made.cfg = SimpleNamespace(bot_token="xoxb-fixture")
+    made._request_context = lambda client, user, **kwargs: "ctx"
     made.handled = []
     made.ingested = []
     made._handle_correction = lambda event, say: False

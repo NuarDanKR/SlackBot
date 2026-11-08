@@ -1,12 +1,14 @@
 """답변 파이프라인 — 환각방지 4겹 회귀 테스트."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from tybot import documents
 from tybot.access import RequestContext
 from tybot.answer import AnswerEngine, parse_model_flag
-from tybot.archive.store import ArchiveStore
+from tybot.archive.store import ArchiveDoc, ArchiveStore, RawLine, SearchHit
 from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity
 from tybot.gateway.router import Router
 from tybot.intent import Intent
@@ -68,6 +70,74 @@ def test_answer_attaches_citation(engine):
     assert "출처:" in ans.to_slack()
     # 근거는 원문 라인이어야 한다
     assert "3억 2천만원" in fake.calls[0][1].content
+
+
+def test_advice_uses_the_file_attached_to_this_question(engine, tmp_path):
+    eng, fake = engine
+    line = RawLine("2026-11-06 09:00", "질문 첨부", "공정률은 72%", 1)
+    doc = ArchiveDoc(
+        path=tmp_path / "__question_attachment__.txt",
+        workspace="pilot",
+        channel="질문 첨부",
+        visibility="private",
+        acl=frozenset(),
+        share_with=frozenset(),
+        last_ingested=None,
+        raw_lines=[line],
+    )
+
+    answer = eng.advise(
+        "진척 관리 방안을 알려줘",
+        _ctx(),
+        extra_hits=[SearchHit(doc=doc, line=line, score=1)],
+    )
+
+    assert answer.reason == "advice"
+    assert "공정률은 72%" in fake.calls[0][1].content
+
+
+def test_a_followup_can_use_a_new_file_without_widening_to_archive_search(
+    engine, tmp_path
+):
+    eng, fake = engine
+    line = RawLine("2026-11-06 09:00", "질문 첨부", "새 첨부의 확정값", 1)
+    doc = ArchiveDoc(
+        path=tmp_path / "__question_attachment__.txt",
+        workspace="pilot",
+        channel="질문 첨부",
+        visibility="private",
+        acl=frozenset(),
+        share_with=frozenset(),
+        last_ingested=None,
+        raw_lines=[line],
+    )
+    followup = SimpleNamespace(
+        applied=True,
+        needs_clarification=False,
+        evidence_hits=[],
+        editing_text="",
+        attachments=[],
+        dropped_codes=(),
+        topic_terms=(),
+        parent_record_ids=(),
+        resolution="resolved",
+        log_line=lambda: "resolved",
+    )
+
+    answer = eng.respond(
+        "이 파일 기준으로 다시 답해줘",
+        _ctx(),
+        Intent(
+            "search",
+            question="이 파일 기준으로 다시 답해줘",
+            reference_mode="prior_turn",
+        ),
+        followup=followup,
+        seed_hits=[SearchHit(doc=doc, line=line, score=1)],
+    )
+
+    assert answer.reason == "answered"
+    assert "새 첨부의 확정값" in fake.calls[0][1].content
 
 
 def test_answer_sends_an_ocr_screened_image_with_the_text_evidence(engine, monkeypatch):

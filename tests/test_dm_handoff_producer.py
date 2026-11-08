@@ -14,6 +14,7 @@ def _bot():
     bot.cfg = SimpleNamespace(bot_token="xoxb-test")
     bot._bot_user_id = lambda: "U87654321"
     bot._user_name = lambda client, user: "Alice"
+    bot._request_context = lambda client, user, **kwargs: "ctx"
     return bot
 
 
@@ -144,7 +145,18 @@ def test_optional_file_mirror_runs_after_legacy_answer(monkeypatch, tmp_path):
         return b"private bytes"
     monkeypatch.setattr("tybot.archive.files.download_bytes", download)
 
-    event = _event(files=[{"id": "F12345678", "name": "note.txt"}])
+    event = _event(
+        files=[
+            {
+                "id": "F12345678",
+                "name": "note.txt",
+                "filetype": "txt",
+                "size": 13,
+                "url_private_download": "https://files.slack.com/files/note.txt",
+                "permalink": "https://tyit.slack.com/files/U1/F12345678",
+            }
+        ]
+    )
     assert _bot().route_message(event, _Client(), None) == "answered"
     assert calls == ["legacy", "answer", "mirror-download"]
 

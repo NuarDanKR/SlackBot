@@ -47,10 +47,11 @@ from ..archive.channel_files import collect as collect_channel_files
 from ..archive.collection_probe import load as load_archiver_channel
 from ..archive.files import (
     AttachmentOrigin,
+    BoundedFileLines,
     attachment_storage,
     stage_attachments,
 )
-from ..archive.store import ArchiveStore
+from ..archive.store import ArchiveDoc, ArchiveStore, RawLine, SearchHit
 from ..archive.write_owner import OwnerLookup
 from ..archive.writer import KST
 from ..attachment_trace import confirm_archived
@@ -152,6 +153,17 @@ from ..poll_view import (
 from ..polls import PollError, apply_vote, close_poll, create_poll
 from ..polls import load as load_poll
 from ..polls import save as save_poll
+from ..question_files import (
+    MAX_FILE_BYTES as MAX_QUESTION_FILE_BYTES,
+)
+from ..question_files import (
+    MAX_TOTAL_BYTES as MAX_QUESTION_FILE_TOTAL_BYTES,
+)
+from ..question_files import (
+    QuestionFileEvidence,
+    read_question_files,
+    validate_question_files,
+)
 from ..schedule import HELP as SCHEDULE_HELP
 from ..schedule import (
     UNAVAILABLE as SCHEDULE_UNAVAILABLE,
@@ -1247,15 +1259,22 @@ class WorkspaceBot:
         if ctype == "im":
             if self._handle_correction(event, say):
                 return "correction"
-            # **수집이 먼저다.** 질문에 붙여 올린 파일을 이번 답변의 근거로 쓰려면
-            # 답하기 전에 변환돼 있어야 한다(B-57 설계 §4).
+            # 권한과 URL을 먼저 검증한 뒤 한 번만 수집하고, 그 본문으로 답한다.
+            if event.get("files"):
+                event["_tybot_request_context"] = self._request_context(
+                    client, str(event.get("user") or ""), in_channel=False
+                )
+                event["_tybot_question_file_preflight_codes"] = (
+                    validate_question_files(event["files"], self.cfg.bot_token)
+                )
             event["_tybot_dm_attachments"] = self._ingest_dm(client, event)
             try:
                 self._handle(event, client, say, in_channel=False)
             finally:
                 # The mirror may fetch attachment bytes. Keep that optional
                 # network work off the critical path for the user's reply.
-                self._mirror_dm_handoff(client, event)
+                if not event.get("_tybot_question_file_preflight_codes"):
+                    self._mirror_dm_handoff(client, event)
             return "answered"
         if ctype in ("channel", "group") and self.realtime:
             self._ingest_live(client, event)
@@ -2970,8 +2989,14 @@ class WorkspaceBot:
         """
         if not event.get("files"):
             return ""
+        codes = tuple(event.get("_tybot_question_file_codes") or ())
+        used = bool(event.get("_tybot_question_file_used"))
+        if codes and not used:
+            return f"_첨부 상태: 이번 답변에 사용하지 못했습니다 (`{codes[0]}`)._"
+        if "file_read_partial" in codes:
+            return "_첨부 상태: 확인 가능한 일부만 이번 답변에 사용했습니다._"
         if not in_channel:
-            return "_첨부 상태: DM 첨부는 현재 요청 처리에만 사용하며 아카이브하지 않습니다._"
+            return "_첨부 상태: 이번 답변에 사용했고 DM 밖에는 공개하지 않습니다._"
         channel_id = str(event.get("channel") or "")
         message_ts = str(event.get("ts") or "")
         if not channel_id or not message_ts:
@@ -2983,6 +3008,10 @@ class WorkspaceBot:
         except Exception as exc:
             log.warning("[%s] 수집 상태 조회 실패: %s", self.workspace, exc)
             return ""
+        if used and claim:
+            return f"_첨부 상태: 이번 답변에 사용했습니다 · 수집 {claim}_"
+        if used:
+            return "_첨부 상태: 이번 답변의 임시 근거로 사용했습니다._"
         return f"_첨부 상태: {claim}_" if claim else ""
 
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
@@ -3261,6 +3290,8 @@ class WorkspaceBot:
         answers: list = []
         ctx: RequestContext | None = None
         last: Answer | None = None
+        attached: QuestionFileEvidence | None = None
+        question_file_hits: list[SearchHit] = []
         for master_task in decision.tasks:
             task = master_task.intent
             q = master_task.question or task.question or text
@@ -3276,12 +3307,33 @@ class WorkspaceBot:
             # 아카이브 근거 답변은 엔진 출력을 **그대로** 쓴다 - 출처가 붙어 있으므로
             # 문장을 다시 만들면 본문과 출처가 어긋날 수 있다(원칙 2).
             if ctx is None:
-                ctx = self._request_context(
-                    client,
-                    user_id,
-                    channel_id=channel_id,
-                    in_channel=in_channel,
+                ctx = event.get("_tybot_request_context") or self._request_context(
+                    client, user_id, channel_id=channel_id, in_channel=in_channel
                 )
+                # 파일은 권한 경계를 만든 뒤에만 열고 이번 요청의 임시 근거로만 쓴다.
+                # 영속 수집과 후속 질문의 좌표 재개방은 별도 경로다.
+                attached = self._question_file_evidence(event)
+                if attached.lines:
+                    question_file_hits = self._question_file_hits(attached, event)
+            if event.get("files") and (attached is None or not attached.lines):
+                code = (
+                    attached.codes[0]
+                    if attached is not None and attached.codes
+                    else "file_read_empty"
+                )
+                ans = Answer(
+                    "질문에 첨부한 파일을 안전하게 읽지 못해 답변하지 않았습니다. "
+                    f"파일과 권한을 확인해 다시 시도해 주세요. (`{code}`)",
+                    [],
+                    None,
+                    0.0,
+                    0,
+                    "no_hits",
+                )
+                last = ans
+                answers.append(ans)
+                sections.append(ans.to_slack(preserve_markdown=True))
+                continue
             # 후속 질문이면 **이전 결과의 좌표를 현재 권한으로 되살린 범위**만
             # 쓴다. 되살리지 못하면 못했다고 답한다 — 채널 전체로 넓히지 않는다.
             followup = None
@@ -3296,8 +3348,10 @@ class WorkspaceBot:
             with specialist_router.bind_qa_record(qa_record_id):
                 ans = self.engine.respond(
                     q, ctx, task, followup=followup, task=master_task,
-                    seed_hits=self._uploaded_now(ctx, event),
+                    seed_hits=question_file_hits,
                 )
+            if attached is not None and attached.lines:
+                ans = self._apply_question_file_citations(ans, attached)
             last = ans
             answers.append(ans)
             sections.append(ans.to_slack(preserve_markdown=True))
@@ -3348,9 +3402,17 @@ class WorkspaceBot:
             out.append(writer.IncomingMessage(
                 ts=ts, speaker=speaker, text=body, source_ts=source_ts,
             ))
-        if event.get("files"):
+        if event.get("files") and not event.get(
+            "_tybot_question_file_preflight_codes"
+        ):
             channel_id = event.get("channel", "unknown")
             storage = attachment_storage(self.archive_dir, self.workspace, channel_id)
+            stage_limits = {}
+            if event.get("channel_type") == "im":
+                stage_limits = {
+                    "max_file_bytes": MAX_QUESTION_FILE_BYTES,
+                    "max_total_bytes": MAX_QUESTION_FILE_TOTAL_BYTES,
+                }
             staged = stage_attachments(
                 event["files"], self.cfg.bot_token, storage,
                 origin=AttachmentOrigin(
@@ -3364,6 +3426,7 @@ class WorkspaceBot:
                         and not event.get("app_id")
                     ),
                 ),
+                **stage_limits,
             )
             # 파일↔줄 연결을 들고 있어야 writer 뒤에 반영을 확인할 수 있다.
             self._pending_attachments = staged
@@ -3488,6 +3551,123 @@ class WorkspaceBot:
         if rows:
             log.info("[%s] 이번 질문의 첨부 원문 %d줄을 근거로 싣는다", self.workspace, len(rows))
         return rows
+
+    def _question_file_evidence(self, event: dict) -> QuestionFileEvidence:
+        """Apply the common one-question attachment boundary after access checks.
+
+        DM attachments have already been converted by ``_ingest_dm``. Reusing
+        those lines avoids a second download. Channel mentions have no such
+        guarantee (the Archiver may own the writer), so the common reader opens
+        only the files attached to this validated event.
+        """
+        files = event.get("files")
+        if not files:
+            return QuestionFileEvidence()
+        preflight_codes = tuple(
+            event.get("_tybot_question_file_preflight_codes") or ()
+        )
+        if preflight_codes:
+            result = QuestionFileEvidence(codes=preflight_codes)
+            event["_tybot_question_file_codes"] = result.codes
+            event["_tybot_question_file_used"] = False
+            return result
+        staged = tuple(event.get("_tybot_dm_attachments") or ())
+        loader = None
+        if staged:
+            def staged_lines(_files, _token):
+                successful = [item for item in staged if getattr(item, "body_lines", ())]
+                lines = [
+                    line
+                    for item in successful
+                    for line in getattr(item, "body_lines", ())
+                ]
+                warnings = [
+                    warning
+                    for item in staged
+                    for warning in getattr(item, "warnings", ())
+                ]
+                return BoundedFileLines(
+                    lines=tuple(lines),
+                    warnings=tuple(warnings),
+                    file_ids=tuple(str(item.file_id) for item in successful),
+                )
+
+            loader = staged_lines
+        kwargs = {"loader": loader} if loader is not None else {}
+        result = read_question_files(files, self.cfg.bot_token, **kwargs)
+        event["_tybot_question_file_codes"] = result.codes
+        event["_tybot_question_file_used"] = bool(result.lines)
+        return result
+
+    def _question_file_hits(
+        self, attached: QuestionFileEvidence, event: dict
+    ) -> list[SearchHit]:
+        """Turn transient file text into non-reopenable evidence hits.
+
+        ``channel_id=None`` is deliberate: ``refs_from_hits`` then refuses to
+        persist these coordinates. The next question must reopen a durable
+        archive coordinate, never an in-memory copy of file text.
+        """
+        if not attached.lines:
+            return []
+        try:
+            shown_at = datetime.fromtimestamp(float(event.get("ts") or 0), tz=KST)
+            stamp = shown_at.strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError, OSError):
+            stamp = ""
+        source = self.store.root / "__question_attachment__.txt"
+        lines = [
+            RawLine(
+                ts=stamp,
+                speaker="질문 첨부",
+                text=text,
+                lineno=index,
+                source_path=source,
+                message_ts=str(event.get("ts") or ""),
+            )
+            for index, text in enumerate(attached.lines, start=1)
+        ]
+        doc = ArchiveDoc(
+            path=source,
+            workspace=self.workspace,
+            channel="질문 첨부",
+            visibility="private",
+            acl=frozenset(),
+            share_with=frozenset(),
+            last_ingested=None,
+            channel_id=None,
+            raw_lines=lines,
+        )
+        return [SearchHit(doc=doc, line=line, score=1) for line in lines]
+
+    @staticmethod
+    def _apply_question_file_citations(
+        answer: Answer, attached: QuestionFileEvidence
+    ) -> Answer:
+        """Expose Slack permalinks, never the synthetic in-memory document."""
+        evidence_reasons = {
+            "answered",
+            "summary",
+            "advice",
+            "interim_advice",
+            "specialist",
+        }
+        if answer.reason not in evidence_reasons or answer.hit_count < 1:
+            answer.citations = []
+            return answer
+        existing = [
+            citation
+            for citation in answer.citations
+            if "__question_attachment__.txt" not in citation
+            and "[질문 첨부]" not in citation
+        ]
+        answer.citations = list(dict.fromkeys([*attached.citations, *existing]))
+        if "file_read_partial" in attached.codes:
+            answer.text = (
+                f"{answer.text.rstrip()}\n\n"
+                "_첨부 일부를 읽지 못했습니다. 확인한 범위만 답변에 사용했습니다._"
+            )
+        return answer
 
     def _ingest_dm(self, client, event) -> list:
         """봇과의 DM 원문을 **그 사람의 작업공간**에 쌓는다(B-57).
