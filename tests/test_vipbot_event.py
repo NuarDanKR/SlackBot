@@ -252,3 +252,86 @@ def test_generation_exception_body_is_not_returned_or_logged(caplog):
     assert got == vipbot_event.EventResult("failed", "generation_failed")
     assert secret not in repr(got)
     assert secret not in caplog.text
+
+
+def test_only_a_delivered_answer_is_offered_to_the_history_writer():
+    recorded = []
+    generated = Generated("executive answer")
+
+    got = handle(
+        event(channel=DM),
+        Slack(),
+        generate=lambda _question, _ctx: generated,
+        record=lambda question, answer, ctx: recorded.append(
+            (question, answer, ctx.user_id)
+        ),
+    )
+
+    assert got.delivery is not None and got.delivery.outcome == "delivered"
+    assert recorded == [("status", generated, USER)]
+
+
+def test_history_failure_does_not_change_an_already_delivered_answer():
+    def broken(*_args):
+        raise RuntimeError("synthetic writer detail must not escape")
+
+    got = handle(event(channel=DM), Slack(), record=broken)
+
+    assert got.delivery is not None and got.delivery.outcome == "delivered"
+
+
+def test_denial_and_generation_failure_are_never_recorded():
+    def forbidden(*_args):
+        raise AssertionError("history writer must not run")
+
+    denied = handle(
+        event(channel=DM),
+        Slack(),
+        authorize=lambda **_kwargs: authorization(allowed=False, code=bot_access.NO_GRANT),
+        record=forbidden,
+    )
+    failed = handle(
+        event(channel=DM),
+        Slack(),
+        generate=lambda _question, _ctx: Generated("answer", ()),
+        record=forbidden,
+    )
+
+    assert denied.delivery is not None and denied.delivery.outcome == "permission_denied"
+    assert failed == vipbot_event.EventResult("failed", "missing_sources")
+
+
+def test_a_denial_dm_after_authorization_changed_is_not_answer_history():
+    decisions = [authorization(), authorization(allowed=False, code=bot_access.NO_GRANT)]
+
+    def forbidden(*_args):
+        raise AssertionError("an undelivered generated answer must not be recorded")
+
+    got = handle(
+        event(channel=DM),
+        Slack(),
+        authorize=lambda **_kwargs: decisions.pop(0),
+        record=forbidden,
+    )
+
+    assert got.delivery is not None
+    assert got.delivery.outcome == "access_check_failed"
+
+
+def test_a_sent_answer_is_recorded_when_only_the_channel_notice_failed():
+    class NoticeFails(Slack):
+        def chat_postMessage(self, *, channel, text, thread_ts=None):
+            if channel == CHANNEL:
+                raise RuntimeError("synthetic notice failure")
+            return super().chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
+
+    recorded = []
+    got = handle(
+        event(),
+        NoticeFails(),
+        record=lambda question, _answer, _ctx: recorded.append(question),
+    )
+
+    assert got.delivery is not None
+    assert got.delivery.outcome == "channel_notice_failed"
+    assert recorded == ["status"]

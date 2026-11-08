@@ -53,6 +53,7 @@ ALLOWED_IMPORTS = {
     "tybot.vipbot_event_claims",
     "tybot.vipbot_followup",
     "tybot.vipbot_history",
+    "tybot.vipbot_history_writer",
     "tybot.vipbot_runtime_access",
     "tybot.vipbot_runtime_store",
 }
@@ -100,6 +101,11 @@ def code(call) -> str:
 class Answer:
     text: str = ANSWER
     citations: list = field(default_factory=lambda: ["[전산팀]공지, 📄문서(2026-11-06)"])
+    reason: str = "answered"
+    evidence_refs: list = field(default_factory=list)
+    attachment_refs: list = field(default_factory=list)
+    subject_terms: list = field(default_factory=list)
+    context_parent_ids: list = field(default_factory=list)
 
     def to_slack(self) -> str:
         return f"{self.text}\n\n출처:\n• {self.citations[0]}"
@@ -175,7 +181,16 @@ def body(**changes) -> dict:
     return values
 
 
-def deliver(payload, *, engine=None, claims=None, config=None, tmp_path, authorize=None):
+def deliver(
+    payload,
+    *,
+    engine=None,
+    claims=None,
+    config=None,
+    tmp_path,
+    authorize=None,
+    history_writer=None,
+):
     client = Client()
     engine = engine or Engine()
     monkey = authorize or (lambda **_kwargs: _authorized())
@@ -189,6 +204,7 @@ def deliver(payload, *, engine=None, claims=None, config=None, tmp_path, authori
             config=config or connection(),
             claims=claims or Claims(),
             engine=engine,
+            history_writer=history_writer,
         )
     finally:
         runtime.authorize_runtime = original
@@ -464,6 +480,48 @@ def test_a_dm_event_is_answered_in_place(tmp_path):
     result, client, _engine = deliver(payload, tmp_path=tmp_path)
     assert result.delivery.outcome == "delivered"
     assert "conversations_open" not in client.names()
+
+
+def test_a_delivered_answer_is_written_to_the_vip_only_coordinate_history(tmp_path):
+    from tybot.evidence_refs import ARCHIVE_LINE, EvidenceRef
+
+    answer = Answer(
+        evidence_refs=[
+            EvidenceRef(
+                kind=ARCHIVE_LINE,
+                workspace=WS,
+                channel_id="C0SOURCE01",
+                document_path="workspaces/tyit/channels/C0SOURCE01/raw/2026-11-09.md",
+                line_no=9,
+            )
+        ],
+        subject_terms=["현황"],
+    )
+    writer = runtime.build_history_writer(tmp_path / "vip-state", WS)
+    payload = body(
+        event={
+            "type": "message",
+            "channel_type": "im",
+            "user": USER,
+            "channel": DM,
+            "ts": "1.1",
+            "text": f"{QUESTION} --model=claude-haiku-5-5",
+        }
+    )
+
+    result, _client, _engine = deliver(
+        payload,
+        engine=Engine(answer),
+        tmp_path=tmp_path,
+        history_writer=writer,
+    )
+
+    assert result.delivery is not None and result.delivery.outcome == "delivered"
+    path = next((tmp_path / "vip-state" / "qa").glob("qa-*.jsonl"))
+    written = path.read_text(encoding="utf-8")
+    assert QUESTION in written
+    assert "--model=" not in written
+    assert ANSWER not in written
 
 
 # --- 5. 경계: import 와 Slack 지연 로딩 ----------------------------------------

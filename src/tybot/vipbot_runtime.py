@@ -57,6 +57,7 @@ from .vipbot_event import EventResult, handle_event
 from .vipbot_event_claims import EventClaims, state_path
 from .vipbot_followup import plan_followup
 from .vipbot_history import load_vip_history
+from .vipbot_history_writer import record_vip_turn
 from .vipbot_runtime_access import authorize_runtime
 from .vipbot_runtime_store import connect_runtime, load_runtime_config
 
@@ -247,6 +248,7 @@ def handle_body(
     engine,
     resolver=None,
     history=None,
+    history_writer=None,
 ) -> EventResult:
     """Slack 이벤트 봉투 하나를 검사하고 이벤트 코어에 넘긴다.
 
@@ -312,6 +314,7 @@ def handle_body(
         render=lambda answer: answer.to_slack(),
         event_id=str(body.get("event_id") or ""),
         claim_event=claims.claim,
+        record=history_writer,
     )
 
 
@@ -357,6 +360,22 @@ def build_history(root: Path):
     return load
 
 
+def build_history_writer(root: Path, workspace: str):
+    """Build the VIP-only coordinate writer used after successful DM delivery."""
+    qa_root = Path(root) / "qa"
+
+    def write(question: str, answer, ctx) -> bool:
+        return record_vip_turn(
+            qa_root,
+            workspace=workspace,
+            slack_user=str(getattr(ctx, "user_id", "") or ""),
+            question=question_for_engine(question),
+            answer=answer,
+        )
+
+    return write
+
+
 def register(
     app,
     *,
@@ -366,6 +385,7 @@ def register(
     engine,
     resolver=None,
     history=None,
+    history_writer=None,
 ) -> None:
     """멘션과 DM 둘만 받는다. 매니페스트가 구독하는 것도 그 둘뿐이다."""
 
@@ -379,6 +399,7 @@ def register(
             engine=engine,
             resolver=resolver,
             history=history,
+            history_writer=history_writer,
         )
         # 수와 고정 낱말만. 질문·답변·근거는 여기 없다.
         log.info(
@@ -514,6 +535,7 @@ def main(argv: list[str] | None = None) -> int:
             engine=engine,
             resolver=build_resolver(settings.archive_dir),
             history=build_history(claims_root()),
+            history_writer=build_history_writer(claims_root(), settings.workspace),
         )
 
         log.info(

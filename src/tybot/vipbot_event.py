@@ -101,6 +101,14 @@ def _failed_authorization(workspace: str, slack_user: str) -> Authorization:
     return Authorization(False, CHECK_FAILED, workspace, slack_user)
 
 
+def _record_delivered(callback, question: str, answer, context: RequestContext) -> bool:
+    try:
+        callback(question, answer, context)
+    except Exception:  # noqa: BLE001 - history failure must not undo delivery
+        return False
+    return True
+
+
 def handle_event(
     event: Mapping[str, object],
     client,
@@ -112,6 +120,7 @@ def handle_event(
     render: Callable[[T], str],
     event_id: str,
     claim_event: Callable[[str], bool],
+    record: Callable[[str, T, RequestContext], object] | None = None,
 ) -> EventResult:
     """Handle one mention or DM while preserving authorization-before-generation."""
     if event.get("bot_id") or event.get("subtype") or not _valid_event(event):
@@ -151,9 +160,12 @@ def handle_event(
     except Exception:  # noqa: BLE001 - authorization details must not escape
         authorization = _failed_authorization(normalized_workspace, slack_user)
     answer = None
+    generated = None
+    generated_context = None
     if _bound(authorization, workspace=normalized_workspace, slack_user=slack_user):
         try:
-            value = generate(question, authorization.context())
+            generated_context = authorization.context()
+            value = generate(question, generated_context)
             citations = getattr(value, "citations", None)
             if not isinstance(citations, (list, tuple)) or not any(
                 isinstance(item, str) and item.strip() for item in citations
@@ -162,6 +174,7 @@ def handle_event(
             answer = str(render(value) or "")
             if not answer.strip():
                 return EventResult("failed", "generation_failed")
+            generated = value
         except Exception:  # noqa: BLE001 - question/model output must not escape
             return EventResult("failed", "generation_failed")
 
@@ -200,6 +213,9 @@ def handle_event(
             check_access=check,
             thread_ts=str(event.get("thread_ts") or event.get("ts") or "") or None,
         )
+    answer_delivered = delivery.outcome in {"delivered", "channel_notice_failed"}
+    if answer_delivered and generated is not None and generated_context is not None and record:
+        _record_delivered(record, question, generated, generated_context)
     return EventResult("handled", delivery=delivery)
 
 
