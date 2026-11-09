@@ -344,6 +344,7 @@ def test_prompt_cache_usage_is_counted_without_understating_cost():
     assert got.input_tokens == 600
     assert got.cache_creation_input_tokens == 200
     assert got.cache_read_input_tokens == 300
+    assert got.prompt_cache_eligible is True
     expected_input = (100 + 200 * 1.25 + 300 * 0.05) * 4 / 1_000_000
     expected_output = 50 * 20 / 1_000_000
     assert got.cost_usd == pytest.approx(expected_input + expected_output)
@@ -362,6 +363,71 @@ def test_old_sdk_usage_without_cache_fields_remains_supported():
     assert got.input_tokens == 10
     assert got.cache_creation_input_tokens == 0
     assert got.cache_read_input_tokens == 0
+    assert got.prompt_cache_eligible is True
+
+
+def test_no_system_prompt_is_not_counted_as_a_cache_miss():
+    from tybot.gateway.base import Message, ModelSpec, Sensitivity
+    from tybot.gateway.providers.anthropic_provider import AnthropicProvider
+
+    provider = AnthropicProvider(api_key="test")
+    provider._client = _FakeClient()
+    spec = ModelSpec("approved", "anthropic", 1.0, 1.0, Sensitivity.CONFIDENTIAL)
+
+    got = provider.complete(spec, [Message("user", "질문")])
+
+    assert got.prompt_cache_eligible is False
+
+
+def test_router_reports_cache_hit_rate_and_net_savings(caplog):
+    from tybot.gateway.base import ModelSpec
+    from tybot.gateway.cost import CostGuard
+
+    spec = ModelSpec(
+        "cached-model", "anthropic", 4.0, 20.0, Sensitivity.CONFIDENTIAL,
+        cache_read_multiplier=0.05,
+    )
+
+    class CacheProvider:
+        name = "anthropic"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, _spec, _messages, **_kwargs):
+            self.calls += 1
+            write = 100 if self.calls == 1 else 0
+            read = 100 if self.calls == 2 else 0
+            return LLMResponse(
+                "답", spec.model, self.name, 100, 1, 0.001,
+                cache_creation_input_tokens=write,
+                cache_read_input_tokens=read,
+                prompt_cache_eligible=True,
+            )
+
+    router = Router(
+        providers={"anthropic": CacheProvider()},
+        registry={spec.model: spec},
+        cost_guard=CostGuard(10.0),
+        default_model=spec.model,
+    )
+
+    with caplog.at_level("INFO", logger="tybot.gateway"):
+        router.complete([Message("system", "규칙"), Message("user", "첫 질문")])
+        router.complete([Message("system", "규칙"), Message("user", "둘째 질문")])
+        router.complete([Message("system", "규칙"), Message("user", "셋째 질문")])
+
+    stats = router.prompt_cache_stats
+    assert stats.eligible_calls == 3
+    assert stats.hits == 1
+    assert stats.hit_rate == pytest.approx(1 / 3)
+    assert stats.write_tokens == 100
+    assert stats.read_tokens == 100
+    # read 할인 $0.00038 - 최초 write premium $0.00010
+    assert stats.net_saved_usd == pytest.approx(0.00028)
+    said = "\n".join(record.getMessage() for record in caplog.records)
+    assert "cache_hits=1/3" in said
+    assert "cache_net_saved=$0.0003" in said
 
 
 # --- 샘플링 파라미터를 제거한 모델 (2026-09-08) -------------------------------

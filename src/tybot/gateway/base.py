@@ -122,6 +122,9 @@ class LLMResponse:
     stop_reason: str = ""
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # Provider 요청에 실제 cache_control 접두사를 넣었는가. 토큰 수가 0인
+    # 첫 요청·최소 길이 미달도 cache miss 분모에는 들어가야 한다.
+    prompt_cache_eligible: bool = False
 
     @property
     def wants_tools(self) -> bool:

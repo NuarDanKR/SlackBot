@@ -173,4 +173,5 @@ class AnthropicProvider:
             stop_reason=str(getattr(resp, "stop_reason", "") or ""),
             cache_creation_input_tokens=cache_write,
             cache_read_input_tokens=cache_read,
+            prompt_cache_eligible=bool(system),
         )

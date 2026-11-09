@@ -5,6 +5,8 @@ import logging
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from threading import Lock
 
 from .base import (
     LLMResponse,
@@ -26,6 +28,21 @@ logger = logging.getLogger("tybot.gateway")
 #
 # 이 숫자는 **한도 검사에만** 쓰인다. 실제 기록은 보고된 토큰으로 한다.
 REVIEW_OUTPUT_TOKEN_ENVELOPE = 16000
+
+
+@dataclass(frozen=True)
+class PromptCacheStats:
+    """이 프로세스에서 관측한 Anthropic prompt cache 누적치."""
+
+    eligible_calls: int
+    hits: int
+    write_tokens: int
+    read_tokens: int
+    net_saved_usd: float
+
+    @property
+    def hit_rate(self) -> float:
+        return self.hits / self.eligible_calls if self.eligible_calls else 0.0
 
 
 def _reported(metrics: dict) -> bool:
@@ -117,6 +134,12 @@ class Router:
         # 장애 때 순서대로 시도할 모델. **비어 있으면 폴백하지 않는다** —
         # 어느 모델이 대체 가능한지는 우리가 짐작할 일이 아니다.
         self._fallback_models = tuple(fallback_models)
+        self._cache_lock = Lock()
+        self._cache_eligible_calls = 0
+        self._cache_hits = 0
+        self._cache_write_tokens = 0
+        self._cache_read_tokens = 0
+        self._cache_net_saved_usd = 0.0
 
     @classmethod
     def from_default_registry(
@@ -165,6 +188,49 @@ class Router:
     @property
     def spent_today(self) -> float:
         return self._cost.spent_today
+
+    @property
+    def prompt_cache_stats(self) -> PromptCacheStats:
+        """재시작 전까지의 cache 적중률과 **write premium 포함** 순절감액."""
+        with self._cache_lock:
+            return PromptCacheStats(
+                eligible_calls=self._cache_eligible_calls,
+                hits=self._cache_hits,
+                write_tokens=self._cache_write_tokens,
+                read_tokens=self._cache_read_tokens,
+                net_saved_usd=self._cache_net_saved_usd,
+            )
+
+    def _record_prompt_cache(
+        self, response: LLMResponse, spec: ModelSpec
+    ) -> PromptCacheStats:
+        if not response.prompt_cache_eligible:
+            return self.prompt_cache_stats
+        read_saved = (
+            response.cache_read_input_tokens
+            * (1.0 - spec.cache_read_multiplier)
+            * spec.input_price_per_mtok
+            / 1_000_000
+        )
+        write_premium = (
+            response.cache_creation_input_tokens
+            * (spec.cache_write_5m_multiplier - 1.0)
+            * spec.input_price_per_mtok
+            / 1_000_000
+        )
+        with self._cache_lock:
+            self._cache_eligible_calls += 1
+            self._cache_hits += int(response.cache_read_input_tokens > 0)
+            self._cache_write_tokens += response.cache_creation_input_tokens
+            self._cache_read_tokens += response.cache_read_input_tokens
+            self._cache_net_saved_usd += read_saved - write_premium
+            return PromptCacheStats(
+                eligible_calls=self._cache_eligible_calls,
+                hits=self._cache_hits,
+                write_tokens=self._cache_write_tokens,
+                read_tokens=self._cache_read_tokens,
+                net_saved_usd=self._cache_net_saved_usd,
+            )
 
     def _priciest_confidential(self) -> ModelSpec:
         """가장 비싼 confidential 단가. **모르는 모델의 상한으로만 쓴다.**"""
@@ -365,12 +431,15 @@ class Router:
         else:
             raise last_error if last_error else UnknownModel("호출할 모델이 없습니다")
         self._cost.record(resp.cost_usd)
+        cache_stats = self._record_prompt_cache(resp, candidate)
         # **어느 워크스페이스가 썼는지 로그에 남긴다.** 안 남기면 「누가 지갑을
         # 비웠나」 를 사후에 되짚을 수 없다 — 2026-09-15 에 그 질문에 답하지 못했다.
         workspace = current_workspace()
         logger.info(
             "llm_call model=%s provider=%s ws=%s in=%d out=%d cost=$%.4f"
-            " cache_write=%d cache_read=%d ws_today=$%.2f spent_today=$%.2f",
+            " cache_write=%d cache_read=%d cache_eligible=%s"
+            " cache_hits=%d/%d cache_net_saved=$%.4f"
+            " ws_today=$%.2f spent_today=$%.2f",
             resp.model,
             resp.provider,
             workspace or "-",
@@ -379,6 +448,10 @@ class Router:
             resp.cost_usd,
             resp.cache_creation_input_tokens,
             resp.cache_read_input_tokens,
+            resp.prompt_cache_eligible,
+            cache_stats.hits,
+            cache_stats.eligible_calls,
+            cache_stats.net_saved_usd,
             self._cost.spent_by_workspace().get(workspace, 0.0),
             self._cost.spent_today,
         )
