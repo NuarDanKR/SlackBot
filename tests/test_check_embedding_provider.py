@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import types
@@ -286,6 +287,33 @@ def test_secret_store_is_an_explicit_supported_key_source(sdk, monkeypatch, caps
 
     assert code == 0 and found["result"] == "ok"
     assert len(calls) == 1
+    assert keys == [KEY]
+
+
+def test_secret_store_reads_env_file_before_looking_up_the_key(sdk, monkeypatch, capsys):
+    """비밀 저장소는 `DATABASE_URL` 을 env 에서 찾는다. env 파일을 안 읽으면 DB 를
+    보지도 않고 「키 없음」 이 된다 — 2026-11-09 서버에서 실제로 그랬다."""
+    _calls, keys = sdk(ok_response())
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    def load_env_file():
+        monkeypatch.setenv("DATABASE_URL", "postgresql://from-env-file")
+        return "test"
+
+    monkeypatch.setitem(
+        sys.modules, "tybot.envfile", types.SimpleNamespace(load_env_file=load_env_file)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tybot.console.llm_secret_store",
+        types.SimpleNamespace(
+            resolve_key=lambda provider: KEY if os.getenv("DATABASE_URL") else None
+        ),
+    )
+
+    code, found = report(capsys, [*PLAN, "--execute", "--key-from", "secret-store"])
+
+    assert code == 0 and found["result"] == "ok"
     assert keys == [KEY]
 
 

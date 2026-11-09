@@ -109,6 +109,12 @@ def resolve_api_key(provider: str, *, source: str) -> str:
     프로바이더 응답 모양 — 을 못 본다. 운영 경로까지 같이 보고 싶으면
     `--key-from secret-store` 로 명시한다.
     """
+    from tybot.envfile import load_env_file
+
+    # 두 경로 모두 env 파일을 먼저 읽는다. 비밀 저장소는 `DATABASE_URL` 과 암호화
+    # 키 경로를 env 에서 찾는데, 읽지 않으면 DB 를 보지도 않고 「키 없음」 이 된다
+    # (2026-11-09 서버에서 실제로 `smoke_api_key_missing` 이 그렇게 났다).
+    load_env_file()
     if source == "secret-store":
         try:
             from tybot.console.llm_secret_store import resolve_key
@@ -117,9 +123,6 @@ def resolve_api_key(provider: str, *, source: str) -> str:
         except Exception:  # noqa: BLE001 - 조회 실패와 미설정을 구분하지 않는다
             found = None
     else:
-        from tybot.envfile import load_env_file
-
-        load_env_file()
         found = os.getenv(f"{provider.upper()}_API_KEY")
     if not found or not str(found).strip():
         raise SmokeRefusal("smoke_api_key_missing")
