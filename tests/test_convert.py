@@ -187,11 +187,12 @@ def test_empty_file_refused():
 
 def test_convertible_set():
     for ext in (
-        "xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp",
+        "xlsx", "xlsm", "xls", "xlsb", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp",
         "png", "jpg", "jpeg", "webp",
     ):
         assert can_convert(ext)
-    for ext in ("xls", "gif", "dwg", "zip"):
+    # xls·xlsb 는 2026-11-09 부터 LibreOffice → xlsx 경로로 변환한다.
+    for ext in ("gif", "dwg", "zip"):
         assert not can_convert(ext)
 
 

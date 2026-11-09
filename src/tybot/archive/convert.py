@@ -17,6 +17,7 @@
 | 형식 | 방법 | 비고 |
 |---|---|---|
 | xlsx/xlsm | Hermes 유래 openpyxl 렌더러 | 표시값·표·시트·마스킹 메타 |
+| xls/xlsb | LibreOffice 로 xlsx 변환 → xlsx 렌더러 | PDF 렌더 대신 표 구조 보존 |
 | docx | kordoc, python-docx 폴백 | 문단 + 표 |
 | pptx/ppt | LibreOffice PDF + kordoc | 시각 배치·이미지 OCR, 기본 텍스트 폴백 |
 | pdf | pypdf + kordoc OCR | 글자 없는 쪽만 **쪽별로** OCR, 쪽 단위 coverage |
@@ -48,6 +49,7 @@ from .external_convert import (
     failure_details,
     kordoc_lines,
     office_pdf_lines,
+    office_to_xlsx,
     xlsx_lines,
 )
 
@@ -119,7 +121,9 @@ MAX_PDF_OCR_PAGES = _limit("TYBOT_PDF_OCR_MAX_PAGES", 50)
 # 머리글·쪽번호만 텍스트로 들어간 스캔 문서가 이 자리에 온다.
 MIN_PDF_TEXT_CHARS = 200
 
-CONVERTIBLE = {"xlsx", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp"}
+CONVERTIBLE = {
+    "xlsx", "xlsm", "xls", "xlsb", "docx", "doc", "pptx", "ppt", "pdf", "hwpx", "hwp",
+}
 
 #: 변환 로직의 판. **출력이 달라지는 변경마다 올린다.**
 #:
@@ -814,6 +818,20 @@ def _image(data: bytes, suffix: str) -> list[str]:
         raise ConvertError(f"이미지 OCR 실패: {exc}") from exc
 
 
+def _legacy_spreadsheet(data: bytes, suffix: str) -> list[str]:
+    """구형 엑셀(xls·xlsb) — LibreOffice 로 xlsx 로 옮긴 뒤 xlsx 변환기로 읽는다.
+
+    2026-11-06 첨부 진단: 자금팀 연간자금수지(.xlsb)·수금계획(.xls) 등이 「미지원」 으로
+    남아 답변 근거가 되지 못했다. PDF 로 렌더하면 열이 쪽 경계에서 잘리므로 표 구조를
+    살리는 xlsx 경로를 탄다.
+    """
+    try:
+        converted = office_to_xlsx(data, suffix)
+    except (ExternalConverterUnavailable, ExternalConversionError) as exc:
+        raise ConvertError(f"{suffix.upper()} 변환 실패: {exc}") from exc
+    return [f"[변환 안내] {suffix.upper()} 를 xlsx 로 옮겨 읽었습니다", *_xlsx(converted)]
+
+
 def _legacy_office(data: bytes, suffix: str) -> list[str]:
     try:
         return _finish(office_pdf_lines(data, suffix))
@@ -823,6 +841,8 @@ def _legacy_office(data: bytes, suffix: str) -> list[str]:
 
 _HANDLERS = {
     "xlsx": _xlsx, "xlsm": _xlsx,
+    "xls": lambda data: _legacy_spreadsheet(data, "xls"),
+    "xlsb": lambda data: _legacy_spreadsheet(data, "xlsb"),
     "docx": _docx, "doc": lambda data: _legacy_office(data, "doc"),
     "pptx": _pptx, "ppt": lambda data: _legacy_office(data, "ppt"),
     "pdf": _pdf,

@@ -311,6 +311,52 @@ def _record_render_coverage(source: bytes, pdf_data: bytes, suffix: str) -> None
         _record("", flag=RENDER_LOST_UNITS)
 
 
+#: LibreOffice 로 xlsx 로 옮겨 읽는 구형 엑셀 형식.
+LEGACY_SPREADSHEETS = frozenset({"xls", "xlsb"})
+
+
+def office_to_xlsx(data: bytes, suffix: str) -> bytes:
+    """구형 엑셀(xls·xlsb)을 xlsx 로 바꾼다. 읽는 것은 xlsx 변환기 몫이다.
+
+    PDF 로 렌더해 읽는 `office_pdf_lines` 를 쓰지 않는 이유: 엑셀을 쪽으로 렌더하면
+    열이 쪽 경계에서 잘리고 시트·셀 구조가 사라진다. 자금 수지표처럼 숫자 표가 본체인
+    문서는 그 구조가 곧 내용이다. xlsx 로 옮기면 시트·행·셀이 그대로 남고, 기존
+    xlsx 변환기의 표 렌더링과 상한을 그대로 탄다.
+    """
+    kind = suffix.lstrip(".").lower()
+    if kind not in LEGACY_SPREADSHEETS:
+        raise ExternalConversionError(f"xlsx 로 옮길 형식이 아닙니다: {kind}")
+    soffice = _binary("LIBREOFFICE_BIN", "soffice", "libreoffice")
+    with tempfile.TemporaryDirectory(prefix="tybot-sheet-") as raw:
+        work = Path(raw)
+        source = work / f"source.{kind}"
+        output = work / "out"
+        profile = work / "profile"
+        output.mkdir()
+        profile.mkdir()
+        source.write_bytes(data)
+        result = _run(
+            [
+                soffice,
+                f"-env:UserInstallation={profile.resolve().as_uri()}",
+                "--headless",
+                "--norestore",
+                "--convert-to",
+                "xlsx",
+                "--outdir",
+                str(output),
+                str(source),
+            ],
+            cwd=work,
+            home=work,
+        )
+        converted = output / "source.xlsx"
+        if result.returncode != 0 or not converted.is_file():
+            detail = (result.stderr or result.stdout).strip()[:300]
+            raise ExternalConversionError(f"LibreOffice xlsx 변환 실패: {detail or '출력 없음'}")
+        return converted.read_bytes()
+
+
 def office_pdf_lines(data: bytes, suffix: str) -> list[str]:
     """Render an office document to PDF, then parse its visual representation."""
     soffice = _binary("LIBREOFFICE_BIN", "soffice", "libreoffice")
