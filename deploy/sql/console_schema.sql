@@ -259,6 +259,27 @@ CREATE INDEX IF NOT EXISTS usage_call_by_workspace ON usage_call (workspace, at 
 COMMENT ON TABLE usage_call IS
     '질문 문장과 답변 본문은 담지 않는다. 의도·근거건수·모델·비용만.';
 
+-- 사용자별 TYBot/VIPBot 성공 답변 제한. 질문·답변 본문은 저장하지 않는다.
+-- 시작 전에 reserved를 잡고 Slack 전달 성공 뒤 counted로 확정한다. 실패는 행을 지운다.
+CREATE TABLE IF NOT EXISTS answer_quota_reservation (
+    reservation_id text PRIMARY KEY,
+    day            date NOT NULL,
+    workspace      text NOT NULL,
+    bot_name       text NOT NULL CHECK (bot_name IN ('tybot', 'vipbot')),
+    slack_user     text NOT NULL,
+    event_key      text NOT NULL,
+    state          text NOT NULL CHECK (state IN ('reserved', 'counted')),
+    reserved_at    timestamptz NOT NULL DEFAULT now(),
+    finalized_at   timestamptz,
+    UNIQUE (day, workspace, bot_name, event_key)
+);
+
+CREATE INDEX IF NOT EXISTS answer_quota_by_user
+    ON answer_quota_reservation (day, workspace, bot_name, slack_user, state);
+
+COMMENT ON TABLE answer_quota_reservation IS
+    '질문·답변 없이 사용자별 일일 성공 전달 횟수와 진행 중 예약만 저장한다.';
+
 -- 일별 집계. 기준선(최근 14일 같은 시각 중위값) 계산과 화면 표시에 쓴다.
 CREATE TABLE IF NOT EXISTS usage_daily (
     day        date NOT NULL,
@@ -461,7 +482,7 @@ DECLARE
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE workspace, workspace_readable, workspace_secret, console_user, console_user_workspace, harness_file, harness_version, harness_request,'
-                ' deploy_request, deploy_event, archive_doc, archive_course, usage_call, usage_daily, anomaly, archive_read_audit,'
+                ' deploy_request, deploy_event, archive_doc, archive_course, usage_call, answer_quota_reservation, usage_daily, anomaly, archive_read_audit,'
                 ' specialist_bot, specialist_workspace, specialist_change_request, specialist_call, console_audit_event TO tyslackai';
         -- bigserial 시퀀스도 함께. 없으면 INSERT 만 권한 오류로 죽는다.
         --
@@ -475,7 +496,7 @@ BEGIN
               JOIN pg_depend d ON d.objid = s.oid AND d.deptype = 'a'
               JOIN pg_class t ON t.oid = d.refobjid
              WHERE s.relkind = 'S' AND t.relname = ANY(ARRAY['workspace', 'workspace_readable', 'workspace_secret', 'console_user', 'console_user_workspace', 'harness_file', 'harness_version', 'harness_request',
-                 'deploy_request', 'deploy_event', 'archive_doc', 'archive_course', 'usage_call', 'usage_daily', 'anomaly', 'archive_read_audit',
+                 'deploy_request', 'deploy_event', 'archive_doc', 'archive_course', 'usage_call', 'answer_quota_reservation', 'usage_daily', 'anomaly', 'archive_read_audit',
                  'specialist_bot', 'specialist_workspace', 'specialist_change_request', 'specialist_call', 'console_audit_event'])
         LOOP
             EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE ' || seq_name || ' TO tyslackai';

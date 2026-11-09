@@ -465,6 +465,7 @@ class WorkspaceBot:
         autojoin: bool | None = None,
         operational_owner: bool = True,
         private_answers: bool = False,
+        answer_quota=None,
     ) -> None:
         from slack_bolt import App
 
@@ -490,6 +491,7 @@ class WorkspaceBot:
         self._question_transform = question_transform or (lambda question: question)
         self.operational_owner = operational_owner
         self.private_answers = private_answers
+        self.answer_quota = answer_quota
         # 전 채널·전 워크스페이스 통합조회 허용 사용자. 채널 멤버십과 워크스페이스 경계를 모두 우회한다.
         self.exec_users = {
             u.strip() for u in (os.getenv("EXEC_USERS") or "").split(",") if u.strip()
@@ -3009,6 +3011,42 @@ class WorkspaceBot:
             )
             return
 
+        quota = getattr(self, "answer_quota", None)
+        reservation_id = ""
+        if quota is not None and event.get("user"):
+            decision = quota.reserve(
+                workspace=self.workspace,
+                bot_name=self.bot_name,
+                slack_user=str(event.get("user") or ""),
+                event_key=f"{event.get('channel') or ''}:{event.get('ts') or ''}",
+            )
+            if decision.duplicate:
+                log.info(
+                    "[%s] 답변 횟수 원장의 재전송 무시 bot=%s ch=%s ts=%s",
+                    self.workspace,
+                    self.bot_name,
+                    event.get("channel"),
+                    event.get("ts"),
+                )
+                return
+            if not decision.allowed:
+                from ..answer_quota import limit_message
+
+                notice = limit_message(decision, self.bot_name)
+                private_channel_request = bool(
+                    getattr(self, "private_answers", False) and in_channel
+                )
+                if private_channel_request:
+                    self._post_private_text(
+                        client, str(event.get("user") or ""), notice
+                    )
+                    with contextlib.suppress(Exception):
+                        say(text=PRIVATE_ANSWER_NOTICE)
+                else:
+                    say(text=notice)
+                return
+            reservation_id = decision.reservation_id
+
         from .progress import RequestProgress
 
         progress = RequestProgress(
@@ -3068,6 +3106,11 @@ class WorkspaceBot:
             )
             self.qa_log.write(rec)
         finally:
+            if quota is not None and reservation_id:
+                if event.pop("_tybot_quota_success", False):
+                    quota.finalize(reservation_id)
+                else:
+                    quota.release(reservation_id)
             progress.close()
 
     def _ingest_notice(self, event: dict, *, in_channel: bool) -> str:
@@ -3326,6 +3369,11 @@ class WorkspaceBot:
                     notice_kw["thread_ts"] = thread_ts
                 with contextlib.suppress(Exception):
                     say(**notice_kw)
+            event["_tybot_quota_success"] = bool(
+                response is not None
+                and ans is not None
+                and ans.reason in ("answered", "advice")
+            )
             rec = QARecord.build(
                 record_id=qa_record_id,
                 workspace=self.workspace,
@@ -4832,6 +4880,7 @@ def _start_external_v3(configs):
 
 def build_bots() -> list[WorkspaceBot]:
     """설정을 읽어 워크스페이스별 봇을 만든다. 공유 자원은 한 번만 생성한다."""
+    from ..answer_quota import AnswerQuota
     from ..gateway.budget import WorkspaceLimits
     from ..gateway.router import Router
 
@@ -4872,6 +4921,7 @@ def build_bots() -> list[WorkspaceBot]:
         ),
         allow_master_business_answers=lambda ctx: master_v2_enabled(ctx.workspace),
     )
+    answer_quota = AnswerQuota.from_env()
 
     # 상태 트리가 다른 워크스페이스 이름을 표시하려면 키만으로는 부족하다.
     # 각 봇은 자기 cfg 만 알기 때문에 여기서 지도를 만들어 넘긴다.
@@ -4880,7 +4930,12 @@ def build_bots() -> list[WorkspaceBot]:
     bots = []
     for cfg in configs:
         bot = WorkspaceBot(
-            cfg, store=store, engine=engine, qa_log=qa_log, archive_dir=archive_dir
+            cfg,
+            store=store,
+            engine=engine,
+            qa_log=qa_log,
+            archive_dir=archive_dir,
+            answer_quota=answer_quota,
         )
         bot.path_problems = problems
         bot.workspace_labels = labels
@@ -4952,6 +5007,7 @@ def build_bots() -> list[WorkspaceBot]:
             autojoin=False,
             operational_owner=False,
             private_answers=True,
+            answer_quota=answer_quota,
         )
         vip_bot.path_problems = problems
         vip_bot.workspace_labels = managed_labels

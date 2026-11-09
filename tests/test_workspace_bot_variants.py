@@ -371,6 +371,7 @@ def test_shared_runtime_builds_vip_as_the_same_workspace_bot(monkeypatch) -> Non
     assert vip_options["realtime"] is False
     assert vip_options["autojoin"] is False
     assert vip_options["private_answers"] is True
+    assert vip_options["answer_quota"] is made[0][1]["answer_quota"]
     assert engine_options[0]["workspace_labels"] == {
         "tyit": "TY IT",
         "mgmt": "경영본부",
