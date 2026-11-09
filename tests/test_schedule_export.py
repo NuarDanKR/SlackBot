@@ -29,6 +29,7 @@ KST = timezone(timedelta(hours=9))
 def default_to_department_schedule_mode(monkeypatch):
     """CLI default-path tests must not inherit an operator's personal-DM flag."""
     monkeypatch.delenv("SCHEDULE_PERSONAL_DM_ENABLED", raising=False)
+    monkeypatch.setattr(se, "load_env_file", lambda: "test")
 
 
 def _row(
