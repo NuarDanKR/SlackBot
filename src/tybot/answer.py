@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -104,6 +105,42 @@ class AnswerPrompts:
     advice: str = ADVICE_PROMPT
     interim_advice: str = INTERIM_ADVICE_PROMPT
     specialist: str | None = None
+
+
+_SPECIALIST_NUMBER_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}"
+    r"|[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    r"(?:(?:퍼센트|백만원|천만원|억원|조원|만원|천원|원|년|월|일|건|명|개|회|차|배)(?![가-힣])|%)?"
+)
+_SPECIALIST_LIST_MARKER_RE = re.compile(
+    r"(?m)^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?\d+[.)]\s+"
+)
+_SPECIALIST_SOURCE_MARKER_RE = re.compile(r"(?i)(?:출처|source)\s*:")
+
+
+def _specialist_numeric_facts(text: str) -> Counter[str]:
+    """Numeric facts whose spelling must survive executive rendering exactly."""
+    without_list_markers = _SPECIALIST_LIST_MARKER_RE.sub("", str(text or ""))
+    return Counter(
+        re.sub(r"\s+", "", match.group(0))
+        for match in _SPECIALIST_NUMBER_RE.finditer(without_list_markers)
+    )
+
+
+def _specialist_render_is_safe(original: str, rendered: str) -> bool:
+    if _specialist_numeric_facts(original) != _specialist_numeric_facts(rendered):
+        return False
+    return _SPECIALIST_SOURCE_MARKER_RE.search(rendered) is None
+
+
+def _specialist_safe_fallback(text: str) -> str:
+    """Remove specialist-authored source claims; system citations remain separate."""
+    lines = [
+        line
+        for line in str(text or "").splitlines()
+        if _SPECIALIST_SOURCE_MARKER_RE.search(line) is None
+    ]
+    return "\n".join(lines).strip()
 
 MODEL_FLAG_RE = re.compile(r"--model=([A-Za-z0-9._\-]+)")
 # 아카이브 범위 자체를 묻는 표현. 분류기가 out_of_scope 로 잘못 보내도 여기서 되돌린다.
@@ -1134,6 +1171,7 @@ class AnswerEngine:
         original = str(text or "")
         if not prompt:
             return original, source_model, source_cost_usd, False
+        fallback = _specialist_safe_fallback(original)
         try:
             response = self._router.complete(
                 [
@@ -1154,11 +1192,14 @@ class AnswerEngine:
             )
         except Exception as exc:  # noqa: BLE001 - grounded original is the fallback
             logger.warning("specialist answer rendering failed: %s", type(exc).__name__)
-            return original, source_model, source_cost_usd, False
+            return fallback, source_model, source_cost_usd, False
         rendered = str(response.text or "").strip()
         if not rendered:
             logger.warning("specialist answer rendering returned empty text")
-            return original, source_model, source_cost_usd, False
+            return fallback, source_model, source_cost_usd, False
+        if not _specialist_render_is_safe(original, rendered):
+            logger.warning("specialist answer rendering changed protected facts")
+            return fallback, source_model, source_cost_usd, False
         return (
             rendered,
             response.model,
