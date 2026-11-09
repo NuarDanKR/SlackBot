@@ -151,3 +151,33 @@ def test_qa_log_dir_comes_from_env_file_and_missing_dir_stops(tmp_path, monkeypa
     ))
     with pytest.raises(SystemExit):
         module.resolve_qa_log_dir("")
+
+
+def test_breakdown_explains_failures_with_codes_only(tmp_path):
+    """상태만으로는 고칠 자리가 안 보인다. 왜 그렇게 분류됐는지를 고정 코드로 센다."""
+    leaked = "Traceback: /var/lib/tybot/archive/비밀.md 연결 실패 secret-host"
+    write_jsonl(
+        tmp_path / "qa-2026-11.jsonl",
+        [
+            {"ts": "2026-11-04T10:00:00+09:00", "workspace": "sample", "record_id": "a",
+             "question": "q", "answer": "", "reason": "error", "status": "error",
+             "error": leaked, "hits": 0, "citations": []},
+            {"ts": "2026-11-04T10:05:00+09:00", "workspace": "sample", "record_id": "b",
+             "question": "q", "answer": "a", "reason": "specialist_timeout", "status": "error",
+             "specialist_error_code": "specialist_timeout", "hits": 0, "citations": []},
+            {"ts": "2026-11-04T11:00:00+09:00", "workspace": "sample", "record_id": "c",
+             "question": "q", "answer": "a", "reason": "ok", "hits": 2,
+             "citations": ["#x / y.md"]},
+        ],
+    )
+    payload = load_script().build_baseline(
+        tmp_path, since=date(2026, 11, 1), workspace="sample",
+        generated_at=datetime(2026, 11, 4, 12, tzinfo=KST),
+    )
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert "grounded_sample" not in payload["breakdown"]
+    failures = payload["breakdown"]["search_failed"]["failureCodes"]
+    assert failures.get("specialist_timeout") == 1
+    assert failures.get("other") == 1
+    for secret in ("Traceback", "비밀", "secret-host", "/var/lib"):
+        assert secret not in rendered

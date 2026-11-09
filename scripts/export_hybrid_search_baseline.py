@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -15,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from tybot.answer_issues import (  # noqa: E402
     KST,
+    failure_code,
     feedback_by_record,
     load_feedback,
     load_records,
@@ -43,6 +45,7 @@ def build_baseline(
     ]
     states = Counter(item.state for item in classified)
     eligible = Counter(item.state for item in classified if item.eligible)
+    breakdown = _breakdown(records, classified)
     return {
         "schema": SCHEMA,
         "generatedAt": generated_at.astimezone(KST).isoformat(),
@@ -53,6 +56,44 @@ def build_baseline(
         "eligible": dict(sorted(eligible.items())),
         "eligibleTotal": sum(eligible.values()),
         "unknownNoEvidence": states.get("unknown_no_evidence", 0),
+        "breakdown": breakdown,
+    }
+
+
+#: 근거를 찾은 답(`grounded_sample`)과 해당 없음은 쪼개 보지 않는다. 고칠 대상은 나머지다.
+BREAKDOWN_SKIP = frozenset({"grounded_sample", "not_applicable"})
+_CODE = re.compile(r"^[a-z0-9_.:-]{1,60}$")
+
+
+def _code(value: object) -> str:
+    """고정 낱말만 그대로 둔다. 문장·경로가 섞인 값은 `other` 로 묶는다."""
+    text = str(value or "").strip().casefold()
+    if not text:
+        return "none"
+    return text if _CODE.fullmatch(text) else "other"
+
+
+def _breakdown(records: list[dict], classified) -> dict:
+    """근거 없는 답의 상태마다 **왜** 그렇게 분류됐는지를 건수로.
+
+    상태만으로는 고칠 자리가 안 보인다. `search_failed` 18건이 시간 초과인지
+    전문 봇 실패인지, `unknown_no_evidence` 가 어떤 reason 을 달고 있는지가
+    다음 수정의 대상을 정한다. 본문은 없고 고정 코드와 건수뿐이다.
+    """
+    out: dict[str, dict[str, Counter]] = {}
+    for row, item in zip(records, classified, strict=True):
+        if item.state in BREAKDOWN_SKIP:
+            continue
+        slot = out.setdefault(item.state, {
+            "reasons": Counter(), "issueCodes": Counter(), "failureCodes": Counter(),
+        })
+        slot["reasons"][_code(row.get("reason"))] += 1
+        for code in item.issue_codes:
+            slot["issueCodes"][_code(code)] += 1
+        slot["failureCodes"][_code(failure_code(row))] += 1
+    return {
+        state: {name: dict(counter.most_common()) for name, counter in parts.items()}
+        for state, parts in sorted(out.items())
     }
 
 
