@@ -631,8 +631,9 @@ def test_the_scan_covers_every_runtime_reader():
 def test_runtime_reader_status_matches_the_actual_contracts():
     """화면이 전부 적용/미적용이라고 뭉개면 안 된다.
 
-    2026-10-12 에 Master 도 `bot_connection` 을 읽게 됐다(WC-14). 라우팅은 아직
-    v2 를 켠 워크스페이스에서만 `specialist_route` 를 본다.
+    2026-10-12 에 Master 도 `bot_connection` 을 읽게 됐다(WC-14). VIPBot 은
+    전용 런타임이 검증된 연결을 읽는다. 라우팅은 아직 v2 를 켠 워크스페이스에서만
+    `specialist_route` 를 본다.
     """
     reads = {
         name: [table for table in NEW_TABLES
@@ -649,7 +650,7 @@ def test_runtime_reader_status_matches_the_actual_contracts():
     assert admin.RUNTIME_READER_STATUS == {
         "master_connection": True,
         "archiver_connection": True,
-        "vipbot_connection": False,
+        "vipbot_connection": True,
         "specialist_route": False,
     }
     # 라우팅이 전 워크스페이스에서 전환되기 전까지는 **전부 적용**이 아니다.
@@ -666,7 +667,7 @@ def test_the_read_model_says_it_does_not_apply_now(repo):
         effect = payload["runtimeEffect"]
         assert effect["appliesNow"] is False
         assert effect["summary"] == "연결별 런타임 적용 상태가 다릅니다. 아래 상세를 확인하세요."
-        assert any("런타임에는 아직" in detail for detail in effect["details"])
+        assert any("다음에 시작할 때 적용" in detail for detail in effect["details"])
         assert len(effect["details"]) >= 3
 
 

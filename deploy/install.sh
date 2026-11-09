@@ -493,6 +493,22 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]] \
 fi
 
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
+# VIPBOT_STAGE:BEGIN
+# VIPBot is staged only on an explicit operator request. Staging installs the
+# static unit and non-secret settings template, but never starts or enables the
+# process and never creates credentials. Existing settings are preserved.
+if [[ "${WITH_VIPBOT:-0}" == "1" ]]; then
+  install -m 0644 "$APP_DIR/deploy/tybot-vipbot.service" /etc/systemd/system/tybot-vipbot.service
+  if [[ ! -f "$CONF_DIR/tybot-vipbot.conf" ]]; then
+    install -o root -g tybot -m 0640 \
+      "$APP_DIR/deploy/tybot-vipbot.conf.example" "$CONF_DIR/tybot-vipbot.conf"
+    echo "  → VIPBot 비시크릿 설정 본보기 생성: $CONF_DIR/tybot-vipbot.conf"
+  else
+    echo "  → $CONF_DIR/tybot-vipbot.conf 이미 존재 — 값을 건드리지 않음."
+  fi
+  echo "  → VIPBot 준비 설치 완료 — readiness 통과 전에는 start/enable 하지 않습니다."
+fi
+# VIPBOT_STAGE:END
 # 타이머는 파일만 배치한다. enable은 운영자가 직접 하거나 관리자 콘솔의 배치 관리에서 결정한다.
 #
 # 다만 **꺼져 있다는 사실을 아무도 모르는 것**이 실제 문제였다. 타이머가 안 켜져 있으면

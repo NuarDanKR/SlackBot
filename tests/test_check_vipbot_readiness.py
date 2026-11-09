@@ -566,6 +566,15 @@ def test_the_shipped_example_passes_its_own_check():
     assert got.get("invalid_lines") == 0
 
 
+def test_the_shipped_example_cannot_activate_an_unnamed_workspace():
+    values = check.allowed_values(EXAMPLE)
+    settings, _archive = check.settings_facts(values)
+    assert settings["workspace"] == ""
+    assert "workspace_unconfigured" in codes(
+        check.evaluate(facts(settings=settings))
+    )
+
+
 def test_a_missing_settings_file_is_reported(tmp_path):
     got = check.settings_file_facts(tmp_path / "absent.conf")
     assert got["present"] is False

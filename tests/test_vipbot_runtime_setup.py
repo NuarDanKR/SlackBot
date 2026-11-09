@@ -306,10 +306,48 @@ def test_only_one_vipbot_process_can_run():
     assert not any(line.startswith("ExecStart=") and "&" in line for line in lines)
 
 
-def test_the_installer_does_not_put_this_draft_on_the_server_by_itself():
-    # 초안이 자동으로 깔리면 「아직 없다」 와 「꺼져 있다」 를 구분할 수 없다.
+def test_the_installer_stages_vipbot_only_after_an_explicit_opt_in():
     install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
-    assert "tybot-vipbot.service" not in install
+    block = install.split("# VIPBOT_STAGE:BEGIN", 1)[1].split(
+        "# VIPBOT_STAGE:END", 1
+    )[0]
+
+    assert block.count('if [[ "${WITH_VIPBOT:-0}" == "1" ]]') == 1
+    assert "tybot-vipbot.service" in block
+    assert "tybot-vipbot.conf.example" in block
+    assert "systemctl start" not in block
+    assert "systemctl enable" not in block
+    assert "--set-password" not in block
+    assert "tybot-vipbot-database-url" not in block
+    assert "tybot-vipbot-anthropic-api-key" not in block
+
+
+def test_the_vipbot_stage_preserves_existing_settings_and_creates_no_secret():
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    block = install.split("# VIPBOT_STAGE:BEGIN", 1)[1].split(
+        "# VIPBOT_STAGE:END", 1
+    )[0]
+
+    assert 'if [[ ! -f "$CONF_DIR/tybot-vipbot.conf" ]]' in block
+    assert "install -o root -g tybot -m 0640" in block
+    assert "sed -i" not in block
+    assert "REPLACE_ME" not in block
+
+
+def test_the_one_time_activation_procedure_stops_the_restarting_service():
+    guide = (
+        ROOT / "docs" / "verification" / "2026-11-06-vipbot-activation.md"
+    ).read_text(encoding="utf-8")
+    start = guide.index("### 9. 한 번 띄워 보기")
+    stop = guide.index("### 10.", start)
+    procedure = guide[start:stop]
+
+    assert "Restart=always" in procedure
+    assert "systemctl start tybot-vipbot" in procedure
+    assert "systemctl stop tybot-vipbot" in procedure
+    assert procedure.index("systemctl start tybot-vipbot") < procedure.index(
+        "systemctl stop tybot-vipbot"
+    )
 
 
 def test_the_database_test_refuses_an_operational_cluster_before_any_grant():

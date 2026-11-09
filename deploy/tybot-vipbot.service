@@ -1,9 +1,9 @@
 [Unit]
 # B-83 VIPBot — TYBot 과 **다른 Slack 앱 · 다른 DB 계정**으로 도는 별도 프로세스.
 #
-# 이 유닛은 **초안이다.** `[Install]` 섹션이 일부러 없어서 `systemctl enable` 이
-# 거부된다. 런타임 모듈이 서기 전에 부팅에 걸어 두면, 없는 모듈로 재시작을
-# 반복하며 journal 만 채우고 「켜 두었다」 는 기억만 남는다.
+# 이 유닛은 **준비 설치용 정적 유닛**이다. `[Install]` 섹션이 일부러 없어서
+# `systemctl enable` 이 거부된다. readiness와 실제 Slack 운영 검증 전에 부팅에
+# 걸어 두면 재시작을 반복하며 journal 만 채우고 「켜 두었다」 는 기억만 남는다.
 # 가동할 때 아래 두 줄을 파일 끝에 더한다:
 #     [Install]
 #     WantedBy=multi-user.target
@@ -59,8 +59,8 @@ LoadCredential=tybot-workspace-secret-key:/etc/tybot/workspace-secret.key
 LoadCredential=tybot-vipbot-anthropic-api-key:/etc/tybot/tybot-vipbot-anthropic-api-key
 Environment=WORKSPACE_SECRET_KEY_FILE=%d/tybot-workspace-secret-key
 
-# 런타임 모듈은 아직 없다. 없는 모듈로 조용히 도는 일이 없도록 먼저 확인한다 —
-# ExecStartPre 가 실패하면 유닛은 기동하지 않고 이유가 journal 에 남는다.
+# 배포가 런타임 모듈을 빠뜨렸다면 Slack 연결 전에 중단한다. ExecStartPre가
+# 실패하면 유닛은 기동하지 않고 이유가 journal에 남는다.
 ExecStartPre=/opt/tybot/.venv/bin/python -c "import tybot.vipbot_runtime"
 ExecStart=/opt/tybot/.venv/bin/python -m tybot.vipbot_runtime
 

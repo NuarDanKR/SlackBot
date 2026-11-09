@@ -162,7 +162,7 @@ sudo vi /etc/tybot/tybot-vipbot.conf
 
 ### 5. Slack 앱 설치
 
-`docs/pilot/vipbot-slack-app-manifest.yaml` 로 **별도 앱**을 만든다. 스코프 6개·
+`docs/pilot/vipbot-slack-app-manifest.yaml` 로 **별도 앱**을 만든다. 스코프 7개·
 이벤트 2개뿐이고 Socket Mode 만 쓴다. 설치 뒤 봇·앱 토큰을 콘솔에서 VIPBot
 연결로 저장한다(`bot_connection`, `bot_key='vipbot'`).
 
@@ -174,11 +174,36 @@ sudo vi /etc/tybot/tybot-vipbot.conf
 
 둘 중 하나라도 비면 VIPBot 은 답하지 않는다(`no_grant` · `no_sources`).
 
+웹콘솔을 쓸 수 없는 장애 시간에는 원시 SQL 대신 같은 저장소 경계를 쓰는 CLI로
+등록한다. `--reason`과 `--actor`는 감사 기록이므로 생략할 수 없다. DB 접속 문자열은
+명령행에 쓰지 않고 기존 root 관리 환경 파일에서 읽는다.
+
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/manage_vipbot_access.py \
+  --env-file /etc/tybot/tybot.env grant \
+  --emp-no '<사번>' --reason 'VIPBot 운영 승인' --actor '<작업자 회사 이메일>'
+
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/manage_vipbot_access.py \
+  --env-file /etc/tybot/tybot.env add-source \
+  --workspace '<워크스페이스 키>' --channel-id '<Slack 채널 ID>' \
+  --name '<채널 표시명>' --reason 'VIPBot 근거 채널 승인' \
+  --actor '<작업자 회사 이메일>'
+
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/manage_vipbot_access.py \
+  --env-file /etc/tybot/tybot.env status \
+  --workspace '<질문자의 워크스페이스 키>' --slack-user '<Slack 사용자 ID>'
+```
+
+`status`가 `allowed=true code=allowed`와 근거 채널 1개 이상을 함께 보여야 한다.
+회수는 같은 도구의 `revoke`·`remove-source` 명령을 사용하며 줄을 삭제하지 않는다.
+
 ### 7. 점검이 조용해질 때까지
 
 ```bash
-cd /opt/tybot && sudo -u tybot env VIPBOT_WORKSPACE=… VIPBOT_ARCHIVE_DIR=… \
-  VIPBOT_DAILY_LIMIT_USD=… /opt/tybot/.venv/bin/python \
+cd /opt/tybot && sudo -u tybot /opt/tybot/.venv/bin/python \
   /opt/tybot/scripts/check_vipbot_readiness.py
 ```
 `준비됨` 이 나와야 다음으로 간다.
@@ -199,12 +224,27 @@ SECURITY DEFINER 차단·퇴직/만료/회수/근거없음을 실제로 거절�
 
 ### 9. 한 번 띄워 보기 (아직 enable 아님)
 
+다음 정식 배포 때 공통 설치기에 **명시적 준비 옵션**을 준다. 공통 설치기는
+VIPBot 외의 평소 배포 작업도 함께 수행한다. `WITH_VIPBOT=1` 블록 자체는 유닛과
+비시크릿 설정 본보기만 배치하며, 기존 설정을 덮어쓰거나 자격증명을 만들거나
+VIPBot 서비스를 start/enable 하지 않는다.
+
 ```bash
-sudo install -m 0644 /opt/tybot/deploy/tybot-vipbot.service \
-  /etc/systemd/system/tybot-vipbot.service
-sudo systemctl daemon-reload
+sudo env WITH_VIPBOT=1 /opt/tybot/deploy/install.sh
+sudo -u tybot /opt/tybot/.venv/bin/python \
+  /opt/tybot/scripts/check_vipbot_readiness.py
+```
+
+점검이 `준비됨`일 때만 수동으로 한 번 시작한다.
+
+이 유닛은 `Restart=always`라서 `start` 뒤에는 계속 실행된다. 아래 확인이 끝나면
+이 단계에서는 반드시 중지한다. 계속 운영하는 결정은 다음 절의 `[Install]` 변경과
+별도로 남긴다.
+
+```bash
 sudo systemctl start tybot-vipbot
 sudo journalctl -u tybot-vipbot -n 50 --no-pager
+sudo systemctl stop tybot-vipbot
 ```
 `VIPBot 기동 ws=… team=… bot=… model=…` 한 줄이 나오면 신원 세 곳이 맞은 것이다.
 틀리면 `vipbot_identity_mismatch` 로 **붙기 전에** 멎는다.
