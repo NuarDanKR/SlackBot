@@ -187,7 +187,8 @@ def test_verify_checks_every_table_privilege_and_other_definer_function():
     assert "p.prosecdef" in body
     assert "other_definers" in body
     assert "ROLE_DEFINER=tybot_vipbot_definer" in body
-    assert "pg_get_function_identity_arguments" in body
+    assert "p.oid IN ('$CONFIG_FN'::regprocedure, '$ACCESS_FN'::regprocedure)" in body
+    assert "r.rolname <> '$ROLE_DEFINER'" in body
 
 
 # --- 4. 스키마 쪽 계약 --------------------------------------------------------
