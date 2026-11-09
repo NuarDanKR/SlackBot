@@ -324,12 +324,11 @@ direct_grants="$(psql_q "SELECT coalesce(string_agg(grantee||':'||table_name||':
 [[ -z "$direct_grants" ]] || fail "VIPBot 기반 표에 직접 GRANT 가 남아 있습니다: $direct_grants"
 log "VIPBot 기반 표 직접 GRANT 없음 (role_table_grants)"
 
-function_owners="$(psql_q "SELECT string_agg(n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||r.rolname, ',' ORDER BY p.proname)
+wrong_function_owners="$(psql_q "SELECT coalesce(string_agg(p.oid::regprocedure::text||':'||r.rolname, ',' ORDER BY p.proname),'')
   FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner
-  JOIN pg_namespace n ON n.oid=p.pronamespace
- WHERE p.oid IN ('$CONFIG_FN'::regprocedure, '$ACCESS_FN'::regprocedure)")"
-expected_owners="public.vipbot_authorization(text, text):$ROLE_DEFINER,public.vipbot_connection_config(text):$ROLE_DEFINER"
-[[ "$function_owners" == "$expected_owners" ]] || fail "VIPBot 함수 소유자가 다릅니다: $function_owners"
+ WHERE p.oid IN ('$CONFIG_FN'::regprocedure, '$ACCESS_FN'::regprocedure)
+   AND r.rolname <> '$ROLE_DEFINER'")"
+[[ -z "$wrong_function_owners" ]] || fail "VIPBot 함수 소유자가 다릅니다: $wrong_function_owners"
 log "함수 소유자: $ROLE_DEFINER"
 
 other_definers="$(psql_q "SELECT coalesce(string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text),'')

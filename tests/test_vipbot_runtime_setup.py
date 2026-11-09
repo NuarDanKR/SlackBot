@@ -331,6 +331,14 @@ def test_role_attribute_checks_do_not_depend_on_postgres_boolean_text():
     )
 
 
+def test_function_owner_check_compares_roles_not_rendered_signatures():
+    script = SETUP.read_text(encoding="utf-8")
+
+    assert "pg_get_function_identity_arguments" not in script
+    assert "AND r.rolname <> '$ROLE_DEFINER'" in script
+    assert '[[ -z "$wrong_function_owners" ]]' in script
+
+
 def test_the_installer_stages_vipbot_only_after_an_explicit_opt_in():
     install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
     block = install.split("# VIPBOT_STAGE:BEGIN", 1)[1].split(
