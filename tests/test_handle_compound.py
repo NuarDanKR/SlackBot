@@ -415,6 +415,49 @@ def test_dm_omitted_subject_reaches_the_common_answer_path():
     assert "2024년" not in bot.engine.asked[0]
 
 
+def test_dm_user_correction_updates_the_next_common_search():
+    ans = Answer("협약서를 확인했습니다", [], "m", 0.0, 1, "answered")
+    bot = _bot([
+        Intent(
+            "summary",
+            question="고창 덕산 사업협약서 주요내용 정리해줘",
+            standalone_question="고창 덕산 사업협약서 주요내용 정리해줘",
+            terms=["고창", "덕산", "사업협약서"],
+        )
+    ], [ans])
+    bot.qa_log.dm_context = [{
+        "question": "고창 데시앙이 맞아",
+        "intent_kind": "feedback",
+        "subject_terms": ["고창", "데시앙"],
+    }]
+
+    bot._handle(
+        {
+            "text": "고창 덕산 사업협약서 주요내용 정리해줘",
+            "user": "U1",
+            "channel": "D1",
+            "ts": "1.0",
+        },
+        Mock(),
+        lambda **kw: None,
+        in_channel=False,
+    )
+
+    assert len(bot.engine.asked) == 1
+    assert "데시앙" in bot.engine.asked[0]
+
+
+def test_feedback_is_labeled_as_correction_not_evidence_for_the_planner():
+    context = WorkspaceBot._thread_conversation_context([{
+        "question": "고창 데시앙이 맞아",
+        "intent_kind": "feedback",
+        "subject_terms": ["고창", "데시앙"],
+    }])
+
+    assert "사용자 정정(검색어 해석용, 사실 근거 아님)" in context
+    assert "이전 질문:" not in context
+
+
 def test_dm_context_carries_coordinates_not_the_previous_bot_answer():
     """싣는 것은 질문과 좌표다. 봇 답변 전문을 실으면 요약 재귀다(원칙 1)."""
     ans = Answer("새 답변", [], "m", 0.0, 1, "answered")

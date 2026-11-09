@@ -452,7 +452,7 @@ class QALog:
                     str(t) for t in (row.get("context_parent_ids") or []) if str(t).strip()
                 ][:8],
             }
-            if not refs and not attachments:
+            if not refs and not attachments and row.get("intent_kind") != "feedback":
                 # 구형 레코드. 좌표가 없으니 지칭어를 풀 실마리가 문장뿐이다.
                 # 짧게 잘라 **지칭 해석 전용**으로만 싣는다.
                 turn["legacy_answer"] = _clip(str(row.get("answer") or ""))[:LEGACY_ANSWER_CHARS]
@@ -523,7 +523,7 @@ class QALog:
                     str(value) for value in (row.get("context_parent_ids") or []) if str(value).strip()
                 ][:8],
             }
-            if not refs and not attachments:
+            if not refs and not attachments and row.get("intent_kind") != "feedback":
                 turn["legacy_answer"] = _clip(str(row.get("answer") or ""))[:LEGACY_ANSWER_CHARS]
             out.append(turn)
         return out

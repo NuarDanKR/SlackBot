@@ -119,6 +119,7 @@ from ..intent import (
     SELF_KINDS,
     WRITE_KINDS,
     Intent,
+    apply_dm_feedback_context,
     carry_dm_subject_context,
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
@@ -736,7 +737,11 @@ class WorkspaceBot:
         blocks: list[str] = []
         used = 0
         for turn in reversed(turns):
-            bits = [f"이전 질문: {turn.get('question', '')}".strip()]
+            if str(turn.get("intent_kind") or "") == "feedback":
+                head = "사용자 정정(검색어 해석용, 사실 근거 아님)"
+            else:
+                head = "이전 질문"
+            bits = [f"{head}: {turn.get('question', '')}".strip()]
             topics = [str(t) for t in (turn.get("subject_terms") or []) if str(t).strip()]
             if topics:
                 bits.append(f"이전 주제: {', '.join(topics[:6])}")
@@ -3343,7 +3348,11 @@ class WorkspaceBot:
                 # 문장을 이어 가면 요약을 근거로 요약하게 된다(원칙 1).
                 evidence_refs=refs_to_json(ans.evidence_refs) if ans else [],
                 attachment_refs=attachment_refs_to_json(ans.attachment_refs) if ans else [],
-                subject_terms=list(ans.subject_terms) if ans else [],
+                subject_terms=(
+                    list(ans.subject_terms)
+                    if ans
+                    else (list(intent.terms) if intent.kind == "feedback" else [])
+                ),
                 context_parent_ids=list(ans.context_parent_ids) if ans else [],
                 context_resolution=(ans.context_resolution if ans else "none"),
                 decision_id=decision_id,
@@ -3407,6 +3416,7 @@ class WorkspaceBot:
                 plan_kwargs["allow_rule_fallback"] = False
             tasks = self.engine.plan(text, **plan_kwargs)
         if channel_id.startswith("D"):
+            tasks = apply_dm_feedback_context(text, tasks, turns)
             tasks = carry_dm_subject_context(text, tasks, turns)
         if not tasks and master_v2:
             from ..intent import PlanningUnavailable

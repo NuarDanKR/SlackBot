@@ -424,6 +424,34 @@ def test_a_legacy_record_without_refs_does_not_widen_to_the_whole_channel(world)
     assert "no_prior_refs" in resolved.dropped_codes
 
 
+def test_dm_feedback_keeps_user_correction_terms_but_not_the_bot_ack(tmp_path):
+    log = QALog(tmp_path / "qa", write_md=False)
+    log.write(
+        QARecord.build(
+            workspace="invest",
+            channel="D1",
+            channel_id="D1",
+            user="U1",
+            user_name="홍길동",
+            question="고창 데시앙이 맞아",
+            intent_kind="feedback",
+            intent_source="context",
+            reason="feedback",
+            hits=0,
+            scope="-",
+            answer="피드백으로 기록했습니다",
+            subject_terms=["고창", "데시앙"],
+            channel_type="im",
+        )
+    )
+
+    (turn,) = log.context_for_dm("invest", "D1", "U1")
+
+    assert turn["intent_kind"] == "feedback"
+    assert turn["subject_terms"] == ["고창", "데시앙"]
+    assert "legacy_answer" not in turn
+
+
 # --- 원문 복원 ----------------------------------------------------------------
 
 

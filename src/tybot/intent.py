@@ -205,6 +205,10 @@ _DM_CONTINUATION_RE = re.compile(
     r"(그럼|그러면|그건|그거|같은\s*내용|해당\s*내용|"
     r"\d{4}\s*년(?:도|에는|은|도)?|자료에는|내용\s*(?:없|있|맞|아니))"
 )
+_DM_CORRECTION_STATEMENT_RE = re.compile(
+    r"(?:이|가|은|는)?\s*(?:맞아|맞아요|맞습니다|아니야|아니에요|아닙니다)\s*[.!]*$|"
+    r"(?:이|가|은|는)?\s*아니라\s+.+(?:이야|예요|입니다)\s*[.!]*$"
+)
 _DATEISH_TERM_RE = re.compile(
     r"^\d{2,4}(?:[./-]\d{1,2}){0,2}(?:년|월|일|년도)?$"
 )
@@ -535,9 +539,40 @@ def _write_is_explicit(text: str, kind: str) -> bool:
         return bool(INGEST_ALL_RE.search(text or ""))
     if kind == "ingest":
         return bool(INGEST_RE.search(text or ""))
-    if kind == "feedback":
-        return bool(FEEDBACK_RE.search(text or ""))
-    return False
+    # Feedback only appends to the review ledger. It cannot collect, edit or
+    # publish source material, so the planner's semantic decision is enough.
+    return kind == "feedback"
+
+
+def apply_dm_feedback_context(
+    text: str, tasks: list[Intent], turns: list[dict]
+) -> list[Intent]:
+    """Treat a declarative correction as feedback on the preceding DM answer.
+
+    Questions such as ``이게 맞아?`` are not corrections. A short declarative
+    ``고창 데시앙이 맞아`` is retained as review/context metadata, never evidence.
+    """
+    body = (text or "").strip()
+    if (
+        not turns
+        or not tasks
+        or "?" in body
+        or len(body) > 160
+        or not _DM_CORRECTION_STATEMENT_RE.search(body)
+    ):
+        return tasks
+    terms = topic_terms_of(body, tasks[0].terms)
+    return [
+        replace(
+            tasks[0],
+            kind="feedback",
+            question=body,
+            standalone_question=body,
+            terms=terms,
+            reference_mode="none",
+            topic_terms=[],
+        )
+    ]
 
 
 def carry_dm_subject_context(
@@ -551,7 +586,7 @@ def carry_dm_subject_context(
     follow-up scope: a new period such as ``2025년에는?`` must search the full
     currently authorized scope, not only documents opened by the previous answer.
     """
-    if len(tasks) != 1 or not turns or not _DM_CONTINUATION_RE.search(text or ""):
+    if len(tasks) != 1 or not turns:
         return tasks
     task = tasks[0]
     if task.kind not in ARCHIVE_KINDS or task.reference_mode != "none":
@@ -564,16 +599,21 @@ def carry_dm_subject_context(
     current_terms = topic_terms_of(text, task.terms)
     current_keys = {term.casefold() for term in current_terms}
     prior_terms: list[str] = []
+    prior_is_feedback = False
     for turn in reversed(turns):
         prior_terms = topic_terms_of(
             str(turn.get("question") or ""),
             [str(term) for term in (turn.get("subject_terms") or [])],
         )
         if prior_terms:
+            prior_is_feedback = str(turn.get("intent_kind") or "") == "feedback"
             break
     if not prior_terms:
         return tasks
     prior_keys = {term.casefold() for term in prior_terms}
+    is_continuation = bool(_DM_CONTINUATION_RE.search(text or "")) or prior_is_feedback
+    if not is_continuation:
+        return tasks
     starts_with_reference = bool(re.match(r"^\s*(?:그럼|그러면|그건|그거)", text or ""))
     if not starts_with_reference and not (current_keys & prior_keys):
         return tasks
@@ -619,6 +659,9 @@ PLANNER_PROMPT = CLASSIFIER_PROMPT.replace(
 - `<이전_스레드>`가 있으면 현재 질문의 "그 문서", "하나", "아까 것" 같은
   지칭어만 해석하는 데 쓴다. 거기 적힌 것은 **질문과 주제 목록**이고, 사실 근거가
   아니다. 실제 원문은 시스템이 좌표로 다시 연다.
+- `<이전_스레드>`의 `사용자 정정`은 직전 검색어를 바로잡는 문맥이다. 정정 문장
+  자체를 사실 근거로 쓰지 말고, 다음 질문의 `standalone_question`과 `terms`에
+  바로잡힌 명칭을 반영한다.
 - 후속 질문의 task.question과 terms는 지칭 대상을 정확히 넣어 독립적으로 이해되게
   만든다. 하나를 가리키면 이전 답변의 전체 목록으로 넓히지 않는다.
 - "방금 그거 다시 정리해줘"처럼 **실행 동사가 있는** 후속 질문은 memory 가 아니다.

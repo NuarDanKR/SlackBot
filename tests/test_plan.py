@@ -18,6 +18,7 @@ from tybot.intent import (
     SELF_KINDS,
     WRITE_KINDS,
     Intent,
+    apply_dm_feedback_context,
     carry_dm_subject_context,
     plan,
 )
@@ -168,6 +169,42 @@ def test_a_new_dm_topic_is_not_contaminated_by_the_previous_question():
     }]
 
     assert carry_dm_subject_context(task.question, [task], turns) == [task]
+
+
+def test_a_declarative_dm_correction_becomes_feedback_context():
+    task = Intent("memory", question="고창 데시앙이 맞아")
+    turns = [{"question": "고창덕산 사업추진 일정 알려줘"}]
+
+    (got,) = apply_dm_feedback_context(task.question, [task], turns)
+
+    assert got.kind == "feedback"
+    assert "고창" in got.terms
+    assert "데시앙" in got.terms
+
+
+def test_a_correction_question_is_not_silently_recorded_as_feedback():
+    task = Intent("search", question="고창 데시앙이 맞아?")
+
+    assert apply_dm_feedback_context(task.question, [task], [{}]) == [task]
+
+
+def test_latest_dm_feedback_supplies_the_corrected_search_name():
+    task = Intent(
+        "summary",
+        question="고창 덕산 사업협약서 주요내용 정리해줘",
+        standalone_question="고창 덕산 사업협약서 주요내용 정리해줘",
+        terms=["고창", "덕산", "사업협약서"],
+    )
+    turns = [{
+        "question": "고창 데시앙이 맞아",
+        "intent_kind": "feedback",
+        "subject_terms": ["고창", "데시앙"],
+    }]
+
+    (got,) = carry_dm_subject_context(task.question, [task], turns)
+
+    assert "데시앙" in got.terms
+    assert "데시앙" in got.standalone_question
 
 
 def test_task_cap_is_enforced():
