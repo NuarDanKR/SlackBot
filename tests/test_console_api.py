@@ -2889,3 +2889,17 @@ def test_collected_docs_counts_only_lines_inside_the_period(env):
     assert reader._in_period("2026-11-05 09:12", "2026-11-01 00:00")
     assert not reader._in_period("", "2026-11-01 00:00")
     assert not reader._in_period("11/05 09:12", "2026-11-01 00:00")
+
+
+def test_admin_chooses_console_or_bot_deploy(client, monkeypatch):
+    """배포 관리의 버튼 둘. 범위는 고정 값 둘 중 하나로만 넘어간다."""
+    seen = []
+    monkeypatch.setattr(console_app.deploy_request, "request_deploy",
+                        lambda actor, **kw: seen.append(kw.get("scope")) or {"ok": True})
+    monkeypatch.setattr(console_app.deploy_request, "console_status", lambda: {"state": "queued"})
+    headers = _write_headers(owner(client))
+    assert client.put("/api/deployment/request", json={"scope": "console"}, headers=headers).status_code == 200
+    assert client.put("/api/deployment/request", json={"scope": "bot"}, headers=headers).status_code == 200
+    assert client.put("/api/deployment/request", json={}, headers=headers).status_code == 200
+    assert seen == ["console", "all", "all"]
+    assert client.put("/api/deployment/request", json={"scope": "root"}, headers=headers).status_code == 422

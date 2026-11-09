@@ -30,6 +30,9 @@ logger = logging.getLogger("tybot.deploy_request")
 # 이 값은 사용자에게 즉시 거절 이유를 알려주기 위한 것이다.
 COOLDOWN_SEC = 60
 CONSOLE_STATES = frozenset({"idle", "queued", "running", "ok", "failed", "skipped"})
+#: 배포 범위. `all` 은 「봇 배포」(봇·콘솔 재시작), `console` 은 「콘솔 배포」(콘솔만).
+#: 러너가 이 목록 밖의 값은 `all` 로 본다 — 요청 파일 값이 실행을 바꾸는 길은 이 둘뿐이다.
+SCOPES = frozenset({"all", "console"})
 MAX_DETAIL_LINES = 30
 MAX_DETAIL_CHARS = 8_000
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -113,7 +116,12 @@ def console_status() -> dict:
         "startedAt": None if queued else status.get("started_at"),
         "finishedAt": None if queued else status.get("finished_at"),
         "approvalId": (request or {}).get("approval_id") or status.get("approval_id"),
+        "scope": _scope((request or {}).get("scope") if pending else status.get("scope")),
     }
+
+
+def _scope(value: object) -> str:
+    return value if value in SCOPES else "all"  # type: ignore[return-value]
 
 
 def is_running() -> bool:
@@ -132,12 +140,16 @@ def seconds_since_last() -> float | None:
         return None
 
 
-def request_deploy(actor: str, *, note: str = "", approval_id: int | None = None) -> dict:
+def request_deploy(
+    actor: str, *, note: str = "", approval_id: int | None = None, scope: str = "all"
+) -> dict:
     """배포를 요청한다. 거절되면 `{"ok": False, "reason": ...}` 를 돌려준다.
 
     거절 사유를 예외가 아니라 값으로 주는 이유: 콘솔이 화면에 그대로 띄우면 되고,
     '요청이 실패했는지 배포가 실패했는지' 를 사용자가 구분할 수 있다.
     """
+    if scope not in SCOPES:
+        return {"ok": False, "reason": "알 수 없는 배포 범위입니다."}
     if is_running():
         return {"ok": False, "reason": "배포가 이미 진행 중입니다."}
     if request_path().exists():
@@ -153,6 +165,7 @@ def request_deploy(actor: str, *, note: str = "", approval_id: int | None = None
         # 자유 입력은 기록만 한다 - 실행에 쓰이지 않는다. 길이를 잘라 로그 오염을 막는다.
         "note": (note or "")[:200],
         "approval_id": approval_id,
+        "scope": scope,
     }
     _write_atomic(request_path(), payload)
     return {"ok": True, "requested_at": payload["requested_at"]}
@@ -183,6 +196,7 @@ def write_status(
     detail: str = "",
     started_at: str | None = None,
     approval_id: int | None = None,
+    scope: str = "all",
 ) -> dict:
     """배포 진행 상태를 남긴다. 콘솔이 읽으므로 0644 로 둔다(시크릿 없음)."""
     if started_at is None and state != "running":
@@ -201,6 +215,7 @@ def write_status(
         "detail": sanitize_deploy_detail(detail),
         "started_at": started_at or _now().isoformat(timespec="seconds"),
         "approval_id": approval_id,
+        "scope": _scope(scope),
     }
     if state != "running":
         payload["finished_at"] = _now().isoformat(timespec="seconds")

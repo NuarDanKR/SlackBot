@@ -2793,8 +2793,18 @@ def deployment(user: User) -> dict:
     return deploy_request.console_status()
 
 
+class DirectDeployBody(BaseModel):
+    """`bot` = 봇 배포(봇·콘솔 재시작), `console` = 콘솔 배포(콘솔만 재시작).
+
+    콘솔 배포는 바뀐 파일이 전부 콘솔 전용일 때만 서버가 진행한다
+    (`scripts/deploy_scope.py`). 봇 코드가 섞여 있으면 운영을 바꾸지 않고 거절한다.
+    """
+
+    scope: Literal["bot", "console"] = "bot"
+
+
 @app.put("/api/deployment/request")
-def request_deployment(request: Request, user: User) -> dict:
+def request_deployment(request: Request, user: User, body: DirectDeployBody | None = None) -> dict:
     """관리자의 직접 배포. 승인 절차를 거치지 않는다.
 
     승인 절차는 **개발자가 올린 코드를 다른 사람이 본다**는 데 뜻이 있다.
@@ -2807,20 +2817,26 @@ def request_deployment(request: Request, user: User) -> dict:
     _require_admin(user)
     _check_write_request(request)
     try:
-        result = deploy_request.request_deploy(user.email, note="관리자 직접 배포")
+        scope = "console" if body is not None and body.scope == "console" else "all"
+        result = deploy_request.request_deploy(
+            user.email,
+            note="관리자 직접 배포(콘솔만)" if scope == "console" else "관리자 직접 배포",
+            scope=scope,
+        )
     except OSError as e:
         logger.exception("배포 요청 파일 기록 실패")
         raise HTTPException(status_code=500, detail="배포 요청을 기록하지 못했습니다.") from e
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=str(result.get("reason") or "배포 요청 거절"))
-    logger.warning("관리자 직접 배포 — actor=%s (승인 절차 없음)", user.email)
+    logger.warning("관리자 직접 배포 — actor=%s scope=%s (승인 절차 없음)", user.email, scope)
     _audit_event(
         actor=user.email,
         category="deployment",
-        action="direct-deploy",
+        action="direct-deploy-console" if scope == "console" else "direct-deploy",
         target_type="deployment",
         target_id=str(result.get("request_id") or "current"),
         outcome="requested",
+        metadata={"scope": scope},
     )
     return deploy_request.console_status()
 
