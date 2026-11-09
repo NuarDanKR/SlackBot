@@ -70,9 +70,88 @@ def contract_path(key: str) -> Path | None:
     legacy = PROMPT_DIR / f"{key}.md"
     return legacy if legacy.is_file() else None
 
-# 근거를 프롬프트에 실을 때의 상한. 넘으면 앞에서 자른다 —
-# 자르는 것이 나은 이유: 컨텍스트를 넘겨 호출이 통째로 실패하면 답이 아예 안 나간다.
+# 근거를 프롬프트에 실을 때의 상한. 넘으면 줄인다 —
+# 줄이는 것이 나은 이유: 컨텍스트를 넘겨 호출이 통째로 실패하면 답이 아예 안 나간다.
+# 줄이는 방법은 `fit_evidence` 가 정한다(앞에서 자르지 않는다).
 MAX_EVIDENCE_CHARS = 40_000
+
+# 엑셀 변환본의 시트 경계. 근거 줄은 `[ts] (채널) 이름: [시트] 시트명` 꼴이다.
+_SHEET_MARK = re.compile(r"\[시트\]")
+
+
+def fit_evidence(text: str, limit: int | None = None) -> str:
+    """근거를 `limit` 자 안에 넣는다. **앞에서 자르지 않는다.**
+
+    예전에는 `text[:limit]` 였다. 엑셀 변환본은 시트가 순서대로 이어 붙어 있어서,
+    4만 자를 넘는 통합문서는 **앞 시트만 남고 뒤 시트가 통째로 사라졌다** — 「엑셀은
+    첫 시트만 답한다」 는 보고(2026-11-09)의 원인이다. 질문 첨부는 12만 자까지
+    받아 놓고(`question_files.MAX_QUESTION_CHARS`) 여기서 말없이 4만 자로 잘렸다.
+
+    그래서 시트(시트 표식이 없으면 전체)마다 분량을 나눈다.
+
+    - 작은 구역은 통째로 싣고, 남는 분량을 큰 구역들이 똑같이 나눈다
+    - 구역 안에서는 **앞줄부터** 싣는다 — 표의 머리글이 앞에 있다
+    - 줄은 되도록 통째로 싣는다. 남은 몫보다 큰 줄 하나만 몫만큼 잘라 싣는다
+    - 줄인 구역에는 몇 줄 중 몇 줄을 실었는지 적고, 맨 앞에 안내를 단다.
+      모델이 일부만 보고 「전체 합계는」 이라고 단정하지 않게
+    - 몫보다 긴 줄 하나만 있는 구역은 그 줄을 몫만큼 잘라 싣는다 — 통째로 빼면
+      「줄이는」 것이 아니라 「버리는」 것이 된다
+    """
+    # 상한은 **부를 때** 읽는다. 기본 인자로 묶으면 설정·시험이 바꾼 값을 못 본다.
+    limit = MAX_EVIDENCE_CHARS if limit is None else limit
+    if len(text) <= limit:
+        return text
+    lines = text.split("\n")
+    sections: list[list[str]] = [[]]
+    for line in lines:
+        if _SHEET_MARK.search(line) and sections[-1]:
+            sections.append([])
+        sections[-1].append(line)
+
+    notice = (
+        f"[근거 분량 안내] 근거 {len(text):,}자 중 일부만 실었습니다. "
+        "구역(시트)마다 앞부분만 있으니, 실리지 않은 행의 값이나 전체 합계를 "
+        "추정하지 말고 일부만 확인했다고 밝히세요."
+    )
+    # 줄인 구역마다 붙는 안내 줄의 몫을 미리 뺀다.
+    tail_room = 60
+    budget = limit - len(notice) - 1 - tail_room * len(sections)
+    if budget < 200 * len(sections):
+        # 안내 줄을 달 자리도 없을 만큼 작은 상한. 나눠 봐야 구역마다 빈 몫이다.
+        return text[:limit]
+    sizes = [sum(len(ln) + 1 for ln in section) for section in sections]
+
+    # 물 채우기: 작은 구역부터 통째로 주고, 남은 몫을 나머지에 고르게.
+    shares = [0] * len(sections)
+    remaining = budget
+    order = sorted(range(len(sections)), key=lambda i: sizes[i])
+    for position, index in enumerate(order):
+        fair = remaining // (len(order) - position)
+        shares[index] = min(sizes[index], fair)
+        remaining -= shares[index]
+
+    out = [notice]
+    for section, share, size in zip(sections, shares, sizes, strict=True):
+        if share >= size:
+            out.extend(section)
+            continue
+        kept: list[str] = []
+        used = 0
+        for line in section:
+            if used + len(line) + 1 > share:
+                # 남은 몫이 넉넉한데 다음 줄 하나가 크면 그 줄을 몫만큼 싣는다.
+                # 줄 단위만 고집하면 큰 셀 하나가 구역 전체를 밀어낸다.
+                room = share - used - 1
+                if room >= 200 or not kept:
+                    kept.append(line[: max(0, room)])
+                break
+            kept.append(line)
+            used += len(line) + 1
+        out.extend(kept)
+        out.append(f"…(이 구역 {len(section)}줄 중 {len(kept)}줄만 실음 — 분량 한도)")
+    fitted = "\n".join(out)
+    # 안내 줄 몫을 넉넉히 뺐으므로 넘지 않는다. 그래도 넘으면 마지막 수단으로 자른다.
+    return fitted if len(fitted) <= limit else fitted[:limit]
 # Leave room for provider framing and tool schemas under the 120k-character
 # failure threshold. Tool output and seed evidence share this request envelope.
 MAX_MODEL_TEXT_CHARS = 110_000
@@ -377,12 +456,12 @@ class PromptSpecialist:
         evidence = "\n\n".join(item.text for item in request.evidence)
         if len(evidence) > MAX_EVIDENCE_CHARS:
             log.warning(
-                "근거가 %d자라 %d자로 자른다 key=%s",
+                "근거가 %d자라 %d자 안으로 시트별로 줄인다 key=%s",
                 len(evidence),
                 MAX_EVIDENCE_CHARS,
                 self.key,
             )
-            evidence = evidence[:MAX_EVIDENCE_CHARS]
+            evidence = fit_evidence(evidence, MAX_EVIDENCE_CHARS)
 
         # 시각 근거는 **텍스트 뒤에** 붙인다. 앞에 두면 프롬프트 캐시가 매번
         # 깨지고(캐시는 접두사 일치), 이미지가 근거 텍스트보다 앞서 읽힌다.
@@ -775,7 +854,11 @@ class ToolSpecialist:
         # 출처도 두 줄이 된다.
         chunks = _deduplicated(item.text for item in request.evidence)
         self.seed_count = len(chunks)
-        seed = "\n\n".join(chunks)[:MAX_EVIDENCE_CHARS]
+        joined = "\n\n".join(chunks)
+        if len(joined) > MAX_EVIDENCE_CHARS:
+            log.warning("seed 근거가 %d자라 %d자 안으로 시트별로 줄인다 key=%s",
+                        len(joined), MAX_EVIDENCE_CHARS, self.key)
+        seed = fit_evidence(joined, MAX_EVIDENCE_CHARS)
         opening = _with_display_hint(f"질문: {request.question}", request)
         briefing = self.scope_plan.briefing()
         if briefing:
