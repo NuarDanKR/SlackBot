@@ -11,6 +11,14 @@ SRC=${TYBOT_SRC:-/var/lib/tybot/src}
 APP=/opt/tybot
 BRANCH=${TYBOT_BRANCH:-master}
 
+# 배포 범위. 배포 관리 화면의 버튼 둘에 맞춘다(scripts/deploy_scope.py 설명 참고).
+#   all     — 「봇 배포」. 지금까지와 같다: 봇·콘솔 모두 재시작
+#   console — 「콘솔 배포」. 바뀐 파일이 전부 콘솔 전용일 때만 진행하고 **콘솔만** 재시작한다.
+#             봇 코드가 섞여 있으면 아무것도 바꾸지 않고 3 으로 끝낸다.
+# 값은 러너가 고정 목록에서만 고른다. 그 밖의 값은 all 로 본다.
+SCOPE=${TYBOT_DEPLOY_SCOPE:-all}
+[[ "$SCOPE" == "console" ]] || SCOPE=all
+
 # 콘솔이 이미 설치돼 있으면 함께 갱신한다.
 if [[ -z ${WITH_CONSOLE:-} ]]; then
   if [[ -f /etc/systemd/system/tybot-console.service ]]; then
@@ -70,6 +78,28 @@ if [[ "$LOCAL" != "$REMOTE" ]]; then
 fi
 git reset --hard --quiet "origin/$BRANCH"
 
+# 콘솔 배포는 바뀐 파일이 전부 콘솔 전용일 때만 한다. 기준은 **배포된 커밋**이다 —
+# 소스 클론이 아니라 /opt 에 실제로 들어가 있는 것과 비교해야 한다.
+if [[ "$SCOPE" == "console" ]]; then
+  if [[ -z "$DEPLOYED" ]] || ! git cat-file -e "${DEPLOYED}^{commit}" 2>/dev/null; then
+    log "배포된 커밋을 알 수 없어 콘솔만 배포할 수 없습니다 — 「봇 배포」 로 진행하세요."
+    exit 3
+  fi
+  SCOPE_JSON=$(git diff --name-only "$DEPLOYED" HEAD \
+    | "$APP/.venv/bin/python" -I "$SRC/scripts/deploy_scope.py" --root "$SRC" -) || {
+    log "바뀐 파일을 판정하지 못했습니다 — 「봇 배포」 로 진행하세요."
+    exit 3
+  }
+  BOT_FILES=$("$APP/.venv/bin/python" -I -c 'import json,sys; print("\n".join(json.load(sys.stdin)["bot"]))' <<<"$SCOPE_JSON")
+  if [[ -n "$BOT_FILES" ]]; then
+    log "봇 코드가 바뀌어 있어 콘솔만 배포할 수 없습니다 — 「봇 배포」 로 진행하세요."
+    log "봇 쪽 변경 ($(wc -l <<<"$BOT_FILES")개):"
+    head -n 20 <<<"$BOT_FILES" | sed 's/^/  /'
+    exit 3
+  fi
+  log "콘솔 전용 변경만 있습니다 — 콘솔만 배포합니다 (봇은 재시작하지 않음)"
+fi
+
 log "테스트 실행"
 "$APP/.venv/bin/python" -m pytest --version >/dev/null 2>&1 \
   || "$APP/.venv/bin/pip" install -q pytest
@@ -102,6 +132,26 @@ bash "$APP/deploy/apply-schema.sh"
 # 상태를 알아채고, 새 커밋이 없어도 배포한다.
 git rev-parse HEAD > "$APP/.deployed-commit"
 chmod 644 "$APP/.deployed-commit"
+
+if [[ "$SCOPE" == "console" ]]; then
+  # 봇과 봇 타이머는 건드리지 않는다. 콘솔만 다시 띄운다.
+  if ! systemctl restart tybot-console; then
+    log "콘솔 재시작 실패 — journalctl -u tybot-console -n 50 확인"
+    exit 1
+  fi
+  sleep 3
+  if systemctl is-active --quiet tybot-console; then
+    log "완료: $(git rev-parse --short HEAD) 콘솔 기동 정상 (봇은 그대로)"
+  else
+    log "콘솔 기동 실패 — journalctl -u tybot-console -n 50 확인"
+    exit 1
+  fi
+  if ((INSTALL_RC == 4)); then
+    log "다만 일부 구성 요소가 빠졌습니다 — 위 ⚠ 를 보고 고친 뒤 다시 배포하세요."
+    exit 4
+  fi
+  exit 0
+fi
 
 systemctl restart tybot
 
