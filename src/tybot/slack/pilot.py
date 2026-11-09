@@ -22,6 +22,8 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from .. import (
@@ -57,6 +59,7 @@ from ..archive.writer import KST
 from ..attachment_trace import confirm_archived
 from ..audit import QALog, QARecord
 from ..autojoin import on_channel_event, sweep
+from ..bot_access import DENY_MESSAGE
 from ..canvas_answer import create as create_answer_canvas
 from ..canvas_answer import grant_channel as grant_canvas_channel
 from ..canvas_answer import grant_user as grant_canvas_user
@@ -162,6 +165,7 @@ from ..question_files import (
 from ..question_files import (
     QuestionFileEvidence,
     read_question_files,
+    refusal_message,
     validate_question_files,
 )
 from ..schedule import HELP as SCHEDULE_HELP
@@ -328,6 +332,8 @@ def _scope_label(ctx: RequestContext | None) -> str:
     """감사 기록용 권한범위 표기 — 채널명은 남기지 않는다(로그 자체가 유출 경로가 되지 않게)."""
     if ctx is None:
         return "-"
+    if ctx.evidence_sources is not None:
+        return f"managed sources {len(ctx.evidence_sources)}"
     if ctx.channel_id or ctx.channel:
         return "현재 채널"
     if ctx.role == "exec":
@@ -424,6 +430,17 @@ def _response_ts(response) -> str:
         return ""
 
 
+class RequestAuthorizationDenied(RuntimeError):
+    """A fixed-code denial raised before request-side model work starts."""
+
+    def __init__(self, code: str) -> None:
+        self.code = str(code or "check_failed")
+        super().__init__(self.code)
+
+
+PRIVATE_ANSWER_NOTICE = "요청하신 내용은 DM 으로 보냈습니다."
+
+
 class WorkspaceBot:
     """워크스페이스 1개에 대응하는 Socket Mode 봇.
 
@@ -439,19 +456,38 @@ class WorkspaceBot:
         engine: AnswerEngine,
         qa_log: QALog,
         archive_dir: str,
+        request_context_resolver: Callable[[object, str], RequestContext] | None = None,
+        question_transform: Callable[[str], str] | None = None,
+        bot_name: str | None = None,
+        realtime: bool | None = None,
+        autojoin: bool | None = None,
+        operational_owner: bool = True,
+        private_answers: bool = False,
     ) -> None:
         from slack_bolt import App
 
         self.cfg = cfg
         self.workspace = cfg.key
         self.archive_dir = archive_dir
-        self.bot_name = os.getenv("BOT_NAME", "tybot")
-        self.realtime = _truthy(os.getenv("REALTIME_INGEST", "1"))
+        self.bot_name = bot_name or os.getenv("BOT_NAME", "tybot")
+        self.realtime = (
+            _truthy(os.getenv("REALTIME_INGEST", "1"))
+            if realtime is None
+            else realtime
+        )
         # 스레드 답글 대신 채널 본문에 답할지. 스레드가 기본인 이유는 채널 소음과
         # 자기 답변 재수집(요약 재귀) 위험을 줄이기 때문이다.
         self.reply_in_thread = _truthy(os.getenv("REPLY_IN_THREAD", "1"))
         # 채널 이름이 규칙에 맞으면 초대 없이 봇이 스스로 참여한다(공개 채널만).
-        self.autojoin = _truthy(os.getenv("AUTOJOIN_CHANNELS", "1"))
+        self.autojoin = (
+            _truthy(os.getenv("AUTOJOIN_CHANNELS", "1"))
+            if autojoin is None
+            else autojoin
+        )
+        self._request_context_resolver = request_context_resolver
+        self._question_transform = question_transform or (lambda question: question)
+        self.operational_owner = operational_owner
+        self.private_answers = private_answers
         # 전 채널·전 워크스페이스 통합조회 허용 사용자. 채널 멤버십과 워크스페이스 경계를 모두 우회한다.
         self.exec_users = {
             u.strip() for u in (os.getenv("EXEC_USERS") or "").split(",") if u.strip()
@@ -531,6 +567,12 @@ class WorkspaceBot:
 
     def _context(self, client, user_id: str) -> RequestContext:
         """권한 컨텍스트 — 답변 생성 **이전에** 검색 범위를 좁힌다."""
+        resolver = getattr(self, "_request_context_resolver", None)
+        if resolver is not None:
+            resolved = resolver(client, user_id)
+            if not isinstance(resolved, RequestContext):
+                raise RequestAuthorizationDenied("check_failed")
+            return resolved
         if user_id in self.exec_users:
             log.info("exec 통합조회 user=%s", user_id)
             # `user_id` 는 통합조회에서도 채운다. 이건 권한을 넓히는 값이 아니라
@@ -561,6 +603,35 @@ class WorkspaceBot:
             permission_unverified=unverified,
         )
 
+    @staticmethod
+    def _open_dm_channel(client, user_id: str) -> str:
+        try:
+            opened = client.conversations_open(users=user_id) or {}
+        except Exception as exc:
+            log.warning("DM 열기 실패 user=%s err=%s", user_id, type(exc).__name__)
+            return ""
+        channel_id = str(((opened.get("channel") or {}).get("id")) or "")
+        if not channel_id.startswith("D"):
+            log.warning("DM 채널 확인 실패 user=%s", user_id)
+            return ""
+        return channel_id
+
+    def _deliver_denial(self, client, say, user_id: str) -> None:
+        if not getattr(self, "private_answers", False):
+            say(DENY_MESSAGE)
+            return
+        self._post_private_text(client, user_id, DENY_MESSAGE)
+
+    def _post_private_text(self, client, user_id: str, text: str):
+        dm_channel = self._open_dm_channel(client, user_id)
+        if not dm_channel:
+            return None
+        try:
+            return client.chat_postMessage(channel=dm_channel, text=text)
+        except Exception as exc:
+            log.warning("DM 전송 실패 user=%s err=%s", user_id, type(exc).__name__)
+            return None
+
     def _request_context(
         self,
         client,
@@ -578,21 +649,10 @@ class WorkspaceBot:
         if not in_channel:
             return base
         channel = self._channel_name(client, channel_id) if channel_id else ""
-        return RequestContext(
-            workspace=str(getattr(base, "workspace", self.workspace) or self.workspace),
-            channels=frozenset(getattr(base, "channels", ()) or ()),
-            role=str(getattr(base, "role", "member") or "member"),
-            readable_workspaces=frozenset(
-                getattr(base, "readable_workspaces", ()) or ()
-            ),
-            is_root=bool(getattr(base, "is_root", False)),
+        return replace(
+            base,
             channel_id=channel_id,
             channel=channel,
-            user_id=str(getattr(base, "user_id", "") or ""),
-            permission_unverified=bool(
-                getattr(base, "permission_unverified", False)
-            ),
-            evidence_sources=getattr(base, "evidence_sources", None),
         )
 
     def _specialist_roster(self) -> list:
@@ -1261,19 +1321,37 @@ class WorkspaceBot:
                 return "correction"
             # 권한과 URL을 먼저 검증한 뒤 한 번만 수집하고, 그 본문으로 답한다.
             if event.get("files"):
-                event["_tybot_request_context"] = self._request_context(
-                    client, str(event.get("user") or ""), in_channel=False
-                )
+                try:
+                    event["_tybot_request_context"] = self._request_context(
+                        client, str(event.get("user") or ""), in_channel=False
+                    )
+                except RequestAuthorizationDenied as exc:
+                    log.info(
+                        "[%s] request denied user=%s code=%s",
+                        self.workspace,
+                        str(event.get("user") or ""),
+                        exc.code,
+                    )
+                    self._deliver_denial(
+                        client, say, str(event.get("user") or "")
+                    )
+                    return "denied"
                 event["_tybot_question_file_preflight_codes"] = (
                     validate_question_files(event["files"], self.cfg.bot_token)
                 )
-            event["_tybot_dm_attachments"] = self._ingest_dm(client, event)
+            owns_operations = getattr(self, "operational_owner", True)
+            event["_tybot_dm_attachments"] = (
+                self._ingest_dm(client, event) if owns_operations else []
+            )
             try:
                 self._handle(event, client, say, in_channel=False)
             finally:
                 # The mirror may fetch attachment bytes. Keep that optional
                 # network work off the critical path for the user's reply.
-                if not event.get("_tybot_question_file_preflight_codes"):
+                if (
+                    owns_operations
+                    and not event.get("_tybot_question_file_preflight_codes")
+                ):
                     self._mirror_dm_handoff(client, event)
             return "answered"
         if ctype in ("channel", "group") and self.realtime:
@@ -2419,6 +2497,8 @@ class WorkspaceBot:
 
         기록에 실패해도 봇은 계속 답한다 — 다음 대조가 다시 시도한다.
         """
+        if not getattr(self, "operational_owner", True):
+            return
         channel_id = str(event.get("channel") or "")
         if not channel_id:
             return
@@ -2436,6 +2516,8 @@ class WorkspaceBot:
 
     def _restore_channel(self, client, event: dict) -> None:
         """보관 해제. 기록을 지워 다시 근거가 되게 한다."""
+        if not getattr(self, "operational_owner", True):
+            return
         channel_id = str(event.get("channel") or "")
         if not channel_id:
             return
@@ -2452,6 +2534,8 @@ class WorkspaceBot:
         아카이브가 아는 채널만 본다. 워크스페이스 전체를 훑어 기록을 만들면 수집
         대상이 아닌 채널까지 쌓인다.
         """
+        if not getattr(self, "operational_owner", True):
+            return
         known = sorted({
             (str(doc.channel_id or ""), doc.channel)
             for doc in self.store.docs()
@@ -2925,8 +3009,12 @@ class WorkspaceBot:
             client, say, channel=str(event.get("channel") or ""),
             root_ts=str(event.get("thread_ts") or event.get("ts") or ""),
         )
+        private_channel_request = bool(
+            getattr(self, "private_answers", False) and in_channel
+        )
         started = time.monotonic()
-        progress.start()
+        if not private_channel_request:
+            progress.start()
         try:
             self._handle_request(event, client, progress.send, in_channel=in_channel)
         except Exception as e:
@@ -2938,12 +3026,19 @@ class WorkspaceBot:
             )
             reply = failure_message(e)
             response_ts = ""
-            with contextlib.suppress(Exception):
-                ts = event.get("thread_ts") or event.get("ts")
-                if self.reply_in_thread or event.get("thread_ts"):
-                    response_ts = _response_ts(progress.send(text=reply, thread_ts=ts))
-                else:
-                    response_ts = _response_ts(progress.send(text=reply))
+            if private_channel_request:
+                response_ts = _response_ts(
+                    self._post_private_text(
+                        client, str(event.get("user") or ""), reply
+                    )
+                )
+            else:
+                with contextlib.suppress(Exception):
+                    ts = event.get("thread_ts") or event.get("ts")
+                    if self.reply_in_thread or event.get("thread_ts"):
+                        response_ts = _response_ts(progress.send(text=reply, thread_ts=ts))
+                    else:
+                        response_ts = _response_ts(progress.send(text=reply))
             rec = QARecord.build(
                 record_id=str(event.get("_tybot_qa_record_id") or uuid.uuid4().hex),
                 workspace=self.workspace,
@@ -3015,6 +3110,27 @@ class WorkspaceBot:
         return f"_첨부 상태: {claim}_" if claim else ""
 
     def _handle_request(self, event, client, say, *, in_channel: bool) -> None:
+        user_id = str(event.get("user") or "")
+        if (
+            getattr(self, "_request_context_resolver", None) is not None
+            and event.get("_tybot_request_context") is None
+        ):
+            try:
+                event["_tybot_request_context"] = self._request_context(
+                    client,
+                    user_id,
+                    channel_id=str(event.get("channel") or ""),
+                    in_channel=in_channel,
+                )
+            except RequestAuthorizationDenied as exc:
+                log.info(
+                    "[%s] request denied user=%s code=%s",
+                    self.workspace,
+                    user_id,
+                    exc.code,
+                )
+                self._deliver_denial(client, say, user_id)
+                return
         # 처리 시작부터 하나의 ID를 공유해야 분류 호출과 최종 질문·답변 원본을
         # 시간 추정 없이 정확히 연결할 수 있다.
         qa_record_id = uuid.uuid4().hex
@@ -3022,6 +3138,9 @@ class WorkspaceBot:
         event["_tybot_qa_record_id"] = qa_record_id
         raw_text = _clean(event.get("text", ""))
         canvas_requested, text = parse_canvas_request(raw_text)
+        transform = getattr(self, "_question_transform", None)
+        if transform is not None:
+            text = transform(text)
         if canvas_requested and not text:
             text = "최근 업무 내용을 정리해줘"
         user_id = event.get("user", "")
@@ -3065,12 +3184,25 @@ class WorkspaceBot:
             use_canvas = answer_supports_canvas and (
                 artifact.wants_canvas or automatic(reply, raw_text)
             )
+            private_delivery = bool(
+                getattr(self, "private_answers", False) and in_channel
+            )
+            delivery_channel = channel_id
+            if private_delivery:
+                delivery_channel = self._open_dm_channel(client, str(user_id or ""))
+                if not delivery_channel:
+                    use_canvas = False
             if artifact.unsupported_operation:
                 # **실행한 척하지 않는다.** 판정은 됐지만 지금 못 하는 동작이라
                 # 사람에게 그렇게 말한다(설계 §3.2).
                 notice = UNSUPPORTED_ARTIFACT.get(artifact.unsupported_operation, "")
                 reply = f"{reply}\n\n{notice}".rstrip()
-            if ans is not None and ctx is not None and (ctx.channel_id or ctx.channel):
+            if (
+                ans is not None
+                and ctx is not None
+                and ctx.evidence_sources is None
+                and (ctx.channel_id or ctx.channel)
+            ):
                 reply = f"{reply}\n\n{CHANNEL_SCOPE_NOTICE}"
             # 첨부를 올리면서 물은 경우, **그 첨부가 지금 근거가 되나**를 같이
             # 말한다. 안 말하면 사람은 방금 올린 파일이 답에 반영됐다고 읽는다 —
@@ -3084,7 +3216,7 @@ class WorkspaceBot:
             delivery_thread = thread_ts or (
                 str(event.get("thread_ts") or event.get("ts") or "") if use_canvas else None
             )
-            if delivery_thread:
+            if delivery_thread and not private_delivery:
                 fallback_kw["thread_ts"] = delivery_thread
             kw = dict(fallback_kw)
             canvas = None
@@ -3119,10 +3251,10 @@ class WorkspaceBot:
                             f"<{canvas.permalink}|Canvas 열기>"
                         )
                     }
-                    if delivery_thread:
+                    if delivery_thread and not private_delivery:
                         kw["thread_ts"] = delivery_thread
-                    if not channel_id.startswith("D"):
-                        grant_canvas_channel(client, canvas.canvas_id, channel_id)
+                    if delivery_channel and not delivery_channel.startswith("D"):
+                        grant_canvas_channel(client, canvas.canvas_id, delivery_channel)
                 except Exception as exc:
                     log.exception("[%s] Canvas 답변 생성 실패: %s", self.workspace, exc)
                     canvas = None
@@ -3137,15 +3269,53 @@ class WorkspaceBot:
                     has_evidence=bool(ans.evidence_refs),
                     answered=ans.reason in ("answered", "advice"),
                 )
-            response = say(**kw)
-            if canvas is not None and channel_id.startswith("D"):
+            if private_delivery:
+                try:
+                    response = (
+                        client.chat_postMessage(channel=delivery_channel, **kw)
+                        if delivery_channel
+                        else None
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "[%s] VIP DM 답변 전송 실패 err=%s",
+                        self.workspace,
+                        type(exc).__name__,
+                    )
+                    response = None
+            else:
+                response = say(**kw)
+            if (
+                canvas is not None
+                and response is not None
+                and delivery_channel.startswith("D")
+            ):
                 try:
                     # Slack은 Canvas를 먼저 DM으로 보낸 뒤 사용자 접근을 부여하도록 요구한다.
                     grant_canvas_user(client, canvas.canvas_id, user_id)
                 except Exception as exc:
                     log.exception("[%s] Canvas DM 권한 부여 실패: %s", self.workspace, exc)
                     # 접근할 수 없는 링크만 남기지 않고 원래 메시지 답변도 전달한다.
-                    response = say(**fallback_kw)
+                    if private_delivery:
+                        try:
+                            response = client.chat_postMessage(
+                                channel=delivery_channel, **fallback_kw
+                            )
+                        except Exception as post_exc:
+                            log.warning(
+                                "[%s] VIP DM 대체 답변 전송 실패 err=%s",
+                                self.workspace,
+                                type(post_exc).__name__,
+                            )
+                            response = None
+                    else:
+                        response = say(**fallback_kw)
+            if private_delivery and response is not None:
+                notice_kw = {"text": PRIVATE_ANSWER_NOTICE}
+                if thread_ts:
+                    notice_kw["thread_ts"] = thread_ts
+                with contextlib.suppress(Exception):
+                    say(**notice_kw)
             rec = QARecord.build(
                 record_id=qa_record_id,
                 workspace=self.workspace,
@@ -3261,6 +3431,9 @@ class WorkspaceBot:
 
         # 쓰기 동작은 **단독으로만** 실행한다. 무엇을 실행하는지 모호하면 실행하지 않는다.
         if first.kind in WRITE_KINDS:
+            if not getattr(self, "operational_owner", True):
+                finish(DENY_MESSAGE, intent=first, ans=None, ctx=None)
+                return
             if first.kind == "ingest_all":
                 finish(self._ingest_all(client), intent=first, ans=None, ctx=None)
                 return
@@ -3322,8 +3495,7 @@ class WorkspaceBot:
                     else "file_read_empty"
                 )
                 ans = Answer(
-                    "질문에 첨부한 파일을 안전하게 읽지 못해 답변하지 않았습니다. "
-                    f"파일과 권한을 확인해 다시 시도해 주세요. (`{code}`)",
+                    refusal_message(code),
                     [],
                     None,
                     0.0,
@@ -4226,10 +4398,12 @@ class WorkspaceBot:
         from slack_bolt.adapter.socket_mode import SocketModeHandler
 
         self._handler = SocketModeHandler(self.app, self.cfg.app_token)
-        self._backfill_channel_owners()
+        if getattr(self, "operational_owner", True):
+            self._backfill_channel_owners()
         self._handler.connect()
-        self.autojoin_sweep()
-        self.identity_sweep()
+        if getattr(self, "operational_owner", True):
+            self.autojoin_sweep()
+            self.identity_sweep()
         # 봇이 꺼져 있던 사이의 보관·삭제를 따라잡는다(B-51). 이벤트만 쓰면
         # 그 동안의 변화를 영영 놓치고, 없앤 채널 자료가 계속 답에 나온다.
         self.retired_sweep()
@@ -4338,6 +4512,8 @@ class WorkspaceBot:
         연결 상태·채널 수처럼 **Slack 만 아는 것**은 봇이 적어 둔다. 콘솔이 직접 Slack 을
         호출하면 콘솔에도 토큰이 필요해지고 rate limit 을 나눠 쓰게 된다.
         """
+        if not getattr(self, "operational_owner", True):
+            return
         channels = uninvited = 0
         channel_rows: list[dict[str, str | bool]] = []
         try:
@@ -4461,6 +4637,30 @@ def _kst_stamp(ts: str) -> str:
         return ts
 
 
+def _bind_request_live_fetch(ctx, live_fetch):
+    """Bind live Slack reads to the request's current evidence coordinates."""
+    if live_fetch is None:
+        return None
+    managed_sources = getattr(ctx, "evidence_sources", None)
+    if managed_sources is None:
+        workspace = str(getattr(ctx, "workspace", "") or "")
+        return lambda channel_id, limit: live_fetch(workspace, channel_id, limit)
+    if not managed_sources:
+        return None
+
+    workspaces_by_channel: dict[str, set[str]] = {}
+    for workspace, channel_id in managed_sources:
+        workspaces_by_channel.setdefault(str(channel_id), set()).add(str(workspace))
+
+    def fetch(channel_id: str, limit: int) -> list[dict]:
+        workspaces = workspaces_by_channel.get(str(channel_id), set())
+        if len(workspaces) != 1:
+            return []
+        return live_fetch(next(iter(workspaces)), str(channel_id), limit)
+
+    return fetch
+
+
 def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=None):
     """엔진이 근거를 모은 뒤 부를 훅. **전문 봇 호출의 결말**을 돌려준다.
 
@@ -4513,11 +4713,7 @@ def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=Non
             # 현재 요청 workspace에만 결속되므로, 그 좌표로 다른 workspace 채널을
             # 물으면 잘못된 Slack 조직에서 조회한다. workspace를 인자로 받는 계약이
             # 생기기 전에는 관리형 근거 컨텍스트의 실시간 조회를 닫고 아카이브만 쓴다.
-            bound = (
-                (lambda cid, n: live_fetch(workspace, cid, n))
-                if live_fetch and managed_sources is None
-                else None
-            )
+            bound = _bind_request_live_fetch(ctx, live_fetch)
             return ToolBox(
                 store=store, ctx=ctx, live_fetch=bound,
                 here=getattr(ctx, "channel", "") or "",
@@ -4530,7 +4726,9 @@ def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=Non
                 evidence=[evidence] if evidence and evidence.strip() else [],
                 router=router,
                 toolbox_factory=make_toolbox,
-                live=bool(live_fetch) and managed_sources is None,
+                live=bool(live_fetch) and (
+                    managed_sources is None or bool(managed_sources)
+                ),
                 visual=visual,
                 authorization_id=f"{workspace}:{getattr(ctx, 'role', '-') or '-'}",
                 decision_id=str(getattr(task, "decision_id", "") or ""),
@@ -4548,6 +4746,17 @@ def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=Non
         return outcome
 
     return hook
+
+
+def _require_distinct_runtime_tokens(
+    configs: list[WorkspaceConfig], *, bot_token: str, app_token: str
+) -> None:
+    """Refuse a second Socket Mode session for credentials already in use."""
+    if any(
+        bot_token == config.bot_token or app_token == config.app_token
+        for config in configs
+    ):
+        raise ConfigError("VIPBot Slack credentials duplicate a TYBot connection")
 
 
 _external_v3_tool_server = None
@@ -4660,7 +4869,87 @@ def build_bots() -> list[WorkspaceBot]:
         bot.workspace_labels = labels
         live_bots[cfg.key] = bot
         bots.append(bot)
+
+    if _truthy(os.getenv("VIPBOT_SHARED_RUNTIME_ENABLED", "0")):
+        from ..console.bot_identity import runtime_tokens
+        from ..console.workspace_store import list_workspaces
+        from ..vip_profile import load_profile, question_for_engine
+        from ..vip_workspace import build_engine as build_vip_engine
+        from ..vip_workspace import context_resolver
+
+        vip_workspace = str(os.getenv("VIPBOT_WORKSPACE") or "").strip().lower()
+        if vip_workspace not in labels:
+            raise ConfigError(
+                "VIPBOT_WORKSPACE must name an existing managed workspace"
+            )
+        vip_bot_token, vip_app_token = runtime_tokens(vip_workspace, "vipbot")
+        _require_distinct_runtime_tokens(
+            configs, bot_token=vip_bot_token, app_token=vip_app_token
+        )
+        vip_profile = load_profile()
+        managed_labels = dict(labels)
+        try:
+            managed_labels.update(
+                {
+                    str(row["key"]): str(row.get("label") or row["key"])
+                    for row in list_workspaces()
+                    if row.get("state") != "disabled"
+                }
+            )
+        except Exception as exc:
+            log.warning(
+                "VIPBot workspace labels unavailable; active runtime labels only err=%s",
+                type(exc).__name__,
+            )
+        vip_qa_log = QALog(
+            os.getenv("VIPBOT_QA_LOG_DIR", "/var/lib/tybot-vipbot/qa"),
+            write_md=_truthy(os.getenv("QA_LOG_MD", "1")),
+        )
+        vip_cfg = WorkspaceConfig(
+            key=vip_workspace,
+            label=f"{labels[vip_workspace]} VIPBot",
+            bot_token=vip_bot_token,
+            app_token=vip_app_token,
+        )
+        vip_engine = build_vip_engine(
+            store=store,
+            profile=vip_profile,
+            workspace_labels=managed_labels,
+            specialist_factory=lambda vip_router: specialist_hook(
+                vip_router,
+                store=store,
+                live_fetch=live_fetch,
+                external_v3_factory=external_v3_factory,
+            ),
+        )
+        vip_bot = WorkspaceBot(
+            vip_cfg,
+            store=store,
+            engine=vip_engine,
+            qa_log=vip_qa_log,
+            archive_dir=archive_dir,
+            request_context_resolver=context_resolver(vip_workspace),
+            question_transform=question_for_engine,
+            bot_name="vipbot",
+            realtime=False,
+            autojoin=False,
+            operational_owner=False,
+            private_answers=True,
+        )
+        vip_bot.path_problems = problems
+        vip_bot.workspace_labels = managed_labels
+        bots.append(vip_bot)
     return bots
+
+
+def _record_bot_runtime_result(bot: WorkspaceBot, error: str | None) -> None:
+    """Publish status only for the bot that owns the workspace runtime row."""
+    if not getattr(bot, "operational_owner", True) or not os.getenv("DATABASE_URL"):
+        return
+    with contextlib.suppress(Exception):
+        from ..console.workspace_store import record_runtime_result
+
+        record_runtime_result(bot.workspace, error)
 
 
 def main() -> int:
@@ -4701,18 +4990,10 @@ def main() -> int:
                     "워크스페이스 연결 실패 — %s만 제외하고 나머지는 계속 기동합니다",
                     bot.workspace,
                 )
-                if os.getenv("DATABASE_URL"):
-                    with contextlib.suppress(Exception):
-                        from ..console.workspace_store import record_runtime_result
-
-                        record_runtime_result(bot.workspace, str(exc))
+                _record_bot_runtime_result(bot, str(exc))
                 continue
             connected.append(bot)
-            if os.getenv("DATABASE_URL"):
-                with contextlib.suppress(Exception):
-                    from ..console.workspace_store import record_runtime_result
-
-                    record_runtime_result(bot.workspace, None)
+            _record_bot_runtime_result(bot, None)
         if not connected:
             log.error("연결에 성공한 워크스페이스가 없어 기동을 중단합니다")
             return 1

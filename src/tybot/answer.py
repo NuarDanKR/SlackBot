@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import document_evidence, documents, summary_guide
-from .access import RequestContext
+from .access import RequestContext, can_access
 from .archive.store import ArchiveStore, SearchHit
 from .attachment_review import find_sendable, status_line
 from .channels import source_label
@@ -136,10 +137,13 @@ def _workspace_labels() -> dict[str, str]:
     return labels
 
 
-def _mentioned_workspaces(question: str) -> frozenset[str]:
+def _mentioned_workspaces(
+    question: str, labels: Mapping[str, str] | None = None
+) -> frozenset[str]:
     """질문에 명시된 워크스페이스 키·표시 이름을 DB 메타데이터에서 찾는다."""
     found: set[str] = set()
-    for key, label in _workspace_labels().items():
+    known = _workspace_labels() if labels is None else labels
+    for key, label in known.items():
         if label and label in question:
             found.add(key)
             continue
@@ -148,7 +152,11 @@ def _mentioned_workspaces(question: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _named_workspace_filter(question: str, ctx) -> frozenset[str] | None:
+def _named_workspace_filter(
+    question: str,
+    ctx,
+    labels: Mapping[str, str] | None = None,
+) -> frozenset[str] | None:
     """DM에서 명시적인 워크스페이스 지정만 범위를 좁힌다. 조직명 언급만으로는 아니다.
 
     채널 질문의 범위는 **현재 워크스페이스·현재 채널로 고정**이고, 질문 본문이
@@ -167,6 +175,13 @@ def _named_workspace_filter(question: str, ctx) -> frozenset[str] | None:
     현재 채널에 공유된 원문은 **다른 조직 이야기여도 근거로 쓴다.** 그 채널에
     올라왔다는 사실이 그 방 사람들이 그것을 함께 본다는 뜻이다.
     """
+    # A managed evidence scope is already independent of the channel where the
+    # user asked.  In that scope a configured workspace label is an explicit
+    # selector by itself: answering a question that names one division with a
+    # different division's evidence first is undesirable. It is a preference,
+    # not an access filter, so summary must still receive every managed source.
+    if getattr(ctx, "evidence_sources", None) is not None:
+        return None
     if getattr(ctx, "in_channel", False):
         return None
     # An organization mentioned as the topic is not a workspace selector.
@@ -181,6 +196,71 @@ def _named_workspace_filter(question: str, ctx) -> frozenset[str] | None:
                 found.add(key)
                 break
     return frozenset(found) or None
+
+
+def _prefer_managed_workspace_context(
+    question: str,
+    ctx: RequestContext,
+    labels: Mapping[str, str] | None = None,
+) -> RequestContext:
+    """Prioritize an explicit workspace without reducing managed evidence.
+
+    VIP evidence is a set of administrator-selected coordinates, independent
+    of the Slack channel where the request arrived. A configured workspace
+    name changes ordering only; every registered source remains eligible.
+    """
+    if ctx.evidence_sources is None:
+        return ctx
+    selected = _mentioned_workspaces(question, labels)
+    if not selected:
+        return ctx
+    logger.info(
+        "managed workspace preference selected=%s sources=%d",
+        sorted(selected),
+        len(ctx.evidence_sources),
+    )
+    return replace(
+        ctx,
+        preferred_workspaces=selected,
+    )
+
+
+def _filter_scoped_hits(hits, ctx: RequestContext) -> list[SearchHit]:
+    """Recheck supplied hits and apply the managed workspace preference.
+
+    Follow-up coordinates are opened before the engine interprets the new
+    question. Access still comes only from ``evidence_sources``; a named
+    workspace changes ordering and never expands or shrinks that set. The
+    exact synthetic hit used for this question's attachment remains eligible.
+    """
+    rows = list(hits or ())
+    if ctx.evidence_sources is None:
+        return rows
+    allowed = [
+        hit
+        for hit in rows
+        if (
+            hit.doc.channel_id is None
+            and hit.doc.channel == "질문 첨부"
+            and hit.doc.path.name == "__question_attachment__.txt"
+        )
+        or (
+            can_access(
+                ctx,
+                visibility=hit.doc.visibility,
+                acl=hit.doc.acl,
+                owner_workspace=hit.doc.workspace,
+                share_with=hit.doc.share_with,
+                channel_id=hit.doc.channel_id,
+                channel=hit.doc.channel,
+                dm_user=hit.doc.dm_user,
+            )
+        )
+    ]
+    preferred = ctx.preferred_workspaces
+    if preferred:
+        allowed.sort(key=lambda hit: hit.doc.workspace not in preferred)
+    return allowed
 
 
 # --- 근거가 없을 때 무엇이라고 말하나 (2026-10-16) ---------------------------
@@ -198,6 +278,12 @@ def _named_workspace_filter(question: str, ctx) -> frozenset[str] | None:
 # 초대(`/invite`)하고…」 로 나갔다. 이미 초대돼 있는 채널에서 그 문장을 받으면
 # 사람은 무엇을 해야 할지 모르고, 수집 장애는 「자료가 없다」 로 덮인다.
 CHANNEL_NO_EVIDENCE = "현재 채널에서 해당 근거를 찾지 못했습니다."
+# 채널 질문은 **그 채널만** 찾는다(`can_access` 1번 — 채널 답변은 그 방 사람이 모두
+# 본다). 범위를 넓히지 않고, 넓은 범위가 필요할 때 갈 곳만 알려 준다.
+CHANNEL_SCOPE_HINT = (
+    "다른 채널의 자료까지 찾으려면 봇에게 DM 으로 물어 보세요. "
+    "DM 에서는 본인이 열람할 수 있는 채널 전체에서 찾습니다."
+)
 PERMISSION_UNVERIFIED = (
     "열람 권한 범위를 확인하지 못했습니다. 자료가 없다는 뜻이 아닙니다. "
     "잠시 뒤 다시 물어봐 주세요."
@@ -953,6 +1039,28 @@ def _blocks_from_hits(hits: list[SearchHit], ctx) -> tuple[list, list, list, int
     return blocks, citations, parts, total
 
 
+def _question_retry_query(question: str, terms) -> str:
+    """분류기 핵심어로 0건일 때 **질문 원문의 낱말**로 다시 찾을 검색어. 없으면 빈 문자열.
+
+    핵심어는 분류기가 고른 몇 낱말이라 문서 표현과 어긋나면 그대로 0건이다
+    (「미수금」 으로 뽑았는데 문서는 「미회수 금액」). 질문에는 사람이 실제로 쓴 낱말이
+    더 있다. 요청 표현(「알려줘」)과 지칭어(「방금」)는 뺀다 — 넣으면 아무 줄이나 맞는다.
+
+    핵심어에 이미 있던 낱말만 남으면 다시 찾을 이유가 없어 빈 문자열을 돌려준다.
+    **동의어를 만들지 않는다** — 사람이 쓴 낱말만 쓴다(`intent.DOCUMENT_SYNONYMS` 주석).
+    """
+    from . import search_index
+    from .intent import REFERENCE_STOPWORDS, STOPWORDS, TOKEN_RE
+
+    words = [
+        word for word in TOKEN_RE.findall(question or "")
+        if word not in STOPWORDS and word not in REFERENCE_STOPWORDS
+    ]
+    tried = set(search_index.tokens_of(" ".join(terms or [])))
+    fresh = set(search_index.tokens_of(" ".join(words))) - tried
+    return " ".join(words) if fresh else ""
+
+
 class AnswerEngine:
     def __init__(
         self,
@@ -966,6 +1074,7 @@ class AnswerEngine:
         allow_master_business_answers=False,
         prompts: AnswerPrompts | None = None,
         max_output_tokens: int | None = None,
+        workspace_labels: Mapping[str, str] | None = None,
     ) -> None:
         self._store = store
         self._router = router
@@ -976,6 +1085,7 @@ class AnswerEngine:
         # 이 파일이 그대로 쓰인다.
         self._specialist = specialist
         self._prompts = prompts or AnswerPrompts()
+        self._workspace_labels = dict(workspace_labels or {})
         if (
             isinstance(max_output_tokens, bool)
             or (
@@ -1264,7 +1374,8 @@ class AnswerEngine:
             return Answer(NO_ACCESS_TEXT, [], None, 0.0, 0, "no_access", terms=terms)
         if had_documents:
             return Answer(
-                f"{CHANNEL_NO_EVIDENCE} 이 채널의 원문은 조회했고, 추측으로 답하지 않습니다.",
+                f"{CHANNEL_NO_EVIDENCE} 이 채널의 원문은 조회했고, 추측으로 답하지 않습니다."
+                f"\n\n{CHANNEL_SCOPE_HINT}",
                 [], None, 0.0, 0, "no_hits", terms=terms,
             )
         return Answer(
@@ -1320,11 +1431,15 @@ class AnswerEngine:
         # 말하면 사람은 있지도 않은 권한 문제를 찾으러 간다.
         had_documents = False
         if scoped:
-            summary_hits = list(evidence_hits or ())
+            summary_hits = _filter_scoped_hits(evidence_hits, ctx)
             blocks, citations, specialist_parts, total = _blocks_from_hits(summary_hits, ctx)
             visible_docs = []
         else:
             accessible = self._store.visible_docs(ctx)
+            if ctx.preferred_workspaces:
+                accessible.sort(
+                    key=lambda doc: doc.workspace not in ctx.preferred_workspaces
+                )
             had_documents = bool(accessible)
             visible_docs = [
                 doc
@@ -1750,6 +1865,9 @@ class AnswerEngine:
         model, q = parse_model_flag(question)
         if not q:
             return Answer("질문 내용이 없습니다.", [], None, 0.0, 0, "error")
+        ctx = _prefer_managed_workspace_context(
+            q, ctx, self._workspace_labels or None
+        )
         intent = intent or classify(q, self._router)
 
         # 사람이 **이번 질문에 붙여 올린 원문**(B-57). 「찾아야 하는 자료」가 아니라
@@ -1778,7 +1896,9 @@ class AnswerEngine:
                 ctx,
                 days=intent.days or DEFAULT_DAYS,
                 model=model,
-                workspace_filter=_named_workspace_filter(q, ctx),
+                workspace_filter=_named_workspace_filter(
+                    q, ctx, self._workspace_labels or None
+                ),
                 question=q,
                 # 문서 종류가 있으면 문서 집합 요약이다 — 채널당 최근 줄이 아니라
                 # 보고서마다 몫을 나눈다(설계 §11).
@@ -1810,7 +1930,9 @@ class AnswerEngine:
                     ctx,
                     days=parse_period(q),
                     model=model,
-                    workspace_filter=_named_workspace_filter(q, ctx),
+                    workspace_filter=_named_workspace_filter(
+                        q, ctx, self._workspace_labels or None
+                    ),
                     question=q,
                     document_query=list(intent.document_query),
                     all_time=intent.wants_all_time,
@@ -1871,7 +1993,10 @@ class AnswerEngine:
                 context_resolution=followup.resolution,
             )
 
-        hits = self._with_seed(seed_hits, followup.evidence_hits)
+        followup_hits = list(followup.evidence_hits or ())
+        scoped_hits = _filter_scoped_hits(followup_hits, ctx)
+        scope_rejected = len(scoped_hits) != len(followup_hits)
+        hits = self._with_seed(seed_hits, scoped_hits)
         if intent.format_only:
             from dataclasses import replace
 
@@ -1892,7 +2017,9 @@ class AnswerEngine:
                 widen_terms := [
                     t for t in (list(intent.terms) or list(followup.topic_terms)) if t
                 ]
-            ) and not (set(followup.dropped_codes) & PERMISSION_MISS_CODES):
+            ) and not scope_rejected and not (
+                set(followup.dropped_codes) & PERMISSION_MISS_CODES
+            ):
                 # **되돌아 나오는 문**(2026-09-18 문제 패킷 QA ec366cd4·43142c76).
                 #
                 # 좁히기는 "방금 그 문서 다시" 를 위한 장치였는데, 사람이 대화로
@@ -2038,13 +2165,29 @@ class AnswerEngine:
         if not q:
             return Answer("질문 내용이 없습니다.", [], None, 0.0, 0, "error")
 
+        ctx = _prefer_managed_workspace_context(
+            q, ctx, self._workspace_labels or None
+        )
         scoped = evidence_hits is not None
         if scoped:
-            hits = list(evidence_hits or ())
+            hits = _filter_scoped_hits(evidence_hits, ctx)
         else:
             # 2겹: 색인이 아니라 원문 라인을 연다.
             query = " ".join(terms) if terms else q
             hits = self._store.search(query, ctx, limit=self._max_hits)
+            if not hits and terms:
+                # 분류기가 고른 핵심어가 문서 표현과 어긋나면 0건이 된다. 사람이 쓴
+                # 질문에는 다른 낱말이 더 있다 — 「근거 없음」 으로 닫기 전에 그 낱말로
+                # **같은 권한 범위에서** 한 번 더 찾는다. 범위는 넓히지 않는다.
+                retry = _question_retry_query(q, terms)
+                if retry:
+                    hits = self._store.search(retry, ctx, limit=self._max_hits)
+                    logger.info(
+                        "answer 핵심어 0건 -> 질문 낱말로 재검색 terms=%r hits=%d ws=%s",
+                        terms, len(hits), ctx.workspace,
+                    )
+                    if hits:
+                        query = retry
             hits = self._with_approved_guide(query, hits, ctx)
             # 방금 올린 첨부는 **검색 앞에** 둔다. 검색어가 파일 내용과 어긋나도
             # 빠지면 안 되는 근거다 — 사람은 그 파일을 보고 물었다(B-57 §4).

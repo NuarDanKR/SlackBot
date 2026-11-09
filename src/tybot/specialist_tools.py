@@ -743,7 +743,7 @@ class ToolBox:
                 if link:
                     self.touched.live_permalinks.append(link)
                 self.touched.record_live(
-                    self.ctx.workspace,
+                    str(getattr(doc, "workspace", "") or self.ctx.workspace),
                     str(getattr(doc, "channel_id", "") or ""),
                     str(message.get("ts") or ""),
                 )

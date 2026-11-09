@@ -62,6 +62,9 @@ class RequestContext:
     # 멤버십 대신 관리자가 고른 정확한 ``(workspace, channel_id)``만 읽는 경로가
     # 사용한다. 일반 ``role=exec``/``is_root``와 섞지 않는다.
     evidence_sources: frozenset[tuple[str, str]] | None = None
+    # 관리형 근거 범위를 줄이지 않고 검색 순서만 앞당기는 워크스페이스 힌트.
+    # 권한 판정에는 절대 사용하지 않는다.
+    preferred_workspaces: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def in_channel(self) -> bool:

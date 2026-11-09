@@ -471,7 +471,7 @@ def test_the_hook_binds_the_request_context_into_the_toolbox():
     assert box.store is store
 
 
-def test_managed_cross_workspace_scope_does_not_use_workspace_bound_live_fetch():
+def test_managed_cross_workspace_scope_binds_live_fetch_to_the_registered_source():
     from types import SimpleNamespace
 
     from tybot.slack import pilot
@@ -486,6 +486,11 @@ def test_managed_cross_workspace_scope_does_not_use_workspace_bound_live_fetch()
         return SpecialistOutcome(UNAVAILABLE, error_code="test")
 
     live_calls = []
+
+    def live_fetch(*args):
+        live_calls.append(args)
+        return [{"ts": "1", "text": "current"}]
+
     ctx = SimpleNamespace(
         workspace="tyit",
         role="member",
@@ -495,7 +500,7 @@ def test_managed_cross_workspace_scope_does_not_use_workspace_bound_live_fetch()
     hook = pilot.specialist_hook(
         router=None,
         store=object(),
-        live_fetch=lambda *args: live_calls.append(args),
+        live_fetch=live_fetch,
     )
     import tybot.specialist_router as sr
 
@@ -506,9 +511,37 @@ def test_managed_cross_workspace_scope_does_not_use_workspace_bound_live_fetch()
         sr.serve = original
 
     box = captured["factory"]()
-    assert box.live_fetch is None
-    assert captured["live"] is False
-    assert live_calls == []
+    assert box.live_fetch("C0EXEC001", 3) == [{"ts": "1", "text": "current"}]
+    assert captured["live"] is True
+    assert live_calls == [("mgmt", "C0EXEC001", 3)]
+
+
+def test_managed_live_fetch_refuses_an_ambiguous_cross_workspace_coordinate():
+    from types import SimpleNamespace
+
+    from tybot.slack import pilot
+
+    calls = []
+    ctx = SimpleNamespace(
+        workspace="tyit",
+        evidence_sources=frozenset({("mgmt", "C1"), ("tec", "C1")}),
+    )
+    bound = pilot._bind_request_live_fetch(
+        ctx, lambda *args: calls.append(args) or [{"text": "must not escape"}]
+    )
+
+    assert bound("C1", 20) == []
+    assert calls == []
+
+
+def test_empty_managed_scope_has_no_live_fetch_tool():
+    from types import SimpleNamespace
+
+    from tybot.slack import pilot
+
+    ctx = SimpleNamespace(workspace="tyit", evidence_sources=frozenset())
+
+    assert pilot._bind_request_live_fetch(ctx, lambda *_args: []) is None
 
 
 def test_the_answer_cites_what_the_specialist_read():

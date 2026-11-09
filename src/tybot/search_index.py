@@ -74,10 +74,24 @@ JOSA = (
 )
 _HANGUL_WORD = re.compile(r"^[가-힣]+$")
 
+# 질문 어미. 「청구했나요」 는 `%청구했나요%` 로 찾게 되어 본문의 「청구」 에 맞지
+# 않는다 — 분류기가 핵심어를 못 뽑았거나, 핵심어로 0건이라 질문 낱말로 다시 찾을 때
+# (`answer._question_retry_query`) 특히 그렇다. 조사와 같은 규칙이다: 긴 것부터,
+# 남는 말이 2자 이상일 때만 뗀다. 떼면 넓어지기만 한다.
+#
+# 「인지」 는 넣지 않는다 — 「수입인지」 처럼 명사 끝에 흔하다.
+QUESTION_ENDINGS = (
+    "했는지요", "했나요", "하나요", "인가요", "했어요", "했는지", "하는지",
+    "입니까", "합니까", "인지요", "은요", "는요", "나요", "까요", "는지",
+)
+
 
 def _strip_josa(token: str) -> str:
     if len(token) < 3 or not _HANGUL_WORD.match(token):
         return token
+    for ending in QUESTION_ENDINGS:
+        if token.endswith(ending) and len(token) - len(ending) >= 2:
+            return token[: -len(ending)]
     for particle in JOSA:
         if token.endswith(particle) and len(token) - len(particle) >= 2:
             return token[: -len(particle)]

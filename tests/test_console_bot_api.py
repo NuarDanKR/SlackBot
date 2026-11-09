@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -240,11 +241,43 @@ def test_token_pair_and_fingerprint_are_read_from_one_sql_snapshot(monkeypatch):
     assert bot_identity._tokens("tyit", "master") == ("bot", "app", "fp-1")
     assert len(cursor.calls) == 1
     query, params = cursor.calls[0]
-    assert params == ("tyit", "master")
+    assert params == ("tyit", "master", False)
     assert "WITH target AS" in query
     assert "fingerprint AS" in query
     assert "md5(s.ciphertext)" in query
     assert "f.value AS fingerprint" in query
+
+
+def test_runtime_tokens_drop_the_internal_fingerprint(monkeypatch):
+    loaded = Mock(return_value=("bot", "app", "fp-1"))
+    monkeypatch.setattr(bot_identity, "_tokens", loaded)
+
+    assert bot_identity.runtime_tokens("tyit", "vipbot") == ("bot", "app")
+    loaded.assert_called_once_with("tyit", "vipbot", require_runtime=True)
+
+
+def test_runtime_token_state_and_secrets_are_bound_in_the_same_sql_snapshot(
+    monkeypatch,
+):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = []
+    cursor.__enter__.return_value = cursor
+    cursor.__exit__.return_value = False
+    connection = MagicMock()
+    connection.cursor.return_value = cursor
+    connection.__enter__.return_value = connection
+    connection.__exit__.return_value = False
+    monkeypatch.setattr(bot_identity, "_connect", lambda: connection)
+
+    with pytest.raises(bot_admin.BotAdminRefused):
+        bot_identity.runtime_tokens("tyit", "vipbot")
+
+    query, params = cursor.execute.call_args.args
+    assert params == ("tyit", "vipbot", True)
+    assert "state = 'enabled'" in query
+    assert "identity_ok IS TRUE" in query
+    assert "nullif(team_id, '') IS NOT NULL" in query
+    assert "nullif(bot_user_id, '') IS NOT NULL" in query
 
 
 def _slack(team="T1", user="U2", *, fail=False):

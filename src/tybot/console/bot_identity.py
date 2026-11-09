@@ -30,7 +30,9 @@ class SlackUnavailable(WorkspaceStoreError):
     """Slack 이 답하지 않았다. **저장은 그대로다**(§7.5 → 503)."""
 
 
-def _tokens(workspace: str, bot_key: str) -> tuple[str, str, str]:
+def _tokens(
+    workspace: str, bot_key: str, *, require_runtime: bool = False
+) -> tuple[str, str, str]:
     """이 연결의 봇·앱 토큰. 쌍이 아니면 거절한다."""
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
@@ -40,6 +42,15 @@ def _tokens(workspace: str, bot_key: str) -> tuple[str, str, str]:
                   FROM bot_connection
                  WHERE workspace = %s AND bot_key = %s
                    AND connector_type = 'slack_socket'
+                   AND (
+                       NOT %s
+                       OR (
+                           state = 'enabled'
+                           AND identity_ok IS TRUE
+                           AND nullif(team_id, '') IS NOT NULL
+                           AND nullif(bot_user_id, '') IS NOT NULL
+                       )
+                   )
             ), fingerprint AS (
                 SELECT t.id,
                        coalesce(
@@ -59,7 +70,7 @@ def _tokens(workspace: str, bot_key: str) -> tuple[str, str, str]:
              WHERE s.kind IN ('bot', 'app')
              ORDER BY s.kind
             """,
-            (workspace, bot_key),
+            (workspace, bot_key, require_runtime),
         )
         rows = cur.fetchall()
     encrypted = {str(row["kind"]): bytes(row["ciphertext"]) for row in rows}
@@ -94,6 +105,14 @@ def bot_token_for_admin_operation(workspace: str, bot_key: str) -> str:
     bot_token, app_token, _fingerprint = _tokens(workspace, bot_key)
     del app_token
     return bot_token
+
+
+def runtime_tokens(workspace: str, bot_key: str) -> tuple[str, str]:
+    """Load one verified Socket Mode token pair for a bot runtime."""
+    bot_token, app_token, _fingerprint = _tokens(
+        workspace, bot_key, require_runtime=True
+    )
+    return bot_token, app_token
 
 
 def verify_connection(

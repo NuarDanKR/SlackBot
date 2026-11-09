@@ -1111,6 +1111,8 @@ class ArchiveStore:
             return []
 
         docs = self._visible_channel_docs(ctx)
+        if ctx.preferred_workspaces:
+            docs.sort(key=lambda doc: doc.workspace not in ctx.preferred_workspaces)
         if channels is not None:
             # 전문 봇의 `where`는 검색 결과를 받은 뒤 자르는 조건이 아니다.
             # 먼저 권한을 적용한 문서에서 범위를 더 좁힌다. 반대로 이 인자로
@@ -1185,7 +1187,9 @@ class ArchiveStore:
         #
         # 낡은 문서만 파일에서 보완한다. 전체 아카이브를 매번 훑지 않는다.
         hits += self._stale_hits(query, tokens, docs, expected_counts)
-        return self._rank(hits, limit)
+        return self._rank(
+            hits, limit, preferred_workspaces=ctx.preferred_workspaces
+        )
 
     def _scan_attachment_fallback(
         self, query, tokens, channel_docs, ctx, limit, channels
@@ -1194,7 +1198,13 @@ class ArchiveStore:
         from . import attachment_reader
 
         keep = max(limit, 1) * SCAN_KEEP_FACTOR
-        hits = self._scan(query, tokens, channel_docs, keep)
+        hits = self._scan(
+            query,
+            tokens,
+            channel_docs,
+            keep,
+            preferred_workspaces=ctx.preferred_workspaces,
+        )
         permitted = self._visible_predicate(ctx)
         for doc in attachment_reader.iter_archive_docs(
             self.root, channel_docs, cache=self._attachments
@@ -1203,8 +1213,14 @@ class ArchiveStore:
                 continue
             hits.extend(self._scan(query, tokens, [doc], keep))
             if len(hits) >= keep * 2:
-                hits = self._rank(hits, keep)
-        return self._rank(hits, limit)
+                hits = self._rank(
+                    hits,
+                    keep,
+                    preferred_workspaces=ctx.preferred_workspaces,
+                )
+        return self._rank(
+            hits, limit, preferred_workspaces=ctx.preferred_workspaces
+        )
 
     def _stale_hits(self, query, tokens, docs, expected_counts) -> list[SearchHit]:
         """색인이 뒤처진 문서만 파일에서 찾아 보탠다.
@@ -1243,7 +1259,13 @@ class ArchiveStore:
         return self._scan(query, tokens, stale, len(stale) * 20)
 
     def _scan(
-        self, query: str, tokens: list[str], docs: list[ArchiveDoc], limit: int
+        self,
+        query: str,
+        tokens: list[str],
+        docs: list[ArchiveDoc],
+        limit: int,
+        *,
+        preferred_workspaces: frozenset[str] = frozenset(),
     ) -> list[SearchHit]:
         """파일 스캔 폴백. 색인 경로와 **같은 점수 함수**를 쓴다.
 
@@ -1270,12 +1292,26 @@ class ArchiveStore:
                     continue
                 hits.append(SearchHit(doc=doc, line=line, score=score))
                 if len(hits) >= keep * 2:
-                    hits = self._rank(hits, keep)
-        return self._rank(hits, limit)
+                    hits = self._rank(
+                        hits,
+                        keep,
+                        preferred_workspaces=preferred_workspaces,
+                    )
+        return self._rank(
+            hits, limit, preferred_workspaces=preferred_workspaces
+        )
 
     @staticmethod
-    def _rank(hits: list[SearchHit], limit: int) -> list[SearchHit]:
-        """점수 → **최근순** → 경로. 예전에는 점수 다음이 파일명이었다.
+    def _rank(
+        hits: list[SearchHit],
+        limit: int,
+        *,
+        preferred_workspaces: frozenset[str] = frozenset(),
+    ) -> list[SearchHit]:
+        """선호 workspace → 점수 → **최근순** → 경로.
+
+        선호 workspace가 없으면 기존 점수 순서와 완전히 같다. 선호는 권한을
+        넓히지 않으며 호출자가 이미 허용한 문서 사이의 순서만 바꾼다.
 
         같은 점수면 오래된 줄이 먼저 올라와, 바뀐 숫자를 묻는 질문에 옛 값이 근거로
         붙었다. 시각 표기가 없는 줄은 뒤로 보낸다(판정할 수 없는 것을 앞세우지 않는다).
@@ -1302,4 +1338,9 @@ class ArchiveStore:
         hits.sort(key=lambda h: (h.doc.path.name, h.line.lineno))
         hits.sort(key=lambda h: h.line.ts or "", reverse=True)   # 최근순
         hits.sort(key=lambda h: -h.score)
+        if preferred_workspaces:
+            # Preference never grants access: ``hits`` already came from
+            # ``visible_docs(ctx)``. Stable sorting only moves an explicitly
+            # named workspace ahead of the other registered source channels.
+            hits.sort(key=lambda h: h.doc.workspace not in preferred_workspaces)
         return hits[:limit]

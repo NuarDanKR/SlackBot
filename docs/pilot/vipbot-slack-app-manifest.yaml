@@ -1,23 +1,42 @@
 # VIPBot — 별도 Slack 앱. TYBot·TY Archiving 과 **따로** 설치한다.
 #
-# 이 앱은 묻는 사람 한 명에게만 답한다. 채널 원문을 모으지 않고, 채널에 자동으로
-# 들어가지 않고, Canvas 를 쓰지 않는다. 질문에 직접 붙인 파일만 이번 답변 동안
-# 읽고 버린다. 그 밖의 수집·쓰기 스코프는 여기 **없다.** 스코프는 나중에 지우기
-# 어렵다 — 한 번 설치되면 워크스페이스마다 다시 승인을 받아야 하고, 그 사이 토큰은
-# 넓은 권한을 들고 돌아다닌다.
+# VIPBot 은 별도 제품이 아니다. 같은 `WorkspaceBot` · 같은 `AnswerEngine` 을 쓰고
+# 다른 것은 **넷**뿐이다.
+#
+#   1. VIP 모델·프롬프트·비용 상한
+#   2. `bot_access(bot='vipbot')` 사용자 판정
+#   3. `bot_source_channel(bot='vipbot')` 근거 좌표
+#   4. **상세 답변은 요청자 DM 으로만 간다**(`private_answers`)
+#
+# 1~3 은 *무엇을 근거로 답하나*이고 4 는 *누가 그 답을 보나*다. 답을 **만드는**
+# 코드는 전부 공통이다 — 본문·출처·Canvas 판단·근거 보기가 TYBot 과 같은 곳에서
+# 나온다. 갈라지는 것은 마지막 한 걸음, 어디로 보내느냐뿐이다.
+#
+# 그래서 스코프가 TYBot 의 답변 경로와 같은 모양이어야 한다. 채널에서 불러도
+# 본문은 DM 으로 가지만, **그 본문을 만드는 호출은 똑같이 일어난다.**
+#
+# 앱만 따로인 이유는 토큰과 설치 승인을 분리하기 위해서다. 그래서 스코프는
+# **공통 답변 경로가 실제로 부르는 것까지**이고, 거기서 한 칸도 더 가지 않는다.
+# 수집·백필·자동 참여·채널 관리·아카이브 쓰기는 여기 **없다.** 운영 원문 writer 는
+# TYBot 하나뿐이다.
+#
+# 스코프는 설치된 뒤에 좁히기 어렵다 — 한 번 승인되면 워크스페이스마다 다시
+# 받아야 하고, 그 사이 토큰은 넓은 권한을 들고 돌아다닌다.
 #
 # 인바운드 포트를 열지 않는다(Socket Mode). 봇이 자기 출력을 되먹는 길과 외부에서
 # 들어오는 길을 둘 다 막는다 — CLAUDE.md 아키텍처 규칙.
 display_information:
   name: VIPBot
-  description: 임원·VIP 전용 질의 봇. 상세 답변은 요청자 DM 으로만 보낸다
+  description: 임원·VIP 전용 질의 봇. 답은 TYBot 과 같은 경로로 만들고 상세는 DM 으로만 보낸다
   background_color: "#2f2a4a"
 features:
   app_home:
-    # DM 이 유일한 답변 창구다. 메시지 탭이 꺼져 있으면 사람이 봇에게 말을 걸 수
-    # 없고, 그러면 채널이 유일한 창구가 된다 — 그건 막으려던 바로 그 상태다.
+    # DM 이 **상세 답변이 도착하는 곳**이다. 메시지 탭이 꺼져 있으면 사람이 봇에게
+    # 말을 걸 수 없고, 채널에서 불러도 답을 받을 곳이 없다.
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
+    # 홈 탭은 열지 않는다. 공통 봇의 첫 사용 안내(`on_home_opened`)는 `tab == home`
+    # 일 때만 보내므로, 홈 탭이 없으면 그 경로는 애초에 열리지 않는다.
     home_tab_enabled: false
   bot_user:
     display_name: vipbot
@@ -27,16 +46,37 @@ oauth_config:
     bot:
       # 채널에서 호출을 받는다. 호출 그 자체만 보이고 채널 대화는 안 보인다.
       - app_mentions:read
-      # DM 과 채널 안내를 보낸다.
+      # 답변 본문(요청자 DM)·채널 고정 안내 한 줄·진행 안내(`chat.update`).
       - chat:write
       # DM 으로 온 질문을 받는다(message.im 이벤트의 전제 스코프).
       - im:history
-      # 요청자와의 DM 을 연다(conversations.open).
+      # 요청자와의 DM 을 연다(`conversations.open`). 채널에서 부른 질문의 본문은
+      # **여기로만** 나간다. 열지 못하면 답을 보내지 않고 채널에도 남기지 않는다.
       - im:write
-      # 질문에 **붙여 올린 파일 한 번**을 읽는다. 아카이브에 쓰지 않는다 —
-      # 읽고, 답하고, 버린다(`question_files` · `vipbot_runtime.answer_with_files`).
-      # 2026-11-06 연결 완료 뒤에 더했다. 쓰는 권한(`files:write`)은 **없다.**
+      # 질문에 **붙여 올린 파일 한 번**을 읽는다(`question_files`). Canvas 답변의
+      # permalink 조회(`files.info`)도 이 스코프다. 쓰는 권한은 **없다.**
       - files:read
+      # Canvas 답변. 공통 경로는 요청이 있거나 표가 길면 Canvas 로 내보낸다
+      # (`canvas_answer.create`). 이 스코프가 없으면 VIP 만 Canvas 답변이
+      # 조용히 메시지로 되돌아간다 — 같은 질문에 다른 형식이 나간다.
+      #
+      # **권한은 요청자 한 명에게만 준다** — `canvases.access.set(user_ids=[...])`.
+      # 채널에 주면(`channel_ids`) 링크를 숨겨도 그 채널 사람이 파일 목록에서
+      # 찾을 수 있고, 그러면 DM 전용 전달이 무의미해진다.
+      - canvases:write
+      # 👀 수신 표시. 공통 경로가 요청을 받자마자 무조건 부른다
+      # (`pilot._handle_request` → `reactions.add`).
+      #
+      # 이건 **채널에 남는다** — 본문이 아니라 「받았다」 는 신호이고, 질문 자체는
+      # 이미 그 채널에 보인다. 상세가 DM 으로 가므로 이 표시마저 없으면 사람은
+      # 봇이 무시했다고 읽는다.
+      - reactions:write
+      # 채널 이름 한 줄(`conversations.info`). **범위 판정은 channel_id 로 한다** —
+      # 이 스코프가 없다고 권한이 넓어지지도 좁아지지도 않는다. 없으면 출처·
+      # 근거 보기·감사기록에 `#팀_자금(ABB540)_주간보고` 대신 `C09…` 가 남아
+      # TYBot 과 출처 형식이 달라진다(원칙 2).
+      - channels:read
+      - groups:read
       # Slack 사용자 ↔ 사번 매핑(identity.ensure). 권한 판정의 입구다.
       - users:read
       - users:read.email
@@ -47,27 +87,53 @@ settings:
       - app_mention
       - message.im
   interactivity:
-    is_enabled: false
-  # 아웃바운드 연결만 쓴다. request_url 이 없다 = 새로 여는 인바운드 포트가 없다.
+    # **request_url 이 없다** — 인바운드 포트는 여전히 열리지 않고, 상호작용
+    # 페이로드는 Socket Mode 로 들어온다.
+    #
+    # 켜는 이유: 공통 답변은 근거로 답할 때마다 「근거 보기」 버튼을 붙인다
+    # (`evidence_view.blocks`). 꺼 두면 버튼은 그려지는데 눌러도 아무 일이
+    # 일어나지 않는다 — 코드 주석이 말하는 「버튼이 있는데 눌러도 아무것도
+    # 안 나오면 없는 것만 못하다」 가 VIP 에서만 재현된다.
+    is_enabled: true
+  org_deploy_enabled: false
   socket_mode_enabled: true
   token_rotation_enabled: false
 #
 # 일부러 넣지 않은 것 (tests/test_vipbot_boundary.py 가 고정한다)
 #
-#   channels:history · groups:history · im:read 외 수집 스코프
-#       → 채널 원문 수집은 TY Archiving 앱의 일이다. 두 앱이 같은 원문을 모으면
-#         어느 쪽이 쓴 줄인지 알 수 없고, 되돌릴 때 한쪽만 되돌아간다
-#   channels:join · channels:manage · channels:write.invites
-#       → 자동 참여 금지. 봇이 스스로 들어간 채널은 아무도 승인하지 않았다
+#   channels:history · groups:history · mpim:history
+#       → 채널 원문 수집은 TY Archiving·TYBot 의 일이다. 두 앱이 같은 원문을
+#         모으면 어느 쪽이 쓴 줄인지 알 수 없고, 되돌릴 때 한쪽만 되돌아간다.
+#         VIP 의 실시간 조회도 VIP 토큰으로 읽지 않는다 — 공통 런타임이 그
+#         워크스페이스를 소유한 TYBot 인스턴스로 읽는다(`_bind_request_live_fetch`)
+#   channels:join · channels:manage · groups:write · channels:write.invites
+#       → 자동 참여·채널 생성 금지(`autojoin=False`). 봇이 스스로 들어간 채널은
+#         아무도 승인하지 않았다
 #   files:write
-#       → 첨부를 **보관하지 않는다.** 질문에 붙인 파일은 이번 답변의 입력일 뿐
-#         이고, 아카이브에 쌓는 것은 Archiver 의 일이다(B-83 읽기 전용)
-#   canvases:write · canvases:read
-#       → Canvas 는 요약 검토의 창구다. VIPBot 은 검토에 끼지 않는다
+#       → 첨부를 **보관하지 않는다.** 질문에 붙인 파일은 이번 답변의 입력일 뿐이고,
+#         아카이브에 쌓는 것은 Archiver 의 일이다
+#   canvases:read
+#       → 채널 Canvas **본문 수집**용 스코프다. 쓰기(`canvases:write`)는 답변을
+#         내보내는 길이고 읽기는 모으는 길이다. 모으지 않는다
 #   commands
-#       → 슬래시 명령 없음. 호출 경로는 멘션과 DM 둘뿐이다
-#   reactions:read · reactions:write
-#       → 수집 신호를 읽지 않는다
-#   message.channels · message.groups · channel_created · channel_rename
-#       → 수집 이벤트. 받으면 「안 쓰더라도 받고는 있는」 상태가 되고,
-#         그 상태는 로그에 남는다
+#       → 슬래시 명령 없음. Slack 은 한 워크스페이스에서 같은 명령 이름을 두 앱이
+#         가질 수 없게 한다 — `/피드백` · `/권한` 은 TYBot 이 이미 쥐고 있다.
+#         VIP 사용자는 같은 명령을 TYBot 에서 쓴다
+#   reactions:read · reaction_added · reaction_removed
+#       → 👀 를 **붙이는** 것과 남의 반응을 **읽는** 것은 다른 스코프다. 공통 봇에는
+#         반응 이벤트 처리기가 없다(실제로 없다 — `app.event("reaction_added")` 가
+#         어디에도 없다). 받기만 하고 안 쓰는 이벤트는 로그에만 남는다
+#   message.channels · message.groups · channel_created · channel_rename ·
+#   channel_archive · channel_deleted · group_* · member_joined_channel · file_shared
+#       → 수집·채널 수명주기 이벤트. 그 상태의 소유자는 TYBot 하나뿐이다
+#         (`operational_owner=False`)
+#   app_home_opened
+#       → 홈 탭을 열지 않으므로 이 이벤트의 유일한 처리 갈래가 닫혀 있다
+#
+# DM 전용 전달에서 **스코프로는 막지 못하는 것**
+#
+#   채널에 본문을 올릴 권한(`chat:write`)은 어차피 있어야 한다 — 고정 안내
+#   한 줄이 거기로 나가기 때문이다. 즉 「상세는 DM 으로만」 은 매니페스트가
+#   아니라 코드가 지키는 규칙이고(`private_answers`), 그래서
+#   `tests/test_vip_common_answer_path.py` 가 그 동작을 따로 고정한다.
+#   DM 을 열지 못하거나 전송이 실패하면 **채널 fallback 도 안내도 없다.**

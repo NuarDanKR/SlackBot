@@ -638,6 +638,36 @@ def test_live_lines_are_marked():
     assert box.touched.live_messages == [("tyit", "C1", "1")]
 
 
+def test_cross_workspace_live_coordinates_use_the_source_workspace():
+    doc = FakeDoc(
+        workspace="mgmt",
+        channel="#executive-report",
+        channel_id="CEXEC",
+        raw_lines=[FakeLine("0", "owner", "archived")],
+    )
+    box = tools.ToolBox(
+        store=FakeStore([doc]),
+        ctx=RequestContext(
+            workspace="tyit",
+            evidence_sources=frozenset({("mgmt", "CEXEC")}),
+        ),
+        live_fetch=_live(
+            [
+                {
+                    "ts": "1",
+                    "speaker": "owner",
+                    "text": "current",
+                    "permalink": "https://mgmt.slack.com/archives/CEXEC/p1",
+                }
+            ]
+        ),
+    )
+
+    box.run("fetch_recent_slack", {"channel": "#executive-report"})
+
+    assert box.touched.live_messages == [("mgmt", "CEXEC", "1")]
+
+
 def test_bot_messages_are_never_fetched():
     """실으면 우리 답이 다음 답의 근거가 되고, 한 번 잘못 말한 숫자가 굳는다."""
     box = _box(_store(), live=_live([

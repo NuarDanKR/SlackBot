@@ -70,7 +70,7 @@ class _Fake:
         return LLMResponse("정리 결과", spec.model, self.name, 200, 40, 0.001)
 
 
-def _engine(tmp_path):
+def _engine(tmp_path, *, workspace_labels=None):
     from tybot.answer import AnswerEngine
     from tybot.gateway.base import ModelSpec, Sensitivity
     from tybot.gateway.cost import CostGuard
@@ -87,7 +87,10 @@ def _engine(tmp_path):
         cost_guard=CostGuard(10.0),
     )
     return AnswerEngine(
-        ArchiveStore(tmp_path), router, allow_master_business_answers=True
+        ArchiveStore(tmp_path),
+        router,
+        allow_master_business_answers=True,
+        workspace_labels=workspace_labels,
     ), fake
 
 
@@ -145,7 +148,271 @@ def test_a_named_workspace_does_not_narrow_a_channel_question(tmp_path, labels):
     ) is None
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("건축본부의 저번주 주요 보고내용을 요약해줘", frozenset({"build"})),
+        ("프로젝트금융팀 저번주 주요 보고내용을 요약해줘", frozenset({"pf"})),
+        ("투자사업팀과 건축본부 보고를 비교해줘", frozenset({"invest", "build"})),
+        ("저번주 주요 보고내용을 요약해줘", None),
+    ],
+)
+def test_managed_scope_treats_a_workspace_label_as_a_preference(
+    monkeypatch, question, expected
+):
+    from tybot import answer
+
+    monkeypatch.setattr(
+        answer,
+        "_workspace_labels",
+        lambda: {
+            "build": "건축본부",
+            "pf": "프로젝트금융",
+            "invest": "투자사업팀",
+        },
+    )
+    ctx = RequestContext(
+        workspace="tyit",
+        user_id="U1",
+        channel_id="CASK",
+        evidence_sources=frozenset(
+            {("build", "CBUILD"), ("pf", "CPF"), ("invest", "CINVEST")}
+        ),
+    )
+
+    assert answer._mentioned_workspaces(question) == (expected or frozenset())
+    assert answer._named_workspace_filter(question, ctx) is None
+
+
+def test_managed_scope_prioritizes_named_workspace_without_hiding_other_sources(
+    tmp_path, monkeypatch
+):
+    from tybot import answer
+
+    monkeypatch.setattr(
+        answer,
+        "_workspace_labels",
+        lambda: {"build": "건축본부", "invest": "투자사업팀"},
+    )
+    _write(
+        tmp_path,
+        "build",
+        "#건축_주간보고",
+        "CBUILD",
+        "건축본부 지난주 핵심 보고",
+    )
+    _write(
+        tmp_path,
+        "invest",
+        "#투자_마케팅",
+        "CINVEST",
+        "투자사업팀 분양 및 입주 현황",
+    )
+    engine, fake = _engine(tmp_path)
+    ctx = RequestContext(
+        workspace="tyit",
+        user_id="U1",
+        channel_id="CASK",
+        evidence_sources=frozenset(
+            {("build", "CBUILD"), ("invest", "CINVEST")}
+        ),
+    )
+
+    result = engine.respond(
+        "건축본부의 저번주 주요 보고내용을 요약해줘",
+        ctx,
+        Intent("summary"),
+    )
+
+    assert result.reason == "answered"
+    evidence = fake.calls[0][1].content
+    assert "건축본부 지난주 핵심 보고" in evidence
+    assert "투자사업팀 분양 및 입주 현황" in evidence
+    assert evidence.index("건축본부 지난주 핵심 보고") < evidence.index(
+        "투자사업팀 분양 및 입주 현황"
+    )
+
+
+def test_named_workspace_never_changes_the_registered_managed_scope(
+    monkeypatch,
+):
+    from tybot import answer
+
+    monkeypatch.setattr(
+        answer,
+        "_workspace_labels",
+        lambda: {"build": "건축본부", "invest": "투자사업팀"},
+    )
+    ctx = RequestContext(
+        workspace="tyit",
+        user_id="U1",
+        evidence_sources=frozenset({("invest", "CINVEST")}),
+    )
+
+    preferred = answer._prefer_managed_workspace_context(
+        "건축본부의 저번주 주요 보고내용을 요약해줘", ctx
+    )
+
+    assert preferred.evidence_sources == frozenset({("invest", "CINVEST")})
+    assert preferred.preferred_workspaces == frozenset({"build"})
+    assert ctx.evidence_sources == frozenset({("invest", "CINVEST")})
+    assert ctx.preferred_workspaces == frozenset()
+
+
+def test_search_prefers_named_workspace_within_all_registered_sources(tmp_path):
+    _write(tmp_path, "build", "#건축_주간보고", "CBUILD", "공통 주간 보고")
+    _write(tmp_path, "invest", "#투자_주간보고", "CINVEST", "공통 주간 보고")
+    _write(tmp_path, "secret", "#미등록_주간보고", "CSECRET", "공통 주간 보고")
+    store = ArchiveStore(tmp_path)
+    ctx = RequestContext(
+        workspace="tyit",
+        user_id="U1",
+        evidence_sources=frozenset({("build", "CBUILD"), ("invest", "CINVEST")}),
+        preferred_workspaces=frozenset({"build"}),
+    )
+
+    hits = store.search("공통 주간 보고", ctx, limit=10)
+
+    assert hits[0].doc.workspace == "build"
+    assert {hit.doc.workspace for hit in hits} == {"build", "invest"}
+
+
+def test_common_direct_answer_path_also_honors_the_named_workspace(
+    tmp_path, monkeypatch
+):
+    from tybot import answer
+
+    monkeypatch.setattr(
+        answer,
+        "_workspace_labels",
+        lambda: {},
+    )
+    _write(
+        tmp_path,
+        "pf",
+        "#프로젝트금융_주간보고",
+        "CPF",
+        "프로젝트금융팀 지난주 핵심 보고",
+    )
+    _write(
+        tmp_path,
+        "invest",
+        "#투자_마케팅",
+        "CINVEST",
+        "투자사업팀 분양 및 입주 현황",
+    )
+    engine, fake = _engine(
+        tmp_path,
+        workspace_labels={"pf": "프로젝트금융", "invest": "투자사업팀"},
+    )
+    ctx = RequestContext(
+        workspace="tyit",
+        user_id="U1",
+        evidence_sources=frozenset({("pf", "CPF"), ("invest", "CINVEST")}),
+    )
+
+    result = engine.answer(
+        "프로젝트금융팀 저번주 주요 보고내용을 요약해줘",
+        ctx,
+    )
+
+    assert result.reason == "answered"
+    evidence = fake.calls[0][1].content
+    assert "프로젝트금융팀 지난주 핵심 보고" in evidence
+    assert "투자사업팀 분양 및 입주 현황" not in evidence
+
+
 # --- 2. 다른 채널 자료는 새지 않는다 -------------------------------------------
+
+
+def test_named_workspace_prioritizes_preopened_followup_hits(tmp_path):
+    from tybot.thread_followup import ResolvedFollowup
+
+    _write(tmp_path, "build", "#건축_주간보고", "CBUILD", "건축본부 핵심 보고")
+    _write(tmp_path, "invest", "#투자_마케팅", "CINVEST", "투자사업팀 분양 현황")
+    engine, fake = _engine(
+        tmp_path,
+        workspace_labels={"build": "건축본부", "invest": "투자사업팀"},
+    )
+    broad = RequestContext(
+        workspace="tyit",
+        user_id="U1",
+        evidence_sources=frozenset({("build", "CBUILD"), ("invest", "CINVEST")}),
+    )
+    stale_hits = engine._store.search("보고 분양", broad, limit=10)
+    assert {hit.doc.workspace for hit in stale_hits} == {"build", "invest"}
+
+    result = engine.respond(
+        "건축본부 것만 다시 정리해줘",
+        broad,
+        Intent("summary", terms=["보고"]),
+        followup=ResolvedFollowup(
+            evidence_hits=stale_hits,
+            topic_terms=["보고"],
+            resolution="prior_turn",
+        ),
+    )
+
+    assert result.reason == "answered"
+    evidence = fake.calls[0][1].content
+    assert "건축본부 핵심 보고" in evidence
+    assert "투자사업팀 분양 현황" in evidence
+    assert evidence.index("건축본부 핵심 보고") < evidence.index(
+        "투자사업팀 분양 현황"
+    )
+
+
+def test_named_workspace_keeps_current_question_file_and_registered_old_hits(
+    tmp_path,
+):
+    from tybot.archive.store import ArchiveDoc, RawLine, SearchHit
+    from tybot.thread_followup import ResolvedFollowup
+
+    _write(tmp_path, "invest", "#투자_마케팅", "CINVEST", "투자사업팀 분양 현황")
+    engine, fake = _engine(
+        tmp_path,
+        workspace_labels={"build": "건축본부", "invest": "투자사업팀"},
+    )
+    broad = RequestContext(
+        workspace="tyit",
+        user_id="U1",
+        evidence_sources=frozenset({("build", "CBUILD"), ("invest", "CINVEST")}),
+    )
+    stale_hits = engine._store.search("분양", broad, limit=10)
+    source = tmp_path / "__question_attachment__.txt"
+    line = RawLine("2026-11-09 10:00", "질문 첨부", "건축본부 첨부 보고", 1, source)
+    attached = SearchHit(
+        ArchiveDoc(
+            source,
+            "tyit",
+            "질문 첨부",
+            "private",
+            frozenset(),
+            frozenset(),
+            None,
+            channel_id=None,
+            raw_lines=[line],
+        ),
+        line,
+        1,
+    )
+
+    result = engine.respond(
+        "건축본부 것만 다시 정리해줘",
+        broad,
+        Intent("summary", terms=["보고"]),
+        followup=ResolvedFollowup(
+            evidence_hits=stale_hits,
+            topic_terms=["보고"],
+            resolution="prior_turn",
+        ),
+        seed_hits=[attached],
+    )
+
+    assert result.reason == "answered"
+    evidence = fake.calls[0][1].content
+    assert "건축본부 첨부 보고" in evidence
+    assert "투자사업팀 분양 현황" in evidence
 
 
 def test_another_channel_never_leaks_into_a_channel_answer(tmp_path, labels):
