@@ -36,6 +36,8 @@ def _qa(**over) -> dict:
         "intent_kind": "search",
         "intent_source": "regex",
         "citations": [],
+        "evidence_refs": [],
+        "attachment_refs": [],
     }
     row.update(over)
     return row
@@ -149,6 +151,123 @@ def test_specialist_unavailable_is_counted_as_a_specialist_failure():
 
     assert "error" in codes
     assert "specialist_failure" in codes
+
+
+def test_an_explicit_followup_with_no_resolution_is_a_review_candidate():
+    row = _qa(
+        question="방금 그 문서 다시 정리해줘",
+        context_resolution="none",
+        context_parent_ids=[],
+    )
+
+    assert "context_reference_missed" in answer_issues.issue_codes(row, [])
+
+
+def test_a_resolved_followup_keeps_its_parent_lineage():
+    row = _qa(
+        question="방금 그 문서 다시 정리해줘",
+        context_resolution="prior_turn",
+        context_parent_ids=["QA-0"],
+    )
+
+    codes = answer_issues.issue_codes(row, [])
+
+    assert "context_reference_missed" not in codes
+    assert "context_lineage_missing" not in codes
+
+
+def test_a_followup_resolution_without_parent_ids_is_visible():
+    row = _qa(context_resolution="prior_topic", context_parent_ids=[])
+
+    assert "context_lineage_missing" in answer_issues.issue_codes(row, [])
+
+
+@pytest.mark.parametrize("resolution", ["scoped_empty", "widened_after_scope_miss"])
+def test_a_followup_scope_miss_is_visible(resolution):
+    row = _qa(context_resolution=resolution)
+
+    assert "context_scope_miss" in answer_issues.issue_codes(row, [])
+
+
+def test_an_ellipsis_after_a_turn_in_the_same_dm_is_a_review_candidate(qa_log):
+    root = qa_log([
+        _qa(
+            record_id="QA-1",
+            ts=f"{TODAY.isoformat()}T09:00:00+09:00",
+            channel_id="D1",
+            user="U1",
+            question="9월 차입금을 알려줘",
+            context_resolution="none",
+        ),
+        _qa(
+            record_id="QA-2",
+            ts=f"{TODAY.isoformat()}T09:01:00+09:00",
+            channel_id="D1",
+            user="U1",
+            question="그럼 10월은?",
+            context_resolution="none",
+        ),
+    ])
+
+    report = answer_issues.build_report(root, days=7)
+
+    assert "possible_context_miss" in report
+    assert "QA-2" in report
+
+
+def test_an_ellipsis_does_not_join_different_users_or_channels():
+    prior = _qa(record_id="QA-1", channel_id="D1", user="U1")
+    other_user = _qa(
+        record_id="QA-2", channel_id="D1", user="U2", question="그럼 10월은?"
+    )
+    other_channel = _qa(
+        record_id="QA-3", channel_id="D2", user="U1", question="그럼 10월은?"
+    )
+
+    misses = answer_issues.probable_ellipsis_context_misses(
+        [prior, other_user, other_channel]
+    )
+
+    assert misses == set()
+
+
+def test_context_metadata_is_printed_for_review(qa_log):
+    root = qa_log([
+        _qa(
+            question="방금 그 문서 다시 정리해줘",
+            context_resolution="prior_turn",
+            context_parent_ids=[],
+        )
+    ])
+
+    report = answer_issues.build_report(root, days=7)
+
+    assert "맥락: `prior_turn`" in report
+    assert "부모 QA: `-`" in report
+
+
+def test_review_packet_keeps_coordinates_for_source_reopening(qa_log):
+    root = qa_log([
+        _qa(
+            evidence_refs=[
+                {
+                    "workspace": "tyit",
+                    "channel_id": "C1",
+                    "doc_path": "C1/2026-11-09.md",
+                    "source_revision": "rev-1",
+                }
+            ],
+            answer="좌표로 확인한 답변",
+            reason="answered",
+            hits=1,
+            citations=["#전산팀 (tyit), 문서"],
+        )
+    ])
+
+    report = answer_issues.build_report(root, days=7)
+
+    assert "근거 좌표 (현재 권한으로 다시 열어 검증)" in report
+    assert '"source_revision": "rev-1"' in report
 
 
 # --- CLI 와 콘솔이 같은 보고서를 만든다 ---------------------------------------

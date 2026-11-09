@@ -29,6 +29,7 @@ from pathlib import Path
 
 from .answer_status import answer_failed, failure_code
 from .feedback import event_id
+from .intent import followup_hint
 
 KST = timezone(timedelta(hours=9))
 SLOW_MS = 15_000
@@ -50,6 +51,12 @@ _RESOURCE_ERROR_MARKERS = (
     "memoryerror",
     "resource_exhausted",
 )
+_ELLIPSIS_REFERENCE_RE = re.compile(
+    r"^\s*(?:그럼|그러면|그건|그거|그\s*(?:문서|자료|내용|부분)|"
+    r"위\s*(?:문서|자료|내용)|앞(?:서|의)?\s*(?:문서|자료|내용))\b"
+)
+_FOLLOWUP_RESOLUTIONS = {"prior_turn", "prior_topic", "prior_attachments"}
+_SCOPE_MISS_RESOLUTIONS = {"scoped_empty", "widened_after_scope_miss"}
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -250,7 +257,61 @@ def issue_codes(row: dict, feedback: list[dict]) -> list[str]:
         codes.append("specialist_failure")
     if any(str(item.get("kind") or "") in PROBLEM_FEEDBACK for item in feedback):
         codes.append("feedback")
+    resolution = str(row.get("context_resolution") or "none")
+    reference_mode, _attachments = followup_hint(str(row.get("question") or ""))
+    if reference_mode != "none" and resolution == "none":
+        codes.append("context_reference_missed")
+    if resolution in _FOLLOWUP_RESOLUTIONS and not _strings(row.get("context_parent_ids")):
+        codes.append("context_lineage_missing")
+    if resolution in _SCOPE_MISS_RESOLUTIONS:
+        codes.append("context_scope_miss")
     return codes
+
+
+def _strings(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _conversation_key(row: dict) -> tuple[str, ...] | None:
+    workspace = str(row.get("workspace") or "").strip()
+    channel_id = str(row.get("channel_id") or "").strip()
+    thread_ts = str(row.get("thread_ts") or "").strip()
+    user = str(row.get("user") or "").strip()
+    if workspace and channel_id and thread_ts:
+        return ("thread", workspace, channel_id, thread_ts)
+    if workspace and channel_id.startswith("D") and user:
+        return ("dm", workspace, channel_id, user)
+    return None
+
+
+def probable_ellipsis_context_misses(records: list[dict]) -> set[str]:
+    """Find successful-looking turns that probably lost an omitted subject.
+
+    This is deliberately a review candidate, not a production classifier. It only
+    fires when an earlier QA turn exists in the same DM or Slack thread. The report
+    can therefore expose phrases such as ``그럼 그 내용은?`` without changing what
+    the bot searches or allowing a previous answer to become evidence.
+    """
+    latest: dict[tuple[str, ...], dict] = {}
+    misses: set[str] = set()
+    for row in sorted(records, key=lambda item: str(item.get("ts") or "")):
+        key = _conversation_key(row)
+        if key is None:
+            continue
+        question = str(row.get("question") or "")
+        resolution = str(row.get("context_resolution") or "none")
+        record_id = str(row.get("record_id") or "")
+        if (
+            key in latest
+            and record_id
+            and resolution == "none"
+            and _ELLIPSIS_REFERENCE_RE.search(question)
+        ):
+            misses.add(record_id)
+        latest[key] = row
+    return misses
 
 
 def _text(value: object, limit: int = 6000) -> str:
@@ -264,6 +325,14 @@ def _block(value: object, *, empty: str = "(없음)") -> str:
     return f"```text\n{_text(value) or empty}\n```"
 
 
+def _coordinates_block(row: dict) -> str:
+    coordinates = {
+        "evidence_refs": row.get("evidence_refs") or [],
+        "attachment_refs": row.get("attachment_refs") or [],
+    }
+    return _block(json.dumps(coordinates, ensure_ascii=False, indent=2))
+
+
 def render_report(
     records: list[dict],
     feedback_rows: list[dict],
@@ -274,10 +343,13 @@ def render_report(
     limit: int = 200,
 ) -> str:
     grouped = feedback_by_record(feedback_rows)
+    ellipsis_misses = probable_ellipsis_context_misses(records)
     candidates: list[tuple[dict, list[dict], list[str]]] = []
     for row in records:
         linked = grouped.get(str(row.get("record_id") or ""), [])
         codes = issue_codes(row, linked)
+        if str(row.get("record_id") or "") in ellipsis_misses:
+            codes.append("possible_context_miss")
         if codes:
             candidates.append((row, linked, codes))
     selected = candidates[:limit]
@@ -330,6 +402,10 @@ def render_report(
         "partial_scope": "일부 범위 미확인·상한 제외",
         "specialist_failure": "전문 봇 실패·폴백",
         "feedback": "사용자 문제·정정 피드백",
+        "context_reference_missed": "명시적 이전 맥락 지칭 미해결",
+        "context_lineage_missing": "후속 맥락 부모 QA 누락",
+        "context_scope_miss": "이전 근거 좌표 재개방 실패",
+        "possible_context_miss": "생략형 이전 맥락 누락 후보",
     }
     out.extend(f"| {labels[code]} | {counts.get(code, 0)} |" for code in labels)
     out.extend([
@@ -377,6 +453,8 @@ def render_report(
             f"- 모델: `{row.get('model') or '-'}` · 전문 봇 시도: "
             f"`{row.get('specialists_attempted') or row.get('attempted_specialists') or '-'}`",
             f"- 오류: `{_text(row.get('error'), 1000) or '-'}`",
+            f"- 맥락: `{row.get('context_resolution') or 'none'}` · 부모 QA: "
+            f"`{', '.join(_strings(row.get('context_parent_ids'))) or '-'}`",
             "",
             "**질문**",
             _block(row.get("question")),
@@ -386,6 +464,9 @@ def render_report(
             "",
             "**출처**",
             _block("\n".join(str(item) for item in (row.get("citations") or []))),
+            "",
+            "**근거 좌표 (현재 권한으로 다시 열어 검증)**",
+            _coordinates_block(row),
         ])
         if row.get("task_traces"):
             out.extend([
@@ -427,6 +508,9 @@ def render_report(
             "",
             "**출처**",
             _block("\n".join(str(item) for item in (row.get("citations") or []))),
+            "",
+            "**근거 좌표 (현재 권한으로 다시 열어 검증)**",
+            _coordinates_block(row),
         ])
     out.extend([
         "",
