@@ -58,8 +58,34 @@ class Candidate:
     spoken_at: str
 
 
+# 어절 끝의 조사. 긴 것부터 본다(「에서」 를 「에」 로 먼저 자르지 않게).
+#
+# 검색어는 어절 단위로 잘리므로 「기성률은」 은 `%기성률은%` 로 찾게 되고, 본문의
+# 「기성률」 에 맞지 않는다. 분류기가 핵심어를 뽑지 못해 질문 원문이 그대로 오는
+# 경로에서 특히 그랬다.
+#
+# **떼면 넓어지기만 한다.** 남는 말은 원래 어절의 앞부분이라, 원래 어절이 든 줄은
+# 떼고 난 말로도 그대로 찾힌다. 그래서 남는 말이 2자 이상일 때만 뗀다 — 「회의」 를
+# 「회」 로 만들면 넓어지는 정도가 아니라 아무 줄이나 맞는다.
+JOSA = (
+    "에서는", "으로는", "에서", "으로", "에게", "한테", "까지", "부터", "보다", "처럼",
+    "이랑", "에는", "에도", "이나", "과는", "와는",
+    "은", "는", "이", "가", "을", "를", "의", "에", "로", "와", "과", "도", "만", "랑",
+)
+_HANGUL_WORD = re.compile(r"^[가-힣]+$")
+
+
+def _strip_josa(token: str) -> str:
+    if len(token) < 3 or not _HANGUL_WORD.match(token):
+        return token
+    for particle in JOSA:
+        if token.endswith(particle) and len(token) - len(particle) >= 2:
+            return token[: -len(particle)]
+    return token
+
+
 def tokens_of(query: str) -> list[str]:
-    return [t.lower() for t in TOKEN_RE.findall(query or "")]
+    return [_strip_josa(t.lower()) for t in TOKEN_RE.findall(query or "")]
 
 
 def score_line(tokens: list[str], query: str, speaker: str, text: str) -> int:
@@ -117,7 +143,7 @@ def candidates(query: str, channels: list[str]) -> list[Candidate] | None:
 
     `channels` 는 **이미 권한을 통과한** 채널 목록이다. 이 함수는 판정하지 않는다.
     """
-    words = tokens_of(query)
+    words = list(dict.fromkeys(tokens_of(query)))
     if not words or not channels:
         return [] if channels else None
 
@@ -126,40 +152,91 @@ def candidates(query: str, channels: list[str]) -> list[Candidate] | None:
         return None
     try:
         with conn, conn.cursor() as cur:
-            # pg_bigm 은 `LIKE '%...%'` 를 인덱스로 받는다. 토큰마다 OR 로 걸고
-            # 점수는 파이썬에서 다시 매긴다 — SQL 에 점수를 넣으면 파일 경로와 갈린다.
-            # clauses 는 **인덱스로만** 만든다. 값은 전부 바인딩이라 주입 경로가 없다.
-            clauses = " OR ".join(
-                f"body ILIKE %(w{i})s OR speaker ILIKE %(w{i})s"
-                for i in range(len(words))
-            )
-            params: dict[str, object] = {
-                f"w{i}": f"%{w}%" for i, w in enumerate(words)
-            }
-            params["channels"] = channels
-            params["lim"] = CANDIDATE_LIMIT
-            cur.execute(
-                f"""
-                SELECT doc_path, line_no, spoken_at
-                  FROM raw_line
-                 WHERE channel = ANY(%(channels)s)
-                   AND ({clauses})
-                 ORDER BY spoken_at DESC
-                 LIMIT %(lim)s
-                """,
-                params,
-            )
-            return [
-                Candidate(
-                    doc_path=str(r["doc_path"]),
-                    line_no=int(r["line_no"]),
-                    spoken_at=str(r["spoken_at"]),
-                )
-                for r in cur.fetchall()
-            ]
+            return _ranked_candidates(cur, words, channels, CANDIDATE_LIMIT)
     except Exception as exc:  # noqa: BLE001 - 조회 실패는 파일 스캔으로 넘긴다
         log.warning("검색 색인 조회 실패 — 파일 스캔으로 넘어갑니다: %s", exc)
         return None
+
+
+def _variants(word: str) -> list[str]:
+    """한 낱말을 찾을 표기들. 영문이 섞이면 대소문자 세 가지를 함께 찾는다.
+
+    `ILIKE` 를 쓰면 pg_bigm 인덱스를 못 탄다(실측 2026-11-09: 전 질의 110만 줄
+    전체 스캔, 5~7초). 한글에는 대소문자가 없으므로 `LIKE` 로 충분하다. 영문
+    약어(「PF」·「RFI」)는 본문에 대문자로 적히는 일이 많아 소문자만 찾으면
+    빠진다 — 그래서 소문자·대문자·첫 글자 대문자를 같이 찾는다. 「iPhone」 처럼
+    섞인 표기는 이 셋에 안 들어가는데, 그 대가로 인덱스를 지킨다.
+    """
+    if not re.search(r"[a-z]", word):
+        return [word]
+    return list(dict.fromkeys([word, word.upper(), word.capitalize()]))
+
+
+def _match(word: str, params: list) -> str:
+    """낱말 하나가 본문이나 발화자에 들어 있다. 값은 전부 바인딩한다."""
+    parts = []
+    for form in _variants(word):
+        pattern = f"%{form}%"
+        parts += ["body LIKE %s", "speaker LIKE %s"]
+        params += [pattern, pattern]
+    return "(" + " OR ".join(parts) + ")"
+
+
+def _ranked_candidates(cur, words: list[str], channels: list[str], limit: int) -> list[Candidate]:
+    """**낱말을 많이 맞춘 줄부터**, 같으면 최근 줄부터 후보를 고른다.
+
+    예전에는 낱말 중 **하나라도** 든 줄을 최근 순으로 500줄 잘랐다. 「현장」·「보고」
+    처럼 흔한 낱말이 끼면 최근 며칠 치가 그 500줄을 다 채워, 낱말을 모두 가진 옛
+    줄이 점수를 받기도 전에 버려졌다. 실측(2026-11-09, 110만 줄):
+
+    | 검색어 | 모두 맞는 줄 | 500줄에 남은 줄 | 창이 덮은 기간 |
+    |---|---|---|---|
+    | 자금 보고 | 2,635 | 0 | 그날 하루 |
+    | 기성 현장 | 3,219 | 2 | 사흘 |
+
+    그래서 두 단계로 고른다.
+
+    1. 모두 맞는 줄 — 최근 순. 인덱스 교집합이라 빠르다(실측 10~20ms)
+    2. 자리가 남으면 일부만 맞는 줄 — 맞춘 낱말 수 순, 같으면 최근 순
+
+    점수는 여전히 파이썬(`score_line`)이 매긴다. 여기서 정하는 것은 **누가 후보에
+    드는가**뿐이다.
+    """
+    def run(sql: str, params: list) -> list[Candidate]:
+        cur.execute(sql, params)
+        return [
+            Candidate(
+                doc_path=str(r["doc_path"]),
+                line_no=int(r["line_no"]),
+                spoken_at=str(r["spoken_at"]),
+            )
+            for r in cur.fetchall()
+        ]
+
+    params: list = [channels]
+    every = " AND ".join(_match(w, params) for w in words)
+    params.append(limit)
+    found = run(
+        f"""SELECT doc_path, line_no, spoken_at FROM raw_line
+             WHERE channel = ANY(%s) AND {every}
+             ORDER BY spoken_at DESC LIMIT %s""",
+        params,
+    )
+    if len(words) == 1 or len(found) >= limit:
+        return found
+
+    params = []
+    matched = " + ".join(f"({_match(w, params)})::int" for w in words)
+    params.append(channels)
+    some = " OR ".join(_match(w, params) for w in words)
+    every = " AND ".join(_match(w, params) for w in words)
+    params.append(limit - len(found))
+    return found + run(
+        f"""SELECT doc_path, line_no, spoken_at, {matched} AS matched FROM raw_line
+             WHERE channel = ANY(%s) AND ({some}) AND NOT ({every})
+             ORDER BY matched DESC, spoken_at DESC LIMIT %s""",
+        params,
+    )
 
 
 def indexed_counts(doc_paths: list[str]) -> dict[str, int] | None:

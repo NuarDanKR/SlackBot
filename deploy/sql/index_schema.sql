@@ -173,11 +173,19 @@ BEGIN
         DROP INDEX IF EXISTS raw_line_trgm_fallback;
         CREATE INDEX IF NOT EXISTS raw_line_bigm
             ON raw_line USING gin (body gin_bigm_ops);
+        -- 검색은 낱말마다 `body LIKE … OR speaker LIKE …` 로 찾는다. 발화자에
+        -- 인덱스가 없으면 그 OR 하나 때문에 **모든 검색이 전체 스캔**이 된다
+        -- (2026-11-09 실측: 110만 줄, 질의당 5~7초). 발화자는 짧아 인덱스도 작다.
+        DROP INDEX IF EXISTS raw_line_speaker_trgm_fallback;
+        CREATE INDEX IF NOT EXISTS raw_line_speaker_bigm
+            ON raw_line USING gin (speaker gin_bigm_ops);
     ELSE
         -- 깨끗한 DB에도 fallback 이 동작하도록 trusted 기본 확장을 준비한다.
         EXECUTE 'CREATE EXTENSION IF NOT EXISTS pg_trgm';
         CREATE INDEX IF NOT EXISTS raw_line_trgm_fallback
             ON raw_line USING gin (body gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS raw_line_speaker_trgm_fallback
+            ON raw_line USING gin (speaker gin_trgm_ops);
         RAISE WARNING 'pg_bigm 이 없어 pg_trgm 으로 대체했다. 2글자 한국어 검색(기성·타설)은 인덱스를 타지 못한다. 슈퍼유저로 CREATE EXTENSION pg_bigm; 실행 후 이 파일을 다시 적용할 것.';
     END IF;
 END $$;
