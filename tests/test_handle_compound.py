@@ -382,6 +382,39 @@ def test_dm_always_shows_recent_turns_to_the_planner():
     assert "이전 질문 주제" in context
 
 
+def test_dm_omitted_subject_reaches_the_common_answer_path():
+    """운영 사례: 같은 사용자의 다음 질문에서 PCM 이 생략돼 검색어가 끊겼다."""
+    ans = Answer("2025년 자료를 확인했습니다", [], "m", 0.0, 1, "answered")
+    bot = _bot([
+        Intent(
+            "search",
+            question="2025년에는 향타기 내용없어?",
+            standalone_question="2025년에는 향타기 내용없어?",
+            terms=["2025년", "향타기"],
+        )
+    ], [ans])
+    bot.qa_log.dm_context = [{
+        "question": "2024년 향타기 PCM 관련 자료 찾아줘",
+        "subject_terms": ["2024년", "향타기", "PCM"],
+    }]
+
+    bot._handle(
+        {
+            "text": "2025년에는 향타기 내용없어?",
+            "user": "U1",
+            "channel": "D1",
+            "ts": "1.0",
+        },
+        Mock(),
+        lambda **kw: None,
+        in_channel=False,
+    )
+
+    assert len(bot.engine.asked) == 1
+    assert "PCM" in bot.engine.asked[0]
+    assert "2024년" not in bot.engine.asked[0]
+
+
 def test_dm_context_carries_coordinates_not_the_previous_bot_answer():
     """싣는 것은 질문과 좌표다. 봇 답변 전문을 실으면 요약 재귀다(원칙 1)."""
     ans = Answer("새 답변", [], "m", 0.0, 1, "answered")

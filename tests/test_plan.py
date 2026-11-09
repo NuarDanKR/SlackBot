@@ -11,7 +11,16 @@ from types import SimpleNamespace
 
 from tybot.answer import AnswerEngine
 from tybot.compose import join_sections, truncated_notice, write_from_facts
-from tybot.intent import ARCHIVE_KINDS, KINDS, MAX_TASKS, SELF_KINDS, WRITE_KINDS, plan
+from tybot.intent import (
+    ARCHIVE_KINDS,
+    KINDS,
+    MAX_TASKS,
+    SELF_KINDS,
+    WRITE_KINDS,
+    Intent,
+    carry_dm_subject_context,
+    plan,
+)
 
 
 class FakeResponse:
@@ -108,6 +117,57 @@ def test_write_intent_is_isolated():
     ])
     tasks = plan("요약하고 수집해", router)
     assert [t.kind for t in tasks] == ["ingest"]
+
+
+def test_completed_upload_statement_cannot_authorize_ingest():
+    router = FakeRouter([
+        _tasks({"kind": "ingest", "question": "PCM 들어간 자료 업로드해놨어"})
+    ])
+
+    (task,) = plan("2025년도 자료에는 없어? PCM 들어간 자료 업로드해놨어", router)
+
+    assert task.kind == "search"
+    assert "PCM" in task.terms
+
+
+def test_an_explicit_collection_command_still_authorizes_ingest():
+    router = FakeRouter([
+        _tasks({"kind": "ingest", "question": "이 채널 내용 수집해줘"})
+    ])
+
+    (task,) = plan("이 채널 내용 수집해줘", router)
+
+    assert task.kind == "ingest"
+
+
+def test_same_user_dm_carries_an_omitted_subject_into_a_new_period_search():
+    task = Intent(
+        "search",
+        question="2025년에는 향타기 내용없어?",
+        standalone_question="2025년에는 향타기 내용없어?",
+        terms=["2025년", "향타기"],
+    )
+    turns = [{
+        "question": "2024년 향타기 PCM 관련 자료 찾아줘",
+        "subject_terms": ["2024년", "향타기", "PCM"],
+    }]
+
+    (got,) = carry_dm_subject_context(task.question, [task], turns)
+
+    assert got.reference_mode == "none"
+    assert "PCM" in got.terms
+    assert "PCM" in got.standalone_question
+    assert "2024년" not in got.standalone_question
+
+
+def test_a_new_dm_topic_is_not_contaminated_by_the_previous_question():
+    task = Intent("search", question="철근 반입 일정 알려줘", terms=["철근", "반입"])
+    turns = [{
+        "question": "향타기 PCM 관련 자료 찾아줘",
+        "subject_terms": ["향타기", "PCM"],
+    }]
+
+    assert carry_dm_subject_context(task.question, [task], turns) == [task]
 
 
 def test_task_cap_is_enforced():

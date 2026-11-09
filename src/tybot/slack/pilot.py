@@ -119,6 +119,7 @@ from ..intent import (
     SELF_KINDS,
     WRITE_KINDS,
     Intent,
+    carry_dm_subject_context,
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
@@ -3405,6 +3406,8 @@ class WorkspaceBot:
             if master_v2:
                 plan_kwargs["allow_rule_fallback"] = False
             tasks = self.engine.plan(text, **plan_kwargs)
+        if channel_id.startswith("D"):
+            tasks = carry_dm_subject_context(text, tasks, turns)
         if not tasks and master_v2:
             from ..intent import PlanningUnavailable
 

@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import string
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic as _monotonic
 
 from .gateway.base import Message, Sensitivity
@@ -200,6 +200,13 @@ INGEST_ALL_RE = re.compile(
 INGEST_RE = re.compile(
     r"((수집|취합)\s*(해|해줘|하자|해라|시작|좀)|^\s*(수집|취합|ingest)\s*$|"
     r"(대화|내용|채팅|기록)\s*(를|을)?\s*(수집|취합|모아|긁어)|모아\s*줘|긁어\s*와)"
+)
+_DM_CONTINUATION_RE = re.compile(
+    r"(그럼|그러면|그건|그거|같은\s*내용|해당\s*내용|"
+    r"\d{4}\s*년(?:도|에는|은|도)?|자료에는|내용\s*(?:없|있|맞|아니))"
+)
+_DATEISH_TERM_RE = re.compile(
+    r"^\d{2,4}(?:[./-]\d{1,2}){0,2}(?:년|월|일|년도)?$"
 )
 ADVICE_RE = re.compile(
     r"(추천|권장|의견|조언|어느\s*(쪽|방향|게)|어떤\s*(쪽|방향|방법)|"
@@ -520,6 +527,79 @@ def classify_by_rule(text: str) -> Intent:
     if ADVICE_RE.search(text):
         return Intent("advice", terms=terms, source="regex")
     return Intent("search", terms=terms or TOKEN_RE.findall(text), source="regex")
+
+
+def _write_is_explicit(text: str, kind: str) -> bool:
+    """A model may propose a write, but only the user's imperative authorizes it."""
+    if kind == "ingest_all":
+        return bool(INGEST_ALL_RE.search(text or ""))
+    if kind == "ingest":
+        return bool(INGEST_RE.search(text or ""))
+    if kind == "feedback":
+        return bool(FEEDBACK_RE.search(text or ""))
+    return False
+
+
+def carry_dm_subject_context(
+    text: str, tasks: list[Intent], turns: list[dict]
+) -> list[Intent]:
+    """Restore an omitted DM subject without reusing a previous bot answer.
+
+    DM history has already been restricted to the same workspace, channel and user
+    by ``QALog.context_for_dm``. This helper only adds a small number of missing
+    subject terms from the latest eligible *user question*. It does not set a
+    follow-up scope: a new period such as ``2025년에는?`` must search the full
+    currently authorized scope, not only documents opened by the previous answer.
+    """
+    if len(tasks) != 1 or not turns or not _DM_CONTINUATION_RE.search(text or ""):
+        return tasks
+    task = tasks[0]
+    if task.kind not in ARCHIVE_KINDS or task.reference_mode != "none":
+        return tasks
+    current_question = (task.question or text or "").strip()
+    standalone = (task.standalone_question or "").strip()
+    if standalone and standalone not in {current_question, (text or "").strip()}:
+        return tasks
+
+    current_terms = topic_terms_of(text, task.terms)
+    current_keys = {term.casefold() for term in current_terms}
+    prior_terms: list[str] = []
+    for turn in reversed(turns):
+        prior_terms = topic_terms_of(
+            str(turn.get("question") or ""),
+            [str(term) for term in (turn.get("subject_terms") or [])],
+        )
+        if prior_terms:
+            break
+    if not prior_terms:
+        return tasks
+    prior_keys = {term.casefold() for term in prior_terms}
+    starts_with_reference = bool(re.match(r"^\s*(?:그럼|그러면|그건|그거)", text or ""))
+    if not starts_with_reference and not (current_keys & prior_keys):
+        return tasks
+
+    missing = [
+        term
+        for term in prior_terms
+        if term.casefold() not in current_keys
+        and not _DATEISH_TERM_RE.fullmatch(term)
+        and len(term) > 1
+    ]
+    missing.sort(
+        key=lambda term: (
+            not bool(re.fullmatch(r"[A-Z][A-Z0-9_-]{1,15}", term)),
+            prior_terms.index(term),
+        )
+    )
+    added = missing[:2]
+    if not added:
+        return tasks
+    terms = list(task.terms)
+    for term in added:
+        if term not in terms:
+            terms.append(term)
+    resolved = f"{current_question} (이전 질문에서 이어지는 주제: {', '.join(added)})"
+    return [replace(task, terms=terms, standalone_question=resolved)]
 
 
 # 절 경계에서 떼어낼 공백·구두점(전각 쉼표 포함).
@@ -1149,9 +1229,18 @@ def plan(
             raise PlanningUnavailable("LLM planner returned invalid output") from e
         return _context_fallback(text, conversation_context, thread_has_refs=thread_has_refs)
 
-    writes = [x for x in tasks if x.kind in WRITE_KINDS]
+    writes = [
+        task for task in tasks
+        if task.kind in WRITE_KINDS and _write_is_explicit(text, task.kind)
+    ]
     if writes:
         return [writes[0]]
+    if any(task.kind in WRITE_KINDS for task in tasks):
+        # A completed-state sentence such as ``자료 업로드해놨어`` is evidence
+        # context, not permission to collect a channel. Preserve any business task;
+        # if the model returned only the unsafe write, fall back to read-only rules.
+        read_only = [task for task in tasks if task.kind not in WRITE_KINDS]
+        return _dedupe(read_only) if read_only else plan_by_rule(text)
     # 실행 계층이 상한을 적용하고 생략 안내를 만든다. planner는 전체 개수를 보존한다.
     # 정상 LLM 경로에서는 모델의 의미 판정을 규칙으로 덮어쓰지 않는다.
     return _dedupe(tasks)
