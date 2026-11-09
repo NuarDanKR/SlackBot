@@ -25,6 +25,18 @@ _spec = importlib.util.spec_from_file_location(
 check = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(check)
 
+
+@pytest.fixture(autouse=True)
+def restore_process_environment():
+    """The smoke helper loads the server env file; never leak it to later tests."""
+    before = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+
+
 KEY = "sk-live-must-never-be-printed-0123456789"
 PLAN = ["--provider", "openai", "--model", "text-embedding-x", "--dimensions", "2"]
 
