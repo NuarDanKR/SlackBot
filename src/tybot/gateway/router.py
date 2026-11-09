@@ -61,11 +61,11 @@ DEFAULT_REGISTRY: dict[str, ModelSpec] = {
     # 현행 Opus. **RPC worker 의 기본 모델이다**(`HERMES_RPC_MODEL` 기본값).
     "claude-opus-5-5": ModelSpec(
         "claude-opus-5-5", "anthropic", 4.0, 20.0, Sensitivity.CONFIDENTIAL,
-        supports_sampling=False,
+        supports_sampling=False, cache_read_multiplier=0.05,
     ),
     "claude-sonnet-5-5": ModelSpec(
         "claude-sonnet-5-5", "anthropic", 2.0, 10.0, Sensitivity.CONFIDENTIAL,
-        supports_sampling=False,
+        supports_sampling=False, cache_read_multiplier=0.05,
     ),
     "claude-sonnet-5": ModelSpec(
         "claude-sonnet-5", "anthropic", 2.0, 10.0, Sensitivity.CONFIDENTIAL,
@@ -370,13 +370,15 @@ class Router:
         workspace = current_workspace()
         logger.info(
             "llm_call model=%s provider=%s ws=%s in=%d out=%d cost=$%.4f"
-            " ws_today=$%.2f spent_today=$%.2f",
+            " cache_write=%d cache_read=%d ws_today=$%.2f spent_today=$%.2f",
             resp.model,
             resp.provider,
             workspace or "-",
             resp.input_tokens,
             resp.output_tokens,
             resp.cost_usd,
+            resp.cache_creation_input_tokens,
+            resp.cache_read_input_tokens,
             self._cost.spent_by_workspace().get(workspace, 0.0),
             self._cost.spent_today,
         )

@@ -91,7 +91,17 @@ class AnthropicProvider:
             "max_tokens": max_tokens,
         }
         if system:
-            request["system"] = [{"type": "text", "text": system}]
+            # 질문·근거·답변은 캐시하지 않는다. 요청마다 같은 정적 시스템 지시만
+            # 5분 prompt cache 대상으로 둬 ACL이나 원문 revision과 무관하게
+            # 반복 입력 토큰을 줄인다. 짧아 모델 최소 길이에 못 미치면 API가
+            # 캐시를 건너뛰며, 아래 usage 값이 0으로 남는다.
+            request["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                }
+            ]
         # `temperature` 를 받지 않는 모델이 있다 — Opus 5·4.8·4.7, Sonnet 5 는
         # 샘플링 파라미터를 제거했고 보내면 `temperature is deprecated for this
         # model` 로 400 이다. **어느 모델이 무엇을 받는지는 레지스트리가 안다** —
@@ -139,16 +149,28 @@ class AnthropicProvider:
             for b in resp.content
             if getattr(b, "type", "") == "tool_use"
         )
-        in_tok = resp.usage.input_tokens
-        out_tok = resp.usage.output_tokens
+        uncached_in = int(getattr(resp.usage, "input_tokens", 0) or 0)
+        cache_write = int(
+            getattr(resp.usage, "cache_creation_input_tokens", 0) or 0
+        )
+        cache_read = int(getattr(resp.usage, "cache_read_input_tokens", 0) or 0)
+        in_tok = uncached_in + cache_write + cache_read
+        out_tok = int(getattr(resp.usage, "output_tokens", 0) or 0)
         return LLMResponse(
             text=text,
             model=spec.model,
             provider=self.name,
             input_tokens=in_tok,
             output_tokens=out_tok,
-            cost_usd=spec.cost(in_tok, out_tok),
+            cost_usd=spec.cost_with_cache(
+                input_tokens=uncached_in,
+                cache_creation_input_tokens=cache_write,
+                cache_read_input_tokens=cache_read,
+                output_tokens=out_tok,
+            ),
             raw=resp,
             tool_calls=calls,
             stop_reason=str(getattr(resp, "stop_reason", "") or ""),
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
         )

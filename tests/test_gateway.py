@@ -188,6 +188,14 @@ def test_registry_specs_have_valid_sensitivity():
     for spec in DEFAULT_REGISTRY.values():
         assert spec.max_sensitivity in Sensitivity
         assert spec.input_price_per_mtok >= 0
+        assert spec.cache_write_5m_multiplier >= 1
+        assert 0 <= spec.cache_read_multiplier <= 1
+
+
+def test_current_models_use_their_documented_cache_read_discount():
+    assert DEFAULT_REGISTRY["claude-opus-5-5"].cache_read_multiplier == 0.05
+    assert DEFAULT_REGISTRY["claude-sonnet-5-5"].cache_read_multiplier == 0.05
+    assert DEFAULT_REGISTRY["claude-haiku-4-5"].cache_read_multiplier == 0.10
 
 
 # --- Anthropic 은 `system` 을 배열로 받는다 (2026-09-08 실측) ----------------
@@ -244,7 +252,13 @@ def test_the_system_prompt_is_sent_as_a_content_block_array():
     )
 
     assert isinstance(kwargs["system"], list), "문자열로 보내면 opus 가 400 을 준다"
-    assert kwargs["system"] == [{"type": "text", "text": "너는 기록 담당이다"}]
+    assert kwargs["system"] == [
+        {
+            "type": "text",
+            "text": "너는 기록 담당이다",
+            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+        }
+    ]
 
 
 def test_several_system_messages_become_one_block():
@@ -255,7 +269,13 @@ def test_several_system_messages_become_one_block():
         [Message("system", "가"), Message("system", "나"), Message("user", "?")]
     )
 
-    assert kwargs["system"] == [{"type": "text", "text": "가\n\n나"}]
+    assert kwargs["system"] == [
+        {
+            "type": "text",
+            "text": "가\n\n나",
+            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+        }
+    ]
 
 
 def test_no_system_message_omits_the_key():
@@ -278,6 +298,70 @@ def test_the_user_turns_are_untouched():
     kwargs = _provider_call([Message("system", "규칙"), Message("user", "합계는?")])
 
     assert kwargs["messages"] == [{"role": "user", "content": "합계는?"}]
+
+
+def test_prompt_cache_usage_is_counted_without_understating_cost():
+    from tybot.gateway.base import Message, ModelSpec, Sensitivity
+    from tybot.gateway.providers.anthropic_provider import AnthropicProvider
+
+    class Usage:
+        input_tokens = 100
+        output_tokens = 50
+        cache_creation_input_tokens = 200
+        cache_read_input_tokens = 300
+
+    class Block:
+        type = "text"
+        text = "답"
+
+    class Response:
+        def __init__(self):
+            self.content = [Block()]
+            self.usage = Usage()
+
+    class Client:
+        class messages:
+            @staticmethod
+            def create(**_kwargs):
+                return Response()
+
+    provider = AnthropicProvider(api_key="test")
+    provider._client = Client()
+    spec = ModelSpec(
+        "approved",
+        "anthropic",
+        4.0,
+        20.0,
+        Sensitivity.CONFIDENTIAL,
+        cache_read_multiplier=0.05,
+    )
+
+    got = provider.complete(
+        spec,
+        [Message("system", "고정 규칙"), Message("user", "질문")],
+    )
+
+    assert got.input_tokens == 600
+    assert got.cache_creation_input_tokens == 200
+    assert got.cache_read_input_tokens == 300
+    expected_input = (100 + 200 * 1.25 + 300 * 0.05) * 4 / 1_000_000
+    expected_output = 50 * 20 / 1_000_000
+    assert got.cost_usd == pytest.approx(expected_input + expected_output)
+
+
+def test_old_sdk_usage_without_cache_fields_remains_supported():
+    from tybot.gateway.base import Message, ModelSpec, Sensitivity
+    from tybot.gateway.providers.anthropic_provider import AnthropicProvider
+
+    provider = AnthropicProvider(api_key="test")
+    provider._client = _FakeClient()
+    spec = ModelSpec("approved", "anthropic", 1.0, 1.0, Sensitivity.CONFIDENTIAL)
+
+    got = provider.complete(spec, [Message("system", "규칙"), Message("user", "질문")])
+
+    assert got.input_tokens == 10
+    assert got.cache_creation_input_tokens == 0
+    assert got.cache_read_input_tokens == 0
 
 
 # --- 샘플링 파라미터를 제거한 모델 (2026-09-08) -------------------------------

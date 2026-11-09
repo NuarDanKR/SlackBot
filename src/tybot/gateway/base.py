@@ -54,10 +54,33 @@ class ModelSpec:
     # Opus 5·4.8·4.7 과 Sonnet 5 는 샘플링 파라미터를 제거했고 보내면 400 이다.
     # Haiku 4.5·Sonnet 4.6·Opus 4.6 은 받는다.
     supports_sampling: bool = True
+    # Anthropic 5분 prompt cache 기본 배율. 다른 provider는 이 값을 쓰지 않는다.
+    # 모델별 cache read 할인이 다를 수 있어 레지스트리가 사실을 소유한다.
+    cache_write_5m_multiplier: float = 1.25
+    cache_read_multiplier: float = 0.10
 
     def cost(self, input_tokens: int, output_tokens: int) -> float:
         return (
             input_tokens / 1_000_000 * self.input_price_per_mtok
+            + output_tokens / 1_000_000 * self.output_price_per_mtok
+        )
+
+    def cost_with_cache(
+        self,
+        *,
+        input_tokens: int,
+        cache_creation_input_tokens: int,
+        cache_read_input_tokens: int,
+        output_tokens: int,
+    ) -> float:
+        """Provider가 보고한 cache 구간별 실제 입력 단가를 적용한다."""
+        weighted_input = (
+            input_tokens
+            + cache_creation_input_tokens * self.cache_write_5m_multiplier
+            + cache_read_input_tokens * self.cache_read_multiplier
+        )
+        return (
+            weighted_input / 1_000_000 * self.input_price_per_mtok
             + output_tokens / 1_000_000 * self.output_price_per_mtok
         )
 
@@ -97,6 +120,8 @@ class LLMResponse:
     # 전송이고, 무엇을 몇 번 부를지는 정책이라 여기서 정하지 않는다.
     tool_calls: tuple[ToolCall, ...] = ()
     stop_reason: str = ""
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
     @property
     def wants_tools(self) -> bool:
