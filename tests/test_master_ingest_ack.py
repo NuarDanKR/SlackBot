@@ -31,6 +31,13 @@ from tybot.archive.archiving_state import IngestProgress, IngestState
 from tybot.intent import Intent
 from tybot.question_files import QuestionFileEvidence
 
+
+@pytest.fixture(autouse=True)
+def _use_the_default_master_path(monkeypatch):
+    """This module tests the legacy/common request path, not the v2 rollout."""
+    monkeypatch.delenv("TYBOT_MASTER_V2_WORKSPACES", raising=False)
+
+
 ANSWER = Answer(
     "지난주 기성 청구는 15억입니다.",
     ["#팀_자금(ABB540)_주간보고, 📄2026-09.md(2026-09-20)"],

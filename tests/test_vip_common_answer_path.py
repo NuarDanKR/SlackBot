@@ -57,6 +57,12 @@ VIP_SOURCES = frozenset({("tyit", "C-EXEC")})
 DM_CHANNEL = "D-VIP"
 
 
+@pytest.fixture(autouse=True)
+def _use_the_default_master_path(monkeypatch):
+    """Keep shared answer-path tests independent of the server rollout env."""
+    monkeypatch.delenv("TYBOT_MASTER_V2_WORKSPACES", raising=False)
+
+
 class FakeQALog:
     """VIP 전용 QA 디렉터리. 좌표가 TYBot 기록과 섞이면 안 된다."""
 
