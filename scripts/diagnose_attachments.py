@@ -112,14 +112,20 @@ def main() -> int:
     items = scan(root)
     converted = [item for item in items if item.status == CONVERTED or item.extracted]
     failed = [item for item in items if item.conversion_failed]
-    unsupported = [item for item in items if item.status == UNSUPPORTED]
+    # 변환 앱(rhwp)에 넘긴 HWP 는 실패가 아니다. 미지원과 따로 센다.
+    delegated = [item for item in items if item.delegated]
+    unsupported = [
+        item for item in items if item.status == UNSUPPORTED and not item.delegated
+    ]
     historical = [
         item for item in items
-        if item not in converted and item not in failed and item not in unsupported
+        if item not in converted and item not in failed
+        and item not in unsupported and item not in delegated
     ]
     print(
         f"  완료 {len(converted)} · 실패 {len(failed) - len(unsupported)} · "
-        f"미지원 {len(unsupported)} · 과거 상태 {len(historical)}"
+        f"미지원 {len(unsupported)} · 변환 앱 위임 {len(delegated)} · "
+        f"과거 상태 {len(historical)}"
     )
 
     if failed:

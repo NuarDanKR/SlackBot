@@ -7,7 +7,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from .archive.converter_bots import DELEGATED_TYPES, conversion_delegated
 from .archive.files import BoundedFileLines, SlackFile, bounded_file_lines
+
+#: 질문에 붙인 HWP. 변환하지 않고 변환 앱의 PDF 로 다시 묻게 한다.
+HWP_USE_PDF_CODE = "file_hwp_use_converted_pdf"
 
 MAX_QUESTION_FILES = 4
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -114,6 +118,10 @@ def read_question_files(
         normalized["url_private_download"] = download
         normalized.pop("url_private", None)
         parsed_file = SlackFile.from_event(normalized)
+        if parsed_file.filetype in DELEGATED_TYPES and conversion_delegated():
+            # HWP 는 답변할 때 변환하지 않는다. 변환 앱(rhwp)이 채널에 올린 PDF 로
+            # 다시 물어 달라고 안내한다(2026-11-09 오너 결정).
+            return QuestionFileEvidence(codes=(HWP_USE_PDF_CODE,))
         if not (parsed_file.is_text or parsed_file.is_convertible):
             return QuestionFileEvidence(codes=("file_type_unsupported",))
         citation = _permalink(row.get("permalink"))
@@ -167,6 +175,19 @@ def read_question_files(
     )
 
 
+def refusal_message(code: str) -> str:
+    """질문 첨부를 못 써서 답하지 않을 때 사람에게 보여 줄 문장."""
+    if code == HWP_USE_PDF_CODE:
+        return (
+            "한글(HWP) 파일은 답변할 때 직접 변환하지 않습니다. 채널의 rhwp 앱이 올린 "
+            f"PDF 변환본을 첨부해 다시 물어봐 주세요. (`{code}`)"
+        )
+    return (
+        "질문에 첨부한 파일을 안전하게 읽지 못해 답변하지 않았습니다. "
+        f"파일과 권한을 확인해 다시 시도해 주세요. (`{code}`)"
+    )
+
+
 def validate_question_files(files: object, bot_token: str) -> tuple[str, ...]:
     """Validate event metadata and URLs without downloading file bytes."""
 
@@ -180,11 +201,13 @@ def validate_question_files(files: object, bot_token: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "HWP_USE_PDF_CODE",
     "MAX_FILE_BYTES",
     "MAX_QUESTION_CHARS",
     "MAX_QUESTION_FILES",
     "MAX_TOTAL_BYTES",
     "QuestionFileEvidence",
     "read_question_files",
+    "refusal_message",
     "validate_question_files",
 ]

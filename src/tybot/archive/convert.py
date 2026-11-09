@@ -1031,7 +1031,18 @@ def _has_body(lines: list[str]) -> bool:
 
 
 def can_convert(filetype: str) -> bool:
-    return filetype.lower() in _HANDLERS
+    """TYBot 이 이 형식을 변환하는가.
+
+    HWP 는 지정된 변환 앱(rhwp)이 있으면 **TYBot 이 변환하지 않는다** — 앱이 올린
+    PDF 가 원문 첨부로 들어온다(2026-11-09 오너 결정). 수집·소급 변환·재처리 큐·
+    질문 첨부가 모두 이 함수로 판정하므로 여기 한 곳에서 막는다.
+    """
+    kind = filetype.lower()
+    if kind not in _HANDLERS:
+        return False
+    from .converter_bots import DELEGATED_TYPES, conversion_delegated
+
+    return not (kind in DELEGATED_TYPES and conversion_delegated())
 
 
 def convert(filetype: str, data: bytes) -> list[str]:

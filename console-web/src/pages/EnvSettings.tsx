@@ -21,6 +21,8 @@ interface EnvSettingsData {
   }
   defaultModel: string
   toolBudgetSeconds: number
+  /** HWP 를 PDF 로 바꿔 올리는 변환 앱(rhwp)의 Slack 앱 ID. 비어 있으면 TYBot 이 HWP 를 직접 변환합니다. */
+  converterAppIds?: string[]
   models: { id: string; provider: string; maxSensitivity: 'public' | 'internal' | 'confidential' }[]
   changed?: string[]
 }
@@ -37,6 +39,7 @@ function preview(data: EnvSettingsData): string {
     `INCLUDE_RETIRED_CHANNELS=${data.includeRetiredChannels ? '1' : '0'}`,
     `DEFAULT_MODEL=${data.defaultModel}`,
     `TYBOT_SPECIALIST_TOOL_SECONDS=${data.toolBudgetSeconds}`,
+    `TYBOT_CONVERTER_APP_IDS=${(data.converterAppIds ?? []).join(',')}`,
   ].join('\n')
 }
 
@@ -114,6 +117,7 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
         includeRetiredChannels: draft.includeRetiredChannels,
         defaultModel: draft.defaultModel,
         toolBudgetSeconds: draft.toolBudgetSeconds,
+        converterAppIds: draft.converterAppIds ?? [],
       })
       setDraft(copySettings(saved))
       const count = saved.changed?.length ?? 0
@@ -225,6 +229,22 @@ export function EnvSettings({ onToast }: { onToast: (message: string) => void })
               value={draft.toolBudgetSeconds} disabled={!draft.editable}
               onChange={(event) => setDraft({ ...draft, toolBudgetSeconds: Number(event.target.value) })} />
             <span className="field-help">15~120초 · 실제 자료 조회에 쓴 누적 시간입니다. 모델 대기 시간은 제외합니다. 전체 답변 제한은 그대로이며, 추가 모델 호출이 생기면 토큰 비용이 늘 수 있습니다.</span>
+          </div>
+        </div>
+        <div className="card card-pad model-setting">
+          <div className="field">
+            <label className="field-label" htmlFor="converter-app-ids">HWP 변환 앱 (Slack 앱 ID)</label>
+            <input id="converter-app-ids" className="input" type="text" placeholder="A0123456789"
+              value={(draft.converterAppIds ?? []).join(', ')} disabled={!draft.editable}
+              onChange={(event) => setDraft({
+                ...draft,
+                converterAppIds: event.target.value.split(',').map((part) => part.trim()).filter(Boolean),
+              })} />
+            <span className="field-help">
+              지정한 앱(rhwp)이 채널에 올린 <b>PDF 파일만</b> 원문 첨부로 받고, TYBot 은 HWP 를 직접 변환하지 않습니다.
+              앱이 남긴 안내 글은 받지 않습니다. 비워 두면 예전처럼 TYBot 이 HWP 를 변환합니다.
+              쉼표로 여러 개를 적을 수 있으며 형식이 틀린 값은 저장되지 않습니다.
+            </span>
           </div>
         </div>
       </Section>

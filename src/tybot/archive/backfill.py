@@ -178,6 +178,20 @@ def _retry_seconds(exc: Exception) -> float:
         return DEFAULT_RETRY_SECONDS
 
 
+def _collectable(message: dict) -> dict | None:
+    """모을 메시지. 사람 메시지는 그대로, 지정된 변환 앱의 PDF 는 파일만 남겨서.
+
+    실시간 경로(`ArchivingBot.ingest_event`)와 같은 예외다. 한쪽만 받으면 같은
+    PDF 가 들어온 길에 따라 아카이브에 있다가 없다가 한다.
+    """
+    human, _ = _is_human(message)
+    if human:
+        return message
+    from .converter_bots import converted_document_message
+
+    return converted_document_message(message)
+
+
 def _is_human(message: dict) -> tuple[bool, str]:
     """사람이 쓴 것인가. 아니면 **왜 아닌지** 돌려준다.
 
@@ -281,7 +295,8 @@ def collect(
     ):
         for message in page.get("messages") or []:
             ts = str(message.get("ts") or "")
-            human, _ = _is_human(message)
+            kept = _collectable(message)
+            human = kept is not None
             # conversations.history의 thread 부모는 보통 thread_ts가 없고
             # reply_count/latest_reply만 가진다. thread_ts만 보면 답글이 빠진다.
             is_parent = (
@@ -299,7 +314,7 @@ def collect(
             ):
                 continue
             seen.add(ts)
-            found.append(Found(target.channel_id, ts, message))
+            found.append(Found(target.channel_id, ts, kept))
 
     for thread_ts in sorted(threads):
         outside = bool(oldest) and thread_ts < oldest
@@ -310,14 +325,15 @@ def collect(
         ):
             for message in page.get("messages") or []:
                 ts = str(message.get("ts") or "")
-                human, _ = _is_human(message)
+                kept = _collectable(message)
+                human = kept is not None
                 if not human or not ts or ts in seen or not _in_range(
                     ts, oldest=oldest, latest=latest
                 ):
                     continue
                 seen.add(ts)
                 picked += 1
-                found.append(Found(target.channel_id, ts, message, thread_ts=thread_ts))
+                found.append(Found(target.channel_id, ts, kept, thread_ts=thread_ts))
         if outside and picked:
             # 부모는 범위 밖이라 안 들어온다. 답글만 들어오는 스레드가 몇 개인지
             # 세어 둔다 — 「부분」 이라는 사실을 결과가 말할 수 있어야 한다.

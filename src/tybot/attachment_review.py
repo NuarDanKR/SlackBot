@@ -11,7 +11,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .archive.converter_bots import DELEGATED_CODE
+
 logger = logging.getLogger("tybot.attachment_review")
+
+#: 변환을 변환 앱(rhwp)에 넘긴 HWP 원본의 표시. 상태값은 `unsupported` 그대로지만
+#: 실패가 아니므로 실패 집계·조치 목록에서 뺀다.
+DELEGATED_LABEL = "변환 앱 위임 (rhwp PDF 사용)"
 
 PENDING = "pending_review"
 APPROVED = "approved"
@@ -130,8 +136,13 @@ class Attachment:
         return self.status == APPROVED
 
     @property
+    def delegated(self) -> bool:
+        """변환을 지정된 변환 앱(rhwp)에 넘긴 원본. 실패가 아니다."""
+        return self.status == UNSUPPORTED and self.error_code == DELEGATED_CODE
+
+    @property
     def conversion_failed(self) -> bool:
-        return self.status in FAILURE_STATES
+        return self.status in FAILURE_STATES and not self.delegated
 
 
 def staging_root(archive_dir: Path | str) -> Path:
@@ -314,6 +325,8 @@ NO_METADATA = "현재 상태를 확인하지 못함"
 
 def status_label(item: Attachment) -> str:
     """이 첨부의 **지금** 상태 한 낱말."""
+    if item.delegated:
+        return DELEGATED_LABEL
     if item.status in FAILURE_STATES or item.status == PII_REFUSED:
         return STATUS_LABELS.get(item.status, "변환 실패")
     if item.conversion_state == PARTIAL:
@@ -331,6 +344,8 @@ def status_line(item: Attachment) -> str:
     """Slack 한 줄. 실패는 **조치 중심 사유**만 붙인다 — 추출 본문은 싣지 않는다."""
     label = status_label(item)
     name = item.name or item.file_id
+    if item.delegated:
+        return f"{name} — {label}"
     if item.status in FAILURE_STATES or item.status == PII_REFUSED:
         return f"{name} — {label}: {public_failure_reason(item)}"
     # 통과했지만 민감 용어가 있던 파일은 **표시는 남긴다**(설계 §2.4). 막지

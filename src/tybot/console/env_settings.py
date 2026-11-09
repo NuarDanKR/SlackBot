@@ -24,6 +24,9 @@ MANAGED_STATIC_KEYS = {
     # 보관·삭제된 채널의 원문을 근거로 쓸 것인가(B-51). **기본은 아니다.**
     "INCLUDE_RETIRED_CHANNELS",
     "TYBOT_SPECIALIST_TOOL_SECONDS",
+    # HWP 를 PDF 로 바꿔 올리는 변환 앱(rhwp)의 Slack 앱 ID. 이 앱이 올린 PDF 만
+    # 원문 첨부로 받고, TYBot 은 HWP 를 직접 변환하지 않는다(2026-11-09 오너 결정).
+    "TYBOT_CONVERTER_APP_IDS",
 }
 
 
@@ -94,6 +97,10 @@ def snapshot() -> dict:
         "retiredChannels": _retired_summary(),
         "defaultModel": default_model,
         "toolBudgetSeconds": int(parse_tool_seconds(values.get("TYBOT_SPECIALIST_TOOL_SECONDS"))),
+        "converterAppIds": [
+            part.strip() for part in values.get("TYBOT_CONVERTER_APP_IDS", "").split(",")
+            if part.strip()
+        ],
         "models": [
             {
                 "id": spec.model,
@@ -122,6 +129,17 @@ def _validate(payload: dict) -> dict[str, str]:
             raise ValueError("자료 조회 시간은 정수여야 합니다.") from exc
     if not MIN_TOOL_SECONDS <= tool_seconds <= MAX_CONFIGURED_TOOL_SECONDS:
         raise ValueError(f"자료 조회 시간은 {MIN_TOOL_SECONDS}~{MAX_CONFIGURED_TOOL_SECONDS}초여야 합니다.")
+    from ..archive.converter_bots import parse_app_ids
+
+    supplied_apps = payload.get("converterAppIds")
+    if supplied_apps is None:
+        converter_apps = current.get("TYBOT_CONVERTER_APP_IDS", "")
+    else:
+        raw_apps = (
+            ",".join(str(item) for item in supplied_apps)
+            if isinstance(supplied_apps, list) else str(supplied_apps)
+        )
+        converter_apps = ",".join(parse_app_ids(raw_apps))
     return {
         "REALTIME_INGEST": "1" if payload.get("realtimeIngest") else "0",
         "AUTOJOIN_CHANNELS": "1" if payload.get("autojoinChannels") else "0",
@@ -133,6 +151,7 @@ def _validate(payload: dict) -> dict[str, str]:
         ),
         "DEFAULT_MODEL": model,
         "TYBOT_SPECIALIST_TOOL_SECONDS": str(tool_seconds),
+        "TYBOT_CONVERTER_APP_IDS": converter_apps,
     }
 
 
@@ -162,6 +181,9 @@ def save(payload: dict, *, actor: str) -> tuple[dict, list[str]]:
     # 콘솔의 다른 읽기 화면도 저장 직후 새 라벨·권한 관계를 보게 한다. 봇 프로세스에는
     # 영향이 없으며, 봇은 아래 재시작 요청 후 같은 파일을 새로 읽는다.
     os.environ.update(values)
+    from ..archive.converter_bots import clear_cache
+
+    clear_cache()
 
     if changed:
         request_restart(actor, changed)

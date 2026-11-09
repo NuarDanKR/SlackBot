@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 
 from ..pii_screen import ScreenMetadata
 from .convert import ConvertError, can_convert, convert
+from .converter_bots import DELEGATED_CODE, DELEGATED_TYPES, conversion_delegated
 from .text_normalize import remove_nul
 
 logger = logging.getLogger("tybot.files")
@@ -89,7 +90,13 @@ class SlackFile:
         suffix = Path(name).suffix.lstrip(".").lower()
         # Slack은 구형 HWP를 흔히 `binary`로 보고한다. 파일명 확장자가 우리가 실제로
         # 처리하는 형식이면 그것을 우선해야 HWP가 변환기에 도달한다.
-        filetype = suffix if suffix in TEXT_EXTS or can_convert(suffix) else reported
+        # 변환을 앱에 넘긴 형식(HWP)도 확장자를 따른다. 변환 대상이 아니게 됐다고
+        # `binary` 로 남기면 「변환을 넘긴 원본」 인지 알아볼 수 없다.
+        filetype = (
+            suffix
+            if suffix in TEXT_EXTS or suffix in DELEGATED_TYPES or can_convert(suffix)
+            else reported
+        )
         return cls(
             id=str(f.get("id", "")),
             name=name,
@@ -471,6 +478,11 @@ def stage_attachments(
 
             if f.is_text:
                 extracted = _decode_text(raw, f.size)
+            elif f.filetype in DELEGATED_TYPES and conversion_delegated():
+                # HWP 는 지정된 변환 앱(rhwp)이 PDF 로 바꿔 채널에 올리고, 그 PDF 가
+                # 원문 첨부로 들어온다(2026-11-09 오너 결정). 여기서 또 변환하면 같은
+                # 문서가 두 벌의 근거가 된다. 원본은 위에서 이미 보관했다.
+                error_code = DELEGATED_CODE
             elif f.is_convertible:
                 # `convert` 를 **모듈 수준 이름 그대로** 부른다. 다른 함수로
                 # 바꾸면 이 이름을 갈아 끼우던 테스트가 조용히 무력해진다 —
@@ -624,6 +636,10 @@ def stage_attachments(
 
         if extracted is not None:
             label = "자동변환"
+        elif state == "unsupported" and error_code == DELEGATED_CODE:
+            # 실패가 아니다. 변환 앱(rhwp)의 PDF 가 따로 들어온다 — 「미지원」 으로
+            # 적으면 진단이 조치 대상으로 세고, 사람은 고칠 것이 없는 파일을 찾아 헤맨다.
+            label = "변환앱위임"
         elif state == "unsupported":
             label = "미지원"
         elif state == "pii_refused":

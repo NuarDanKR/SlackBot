@@ -15,6 +15,7 @@ from .archive import attachment_ack, channel_membership, ingest_ack, shadow_path
 from .archive.archiving_state import IngestState
 from .archive.attachment_writer import raw_lines_for
 from .archive.attachment_writer import write_docs as write_attachment_docs
+from .archive.converter_bots import converted_document_message
 from .archive.revision_store import record_revision
 from .archive.store import ArchiveStore
 from .archive.write_owner import OwnerLookup
@@ -257,7 +258,14 @@ class ShadowCollector:
         if subtype in ("message_changed", "message_deleted"):
             return self._ingest_revision(client, event, channel, channel_id)
         if event.get("bot_id") or event.get("app_id") or subtype not in ("", "file_share"):
-            return "skipped-bot-or-system"
+            # 지정된 변환 앱(rhwp)의 PDF 만 예외로 받는다 — 파일만, 본문 없이.
+            converted = converted_document_message(event)
+            if converted is None:
+                return "skipped-bot-or-system"
+            return self.ingest_message(
+                client, converted, channel=channel, channel_id=channel_id,
+                is_private=is_private,
+            )
         if not event.get("user") or not event.get("ts"):
             return "skipped-identity"
 

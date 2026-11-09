@@ -28,6 +28,7 @@ from .archive import writer
 from .archive.canvas import canvas_lines
 from .archive.channel_files import ChannelFileScan, referenced_files
 from .archive.channel_files import collect as collect_channel_files
+from .archive.converter_bots import CONVERTER_MARK, converted_document_message
 from .archive.files import (
     AttachmentOrigin,
     attachment_storage,
@@ -87,6 +88,8 @@ def _messages_from(
                     event.get("user")
                     and not event.get("bot_id")
                     and not event.get("app_id")
+                    # 변환 앱 PDF 는 받지만 **사람이 올린 것은 아니다**.
+                    and not event.get(CONVERTER_MARK)
                 ),
             ),
             separate_attachments=separate_attachments,
@@ -177,7 +180,10 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
                 or m.get("app_id")
                 or m.get("subtype") not in (None, "file_share")
             ):
-                continue
+                # 지정된 변환 앱의 PDF 만 예외로 받는다(파일만, 본문 없이).
+                m = converted_document_message(m)
+                if m is None:
+                    continue
             msgs.extend(_messages_from(
                 client, m, cfg.bot_token, name_cache, storage,
                 workspace=cfg.key, channel_id=ch["id"], staged_out=staged,

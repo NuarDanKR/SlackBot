@@ -148,7 +148,7 @@ class AttachmentTrace:
 # 그래서 정규식으로 라벨을 잡으면 첫 `]` 에서 끊기고, 이름이 안 맞아 **전부 실패로**
 # 보인다(2026-09-11 실측). 이름을 넣어 접두사를 만들어 비교한다.
 #
-# 라벨은 코드가 정한 고정 문자열이라(`자동변환`·`미지원`·`수집제외`·`처리실패`·
+# 라벨은 코드가 정한 고정 문자열이라(`자동변환`·`미지원`·`변환앱위임`·`수집제외`·`처리실패`·
 # `본문 수집`·`변환`·`미변환`·`검수대기`) 대괄호가 없다. 그래서 목록 줄은 첫 `] ` 로
 # 자를 수 있다.
 LISTED_PREFIX = "[첨부:"
@@ -276,6 +276,9 @@ def _converted(meta: dict, meta_path: Path) -> StageResult:
         # 변환 자체는 됐고 PII 로 막은 것이다. 다음 단계에서 그렇게 말한다.
         return StageResult(CONVERTED, OK, "extracted=(PII 검사에서 폐기)")
     if status == "unsupported":
+        if meta.get("error_code") == "delegated_to_converter_app":
+            # HWP 를 변환 앱(rhwp)에 넘겼다. 같은 문서는 그 앱의 PDF 로 들어온다.
+            return StageResult(CONVERTED, SKIPPED, "code=delegated-to-converter-app")
         return StageResult(CONVERTED, SKIPPED, "code=unsupported-format")
     extracted = meta_path.parent / "extracted.md"
     if not meta.get("extracted") or not extracted.is_file():
