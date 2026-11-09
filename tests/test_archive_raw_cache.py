@@ -595,9 +595,22 @@ def _peaks(store, rounds: int) -> list[int]:
 
 
 def _assert_flat(peaks: list[int]) -> None:
+    """누수는 **매 라운드 쌓인다.** 한 라운드만 튀고 돌아오는 것은 누수가 아니다.
+
+    뒤 절반에서 가장 큰 값 하나는 빼고 본다. 2026-11-09 전체 실행에서 42라운드 중
+    38번째 한 번만 4.2MB 가 튀고 바로 511KB 로 돌아왔다 — 프로세스 어딘가의 일회성
+    할당이 그 라운드에 걸린 것이다. 그 시점은 다른 모듈 구성에 따라 앞뒤로 옮겨
+    다녀서, 앞 절반에 걸리면 통과하고 뒤 절반에 걸리면 깨졌다.
+
+    진짜 누수는 두 번째로 큰 값과 마지막 라운드들에서 그대로 잡힌다.
+    """
     half = len(peaks) // 2
-    early, late = max(peaks[:half]), max(peaks[half:])
+    early = max(peaks[:half])
+    late = sorted(peaks[half:])[-2]
     assert late < early * 1.5 + 256 * 1024, (early, late)
+    # 끝나 갈 때 기준선으로 돌아와 있어야 한다. 쌓이는 누수는 여기서 가장 크다.
+    tail = max(peaks[-3:])
+    assert tail < early * 1.5 + 256 * 1024, (early, tail)
 
 
 def test_forty_two_rounds_stay_flat(tmp_path):
