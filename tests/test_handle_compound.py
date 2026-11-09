@@ -14,6 +14,7 @@ from unittest.mock import Mock
 import pytest
 
 from tybot import channel_lifecycle
+from tybot.access import RequestContext
 from tybot.answer import Answer
 from tybot.canvas_answer import CanvasResult
 from tybot.intent import Intent
@@ -74,12 +75,13 @@ def _bot(tasks, answers) -> WorkspaceBot:
     bot._chan_cache = {"C1": "#팀-전산_ABB110-회의"}
     bot.path_problems = {}
     bot._user_name = lambda client, uid: "단라운"
-    bot._context = lambda client, uid: Mock(
+    bot._context = lambda client, uid: RequestContext(
         role="member",
         workspace="mgmt",
         is_root=False,
-        channels={"#팀-전산_ABB110-회의"},
+        channels=frozenset({"#팀-전산_ABB110-회의"}),
         readable_workspaces=frozenset(),
+        user_id=uid,
     )
     # 상태 답변이 쓰는 값들. LLM 이 없어도 결정적 블록이 나와야 한다.
     bot.store = Mock(docs=lambda: [], broken=lambda: [])
