@@ -69,7 +69,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="첨부 처리 단계 추적 — 읽기만 한다",
     )
-    ap.add_argument("--archive", default=os.getenv("ARCHIVE_DIR", "./archive"))
+    # 기본값은 env 파일을 읽은 **뒤에** 정한다. 여기서 os.getenv 로 정하면
+    # TYBOT_ENV_FILE 의 ARCHIVE_DIR 이 반영되기 전이라 서버에서 "./archive" 가 된다.
+    ap.add_argument("--archive", default=None, help="기본: ARCHIVE_DIR")
     ap.add_argument("--workspace", default="", help="워크스페이스 키")
     ap.add_argument("--channel", default="", help="Slack 채널 ID")
     ap.add_argument("--file-id", default="", help="Slack 파일 ID")
@@ -82,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from tybot.archive.store import ArchiveStore
 
-    archive = pathlib.Path(args.archive)
+    archive = pathlib.Path(args.archive or os.getenv("ARCHIVE_DIR", "./archive"))
     if not archive.exists():
         print(f"아카이브 경로가 없다: {archive}")
         return EXIT_INPUT
