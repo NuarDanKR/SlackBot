@@ -103,6 +103,7 @@ class AnswerPrompts:
     summary: str = SUMMARY_PROMPT
     advice: str = ADVICE_PROMPT
     interim_advice: str = INTERIM_ADVICE_PROMPT
+    specialist: str | None = None
 
 MODEL_FLAG_RE = re.compile(r"--model=([A-Za-z0-9._\-]+)")
 # 아카이브 범위 자체를 묻는 표현. 분류기가 out_of_scope 로 잘못 보내도 여기서 되돌린다.
@@ -1114,6 +1115,57 @@ class AnswerEngine:
             return default
         return configured
 
+    def _render_specialist_answer(
+        self,
+        text: str,
+        question: str,
+        *,
+        model: str | None,
+        source_model: str | None,
+        source_cost_usd: float,
+    ) -> tuple[str, str | None, float, bool]:
+        """Apply an optional runtime presentation contract to specialist text.
+
+        Citations and evidence coordinates never enter this function and are
+        therefore retained by the caller. A rendering failure keeps the exact
+        specialist response instead of dropping an otherwise grounded answer.
+        """
+        prompt = self._prompts.specialist
+        original = str(text or "")
+        if not prompt:
+            return original, source_model, source_cost_usd, False
+        try:
+            response = self._router.complete(
+                [
+                    Message("system", prompt),
+                    Message(
+                        "user",
+                        "<question>\n"
+                        f"{question}\n"
+                        "</question>\n\n"
+                        "<specialist_answer>\n"
+                        f"{original}\n"
+                        "</specialist_answer>",
+                    ),
+                ],
+                model=model,
+                sensitivity=self._sensitivity,
+                max_tokens=self._output_limit(1800),
+            )
+        except Exception as exc:  # noqa: BLE001 - grounded original is the fallback
+            logger.warning("specialist answer rendering failed: %s", type(exc).__name__)
+            return original, source_model, source_cost_usd, False
+        rendered = str(response.text or "").strip()
+        if not rendered:
+            logger.warning("specialist answer rendering returned empty text")
+            return original, source_model, source_cost_usd, False
+        return (
+            rendered,
+            response.model,
+            source_cost_usd + response.cost_usd,
+            True,
+        )
+
     def _master_answers_allowed(self, ctx: RequestContext) -> bool:
         policy = self._master_answer_policy
         if callable(policy):
@@ -1582,6 +1634,15 @@ class AnswerEngine:
                 outcome = _Outcome("unavailable", error_code="acl-source-violation")
                 special = None
             if special is not None:
+                rendered, rendered_model, rendered_cost, _ = (
+                    self._render_specialist_answer(
+                        special.text,
+                        question or f"최근 {days}일 진행 상황을 정리해 주세요.",
+                        model=model,
+                        source_model=special.model,
+                        source_cost_usd=special.cost_usd,
+                    )
+                )
                 logger.info(
                     "summary ok(전문가) ws=%s specialist=%s model=%s docs=%d",
                     ctx.workspace,
@@ -1590,10 +1651,10 @@ class AnswerEngine:
                     len(blocks),
                 )
                 return Answer(
-                    _with_coverage(special.text, specialist_coverage),
+                    _with_coverage(rendered, specialist_coverage),
                     selected_citations,
-                    special.model,
-                    special.cost_usd,
+                    rendered_model,
+                    rendered_cost,
                     selected_lines,
                     "answered",
                     withheld=withheld,
@@ -1694,14 +1755,20 @@ class AnswerEngine:
             if special is not None:
                 citations = _specialist_citations(special, hits, ctx)
                 citations += _attachment_source_links(hits)
-                text = special.text
-                model_name = special.model
-                cost_usd = special.cost_usd
+                text, model_name, cost_usd, specialist_rendered = (
+                    self._render_specialist_answer(
+                        special.text,
+                        q,
+                        model=model,
+                        source_model=special.model,
+                        source_cost_usd=special.cost_usd,
+                    )
+                )
                 master_interim = False
                 # Hermes는 사내 근거를 읽는 전문 봇이다. 별도 판단 전문 봇이
                 # 등록되기 전까지만, 마스터가 **같은 권한 필터 원문**으로 조언을
                 # 덧붙인다. 외부 사실이나 Hermes 답변을 근거로 삼지 않는다.
-                if special.specialist == "hermes":
+                if special.specialist == "hermes" and not specialist_rendered:
                     evidence = (
                         f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n"
                         if hits else "<원문>\n(관련 원문 없음)\n</원문>\n\n"
@@ -2221,15 +2288,24 @@ class AnswerEngine:
                 special = None
             if special is not None:
                 citations = _specialist_citations(special, [], ctx)
+                rendered, rendered_model, rendered_cost, _ = (
+                    self._render_specialist_answer(
+                        special.text,
+                        q,
+                        model=model,
+                        source_model=special.model,
+                        source_cost_usd=special.cost_usd,
+                    )
+                )
                 logger.info(
                     "answer ok(전문가·빈 seed) ws=%s specialist=%s srcs=%d",
                     ctx.workspace, special.specialist, len(citations),
                 )
                 return Answer(
-                    special.text,
+                    rendered,
                     citations,
-                    special.model,
-                    special.cost_usd,
+                    rendered_model,
+                    rendered_cost,
                     0,
                     "answered",
                     specialist=special.specialist,
@@ -2314,6 +2390,15 @@ class AnswerEngine:
             if special is not None:
                 citations = _specialist_citations(special, hits, ctx)
                 citations += _attachment_source_links(hits)
+                rendered, rendered_model, rendered_cost, _ = (
+                    self._render_specialist_answer(
+                        special.text,
+                        q,
+                        model=model,
+                        source_model=special.model,
+                        source_cost_usd=special.cost_usd,
+                    )
+                )
                 logger.info(
                     "answer ok(전문가) ws=%s specialist=%s model=%s hits=%d srcs=%s",
                     ctx.workspace,
@@ -2323,10 +2408,10 @@ class AnswerEngine:
                     citations,
                 )
                 return Answer(
-                    special.text,
+                    rendered,
                     citations,
-                    special.model,
-                    special.cost_usd,
+                    rendered_model,
+                    rendered_cost,
                     len(hits),
                     "answered",
                     specialist=special.specialist,

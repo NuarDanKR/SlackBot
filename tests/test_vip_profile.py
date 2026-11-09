@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -21,7 +23,7 @@ def _code(call) -> str:
 def test_profile_uses_the_reviewed_high_quality_model_and_separate_budget():
     profile = vip_profile.load_profile({"VIPBOT_DAILY_LIMIT_USD": "12.50"})
 
-    assert profile.revision == "vip-executive-v1"
+    assert profile.revision == "vip-executive-v2"
     assert profile.model == "claude-opus-5-5"
     assert profile.daily_limit_usd == 12.5
     assert profile.cost_state_path == "/var/lib/tybot-vipbot/cost-state.json"
@@ -76,6 +78,7 @@ def test_all_answer_modes_keep_the_source_rules_and_executive_contract():
         profile.prompts.summary,
         profile.prompts.advice,
         profile.prompts.interim_advice,
+        profile.prompts.specialist,
     ):
         assert "원문" in prompt
         assert "BLUF" in prompt
@@ -98,11 +101,71 @@ def test_common_answer_engine_accepts_the_profile_without_changing_defaults():
     )
 
     assert default._prompts == AnswerPrompts()
+    assert default._prompts.specialist is None
     assert vip._prompts == profile.prompts
+    assert vip._prompts.specialist is not None
     assert default._output_limit(2048) == 2048
     assert vip._output_limit(2048) == profile.max_output_tokens
     assert vip._output_limit(1024) == profile.max_output_tokens
     assert vip._output_limit(1000) == profile.max_output_tokens
+
+
+def test_vip_specialist_renderer_uses_the_profile_and_accumulates_cost():
+    from tybot.answer import AnswerEngine
+
+    router = Mock()
+    router.complete.return_value = SimpleNamespace(
+        text="**결론:** 현 상태를 유지합니다.",
+        model="claude-opus-5-5",
+        cost_usd=0.25,
+    )
+    profile = vip_profile.load_profile({"VIPBOT_DAILY_LIMIT_USD": "10"})
+    engine = AnswerEngine(
+        store=None,
+        router=router,
+        prompts=profile.prompts,
+        max_output_tokens=profile.max_output_tokens,
+    )
+
+    rendered = engine._render_specialist_answer(
+        "전문봇 원문",
+        "현황을 정리해줘",
+        model=None,
+        source_model="specialist-model",
+        source_cost_usd=0.5,
+    )
+
+    assert rendered == (
+        "**결론:** 현 상태를 유지합니다.",
+        "claude-opus-5-5",
+        0.75,
+        True,
+    )
+    messages = router.complete.call_args.args[0]
+    assert "BLUF" in messages[0].content
+    assert "전문봇 원문" in messages[1].content
+
+
+def test_specialist_renderer_failure_keeps_the_exact_grounded_answer():
+    from tybot.answer import AnswerEngine
+
+    router = Mock()
+    router.complete.side_effect = RuntimeError("provider unavailable")
+    profile = vip_profile.load_profile({"VIPBOT_DAILY_LIMIT_USD": "10"})
+    engine = AnswerEngine(store=None, router=router, prompts=profile.prompts)
+
+    assert engine._render_specialist_answer(
+        "숫자 72%를 포함한 전문봇 원문",
+        "현황",
+        model=None,
+        source_model="specialist-model",
+        source_cost_usd=0.5,
+    ) == (
+        "숫자 72%를 포함한 전문봇 원문",
+        "specialist-model",
+        0.5,
+        False,
+    )
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
