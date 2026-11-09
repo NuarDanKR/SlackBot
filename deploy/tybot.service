@@ -56,8 +56,8 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-# 쓰기 허용 경로 — 아카이브와 캐시만
-ReadWritePaths=/var/lib/tybot /run/tybot
+# 쓰기 허용 경로 — 중앙 아카이브/캐시와 VIP 전용 비용·QA 상태
+ReadWritePaths=/var/lib/tybot /var/lib/tybot-vipbot /run/tybot
 # 인바운드 소켓 불필요(Socket Mode 는 아웃바운드 WebSocket)
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 

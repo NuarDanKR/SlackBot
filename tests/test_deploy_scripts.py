@@ -6,6 +6,16 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_shared_vip_runtime_can_persist_its_cost_and_qa_state():
+    unit = (ROOT / "deploy" / "tybot.service").read_text(encoding="utf-8")
+
+    assert "ProtectSystem=strict" in unit
+    writable = next(
+        line for line in unit.splitlines() if line.startswith("ReadWritePaths=")
+    )
+    assert "/var/lib/tybot-vipbot" in writable.split("=")[1].split()
+
+
 def test_update_restarts_bot_after_install():
     script = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
     install = 'TYBOT_INSTALL_HINTS=0 bash "$SRC/deploy/install.sh"'
