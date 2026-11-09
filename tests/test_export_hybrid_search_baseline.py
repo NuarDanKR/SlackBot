@@ -5,6 +5,8 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
+
 from tybot.answer_issues import KST
 
 
@@ -122,3 +124,30 @@ def test_unknown_no_evidence_is_reported_but_not_eligible(tmp_path):
     )
     assert payload["unknownNoEvidence"] == 1
     assert payload["eligibleTotal"] == 0
+
+
+def test_qa_log_dir_comes_from_env_file_and_missing_dir_stops(tmp_path, monkeypatch):
+    """서버의 QA_LOG_DIR 는 env 파일에만 있다. 못 읽으면 0건을 정상처럼 낸다."""
+    import sys
+    import types
+
+    spec = importlib.util.spec_from_file_location(
+        "export_baseline_env", Path(__file__).resolve().parents[1]
+        / "scripts" / "export_hybrid_search_baseline.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    qa = tmp_path / "qa-log"
+    qa.mkdir()
+    monkeypatch.delenv("QA_LOG_DIR", raising=False)
+    monkeypatch.setitem(sys.modules, "tybot.envfile", types.SimpleNamespace(
+        load_env_file=lambda: monkeypatch.setenv("QA_LOG_DIR", str(qa))
+    ))
+    assert module.resolve_qa_log_dir("") == qa
+
+    monkeypatch.setitem(sys.modules, "tybot.envfile", types.SimpleNamespace(
+        load_env_file=lambda: monkeypatch.setenv("QA_LOG_DIR", str(tmp_path / "missing"))
+    ))
+    with pytest.raises(SystemExit):
+        module.resolve_qa_log_dir("")

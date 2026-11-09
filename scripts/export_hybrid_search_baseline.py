@@ -56,6 +56,22 @@ def build_baseline(
     }
 
 
+def resolve_qa_log_dir(explicit: str) -> Path:
+    """QA 기록 위치. env 파일을 **먼저** 읽고, 없는 경로면 멈춘다.
+
+    서버에서 `QA_LOG_DIR` 는 `/etc/tybot/tybot.env` 에만 있다. env 파일을 안 읽으면
+    `./qa-log` 로 떨어지고, 그 경로가 없으면 기록 0건을 **정상 결과처럼** 낸다 —
+    「무근거 답변이 없다」 와 「기록을 못 봤다」 가 같은 출력이 된다.
+    """
+    from tybot.envfile import load_env_file
+
+    load_env_file()
+    root = Path(explicit or os.getenv("QA_LOG_DIR", "./qa-log")).expanduser()
+    if not root.is_dir():
+        raise SystemExit(f"QA 기록 폴더가 없습니다: {root} (--qa-log-dir 또는 QA_LOG_DIR 확인)")
+    return root
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="질문·답변 본문 없이 B-12 shadow 평가 기준선 건수만 내보냅니다."
@@ -72,7 +88,7 @@ def main() -> int:
     if args.days < 1:
         raise SystemExit("--days는 1 이상이어야 합니다.")
     now = datetime.now(KST)
-    root = Path(args.qa_log_dir or os.getenv("QA_LOG_DIR", "./qa-log")).expanduser()
+    root = resolve_qa_log_dir(args.qa_log_dir)
     payload = build_baseline(
         root,
         since=(now - timedelta(days=args.days)).date(),
