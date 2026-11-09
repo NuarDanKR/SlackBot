@@ -268,7 +268,12 @@ def test_master_service_can_serve_the_external_specialist_tool_socket():
     assert "SupplementaryGroups=tybot-specialist-rpc" in unit
     assert "RuntimeDirectory=tybot" in unit
     assert "RuntimeDirectoryMode=0750" in unit
-    assert "ReadWritePaths=/var/lib/tybot /run/tybot" in unit
+    writable = next(
+        line.removeprefix("ReadWritePaths=").split()
+        for line in unit.splitlines()
+        if line.startswith("ReadWritePaths=")
+    )
+    assert {"/var/lib/tybot", "/run/tybot"} <= set(writable)
 
 
 def test_master_memory_regressions_are_contained_to_the_service():
