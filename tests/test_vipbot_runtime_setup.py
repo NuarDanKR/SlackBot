@@ -224,13 +224,13 @@ def test_the_window_pins_the_bot_key_so_the_caller_cannot_choose_it():
 
 def test_the_dsn_arrives_as_a_credential_under_the_name_the_code_looks_for():
     assert (
-        f"LoadCredential={vipbot_dsn.CREDENTIAL_NAME}:/etc/tybot/{vipbot_dsn.CREDENTIAL_NAME}"
+        f"Environment=VIPBOT_DATABASE_URL_FILE=/etc/tybot/{vipbot_dsn.CREDENTIAL_NAME}"
     ) in unit()
 
 
 def test_the_model_key_arrives_as_a_dedicated_credential():
     assert (
-        f"LoadCredential={vipbot_anthropic_credential.CREDENTIAL_NAME}:"
+        f"Environment={vipbot_anthropic_credential.FILE_ENV}="
         f"/etc/tybot/{vipbot_anthropic_credential.CREDENTIAL_NAME}"
     ) in unit()
     assert "Environment=ANTHROPIC_API_KEY" not in unit()
@@ -260,8 +260,7 @@ def test_no_secret_value_is_written_into_the_unit_itself():
 
 def test_the_encryption_key_also_arrives_as_a_credential():
     lines = directives()
-    assert any(line.startswith("LoadCredential=tybot-workspace-secret-key:") for line in lines)
-    assert "Environment=WORKSPACE_SECRET_KEY_FILE=%d/tybot-workspace-secret-key" in lines
+    assert "Environment=WORKSPACE_SECRET_KEY_FILE=/etc/tybot/workspace-secret.key" in lines
 
 
 def test_the_draft_cannot_be_enabled_until_the_runtime_module_exists():

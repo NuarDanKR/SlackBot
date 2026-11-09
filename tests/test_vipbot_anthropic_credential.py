@@ -36,6 +36,12 @@ def test_systemd_credential_is_the_only_success_path(tmp_path):
     assert resolve(tmp_path) == KEY
 
 
+def test_an_explicit_private_file_supports_systemd_239(tmp_path):
+    path = private(tmp_path / "anthropic.key")
+
+    assert credential.resolve_anthropic_api_key({credential.FILE_ENV: str(path)}) == KEY
+
+
 def test_plaintext_environment_presence_is_rejected_without_reading_its_value(tmp_path):
     private(tmp_path / credential.CREDENTIAL_NAME)
     assert (

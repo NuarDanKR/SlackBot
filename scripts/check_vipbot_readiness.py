@@ -95,6 +95,12 @@ SETTINGS_FILE = "/etc/tybot/tybot-vipbot.conf"
 #: `EnvironmentFile=` 로 들일 수 있는 **유일한** 경로.
 ALLOWED_ENVIRONMENT_FILES = (SETTINGS_FILE,)
 
+CREDENTIAL_FILE_ENV = {
+    "VIPBOT_DATABASE_URL_FILE": "tybot-vipbot-database-url",
+    "WORKSPACE_SECRET_KEY_FILE": "tybot-workspace-secret-key",
+    "VIPBOT_ANTHROPIC_API_KEY_FILE": "tybot-vipbot-anthropic-api-key",
+}
+
 #: 이 점검이 낼 수 있는 **전부.** 고정 낱말이라 그대로 세고 티켓에 붙인다.
 FINDING_CODES = frozenset(
     {
@@ -178,6 +184,7 @@ class Facts:
 def evaluate(facts: Facts) -> list[Finding]:
     """사실 묶음 하나를 보고 **켤 수 있는지**를 말한다."""
     found: list[Finding] = []
+    found.extend(_database(facts))
     found.extend(_roles(facts))
     found.extend(_functions(facts))
     found.extend(_connection(facts))
@@ -187,6 +194,12 @@ def evaluate(facts: Facts) -> list[Finding]:
     found.extend(_settings_file(facts))
     found.extend(_unit(facts))
     return found
+
+
+def _database(facts: Facts) -> list[Finding]:
+    if facts.database_checked or not facts.database_error:
+        return []
+    return [Finding("database_unreachable", facts.database_error)]
 
 
 def _roles(facts: Facts) -> list[Finding]:
@@ -414,11 +427,31 @@ def unit_facts(path: pathlib.Path) -> dict:
         for name in environment_files
         if name not in ALLOWED_ENVIRONMENT_FILES
     )
+    loaded_paths = {
+        line.split("=", 1)[1].split(":", 1)[0]: line.split(":", 1)[1]
+        for line in directives
+        if line.startswith("LoadCredential=") and ":" in line
+    }
+    declared_values = {
+        payload.split("=", 1)[0]: payload.split("=", 1)[1]
+        for line in directives
+        if line.startswith("Environment=")
+        for payload in (line.split("=", 1)[1],)
+        if "=" in payload
+    }
+    loaded_paths.update(
+        {
+            credential_name: declared_values[env_name]
+            for env_name, credential_name in CREDENTIAL_FILE_ENV.items()
+            if declared_values.get(env_name)
+        }
+    )
     loaded = {
         line.split("=", 1)[1].split(":", 1)[0]
         for line in directives
         if line.startswith("LoadCredential=")
     }
+    loaded.update(loaded_paths)
     declared = {
         line.split("=", 1)[1].split("=", 1)[0]
         for line in directives
@@ -429,11 +462,7 @@ def unit_facts(path: pathlib.Path) -> dict:
         "path": str(path),
         "shared_env": tuple(dict.fromkeys(shared)),
         "credentials": tuple(sorted(loaded)),
-        "credential_paths": {
-            line.split("=", 1)[1].split(":", 1)[0]: line.split(":", 1)[1]
-            for line in directives
-            if line.startswith("LoadCredential=") and ":" in line
-        },
+        "credential_paths": loaded_paths,
         # 유닛은 설정 **파일을 가리키기만** 한다. 값을 박으면 서버마다 다른
         # 유닛이 생기고, 저장소의 유닛과 갈린 사실이 아무 데도 안 보인다.
         "hardcoded_settings": tuple(
@@ -567,7 +596,7 @@ def _credential_shape_ok(name: str, path: pathlib.Path) -> bool:
         if name.endswith("anthropic-api-key"):
             from tybot.vipbot_anthropic_credential import resolve_anthropic_api_key
 
-            resolve_anthropic_api_key({"CREDENTIALS_DIRECTORY": str(path.parent)})
+            resolve_anthropic_api_key({"VIPBOT_ANTHROPIC_API_KEY_FILE": str(path)})
             return True
         if name.endswith("secret-key"):
             from cryptography.fernet import Fernet

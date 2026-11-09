@@ -124,8 +124,8 @@ DSN 은 **URI 형식**이고 접속 user 가 $ROLE_RUNTIME 이어야 한다. 런
   (host=… user=… 키워드 형식은 받지 않는다. ?user= 로 덮어쓴 것도 거절한다)
 
 서비스에는 **자격증명으로** 넘긴다. 환경변수에 DSN 을 적지 않는다:
-  LoadCredential=$CREDENTIAL:/etc/tybot/$CREDENTIAL
-  (deploy/tybot-vipbot.service 초안에 이미 들어 있다)
+  Environment=VIPBOT_DATABASE_URL_FILE=/etc/tybot/$CREDENTIAL
+  (값이 아니라 0600 파일 경로만 넘긴다. systemd 239 호환)
 
 확인:
   sudo $0 --verify

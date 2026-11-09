@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 CREDENTIAL_NAME = "tybot-vipbot-anthropic-api-key"
+FILE_ENV = "VIPBOT_ANTHROPIC_API_KEY_FILE"
 PLAINTEXT_ENV = "vipbot_anthropic_plaintext_environment"
 UNCONFIGURED = "vipbot_anthropic_credential_unconfigured"
 UNREADABLE = "vipbot_anthropic_credential_unreadable"
@@ -60,6 +61,9 @@ def resolve_anthropic_api_key(environ: Mapping[str, str] | None = None) -> str:
     values = os.environ if environ is None else environ
     if "ANTHROPIC_API_KEY" in values:
         raise VipbotAnthropicCredentialError(PLAINTEXT_ENV)
+    explicit = str(values.get(FILE_ENV, "") or "").strip()
+    if explicit:
+        return _read(Path(explicit))
     directory = str(values.get("CREDENTIALS_DIRECTORY", "") or "").strip()
     if not directory:
         raise VipbotAnthropicCredentialError(UNCONFIGURED)
@@ -69,6 +73,7 @@ def resolve_anthropic_api_key(environ: Mapping[str, str] | None = None) -> str:
 __all__ = [
     "BAD_MODE",
     "CREDENTIAL_NAME",
+    "FILE_ENV",
     "INVALID",
     "PLAINTEXT_ENV",
     "UNCONFIGURED",
