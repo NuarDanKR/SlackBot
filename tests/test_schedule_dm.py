@@ -49,6 +49,12 @@ from tybot.schedule_dm import (
 NOW = datetime(2026, 9, 1, 13, 30, tzinfo=KST)
 
 
+@pytest.fixture(autouse=True)
+def default_to_department_schedule_mode(monkeypatch):
+    """These tests cover the default org-folder path, regardless of server env."""
+    monkeypatch.delenv("SCHEDULE_PERSONAL_DM_ENABLED", raising=False)
+
+
 # --- 가짜 DB ------------------------------------------------------------------
 class FakeCursor:
     def __init__(self, conn):

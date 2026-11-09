@@ -25,6 +25,12 @@ _spec.loader.exec_module(se)
 KST = timezone(timedelta(hours=9))
 
 
+@pytest.fixture(autouse=True)
+def default_to_department_schedule_mode(monkeypatch):
+    """CLI default-path tests must not inherit an operator's personal-DM flag."""
+    monkeypatch.delenv("SCHEDULE_PERSONAL_DM_ENABLED", raising=False)
+
+
 def _row(
     folder_id=100,
     event_id=1,
