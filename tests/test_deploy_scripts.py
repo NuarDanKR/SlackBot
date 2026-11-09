@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -812,3 +814,80 @@ def test_the_plaintext_dropin_keeps_the_proxy_options():
     assert "ExecStart=" in block, "drop-in 블록을 잘못 잘랐습니다"
     assert "--proxy-headers" in block
     assert "--forwarded-allow-ips=127.0.0.1" in block
+
+
+# --- 임베딩 계열의 더 엄한 규약 (2026-11-09) -----------------------------------
+#
+# 표의 PostgreSQL 기본값은 PUBLIC 에게 아무 권한도 주지 않는다. 그래서 대부분의
+# 스키마는 `REVOKE ... FROM PUBLIC` 을 적지 않고, 그 상태가 틀린 것은 아니다.
+#
+# 임베딩 계열만 다르게 간다. 여기 쌓이는 것은 **어느 워크스페이스가 색인됐고 그게
+# 얼마를 썼는지**이고, 한 번이라도 누가 PUBLIC 에 GRANT 하면 그 사실이 조용히
+# 전부에게 열린다. 그래서 같은 줄을 매 파일에 적어 두고, 새 파일이 그 줄을
+# 빠뜨리면 여기서 걸린다 — `search_embedding_run_schema.sql` 이 실제로 그랬다.
+EMBEDDING_SCHEMAS = (
+    "search_embedding_schema.sql",
+    "search_embedding_query_schema.sql",
+    "search_embedding_run_schema.sql",
+)
+
+
+def test_the_embedding_schemas_are_all_applied():
+    listed = _listed_files()
+    for name in EMBEDDING_SCHEMAS:
+        assert name in listed, f"{name} 이 apply-schema.sh 목록에 없다"
+
+
+@pytest.mark.parametrize("name", EMBEDDING_SCHEMAS)
+def test_every_embedding_table_closes_public_access(name):
+    body = _code(name)
+    for table in sorted(_created_tables(_sql(name))):
+        assert f"REVOKE ALL ON TABLE {table} FROM PUBLIC" in body, (
+            f"{name}:{table} 가 PUBLIC 을 회수하지 않는다"
+        )
+
+
+def test_the_run_ledger_cannot_be_deleted_by_the_runtime():
+    """이력은 캐시가 아니다. 지우는 것은 운영 판단이지 러너의 버그가 할 일이 아니다."""
+    body = _code("search_embedding_run_schema.sql")
+    # `COMMENT ON TABLE` 도 같은 낱말을 쓴다. GRANT 문만 집는다.
+    found = re.search(
+        r"GRANT\s+(.+?)\s+ON\s+TABLE\s+search_embedding_index_run",
+        body,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert found, "표에 대한 GRANT 가 없다"
+    granted = found.group(1).upper()
+    assert "SELECT" in granted and "INSERT" in granted and "UPDATE" in granted
+    assert "DELETE" not in granted
+    assert "TRUNCATE" not in granted
+
+
+def test_schemas_with_a_serial_column_grant_its_sequence():
+    """`bigserial` 표에 INSERT 권한만 주면 **첫 INSERT 에서 막힌다.**
+
+    권한 오류는 시퀀스 이름을 말하므로, 읽는 사람은 자기가 만든 적 없는 객체의
+    이름을 보고 원인을 찾아야 한다.
+    """
+    offenders: list[str] = []
+    for name in _listed_files():
+        body = _code(name)
+        if not _created_tables(_sql(name)):
+            continue
+        if not re.search(r"\b(?:big)?serial\b", body, re.IGNORECASE):
+            continue
+        if "ON SEQUENCE" not in body.upper():
+            offenders.append(name)
+    assert not offenders, (
+        f"serial 컬럼을 만들면서 시퀀스 GRANT 가 없는 스키마: {offenders}"
+    )
+
+
+def test_the_embedding_sequence_grant_is_resolved_not_spelled_out():
+    """`<표>_id_seq` 라고 적으면, 이름이 다른 시퀀스를 가진 기존 표에서 빈손이 된다.
+
+    그때 실패는 배포가 아니라 **첫 INSERT** 에서 난다.
+    """
+    body = _code("search_embedding_run_schema.sql")
+    assert "pg_depend" in body
+    assert "search_embedding_index_run_id_seq" not in body

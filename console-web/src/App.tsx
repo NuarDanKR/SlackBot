@@ -12,6 +12,7 @@ import { Collected } from './pages/Collected'
 import { ConsoleUsers } from './pages/ConsoleUsers'
 import { Dashboard } from './pages/Dashboard'
 import { Deploy } from './pages/Deploy'
+import { EmbeddingIndex } from './pages/EmbeddingIndex'
 import { EnvSettings } from './pages/EnvSettings'
 import { Harness } from './pages/Harness'
 import { Home } from './pages/Home'
@@ -55,6 +56,7 @@ const NAV: NavGroup[] = [
     { path: '/manage/commands', label: '명령 진단', minimum: 'developer' },
     { path: '/manage/logs', label: '서비스 로그', minimum: 'developer' },
     { path: '/manage/batches', label: '배치 관리', minimum: 'admin' },
+    { path: '/manage/embedding', label: '임베딩 색인', minimum: 'admin' },
     { path: '/manage/deploy', label: '배포 관리', minimum: 'admin' },
     { path: '/manage/workspaces', label: '워크스페이스 관리', minimum: 'admin' },
     { path: '/manage/environment', label: '환경 설정', minimum: 'admin' },
@@ -196,6 +198,7 @@ export default function App() {
       {path === '/manage/commands' && <CommandDiagnostics />}
       {path === '/manage/logs' && <ServiceLogs context={logContext} />}
       {path === '/manage/batches' && <BatchTimers onToast={toast} />}
+      {path === '/manage/embedding' && <EmbeddingIndex onToast={toast} />}
       {path === '/manage/deploy' && <Deploy onToast={toast} />}
       {path === '/manage/workspaces' && <Workspaces selectedKey={location.query.get('workspace')} onToast={toast} />}
       {path === '/manage/environment' && <EnvSettings onToast={toast} />}

@@ -1,0 +1,13 @@
+[Unit]
+Description=TYBot 임베딩 색인 타이머 (30분, B-12)
+
+[Timer]
+# 켜 두어도 안전하다 — 켜진 워크스페이스 정책이 없으면 회차마다 모델 호출 0 으로 끝난다.
+# 실제 전송은 콘솔의 정책 화면에서 워크스페이스를 켜야 시작된다.
+OnBootSec=15min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

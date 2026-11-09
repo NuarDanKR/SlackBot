@@ -35,10 +35,17 @@ const SERVER_DOWN = [
   '  콘솔은 루프백에만 바인딩하므로 nginx 가 없으면 브라우저에서 닿지 않습니다(B-35).',
 ].join('\n')
 
+/** 서버가 `{code, blockers}` 모양으로 거절했을 때의 사유. 화면이 사람 말로 바꿔 그린다. */
+export interface ApiRefusal {
+  code: string
+  blockers: string[]
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly refusal: ApiRefusal | null = null,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -66,9 +73,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     let detail = ''
+    let refusal: ApiRefusal | null = null
     try {
       const body = await res.json()
-      if (body?.detail) detail = String(body.detail)
+      const raw = body?.detail
+      if (raw && typeof raw === 'object' && typeof raw.code === 'string') {
+        // 고정 코드 거절. 문자열로 바꾸면 「[object Object]」 가 된다.
+        refusal = {
+          code: raw.code,
+          blockers: Array.isArray(raw.blockers) ? raw.blockers.map(String) : [],
+        }
+        detail = refusal.blockers.length
+          ? `${refusal.code} (${refusal.blockers.join(', ')})`
+          : refusal.code
+      } else if (raw) {
+        detail = String(raw)
+      }
     } catch {
       // 본문이 JSON 이 아닌 경우입니다(아래에서 상태 코드로 사유를 만듭니다).
     }
@@ -80,7 +100,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
           ? SERVER_DOWN
           : `요청이 거절되었습니다. (${res.status} ${res.statusText})`
     }
-    throw new ApiError(res.status, detail)
+    throw new ApiError(res.status, detail, refusal)
   }
   return (await res.json()) as T
 }

@@ -1,0 +1,30 @@
+[Unit]
+Description=TYBot 임베딩 색인 한 회차 (B-12, 켜진 워크스페이스만)
+Documentation=file:///opt/tybot/BACKLOG.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+# 켜진 워크스페이스 정책이 없으면 모델을 부르지 않고 `nothing_enabled` 로 끝난다.
+# 한 회차는 IndexLimits 기본값(문서 100 · 500만 자 · 호출 100)으로 묶인다.
+# 남은 문서는 다음 회차가 DB 의 ready/current 를 보고 이어 간다.
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.embedding_index_cli --execute --trigger timer
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-embedding-index
+# embedding_index_cli.STALE_RUN_MINUTES(150분)보다 짧아야 한다. 길면 살아 있는
+# 실행을 다음 회차가 「죽은 실행」 으로 정리한다.
+TimeoutStartSec=7200
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tybot
+
+[Install]
+WantedBy=multi-user.target

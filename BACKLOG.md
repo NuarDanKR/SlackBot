@@ -2189,6 +2189,16 @@ TYBot 수집 계층에서 사전 설치된 kordoc/LibreOffice를 호출한다
 - [ ] 원문·질문·임베딩을 외부 provider로 보낼 경우 workspace별 명시적 승인과 감사가
       선행한다. 승인 전 기본 경로는 로컬/비활성이고, 실패 시 키워드 검색으로 닫힌다.
 
+- [x] 운영 연결 — 실행 잡(`tybot.embedding_index_cli`, 기본 계획 모드) · 실행 이력 표 ·
+      30분 타이머 · 콘솔 「운영 > 임베딩 색인」(모델 등록·활성·외부 승인, 워크스페이스
+      승인·미리 보기, 색인 현황, 실행 이력). 켜진 워크스페이스가 없으면 모델 호출 0
+      (Claude/2026-11-09). [운영 연결](docs/verification/2026-11-09-embedding-index-operations.md)
+- [x] **판정의 transport 대조.** 정책 행의 `transport` 는 사람이 적는 값이라 OpenAI 모델을
+      `local` 로 적으면 외부 승인 없이 나갈 수 있었다. `PROVIDER_TRANSPORTS` 로 프로바이더의
+      실제 경계를 대조한다(Codex/2026-11-09). 콘솔 저장과 실행 잡도 같은 표로 거절한다
+- [ ] 운영 활성화 — 프로바이더 스모크 1회, 모델 외부 전송 승인(**오너 결정**), 첫
+      워크스페이스 승인, 배치 관리에서 타이머 사용 시작
+
 구현·미활성 경계: [2026-11-04 pgvector 기반 작업](docs/verification/2026-11-04-search-embedding-foundation.md).
 
 ---

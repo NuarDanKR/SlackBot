@@ -38,6 +38,7 @@ FILES=(
   index_schema.sql            # org_unit · employee · user_identity · raw_line
   search_embedding_schema.sql # B-12 revisioned pgvector candidate cache, default unused
   search_embedding_query_schema.sql # B-12 질의 임베딩 승인. 색인 승인과 별개, 기본 OFF
+  search_embedding_run_schema.sql # B-12 색인 실행 이력. 숫자·고정 코드만
   console_schema.sql          # console_user · workspace · usage_* · specialist_*
   # 기능별
   schedule_schema.sql

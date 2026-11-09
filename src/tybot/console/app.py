@@ -3343,6 +3343,18 @@ image_description_policy_router = image_description_policy_routes.build_router(
 )
 app.include_router(image_description_policy_router)
 
+# B-12 임베딩 색인 운영(모델 등록·워크스페이스 승인·현황). 쓰기 보호와 감사는
+# 이미지 설명 정책과 같은 방식으로 주입한다 — 순환 import 를 피한다.
+from . import embedding_routes  # noqa: E402
+
+embedding_router = embedding_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(embedding_router)
+
 # 사용자 목록 · 봇 사용 권한(vipbot 등). admin 전용.
 from . import user_access_routes  # noqa: E402
 

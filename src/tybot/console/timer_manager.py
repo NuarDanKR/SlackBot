@@ -30,6 +30,13 @@ TIMERS = {
             "all-hours-hourly": "하루 종일 매시",
         },
     },
+    "tybot-embedding-index.timer": {
+        "label": "임베딩 색인",
+        "description": "켜진 워크스페이스의 원문을 30분마다 한 회차씩 벡터 색인에 넣습니다. "
+        "켜진 워크스페이스가 없으면 모델을 부르지 않습니다.",
+        "default": "fixed-30m",
+        "presets": {},
+    },
     "tybot-schedule-dm.timer": {
         "label": "일정 DM 알림",
         "description": "예정된 일정을 10분·30분 전에 개인 DM으로 알립니다.",
@@ -62,7 +69,11 @@ TIMERS = {
 
 
 #: 바꿀 수 없는 주기의 표시 이름
-FIXED_LABELS = {"fixed-1m": "매분(고정)", "fixed-twice-daily": "매일 07:10·12:40(고정)"}
+FIXED_LABELS = {
+    "fixed-1m": "매분(고정)",
+    "fixed-30m": "30분마다(고정)",
+    "fixed-twice-daily": "매일 07:10·12:40(고정)",
+}
 
 
 class TimerManagerError(RuntimeError):

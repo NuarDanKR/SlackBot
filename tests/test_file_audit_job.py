@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -318,5 +319,10 @@ def test_service_is_readonly_and_timer_is_opt_in():
     timer = (root / "deploy/tybot-file-audit.timer").read_text()
     assert "OnCalendar=*-*-* 02:30:00" in timer
     installer = (root / "deploy/install.sh").read_text(encoding="utf-8")
-    assert " tybot-file-audit)" in installer
+    # 목록의 **마지막 자리**를 단언하지 않는다. `)` 를 붙여 보면 뒤에 타이머가
+    # 하나 더 붙는 날 이 시험이 깨지는데, 깨진 이유는 file-audit 과 아무 상관이
+    # 없다(2026-11-09: `tybot-embedding-index` 가 뒤에 붙으면서 실제로 그랬다).
+    timers = re.search(r"^TIMERS=\((.*?)\)", installer, re.MULTILINE | re.DOTALL)
+    assert timers, "install.sh 에 TIMERS 목록이 없다"
+    assert "tybot-file-audit" in timers.group(1).split()
     assert "enable --now tybot-file-audit" not in installer
