@@ -179,6 +179,16 @@ BEGIN
         DROP INDEX IF EXISTS raw_line_speaker_trgm_fallback;
         CREATE INDEX IF NOT EXISTS raw_line_speaker_bigm
             ON raw_line USING gin (speaker gin_bigm_ops);
+        -- 검색은 본문을 **띄어쓰기를 지운 식**으로 찾는다(`search_index.COMPACT_BODY`).
+        -- 「주간업무보고」 로 물어도 「주간 업무보고」 를 찾게 하려고 — 실측은 그 상수
+        -- 주석에 있다. 식이 검색 쪽과 글자까지 같아야 이 인덱스를 탄다.
+        --
+        -- `raw_line_bigm`(body 그대로)은 **한 배포 동안 남긴다.** 스키마가 코드보다
+        -- 먼저 적용되면 옛 코드가 `body LIKE` 로 찾는 동안 인덱스가 없어 전체 스캔이
+        -- 된다. 새 코드가 나간 뒤 다음 배포에서 지운다(BACKLOG B-12 메모).
+        DROP INDEX IF EXISTS raw_line_trgm_compact_fallback;
+        CREATE INDEX IF NOT EXISTS raw_line_bigm_compact
+            ON raw_line USING gin ((replace(body, ' ', '')) gin_bigm_ops);
     ELSE
         -- 깨끗한 DB에도 fallback 이 동작하도록 trusted 기본 확장을 준비한다.
         EXECUTE 'CREATE EXTENSION IF NOT EXISTS pg_trgm';
@@ -186,6 +196,8 @@ BEGIN
             ON raw_line USING gin (body gin_trgm_ops);
         CREATE INDEX IF NOT EXISTS raw_line_speaker_trgm_fallback
             ON raw_line USING gin (speaker gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS raw_line_trgm_compact_fallback
+            ON raw_line USING gin ((replace(body, ' ', '')) gin_trgm_ops);
         RAISE WARNING 'pg_bigm 이 없어 pg_trgm 으로 대체했다. 2글자 한국어 검색(기성·타설)은 인덱스를 타지 못한다. 슈퍼유저로 CREATE EXTENSION pg_bigm; 실행 후 이 파일을 다시 적용할 것.';
     END IF;
 END $$;

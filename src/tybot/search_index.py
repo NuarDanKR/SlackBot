@@ -92,13 +92,20 @@ def score_line(tokens: list[str], query: str, speaker: str, text: str) -> int:
     """한 줄의 점수. **색인 경로와 파일 경로가 이 함수 하나를 쓴다.**
 
     두 곳에 적으면 갈려도 에러가 안 나고, 같은 질문에 다른 답이 나온다.
+
+    낱말은 **띄어쓰기를 무시하고** 맞춘다 — 후보 SQL(`_match`)과 같은 기준이다
+    (`COMPACT_BODY`). 발화자와 본문 사이에는 공백이 아닌 구분자를 둔다. 공백으로
+    이으면 띄어쓰기를 지울 때 「김부장」+「공사비」 가 붙어 「부장공」 같은 없는 낱말이
+    맞는다.
     """
     hay = f"{speaker} {text}".lower()
-    score = sum(1 for t in tokens if t in hay)
+    compact = f"{speaker}\n{text}".lower().replace(" ", "")
+    score = sum(1 for t in tokens if t in compact)
     if not score:
         return 0
     phrase = (query or "").strip().lower()
     # 구절이 통째로 들어 있으면 얹는다. 토큰이 우연히 흩어져 맞은 줄보다 앞세운다.
+    # 구절은 띄어쓰기까지 같은 경우만 — 사람이 적은 그대로인 줄을 앞세운다.
     if len(phrase) >= 2 and phrase in hay:
         score += PHRASE_BONUS
     return score
@@ -172,12 +179,31 @@ def _variants(word: str) -> list[str]:
     return list(dict.fromkeys([word, word.upper(), word.capitalize()]))
 
 
+#: 본문에서 띄어쓰기를 지운 식. **`index_schema.sql` 의 `raw_line_bigm_compact` 와
+#: 글자까지 같아야** 인덱스를 탄다 — 식이 다르면 오류 없이 110만 줄 전체 스캔이 된다.
+#:
+#: 왜 띄어쓰기를 지우나. 「주간업무보고」 로 물으면 본문의 「주간 업무보고」 를 못
+#: 찾았다. 운영 실측(2026-11-09, 110만 줄, 같은 낱말을 그대로/공백 무시로 센 줄 수):
+#:
+#: | 낱말 | 그대로 | 공백 무시 | 늘어난 줄의 실제 표기 |
+#: |---|---|---|---|
+#: | 주간업무보고 | 334 | 498 | 「주간 업무보고」 143 · 「주간업무 보고」 10 |
+#: | PF대출 | 2,261 | 2,616 | 「PF 대출」 347 |
+#: | 안전점검 | 964 | 1,021 | 「안전 점검」 57 |
+#: | 하도급 | 7,069 | 8,272 | 글자마다 띄운 표 머리글(「하 도 급」) |
+#: | 회의록·품의서·준공검사 | 같음 | 같음 | — |
+#:
+#: 잃는 쪽도 쟀다. 「착공계」 는 「착공 계획」 19줄이 새로 맞는다 — 점수(`score_line`)와
+#: 구절 가점이 사람이 적은 그대로인 줄을 앞세우므로 근거 자리를 뺏지는 않는다.
+COMPACT_BODY = "replace(body, ' ', '')"
+
+
 def _match(word: str, params: list) -> str:
-    """낱말 하나가 본문이나 발화자에 들어 있다. 값은 전부 바인딩한다."""
+    """낱말 하나가 본문(띄어쓰기 무시)이나 발화자에 들어 있다. 값은 전부 바인딩한다."""
     parts = []
     for form in _variants(word):
         pattern = f"%{form}%"
-        parts += ["body LIKE %s", "speaker LIKE %s"]
+        parts += [f"{COMPACT_BODY} LIKE %s", "speaker LIKE %s"]
         params += [pattern, pattern]
     return "(" + " OR ".join(parts) + ")"
 

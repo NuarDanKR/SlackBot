@@ -64,9 +64,11 @@ class FakeCursor:
 
     @staticmethod
     def _hits(line, groups):
+        # 본문은 띄어쓰기를 지운 식으로 찾는다(`si.COMPACT_BODY`).
+        body = line.body.replace(" ", "")
         return sum(
             1 for forms in groups
-            if any(f in line.body or f in line.speaker for f in forms)
+            if any(f in body or f in line.speaker for f in forms)
         )
 
     def fetchall(self):
@@ -150,6 +152,45 @@ def test_stripping_particles_only_widens():
     for word in ["현장의", "기성률은", "사무실에서", "공사비가", "고속도로"]:
         stem = si.tokens_of(word)[0]
         assert word.startswith(stem) and len(stem) >= 2
+
+
+def test_a_compound_word_finds_the_spaced_spelling():
+    """「주간업무보고」 로 물어도 본문의 「주간 업무보고」 를 찾는다 (실측 +49%)."""
+    lines = [
+        Line(1, "주간 업무보고 첨부합니다", days_ago=3),
+        Line(2, "하 도 급 계 약 현 황", days_ago=5),
+    ]
+    got = si._ranked_candidates(FakeCursor(lines), ["주간업무보고"], ["C1"], 500)
+    assert [c.line_no for c in got] == [1]
+    got = si._ranked_candidates(FakeCursor(lines), ["하도급"], ["C1"], 500)
+    assert [c.line_no for c in got] == [2]
+
+
+def test_the_body_expression_matches_the_index_expression():
+    """식이 인덱스와 다르면 오류 없이 전체 스캔이 된다. 스키마와 글자까지 대조한다."""
+    from pathlib import Path
+
+    schema = (Path(__file__).resolve().parents[1] / "deploy/sql/index_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    assert f"(({si.COMPACT_BODY}) gin_bigm_ops)" in schema
+    assert f"(({si.COMPACT_BODY}) gin_trgm_ops)" in schema
+    cur = FakeCursor([])
+    si._ranked_candidates(cur, ["자금", "보고"], ["C1"], 10)
+    sql = cur.executed[0][0]
+    assert f"{si.COMPACT_BODY} LIKE %s" in sql
+    assert "body LIKE" not in sql.replace(f"{si.COMPACT_BODY} LIKE", "")
+
+
+def test_score_ignores_spaces_but_not_across_speaker_and_body():
+    tokens = si.tokens_of("주간업무보고")
+    assert si.score_line(tokens, "주간업무보고", "담당자", "주간 업무보고 첨부") >= 1
+    # 발화자 끝과 본문 앞이 붙어 없는 낱말이 생기지 않는다.
+    assert si.score_line(["부장공"], "부장공", "김부장", "공사비 확정") == 0
+    # 띄어쓰기까지 같은 줄이 구절 가점으로 앞선다.
+    exact = si.score_line(si.tokens_of("주간 업무보고"), "주간 업무보고", "a", "주간 업무보고")
+    loose = si.score_line(si.tokens_of("주간 업무보고"), "주간 업무보고", "a", "주간업무보고")
+    assert exact > loose > 0
 
 
 def test_candidate_sql_never_interpolates_values():
