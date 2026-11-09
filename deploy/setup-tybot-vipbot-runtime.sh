@@ -295,11 +295,15 @@ log "멤버십 확인: $ROLE_GROUP 하나, ADMIN OPTION 없음"
 
 # 여기부터는 **실제로 쓸 수 있는 권한**을 본다. 역할과 멤버십이 맞아도 상속 경로가
 # 끊겨 있으면 런타임은 기동에서 실패하고, 그 실패는 「권한 정상」 보고 뒤에 온다.
-can_exec="$(psql_q "SELECT coalesce(has_function_privilege('$ROLE_RUNTIME','$CONFIG_FN','EXECUTE')::text,'absent')")"
+can_exec="$(psql_q "SELECT CASE
+    WHEN has_function_privilege('$ROLE_RUNTIME','$CONFIG_FN','EXECUTE') THEN 't'
+    ELSE 'f' END")"
 [[ "$can_exec" == t ]] || fail "$ROLE_RUNTIME 이 $CONFIG_FN 을 실행할 수 없습니다(실제 $can_exec). apply-schema.sh 를 먼저 돌리세요"
 log "실행 권한 확인: $CONFIG_FN"
 
-can_authorize="$(psql_q "SELECT coalesce(has_function_privilege('$ROLE_RUNTIME','$ACCESS_FN','EXECUTE')::text,'absent')")"
+can_authorize="$(psql_q "SELECT CASE
+    WHEN has_function_privilege('$ROLE_RUNTIME','$ACCESS_FN','EXECUTE') THEN 't'
+    ELSE 'f' END")"
 [[ "$can_authorize" == t ]] || fail "$ROLE_RUNTIME 이 $ACCESS_FN 을 실행할 수 없습니다(실제 $can_authorize). apply-schema.sh 를 먼저 돌리세요"
 log "실행 권한 확인: $ACCESS_FN"
 
@@ -368,7 +372,9 @@ log "권한 함수 ACL: PUBLIC 줄 없음"
 
 # 다른 봇의 창구도 열려 있으면 안 된다. VIPBot 런타임이 Archiver 의 연결을 읽을
 # 이유가 없고, 읽을 수 있으면 그 자체가 분리가 깨진 상태다.
-other_exec="$(psql_q "SELECT coalesce(has_function_privilege('$ROLE_RUNTIME','archiver_connection_config(text)','EXECUTE')::text,'f')")"
+other_exec="$(psql_q "SELECT CASE
+    WHEN has_function_privilege('$ROLE_RUNTIME','archiver_connection_config(text)','EXECUTE') THEN 't'
+    ELSE 'f' END")"
 [[ "$other_exec" == f ]] || fail "$ROLE_RUNTIME 이 archiver_connection_config(text) 를 실행할 수 있습니다"
 log "다른 봇 창구: 실행 불가"
 

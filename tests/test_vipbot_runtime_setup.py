@@ -316,6 +316,19 @@ def test_role_attribute_checks_do_not_depend_on_postgres_boolean_text():
     assert "CASE WHEN rolcanlogin THEN 't' ELSE 'f' END" in script
     assert "CASE WHEN rolinherit THEN 't' ELSE 'f' END" in script
     assert script.count("CASE WHEN rolbypassrls THEN 't' ELSE 'f' END") == 2
+    assert (
+        "has_function_privilege('$ROLE_RUNTIME','$CONFIG_FN','EXECUTE')::text"
+        not in script
+    )
+    assert (
+        "has_function_privilege('$ROLE_RUNTIME','$ACCESS_FN','EXECUTE')::text"
+        not in script
+    )
+    assert (
+        "has_function_privilege("
+        "'$ROLE_RUNTIME','archiver_connection_config(text)','EXECUTE')::text"
+        not in script
+    )
 
 
 def test_the_installer_stages_vipbot_only_after_an_explicit_opt_in():
