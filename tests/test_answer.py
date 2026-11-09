@@ -12,7 +12,7 @@ from tybot.archive.store import ArchiveDoc, ArchiveStore, RawLine, SearchHit
 from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity
 from tybot.gateway.router import Router
 from tybot.intent import Intent
-from tybot.specialist_router import UNAVAILABLE, SpecialistOutcome
+from tybot.specialist_router import EVIDENCE_INSUFFICIENT, UNAVAILABLE, SpecialistOutcome
 
 DOC = """---
 workspace: pilot
@@ -188,6 +188,28 @@ def test_master_v2_answers_when_no_specialist_is_registered(engine):
     assert answer.reason == "answered"
     assert answer.specialist == ""
     assert fake.calls
+
+
+def test_master_v2_uses_filtered_evidence_when_the_specialist_has_too_little(engine):
+    base, fake = engine
+    routed = AnswerEngine(
+        base._store,
+        base._router,
+        specialist=lambda *args, **kwargs: SpecialistOutcome(
+            EVIDENCE_INSUFFICIENT,
+            error_code="evidence_insufficient",
+            attempted=("hermes",),
+        ),
+        allow_master_business_answers=lambda ctx: ctx.workspace == "pilot",
+    )
+
+    answer = routed.answer("기성금 얼마야", _ctx())
+
+    assert answer.reason == "answered"
+    assert answer.specialist == ""
+    assert answer.citations
+    assert fake.calls
+    assert "3억 2천만원" in fake.calls[-1][1].content
 
 
 def test_master_v2_does_not_hide_a_specialist_runtime_failure(engine):

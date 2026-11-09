@@ -1218,12 +1218,13 @@ class AnswerEngine:
         return bool(policy)
 
     def _may_fall_back_to_master(self, ctx: RequestContext, outcome) -> bool:
-        """Only absence of a suitable specialist permits a master answer."""
+        """Permit a grounded master answer only for non-operational outcomes."""
         if not self._master_answers_allowed(ctx):
             return False
         code = str(getattr(outcome, "error_code", "") or "")
-        return code == "no-specialist-registered" or code.startswith(
-            "no-specialist-for:"
+        return (
+            code in {"evidence_insufficient", "no-specialist-registered"}
+            or code.startswith("no-specialist-for:")
         )
 
     @classmethod
