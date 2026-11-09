@@ -803,7 +803,8 @@ def test_the_tool_budget_stops_an_endless_search_without_claiming_absence():
     budget.spend("search", "결과")
 
     refusal = budget.refuse("search")
-    assert "예산" in refusal
+    assert "탐색 상한" in refusal
+    assert "부분 답변" in refusal
     assert "단정하지 말고" in refusal, "「없다」 로 가지 말라고 말해야 한다"
     assert budget.exhausted
     assert budget.reason == "calls"

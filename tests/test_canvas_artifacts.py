@@ -130,6 +130,7 @@ def test_dynamic_title_canvas_is_still_excluded_from_collection(tmp_path, monkey
 
     monkeypatch.setenv("STATE_DIR", str(tmp_path))
     assert is_generated_canvas("전산팀 공지 일정 정리 · TYBot") is True
+    assert is_generated_canvas("전산팀 공지 일정 정리 · VIPBot") is True
 
     # 제목을 사람이 고쳐도 기록한 ID 로 걸린다.
     remember_generated("F-1", workspace="pilot", channel_id="C1", qa_record_id="Q1")
@@ -138,6 +139,11 @@ def test_dynamic_title_canvas_is_still_excluded_from_collection(tmp_path, monkey
 
     # 기록도 제목도 없으면 본문 표식이 마지막 방어선이다.
     assert is_generated_canvas("사람이 고친 제목", "F-2", DISCLAIMER_MARK) is True
+    assert is_generated_canvas(
+        "사람이 고친 제목",
+        "F-VIP",
+        "VIPBot이 요청 시점에 확인 가능한 사내 자료를 바탕으로 생성한 AI 문서",
+    ) is True
     # 사람이 만든 Canvas 는 그대로 수집한다.
     assert is_generated_canvas("9월 공정 계획", "F-3", "착공 일정 정리") is False
 
@@ -148,6 +154,7 @@ def test_legacy_fixed_title_canvas_stays_excluded(tmp_path, monkeypatch):
 
     monkeypatch.setenv("STATE_DIR", str(tmp_path))
     assert is_generated_canvas("TYBot 정식 답변") is True
+    assert is_generated_canvas("VIPBot 정식 답변") is True
 
 
 def test_generated_log_holds_only_coordinates(tmp_path, monkeypatch):

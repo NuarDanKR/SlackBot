@@ -164,6 +164,12 @@ class ArtifactRequest:
 
         return f"{self.title}{TITLE_SUFFIX}" if self.title else ""
 
+    def canvas_title_for(self, bot_name: str) -> str:
+        """Return the title for the configured bot branch."""
+        from .canvas_answer import title_suffix
+
+        return f"{self.title}{title_suffix(bot_name)}" if self.title else ""
+
 
 def _clean_title(raw: str, *, question: str) -> tuple[str, str]:
     """(검증된 제목, 출처). 못 쓰면 빈 제목과 `fallback`.

@@ -3144,11 +3144,13 @@ class WorkspaceBot:
         event["_tybot_qa_record_id"] = qa_record_id
         raw_text = _clean(event.get("text", ""))
         canvas_requested, text = parse_canvas_request(raw_text)
+        display_question = raw_text
         transform = getattr(self, "_question_transform", None)
         if transform is not None:
             text = transform(text)
         if canvas_requested and not text:
             text = "최근 업무 내용을 정리해줘"
+            display_question = text
         user_id = event.get("user", "")
         channel_id = event.get("channel", "")
         if in_channel and channel_id:
@@ -3242,7 +3244,9 @@ class WorkspaceBot:
                 try:
                     canvas = create_answer_canvas(
                         client, reply,
-                        title=artifact.canvas_title,
+                        title=artifact.canvas_title_for(self.bot_name),
+                        bot_name=self.bot_name,
+                        question=display_question,
                         provenance={
                             "workspace": self.workspace,
                             "channel_id": channel_id,

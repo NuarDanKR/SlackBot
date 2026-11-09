@@ -29,6 +29,29 @@ DISCLAIMER_MARK = "TYBot이 요청 시점에 확인 가능한 사내 자료를 �
 # 제목 접미사. **한 곳에서만 정의한다** — 만드는 쪽과 제외하는 쪽이 다른 값을
 # 들고 있으면 우리가 만든 문서를 우리가 다시 수집한다(원칙 1).
 TITLE_SUFFIX = " · TYBot"
+VIP_TITLE_SUFFIX = " · VIPBot"
+TITLE_SUFFIXES = (TITLE_SUFFIX, VIP_TITLE_SUFFIX)
+DISCLAIMER_MARKS = (
+    DISCLAIMER_MARK,
+    "VIPBot이 요청 시점에 확인 가능한 사내 자료를 바탕으로 생성한 AI 문서",
+)
+
+
+def display_name(bot_name: str = "tybot") -> str:
+    """Return a known product name instead of accepting arbitrary title text."""
+    return "VIPBot" if (bot_name or "").strip().lower() == "vipbot" else "TYBot"
+
+
+def title_suffix(bot_name: str = "tybot") -> str:
+    return f" · {display_name(bot_name)}"
+
+
+def disclaimer(bot_name: str = "tybot") -> str:
+    bot = display_name(bot_name)
+    return (
+        f"> 이 문서는 {bot}이 요청 시점에 확인 가능한 사내 자료를 바탕으로 생성한 AI 문서입니다.\n"
+        "> 중요한 일정·금액·의사결정은 아래 출처 원문을 확인하세요."
+    )
 
 
 def automatic(body: str, request: str) -> bool:
@@ -96,7 +119,16 @@ def parse_request(text: str) -> tuple[bool, str]:
     return matched, cleaned
 
 
-def markdown(body: str) -> str:
+def _question_block(question: str) -> str:
+    cleaned = " ".join((question or "").split()).strip()
+    if not cleaned:
+        return ""
+    # 질문은 표시용이다. 질문 안의 문법이 Canvas 구조를 바꾸지 못하게 한다.
+    escaped = re.sub(r"([\\`*_{}\[\]()<>#+.!|~-])", r"\\\1", cleaned[:2000])
+    return f"## 요청한 질문\n> {escaped}"
+
+
+def markdown(body: str, *, bot_name: str = "tybot", question: str = "") -> str:
     """Slack mrkdwn을 Canvas용 Markdown으로 바꾸고 답변·근거 구조를 보존한다.
 
     **본문에 H1 제목을 넣지 않는다.** Slack 이 Canvas 제목을 따로 보여 주므로
@@ -107,7 +139,11 @@ def markdown(body: str) -> str:
     converted = re.sub(r"(?m)^\*([^*\n]+)\*:?\s*$", r"## \1", converted)
     converted = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"**\1**", converted)
     converted = _split_large_tables(converted)
-    return f"{DISCLAIMER}\n\n{converted}\n"
+    blocks = [disclaimer(bot_name)]
+    if asked := _question_block(question):
+        blocks.append(asked)
+    blocks.append(converted)
+    return "\n\n".join(blocks) + "\n"
 
 
 def _table_cells(line: str) -> list[str]:
@@ -155,7 +191,13 @@ def _split_large_tables(text: str) -> str:
 
 
 def create(
-    client, body: str, *, title: str = "", provenance: dict | None = None
+    client,
+    body: str,
+    *,
+    title: str = "",
+    bot_name: str = "tybot",
+    question: str = "",
+    provenance: dict | None = None,
 ) -> CanvasResult:
     """독립 Canvas를 만들고 링크를 반환한다. 공유 범위는 호출자가 별도로 설정한다.
 
@@ -167,8 +209,11 @@ def create(
     만든다 — 제목 접미사와 Disclaimer 가 남은 방어선이다.
     """
     response = client.canvases_create(
-        title=title.strip() or TITLE,
-        document_content={"type": "markdown", "markdown": markdown(body)},
+        title=title.strip() or f"{display_name(bot_name)} 정식 답변",
+        document_content={
+            "type": "markdown",
+            "markdown": markdown(body, bot_name=bot_name, question=question),
+        },
     )
     canvas_id = str(response.get("canvas_id") or response.get("file_id") or "")
     if not canvas_id:

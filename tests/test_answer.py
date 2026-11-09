@@ -247,6 +247,8 @@ def test_specialist_budget_failure_is_not_reported_as_missing_data(engine):
     assert answer.reason == "search_budget"
     assert answer.specialist_error_code == "search-budget-exhausted"
     assert "자료가 없다는 뜻은 아닙니다" in answer.text
+    assert "비용이나 토큰이 부족한 것은 아니" in answer.text
+    assert "검색 예산" not in answer.text
     assert "확인하지 못한 범위: 평택고덕 2026년 9월" in answer.text
     assert fake.calls == []
 
@@ -260,6 +262,7 @@ def test_no_hits_budget_notice_preserves_named_scope(engine):
     answer = base._specialist_no_hits(outcome, "기성금", _ctx())
     assert answer.reason == "search_budget"
     assert "확인하지 못한 범위: 김해외동 2026년 9월" in answer.text
+    assert "비용이나 토큰이 부족한 것은 아니" in answer.text
     assert not answer.citations
 
 

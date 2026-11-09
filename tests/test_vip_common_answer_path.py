@@ -270,6 +270,27 @@ def test_the_canvas_decision_is_made_by_the_common_code(monkeypatch):
     )
 
 
+def test_canvas_brand_and_question_are_configuration_on_the_common_path(monkeypatch):
+    made: list[dict] = []
+    monkeypatch.setattr(
+        "tybot.slack.pilot.create_answer_canvas",
+        lambda client, body, **kw: made.append(kw)
+        or CanvasResult("F1", "https://example.slack.com/F1"),
+    )
+
+    for vip in (False, True):
+        bot = _bot([Intent("summary", question="기획팀 활동")], [_answered()], vip=vip)
+        _handle(bot, "지난주 기획팀 활동을 캔버스로 답변해", client=_client())
+
+    assert [item["bot_name"] for item in made] == ["tybot", "vipbot"]
+    assert made[0]["title"].endswith(" · TYBot")
+    assert made[1]["title"].endswith(" · VIPBot")
+    assert [item["question"] for item in made] == [
+        "지난주 기획팀 활동을 캔버스로 답변해",
+        "지난주 기획팀 활동을 캔버스로 답변해",
+    ]
+
+
 def test_an_answer_without_evidence_is_not_wrapped_in_an_empty_canvas(monkeypatch):
     created = Mock()
     monkeypatch.setattr("tybot.slack.pilot.create_answer_canvas", created)

@@ -60,6 +60,25 @@ def test_canvas_markdown_converts_slack_source_links():
     assert "[보고서 원본](https://example.slack.com/F1)" in rendered
 
 
+def test_canvas_puts_the_users_question_before_the_answer():
+    rendered = markdown(
+        "답변 본문",
+        question="지난주 기획팀에서 한 것들을 요약해줘",
+    )
+
+    assert "## 요청한 질문" in rendered
+    assert rendered.index("지난주 기획팀에서 한 것들을 요약해줘") < rendered.index(
+        "답변 본문"
+    )
+
+
+def test_vip_canvas_uses_vip_branding_only():
+    rendered = markdown("답변 본문", bot_name="vipbot", question="현황 알려줘")
+
+    assert "VIPBot이 요청 시점에" in rendered
+    assert "TYBot이 요청 시점에" not in rendered
+
+
 def test_canvas_markdown_keeps_normal_tables():
     table = "| 항목 | 금액 |\n| --- | ---: |\n| 기성 | 300 |"
     assert table in markdown(table)
@@ -91,3 +110,17 @@ def test_create_grants_current_conversation_and_returns_permalink():
     )
     grant_user(client, result.canvas_id, "U123")
     assert client.canvases_access_set.call_args.kwargs["user_ids"] == ["U123"]
+
+
+def test_create_uses_the_vip_fallback_title_and_question():
+    client = Mock()
+    client.canvases_create.return_value = {"canvas_id": "F-VIP"}
+    client.files_info.return_value = {
+        "file": {"permalink": "https://example.slack.com/docs/F-VIP"}
+    }
+
+    create(client, "답변", bot_name="vipbot", question="무엇을 했어?")
+
+    sent = client.canvases_create.call_args.kwargs
+    assert sent["title"] == "VIPBot 정식 답변"
+    assert "무엇을 했어?" in sent["document_content"]["markdown"]

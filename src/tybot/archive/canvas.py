@@ -40,6 +40,7 @@ def _canvas_limit() -> int:
 
 # 예전 고정 제목. 이미 만들어진 Canvas 가 남아 있으므로 계속 본다.
 GENERATED_TITLE = "TYBot 정식 답변"
+GENERATED_TITLES = (GENERATED_TITLE, "VIPBot 정식 답변")
 
 
 def is_generated_canvas(title: str, canvas_id: str = "", body: str = "") -> bool:
@@ -49,22 +50,25 @@ def is_generated_canvas(title: str, canvas_id: str = "", body: str = "") -> bool
     우리 문서를 못 알아보게 됐다. 못 알아보는 순간 봇 답변이 다시 근거로 수집된다
     — 원칙 1(요약 재귀 금지)이 조용히 깨지는 자리다.
 
-    1. 제목 접미사 ` · TYBot` — 사람이 제목을 고치면 사라질 수 있다
+    1. 제목 접미사 ` · TYBot` 또는 ` · VIPBot` — 사람이 제목을 고치면 사라질 수 있다
     2. 기록한 canvas_id — 디스크 유실·재설치로 사라질 수 있다
     3. 본문 첫 블록의 Disclaimer — 사람이 지울 수 있다
 
     한 겹씩은 다 뚫린다. 그래서 셋을 함께 본다.
     """
-    from ..canvas_answer import DISCLAIMER_MARK, TITLE_SUFFIX, is_generated
+    from ..canvas_answer import DISCLAIMER_MARKS, TITLE_SUFFIXES, is_generated
 
     name = (title or "").strip()
-    if name.startswith(GENERATED_TITLE) or name.endswith(TITLE_SUFFIX.strip()):
+    if any(name.startswith(title) for title in GENERATED_TITLES) or any(
+        name.endswith(suffix.strip()) for suffix in TITLE_SUFFIXES
+    ):
         return True
     if canvas_id and is_generated(canvas_id):
         return True
     # 본문은 **앞쪽만** 본다. Disclaimer 는 첫 블록이고, 뒤까지 뒤지면 우리 답변을
     # 인용한 사람 문서까지 제외된다.
-    return DISCLAIMER_MARK in (body or "")[:2000]
+    prefix = (body or "")[:2000]
+    return any(mark in prefix for mark in DISCLAIMER_MARKS)
 
 MAX_CANVAS_BYTES = 1024 * 1024  # 캔버스 마크다운 상한(Slack 문서상 1 MiB)
 # **자르지 않는다**(2026-09-14). 300 이던 것을 없앴다 — 캔버스에 정리해 둔 표와

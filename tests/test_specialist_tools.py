@@ -183,7 +183,7 @@ def test_toolbox_never_returns_more_than_remaining_character_budget(monkeypatch)
     assert len(got) == 20
     assert box.budget.chars == 100
     assert box.budget.reason == "chars"
-    assert "검색 예산" in box.run("read_document", {"name": "x"})
+    assert "탐색 상한" in box.run("read_document", {"name": "x"})
     assert box.budget.chars == 100
 
 
@@ -301,7 +301,7 @@ def test_toolbox_charges_only_dispatch_time(monkeypatch):
     monkeypatch.setattr(box, "_dispatch", slow_dispatch)
     assert box.run("search", {"query": "x"}) == "결과"
     assert box.budget.tool_seconds >= 0.005
-    assert "검색 예산" in box.run("read_document", {"name": "x"})
+    assert "탐색 상한" in box.run("read_document", {"name": "x"})
     assert box.budget.reason == "time"
 
 

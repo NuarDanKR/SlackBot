@@ -153,7 +153,7 @@ class ToolBudget:
             )
         if self.reason:
             return (
-                "(검색 예산을 다 썼습니다. 더 찾지 말고 지금까지 읽은 것으로 답하세요. "
+                "(이번 요청의 탐색 상한에 닿았습니다. 더 찾지 말고 지금까지 읽은 것으로 부분 답변하세요. "
                 "자료가 없다고 단정하지 말고, 어디까지 찾아봤는지 한 줄 적으세요.)"
             )
         return ""
@@ -224,7 +224,7 @@ def _clip_to_budget(text: str, remaining: int) -> str:
     """Keep both content and truncation notice inside the remaining character budget."""
     if len(text) <= remaining:
         return text
-    notice = "\n(도구 응답 예산 도달: 일부만 전달됨. 읽지 못한 부분은 근거로 쓰지 마세요.)"
+    notice = "\n(도구 응답 길이 상한 도달: 일부만 전달됨. 읽지 못한 부분은 근거로 쓰지 마세요.)"
     if remaining <= len(notice):
         return notice[:remaining]
     return text[: remaining - len(notice)] + notice
@@ -396,7 +396,7 @@ class ToolBox:
                     name, reserve_chars, self.budget.summary(),
                 )
                 return ToolRun(
-                    "(답변용 글자 예산을 남겨야 합니다. 더 찾지 말고 지금까지 읽은 것으로 답하세요.)",
+                    "(답변을 작성할 공간을 남겨야 합니다. 더 찾지 말고 지금까지 읽은 것으로 부분 답변하세요.)",
                     "reserved",
                 )
             self.touched.calls.append(name)

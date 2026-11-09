@@ -1377,8 +1377,9 @@ class AnswerEngine:
         if outcome.error_code in ("search-budget-exhausted",):
             coverage_note = str(getattr(outcome, "coverage_note", "") or "")
             return Answer(
-                f"「{q}」 를 찾다가 검색 한도에 닿았습니다. 자료가 없다는 뜻은 아닙니다. "
-                "채널이나 기간을 좁혀 다시 물어보세요."
+                f"「{q}」 를 찾다가 한 요청에서 확인할 수 있는 자료 범위 상한에 닿았습니다. "
+                "비용이나 토큰이 부족한 것은 아니며, 자료가 없다는 뜻도 아닙니다. "
+                "채널이나 기간을 좁혀 다시 물어보면 이어서 확인할 수 있습니다."
                 + (f"\n{coverage_note}" if coverage_note else ""),
                 [], None, 0.0, 0, "search_budget",
                 terms=list(terms or []),
@@ -1422,8 +1423,9 @@ class AnswerEngine:
         if outcome.error_code == "search-budget-exhausted":
             coverage_note = str(getattr(outcome, "coverage_note", "") or "")
             return Answer(
-                "검색 한도에 닿아 답변 근거를 충분히 확인하지 못했습니다. "
-                "자료가 없다는 뜻은 아닙니다. 채널이나 기간을 좁혀 다시 물어보세요."
+                "한 요청에서 확인할 수 있는 자료 범위 상한에 닿아 답변 근거를 충분히 확인하지 못했습니다. "
+                "비용이나 토큰이 부족한 것은 아니며, 자료가 없다는 뜻도 아닙니다. "
+                "채널이나 기간을 좁혀 다시 물어보면 이어서 확인할 수 있습니다."
                 + (f"\n{coverage_note}" if coverage_note else ""),
                 [], None, 0.0, hits, "search_budget",
                 terms=list(terms or []),
