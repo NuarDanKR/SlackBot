@@ -150,7 +150,9 @@ log "대상 확인: $target"
 # ---------------------------------------------------------------------------
 # 그룹은 NOLOGIN 이어야 한다
 # ---------------------------------------------------------------------------
-group_login="$(psql_q "SELECT coalesce((SELECT rolcanlogin FROM pg_roles WHERE rolname='$ROLE_GROUP')::text,'absent')")"
+group_login="$(psql_q "SELECT coalesce(
+    (SELECT CASE WHEN rolcanlogin THEN 't' ELSE 'f' END
+       FROM pg_roles WHERE rolname='$ROLE_GROUP'), 'absent')")"
 [[ "$group_login" != absent ]] || fail "$ROLE_GROUP 역할이 없습니다. deploy/apply-schema.sh 를 먼저 돌리세요"
 [[ "$group_login" == f ]] || fail "$ROLE_GROUP 이 LOGIN 입니다. 그룹에는 접속 자격이 없어야 합니다"
 log "$ROLE_GROUP: NOLOGIN 확인"
@@ -177,7 +179,13 @@ group_parents="$(psql_q "SELECT coalesce(string_agg(g.rolname, ',' ORDER BY g.ro
 log "$ROLE_GROUP: 다른 역할을 상속하지 않음"
 
 definer_state="$(psql_q "SELECT coalesce(
-    (SELECT rolcanlogin||rolsuper||rolcreatedb||rolcreaterole||rolreplication||rolbypassrls
+    (SELECT concat(
+        CASE WHEN rolcanlogin THEN 't' ELSE 'f' END,
+        CASE WHEN rolsuper THEN 't' ELSE 'f' END,
+        CASE WHEN rolcreatedb THEN 't' ELSE 'f' END,
+        CASE WHEN rolcreaterole THEN 't' ELSE 'f' END,
+        CASE WHEN rolreplication THEN 't' ELSE 'f' END,
+        CASE WHEN rolbypassrls THEN 't' ELSE 'f' END)
        FROM pg_roles WHERE rolname='$ROLE_DEFINER'), 'absent')")"
 [[ "$definer_state" == ffffff ]] || fail "$ROLE_DEFINER 속성이 다릅니다(기대 ffffff · 실제 $definer_state)"
 definer_memberships="$(psql_q "SELECT count(*)
@@ -259,7 +267,14 @@ fi
 # ---------------------------------------------------------------------------
 # 확인 — apply 뒤에도, --verify 로도 같은 검사를 돈다
 # ---------------------------------------------------------------------------
-attrs="$(psql_q "SELECT rolcanlogin||rolinherit||rolsuper||rolcreatedb||rolcreaterole||rolreplication||rolbypassrls
+attrs="$(psql_q "SELECT concat(
+                    CASE WHEN rolcanlogin THEN 't' ELSE 'f' END,
+                    CASE WHEN rolinherit THEN 't' ELSE 'f' END,
+                    CASE WHEN rolsuper THEN 't' ELSE 'f' END,
+                    CASE WHEN rolcreatedb THEN 't' ELSE 'f' END,
+                    CASE WHEN rolcreaterole THEN 't' ELSE 'f' END,
+                    CASE WHEN rolreplication THEN 't' ELSE 'f' END,
+                    CASE WHEN rolbypassrls THEN 't' ELSE 'f' END)
                  FROM pg_roles WHERE rolname='$ROLE_RUNTIME'")"
 if [[ -z "$attrs" ]]; then
   echo "준비 상태: $ROLE_RUNTIME 이 아직 없습니다. 구조만 선 상태입니다."

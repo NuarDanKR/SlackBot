@@ -306,6 +306,18 @@ def test_only_one_vipbot_process_can_run():
     assert not any(line.startswith("ExecStart=") and "&" in line for line in lines)
 
 
+def test_role_attribute_checks_do_not_depend_on_postgres_boolean_text():
+    script = SETUP.read_text(encoding="utf-8")
+
+    # `boolean::text` is `true`/`false`, while unaligned psql display is `t`/`f`.
+    # Mixing the two made a real NOLOGIN role look like LOGIN on PostgreSQL 18.
+    assert "rolcanlogin FROM pg_roles" not in script
+    assert "rolcanlogin||" not in script
+    assert "CASE WHEN rolcanlogin THEN 't' ELSE 'f' END" in script
+    assert "CASE WHEN rolinherit THEN 't' ELSE 'f' END" in script
+    assert script.count("CASE WHEN rolbypassrls THEN 't' ELSE 'f' END") == 2
+
+
 def test_the_installer_stages_vipbot_only_after_an_explicit_opt_in():
     install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
     block = install.split("# VIPBOT_STAGE:BEGIN", 1)[1].split(
