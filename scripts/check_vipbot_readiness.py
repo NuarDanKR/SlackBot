@@ -409,11 +409,14 @@ def unit_facts(path: pathlib.Path) -> dict:
         for line in (row.split("#", 1)[0] for row in raw.splitlines())
         if line.strip()
     ]
-    shared = [
-        name
-        for name in SHARED_ENV
-        if any(name in line for line in directives if "=" in line)
-    ]
+    declared_environment_names = {
+        payload.split("=", 1)[0]
+        for line in directives
+        if line.startswith("Environment=")
+        for payload in (line.split("=", 1)[1],)
+        if "=" in payload
+    }
+    shared = [name for name in SHARED_ENV if name in declared_environment_names]
     # `EnvironmentFile=` 자체는 금지가 아니다. **어느 파일이냐**가 전부다 —
     # `/etc/tybot/tybot.env` 에는 Master 의 DSN 이 있고, VIPBot 전용 파일에는
     # 네 키만 있다. 전자를 들이면 전용 계정이 무의미해진다.

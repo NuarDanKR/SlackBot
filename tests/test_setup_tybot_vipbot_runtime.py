@@ -94,4 +94,5 @@ def test_the_documented_credential_matches_the_resolver():
     text = source()
     assert vipbot_dsn.CREDENTIAL_NAME in text
     assert vipbot_dsn.RUNTIME_ROLE in text
-    assert "VIPBOT_DATABASE_URL" not in text, "DSN 값은 명령 인자로 받지 않는다"
+    assert "VIPBOT_DATABASE_URL=" not in text, "DSN 값은 명령 인자로 받지 않는다"
+    assert "VIPBOT_DATABASE_URL_FILE" in text

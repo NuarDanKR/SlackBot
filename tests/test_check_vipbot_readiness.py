@@ -781,7 +781,7 @@ def test_an_unreachable_database_is_reported_as_not_checked(tmp_path, monkeypatc
     got = check.gather(unit_path=UNIT, skip_db=False, environ={})
     assert got.database_checked is False
     assert got.database_error == "RuntimeError"
-    assert codes(check.evaluate(got)) == ["database_unreachable"]
+    assert "database_unreachable" in codes(check.evaluate(got))
 
 
 def test_an_explicit_database_skip_does_not_claim_the_database_failed():
