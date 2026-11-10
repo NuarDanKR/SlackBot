@@ -207,7 +207,7 @@ def find_lists(client, channel: str) -> tuple[list[dict], str, Counter]:
         if not cursor:
             return found, "", seen
     # 끝까지 못 읽었다. 반쪽 목록으로 「List 가 없다」 고 말하지 않는다.
-    return found, "too_many_pages", seen
+    return [], "too_many_pages", seen
 
 
 def _reason(exc: Exception) -> str:

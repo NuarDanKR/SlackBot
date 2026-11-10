@@ -184,8 +184,9 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/probe_slack_lists.p
 
 ### (나)일 때의 대안 (설계만, 구현 전)
 
-1. **채널 북마크**(`bookmarks.list`)에서 List 링크를 얻는다. Slack 은 채널에 붙은
-   List 를 북마크로 단다. 추가 scope `bookmarks:read`
+1. **채널 북마크 후보 실측**(`bookmarks.list`). List 탭이 북마크 응답에 실제로
+   나타나는지는 아직 확인하지 않았다. 나타날 때만 시작점으로 쓴다. 추가 scope
+   `bookmarks:read`
 2. **메시지 이벤트**에서 List 공유를 잡는다. 이미 수집 중인 경로라 scope 가 늘지 않지만,
    과거에 붙은 List 는 못 잡는다(소급 불가)
 3. 콘솔에 **List ID 를 사람이 등록**한다. scope 가 가장 적게 늘고 범위가 가장

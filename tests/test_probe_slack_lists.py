@@ -475,7 +475,7 @@ def test_an_empty_channel_is_told_apart_from_a_channel_without_lists():
 def test_a_half_read_file_listing_is_a_failure_not_an_empty_result():
     client = Mock()
     client.files_list.return_value = {
-        "files": [{"id": "F1", "filetype": "pdf"}],
+        "files": [{"id": LIST_ID, "filetype": "list"}],
         "response_metadata": {"next_cursor": "always-more"},
     }
 
@@ -484,6 +484,11 @@ def test_a_half_read_file_listing_is_a_failure_not_an_empty_result():
     assert failure == "too_many_pages"
     assert found == []
     assert sum(seen.values()) == probe.MAX_PAGES
+
+    out = probe.probe_channel(client, "tyit", CHANNEL)
+    assert out["list_lookup_failure"] == "too_many_pages"
+    assert out["list_count"] == 0
+    assert out["lists"] == []
 
 
 # --- 7. 토큰은 콘솔 DB 에서 온다 -----------------------------------------------
