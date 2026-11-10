@@ -63,6 +63,13 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 KST = timezone(timedelta(hours=9))
 
+# B-88 owner policy: one global review round on Tuesday and Friday at 17:00 KST.
+# Public holidays do not suppress a round. There is no approved holiday-calendar
+# source, and silently guessing one would make scheduled reviews disappear.
+GLOBAL_REVIEW_WEEKDAYS = frozenset({1, 4})
+GLOBAL_REVIEW_AT = time(17, 0)
+GLOBAL_REVIEW_HOLIDAY_POLICY = "run"
+
 KIND_ATTACHMENT = "attachment"
 KIND_SUMMARY = "summary"
 
@@ -258,11 +265,25 @@ def due(
     다만 날이 바뀌면 그날 몫은 버린다(다음 날 몫에 밀린 건수로 잡힌다).
     """
     local = now.astimezone(KST)
+    if schedule_kind == "global":
+        return (
+            local.weekday() in GLOBAL_REVIEW_WEEKDAYS
+            and local.time() >= GLOBAL_REVIEW_AT
+        )
     if schedule_kind == "weekly" and local.weekday() != weekday:
         return False
     if schedule_kind != "daily" and schedule_kind != "weekly":
         return False
     return local.time() >= send_at
+
+
+def global_review_round_id(now: datetime) -> str:
+    """Return the deterministic global round ID, or empty outside a due window."""
+    if not due(GLOBAL_REVIEW_AT, now, "global"):
+        return ""
+    local = now.astimezone(KST)
+    weekday = "tue" if local.weekday() == 1 else "fri"
+    return f"summary-review:{local.date().isoformat()}:{weekday}:1700-kst"
 
 
 def schedule_parts(channel) -> tuple[str, str, str, time, str, int | None]:
@@ -525,10 +546,7 @@ def _channels(conn) -> list[ReviewChannel]:
         cur.execute(
             """
             SELECT workspace, channel_id,
-                   max(channel_name) AS channel_name,
-                   min(send_at)      AS send_at,
-                   min(schedule_kind) AS schedule_kind,
-                   min(weekday)       AS weekday
+                   max(channel_name) AS channel_name
               FROM channel_reviewer
              WHERE enabled
              GROUP BY workspace, channel_id
@@ -537,9 +555,8 @@ def _channels(conn) -> list[ReviewChannel]:
         return [
             (
                 str(r["workspace"]), str(r["channel_id"]),
-                str(r["channel_name"] or ""), r["send_at"],
-                str(r.get("schedule_kind") or "daily"),
-                int(r["weekday"]) if r.get("weekday") is not None else None,
+                str(r["channel_name"] or ""), GLOBAL_REVIEW_AT,
+                "global", None,
             )
             for r in cur.fetchall()
         ]
@@ -598,7 +615,8 @@ NO_REVIEW_CONFIG = "no-review-config"
 
 
 def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]],
-                  generate_only: bool = False, skipped_reason: str = "") -> None:
+                  generate_only: bool = False, skipped_reason: str = "",
+                  round_id: str = "") -> None:
     """채널별 결과를 JSON 으로 남긴다. **종료 코드는 이걸 대신하지 못한다.**
 
     보낼 것이 없어도, 검토자가 없어도, 이미 보냈어도 실행은 0 으로 끝난다. 그래서
@@ -635,6 +653,7 @@ def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]],
         "statusSent": getattr(result, "status_sent", 0),
         "statusFailed": getattr(result, "status_failed", 0),
         "generateOnly": bool(generate_only),
+        "roundId": round_id,
         "channels": outcomes,
     }
     if skipped_reason:
@@ -913,6 +932,13 @@ def main(argv: list[str] | None = None) -> int:
             heartbeat.state_dir() / "channel-owners.json"
         ).responsibles()
         summary_result = None
+        execution_now = datetime.now(KST)
+        round_id = "" if manual else global_review_round_id(execution_now)
+        if round_id:
+            logger.info(
+                "global summary review round id=%s holiday_policy=%s channels=%d",
+                round_id, GLOBAL_REVIEW_HOLIDAY_POLICY, len(channels),
+            )
         if not args.dry_run:
             from . import summary_review
             from .config import cost_state_path
@@ -955,13 +981,14 @@ def main(argv: list[str] | None = None) -> int:
                     _write_result(
                         args.result_json, None, unconfigured=[],
                         generate_only=args.generate_only, skipped_reason="already-running",
+                        round_id=round_id,
                     )
                 return 0
             try:
                 if args.backfill:
                     _run_backfill(
                         summary_review, conn, store, channels,
-                        complete=complete_summary, now=datetime.now(KST),
+                        complete=complete_summary, now=execution_now,
                         since=args.since, rounds=args.rounds, resume=args.resume,
                     )
 
@@ -977,13 +1004,14 @@ def main(argv: list[str] | None = None) -> int:
                     generate_only=args.generate_only,
                     force_generate=args.force_now,
                     notify_status=True,
+                    now=execution_now,
                 )
             finally:
                 lock.release()
 
     if args.result_json:
         _write_result(args.result_json, summary_result, unconfigured=unconfigured,
-                      generate_only=args.generate_only)
+                      generate_only=args.generate_only, round_id=round_id)
 
     if summary_result is not None:
         # Canvas 수치를 **따로** 남긴다. 폴백을 성공과 합치면 Canvas 가 계속

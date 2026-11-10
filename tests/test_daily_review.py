@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -65,6 +65,48 @@ def test_weekly_schedule_is_due_only_on_its_weekday_after_its_time():
     assert not dr.due(time(9, 0), wednesday, "weekly", 3)
 
 
+def test_global_review_is_due_only_tuesday_and_friday_after_1700_kst():
+    assert not dr.due(time.min, datetime(2026, 11, 10, 16, 59, tzinfo=KST), "global")
+    assert dr.due(time.max, datetime(2026, 11, 10, 17, 0, tzinfo=KST), "global")
+    assert dr.due(time.max, datetime(2026, 11, 13, 19, 0, tzinfo=KST), "global")
+    assert not dr.due(time.min, datetime(2026, 11, 11, 19, 0, tzinfo=KST), "global")
+
+
+def test_global_round_id_is_stable_and_timezone_aware():
+    tuesday_utc = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+
+    assert dr.global_review_round_id(tuesday_utc) == (
+        "summary-review:2026-11-10:tue:1700-kst"
+    )
+    assert dr.global_review_round_id(tuesday_utc + timedelta(hours=5)) == (
+        "summary-review:2026-11-10:tue:1700-kst"
+    )
+    assert dr.global_review_round_id(tuesday_utc - timedelta(minutes=1)) == ""
+    assert dr.GLOBAL_REVIEW_HOLIDAY_POLICY == "run"
+
+
+def test_configured_channels_ignore_legacy_per_channel_schedules():
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def execute(self, query):
+            self.query = query
+
+        def fetchall(self):
+            return [{"workspace": "tyit", "channel_id": "C1", "channel_name": "주간"}]
+
+    cursor = Cursor()
+    channels = dr._channels(SimpleNamespace(cursor=lambda: cursor))
+
+    assert "send_at" not in cursor.query
+    assert "schedule_kind" not in cursor.query
+    assert channels == [("tyit", "C1", "주간", time(17, 0), "global", None)]
+
+
 def test_a_run_result_says_which_channel_got_nothing_and_why(tmp_path):
     """종료 코드는 「보낼 것이 없었다」 를 말하지 못한다. 결과 파일이 말한다."""
     from tybot.summary_review import ChannelOutcome, RunResult
@@ -84,6 +126,7 @@ def test_a_run_result_says_which_channel_got_nothing_and_why(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
 
     assert payload["sent"] == 1
+    assert payload["roundId"] == ""
     codes = {row["channelId"]: row["code"] for row in payload["channels"]}
     assert codes == {"C1": "sent", "C2": "no-reviewer", "C9": "no-review-config"}
     assert any(row["reason"] for row in payload["channels"] if row["code"] != "sent")
@@ -592,6 +635,16 @@ def test_deploy_doc_enables_the_timer():
 
     doc = pathlib.Path("docs/deploy/rocky8.md").read_text(encoding="utf-8")
     assert "systemctl enable --now tybot-review-dm.timer" in doc
+
+
+def test_review_timer_runs_one_global_kst_round_on_tuesday_and_friday():
+    import pathlib
+
+    timer = pathlib.Path("deploy/tybot-review-dm.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=Tue *-*-* 17:00:00 Asia/Seoul" in timer
+    assert "OnCalendar=Fri *-*-* 17:00:00 Asia/Seoul" in timer
+    assert "Persistent=true" in timer
+    assert "OnUnitActiveSec" not in timer
 
 
 # --- 소급 검토 CLI (B-58) -----------------------------------------------------
