@@ -404,10 +404,11 @@ def test_a_channel_list_lookup_failure_is_not_reported_as_no_lists():
     client = Mock()
     client.files_list.side_effect = RuntimeError("channel_not_found")
 
-    found, failure = probe.find_lists(client, CHANNEL)
+    found, failure, seen = probe.find_lists(client, CHANNEL)
 
     assert found == []
     assert failure == "RuntimeError"
+    assert sum(seen.values()) == 0
 
 
 def test_only_list_filetypes_are_taken_from_the_channel():
@@ -420,10 +421,69 @@ def test_only_list_filetypes_are_taken_from_the_channel():
         "response_metadata": {"next_cursor": ""},
     }
 
-    found, failure = probe.find_lists(client, CHANNEL)
+    found, failure, seen = probe.find_lists(client, CHANNEL)
 
     assert failure == ""
     assert [item["id"] for item in found] == [LIST_ID]
+    assert dict(seen) == {"list": 1, "pdf": 1}
+
+
+def test_no_undocumented_types_filter_is_sent_to_slack():
+    """`files.list` 의 `types` 는 `all·spaces·snippets·images·gdocs·zips·pdfs·canvas`
+    만 받는다. **`list` 는 그 목록에 없다.**
+
+    1차 실측에서 `types="list"` 를 보냈고 0건이 돌아왔다. 실패 칸은 비어 있어서
+    보고서는 그것을 「List 가 없다」 로 적었다 — 이 도구가 막으려던 바로 그
+    잘못이다. 거르는 일은 우리가 한다.
+    """
+    client = Mock()
+    client.files_list.return_value = {
+        "files": [], "response_metadata": {"next_cursor": ""}
+    }
+
+    probe.find_lists(client, CHANNEL)
+
+    (call,) = client.files_list.call_args_list
+    assert "types" not in call.kwargs, "문서에 없는 types 값을 보냈다"
+
+
+def test_an_empty_channel_is_told_apart_from_a_channel_without_lists():
+    """「0건」 두 가지를 가른다.
+
+    파일이 아예 없는 채널과, 파일은 많은데 List 가 없는 채널은 다음에 할 일이
+    다르다 — 전자는 채널을 잘못 고른 것일 수 있고, 후자는 실제 결론이다.
+    """
+    empty = Mock()
+    empty.files_list.return_value = {
+        "files": [], "response_metadata": {"next_cursor": ""}
+    }
+    busy = Mock()
+    busy.files_list.return_value = {
+        "files": [{"id": "F1", "filetype": "pdf"}, {"id": "F2", "filetype": "png"}],
+        "response_metadata": {"next_cursor": ""},
+    }
+
+    out_empty = probe.probe_channel(empty, "tyit", CHANNEL)
+    out_busy = probe.probe_channel(busy, "tyit", CHANNEL)
+
+    assert out_empty["list_count"] == out_busy["list_count"] == 0
+    assert out_empty["files_seen"] == 0
+    assert out_busy["files_seen"] == 2
+    assert out_busy["filetypes"] == {"pdf": 1, "png": 1}
+
+
+def test_a_half_read_file_listing_is_a_failure_not_an_empty_result():
+    client = Mock()
+    client.files_list.return_value = {
+        "files": [{"id": "F1", "filetype": "pdf"}],
+        "response_metadata": {"next_cursor": "always-more"},
+    }
+
+    found, failure, seen = probe.find_lists(client, CHANNEL)
+
+    assert failure == "too_many_pages"
+    assert found == []
+    assert sum(seen.values()) == probe.MAX_PAGES
 
 
 # --- 7. 토큰은 콘솔 DB 에서 온다 -----------------------------------------------

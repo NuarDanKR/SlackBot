@@ -104,7 +104,7 @@ List는 일반 파일과 호출 방식, 페이지네이션, scope, rate limit, p
 
 ## 실측 도구 (2026-11-10, Claude)
 
-`scripts/probe_slack_lists.py` · 시험 `tests/test_probe_slack_lists.py` (41건).
+`scripts/probe_slack_lists.py` · 시험 `tests/test_probe_slack_lists.py` (44건).
 
 ```bash
 sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/probe_slack_lists.py \
@@ -112,7 +112,36 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/probe_slack_lists.p
     --fixture /var/lib/tybot/reports/lists-probe-2026-11-10.json
 ```
 
-**아직 실행하지 않았다.** 등록 채널 하나가 필요하고, 그것은 서버에서 사람이 한다.
+### 1차 실측 (2026-11-10) — **결론 없음, 도구 결함**
+
+```json
+{"workspace": "5a9b3946", "channel": "648c9768",
+ "list_count": 0, "list_lookup_failure": "", "lists": []}
+```
+
+**이 0 을 「List 가 없다」 로 읽으면 안 된다.** 도구가 틀렸다.
+
+`files.list` 에 `types="list"` 를 보냈는데 Slack 문서의 `types` 값은
+`all · spaces · snippets · images · gdocs · zips · pdfs · canvas` 다 —
+**`list` 는 그 목록에 없다.** 알 수 없는 값으로 서버에서 거른 결과가 0건이고,
+실패 칸은 비어 있었다.
+
+이것은 이 도구가 막으려고 만든 바로 그 잘못이다. **못 본 것을 「없음」 으로
+적었고, 읽는 사람이 구분할 길이 없었다.** 반쪽 페이지와 API 오류는 조심스럽게
+다뤘으면서 정작 첫 호출의 필터를 확인하지 않았다.
+
+고친 것 둘.
+
+1. `types` 를 **보내지 않는다**(기본 `all`). 고르는 일은 우리가 한다 —
+   응답의 `filetype == "list"` 로 거른다
+2. `files_seen` 과 `filetypes` 를 함께 보고한다. 「파일이 0건」 과 「파일은
+   많은데 List 가 없다」 는 다음에 할 일이 다르다
+
+**다시 실행해야 한다.** 1차 결과는 버린다.
+
+---
+
+**아직 유효한 실측이 없다.** 등록 채널 하나가 필요하고, 그것은 서버에서 사람이 한다.
 
 ### 토큰은 콘솔 DB 에서 온다 (2026-11-10 수정)
 
@@ -174,7 +203,7 @@ Slack 이 거절하지만 **그 거절은 요청이 나간 뒤에 온다.** 이�
 | 기록에 본문 없음 | 보고서에 원문·파일명·ID 가 없음 · `print` 가 응답 필드를 안 꺼냄 |
 | 토큰은 DB | `runtime_tokens` 사용 · env 미사용 · 기본 봇 `archiver` · 실패 시 예외 클래스만 출력 |
 
-돌연변이 10종(토큰을 env 에서 읽기 · 기본 봇을 TYBot 으로 · 예외를 그대로
+돌연변이 12종(`types="list"` 부활 · filetypes 집계 제거 · 토큰을 env 에서 읽기 · 기본 봇을 TYBot 으로 · 예외를 그대로
 출력 · 반쪽 목록을 완료로 · 미완에 가시성 조회 · 가시성 실패를 통과로 ·
 타 채널 공유를 통과로 · ID 평문 기록 · 문자열 `attachment` 허용 · `list` 아닌
 filetype 수집) **전부 잡힘.**

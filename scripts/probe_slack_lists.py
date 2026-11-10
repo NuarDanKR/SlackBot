@@ -169,24 +169,45 @@ class ListProbe:
         }
 
 
-def find_lists(client, channel: str) -> tuple[list[dict], str]:
-    """등록 채널 하나에서 `filetype=list` 만. 워크스페이스를 훑지 않는다."""
+def find_lists(client, channel: str) -> tuple[list[dict], str, Counter]:
+    """등록 채널 하나에서 `filetype=list` 만. 워크스페이스를 훑지 않는다.
+
+    ## `types` 를 넘기지 않는다 (2026-11-10 1차 실측에서 고침)
+
+    처음에는 `types="list"` 로 **서버에서** 걸렀다. 그 값은 Slack 문서에 없다 —
+    `files.list` 의 `types` 는 `all·spaces·snippets·images·gdocs·zips·pdfs·canvas`
+    를 받는다. 알 수 없는 값을 주면 아무것도 안 돌아오고, 우리 보고서는 그것을
+    `list_count: 0` 으로 적었다.
+
+    **이 도구가 막으려던 바로 그 잘못이다.** 못 본 것을 「없음」 으로 적었고,
+    실패 칸은 비어 있어 읽는 사람이 구분할 길이 없었다.
+
+    이제 기본값(`all`)으로 받아 **우리가** 고른다. 같이 세는 `filetypes` 가
+    「파일이 0건」 과 「파일은 많은데 List 가 없다」 를 가른다 — 둘은 다음에 할
+    일이 다르다.
+    """
     found: list[dict] = []
+    seen: Counter[str] = Counter()
     cursor = ""
     for _ in range(MAX_PAGES):
         try:
             res = client.files_list(
-                channel=channel, types="list", limit=PAGE_SIZE, cursor=cursor
+                channel=channel, limit=PAGE_SIZE, cursor=cursor
             ) or {}
         except Exception as exc:  # noqa: BLE001 - 사유만 남긴다
-            return [], _reason(exc)
+            return [], _reason(exc), seen
         for item in res.get("files") or []:
-            if isinstance(item, dict) and str(item.get("filetype")) == "list":
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("filetype") or "-")
+            seen[kind] += 1
+            if kind == "list":
                 found.append(item)
         cursor = str(((res.get("response_metadata") or {}).get("next_cursor")) or "")
         if not cursor:
-            return found, ""
-    return found, "too_many_pages"
+            return found, "", seen
+    # 끝까지 못 읽었다. 반쪽 목록으로 「List 가 없다」 고 말하지 않는다.
+    return found, "too_many_pages", seen
 
 
 def _reason(exc: Exception) -> str:
@@ -252,10 +273,14 @@ def probe_channel(client, workspace: str, channel: str) -> dict:
     `main` 에서 떼어 둔 이유는 시험 때문만이 아니다. 인자 파싱·토큰 읽기와
     섞여 있으면 「이 함수가 쓰는 일을 하나」 를 읽어서 확인할 수 없다.
     """
-    lists, failure = find_lists(client, channel)
+    lists, failure, filetypes = find_lists(client, channel)
     out: dict = {
         "workspace": short(workspace),
         "channel": short(channel),
+        # **「0건」 의 뜻을 읽을 수 있게 한다.** 파일이 아예 없는 채널과, 파일은
+        # 많은데 List 가 없는 채널은 다음에 할 일이 다르다.
+        "files_seen": sum(filetypes.values()),
+        "filetypes": dict(sorted(filetypes.items())),
         "list_count": len(lists),
         "list_lookup_failure": failure,
         "lists": [],
