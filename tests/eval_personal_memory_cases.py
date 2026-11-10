@@ -396,6 +396,25 @@ def test_every_case_uses_a_known_kind_and_reason():
             assert case.expect_reason == "", f"{case.name}: 저장하는데 사유가 있다"
 
 
+@pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
+def test_product_classifier_follows_the_independent_cases(case):
+    """The design cases become an executable contract with the B-91 product code."""
+    from tybot.user_memory import classify_feedback
+
+    got = classify_feedback(
+        case.utterance,
+        prior_record_id=case.prior_record_id,
+        resolved_evidence=case.resolved_evidence,
+    )
+
+    assert got.kind == case.expect_kind
+    assert got.reason == case.expect_reason
+    if case.expect_body:
+        assert got.body == case.expect_body
+    assert got.promotable is case.expect_promotable
+    assert set(case.fact_tokens) <= set(got.fact_tokens)
+
+
 def test_a_stored_preference_is_always_enumerated():
     """**열거형 밖은 저장하지 않는다**(위협 T2-2).
 

@@ -158,8 +158,9 @@ def test_common_runtime_refunds_a_request_without_a_successful_answer():
 
 def test_common_runtime_stops_before_model_work_when_the_limit_is_full():
     quota = AnswerQuota(MemoryQuotaStore(), limit=1)
-    counted = _reserve(quota, 99)
-    quota.finalize(counted.reservation_id, now=NOW)
+    runtime_now = datetime.now(UTC)
+    counted = _reserve(quota, 99, now=runtime_now)
+    quota.finalize(counted.reservation_id, now=runtime_now)
     bot = _workspace_bot(quota)
     bot._handle_request = Mock()
     say = Mock(return_value={"ts": "2.0"})

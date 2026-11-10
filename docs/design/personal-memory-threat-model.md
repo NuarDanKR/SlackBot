@@ -1,7 +1,9 @@
 # 개인화 기억 — 위협 모델과 스키마 초안 (B-91 설계)
 
-작성 2026-11-10 · Claude. **제품 코드를 고치지 않았다.** 구현은 Codex 몫이고
-B-88 뒤에 시작한다. 이 문서는 그 전에 정해 두어야 **되돌리기 어려운** 것들을 적는다.
+작성 2026-11-10 · Claude. 2026-11-11 Codex가 저장소·결정적 분류·수명주기·주입 상한
+기반을 `src/tybot/user_memory.py`와 `deploy/sql/user_memory_schema.sql`에 구현했다.
+Slack 요청 경로 연결과 사용자 조회·철회 명령은 다음 단계다. 이 문서는 구현 전에 정해
+둔 **되돌리기 어려운** 경계를 계속 규정한다.
 
 연관: [`summary-abstraction.md`](summary-abstraction.md) ·
 [`thread-follow-up-evidence.md`](thread-follow-up-evidence.md) ·

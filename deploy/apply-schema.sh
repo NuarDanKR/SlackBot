@@ -65,6 +65,7 @@ FILES=(
   license_member_schema.sql   # 라이선스 보유자 명단(직접 입력). employee · slack_license_manual 을 참조한다
   bot_access_schema.sql       # 봇 사용 권한(사번 단위). employee 를 참조한다
   bot_source_schema.sql       # 봇 근거 채널(채널 ID 단위)
+  user_memory_schema.sql      # B-91 사용자별 구조화 피드백 기억
   vipbot_access_schema.sql    # VIPBot 전용 권한·근거 읽기 창구
   console_account_sync_schema.sql  # 콘솔 계정 자동 관리. console_user 에 열을 더한다
   console_password_schema.sql  # 임시 비밀번호(TYBot DM 발급). console_user 에 열을 더한다
