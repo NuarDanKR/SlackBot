@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from . import channel_apps
 from .archive.collection_probe import ArchiverChannel
 from .channels import parse
 from .collection_status import (
@@ -108,6 +109,11 @@ class HealthFacts:
     # 「누군가는 고칠 수 있다」 를 보이면 안 된다 — 실제로 그렇게 만들었다가,
     # `/채널 수정` 은 거절되는데 같은 화면의 관리 항목은 초록으로 뜨는 상태가 됐다
     # (2026-09-08 실측). 화면이 자기 모순이면 사람은 화면을 안 믿는다.
+    # 필수 앱 넷(Archiver·TYBot·rhwp·Hermes)의 참여 판정(B-87).
+    #
+    # `None` 은 **검사 자체를 못 했다**는 뜻이다. 빈 튜플(검사했고 넷 다
+    # 해당 없음)과 구분한다 — 전자는 모르는 것이고 후자는 아는 것이다.
+    required_apps: tuple[channel_apps.AppStatus, ...] | None = None
     viewer_can_edit: bool = True
     # 고칠 수 있는 사람. TYBot 이 만든 채널은 **Slack 상 생성자가 봇**이라
     # 이 값이 비는 경우가 있다 — 그러면 아무도 못 고치는 채널이다.
@@ -358,9 +364,40 @@ def check_manager(f: HealthFacts) -> Check:
     )
 
 
+def check_required_apps(f: HealthFacts) -> Check:
+    """필수 앱 넷이 이 채널에 있는가 (B-87).
+
+    `check_membership` 은 **이 봇 자신**만 본다. 그래서 수집기나 변환 앱이
+    빠져도 그 줄은 초록이었다 — 멘션하면 답은 하는데 아카이브에는 아무것도
+    안 쌓이는 채널이 「모두 정상」 으로 보였다.
+
+    **미초대 하나라도 있으면 빨강이다.** 없는 앱이 하는 일은 아무도 대신하지
+    않는다. 확인 불가만 있으면 노랑 — 고장일 수도 아닐 수도 있고, 사람이 할
+    일은 「다시 보기」 다.
+    """
+    if f.required_apps is None:
+        return Check(
+            UNKNOWN, "필수 앱", "필수 앱 참여 여부를 확인하지 못했습니다.",
+            "잠시 뒤 다시 실행해 보세요.",
+        )
+    rows = tuple(f.required_apps)
+    detail = channel_apps.summary(rows)
+    body = "\n".join(f"　{line}" for line in channel_apps.lines(rows))
+    gone = channel_apps.missing(rows)
+    unsure = channel_apps.unresolved(rows)
+    if gone:
+        mark = BAD
+    elif unsure:
+        mark = WARN
+    else:
+        mark = OK
+    return Check(mark, "필수 앱", f"{detail}\n{body}" if body else detail)
+
+
 CHECKS = (
     check_name,
     check_membership,
+    check_required_apps,
     check_collection,
     check_reviewer,
     check_digest,
@@ -420,6 +457,7 @@ __all__ = [
     "WARN",
     "Check",
     "HealthFacts",
+    "check_required_apps",
     "checks",
     "report",
 ]

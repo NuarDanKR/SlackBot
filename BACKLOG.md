@@ -256,9 +256,21 @@ _최종 갱신: 2026-11-10_
 - rhwp는 HWP 변환을 쓰는 운영 채널에서 필수로 표시한다. Hermes가 외부 RPC만 쓰고 Slack 앱이 필요 없는
   구성이라면 `해당 없음(외부 전문봇)`으로 사실대로 표시한다.
 
-- [ ] 네 역할 identity 조회와 채널 membership 대조 구현
-- [ ] 누락 앱 이름과 초대 방법을 한 화면에 표시
-- [ ] private channel·Slack API 오류·DB binding 누락·외부 Hermes 모드 회귀 시험
+진행(2026-11-10, Claude):
+
+- [x] 네 역할 identity 조회와 채널 membership 대조 구현
+      (`channel_apps.py` 판정 · `channel_app_probe.py` 수집)
+- [x] 누락 앱 이름과 초대 방법을 한 화면에 표시 (`/채널 상태` 의 「필수 앱」 줄)
+- [x] private channel·Slack API 오류·DB binding 누락·외부 Hermes 모드 회귀 시험
+      (`tests/test_channel_apps.py` 40건 · 돌연변이 11종)
+
+정체성은 `bot_connection` 의 검증된 `bot_user_id`(state=`enabled` 만)와 콘솔이
+관리하는 변환 앱 ID 뿐이다. 이름은 보지 않는다. 멤버 목록을 끝까지 읽지 못하면
+통째로 버리고 `확인 불가` 로 적는다 — 반쪽 목록은 뒤 페이지의 앱을 「미초대」 로
+만든다.
+
+남은 것: 실제 워크스페이스에서 `/채널 상태` 를 쳐 네 줄이 사실과 맞는지 확인
+(서버에서 사람이 해야 한다).
 
 ---
 

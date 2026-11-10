@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from tybot import channel_apps
 from tybot import channel_health as ch
 from tybot.archive.collection_probe import ArchiverChannel
 from tybot.channel_management import (
@@ -22,8 +23,24 @@ from tybot.channels import parse
 GOOD = "#팀-전산_ABB110-주간회의"
 
 
+def _apps_all_joined() -> tuple:
+    """필수 앱 넷이 전부 참여 중인 상태(B-87).
+
+    기본값은 `None`(= 검사 못 함)이라 그대로 두면 모든 채널이 「확인할 것이
+    있습니다」 가 된다. 그 기본값은 **일부러** 그렇다 — 검사하지 않은 것을
+    정상이라고 말하지 않기 위해서다.
+    """
+    return tuple(
+        channel_apps.AppStatus(
+            role, channel_apps.LABELS[role], channel_apps.JOINED, channel_apps.MEMBER
+        )
+        for role in channel_apps.ROLES
+    )
+
+
 def _facts(**kw) -> ch.HealthFacts:
     base = {
+        "required_apps": _apps_all_joined(),
         "channel": GOOD,
         "channel_id": "C1",
         "is_member": True,

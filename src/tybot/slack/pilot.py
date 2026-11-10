@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 
 from .. import (
     canvas_harness,
+    channel_apps,
     channel_lifecycle,
     daily_review,
     evidence_view,
@@ -2470,6 +2471,32 @@ class WorkspaceBot:
             except Exception as e:
                 log.warning("[%s] 첨부 대기 집계 실패 ch=%s: %s", self.workspace, channel_id, e)
 
+        # 필수 앱 넷의 참여 판정(B-87). **DM 에서는 묻지 않는다** — DM 에 앱을
+        # 초대한다는 개념이 없고, 물으면 Slack 이 거절해 「확인 불가」 네 줄이
+        # 아무 의미 없이 남는다.
+        #
+        # 실패해도 `None` 으로 남겨 화면이 「확인하지 못했습니다」 라고 말한다.
+        # 여기서 예외를 올리면 멀쩡한 나머지 항목까지 같이 사라진다.
+        required_apps = None
+        is_dm = bool(info.get("is_im")) or channel_id.startswith("D")
+        if not is_dm:
+            try:
+                from ..channel_app_probe import facts as app_facts
+
+                required_apps = channel_apps.evaluate(
+                    app_facts(
+                        client,
+                        self.workspace,
+                        channel_id,
+                        is_private=bool(info.get("is_private")),
+                    )
+                )
+            except Exception as e:
+                log.warning(
+                    "[%s] 필수 앱 참여 조회 실패 ch=%s: %s",
+                    self.workspace, channel_id, type(e).__name__,
+                )
+
         return HealthFacts(
             channel=channel,
             channel_id=channel_id,
@@ -2492,6 +2519,7 @@ class WorkspaceBot:
             review_canvas=review_canvas,
             review_canvas_error=review_canvas_error,
             waiting_attachments=waiting,
+            required_apps=required_apps,
             # **권한 판정은 `/채널 수정` 과 같은 함수를 쓴다.** 갈리면 수정은
             # 거절되는데 화면은 초록으로 뜬다(2026-09-08 실측). 화면이 자기
             # 모순이면 사람은 화면을 안 믿는다.
