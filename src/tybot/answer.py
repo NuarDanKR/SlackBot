@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from collections import Counter
@@ -16,7 +18,7 @@ from .access import RequestContext, can_access
 from .archive.store import ArchiveStore, SearchHit
 from .attachment_review import find_sendable, status_line
 from .channels import source_label
-from .evidence_refs import MAX_REFS, live_ref, refs_from_hits
+from .evidence_refs import MAX_REFS, live_ref, ref_from_hit, refs_from_hits
 from .gateway.base import Message, Sensitivity
 from .gateway.cost import CostLimitExceeded
 from .gateway.router import ModelNotAllowed, Router, UnknownModel
@@ -105,6 +107,64 @@ class AnswerPrompts:
     advice: str = ADVICE_PROMPT
     interim_advice: str = INTERIM_ADVICE_PROMPT
     specialist: str | None = None
+
+
+def _response_cache_scope(
+    ctx: RequestContext,
+    hits,
+    root: Path | str,
+    *,
+    namespace: str,
+) -> str | None:
+    """Bind one cached completion to current ACL and immutable evidence coordinates.
+
+    Search and permission filtering happen before this function. If even one hit
+    cannot be represented as a local archive coordinate, caching is disabled;
+    live Slack evidence and question attachments must be reopened every time.
+    """
+    evidence = []
+    base = Path(root)
+    for hit in hits or ():
+        ref = ref_from_hit(hit, base)
+        if ref is None:
+            return None
+        try:
+            stat = (base / ref.document_path).stat()
+        except OSError:
+            return None
+        evidence.append(
+            {
+                "ref": ref.to_json(),
+                "mtime_ns": stat.st_mtime_ns,
+                "size": stat.st_size,
+            }
+        )
+    payload = {
+        "v": 1,
+        "namespace": namespace,
+        "access": {
+            "workspace": ctx.workspace,
+            "channels": sorted(ctx.channels),
+            "role": ctx.role,
+            "readable_workspaces": sorted(ctx.readable_workspaces),
+            "is_root": ctx.is_root,
+            "channel_id": ctx.channel_id,
+            "channel": ctx.channel,
+            "user_id": ctx.user_id,
+            "permission_unverified": ctx.permission_unverified,
+            "evidence_sources": (
+                sorted([list(item) for item in ctx.evidence_sources])
+                if ctx.evidence_sources is not None
+                else None
+            ),
+            "preferred_workspaces": sorted(ctx.preferred_workspaces),
+        },
+        "evidence": evidence,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 _SPECIALIST_NUMBER_RE = re.compile(
@@ -1133,6 +1193,7 @@ class AnswerEngine:
         prompts: AnswerPrompts | None = None,
         max_output_tokens: int | None = None,
         workspace_labels: Mapping[str, str] | None = None,
+        response_cache_namespace: str = "tybot",
     ) -> None:
         self._store = store
         self._router = router
@@ -1144,6 +1205,7 @@ class AnswerEngine:
         self._specialist = specialist
         self._prompts = prompts or AnswerPrompts()
         self._workspace_labels = dict(workspace_labels or {})
+        self._response_cache_namespace = str(response_cache_namespace or "").strip()
         if (
             isinstance(max_output_tokens, bool)
             or (
@@ -1180,6 +1242,7 @@ class AnswerEngine:
         model: str | None,
         source_model: str | None,
         source_cost_usd: float,
+        cache_scope: str | None = None,
     ) -> tuple[str, str | None, float, bool]:
         """Apply an optional runtime presentation contract to specialist text.
 
@@ -1209,6 +1272,7 @@ class AnswerEngine:
                 model=model,
                 sensitivity=self._sensitivity,
                 max_tokens=self._output_limit(1800),
+                cache_scope=cache_scope,
             )
         except Exception as exc:  # noqa: BLE001 - grounded original is the fallback
             logger.warning("specialist answer rendering failed: %s", type(exc).__name__)
@@ -1705,6 +1769,12 @@ class AnswerEngine:
                         model=model,
                         source_model=special.model,
                         source_cost_usd=special.cost_usd,
+                        cache_scope=_response_cache_scope(
+                            ctx,
+                            selected_hits,
+                            self._store.root,
+                            namespace=self._response_cache_namespace,
+                        ),
                     )
                 )
                 logger.info(
@@ -1765,6 +1835,12 @@ class AnswerEngine:
                 model=model,
                 sensitivity=self._sensitivity,
                 max_tokens=self._output_limit(2048),
+                cache_scope=_response_cache_scope(
+                    ctx,
+                    summary_hits,
+                    self._store.root,
+                    namespace=self._response_cache_namespace,
+                ),
             )
         except (UnknownModel, ModelNotAllowed) as e:
             return Answer(f"모델 선택 오류: {e}", [], model, 0.0, total, "error")
@@ -1826,6 +1902,12 @@ class AnswerEngine:
                         model=model,
                         source_model=special.model,
                         source_cost_usd=special.cost_usd,
+                        cache_scope=_response_cache_scope(
+                            ctx,
+                            hits,
+                            self._store.root,
+                            namespace=self._response_cache_namespace,
+                        ),
                     )
                 )
                 master_interim = False
@@ -1846,6 +1928,12 @@ class AnswerEngine:
                             model=model,
                             sensitivity=self._sensitivity,
                             max_tokens=self._output_limit(1000),
+                            cache_scope=_response_cache_scope(
+                                ctx,
+                                hits,
+                                self._store.root,
+                                namespace=self._response_cache_namespace,
+                            ),
                         )
                     except Exception as exc:  # noqa: BLE001 - Hermes 요약은 보존한다
                         logger.warning("마스터 임시 판단 생성 실패: %s", exc)
@@ -1915,6 +2003,12 @@ class AnswerEngine:
                 model=model,
                 sensitivity=self._sensitivity,
                 max_tokens=self._output_limit(1500),
+                cache_scope=_response_cache_scope(
+                    ctx,
+                    hits,
+                    self._store.root,
+                    namespace=self._response_cache_namespace,
+                ),
             )
         except (UnknownModel, ModelNotAllowed) as e:
             return Answer(f"모델 선택 오류: {e}", [], model, 0.0, len(hits), "error")
@@ -2461,6 +2555,12 @@ class AnswerEngine:
                         model=model,
                         source_model=special.model,
                         source_cost_usd=special.cost_usd,
+                        cache_scope=_response_cache_scope(
+                            ctx,
+                            hits,
+                            self._store.root,
+                            namespace=self._response_cache_namespace,
+                        ),
                     )
                 )
                 logger.info(
@@ -2518,6 +2618,12 @@ class AnswerEngine:
                 model=model,
                 sensitivity=self._sensitivity,
                 max_tokens=self._output_limit(1024),
+                cache_scope=_response_cache_scope(
+                    ctx,
+                    hits,
+                    self._store.root,
+                    namespace=self._response_cache_namespace,
+                ),
             )
         except (UnknownModel, ModelNotAllowed) as e:
             return Answer(f"모델 선택 오류: {e}", [], model, 0.0, len(hits), "error")

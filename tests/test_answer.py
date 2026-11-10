@@ -17,6 +17,7 @@ from tybot.specialist_router import EVIDENCE_INSUFFICIENT, UNAVAILABLE, Speciali
 DOC = """---
 workspace: pilot
 channel: "#현장_김해외동(180182)_채팅방"
+channel_id: C-PILOT
 visibility: private
 acl: [#현장_김해외동(180182)_채팅방]
 doc_count: 1
@@ -70,6 +71,80 @@ def test_answer_attaches_citation(engine):
     assert "출처:" in ans.to_slack()
     # 근거는 원문 라인이어야 한다
     assert "3억 2천만원" in fake.calls[0][1].content
+
+
+def test_same_user_and_current_evidence_reuse_the_exact_answer(engine):
+    eng, fake = engine
+    ctx = RequestContext(
+        workspace="pilot",
+        channels=frozenset({"#현장_김해외동(180182)_채팅방"}),
+        user_id="U-ONE",
+    )
+
+    first = eng.answer("기성금 얼마야", ctx)
+    second = eng.answer("기성금 얼마야", ctx)
+
+    assert len(fake.calls) == 1
+    assert first.cost_usd > 0
+    assert second.cost_usd == 0
+    assert second.text == first.text
+    assert second.citations == first.citations
+
+
+def test_answer_cache_does_not_cross_users(engine):
+    eng, fake = engine
+    first = RequestContext(
+        workspace="pilot",
+        channels=frozenset({"#현장_김해외동(180182)_채팅방"}),
+        user_id="U-ONE",
+    )
+    second = RequestContext(
+        workspace="pilot",
+        channels=first.channels,
+        user_id="U-TWO",
+    )
+
+    eng.answer("기성금 얼마야", first)
+    eng.answer("기성금 얼마야", second)
+
+    assert len(fake.calls) == 2
+
+
+def test_answer_cache_is_invalidated_when_the_source_file_changes(engine):
+    eng, fake = engine
+    ctx = RequestContext(
+        workspace="pilot",
+        channels=frozenset({"#현장_김해외동(180182)_채팅방"}),
+        user_id="U-ONE",
+    )
+    source = eng._store.root / "channels" / "pilot" / "김해외동.md"
+
+    eng.answer("기성금 얼마야", ctx)
+    source.write_text(source.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    eng.answer("기성금 얼마야", ctx)
+
+    assert len(fake.calls) == 2
+
+
+def test_question_attachment_is_never_response_cached(engine, tmp_path):
+    eng, fake = engine
+    line = RawLine("2026-11-06 09:00", "질문 첨부", "공정률은 72%", 1)
+    doc = ArchiveDoc(
+        path=tmp_path / "__question_attachment__.txt",
+        workspace="pilot",
+        channel="질문 첨부",
+        visibility="private",
+        acl=frozenset(),
+        share_with=frozenset(),
+        last_ingested=None,
+        raw_lines=[line],
+    )
+    hit = SearchHit(doc=doc, line=line, score=1)
+
+    eng.advise("진척 관리 방안을 알려줘", _ctx(), extra_hits=[hit])
+    eng.advise("진척 관리 방안을 알려줘", _ctx(), extra_hits=[hit])
+
+    assert len(fake.calls) == 2
 
 
 def test_advice_uses_the_file_attached_to_this_question(engine, tmp_path):

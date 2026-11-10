@@ -60,6 +60,7 @@ def build_engine(
         prompts=profile.prompts,
         max_output_tokens=profile.max_output_tokens,
         allow_master_business_answers=_managed_scope,
+        response_cache_namespace="vipbot",
     )
 
 

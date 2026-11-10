@@ -63,6 +63,7 @@ def build_engine(
         max_output_tokens=profile.max_output_tokens,
         workspace_labels=workspace_labels,
         allow_master_business_answers=lambda ctx: bool(ctx.evidence_sources),
+        response_cache_namespace="vipbot",
     )
 
 
