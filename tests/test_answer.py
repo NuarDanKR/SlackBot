@@ -246,7 +246,7 @@ def test_specialist_budget_failure_is_not_reported_as_missing_data(engine):
 
     assert answer.reason == "search_budget"
     assert answer.specialist_error_code == "search-budget-exhausted"
-    assert "자료가 없다는 뜻은 아닙니다" in answer.text
+    assert "자료가 없다는 뜻도 아닙니다" in answer.text
     assert "비용이나 토큰이 부족한 것은 아니" in answer.text
     assert "검색 예산" not in answer.text
     assert "확인하지 못한 범위: 평택고덕 2026년 9월" in answer.text
