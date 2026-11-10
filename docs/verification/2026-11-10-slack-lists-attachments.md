@@ -50,10 +50,24 @@ List는 일반 파일과 호출 방식, 페이지네이션, scope, rate limit, p
 
 ## 먼저 해야 할 읽기 전용 실측
 
-- 저장소는 현재 `slack_sdk==3.43.0`을 고정하고 있고, 로컬에 설치된 `WebClient`에는
-  `slackLists_items_list` 편의 메서드가 없다. SDK 업그레이드의 기존 Slack 경로 회귀를
-  먼저 검증하거나, 기존 SDK의 명시적 `api_call("slackLists.items.list", ...)`을 작은
-  어댑터 안에서만 사용할지 결정한다. 제품 코드 곳곳에 문자열 API 호출을 흩뿌리지 않는다.
+- ~~SDK 에 편의 메서드가 없다~~ — **틀렸다(2026-11-10 확인).** 고정된
+  `slack_sdk==3.43.0` 의 `WebClient` 에 `slackLists_items_list` 가 **있다.**
+
+  ```
+  slackLists_items_list(self, *, list_id, limit=None, cursor=None,
+                        archived=None, **kwargs) -> SlackResponse
+  ```
+
+  같은 판에 `slackLists_items_info` · `slackLists_create` ·
+  `slackLists_items_update` · `slackLists_access_set` 도 있다. 따라서 **SDK
+  업그레이드도, 문자열 `api_call` 어댑터도 필요 없다.** 둘 다 하지 않는다 —
+  업그레이드는 기존 Slack 경로 전체의 회귀 위험을 지불하는 일이고, 문자열 호출은
+  오타가 런타임까지 가는 길이다.
+
+  대신 **쓰기 메서드가 같은 클라이언트에 있다**는 사실이 새 위험이다.
+  `slackLists_items_update` 는 `lists:write` 가 없으면 Slack 이 거절하지만,
+  그 거절은 **런타임에** 온다. 수집 코드가 그 이름에 닿지 않는 것을 시험으로
+  고정한다(`lists:write` 금지와 같은 축).
 - 실제 응답에서 List ID, row ID, column ID와 첨부 필드 모양을 비식별 fixture로 만든다.
 - `files.list(channel=...)` 결과의 List가 정말 해당 관리 채널에 연결됐는지 확인한다.
 - 행 첨부 파일의 `files.info`가 `channels`/`groups`에 같은 채널을 싣는지 확인한다.
@@ -85,3 +99,77 @@ List는 일반 파일과 호출 방식, 페이지네이션, scope, rate limit, p
 - List 행 변경 이벤트가 있다고 가정한 실시간 동기화
 
 이 항목들은 별도 오너 결정과 권한·보존 계약 없이는 추가하지 않는다.
+
+---
+
+## 실측 도구 (2026-11-10, Claude)
+
+`scripts/probe_slack_lists.py` · 시험 `tests/test_probe_slack_lists.py` (37건).
+
+```bash
+sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/probe_slack_lists.py \
+    --workspace tyit --channel C0ABCDEF123 \
+    --fixture /var/lib/tybot/reports/lists-probe-2026-11-10.json
+```
+
+**아직 실행하지 않았다.** 등록 채널 하나와 그 워크스페이스의 봇 토큰이 필요하고,
+그것은 서버에서 사람이 한다.
+
+### 이 도구가 하지 않는 것
+
+| | |
+|---|---|
+| 파일 다운로드 | `url_private`·`requests`·`urlopen` 이 소스에 없다 |
+| archive·DB 쓰기 | writer·store 를 들여오지 않는다 |
+| Slack 쓰기 | 쓰기 메서드 **이름**이 소스에 없다(아래) |
+| 워크스페이스 스캔 | `--channel` 하나뿐이고 `--all` 이 없다 |
+| 본문·파일명·사용자 출력 | 건수와 해시만 출력한다 |
+
+### 쓰기 메서드를 이름으로 막는 이유
+
+`slack_sdk==3.43.0` 의 **같은 `WebClient`** 에 `slackLists_items_update` ·
+`slackLists_access_set` 같은 쓰기 메서드가 함께 있다. `lists:write` 가 없으면
+Slack 이 거절하지만 **그 거절은 요청이 나간 뒤에 온다.** 이름이 소스에 없으면
+오타로도 부를 수 없다. 시험이 금지 목록 8개를 하나씩 센다.
+
+### ID 를 해시로 남기는 이유
+
+`files.info` 가시성 확인에는 실제 ID 가 필요하다. 그러나 **기록**에는 짧은
+해시(SHA-256 앞 8자)로 적는다. 같은 ID 는 같은 값이 되어 대조는 되고 복원은 안
+된다. 칸 이름도 해시한다 — 「담당자」 같은 이름은 사람이 쓴 말이고, List 의
+구조에서 조직과 업무가 읽힌다.
+
+검증 문서는 사람이 복사해 옮긴다. 저장소가 비공개라는 것은 그 복사본까지
+보증하지 않는다.
+
+### 시험이 고정하는 계약
+
+| 계약 | 시험 |
+|---|---|
+| `lists:write` 금지 | 쓰기 메서드 8종 이름이 소스에 없음 · SDK 에 실재하는 이름인지 확인 |
+| 전체 페이지 완독 | cursor 를 끝까지 따라감 · 끝나지 않는 cursor 는 **실패**이지 결과가 아님 |
+| 부분 실패 시 미적용 | 한 쪽 실패 → `complete=False`, 그 List 는 가시성도 묻지 않음 |
+| 파일 ID 명시 필드만 | `attachment[]` · `link[].file.file_id` 만 · 행 텍스트·URL 은 무시 |
+| 가시성 확인 | 같은 채널 공유만 통과 · 타 채널만 공유는 불가 · 조회 실패는 `unverified` |
+| 등록 채널 1개 | `filetype=list` 만 시작점 · 채널 목록 조회 실패는 「없음」 아님 |
+| 기록에 본문 없음 | 보고서에 원문·파일명·ID 가 없음 · `print` 가 응답 필드를 안 꺼냄 |
+
+돌연변이 7종(반쪽 목록을 완료로 · 미완에 가시성 조회 · 가시성 실패를 통과로 ·
+타 채널 공유를 통과로 · ID 평문 기록 · 문자열 `attachment` 허용 · `list` 아닌
+filetype 수집) **전부 잡힘.**
+
+### 작성 중 잡은 결함 하나
+
+`attachment` 가 배열이 아니라 **문자열**로 오면 `for` 가 글자 하나하나를 돌려주고,
+그 글자가 전부 파일 ID 가 된다. 그 다음 `files.info` 가 쓰레기 ID 로 나가고 응답은
+「없는 파일」 이다. Slack 응답 모양이 바뀌는 날 조용히 그렇게 된다. `_as_list` 가
+목록만 목록으로 본다 — 문자열은 목록이 아니다.
+
+## 실측 뒤에 정해야 할 것
+
+아래 둘은 **실제 응답을 보기 전에는 못 정한다.** 추측으로 메우지 않는다(계약).
+
+1. 행 첨부의 `files.info` 가 `channels`/`groups` 에 **그 관리 채널을 싣는가.**
+   싣지 않으면 List 접근권과 파일 접근권을 결합하는 공식 계약을 더 조사한 뒤
+   구현을 멈춘다. 실측 보고서의 `other_channel_only` · `unverified` 가 그 답이다.
+2. rate limit 응답의 모양과 재개 가능 여부. 지금은 실패를 사유 코드로만 남긴다.
