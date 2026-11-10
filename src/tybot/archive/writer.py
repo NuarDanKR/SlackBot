@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from ..channels import parse as parse_channel
 from ..lock import archive_write_lock
+from ..sensitive_mask import mask_sensitive
 from .store import (
     RAW_HEADING_RE,
     RAW_LINE_RE,
@@ -245,6 +246,10 @@ class IngestResult:
     skipped_bot: int
     refused: list[tuple[str, str]]
     paths: tuple[Path, ...] = field(default_factory=tuple)
+    #: 가린 민감정보의 **유형별 횟수**(B-86). 원문 조각은 담지 않는다.
+    mask_counts: dict[str, int] = field(default_factory=dict)
+    #: 어느 정책으로 가렸나. 비어 있으면 가릴 것이 없었다는 뜻이다.
+    mask_revision: str = ""
 
 
 def ingest(
@@ -358,6 +363,8 @@ def _ingest_locked(
 
     grouped: dict[date, list[str]] = {}
     refused: list[tuple[str, str]] = []
+    mask_counts: dict[str, int] = {}
+    mask_revision = ""
     skipped_bot = 0
     for message in messages:
         if message.is_bot:
@@ -365,6 +372,22 @@ def _ingest_locked(
             continue
         if message.dedupe_key in existing_dedupe_keys:
             continue
+        # **가린 뒤에 보관한다**(B-86, 2026-11-10 오너 결정).
+        #
+        # 전에는 민감정보가 있으면 그 줄을 버렸다. 버린 줄은 근거에서 사라지고
+        # 봇은 「자료가 없다」 고 답했다 — 사람은 그것을 봇의 고장으로 읽었다.
+        #
+        # 순서가 중요하다. `format_line` **전에** 가린다. 뒤에 가리면 평문이
+        # 한 번은 줄 문자열이 되고, 그 문자열은 dedupe 키·로그·예외 메시지로
+        # 새어 나갈 수 있다.
+        masked = mask_sensitive(message.text)
+        if masked.masked:
+            message = replace(message, text=masked.text)
+            for code, count in masked.counts.items():
+                mask_counts[code] = mask_counts.get(code, 0) + count
+            mask_revision = masked.revision
+        # 가리고도 직접 식별자가 남으면 **가릴 수 없는 모양**이다. 그때는 예전처럼
+        # 제외한다 — 못 가린 것을 보관하는 것이 이 작업의 목적이 아니다.
         reason = screen(message.text)
         if reason:
             refused.append((message.speaker, reason))
@@ -389,7 +412,10 @@ def _ingest_locked(
     fallback_day = messages[0].ts.astimezone(KST).date() if messages else datetime.now(KST).date()
     fallback_path = directory / "raw" / f"{fallback_day.isoformat()}.md"
     if not grouped:
-        return IngestResult(fallback_path, 0, skipped_bot, refused)
+        return IngestResult(
+            fallback_path, 0, skipped_bot, refused,
+            mask_counts=dict(mask_counts), mask_revision=mask_revision,
+        )
 
     stamp = datetime.now(KST).strftime("%Y-%m-%dT%H:%M+09:00")
     pending: dict[Path, str] = {}
@@ -429,4 +455,12 @@ def _ingest_locked(
         path.write_text(body, encoding="utf-8")
 
     paths = tuple(pending)
-    return IngestResult(paths[-1], sum(map(len, grouped.values())), skipped_bot, refused, paths)
+    return IngestResult(
+        paths[-1],
+        sum(map(len, grouped.values())),
+        skipped_bot,
+        refused,
+        paths,
+        mask_counts=dict(mask_counts),
+        mask_revision=mask_revision,
+    )

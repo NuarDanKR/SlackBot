@@ -125,14 +125,24 @@ def test_ingest_skips_bot_output_and_pii(tmp_path):
         ],
         acl=["#팀_자금(ABB540)_주간보고"],
     )
-    # 주민등록번호 줄만 거부한다. **"등기부등본 첨부합니다" 는 사람의 발언이다** —
-    # 단어 하나로 대화를 버리면 사람이 한 말이 아카이브에서 사라진다(설계 §2.4).
-    assert r.written == 2
+    # 2026-11-10 오너 결정(B-86): 주민등록번호 줄도 **가린 뒤 보관한다.**
+    # 전에는 그 줄을 버렸고, 버린 줄은 근거에서 사라져 봇이 「자료가 없다」 고
+    # 답했다 — 사람은 그것을 봇의 고장으로 읽었다.
+    #
+    # **"등기부등본 첨부합니다" 는 사람의 발언이다** — 단어 하나로 대화를 버리면
+    # 사람이 한 말이 아카이브에서 사라진다(설계 §2.4).
+    assert r.written == 3
     assert r.skipped_bot == 1
-    assert len(r.refused) == 1
+    assert r.refused == []
     text = r.path.read_text(encoding="utf-8")
-    assert "태봇" not in text and "900101" not in text
+    assert "태봇" not in text
+    # 평문은 파일 어디에도 없다. 가린 자리만 남는다.
+    assert "900101" not in text and "1234567" not in text
+    assert "[주민등록번호1]" in text
     assert "등기부등본 첨부합니다" in text
+    # 무엇을 몇 건 가렸는지는 **코드와 횟수로만** 남는다.
+    assert r.mask_counts == {"rrn": 1}
+    assert r.mask_revision == "mask-v1"
     validate(text, path=str(r.path))
 
 

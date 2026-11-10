@@ -93,6 +93,52 @@ def test_a_digit_run_without_account_context_is_not_an_account():
     assert sm.mask_sensitive("계좌 110-123-456789").counts == {sm.ACCOUNT: 1}
 
 
+@pytest.mark.parametrize(
+    ("raw", "code"),
+    [
+        ("9001011234567", sm.RRN),
+        ("주민등록번호 9001011234567 입니다", sm.RRN),
+        ("9001015234567", sm.FOREIGN_ID),
+    ],
+)
+def test_a_resident_number_without_a_separator_is_still_masked(raw, code):
+    """시스템에서 내려받은 자료는 하이픈 없이 붙여 쓰는 일이 흔하다.
+
+    하이픈을 필수로 두면 그 형태가 통째로 평문으로 남는다. 더 나쁘게는 계좌
+    문맥에서 `[계좌번호]` 로 가려져 **유형이 틀린 채로** 기록된다 — 가린 것처럼
+    보이지만 감사기록이 거짓말을 한다.
+    """
+    got = sm.mask_sensitive(raw)
+
+    assert got.counts == {code: 1}
+    assert "9001" not in got.text
+
+
+def test_a_bare_resident_number_is_not_mislabelled_as_an_account():
+    got = sm.mask_sensitive("계좌 9001011234567")
+
+    assert got.counts == {sm.RRN: 1}
+    assert sm.ACCOUNT not in got.counts
+
+
+def test_the_same_number_with_and_without_a_hyphen_is_one_person():
+    got = sm.mask_sensitive("900101-1234567 과 9001011234567")
+
+    assert got.text == "[주민등록번호1] 과 [주민등록번호1]"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["2026111012345", "1234567890123", "9913451234567"],
+)
+def test_an_ordinary_thirteen_digit_number_is_left_alone(raw):
+    """13자리를 전부 주민번호로 보지 않는다.
+
+    월·일 자리의 타당성과 뒷자리 첫 숫자(1~8)가 함께 거른다.
+    """
+    assert not sm.mask_sensitive(raw).masked
+
+
 def test_an_impossible_birth_date_is_not_a_resident_number():
     # 견본 번호로 회계 일련번호까지 막지 않는다.
     assert not sm.mask_sensitive("991345-1234567").masked
