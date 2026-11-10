@@ -534,6 +534,71 @@ def test_an_api_failure_still_falls_back_by_rule_when_allowed():
     assert tasks and tasks[0].source != "llm"
 
 
+@pytest.mark.parametrize(
+    ("text", "kind", "source"),
+    [
+        ("현재 너의 상태 알려줘", "status", "regex"),
+        ("사용법 알려줘", "help", "regex"),
+        ("이 채널 내용 수집해줘", "ingest", "cmd"),
+        ("모든 채널 수집해줘", "ingest_all", "cmd"),
+    ],
+)
+def test_deterministic_single_intents_skip_the_llm_planner(text, kind, source):
+    """의미를 더할 것이 없는 요청은 cache보다 **호출하지 않는 것**이 싸다."""
+    p = _CountingProvider(raises=AssertionError("planner must not be called"))
+
+    (task,) = intent.plan(text, _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 0
+    assert task.kind == kind
+    assert task.source == source
+    assert task.question == text
+    assert task.standalone_question == text
+
+
+def test_a_compound_status_and_business_question_still_uses_the_planner():
+    """첫 절만 규칙으로 끝내면 두 번째 업무 질문이 조용히 사라진다."""
+    payload = json.dumps(
+        {
+            "tasks": [
+                {"kind": "status", "question": "상태 어때?", "terms": []},
+                {"kind": "search", "question": "기성금은?", "terms": ["기성금"]},
+            ]
+        },
+        ensure_ascii=False,
+    )
+    p = _CountingProvider((payload, "end_turn"))
+
+    tasks = intent.plan(
+        "상태 어때? 그리고 기성금은?", _router(p), allow_rule_fallback=False
+    )
+
+    assert p.calls == 1
+    assert [task.kind for task in tasks] == ["status", "search"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "이번주 진행 상황 알려줘",
+        "여태까지 수집된 주간 보고를 종합해줘",
+        "첨부 파일도 읽고 답할 수 있어?",
+        "이전 답변 기준으로 다시 정리해줘",
+        "과거 자료 말고 최신 자료를 가져오는 게 좋겠어",
+    ],
+)
+def test_contextual_or_business_intents_do_not_take_the_rule_shortcut(text):
+    payload = json.dumps(
+        {"tasks": [{"kind": "summary", "question": text, "terms": ["업무"]}]},
+        ensure_ascii=False,
+    )
+    p = _CountingProvider((payload, "end_turn"))
+
+    intent.plan(text, _router(p), allow_rule_fallback=False)
+
+    assert p.calls == 1
+
+
 def test_master_v2_never_falls_back_to_the_regex_planner():
     """Master v2 는 정규식으로 내려가지 않는다. 못 판단했으면 못 판단한 것이다."""
     for provider in (

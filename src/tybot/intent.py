@@ -842,6 +842,36 @@ def plan_by_rule(text: str) -> list[Intent]:
     return tasks
 
 
+_DETERMINISTIC_PLAN_KINDS = frozenset({"status", "help", "ingest", "ingest_all"})
+
+
+def _deterministic_plan(text: str) -> list[Intent] | None:
+    """LLM이 더할 의미가 없는 **단일 의도**만 확정한다.
+
+    검색·요약·조언은 검색어·기간·전문봇 선택이 필요하고, memory는 실행형 후속
+    질문과 경계가 가깝다. 이 넷은 비용을 아끼겠다고 규칙으로 확정하지 않는다.
+    복합 질문도 마찬가지다. 한 절만 먼저 처리하면 나머지 질문이 조용히 사라진다.
+    """
+    body = (text or "").strip()
+    if not body or len(split_clauses(body)) != 1:
+        return None
+    task = classify_by_rule(body)
+    if task.kind not in _DETERMINISTIC_PLAN_KINDS:
+        return None
+    # Canvas·첨부·폴더를 근거로 읽는지 묻는 것은 단순 사용법이 아니라 **읽기
+    # 범위 계약**이다. 이전 대화의 생략형도 있어 planner가 맥락과 함께 판정한다.
+    if task.asks_about_our_sources:
+        return None
+    if task.kind in WRITE_KINDS and not _write_is_explicit(body, task.kind):
+        return None
+    task.question = body
+    task.standalone_question = body
+    if task.kind in WRITE_KINDS:
+        task.source = "cmd"
+    logger.info("분해 규칙 확정 kind=%s llm_call=skipped", task.kind)
+    return [task]
+
+
 # 토큰 끝에 붙어 오는 조사·어미. 한국어는 「문서」와 「문서도」가 다른 토큰이라,
 # 떼지 않으면 지칭어가 주제어로 남는다 — 그러면 "처리 안 된 문서도 확인해줘" 가
 # 「문서도」 라는 주제를 가진 질문이 되고, 이전 근거에서 그 낱말을 찾다 0건이 된다.
@@ -1138,12 +1168,15 @@ def plan(
     specialists=None,
     allow_rule_fallback: bool = True,
 ) -> list[Intent]:
-    """복합 질문을 하위질문 목록으로 분해한다(1차 LLM). 실패하면 규칙으로 폴백한다.
+    """확정 명령은 규칙으로, 나머지는 LLM으로 하위질문 목록을 분해한다.
 
     라벨 하나만 돌려주던 예전 구조에서는 "기억나? 그리고 전산팀은 무슨 일 있어?" 처럼
     두 가지를 물으면 **한쪽이 처리 경로에 도달조차 하지 못했다.** 분해를 분류기 책임으로
     옮겨 사람이 실제로 묻는 방식에 맞춘다.
     """
+    deterministic = _deterministic_plan(text)
+    if deterministic is not None:
+        return deterministic
     if router is None and not allow_rule_fallback:
         raise PlanningUnavailable("LLM planner is not configured")
     if router is None:
