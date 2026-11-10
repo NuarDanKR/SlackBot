@@ -464,8 +464,21 @@ class Answer:
         # Slack 에는 표 문법이 없다. 모델이 마크다운 표를 뱉으면 파이프가 그대로 보이고
         # 열이 어긋난다 - 프롬프트로 금지해도 새는 경우가 있어 여기서 다시 그린다.
         from .evidence_view import fix_markdown_tables
+        from .sensitive_mask import mask_sensitive
 
-        parts = [self.text if preserve_markdown else fix_markdown_tables(self.text)]
+        # **전달 직전 마지막 관문**(B-86).
+        #
+        # 수집 때 가렸어도 여기서 또 본다. 이유는 둘이다 —
+        #
+        # 1. 모델이 평문을 돌려줄 수 있다. 근거에 없던 번호를 지어내든, 마스킹
+        #    이전에 쌓인 옛 원문을 읽었든, 그 문장이 그대로 Slack 으로 나간다
+        # 2. 이 함수가 메시지·Canvas·QA 기록이 공유하는 **하나의 출구**다.
+        #    여기서 막으면 세 곳이 같이 막히고, 한 곳만 고치는 날이 오지 않는다
+        #
+        # 출처 줄은 가리지 않는다. 채널 이름과 파일 좌표는 시스템이 만든 값이고,
+        # 가리면 사람이 확인하러 갈 자리를 잃는다(원칙 2).
+        body = mask_sensitive(self.text).text
+        parts = [body if preserve_markdown else fix_markdown_tables(body)]
         note = self.evidence_note()
         if note:
             parts.append(note)

@@ -161,3 +161,23 @@ def test_screen_line_only_blocks_direct_identifiers():
     assert screen_line("등기부등본 제출 예정입니다") is None
     assert screen_line("계약자 명단 취합 중") is None
     assert screen_line("주민등록번호 900101-1234567 입니다") == "주민등록번호 형식"
+
+
+def test_the_last_gate_sees_the_same_shapes_the_masker_does():
+    """`sensitive_mask` 와 모양이 같아야 한다 (B-86, 보안 검토 2026-11-10).
+
+    이 함수는 **마스킹이 꺼졌거나 회귀했을 때** 평문이 보관되지 않게 막는
+    마지막 관문이다. 마스커가 구분자 없는 번호를 가리는데 이쪽이 못 보면,
+    그날 `9001011234567` 은 두 관문을 모두 통과한다.
+
+    두 규칙이 갈리면 **더 느슨한 쪽이 실제 경계**가 된다.
+    """
+    from tybot import sensitive_mask
+
+    for raw in ("9001011234567", "900101-1234567", "9001015234567"):
+        assert screen_line(raw) == "주민등록번호 형식", raw
+        assert sensitive_mask.mask_sensitive(raw).masked, raw
+
+    for raw in ("2026111012345", "1234567890123"):
+        assert screen_line(raw) is None, raw
+        assert not sensitive_mask.mask_sensitive(raw).masked, raw

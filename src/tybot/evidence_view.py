@@ -176,6 +176,7 @@ def stored_report(
     """
     from .channel_lifecycle import mark_for
     from .channels import source_label
+    from .sensitive_mask import mask_sensitive
 
     if not lines and not dropped:
         return NO_EVIDENCE
@@ -190,7 +191,14 @@ def stored_report(
         if label != last:
             out.append(f"*{label}*")
             last = label
-        out.append(f"    `{_stamp(line.ts)}` {line.speaker}: {line.text}")
+        # **옛 원문은 가려져 있지 않다**(B-86).
+        #
+        # 수집 마스킹은 2026-11-10 부터다. 그 전에 쌓인 줄에는 평문이 그대로
+        # 있고, 이 화면은 그 줄을 **원문 그대로** 보여 주는 곳이다. 여기서
+        # 가리지 않으면 답변 본문만 가려지고 「근거 보기」 를 누르면 평문이
+        # 나온다 — 가장 눈에 안 띄는 구멍이다.
+        shown = mask_sensitive(line.text).text
+        out.append(f"    `{_stamp(line.ts)}` {line.speaker}: {shown}")
     if dropped:
         reasons = ", ".join(
             DROP_LABELS.get(code, code) for code in dict.fromkeys(dropped)

@@ -83,9 +83,16 @@ LABELS = {
 }
 
 #: 이미 가려진 자리. 멱등성은 이 모양을 **먼저** 집어내서 지킨다.
+#: 번호 자리를 `\d*` 로 열어 두면 글을 쓰는 사람이 `[이름99999]` 를 적어 다음
+#: 번호를 밀어낼 수 있다. 우리가 내보내는 모양만 받는다.
 MASK_RE = re.compile(
-    r"\[(?:" + "|".join(re.escape(label) for label in LABELS.values()) + r")\d*\]"
+    r"\[(?:" + "|".join(re.escape(label) for label in LABELS.values())
+    + r")(?:[1-9][0-9]{0,3})?\]"
 )
+
+#: 자리 표시에 쓰는 글자. 입력에서 **먼저 걷어낸다**.
+SENTINEL = "\x00"
+_PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
 
 
 @dataclass(frozen=True)
@@ -244,10 +251,19 @@ class _Masker:
         return MASK_RE.sub(swap, text)
 
     def restore(self, text: str) -> str:
-        def swap(match: re.Match[str]) -> str:
-            return self._kept[int(match.group(1))]
+        """자리 표시를 되돌린다. **범위를 벗어나면 그대로 둔다.**
 
-        return re.sub(r"\x00(\d+)\x00", swap, text)
+        입력에서 자리 표시 글자를 미리 걷어내지만, 그 방어가 뚫렸을 때
+        `IndexError` 로 수집이 죽는 것이 가장 나쁜 결말이다 — 한 줄 때문에
+        그 회차의 **모든 줄**이 저장되지 않는다.
+        """
+        def swap(match: re.Match[str]) -> str:
+            index = int(match.group(1))
+            if 0 <= index < len(self._kept):
+                return self._kept[index]
+            return match.group(0)
+
+        return _PLACEHOLDER_RE.sub(swap, text)
 
 
 def _normalize(raw: str) -> str:
@@ -266,7 +282,13 @@ def mask_sensitive(text: str) -> MaskResult:
         return MaskResult("", {}, POLICY_REVISION)
 
     masker = _Masker()
-    body = masker.park(original)
+    # **자리 표시 글자를 먼저 걷어낸다.**
+    #
+    # 변환된 첨부 본문에는 NUL 바이트가 들어온다(저장소에 그 전용 시험이 따로
+    # 있다 — `test_derived_text_nul.py`). 그 글자가 남아 있으면 `restore` 가
+    # 글쓴이가 넣은 숫자를 색인으로 읽고, 잘되면 수집이 죽고 못되면 다른 자리의
+    # 토큰이 그 자리에 들어간다.
+    body = masker.park(original.replace(SENTINEL, ""))
 
     def rrn(match: re.Match[str]) -> str:
         if not _is_rrn(match):

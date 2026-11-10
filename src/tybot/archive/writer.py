@@ -393,6 +393,18 @@ def _ingest_locked(
             refused.append((message.speaker, reason))
             continue
         line = format_line(message)
+        # **줄이 완성된 뒤 한 번 더 본다.**
+        #
+        # `format_line` 은 줄바꿈을 공백으로 접는다. 접히면서 떨어져 있던 숫자가
+        # 붙어 한 값이 될 수 있고, 그러면 마스킹이 지나간 뒤에 민감정보가 생긴다.
+        # 어떤 조합이 그렇게 되는지 전부 세는 대신, **파일에 들어갈 그 문자열**을
+        # 검사한다 — 세다가 하나 빠뜨리면 그 하나가 평문으로 남는다.
+        collapsed = mask_sensitive(line)
+        if collapsed.masked:
+            line = collapsed.text
+            for code, count in collapsed.counts.items():
+                mask_counts[code] = mask_counts.get(code, 0) + count
+            mask_revision = collapsed.revision
         key = dedupe_line(line)
         plain = legacy_dedupe_line(line)
         # 좌표가 있으면 좌표가 신원이다. 좌표를 떼고 비교하면 같은 분의 다른

@@ -366,3 +366,61 @@ def test_clean_text_metadata_says_so_without_a_revision_lie():
 def test_the_policy_revision_is_a_fixed_word():
     # 규칙이 바뀌면 올린다. 무엇으로 가렸는지 모르면 예전 결과를 설명할 수 없다.
     assert sm.POLICY_REVISION == "mask-v1"
+
+
+# --- 10. 바깥에서 밀어 넣는 것 (보안 검토 2026-11-10) -------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "\x000\x00 평범한 글",
+        "계약자: 홍길동 \x0099\x00",
+        "\x00\x00\x00",
+        "앞 \x001\x00 뒤",
+    ],
+)
+def test_a_sentinel_in_the_input_does_not_crash_the_masker(raw):
+    """자리 표시 글자(NUL)가 입력에 있어도 죽지 않는다.
+
+    변환된 첨부 본문에는 NUL 이 들어온다 — 저장소에 그 전용 시험이 따로 있다
+    (`test_derived_text_nul.py`). 그 글자가 색인으로 읽히면 `IndexError` 가
+    나고, 수집 경로에서 그것은 **그 회차의 모든 줄이 저장되지 않는다**는 뜻이다.
+    한 줄 때문에 전부를 잃는다.
+    """
+    got = sm.mask_sensitive(raw)
+
+    assert sm.SENTINEL not in got.text
+
+
+def test_a_sentinel_cannot_pull_in_another_parked_token():
+    """죽지 않는 것만으로는 부족하다. 다른 자리의 토큰이 끌려오면 **내용이
+    바뀐다** — 가린 글이 원문과 다른 말을 하게 된다."""
+    got = sm.mask_sensitive("계약자: [이름1] 담당자: 김철수 \x000\x00")
+
+    assert "담당자: [이름2]" in got.text
+    assert got.text.count("[이름1]") == 1
+
+
+@pytest.mark.parametrize("written", ["[이름99999]", "[이름0]", "[이름-1]"])
+def test_a_handwritten_token_cannot_push_the_numbering(written):
+    """글쓴이가 적은 `[이름99999]` 가 다음 번호를 밀어내지 못한다.
+
+    밀어내면 번호가 치솟고, 「몇 사람인가」 를 읽는 사람이 못 센다.
+    """
+    got = sm.mask_sensitive(f"{written} 계약자: 홍길동")
+
+    assert "계약자: [이름1]" in got.text
+
+
+def test_restore_keeps_an_out_of_range_placeholder_as_is():
+    """두 겹째 방어. 앞에서 NUL 을 걷어내지만 그것이 뚫렸을 때를 위한 것이다.
+
+    여기서 `IndexError` 가 나면 수집 경로에서는 **그 회차의 모든 줄**이
+    저장되지 않는다. 한 줄 때문에 전부를 잃는 것이 가장 나쁜 결말이다.
+    """
+    masker = sm._Masker()
+    masker.park("계약자: [이름1]")
+
+    assert masker.restore("\x0099\x00") == "\x0099\x00"
+    assert masker.restore("\x000\x00") == "[이름1]"

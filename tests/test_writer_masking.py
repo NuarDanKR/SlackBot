@@ -196,3 +196,54 @@ def test_masking_does_not_open_a_door_for_bot_output(tmp_path):
     assert got.skipped_bot == 1
     assert "태봇" not in text
     assert got.mask_counts == {}, "버릴 줄을 먼저 가려 횟수가 부풀었다"
+
+
+# --- 6. 줄이 완성된 뒤의 마지막 관문 (보안 검토 2026-11-10) -------------------
+
+
+def test_a_value_that_only_appears_after_newlines_collapse_is_still_masked(tmp_path):
+    """`format_line` 은 줄바꿈을 공백으로 접는다.
+
+    접히면서 떨어져 있던 숫자가 붙어 한 값이 될 수 있다. 어떤 조합이 그렇게
+    되는지 전부 세는 대신 **파일에 들어갈 그 문자열**을 검사한다 — 세다가 하나
+    빠뜨리면 그 하나가 평문으로 남는다.
+    """
+    got = _ingest(tmp_path, _msg("연락처\n010\n1234\n5678\n입니다"))
+
+    text = got.path.read_text(encoding="utf-8")
+    assert "010 1234 5678" not in text
+    assert "[전화번호1]" in text
+    assert got.mask_counts.get("phone") == 1
+
+
+def test_a_nul_byte_in_the_body_does_not_lose_the_whole_batch(tmp_path):
+    """변환 첨부 본문의 NUL 때문에 그 회차가 통째로 사라지지 않는다."""
+    got = _ingest(
+        tmp_path,
+        _msg("첫 줄"),
+        _msg("둘째 \x000\x00 줄", minute=16),
+        _msg("셋째 줄", minute=17),
+    )
+
+    assert got.written == 3
+    text = got.path.read_text(encoding="utf-8")
+    assert "첫 줄" in text and "셋째 줄" in text
+
+
+def test_the_gate_runs_on_the_line_that_actually_goes_into_the_file(tmp_path, monkeypatch):
+    """마지막 관문은 **파일에 들어갈 그 문자열**을 본다.
+
+    줄 조립이 값을 만들어 내는 조합을 전부 세는 대신 결과를 검사한다. 세다가
+    하나 빠뜨리면 그 하나가 평문으로 남는다. 조립 뒤에 평문을 끼워 넣어
+    관문이 실제로 그 자리에 있는지 본다.
+    """
+    original = writer.format_line
+    monkeypatch.setattr(
+        writer, "format_line", lambda msg: f"{original(msg)} {RRN}"
+    )
+
+    got = _ingest(tmp_path, _msg("평범한 보고"))
+
+    text = got.path.read_text(encoding="utf-8")
+    assert "900101" not in text, "조립 뒤에 생긴 평문이 그대로 저장됐다"
+    assert "[주민등록번호1]" in text
