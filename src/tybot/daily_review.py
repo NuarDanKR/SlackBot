@@ -584,6 +584,24 @@ def _archive_channels(archive) -> list[ReviewChannel]:
     ]
 
 
+def _global_channels(conn, archive) -> list[ReviewChannel]:
+    """Every configured or archived source channel in the global review round.
+
+    Reviewer rows provide delivery targets, not eligibility. A channel without a
+    reviewer must still generate candidates and reach the automatic-summary grace.
+    """
+    found: dict[tuple[str, str], str] = {
+        (workspace, channel_id): name
+        for workspace, channel_id, name, _at, _kind, _weekday in _channels(conn)
+    }
+    for workspace, channel_id, name, _at, _kind, _weekday in _archive_channels(archive):
+        found.setdefault((workspace, channel_id), name)
+    return [
+        (workspace, channel_id, name, GLOBAL_REVIEW_AT, "global", None)
+        for (workspace, channel_id), name in sorted(found.items())
+    ]
+
+
 def _force_target(
     channels: list[ReviewChannel],
     targets: list[tuple[str, str]],
@@ -652,6 +670,7 @@ def _write_result(path: str, result, *, unconfigured: list[tuple[str, str]],
         "canvasFallback": result.canvas_fallback if result else 0,
         "statusSent": getattr(result, "status_sent", 0),
         "statusFailed": getattr(result, "status_failed", 0),
+        "autoPromoted": getattr(result, "auto_promoted", 0),
         "generateOnly": bool(generate_only),
         "roundId": round_id,
         "channels": outcomes,
@@ -885,9 +904,13 @@ def main(argv: list[str] | None = None) -> int:
         if problem:
             logger.error("%s", problem)
             return 2
-        # 검토자가 없는 채널도 후보는 만들 수 있다(B-62). 보내지 않는 회차에서만
-        # 목록을 넓힌다 — 평소 회차가 이 목록을 쓰면 보낼 사람 없는 채널을 매번 돈다.
-        channels = _archive_channels(store) if args.generate_only else _channels(conn)
+        # 검토자 행은 전달 대상을 정할 뿐 검토 대상 채널을 정하지 않는다. 검토자가
+        # 없어도 후보를 만들고 B-88 유예시간 뒤 자동 요약으로 전환해야 한다.
+        channels = (
+            _archive_channels(store)
+            if args.generate_only
+            else _global_channels(conn, store)
+        )
         unconfigured: list[tuple[str, str]] = []
         if targets:
             channels = _force_target(channels, targets)
@@ -961,6 +984,7 @@ def main(argv: list[str] | None = None) -> int:
                         sensitivity=Sensitivity.CONFIDENTIAL,
                         max_tokens=4096,
                     )
+                complete_summary.last_model = response.model
                 return response.text
 
             from .gateway.hermes_review import ReviewGenerator
@@ -1018,7 +1042,8 @@ def main(argv: list[str] | None = None) -> int:
         # 실패하는데도 「잘 보내지고 있다」 로 보인다(B-50).
         logger.info(
             "요약 검토 generated=%d sent=%d skipped=%d failed=%d "
-            "canvas=%d fallback=%d ambiguous=%d expired=%d status_sent=%d status_failed=%d",
+            "canvas=%d fallback=%d ambiguous=%d expired=%d auto_promoted=%d "
+            "status_sent=%d status_failed=%d",
             summary_result.generated,
             summary_result.sent,
             summary_result.skipped,
@@ -1027,6 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
             summary_result.canvas_fallback,
             summary_result.canvas_ambiguous,
             summary_result.expired,
+            summary_result.auto_promoted,
             summary_result.status_sent,
             summary_result.status_failed,
         )

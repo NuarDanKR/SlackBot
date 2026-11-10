@@ -79,7 +79,7 @@ END
 $$;
 
 COMMENT ON TABLE channel_reviewer IS
-    '채널별 요약 검토자. 검토자가 없으면 요약을 반영하지 않는다(자동 반영으로 물러서지 않는다).';
+    '채널별 요약 검토자. 전역 회차에서 알리고, 미검토 후보는 설정된 유예시간 뒤 자동 봇 요약으로 전환한다.';
 
 -- 발송 시각 훑기. 1분마다 도는 타이머가 "지금 보낼 것" 을 찾는 경로다.
 CREATE INDEX IF NOT EXISTS channel_reviewer_schedule_due

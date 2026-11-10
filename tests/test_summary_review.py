@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
 from types import SimpleNamespace
@@ -134,6 +134,14 @@ def test_reject_modal_requires_correction():
 
 def test_defer_is_until_tomorrow():
     assert sr.default_defer_date(date(2026, 9, 15)) == date(2026, 9, 16)
+
+
+def test_auto_summary_grace_is_configurable_and_bounded():
+    assert sr.auto_grace_hours({}) == 72
+    assert sr.auto_grace_hours({"SUMMARY_REVIEW_AUTO_GRACE_HOURS": "96"}) == 96
+    assert sr.auto_grace_hours({"SUMMARY_REVIEW_AUTO_GRACE_HOURS": "bad"}) == 72
+    assert sr.auto_grace_hours({"SUMMARY_REVIEW_AUTO_GRACE_HOURS": "0"}) == 1
+    assert sr.auto_grace_hours({"SUMMARY_REVIEW_AUTO_GRACE_HOURS": "9999"}) == 720
 
 
 def test_prompt_budget_does_not_cut_new_originals():
@@ -285,6 +293,70 @@ def test_schema_keeps_approved_summaries_out_of_raw_archive():
     assert "'expired'" in sql
     assert "evidence_hash" in sql
     assert "evidence_channel_id" in sql
+    assert "'auto_bot_summary'" in sql
+    assert "origin IN ('human_approved', 'auto_bot_summary')" in sql
+    for column in ("policy_revision", "model_revision", "generated_at"):
+        assert column in sql
+
+
+def test_unreviewed_candidate_becomes_distinct_auto_summary_after_grace():
+    now = datetime(2026, 11, 13, 17, 0, tzinfo=sr.KST)
+    candidate = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "workspace": "tyit",
+        "channel_id": "C1",
+        "kind": "new_issue",
+        "current_text": "",
+        "proposed_text": "자동 요약 본문",
+        "policy_revision": "summary-review-v3",
+        "model_revision": "claude-sonnet-5",
+        "generated_at": now,
+    }
+
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+            self.sql = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def execute(self, sql, params=()):
+            self.sql = sql
+            self.calls.append((sql, params))
+
+        def fetchall(self):
+            if "RETURNING *" in self.sql:
+                return [candidate]
+            return []
+
+    cursor = Cursor()
+
+    class Conn:
+        def cursor(self):
+            return cursor
+
+        def commit(self):
+            self.committed = True
+
+    conn = Conn()
+    count = sr.Store(conn).promote_unreviewed(
+        "tyit", "C1", now=now, grace_hours=72,
+    )
+
+    assert count == 1
+    update = next(call for call in cursor.calls if "UPDATE summary_review_candidate" in call[0])
+    assert "state='auto_bot_summary'" in update[0]
+    assert update[1][-1] == now - timedelta(hours=72)
+    insert = next(call for call in cursor.calls if "INSERT INTO approved_summary_item" in call[0])
+    assert "'auto_bot_summary'" in insert[0]
+    assert "system:auto_bot_summary" in insert[0]
+    assert candidate["policy_revision"] in insert[1]
+    assert candidate["model_revision"] in insert[1]
+    assert conn.committed
 
 
 def test_the_evidence_coordinate_comes_from_the_archive_not_the_model():
@@ -326,11 +398,16 @@ class _OutcomeStore:
         self._generated = generated
         self.delivered = []
         self.stamped = []
+        self.expire_calls = []
 
     def __call__(self, conn):
         return self
 
     def expire_unconfirmed(self, workspace, channel_id, on):
+        self.expire_calls.append((workspace, channel_id, on))
+        return 0
+
+    def promote_unreviewed(self, workspace, channel_id, *, now, grace_hours):
         return 0
 
     def generated_on(self, workspace, channel_id, on):
@@ -410,6 +487,46 @@ def test_run_says_no_candidates_instead_of_silently_finishing(monkeypatch):
     assert result.sent == 0
     assert client.posted == []
     assert [row.code for row in result.outcomes] == ["no-candidates"]
+
+
+def test_global_run_does_not_expire_candidates_before_the_configured_grace(monkeypatch):
+    _result, _client, store = _outcome_run(
+        monkeypatch, rows=[], reviewers=[], already=set(),
+    )
+
+    assert store.expire_calls == []
+
+
+def test_auto_promotion_failure_in_one_channel_does_not_block_the_next(monkeypatch):
+    from types import SimpleNamespace
+
+    class PromotionStore(_OutcomeStore):
+        def promote_unreviewed(self, workspace, channel_id, *, now, grace_hours):
+            if channel_id == "C1":
+                raise RuntimeError("promotion failed")
+            return 1
+
+    store = PromotionStore(rows=[], reviewers=[], already=set())
+    monkeypatch.setattr(sr, "Store", store)
+
+    result = sr.run(
+        SimpleNamespace(rollback=lambda: None),
+        {},
+        archive=None,
+        channels=[
+            ("tyit", "C1", "첫 채널", dt_time.min),
+            ("tyit", "C2", "둘째 채널", dt_time.min),
+        ],
+        complete=lambda *args, **kwargs: "",
+        now=datetime(2026, 11, 13, 18, 0, tzinfo=sr.KST),
+    )
+
+    assert result.failed == 1
+    assert result.auto_promoted == 1
+    assert [row.code for row in result.outcomes] == [
+        sr.OUTCOME_GENERATE_FAILED,
+        sr.OUTCOME_NO_CANDIDATES,
+    ]
 
 
 def test_run_says_no_reviewer_when_nobody_is_registered(monkeypatch):

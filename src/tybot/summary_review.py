@@ -9,6 +9,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass, field, replace
@@ -17,6 +18,9 @@ from pathlib import Path
 
 KINDS = frozenset({"number_or_schedule", "new_issue", "closed_issue"})
 OPEN_STATES = ("pending", "deferred")
+AUTO_SUMMARY_STATE = "auto_bot_summary"
+SUMMARY_POLICY_REVISION = "summary-review-v3"
+DEFAULT_AUTO_GRACE_HOURS = 72
 ACTION_APPROVE = "tybot_summary_review_approve"
 ACTION_REJECT = "tybot_summary_review_reject"
 ACTION_DEFER = "tybot_summary_review_defer"
@@ -58,6 +62,16 @@ MAX_NEW_SOURCE_CHARS = MAX_SOURCE_CHARS - MAX_APPROVED_CHARS - 500
 MIN_CORRECTION = 5
 KST = timezone(timedelta(hours=9))
 log = logging.getLogger("tybot.summary_review")
+
+
+def auto_grace_hours(env=None) -> int:
+    """Configured human-review grace, clamped to one hour through thirty days."""
+    source = os.environ if env is None else env
+    try:
+        value = int(str(source.get("SUMMARY_REVIEW_AUTO_GRACE_HOURS", "72")))
+    except ValueError:
+        return DEFAULT_AUTO_GRACE_HOURS
+    return max(1, min(value, 24 * 30))
 
 
 class SummaryReviewError(RuntimeError):
@@ -526,20 +540,24 @@ class Store:
         self.conn.commit()
 
     def save_run(self, *, workspace: str, channel_id: str, channel_name: str,
-                 watermark: str, digest: str, proposals: list[Proposal], on: date) -> int:
+                 watermark: str, digest: str, proposals: list[Proposal], on: date,
+                 model_revision: str = "") -> int:
         with self.conn.cursor() as cur:
             for proposal in proposals:
                 cur.execute(
                     """INSERT INTO summary_review_candidate
                     (id,workspace,channel_id,channel_name,run_date,source_digest,kind,current_text,
                     proposed_text,evidence_quote,evidence_at,evidence_author,evidence_locator,
-                     evidence_message_ts,evidence_hash,evidence_channel_id,form)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                     evidence_message_ts,evidence_hash,evidence_channel_id,form,
+                     policy_revision,model_revision,generated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                            %s,%s,now()) ON CONFLICT DO NOTHING""",
                     (uuid.uuid4(), workspace, channel_id, channel_name, on, digest,
                      proposal.kind, proposal.current_text, proposal.proposed_text,
                      proposal.evidence_quote, proposal.evidence_at, proposal.evidence_author,
                      proposal.evidence_locator, proposal.evidence_message_ts,
-                     proposal.evidence_hash, proposal.evidence_channel_id, proposal.form),
+                     proposal.evidence_hash, proposal.evidence_channel_id, proposal.form,
+                     SUMMARY_POLICY_REVISION, model_revision),
                 )
             cur.execute(
                 """INSERT INTO summary_review_cursor(workspace,channel_id,watermark,source_digest)
@@ -570,6 +588,61 @@ class Store:
                 ORDER BY created_at LIMIT %s""", (workspace, channel_id, on, MAX_CANDIDATES),
             )
             return list(cur.fetchall())
+
+    def promote_unreviewed(self, workspace: str, channel_id: str, *, now: datetime,
+                           grace_hours: int) -> int:
+        """Promote old open candidates as bot summaries, never as human approvals."""
+        threshold = now - timedelta(hours=grace_hours)
+        artifacts: list[str] = []
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """UPDATE summary_review_candidate
+                SET state='auto_bot_summary', decided_at=%s,
+                    decided_by='system:auto_bot_summary', correction='', defer_until=NULL
+                WHERE workspace=%s AND channel_id=%s
+                AND state IN ('pending','deferred') AND created_at<=%s
+                RETURNING *""",
+                (now, workspace, channel_id, threshold),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                current = str(row.get("current_text") or "")
+                if current:
+                    cur.execute(
+                        """UPDATE approved_summary_item
+                        SET superseded_at=%s, superseded_by=%s
+                        WHERE workspace=%s AND channel_id=%s AND body=%s
+                        AND superseded_at IS NULL""",
+                        (now, row["id"], workspace, channel_id, current),
+                    )
+                cur.execute(
+                    """INSERT INTO approved_summary_item
+                    (candidate_id,workspace,channel_id,kind,body,approved_by,approved_at,
+                     origin,policy_revision,model_revision,generated_at)
+                    VALUES (%s,%s,%s,%s,%s,'system:auto_bot_summary',%s,
+                            'auto_bot_summary',%s,%s,%s)
+                    ON CONFLICT DO NOTHING""",
+                    (
+                        row["id"], workspace, channel_id, row["kind"],
+                        row["proposed_text"], now,
+                        str(row.get("policy_revision") or "legacy-unknown"),
+                        str(row.get("model_revision") or ""),
+                        row.get("generated_at") or row.get("created_at") or now,
+                    ),
+                )
+            if rows:
+                cur.execute(
+                    """SELECT DISTINCT artifact_id
+                    FROM summary_review_artifact_candidate
+                    WHERE candidate_id = ANY(%s)""",
+                    ([row["id"] for row in rows],),
+                )
+                artifacts = [str(row.get("artifact_id") or "") for row in cur.fetchall()]
+        self.conn.commit()
+        for artifact_id in artifacts:
+            if artifact_id:
+                self.refresh_artifact_state(artifact_id)
+        return len(rows)
 
     def expire_unconfirmed(self, workspace: str, channel_id: str, on: date) -> int:
         """지난 회차에서 확인하지 않은 후보를 승인 없이 폐기한다.
@@ -827,7 +900,9 @@ class Store:
         with self.conn.cursor() as cur:
             cur.execute(
                 """SELECT count(*) AS total,
-                count(*) FILTER (WHERE c.state IN ('approved','rejected')) AS decided,
+                count(*) FILTER (
+                    WHERE c.state IN ('approved','rejected','auto_bot_summary')
+                ) AS decided,
                 count(*) FILTER (WHERE c.state='deferred') AS deferred,
                 count(*) FILTER (WHERE c.state='expired') AS expired
                 FROM summary_review_artifact_candidate m
@@ -1328,6 +1403,7 @@ DECISION_LABELS = {
     "rejected": "수정 필요",
     "deferred": "내일 다시 확인",
     "expired": "미응답 폐기",
+    "auto_bot_summary": "검토 기한 만료 · 자동 봇 요약",
 }
 
 
@@ -1351,7 +1427,7 @@ def _with_decisions(blocks: list[dict], rows: list[dict]) -> list[dict]:
         state = str(row.get("state") or "")
         who = str(row.get("decided_by") or "")
         label = DECISION_LABELS.get(state, state)
-        tail = f" · <@{who}>" if who and state != "deferred" else ""
+        tail = f" · <@{who}>" if who and state in DECIDED_STATES else ""
         out.append({"type": "context", "elements": [
             {"type": "mrkdwn", "text": f"{label}{tail}"}
         ]})
@@ -1788,6 +1864,7 @@ def generate_channel(store: Store, archive, *, workspace: str, channel_id: str,
         workspace=workspace, channel_id=channel_id, channel_name=channel_name,
         watermark=watermark_after, digest=digest, proposals=proposals,
         on=now.astimezone(KST).date(),
+        model_revision=str(getattr(complete, "last_model", "") or ""),
     )
 
 
@@ -1872,6 +1949,7 @@ class FormSummary:
     pending: int = 0
     deferred: int = 0
     expired: int = 0
+    auto_bot_summary: int = 0
 
     @property
     def decided(self) -> int:
@@ -1894,7 +1972,10 @@ def summarize_forms(rows: list[dict]) -> dict[str, FormSummary]:
         count = int(row.get("n") or 0)
         found.total += count
         state = str(row.get("state") or "")
-        if state in {"approved", "rejected", "pending", "deferred", "expired"}:
+        if state in {
+            "approved", "rejected", "pending", "deferred", "expired",
+            "auto_bot_summary",
+        }:
             setattr(found, state, getattr(found, state) + count)
     return out
 
@@ -1974,6 +2055,7 @@ class RunResult:
     canvas_fallback: int = 0
     canvas_ambiguous: int = 0
     expired: int = 0
+    auto_promoted: int = 0
     # 발송 시각이 지난 채널만 들어간다. 아직 시각 전인 채널은 결과가 아니다.
     outcomes: list[ChannelOutcome] = field(default_factory=list)
 
@@ -2197,9 +2279,12 @@ def run(conn, clients: dict, *, archive, channels, complete, owners=None,
             expire_unscoped = getattr(db, "expire_unscoped", None)
             if callable(expire_unscoped):
                 result.expired += expire_unscoped(workspace, channel_id)
-            result.expired += db.expire_unconfirmed(
-                workspace, channel_id, on
-            )
+            promote_unreviewed = getattr(db, "promote_unreviewed", None)
+            if callable(promote_unreviewed):
+                result.auto_promoted += promote_unreviewed(
+                    workspace, channel_id, now=now,
+                    grace_hours=auto_grace_hours(),
+                )
             stats = None
             if not deliver_only and (
                 force_generate or not db.generated_on(workspace, channel_id, on)

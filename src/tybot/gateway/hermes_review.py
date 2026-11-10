@@ -101,9 +101,12 @@ class ReviewGenerator:
         self._credentials = credentials or CredentialStore(
             env.get("TYBOT_SPECIALIST_V3_HMAC_DIR", "/etc/tybot/credentials/specialist-v3"))
         self._transport = transport_factory or UnixSocketTransport
+        self.last_model = ""
 
     def __call__(self, system, user, workspace):
-        return self._legacy(system, user, workspace)
+        result = self._legacy(system, user, workspace)
+        self.last_model = str(getattr(self._legacy, "last_model", "") or "")
+        return result
 
     def review_candidates(self, *, workspace, source, approved, digest):
         if workspace not in self._enabled:
@@ -173,6 +176,7 @@ class ReviewGenerator:
                     body=reply.body, provided=reply.headers.get("x-tybot-signature", "")):
                 raise ReviewRPCError("bad-signature")
             result = validate(_json(reply.body), request)
+            self.last_model = str(result["metrics"]["model"] or "")
             self._router.record_external_review(workspace, result["metrics"], reservation=reservation)
             charged = True
             log.info("review_rpc ws=%s request=%s status=%s proposed=%d accepted=%d",

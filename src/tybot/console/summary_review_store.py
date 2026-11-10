@@ -76,7 +76,9 @@ def rounds(workspaces: list[str] | None = None, *, limit: int = MAX_ROWS) -> lis
                    (SELECT count(*) FROM summary_review_artifact_candidate m
                       JOIN summary_review_candidate c ON c.id = m.candidate_id
                      WHERE m.artifact_id = a.id
-                       AND c.state IN ('approved','rejected')) AS decided,
+                       AND c.state IN (
+                           'approved','rejected','auto_bot_summary'
+                       )) AS decided,
                    (SELECT count(*) FROM summary_review_delivery d
                      WHERE d.artifact_id = a.id AND d.state = 'sent') AS sent,
                    (SELECT count(*) FROM summary_review_delivery d

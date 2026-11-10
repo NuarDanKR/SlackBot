@@ -108,11 +108,11 @@ def _value(row, key: str) -> str:
 
 
 def active_items(workspaces: str | Iterable[str], *, conn=None) -> list[GuideItem]:
-    """길잡이로 쓸 수 있는 승인 항목.
+    """길잡이로 쓸 수 있는 사람 승인 또는 자동 승격 항목.
 
-    **승인이고, 대체되지 않았고, 근거가 어긋나지 않은 것만** 든다. 반려·보류·
-    미응답 폐기 후보와 정정 모달 입력은 여기에 들어올 길이 없다 —
-    `state='approved'` 가 그 문이고, 정정 문장(`correction`)은 아예 읽지 않는다.
+    **발행 상태이고, 대체되지 않았고, 근거가 어긋나지 않은 것만** 든다. 사람 승인과
+    유예시간 만료 자동 승격은 원산지를 구분해 저장한다. 반려·보류·미응답 폐기 후보와
+    정정 모달 입력은 여기에 들어올 길이 없고, 정정 문장(`correction`)은 읽지 않는다.
     """
     if isinstance(workspaces, str):
         scopes = [workspaces.strip()] if workspaces.strip() else []
@@ -135,7 +135,7 @@ def active_items(workspaces: str | Iterable[str], *, conn=None) -> list[GuideIte
                  WHERE a.workspace = ANY(%(workspaces)s)
                    AND a.superseded_at IS NULL
                    AND a.stale_at IS NULL
-                   AND c.state = 'approved'
+                   AND c.state IN ('approved', 'auto_bot_summary')
                    AND c.evidence_hash <> ''
                  ORDER BY a.approved_at DESC
                  LIMIT %(lim)s

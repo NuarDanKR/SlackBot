@@ -107,6 +107,23 @@ def test_configured_channels_ignore_legacy_per_channel_schedules():
     assert channels == [("tyit", "C1", "주간", time(17, 0), "global", None)]
 
 
+def test_global_round_includes_archived_channels_without_a_reviewer(monkeypatch):
+    configured = [("tyit", "C1", "검토 채널", time(17), "global", None)]
+    archived = [
+        ("tyit", "C1", "옛 이름", time.min, "daily", None),
+        ("civil", "C2", "검토자 없음", time.min, "daily", None),
+    ]
+    monkeypatch.setattr(dr, "_channels", lambda conn: configured)
+    monkeypatch.setattr(dr, "_archive_channels", lambda archive: archived)
+
+    got = dr._global_channels(object(), object())
+
+    assert got == [
+        ("civil", "C2", "검토자 없음", time(17), "global", None),
+        ("tyit", "C1", "검토 채널", time(17), "global", None),
+    ]
+
+
 def test_a_run_result_says_which_channel_got_nothing_and_why(tmp_path):
     """종료 코드는 「보낼 것이 없었다」 를 말하지 못한다. 결과 파일이 말한다."""
     from tybot.summary_review import ChannelOutcome, RunResult

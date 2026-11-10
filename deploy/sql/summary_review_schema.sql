@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS summary_review_candidate (
     CONSTRAINT summary_review_candidate_kind
         CHECK (kind IN ('number_or_schedule', 'new_issue', 'closed_issue')),
     CONSTRAINT summary_review_candidate_state
-        CHECK (state IN ('pending', 'approved', 'rejected', 'deferred', 'expired', 'superseded')),
+        CHECK (state IN ('pending', 'approved', 'rejected', 'deferred', 'expired', 'superseded', 'auto_bot_summary')),
     CONSTRAINT summary_review_candidate_unique
         UNIQUE (workspace, channel_id, source_digest, kind, proposed_text)
 );
@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS approved_summary_item (
     body          text NOT NULL,
     approved_by   text NOT NULL,
     approved_at   timestamptz NOT NULL DEFAULT now(),
+    origin        text NOT NULL DEFAULT 'human_approved',
+    policy_revision text NOT NULL DEFAULT 'legacy-unknown',
+    model_revision text NOT NULL DEFAULT '',
+    generated_at  timestamptz NOT NULL DEFAULT now(),
     superseded_at timestamptz,
     superseded_by uuid REFERENCES summary_review_candidate(id)
 );
@@ -84,7 +88,7 @@ ALTER TABLE summary_review_candidate
     DROP CONSTRAINT IF EXISTS summary_review_candidate_state;
 ALTER TABLE summary_review_candidate
     ADD CONSTRAINT summary_review_candidate_state
-    CHECK (state IN ('pending', 'approved', 'rejected', 'deferred', 'expired', 'superseded'));
+    CHECK (state IN ('pending', 'approved', 'rejected', 'deferred', 'expired', 'superseded', 'auto_bot_summary'));
 
 -- 근거 메시지 좌표 (B-56). Canvas의 후보별 출처 링크가 채널이 아니라 그 메시지를
 -- 연다. 좌표를 남기기 전에 수집한 후보는 빈 문자열이고, 그때는 채널 링크로 내려간다.
@@ -116,6 +120,12 @@ ALTER TABLE summary_review_candidate
 ALTER TABLE summary_review_candidate
     ADD COLUMN IF NOT EXISTS form text NOT NULL DEFAULT 'quote';
 ALTER TABLE summary_review_candidate
+    ADD COLUMN IF NOT EXISTS policy_revision text NOT NULL DEFAULT 'legacy-unknown';
+ALTER TABLE summary_review_candidate
+    ADD COLUMN IF NOT EXISTS model_revision text NOT NULL DEFAULT '';
+ALTER TABLE summary_review_candidate
+    ADD COLUMN IF NOT EXISTS generated_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE summary_review_candidate
     DROP CONSTRAINT IF EXISTS summary_review_candidate_form;
 ALTER TABLE summary_review_candidate
     ADD CONSTRAINT summary_review_candidate_form
@@ -127,6 +137,19 @@ ALTER TABLE approved_summary_item
     ADD COLUMN IF NOT EXISTS stale_at timestamptz;
 ALTER TABLE approved_summary_item
     ADD COLUMN IF NOT EXISTS stale_reason text NOT NULL DEFAULT '';
+ALTER TABLE approved_summary_item
+    ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'human_approved';
+ALTER TABLE approved_summary_item
+    ADD COLUMN IF NOT EXISTS policy_revision text NOT NULL DEFAULT 'legacy-unknown';
+ALTER TABLE approved_summary_item
+    ADD COLUMN IF NOT EXISTS model_revision text NOT NULL DEFAULT '';
+ALTER TABLE approved_summary_item
+    ADD COLUMN IF NOT EXISTS generated_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE approved_summary_item
+    DROP CONSTRAINT IF EXISTS approved_summary_item_origin;
+ALTER TABLE approved_summary_item
+    ADD CONSTRAINT approved_summary_item_origin
+    CHECK (origin IN ('human_approved', 'auto_bot_summary'));
 
 -- 검색 길잡이가 매 질문마다 훑는 범위. 살아 있는 항목만 든다.
 CREATE INDEX IF NOT EXISTS approved_summary_guide

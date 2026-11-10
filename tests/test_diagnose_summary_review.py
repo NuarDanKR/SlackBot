@@ -33,12 +33,14 @@ def test_only_human_decisions_count_toward_the_approval_rate():
         _stat("abstract", "pending", 10),
         _stat("abstract", "deferred", 4),
         _stat("abstract", "expired", 20),
+        _stat("abstract", "auto_bot_summary", 5),
     ])
 
     found = folded["abstract"]
-    assert found.total == 38
+    assert found.total == 43
     assert found.decided == 4
     assert found.approval_rate == 0.75
+    assert found.auto_bot_summary == 5
 
 
 def test_no_decision_is_not_a_zero_percent_approval_rate():

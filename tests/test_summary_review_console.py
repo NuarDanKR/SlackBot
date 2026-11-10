@@ -6,6 +6,43 @@ from tybot.console import summary_review_store as store
 KST = timezone(timedelta(hours=9))
 
 
+def test_auto_bot_summaries_are_settled_in_round_counts(monkeypatch):
+    class Cursor:
+        def __init__(self):
+            self.sql = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def execute(self, sql, _params):
+            self.sql = sql
+
+        def fetchall(self):
+            return []
+
+    cursor = Cursor()
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def cursor(self):
+            return cursor
+
+    monkeypatch.setattr(store, "_connect", Conn)
+
+    assert store.rounds() == []
+    assert "'approved','rejected','auto_bot_summary'" in "".join(
+        cursor.sql.split()
+    )
+
+
 def test_schedule_status_reports_no_configured_channels():
     got = store._schedule_status([], now=datetime(2026, 9, 16, 8, 30, tzinfo=KST))
 

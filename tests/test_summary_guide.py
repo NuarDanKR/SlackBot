@@ -161,7 +161,7 @@ def test_only_approved_live_items_are_read(tmp_path):
     summary_guide.active_items("pilot", conn=conn)
 
     sql = conn.sql[0][0]
-    assert "c.state = 'approved'" in sql
+    assert "c.state IN ('approved', 'auto_bot_summary')" in sql
     assert "a.superseded_at IS NULL" in sql
     assert "a.stale_at IS NULL" in sql
     assert "a.workspace = ANY(%(workspaces)s)" in sql
