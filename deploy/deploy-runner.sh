@@ -39,6 +39,7 @@ detail_path = Path(os.environ["DEPLOY_DETAIL_FILE"]) if os.environ.get("DEPLOY_D
 detail = detail_path.read_text(encoding="utf-8", errors="replace") if detail_path else ""
 write_status(
     state,
+    scope=os.environ.get("DEPLOY_SCOPE", "all"),
     actor=actor,
     before=before,
     after=after,
@@ -66,12 +67,19 @@ from tybot.deploy_request import consume_request
 req = consume_request() or {}
 print(req.get("actor", "unknown"))
 print(req.get("approval_id", ""))
+print(req.get("scope", "all"))
 PYEOF
 )
 ACTOR=${REQUEST_META[0]:-unknown}
 APPROVAL_ID=${REQUEST_META[1]:-}
+# 범위는 고정 목록에서만 고른다. 요청 파일의 값을 그대로 넘기지 않는다.
+case "${REQUEST_META[2]:-all}" in
+  console) SCOPE=console ;;
+  *)       SCOPE=all ;;
+esac
+export DEPLOY_SCOPE="$SCOPE"
 [[ -n "$ACTOR" ]] || ACTOR=unknown
-log "배포 요청 수신 actor=$ACTOR branch=$BRANCH"
+log "배포 요청 수신 actor=$ACTOR branch=$BRANCH scope=$SCOPE"
 
 BEFORE=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)
 BEFORE_TITLE=$(git -C "$SRC" log -1 --format=%s 2>/dev/null || true)
@@ -84,7 +92,8 @@ status running "$ACTOR" "$BEFORE" "" "배포 진행 중" "$BEFORE_TITLE" "" "$AP
 : > "$OUTPUT"
 chmod 600 "$OUTPUT"
 set +e
-TYBOT_SRC="$SRC" TYBOT_BRANCH="$BRANCH" bash "$APP/deploy/update.sh" 2>&1 | tee "$OUTPUT"
+TYBOT_SRC="$SRC" TYBOT_BRANCH="$BRANCH" TYBOT_DEPLOY_SCOPE="$SCOPE" \
+  bash "$APP/deploy/update.sh" 2>&1 | tee "$OUTPUT"
 UPDATE_RC=${PIPESTATUS[0]}
 set -e
 
@@ -100,6 +109,13 @@ if ((UPDATE_RC == 0)); then
       "$APPROVAL_ID"
     log "배포 완료 $BEFORE -> $AFTER"
   fi
+elif ((UPDATE_RC == 3)); then
+  # 콘솔 배포를 거절했다. 운영은 아무것도 바뀌지 않았다.
+  DEPLOY_DETAIL_FILE="$OUTPUT" status failed "$ACTOR" "$BEFORE" "$AFTER" \
+    "봇 코드가 바뀌어 있어 콘솔만 배포할 수 없습니다. 「봇 배포」 로 진행하세요. 운영은 바뀌지 않았습니다." \
+    "$BEFORE_TITLE" "$AFTER_TITLE" "$APPROVAL_ID"
+  log "콘솔 배포 거절(봇 변경 포함)"
+  exit 1
 else
   DEPLOY_DETAIL_FILE="$OUTPUT" status failed "$ACTOR" "$BEFORE" "$AFTER" \
     "배포에 실패했습니다. 아래 실패 사유를 확인하세요." "$BEFORE_TITLE" "$AFTER_TITLE" \

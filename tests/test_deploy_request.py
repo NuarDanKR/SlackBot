@@ -170,3 +170,14 @@ def test_deploy_failure_detail_is_limited_and_redacted():
     assert "xoxb-***" in status["detail"]
     assert "secretvalue123" not in status["detail"]
     assert len(status["detail"].splitlines()) <= dr.MAX_DETAIL_LINES
+
+
+def test_scope_is_recorded_and_unknown_scope_refused():
+    assert dr.request_deploy("a@b.c", scope="nuke")["ok"] is False
+    assert dr.request_deploy("a@b.c", scope="console")["ok"] is True
+    assert dr.console_status()["scope"] == "console"
+    assert dr.consume_request()["scope"] == "console"
+    dr.write_status("ok", actor="a@b.c", scope="console")
+    assert dr.console_status()["scope"] == "console"
+    dr.write_status("ok", actor="a@b.c", scope="weird")
+    assert dr.console_status()["scope"] == "all"

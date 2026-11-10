@@ -473,6 +473,22 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]] && ! grep -qE "^CONSOLE_DIST=.+" "$CONF_DIR
   echo "  → CONSOLE_DIST 를 추가했습니다: $APP_DIR/console-web/dist"
 fi
 
+# 콘솔 세션 서명 키. 없으면 콘솔이 뜰 때마다 임시 키를 새로 만들어, **재시작할 때마다
+# 모두 로그아웃된다**(배포 한 번 = 전원 재로그인). 콘솔 배포를 따로 하게 되면서 재시작이
+# 잦아져 고정한다. 값은 서버에서 만들고 저장소에는 두지 않는다(원칙 6).
+#
+# **이미 있으면 절대 덮지 않는다.** 바꾸면 그 순간 전원이 한 번 로그아웃된다.
+if [[ "${WITH_CONSOLE:-0}" == "1" ]] && ! grep -qE "^CONSOLE_SECRET=.{32,}" "$CONF_DIR/tybot.env"; then
+  if grep -qE "^CONSOLE_SECRET=.+" "$CONF_DIR/tybot.env"; then
+    echo "  ⚠ CONSOLE_SECRET 이 32자보다 짧습니다. 그대로 둡니다 — 바꾸려면 직접 고치세요." >&2
+  else
+    sed -i -E "/^CONSOLE_SECRET=[[:space:]]*$/d" "$CONF_DIR/tybot.env"
+    printf 'CONSOLE_SECRET=%s\n' "$("$APP_DIR/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+      >> "$CONF_DIR/tybot.env"
+    echo "  → CONSOLE_SECRET 을 만들었습니다. 이번 재시작 뒤로는 콘솔을 재시작해도 로그인이 유지됩니다."
+  fi
+fi
+
 # 워크스페이스 Slack 토큰 암호화 키. 콘솔의 워크스페이스 관리가 이것 없이는
 # 아무것도 저장하지 못한다("WORKSPACE_SECRET_KEY 또는 ...가 필요합니다").
 # 문서에만 있던 수동 절차라 실제로 빠져 있었다.
