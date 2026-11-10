@@ -104,7 +104,7 @@ List는 일반 파일과 호출 방식, 페이지네이션, scope, rate limit, p
 
 ## 실측 도구 (2026-11-10, Claude)
 
-`scripts/probe_slack_lists.py` · 시험 `tests/test_probe_slack_lists.py` (37건).
+`scripts/probe_slack_lists.py` · 시험 `tests/test_probe_slack_lists.py` (41건).
 
 ```bash
 sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/probe_slack_lists.py \
@@ -112,8 +112,27 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/probe_slack_lists.p
     --fixture /var/lib/tybot/reports/lists-probe-2026-11-10.json
 ```
 
-**아직 실행하지 않았다.** 등록 채널 하나와 그 워크스페이스의 봇 토큰이 필요하고,
-그것은 서버에서 사람이 한다.
+**아직 실행하지 않았다.** 등록 채널 하나가 필요하고, 그것은 서버에서 사람이 한다.
+
+### 토큰은 콘솔 DB 에서 온다 (2026-11-10 수정)
+
+처음에는 `SLACK_BOT_TOKEN_<WS>` 환경변수를 읽었고, 서버에서 바로
+`봇 토큰을 찾지 못했습니다` 로 멈췄다. **이 저장소에서 Slack 토큰의 정본은
+DB 다**(`bot_connection` · `bot_connection_secret`, 콘솔이 관리).
+
+env 를 따로 읽는 것은 못 찾는 것보다 나쁜 결말을 가진다 — 콘솔에서 토큰을 갈아
+끼운 날 이 스크립트만 옛 토큰으로 돌고, 그 결과를 「그 봇이 List 를 못 본다」 로
+읽게 된다. 실측이 **틀린 결론**을 내고, 그 결론으로 구현을 멈추거나 시작한다.
+
+`console.bot_identity.runtime_tokens(workspace, bot_key)` 를 쓴다. 그 함수는
+`state='enabled'` 이고 신원 확인을 통과한 연결만 돌려준다 — 꺼 둔 연결의 토큰으로
+재면 운영에서 실제로 쓰이지 않을 권한을 보게 된다.
+
+기본 봇은 **`archiver`** 다(`--bot` 으로 바꿀 수 있다). Lists 수집은 Archiver 의
+일이므로 실측도 같은 토큰으로 해야 「이 봇이 볼 수 있나」 가 실제 답이 된다.
+TYBot 토큰으로 재면 Archiver 에 없는 권한을 있는 것으로 읽는다.
+
+`DATABASE_URL` 만 `/etc/tybot/tybot.env` 에서 읽는다.
 
 ### 이 도구가 하지 않는 것
 
@@ -153,8 +172,10 @@ Slack 이 거절하지만 **그 거절은 요청이 나간 뒤에 온다.** 이�
 | 가시성 확인 | 같은 채널 공유만 통과 · 타 채널만 공유는 불가 · 조회 실패는 `unverified` |
 | 등록 채널 1개 | `filetype=list` 만 시작점 · 채널 목록 조회 실패는 「없음」 아님 |
 | 기록에 본문 없음 | 보고서에 원문·파일명·ID 가 없음 · `print` 가 응답 필드를 안 꺼냄 |
+| 토큰은 DB | `runtime_tokens` 사용 · env 미사용 · 기본 봇 `archiver` · 실패 시 예외 클래스만 출력 |
 
-돌연변이 7종(반쪽 목록을 완료로 · 미완에 가시성 조회 · 가시성 실패를 통과로 ·
+돌연변이 10종(토큰을 env 에서 읽기 · 기본 봇을 TYBot 으로 · 예외를 그대로
+출력 · 반쪽 목록을 완료로 · 미완에 가시성 조회 · 가시성 실패를 통과로 ·
 타 채널 공유를 통과로 · ID 평문 기록 · 문자열 `attachment` 허용 · `list` 아닌
 filetype 수집) **전부 잡힘.**
 
