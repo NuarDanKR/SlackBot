@@ -1,0 +1,87 @@
+# Slack Lists 행 첨부 파일 누락 조사와 구현 계약
+
+작성 2026-11-10. **아직 제품 코드를 고치거나 실제 Slack 데이터를 읽지 않았다.**
+운영 제보를 재현하기 전에 현재 코드와 Slack 공식 API 계약을 대조한 기록이다.
+
+## 결론
+
+현재 TYBot 수집 경로는 일반 메시지 첨부, 채널별 `files.list`, Canvas가 가리키는
+파일 ID를 처리한다. 그러나 Slack List의 행을 여는 API 호출은 없고 앱 manifest에도
+`lists:read`가 없다. List 행의 첨부 파일이 기존 경로로 우연히 노출되지 않는다면
+아카이브·변환·검색에서 빠질 수밖에 없는 구조다.
+
+이것은 모델의 "학습" 문제가 아니다. 모델에 전달할 원문 좌표가 수집 단계에서 생기지
+않는 문제다.
+
+## 공식 API에서 확인한 사실
+
+- [`slackLists.items.list`](https://docs.slack.dev/reference/methods/slackLists.items.list/)는
+  List의 행을 페이지 단위로 읽으며 bot token의 `lists:read`가 필요하다.
+- 행 필드에는 파일 ID 배열인 `attachment`가 올 수 있고, 링크 필드에는
+  `link[].file.file_id`가 올 수 있다. 텍스트에서 파일 URL을 추측할 필요가 없다.
+- Slack List 자체는 [`slackLists.items.info`](https://docs.slack.dev/reference/methods/slackLists.items.info/)
+  응답에서 `filetype=list`, `mimetype=application/vnd.slack-list`인 파일로 표현된다.
+- Lists API는 [2025년 9월 공개 API로 추가](https://docs.slack.dev/changelog/2025/09/02/list-api/)됐다.
+  현재 저장소에는 이 API를 호출하는 코드가 없다.
+
+## 현재 코드와의 차이
+
+`src/tybot/archive/channel_files.py`는 의도적으로 `files.list(channel=...)`만 호출해
+등록 채널 밖을 훑지 않는다. `referenced_files()`도 이미 알고 있는 파일 ID에 대해
+`files.info`를 호출할 뿐이다. List 자체가 채널 파일 목록에 보이더라도 그 행을 열어
+첨부 ID를 추출하는 단계가 없다.
+
+따라서 기존 B-45/B-46을 넓혀 암묵적으로 처리하지 않고 B-90으로 별도 관리한다.
+List는 일반 파일과 호출 방식, 페이지네이션, scope, rate limit, provenance가 다르다.
+
+## 닫힌 수집 절차
+
+1. 승인된 관리 채널 하나에서 `files.list(channel=...)`로 `filetype=list`를 찾는다.
+2. 각 List에 `slackLists.items.list(list_id=..., cursor=...)`를 호출해 마지막 페이지까지
+   읽는다. 한 페이지라도 실패하면 그 List 전체를 이번 회차에 적용하지 않는다.
+3. 각 행 필드의 `attachment[]`와 `link[].file.file_id`만 추출한다. 행 텍스트와 일반
+   URL은 파일 좌표로 해석하지 않는다.
+4. 중복 파일 ID마다 `files.info`를 호출하고 현재 관리 채널에서의 가시성을 다시 확인한다.
+   확인할 수 없으면 다운로드하지 않는다.
+5. 검증된 파일 객체만 기존 `stage_files`와 attachment writer로 보낸다. 별도 다운로드,
+   변환기, 정본 형식을 만들지 않는다.
+6. provenance에 workspace, channel_id, list_id, row_id, column_id, file_id를 남긴다.
+   감사 로그에는 ID와 건수만 남기고 행 본문이나 파일 내용을 남기지 않는다.
+
+## 먼저 해야 할 읽기 전용 실측
+
+- 저장소는 현재 `slack_sdk==3.43.0`을 고정하고 있고, 로컬에 설치된 `WebClient`에는
+  `slackLists_items_list` 편의 메서드가 없다. SDK 업그레이드의 기존 Slack 경로 회귀를
+  먼저 검증하거나, 기존 SDK의 명시적 `api_call("slackLists.items.list", ...)`을 작은
+  어댑터 안에서만 사용할지 결정한다. 제품 코드 곳곳에 문자열 API 호출을 흩뿌리지 않는다.
+- 실제 응답에서 List ID, row ID, column ID와 첨부 필드 모양을 비식별 fixture로 만든다.
+- `files.list(channel=...)` 결과의 List가 정말 해당 관리 채널에 연결됐는지 확인한다.
+- 행 첨부 파일의 `files.info`가 `channels`/`groups`에 같은 채널을 싣는지 확인한다.
+  싣지 않는다면 List 접근권한과 파일 접근권한을 결합하는 공식 계약을 추가 조사한 뒤
+  구현을 멈춘다. 가시성을 추측해서 통과시키지 않는다.
+- API pagination과 rate limit 응답을 기록한다. 일부 행만 읽고 완료로 표시하지 않는다.
+
+실측 명령은 기본적으로 응답 구조와 건수만 출력해야 한다. 파일 다운로드, archive 쓰기,
+행 본문 출력은 하지 않는다.
+
+## 시험 계약
+
+- attachment와 link-file 두 형식이 같은 기존 staging 경로에 도달한다.
+- 메시지/파일 탭/Canvas/List에 중복 노출된 파일은 한 revision만 쓴다.
+- 관리 밖 채널의 List, 비활성 채널, 파일 가시성 미확인, malformed ID는 모두 거절한다.
+- 중간 페이지 실패와 rate limit은 `없음`이 아니라 재개 가능한 실패다.
+- dry-run은 Slack 읽기 외 파일 다운로드·DB·archive 쓰기가 0건이다.
+- Archiver에는 `lists:read`만 있고 `lists:write`는 없다. TYBot/VIPBot에는 수집 scope를
+  넣지 않는다.
+- B-86 마스킹 이전의 본문이 staging metadata, 로그, spill, 감사 기록에 남지 않는다.
+- 실제 Slack 검증에서 첨부 정본, 검색 적중, 출처 좌표가 같은 파일 ID로 이어진다.
+
+## 범위 밖
+
+- List 행의 일반 텍스트를 원문으로 아카이빙하는 것
+- List를 만들거나 수정하는 것
+- 워크스페이스 전체 List 스캔
+- VIPBot의 별도 수집기
+- List 행 변경 이벤트가 있다고 가정한 실시간 동기화
+
+이 항목들은 별도 오너 결정과 권한·보존 계약 없이는 추가하지 않는다.
