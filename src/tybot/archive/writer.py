@@ -185,6 +185,45 @@ def _new_doc(
     )
 
 
+_MASK_TYPES_RE = re.compile(r"^mask_types:\s*\[(?P<v>[^\]]*)\]\s*$", re.MULTILINE)
+_MASK_REVISION_RE = re.compile(r"^mask_revision:\s*(?P<v>\S*)\s*$", re.MULTILINE)
+
+
+def _merge_mask_frontmatter(body: str, counts: dict[str, int], revision: str) -> str:
+    """`masked` · `mask_types` · `mask_revision` 을 프론트매터에 **합친다.**
+
+    문서는 날마다 덧붙으므로 덮어쓰면 안 된다. 어제 가린 유형이 오늘 회차에
+    없다고 지우면 「이 문서에 가린 것이 있나」 가 거짓이 된다 — 그 값을 보고
+    원문을 신뢰할지 정하는 쪽이 있다.
+
+    횟수는 적지 않는다. 날마다 더해 봐야 운영에 쓸 곳이 없고, 어느 날 몇 건이
+    가려졌는지는 그 자체로 원문 추정의 단서가 된다.
+    """
+    types = sorted({code for code in counts if counts[code]})
+    if not types:
+        return body
+    found = _MASK_TYPES_RE.search(body)
+    if found:
+        existing = [t.strip() for t in found.group("v").split(",") if t.strip()]
+        merged = ", ".join(sorted(set(existing) | set(types)))
+        body = body[: found.start()] + f"mask_types: [{merged}]" + body[found.end() :]
+    else:
+        merged = ", ".join(types)
+        body = body.replace(
+            "doc_count:",
+            f"masked: true\nmask_types: [{merged}]\nmask_revision: {revision}\n"
+            "doc_count:",
+            1,
+        )
+        return body
+    spot = _MASK_REVISION_RE.search(body)
+    if spot and revision:
+        body = body[: spot.start()] + f"mask_revision: {revision}" + body[spot.end() :]
+    if "\nmasked:" not in body:
+        body = body.replace("doc_count:", "masked: true\ndoc_count:", 1)
+    return body
+
+
 def format_line(msg: IncomingMessage) -> str:
     """원문 한 줄. Slack 메시지 ts 는 **시각 칸 안에** 적는다.
 
@@ -457,6 +496,15 @@ def _ingest_locked(
                 + f"doc_count: {int(counted.group(1)) + len(lines)}"
                 + body[counted.end() :]
             )
+        # 이 문서에 **가린 것이 있다**는 사실을 남긴다(B-86).
+        #
+        # 유형과 정책 판만 적는다. 가린 값도, 몇 번째 줄이었는지도 적지 않는다 —
+        # 줄 번호가 있으면 그 줄만 들어내 원문 추정을 시작할 수 있다.
+        #
+        # **지우지 않고 합친다.** 문서는 날마다 덧붙으므로, 오늘 가릴 것이
+        # 없었다고 어제의 기록을 지우면 「이 문서에 가린 것이 있나」 가 거짓이 된다.
+        if mask_counts:
+            body = _merge_mask_frontmatter(body, mask_counts, mask_revision)
         validate(body, path=str(path))
         if not RAW_HEADING_RE.search(body):
             raise SchemaError(f"{path}: '## 원문' 섹션 유실")

@@ -146,3 +146,53 @@ def test_a_value_the_model_invented_is_masked_too():
 
     assert PHONE not in got
     assert "[전화번호1]" in got
+
+
+# --- 4. 근거 한 줄도 가린다 (보안 검토 2026-11-10) ----------------------------
+
+
+def test_the_search_terms_in_the_evidence_note_are_masked():
+    """검색어는 **질문에서 왔다.**
+
+    「홍길동 연락처 알려줘」 라고 물으면 그 말이 그대로 근거 줄에 실린다.
+    본문만 가리면 가린 답변 바로 아래 줄에 평문이 남는다.
+    """
+    got = Answer(
+        "확인했습니다", ["#팀_자금(ABB540)_주간보고, 📄2026-11.md"], "m", 0.0, 1,
+        "answered", terms=["계약자: 홍길동", PHONE],
+    ).to_slack()
+
+    assert "홍길동" not in got
+    assert PHONE not in got
+    assert "[이름1]" in got or "[전화번호1]" in got
+
+
+def test_a_withheld_attachment_name_is_masked():
+    """못 읽은 첨부의 **파일명**이 근거 줄에 실린다.
+
+    `홍길동_주민등록증.pdf` 같은 이름이 그대로 나가면, 읽지 못한 파일의 내용을
+    가린 것이 무의미해진다.
+    """
+    got = Answer(
+        "확인했습니다", ["#팀, 📄a.md"], "m", 0.0, 1, "answered",
+        withheld=[f"계약자: 홍길동_{RRN}.pdf"],
+    ).to_slack()
+
+    assert "홍길동" not in got
+    assert "900101" not in got
+
+
+def test_the_note_still_says_what_it_needs_to_say():
+    """가리는 것이 설명을 지우는 것으로 되돌아가면 안 된다."""
+    got = Answer(
+        "확인했습니다",
+        ["#팀_자금(ABB540)_주간보고, 📄a.md", "#팀_자금(ABB540)_주간보고, 📄b.md"],
+        "claude-sonnet-5", 0.0, 3, "answered",
+        terms=["기성금"],
+    ).to_slack()
+
+    assert "기성금" in got
+    # `doc_count` 는 출처 건수에서 나오는 파생값이다.
+    assert "문서 2건" in got
+    assert "원문 3줄 사용" in got
+    assert "claude-sonnet-5" in got

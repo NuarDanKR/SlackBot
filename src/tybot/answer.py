@@ -479,7 +479,14 @@ class Answer:
         # 가리면 사람이 확인하러 갈 자리를 잃는다(원칙 2).
         body = mask_sensitive(self.text).text
         parts = [body if preserve_markdown else fix_markdown_tables(body)]
-        note = self.evidence_note()
+        # **근거 한 줄도 가린다.**
+        #
+        # 그 줄에는 검색어(`terms`)와 못 읽은 첨부의 **파일명**(`withheld`)이
+        # 들어간다. 검색어는 질문에서 왔으므로 「홍길동 연락처 알려줘」 가
+        # 그대로 실리고, 파일명은 `홍길동_주민등록증.pdf` 일 수 있다.
+        #
+        # 본문만 가리면 가린 답변 바로 아래 줄에 평문이 남는다.
+        note = mask_sensitive(self.evidence_note()).text
         if note:
             parts.append(note)
         if self.citations:

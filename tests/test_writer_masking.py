@@ -21,6 +21,7 @@ import pytest
 from tybot.archive import writer
 
 RRN = "900101-1234567"
+PHONE = "010-1234-5678"
 BARE_RRN = "9001011234567"
 SECRETS = ("900101", "1234567", "홍길동", "hong@ty.com", "010-1234-5678")
 
@@ -247,3 +248,76 @@ def test_the_gate_runs_on_the_line_that_actually_goes_into_the_file(tmp_path, mo
     text = got.path.read_text(encoding="utf-8")
     assert "900101" not in text, "조립 뒤에 생긴 평문이 그대로 저장됐다"
     assert "[주민등록번호1]" in text
+
+
+# --- 7. 프론트매터에 사실만 남는다 --------------------------------------------
+
+
+def _front(path) -> str:
+    return path.read_text(encoding="utf-8").split("---")[1]
+
+
+def test_the_frontmatter_records_that_something_was_masked(tmp_path):
+    got = _ingest(tmp_path, _msg(f"성명: 홍길동 / {RRN}"))
+
+    front = _front(got.path)
+    assert "masked: true" in front
+    assert "mask_revision: mask-v1" in front
+    assert "mask_types: [name, rrn]" in front
+
+
+def test_the_frontmatter_holds_no_value_and_no_line_number(tmp_path):
+    """횟수도 줄 번호도 적지 않는다.
+
+    어느 줄이 가려졌는지 알면 그 줄만 들어내 원문 추정을 시작할 수 있다.
+    """
+    got = _ingest(tmp_path, _msg(f"성명: 홍길동 / {RRN} / {PHONE}"))
+
+    front = _front(got.path)
+    for secret in SECRETS:
+        assert secret not in front
+    assert "mask_counts" not in front
+
+
+def test_a_clean_document_says_nothing_about_masking(tmp_path):
+    """가릴 것이 없었는데 `masked` 가 서면 프론트매터가 거짓말을 한다."""
+    got = _ingest(tmp_path, _msg("기성금 3억 청구"))
+
+    front = _front(got.path)
+    assert "masked:" not in front
+    assert "mask_types" not in front
+
+
+def test_a_later_clean_batch_does_not_erase_yesterdays_record(tmp_path):
+    """문서는 날마다 덧붙는다. 덮어쓰면 기록이 사라진다.
+
+    그 값을 보고 원문을 신뢰할지 정하는 쪽이 있다.
+    """
+    first = _ingest(tmp_path, _msg(f"성명: 홍길동 / {RRN}"))
+    second = _ingest(tmp_path, _msg("기성금 3억 청구", minute=20))
+
+    assert second.path == first.path
+    front = _front(second.path)
+    assert "masked: true" in front
+    assert "mask_types: [name, rrn]" in front
+
+
+def test_a_new_type_is_merged_into_the_existing_list(tmp_path):
+    _ingest(tmp_path, _msg("성명: 홍길동"))
+    got = _ingest(tmp_path, _msg(f"연락처 {PHONE}", minute=20))
+
+    front = _front(got.path)
+    assert "mask_types: [name, phone]" in front
+    assert front.count("masked: true") == 1
+
+
+@pytest.mark.parametrize("counts", [{}, {"rrn": 0}, {"rrn": 0, "name": 0}])
+def test_merging_nothing_leaves_the_frontmatter_untouched(counts):
+    """두 겹째 가드. 호출부가 이미 막지만 그 가드가 빠지는 날이 온다.
+
+    가릴 것이 없는데 `masked: true` 가 서면 프론트매터가 거짓말을 하고, 그
+    값을 보고 원문을 신뢰할지 정하는 쪽이 틀린 판단을 한다.
+    """
+    body = "---\nschema_version: 2\ndoc_count: 0\n---\n"
+
+    assert writer._merge_mask_frontmatter(body, counts, "mask-v1") == body
