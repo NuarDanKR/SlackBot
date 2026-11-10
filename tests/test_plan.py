@@ -288,8 +288,14 @@ def test_llm_failure_does_not_guess_a_followup_scope():
 
 
 def test_planner_prompt_asks_for_task_list():
-    router = FakeRouter([_tasks({"kind": "status", "question": "상태"})])
-    plan("상태", router)
+    """**확정 명령이 아닌** 질문으로 본다.
+
+    `상태`·`도움말`·수집 명령은 규칙이 바로 확정하고 LLM 을 부르지 않는다
+    (`_deterministic_plan`). 그런 질문으로 프롬프트를 검사하면 호출이 0건이라
+    시험이 무엇을 보는지와 무관하게 깨진다.
+    """
+    router = FakeRouter([_tasks({"kind": "search", "question": "기성금 얼마야"})])
+    plan("기성금 얼마야", router)
     system = router.calls[0][0].content
     assert '"tasks"' in system
     assert "하위질문" in system
