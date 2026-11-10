@@ -29,6 +29,12 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/probe_slack_lists.p
 
 `--channel` 은 **콘솔에 등록된 관리 채널 하나**여야 한다. 워크스페이스 전체를
 훑는 선택지는 없다(계약 §범위 밖).
+
+토큰은 **콘솔 DB** 에서 온다(`bot_connection` · `console/bot_identity`).
+환경변수를 보지 않는다 — 이 저장소에서 Slack 토큰의 정본은 DB 이고, env 로 따로
+읽으면 콘솔에서 토큰을 갈아 끼운 날 이 스크립트만 옛 토큰으로 돌아
+「그 봇이 못 본다」 는 **틀린 결론**이 나온다. `DATABASE_URL` 만
+`/etc/tybot/tybot.env` 에서 읽는다.
 """
 
 from __future__ import annotations
@@ -36,7 +42,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -66,6 +71,28 @@ FORBIDDEN_METHODS = (
     "slackLists_access_set",
     "slackLists_access_delete",
 )
+
+
+#: 기본으로 읽을 봇. **Lists 수집은 Archiver 의 일이다**(B-90 권한 계약) —
+#: 답변 런타임(TYBot·VIPBot)에 수집 책임을 더하지 않는다. 실측도 같은 토큰으로
+#: 해야 「이 봇이 볼 수 있나」 가 실제 답이 된다.
+ARCHIVER_BOT = "archiver"
+
+
+def bot_token(workspace: str, bot_key: str) -> str:
+    """콘솔 DB(`bot_connection`)에서 봇 토큰 하나.
+
+    **환경변수를 보지 않는다.** 이 저장소에서 Slack 토큰의 정본은 DB 다
+    (`console/bot_identity`). env 로 따로 읽으면 콘솔에서 토큰을 갈아 끼운 날
+    이 스크립트만 옛 토큰으로 돌고, 그 결과를 「그 봇이 못 본다」 로 읽게 된다.
+
+    `runtime_tokens` 는 **enabled + 신원 확인 통과**만 돌려준다. 꺼 둔 연결의
+    토큰으로 실측하면 운영에서 실제로 쓰이지 않을 권한을 보게 된다.
+    """
+    from tybot.console.bot_identity import runtime_tokens
+
+    token, _app_token = runtime_tokens(workspace, bot_key)
+    return token
 
 
 def _as_list(value: object) -> list:
@@ -259,6 +286,10 @@ def main() -> int:
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--channel", required=True, help="콘솔에 등록된 관리 채널 하나")
     ap.add_argument(
+        "--bot", default=ARCHIVER_BOT,
+        help=f"어느 봇의 토큰으로 읽을까 (기본 {ARCHIVER_BOT})",
+    )
+    ap.add_argument(
         "--fixture", default="", help="비식별 fixture 를 쓸 경로(선택)"
     )
     args = ap.parse_args()
@@ -266,11 +297,15 @@ def main() -> int:
     from tybot.envfile import load_env_file
 
     load_env_file()
-    token = os.getenv(f"SLACK_BOT_TOKEN_{args.workspace.upper()}") or os.getenv(
-        "SLACK_BOT_TOKEN"
-    )
-    if not token:
-        print("봇 토큰을 찾지 못했습니다. TYBOT_ENV_FILE 을 확인하세요.")
+    try:
+        token = bot_token(args.workspace, args.bot)
+    except Exception as exc:  # noqa: BLE001 - 사유만 보이고 값은 보이지 않는다
+        print(f"봇 토큰을 가져오지 못했습니다: {type(exc).__name__}")
+        print(
+            "콘솔 > 봇 연결에서 "
+            f"{args.workspace}/{args.bot} 이 enabled 이고 신원 확인을 통과했는지 "
+            "확인하세요. DATABASE_URL 은 /etc/tybot/tybot.env 에 있습니다."
+        )
         return 2
 
     from slack_sdk import WebClient

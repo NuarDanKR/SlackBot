@@ -424,3 +424,57 @@ def test_only_list_filetypes_are_taken_from_the_channel():
 
     assert failure == ""
     assert [item["id"] for item in found] == [LIST_ID]
+
+
+# --- 7. 토큰은 콘솔 DB 에서 온다 -----------------------------------------------
+
+
+def test_the_token_comes_from_the_console_database_not_the_environment():
+    """이 저장소에서 Slack 토큰의 정본은 **DB** 다(`bot_connection`).
+
+    env 로 따로 읽으면 콘솔에서 토큰을 갈아 끼운 날 이 스크립트만 옛 토큰으로
+    돌고, 그 결과를 「그 봇이 못 본다」 로 읽게 된다 — 실측이 틀린 결론을 낸다.
+    """
+    body = SOURCE.read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert "runtime_tokens" in code
+    assert "SLACK_BOT_TOKEN" not in code, "환경변수에서 토큰을 읽는다"
+    assert "os.getenv" not in code
+
+
+def test_only_a_verified_enabled_connection_is_used(monkeypatch):
+    """`runtime_tokens` 는 enabled + 신원 확인 통과만 돌려준다.
+
+    꺼 둔 연결의 토큰으로 실측하면 운영에서 실제로 쓰이지 않을 권한을 본다.
+    """
+    called: list = []
+    import tybot.console.bot_identity as identity
+
+    monkeypatch.setattr(
+        identity, "runtime_tokens",
+        lambda ws, key: called.append((ws, key)) or ("xoxb-test", "xapp-test"),
+    )
+
+    assert probe.bot_token("tyit", "archiver") == "xoxb-test"
+    assert called == [("tyit", "archiver")]
+
+
+def test_the_default_bot_is_the_archiver():
+    """Lists 수집은 Archiver 의 일이다(B-90 권한 계약).
+
+    실측도 같은 토큰으로 해야 「이 봇이 볼 수 있나」 가 실제 답이 된다. TYBot
+    토큰으로 재 보면 Archiver 에 없는 권한을 있는 것으로 읽는다.
+    """
+    assert probe.ARCHIVER_BOT == "archiver"
+    assert 'default=ARCHIVER_BOT' in SOURCE.read_text(encoding="utf-8")
+
+
+def test_a_token_failure_prints_a_reason_and_never_the_token():
+    body = SOURCE.read_text(encoding="utf-8")
+
+    # 예외를 그대로 찍으면 드라이버 메시지에 DSN 이 섞여 나올 수 있다.
+    assert "type(exc).__name__" in body
+    assert "print(f\"봇 토큰을 가져오지 못했습니다: {exc}\")" not in body
