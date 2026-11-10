@@ -2,7 +2,11 @@
 
 from dataclasses import dataclass
 
-from tybot.slack.pilot import _cache_metric_delta, _cache_metric_snapshot
+from tybot.slack.pilot import (
+    _bot_cache_metric_snapshot,
+    _cache_metric_delta,
+    _cache_metric_snapshot,
+)
 
 
 @dataclass(frozen=True)
@@ -45,3 +49,8 @@ def test_delta_drops_zeros_and_counter_resets():
         "raw_hits": 3,
         "response_saved_usd": 0.002346,
     }
+
+
+def test_a_minimal_workspace_bot_can_skip_optional_cache_metrics():
+    """일부 단위시험과 오류 복구 경로는 `__init__` 없는 최소 봇을 사용한다."""
+    assert _bot_cache_metric_snapshot(object()) == {}

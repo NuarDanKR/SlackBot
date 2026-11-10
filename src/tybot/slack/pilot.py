@@ -364,6 +364,13 @@ def _cache_metric_snapshot(store, engine) -> dict[str, int | float]:
     return out
 
 
+def _bot_cache_metric_snapshot(bot) -> dict[str, int | float]:
+    """시험·복구 경로의 최소 WorkspaceBot에는 store/engine이 없을 수 있다."""
+    return _cache_metric_snapshot(
+        getattr(bot, "store", None), getattr(bot, "engine", None)
+    )
+
+
 def _cache_metric_delta(
     before: dict[str, int | float], after: dict[str, int | float]
 ) -> dict[str, int | float]:
@@ -3120,7 +3127,7 @@ class WorkspaceBot:
             getattr(self, "private_answers", False) and in_channel
         )
         started = time.monotonic()
-        cache_before = _cache_metric_snapshot(self.store, self.engine)
+        cache_before = _bot_cache_metric_snapshot(self)
         event["_tybot_cache_before"] = cache_before
         if not private_channel_request:
             progress.start()
@@ -3169,7 +3176,7 @@ class WorkspaceBot:
                 channel_type=str(event.get("channel_type") or ("channel" if in_channel else "im")),
                 error=type(e).__name__,
                 cache_metrics=_cache_metric_delta(
-                    cache_before, _cache_metric_snapshot(self.store, self.engine)
+                    cache_before, _bot_cache_metric_snapshot(self)
                 ),
             )
             self.qa_log.write(rec)
@@ -3283,9 +3290,7 @@ class WorkspaceBot:
             else None
         )
         started = time.monotonic()
-        cache_before = event.get("_tybot_cache_before") or _cache_metric_snapshot(
-            self.store, self.engine
-        )
+        cache_before = event.get("_tybot_cache_before") or _bot_cache_metric_snapshot(self)
         # 이 요청의 판정을 QA 기록·전문 봇 호출과 잇는 값. 본문은 담지 않는다.
         decision_id = master_planner.new_decision_id()
         planner_model = ""
@@ -3505,7 +3510,7 @@ class WorkspaceBot:
                 format_retry_count=(ans.format_retry_count if ans else 0),
                 guardrail_result=(ans.guardrail_result if ans else ""),
                 cache_metrics=_cache_metric_delta(
-                    cache_before, _cache_metric_snapshot(self.store, self.engine)
+                    cache_before, _bot_cache_metric_snapshot(self)
                 ),
             )
             log.info("%s", rec.log_line())
