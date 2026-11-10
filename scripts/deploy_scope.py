@@ -4,7 +4,7 @@
 
 | 버튼 | 하는 일 |
 |---|---|
-| 봇 배포 | 지금까지와 같다. 테스트 → 설치 → 스키마 → **봇·콘솔 재시작** |
+| 봇 배포 | 테스트 → 설치 → 스키마 → **봇 재시작**. 콘솔은 콘솔이 쓰는 코드가 바뀌었을 때만 |
 | 콘솔 배포 | 테스트 → 설치 → 스키마 → **콘솔만 재시작**. 봇은 그대로 돈다 |
 
 콘솔과 봇은 같은 코드 폴더(`/opt/tybot`)를 쓴다. 그래서 「콘솔 배포」 는 **바뀐 파일이 전부
@@ -22,6 +22,14 @@
 경로 목록을 사람이 관리하지 않는다 — 봇이 새로 콘솔 모듈을 가져다 쓰기 시작하면 그 순간
 판정이 따라 바뀐다. 정적 분석이라 `importlib` 로 이름을 조립해 부르는 경우는 못 본다.
 그래서 모르는 경우는 전부 **봇 쪽으로** 판정한다(콘솔 배포가 거절될 뿐, 잘못 배포되지 않는다).
+
+## 봇 배포 때 콘솔도 재시작해야 하나
+콘솔은 봇 코드(아카이브 읽기·권한 판정·직원 매핑 …)를 많이 가져다 쓴다. 그런 파일이 바뀌었는데
+콘솔을 그대로 두면 메모리의 옛 코드와 새로 읽는 코드가 섞인다. 그래서 콘솔 진입점
+(`tybot.console.app`)에서 가져오기를 끝까지 따라가 「콘솔이 쓰는 모듈」 을 구하고, 바뀐 파이썬
+파일이 그 안에 있으면 콘솔도 재시작한다(`console_restart`). 판단이 서지 않는 파일(배포 장치·
+의존성 목록·유닛 등 `src/` 밖의 실행 파일)이 바뀌어도 재시작한다 — 몇 초 멈추는 쪽이 섞이는
+쪽보다 낫다. 세션 키가 고정돼 있으므로 재시작해도 로그아웃되지 않는다.
 
 ## 나머지 파일
 - 실행되지 않는 것(테스트·문서·마크다운) → 범위에 영향 없음
@@ -123,6 +131,49 @@ def bot_used_console_modules(root: Path) -> set[str]:
     return reached
 
 
+CONSOLE_ENTRY = "tybot.console.app"
+
+
+def _all_modules(root: Path) -> dict[str, Path]:
+    return {_module_name(root, p): p for p in (root / "src").rglob("*.py")}
+
+
+def console_used_modules(root: Path) -> set[str]:
+    """콘솔 프로세스(진입점 `tybot.console.app`)가 직접·간접으로 가져가는 모든 모듈."""
+    modules = _all_modules(root)
+    if CONSOLE_ENTRY not in modules:
+        return set(modules)              # 진입점을 못 찾으면 전부 쓴다고 본다
+    reached = {CONSOLE_ENTRY}
+    queue = [CONSOLE_ENTRY]
+    while queue:
+        name = queue.pop()
+        for target in _imports(modules[name], name):
+            # `import a.b.c` 는 a, a.b 의 __init__ 도 실행한다
+            parts = target.split(".")
+            for i in range(1, len(parts) + 1):
+                candidate = ".".join(parts[:i])
+                if candidate in modules and candidate not in reached:
+                    reached.add(candidate)
+                    queue.append(candidate)
+    return reached
+
+
+def console_restart(root: Path, changed: list[str]) -> dict:
+    """봇 배포 때 콘솔도 재시작해야 하는지. 모르면 재시작한다."""
+    used = console_used_modules(root)
+    reasons: list[str] = []
+    for raw in changed:
+        path = raw.strip().replace("\\", "/")
+        if not path or path.startswith(NEUTRAL_PREFIXES) or path.endswith(NEUTRAL_SUFFIXES):
+            continue
+        if path.startswith("src/") and path.endswith(".py"):
+            if _module_name(root, root / path) in used:
+                reasons.append(path)
+        else:
+            reasons.append(path)          # src 밖 실행 파일·지워진 파일 등 — 보수적으로
+    return {"restart": bool(reasons), "files": reasons}
+
+
 def classify(root: Path, changed: list[str]) -> dict:
     """바뀐 경로들을 봇·콘솔·무관으로 나누고 배포 범위를 정한다."""
     shared = bot_used_console_modules(root)
@@ -147,12 +198,16 @@ def classify(root: Path, changed: list[str]) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--console-restart", action="store_true",
+                        help="봇 배포 때 콘솔도 재시작해야 하는지만 판정한다")
     parser.add_argument("paths", nargs="*", help="바뀐 경로. '-' 면 표준 입력에서 한 줄씩")
     args = parser.parse_args(argv)
     paths = list(args.paths)
     if paths == ["-"]:
         paths = sys.stdin.read().splitlines()
-    print(json.dumps(classify(args.root.resolve(), paths), ensure_ascii=False))
+    root = args.root.resolve()
+    result = console_restart(root, paths) if args.console_restart else classify(root, paths)
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
