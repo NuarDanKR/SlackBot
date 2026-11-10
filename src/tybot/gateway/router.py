@@ -1,11 +1,14 @@
 """라우터 — 모델 선택, 민감도 라우팅, 비용 가드, 로깅을 묶는다."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Lock
 
 from .base import (
@@ -43,6 +46,24 @@ class PromptCacheStats:
     @property
     def hit_rate(self) -> float:
         return self.hits / self.eligible_calls if self.eligible_calls else 0.0
+
+
+@dataclass(frozen=True)
+class ResponseCacheStats:
+    """Opt-in exact completion cache counters for this process."""
+
+    lookups: int
+    hits: int
+    stores: int
+    expired: int
+    evictions: int
+    saved_input_tokens: int
+    saved_output_tokens: int
+    saved_usd: float
+
+    @property
+    def hit_rate(self) -> float:
+        return self.hits / self.lookups if self.lookups else 0.0
 
 
 def _reported(metrics: dict) -> bool:
@@ -126,6 +147,8 @@ class Router:
         *,
         default_model: str = "claude-sonnet-5",
         fallback_models: Sequence[str] = (),
+        response_cache_ttl_seconds: float | None = None,
+        response_cache_max_entries: int | None = None,
     ) -> None:
         self._providers = providers
         self._registry = registry
@@ -140,6 +163,18 @@ class Router:
         self._cache_write_tokens = 0
         self._cache_read_tokens = 0
         self._cache_net_saved_usd = 0.0
+        self._response_cache_ttl = _cache_ttl(response_cache_ttl_seconds)
+        self._response_cache_max = _cache_max(response_cache_max_entries)
+        self._response_cache_lock = Lock()
+        self._response_cache: OrderedDict[str, tuple[float, LLMResponse]] = OrderedDict()
+        self._response_cache_lookups = 0
+        self._response_cache_hits = 0
+        self._response_cache_stores = 0
+        self._response_cache_expired = 0
+        self._response_cache_evictions = 0
+        self._response_cache_saved_input_tokens = 0
+        self._response_cache_saved_output_tokens = 0
+        self._response_cache_saved_usd = 0.0
 
     @classmethod
     def from_default_registry(
@@ -151,6 +186,8 @@ class Router:
         cost_state_path: str | None = None,
         fallback_models: Sequence[str] | None = None,
         workspace_limits: Callable[[], Mapping[str, float]] | None = None,
+        response_cache_ttl_seconds: float | None = None,
+        response_cache_max_entries: int | None = None,
     ) -> Router:
         """기본 레지스트리로 라우터 생성.
 
@@ -183,6 +220,8 @@ class Router:
             ),
             default_model=default_model,
             fallback_models=fallback_models,
+            response_cache_ttl_seconds=response_cache_ttl_seconds,
+            response_cache_max_entries=response_cache_max_entries,
         )
 
     @property
@@ -200,6 +239,77 @@ class Router:
                 read_tokens=self._cache_read_tokens,
                 net_saved_usd=self._cache_net_saved_usd,
             )
+
+    @property
+    def response_cache_stats(self) -> ResponseCacheStats:
+        with self._response_cache_lock:
+            return ResponseCacheStats(
+                lookups=self._response_cache_lookups,
+                hits=self._response_cache_hits,
+                stores=self._response_cache_stores,
+                expired=self._response_cache_expired,
+                evictions=self._response_cache_evictions,
+                saved_input_tokens=self._response_cache_saved_input_tokens,
+                saved_output_tokens=self._response_cache_saved_output_tokens,
+                saved_usd=self._response_cache_saved_usd,
+            )
+
+    def _response_cache_get(
+        self, key: str, now: float
+    ) -> tuple[LLMResponse | None, str]:
+        with self._response_cache_lock:
+            self._response_cache_lookups += 1
+            entry = self._response_cache.get(key)
+            if entry is None:
+                return None, "not_found"
+            expires_at, cached = entry
+            if expires_at <= now:
+                del self._response_cache[key]
+                self._response_cache_expired += 1
+                return None, "expired"
+            self._response_cache.move_to_end(key)
+            self._response_cache_hits += 1
+            self._response_cache_saved_input_tokens += cached.input_tokens
+            self._response_cache_saved_output_tokens += cached.output_tokens
+            self._response_cache_saved_usd += cached.cost_usd
+            return (
+                replace(
+                    cached,
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_usd=0.0,
+                    raw=None,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    prompt_cache_eligible=False,
+                    response_cache_hit=True,
+                    response_cache_saved_input_tokens=cached.input_tokens,
+                    response_cache_saved_output_tokens=cached.output_tokens,
+                    response_cache_saved_usd=cached.cost_usd,
+                ),
+                "hit",
+            )
+
+    def _response_cache_put(
+        self, key: str, response: LLMResponse, now: float
+    ) -> None:
+        if not response.text or response.tool_calls:
+            return
+        cached = replace(
+            response,
+            raw=None,
+            response_cache_hit=False,
+            response_cache_saved_input_tokens=0,
+            response_cache_saved_output_tokens=0,
+            response_cache_saved_usd=0.0,
+        )
+        with self._response_cache_lock:
+            self._response_cache[key] = (now + self._response_cache_ttl, cached)
+            self._response_cache.move_to_end(key)
+            self._response_cache_stores += 1
+            while len(self._response_cache) > self._response_cache_max:
+                self._response_cache.popitem(last=False)
+                self._response_cache_evictions += 1
 
     def _record_prompt_cache(
         self, response: LLMResponse, spec: ModelSpec
@@ -312,6 +422,8 @@ class Router:
             cost_guard=self._cost,
             default_model=spec.model,
             fallback_models=(),
+            response_cache_ttl_seconds=self._response_cache_ttl,
+            response_cache_max_entries=self._response_cache_max,
         )
 
     def resolve(self, model: str | None, sensitivity: Sensitivity) -> ModelSpec:
@@ -366,8 +478,48 @@ class Router:
         # 남은 시간. **폴백 후보도 같은 시계를 쓴다** — 첫 모델이 다 써 버렸으면
         # 두 번째를 시작하지 않는다(2026-09-16 장애 §5.2).
         timeout_seconds: float | None = None,
+        # Only trusted orchestration code may opt in. The scope must bind the
+        # current requester permissions and source revisions; raw user input is
+        # never logged and the final key is a SHA-256 digest.
+        cache_scope: str | None = None,
     ) -> LLMResponse:
         spec = self.resolve(model, sensitivity)
+        cache_key, cache_reason = _response_cache_key(
+            cache_scope=cache_scope,
+            spec=spec,
+            sensitivity=sensitivity,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tools=tools,
+            enabled=self._response_cache_ttl > 0 and self._response_cache_max > 0,
+        )
+        if cache_key is not None:
+            cached, lookup_reason = self._response_cache_get(
+                cache_key, time.monotonic()
+            )
+            if cached is not None:
+                stats = self.response_cache_stats
+                logger.info(
+                    "llm_response_cache hit model=%s key=%s hits=%d/%d"
+                    " saved_in=%d saved_out=%d saved_usd=$%.4f",
+                    cached.model,
+                    cache_key[:12],
+                    stats.hits,
+                    stats.lookups,
+                    cached.response_cache_saved_input_tokens,
+                    cached.response_cache_saved_output_tokens,
+                    cached.response_cache_saved_usd,
+                )
+                return cached
+            logger.info(
+                "llm_response_cache miss model=%s key=%s reason=%s",
+                spec.model,
+                cache_key[:12],
+                lookup_reason,
+            )
+        elif cache_scope:
+            logger.info("llm_response_cache bypass model=%s reason=%s", spec.model, cache_reason)
         # 러프 사전 견적(입력 토큰 근사 = 콘텐츠 크기/4). 문서·이미지 블록도 누락하지 않는다.
         approx_in = sum(_content_size(m.content) for m in messages) // 4
         self._cost.check(spec.cost(approx_in, max_tokens))
@@ -455,6 +607,8 @@ class Router:
             self._cost.spent_by_workspace().get(workspace, 0.0),
             self._cost.spent_today,
         )
+        if cache_key is not None:
+            self._response_cache_put(cache_key, resp, time.monotonic())
         return resp
 
 
@@ -469,6 +623,59 @@ def _content_size(content: str | list[dict]) -> int:
             elif isinstance(value, dict):
                 total += _content_size([value])
     return total
+
+
+def _cache_ttl(value: float | None) -> float:
+    raw = os.getenv("TYBOT_LLM_RESPONSE_CACHE_TTL_SECONDS", "300") if value is None else value
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return 300.0
+    return max(0.0, parsed)
+
+
+def _cache_max(value: int | None) -> int:
+    raw = os.getenv("TYBOT_LLM_RESPONSE_CACHE_MAX_ENTRIES", "256") if value is None else value
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return 256
+    return max(0, parsed)
+
+
+def _response_cache_key(
+    *,
+    cache_scope: str | None,
+    spec: ModelSpec,
+    sensitivity: Sensitivity,
+    messages: Sequence[Message],
+    max_tokens: int,
+    temperature: float,
+    tools: Sequence[ToolSpec],
+    enabled: bool,
+) -> tuple[str | None, str]:
+    if not enabled:
+        return None, "disabled"
+    if not cache_scope:
+        return None, "scope_missing"
+    if tools:
+        return None, "tools_present"
+    if any(not isinstance(message.content, str) for message in messages):
+        return None, "structured_content"
+    payload = {
+        "v": 1,
+        "scope": cache_scope,
+        "model": spec.model,
+        "provider": spec.provider,
+        "sensitivity": sensitivity.value,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": [(message.role, message.content) for message in messages],
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), "eligible"
 
 
 def _left(timeout_seconds: float | None, started: float) -> float | None:

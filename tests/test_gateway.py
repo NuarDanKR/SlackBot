@@ -124,6 +124,73 @@ def test_default_model_used_when_none():
     assert resp.model == "claude-sonnet-5"
 
 
+def test_exact_response_cache_is_opt_in_and_reports_avoided_usage():
+    router = make_router()
+    messages = [Message("system", "규칙"), Message("user", "질문")]
+
+    first = router.complete(messages, cache_scope="acl-and-revision")
+    second = router.complete(messages, cache_scope="acl-and-revision")
+
+    provider = router._providers["anthropic"]
+    assert provider.calls == 1
+    assert first.cost_usd > 0
+    assert second.response_cache_hit is True
+    assert second.cost_usd == 0
+    assert second.input_tokens == second.output_tokens == 0
+    assert second.response_cache_saved_input_tokens == first.input_tokens
+    assert second.response_cache_saved_output_tokens == first.output_tokens
+    assert second.response_cache_saved_usd == first.cost_usd
+    stats = router.response_cache_stats
+    assert (stats.lookups, stats.hits, stats.stores) == (2, 1, 1)
+    assert stats.saved_usd == first.cost_usd
+
+
+def test_response_cache_does_not_cross_scope_or_request_contract():
+    router = make_router()
+    messages = [Message("user", "같은 질문")]
+
+    router.complete(messages, cache_scope="user-a", max_tokens=100)
+    router.complete(messages, cache_scope="user-b", max_tokens=100)
+    router.complete(messages, cache_scope="user-a", max_tokens=200)
+    router.complete([Message("user", "다른 질문")], cache_scope="user-a", max_tokens=100)
+
+    assert router._providers["anthropic"].calls == 4
+    assert router.response_cache_stats.hits == 0
+
+
+def test_response_cache_is_disabled_without_scope_and_for_structured_input():
+    router = make_router()
+
+    router.complete([Message("user", "질문")])
+    router.complete([Message("user", "질문")])
+    structured = [Message("user", [{"type": "text", "text": "질문"}])]
+    router.complete(structured, cache_scope="safe-scope")
+    router.complete(structured, cache_scope="safe-scope")
+
+    assert router._providers["anthropic"].calls == 4
+    assert router.response_cache_stats.lookups == 0
+
+
+def test_response_cache_expiry_and_lru_bound(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("tybot.gateway.router.time.monotonic", lambda: now[0])
+    router = Router.from_default_registry(
+        providers={"anthropic": FakeProvider("anthropic")},
+        response_cache_ttl_seconds=5,
+        response_cache_max_entries=1,
+    )
+
+    router.complete([Message("user", "첫째")], cache_scope="scope")
+    router.complete([Message("user", "둘째")], cache_scope="scope")
+    assert router.response_cache_stats.evictions == 1
+
+    now[0] = 106.0
+    router.complete([Message("user", "둘째")], cache_scope="scope")
+    stats = router.response_cache_stats
+    assert stats.expired == 1
+    assert router._providers["anthropic"].calls == 3
+
+
 def test_unknown_model_raises():
     r = make_router()
     with pytest.raises(UnknownModel):

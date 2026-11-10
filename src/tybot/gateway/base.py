@@ -125,6 +125,12 @@ class LLMResponse:
     # Provider 요청에 실제 cache_control 접두사를 넣었는가. 토큰 수가 0인
     # 첫 요청·최소 길이 미달도 cache miss 분모에는 들어가야 한다.
     prompt_cache_eligible: bool = False
+    # B-85 opt-in exact response cache. A hit never represents provider usage;
+    # the saved values are audit-only counters for the avoided call.
+    response_cache_hit: bool = False
+    response_cache_saved_input_tokens: int = 0
+    response_cache_saved_output_tokens: int = 0
+    response_cache_saved_usd: float = 0.0
 
     @property
     def wants_tools(self) -> bool:
