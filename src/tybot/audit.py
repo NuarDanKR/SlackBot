@@ -306,6 +306,9 @@ class QARecord:
     converted_cell_count: int = 0
     format_retry_count: int = 0
     guardrail_result: str = ""
+    # 요청 하나에서 증가한 결정적 원문/첨부 캐시와 LLM 캐시 계수.
+    # 본문·질문·파일 경로는 넣지 않고 숫자만 기록한다.
+    cache_metrics: dict[str, int | float] = field(default_factory=dict)
 
     @classmethod
     def build(cls, **kw) -> QARecord:
@@ -317,11 +320,28 @@ class QARecord:
 
     def log_line(self) -> str:
         """journalctl 한 줄 — 경로와 무관하게 항상 질문이 보인다."""
+        cache = self.cache_metrics
+        cache_note = ""
+        if cache:
+            hits = int(cache.get("raw_hits", 0)) + int(
+                cache.get("attachment_hits", 0)
+            )
+            lookups = int(cache.get("raw_lookups", 0)) + int(
+                cache.get("attachment_lookups", 0)
+            )
+            response_hits = int(cache.get("response_hits", 0))
+            saved_tokens = int(cache.get("response_saved_input_tokens", 0)) + int(
+                cache.get("response_saved_output_tokens", 0)
+            )
+            cache_note = (
+                f" cache=docs:{hits}/{lookups},response:{response_hits}"
+                f",saved_tokens:{saved_tokens}"
+            )
         return (
             f'qa user={self.user_name}({self.user}) ch={self.channel} '
             f'intent={self.intent_kind}/{self.intent_source} reason={self.reason} '
             f'hits={self.hits} scope={self.scope} model={self.model} '
-            f'cost=${self.cost_usd:.5f} {self.elapsed_ms}ms q="{self.question}"'
+            f'cost=${self.cost_usd:.5f}{cache_note} {self.elapsed_ms}ms q="{self.question}"'
         )
 
 

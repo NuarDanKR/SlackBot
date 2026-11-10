@@ -329,6 +329,18 @@ def _archive_cache_bytes() -> int:
     return max(0, value) * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class RawCacheStats:
+    """원문 캐시의 누적 계수. 경로와 원문은 감사 범위에 넣지 않는다."""
+
+    lookups: int
+    hits: int
+    misses: int
+    invalidations: int
+    evictions: int
+    bypasses: int
+
+
 class RawCache:
     """원문 MD 파싱 결과를 **파일 지문**으로 기억한다. 상한은 바이트다.
 
@@ -375,6 +387,12 @@ class RawCache:
         #: 상한보다 커서 못 넣은 경로 → 지문. **지문만** 둔다(본문은 없다).
         self.oversize: dict[Path, tuple[int, int]] = {}
         self._oversize_logged = 0
+        self._lookups = 0
+        self._hits = 0
+        self._misses = 0
+        self._invalidations = 0
+        self._evictions = 0
+        self._bypasses = 0
 
     @property
     def held_bytes(self) -> int:
@@ -391,6 +409,18 @@ class RawCache:
         with self._lock:
             return len(self._gates)
 
+    @property
+    def stats(self) -> RawCacheStats:
+        with self._lock:
+            return RawCacheStats(
+                lookups=self._lookups,
+                hits=self._hits,
+                misses=self._misses,
+                invalidations=self._invalidations,
+                evictions=self._evictions,
+                bypasses=self._bypasses,
+            )
+
     # -- 상한 ------------------------------------------------------------
     @staticmethod
     def _cost(result: object, size: int) -> int:
@@ -405,6 +435,7 @@ class RawCache:
             if old is not None:
                 self._bytes -= old[1]
             if self._max <= 0 or cost > self._max:
+                self._bypasses += 1
                 if self._max > 0 and self.oversize.get(path) != fingerprint:
                     self.oversize[path] = fingerprint
                     self._note_oversize(cost)
@@ -420,6 +451,7 @@ class RawCache:
                 if oldest == path:
                     break
                 self._bytes -= self._items.pop(oldest)[1]
+                self._evictions += 1
             sweep = self._puts % SWEEP_EVERY == 0
         if sweep:
             self._sweep_missing()
@@ -441,6 +473,7 @@ class RawCache:
                 entry = self._items.pop(path, None)
                 if entry is not None:
                     self._bytes -= entry[1]
+                    self._invalidations += 1
                 self.oversize.pop(path, None)
 
     def _sweep_missing(self) -> None:
@@ -490,21 +523,30 @@ class RawCache:
             if entry[0] != fingerprint:
                 # 지문이 달라졌다. 자리를 바로 돌려준다 — 어차피 못 쓴다.
                 self._bytes -= self._items.pop(path)[1]
+                self._invalidations += 1
                 return None
             self._items[path] = self._items.pop(path)
             return entry
 
     def get(self, path: Path, fingerprint: tuple[int, int], build):
         """캐시된 파싱 결과. 없으면 `build()` — 같은 경로는 한 번만 만든다."""
+        with self._lock:
+            self._lookups += 1
         entry = self._peek(path, fingerprint)
         if entry is not None:
+            with self._lock:
+                self._hits += 1
             return entry[2]
         with self._gate(path):
             # 문 앞에서 기다리는 동안 앞사람이 채웠을 수 있다. 다시 본다 —
             # 이 재확인이 없으면 문은 순서만 세울 뿐 중복 파싱을 못 막는다.
             entry = self._peek(path, fingerprint)
             if entry is not None:
+                with self._lock:
+                    self._hits += 1
                 return entry[2]
+            with self._lock:
+                self._misses += 1
             result = build()
             self._put(path, fingerprint, result)
             return result
@@ -560,6 +602,25 @@ class ArchiveStore:
         from . import attachment_reader
 
         self._attachments = attachment_reader.DocCache()
+
+    def cache_stats(self) -> dict[str, int]:
+        """감사 기록용 누적 계수. 파일 경로·질문·본문은 포함하지 않는다."""
+        raw = self._cache.stats
+        attachments = self._attachments.stats
+        return {
+            "raw_lookups": raw.lookups,
+            "raw_hits": raw.hits,
+            "raw_misses": raw.misses,
+            "raw_invalidations": raw.invalidations,
+            "raw_evictions": raw.evictions,
+            "raw_bypasses": raw.bypasses,
+            "attachment_lookups": attachments.lookups,
+            "attachment_hits": attachments.hits,
+            "attachment_misses": attachments.misses,
+            "attachment_invalidations": attachments.invalidations,
+            "attachment_evictions": attachments.evictions,
+            "attachment_bypasses": attachments.bypasses,
+        }
 
     def _files(self, *, dm_scope: str = "") -> list[Path]:
         """원문 파일 목록. **DM 은 기본으로 빼고 센다.**

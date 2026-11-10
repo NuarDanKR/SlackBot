@@ -190,6 +190,35 @@ def test_a_rewritten_file_invalidates_the_entry(tmp_path):
     assert "합성 본문 0-9" not in second.text
 
 
+def test_attachment_cache_stats_count_hits_misses_and_stale_revisions(tmp_path):
+    """첨부 캐시 감사 계수에도 파일명이나 본문은 들어가지 않는다."""
+    _channel(tmp_path, 0)
+    path = _attachment(tmp_path, 0, body_lines=10)
+    cache = attachment_reader.DocCache()
+
+    attachment_reader.load_checked(path, tmp_path, cache=cache)
+    attachment_reader.load_checked(path, tmp_path, cache=cache)
+    time.sleep(0.01)
+    path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    attachment_reader.load_checked(path, tmp_path, cache=cache)
+
+    stats = cache.stats
+    assert (stats.lookups, stats.hits, stats.misses) == (3, 1, 2)
+    assert stats.invalidations == 1
+    assert stats.evictions == 0
+
+
+def test_disabled_attachment_cache_records_a_bypass(tmp_path):
+    _channel(tmp_path, 0)
+    path = _attachment(tmp_path, 0)
+    cache = attachment_reader.DocCache(max_bytes=0)
+
+    attachment_reader.load_checked(path, tmp_path, cache=cache)
+
+    assert cache.stats.bypasses == 1
+    assert cache.stats.misses == 1
+
+
 def test_a_rewritten_file_invalidates_the_archive_doc_too(tmp_path):
     """줄 객체 쪽도 같이 무효가 된다 — 한쪽만 낡으면 검색과 본문이 갈린다."""
     _channel(tmp_path, 0)

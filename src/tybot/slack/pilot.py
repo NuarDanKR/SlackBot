@@ -344,6 +344,41 @@ def _scope_label(ctx: RequestContext | None) -> str:
     return f"채널 {len(ctx.channels)}개"
 
 
+def _cache_metric_snapshot(store, engine) -> dict[str, int | float]:
+    """요청 전후를 비교할 누적 계수. 질문·경로·본문은 절대 담지 않는다."""
+    out: dict[str, int | float] = {}
+    with contextlib.suppress(AttributeError, TypeError):
+        out.update(store.cache_stats())
+    router = getattr(engine, "router", None)
+    for prefix, attr in (
+        ("response", "response_cache_stats"),
+        ("prompt", "prompt_cache_stats"),
+    ):
+        stats = getattr(router, attr, None)
+        if stats is None:
+            continue
+        for name in getattr(stats, "__dataclass_fields__", {}):
+            value = getattr(stats, name, 0)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                out[f"{prefix}_{name}"] = value
+    return out
+
+
+def _cache_metric_delta(
+    before: dict[str, int | float], after: dict[str, int | float]
+) -> dict[str, int | float]:
+    """한 요청이 만든 증가분만 남긴다. 프로세스 재시작으로 줄면 기록하지 않는다."""
+    out: dict[str, int | float] = {}
+    for key, current in after.items():
+        previous = before.get(key, 0)
+        if not isinstance(previous, (int, float)) or isinstance(previous, bool):
+            continue
+        delta = current - previous
+        if delta > 0:
+            out[key] = round(delta, 6) if isinstance(delta, float) else delta
+    return out
+
+
 CHANNEL_SCOPE_NOTICE = (
     "_조회 범위: 현재 채널만 · 여러 채널 통합 조회는 TYBot 개인 DM에서 요청하세요._"
 )
@@ -3085,6 +3120,8 @@ class WorkspaceBot:
             getattr(self, "private_answers", False) and in_channel
         )
         started = time.monotonic()
+        cache_before = _cache_metric_snapshot(self.store, self.engine)
+        event["_tybot_cache_before"] = cache_before
         if not private_channel_request:
             progress.start()
         try:
@@ -3131,9 +3168,13 @@ class WorkspaceBot:
                 thread_ts=str(event.get("thread_ts") or event.get("ts") or ""),
                 channel_type=str(event.get("channel_type") or ("channel" if in_channel else "im")),
                 error=type(e).__name__,
+                cache_metrics=_cache_metric_delta(
+                    cache_before, _cache_metric_snapshot(self.store, self.engine)
+                ),
             )
             self.qa_log.write(rec)
         finally:
+            event.pop("_tybot_cache_before", None)
             if quota is not None and reservation_id:
                 if event.pop("_tybot_quota_success", False):
                     quota.finalize(reservation_id)
@@ -3242,6 +3283,9 @@ class WorkspaceBot:
             else None
         )
         started = time.monotonic()
+        cache_before = event.get("_tybot_cache_before") or _cache_metric_snapshot(
+            self.store, self.engine
+        )
         # 이 요청의 판정을 QA 기록·전문 봇 호출과 잇는 값. 본문은 담지 않는다.
         decision_id = master_planner.new_decision_id()
         planner_model = ""
@@ -3460,6 +3504,9 @@ class WorkspaceBot:
                 converted_cell_count=(harness.converted_cells if harness else 0),
                 format_retry_count=(ans.format_retry_count if ans else 0),
                 guardrail_result=(ans.guardrail_result if ans else ""),
+                cache_metrics=_cache_metric_delta(
+                    cache_before, _cache_metric_snapshot(self.store, self.engine)
+                ),
             )
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)

@@ -74,6 +74,29 @@ def test_scope_recorded_without_channel_names():
     assert "채널 5개" in line
 
 
+def test_cache_metrics_are_machine_readable_and_log_counts_only(tmp_path):
+    metrics = {
+        "raw_lookups": 5,
+        "raw_hits": 4,
+        "attachment_lookups": 3,
+        "attachment_hits": 2,
+        "raw_invalidations": 1,
+        "response_hits": 1,
+        "response_saved_input_tokens": 120,
+        "response_saved_output_tokens": 30,
+        "response_saved_usd": 0.0123,
+    }
+    rec = _rec(cache_metrics=metrics)
+    log = QALog(tmp_path)
+    log.write(rec)
+
+    row = json.loads(next(tmp_path.glob("qa-*.jsonl")).read_text(encoding="utf-8"))
+    assert row["cache_metrics"] == metrics
+    line = rec.log_line()
+    assert "cache=docs:6/8,response:1,saved_tokens:150" in line
+    assert "프로젝트-업데이트.md" not in line
+
+
 def test_md_is_not_read_as_archive(tmp_path):
     """감사 MD 가 아카이브 검색에 섞이면 요약 재귀가 된다 — 경로 분리를 고정한다."""
     archive = tmp_path / "archive"

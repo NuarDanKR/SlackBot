@@ -210,6 +210,39 @@ def test_a_rewritten_file_is_reparsed(tmp_path):
     assert len(hits) == 1
 
 
+def test_cache_stats_count_hits_misses_and_stale_revisions(tmp_path):
+    """감사 계수는 본문 없이 적중과 지문 무효화를 구분한다."""
+    path = _write(tmp_path, 0)
+    cache = RawCache()
+
+    def read():
+        return store_mod.load_doc(path)
+
+    first = path.stat()
+    cache.get(path, (first.st_mtime_ns, first.st_size), read)
+    cache.get(path, (first.st_mtime_ns, first.st_size), read)
+    time.sleep(0.01)
+    path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    second = path.stat()
+    cache.get(path, (second.st_mtime_ns, second.st_size), read)
+
+    stats = cache.stats
+    assert (stats.lookups, stats.hits, stats.misses) == (3, 1, 2)
+    assert stats.invalidations == 1
+    assert stats.evictions == 0
+
+
+def test_disabled_raw_cache_records_a_bypass(tmp_path):
+    path = _write(tmp_path, 0)
+    cache = RawCache(max_bytes=0)
+    st = path.stat()
+
+    cache.get(path, (st.st_mtime_ns, st.st_size), lambda: store_mod.load_doc(path))
+
+    assert cache.stats.bypasses == 1
+    assert cache.stats.misses == 1
+
+
 def test_a_stale_entry_releases_its_bytes_immediately(tmp_path):
     """지문이 달라지면 **그 자리에서** 자리를 돌려준다 — 두 벌이 겹치지 않는다."""
     path = _write(tmp_path, 0, lines=40)

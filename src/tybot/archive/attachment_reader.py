@@ -110,6 +110,18 @@ def _cache_bytes() -> int:
     return max(0, value) * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class DocCacheStats:
+    """첨부 캐시 누적 계수. 파일 좌표와 내용은 담지 않는다."""
+
+    lookups: int
+    hits: int
+    misses: int
+    invalidations: int
+    evictions: int
+    bypasses: int
+
+
 class DocCache:
     """첨부 정본 한 장의 파싱 결과를 **파일 지문**으로 기억한다.
 
@@ -164,11 +176,29 @@ class DocCache:
         self._gates: dict[Path, list] = {}
         #: 상한보다 커서 캐시에 못 넣은 경로. **지문만** 둔다(본문은 안 들고 있다).
         self.oversize: dict[Path, tuple[int, int]] = {}
+        self._lookups = 0
+        self._hits = 0
+        self._misses = 0
+        self._invalidations = 0
+        self._evictions = 0
+        self._bypasses = 0
 
     @property
     def held_bytes(self) -> int:
         with self._lock:
             return self._bytes
+
+    @property
+    def stats(self) -> DocCacheStats:
+        with self._lock:
+            return DocCacheStats(
+                lookups=self._lookups,
+                hits=self._hits,
+                misses=self._misses,
+                invalidations=self._invalidations,
+                evictions=self._evictions,
+                bypasses=self._bypasses,
+            )
 
     # -- 상한 ------------------------------------------------------------
     def _put(self, path: Path, fingerprint, size: int, doc, archive) -> None:
@@ -177,6 +207,7 @@ class DocCache:
             if old is not None:
                 self._bytes -= old[1]
             if self._max <= 0 or size > self._max:
+                self._bypasses += 1
                 if self._max > 0 and self.oversize.get(path) != fingerprint:
                     self.oversize[path] = fingerprint
                     while len(self.oversize) > OVERSIZE_NOTICE_LIMIT:
@@ -197,11 +228,16 @@ class DocCache:
                 if oldest == path:
                     break
                 self._bytes -= self._items.pop(oldest)[1]
+                self._evictions += 1
 
     def _peek(self, path: Path, fingerprint: tuple[int, int]):
         with self._lock:
             entry = self._items.get(path)
-            if entry is None or entry[0] != fingerprint:
+            if entry is None:
+                return None
+            if entry[0] != fingerprint:
+                self._bytes -= self._items.pop(path)[1]
+                self._invalidations += 1
                 return None
             # 가장 최근에 쓴 것을 뒤로 보낸다(삽입 순서 = 사용 순서).
             self._items[path] = self._items.pop(path)
@@ -234,34 +270,56 @@ class DocCache:
     # -- 읽기 -------------------------------------------------------------
     def loaded(self, path: Path, build):
         """검증까지 끝난 `AttachmentDoc` (또는 `None`). 캐시에 없으면 `build()`."""
+        with self._lock:
+            self._lookups += 1
         fingerprint = _fingerprint(path)
         if fingerprint is None:
+            with self._lock:
+                self._misses += 1
+                self._bypasses += 1
             return build()
         entry = self._peek(path, fingerprint)
         if entry is not None:
+            with self._lock:
+                self._hits += 1
             return entry[2]
         with self._gate(path):
             # 문 앞에서 기다리는 동안 앞사람이 채웠을 수 있다. 다시 본다 —
             # 이 재확인이 없으면 문은 순서만 세울 뿐 중복 파싱을 못 막는다.
             entry = self._peek(path, fingerprint)
             if entry is not None:
+                with self._lock:
+                    self._hits += 1
                 return entry[2]
+            with self._lock:
+                self._misses += 1
             doc = build()
             self._put(path, fingerprint, fingerprint[1], doc, None)
             return doc
 
     def as_archive(self, path: Path, doc: AttachmentDoc, build):
         """검색이 쓰는 `ArchiveDoc`. 줄 객체를 질문마다 다시 만들지 않는다."""
+        with self._lock:
+            self._lookups += 1
         fingerprint = _fingerprint(path)
         if fingerprint is None:
+            with self._lock:
+                self._misses += 1
+                self._bypasses += 1
             return build()
         entry = self._peek(path, fingerprint)
         if entry is not None and entry[3] is not None:
+            with self._lock:
+                self._hits += 1
             return entry[3]
         with self._gate(path):
             entry = self._peek(path, fingerprint)
             if entry is not None and entry[3] is not None:
+                with self._lock:
+                    self._hits += 1
                 return entry[3]
+            with self._lock:
+                self._misses += 1
             archive = build()
             kept = entry[2] if entry is not None else doc
             self._put(path, fingerprint, fingerprint[1], kept, archive)
