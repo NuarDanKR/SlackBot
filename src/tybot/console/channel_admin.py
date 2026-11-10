@@ -91,6 +91,7 @@ class ChannelRow:
             "scheduleKind": self.schedule_kind,
             "weekday": self.weekday,
             "scheduleLabel": self.schedule_label,
+            "scheduleSource": "global",
             "documents": self.documents,
             "lines": self.lines,
             "attachmentLines": self.attachment_lines,
@@ -174,11 +175,14 @@ def build_rows(
             row.schedule_kind = str(people[0].get("schedule_kind") or "daily")
             raw_weekday = people[0].get("weekday")
             row.weekday = int(raw_weekday) if raw_weekday is not None else None
-            from ..reviewers import parse_send_at, schedule_label
+        # 일정은 **전역 정책 하나**다(B-88). 검토자 유무와 무관하게 같은 문구다 —
+        # 채널별 `send_at`·`schedule_kind`·`weekday` 는 DB 호환용으로 남아 있고
+        # 응답에도 남기지만 실행에 쓰이지 않는다. `scheduleSource` 가 그 사실을
+        # 말한다: 화면이 옛 칸을 다시 그리기 시작해도 이 값을 보면 안 된다는 것을
+        # 응답 안에서 알 수 있어야 한다.
+        from ..channel_management import global_review_label
 
-            row.schedule_label = schedule_label(
-                row.schedule_kind, row.weekday, parse_send_at(row.send_at)
-            )
+        row.schedule_label = global_review_label()
 
         count, last = answers.get(key, (0, ""))
         row.answers = count

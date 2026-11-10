@@ -75,6 +75,7 @@ from ..channel_management import (
     create_modal,
     edit_from_view,
     edit_modal,
+    global_review_label,
     request_from_view,
     requests_from_view,
     selected_prefix,
@@ -2274,7 +2275,11 @@ class WorkspaceBot:
         return creator
 
     def _handle_reviewer_command(self, command: dict, args: str, respond) -> None:
-        """`/채널 검토자 @사람 [@사람2] [매일|매주 수요일] [09:00]`.
+        """`/채널 검토자 @사람 [@사람2]`.
+
+        주기·시각은 받지 않는다(B-88). 전역 회차 하나(화·금 17:00 KST)다.
+        옛 문법(`매주 수요일 09:00`)으로 쳐도 거절하지 않고, **쓰지 않는다고
+        말한다** — 조용히 무시하면 사람은 그 시각에 DM 을 기다린다.
 
         요약은 봇이 후보만 만들고 이 사람이 확정한다.
         설계: docs/design/summary-review.md
@@ -2300,9 +2305,12 @@ class WorkspaceBot:
             )
             return
 
+        # 옛 문법을 썼는지만 본다. 값은 읽지 않는다(B-88).
+        typed_schedule = bool(_time_token(args)) or "매일" in args or "매주" in args
         try:
-            send_at = reviewers.parse_send_at(_time_token(args))
-            schedule_kind, weekday = reviewers.parse_schedule(args)
+            # DB 컬럼은 호환용으로 남아 있어 무언가는 넣어야 한다. 실행에는 안 쓰인다.
+            send_at = reviewers.DEFAULT_SEND_AT
+            schedule_kind, weekday = reviewers.DAILY, None
             rows = reviewers.set_reviewers(
                 workspace=self.workspace,
                 channel_id=channel_id,
@@ -2326,11 +2334,18 @@ class WorkspaceBot:
             )
             return
         names = ", ".join(f"<@{r.reviewer_user}>" for r in rows)
+        # 일정은 전역 회차 하나다(B-88). 채널별 시각을 말하면 사람은 그때 DM 이
+        # 오는 줄 알고 기다린다. 그리고 「확인한 것만 반영」 은 이제 사실이 아니다 —
+        # 기한 안에 검토하지 않은 후보는 자동으로 봇 요약이 된다.
+        ignored = (
+            NEWLINE + "_입력한 주기·시각은 쓰지 않습니다 — 일정은 모든 채널 공통입니다._"
+            if typed_schedule else ""
+        )
         respond(
             f"검토자: {names}" + NEWLINE
-            + reviewers.schedule_label(schedule_kind, weekday, send_at)
-            + "에 요약 후보를 DM 으로 보냅니다." + NEWLINE
-            + "검토자가 확인한 것만 요약에 반영됩니다.",
+            + f"{global_review_label()}에 요약 후보를 DM 으로 보냅니다." + NEWLINE
+            + "기한 안에 검토하지 않은 후보는 자동으로 봇 요약이 됩니다."
+            + ignored,
             response_type="ephemeral",
         )
 
@@ -2344,20 +2359,17 @@ class WorkspaceBot:
         if not rows:
             respond(
                 "이 채널에는 검토 승인자가 없습니다 — **요약을 반영하지 않습니다.**" + NEWLINE
-                + "정하기: `/채널 검토자 @사람 매일 09:00`" + NEWLINE
-                + "주 1회: `/채널 검토자 @사람 매주 수요일 09:00`" + NEWLINE
-                + "여러 명도 됩니다. 해제: `/채널 검토자 없음`",
+                + "정하기: `/채널 검토자 @사람` (여러 명도 됩니다)" + NEWLINE
+                + f"일정: {global_review_label()} (모든 채널 공통)" + NEWLINE
+                + "해제: `/채널 검토자 없음`",
                 response_type="ephemeral",
             )
             return
         names = ", ".join(f"<@{r.reviewer_user}>" for r in rows)
+        # DB 의 채널별 시각은 보이지 않는다(B-88). 보이면 그것이 먹는 줄 안다.
         respond(
-            f"검토자: {names} ("
-            + reviewers.schedule_label(
-                rows[0].schedule_kind, rows[0].weekday, rows[0].send_at
-            )
-            + ")" + NEWLINE
-            + "바꾸기: `/채널 검토자 @사람 매일 09:00` 또는 `매주 수요일 09:00`",
+            f"검토자: {names} ({global_review_label()})" + NEWLINE
+            + "바꾸기: `/채널 검토자 @사람`",
             response_type="ephemeral",
         )
 
@@ -2457,9 +2469,9 @@ class WorkspaceBot:
             found = [r.reviewer_user for r in rows]
             if rows:
                 send_at = rows[0].send_at.strftime("%H:%M")
-                review_schedule = reviewers.schedule_label(
-                    rows[0].schedule_kind, rows[0].weekday, rows[0].send_at
-                )
+                # 상태 화면은 이 값을 보지 않는다(`channel_health`) — 전역
+                # 일정만 말한다. 채워 두는 것은 옛 호출부와의 호환 때문이다.
+                review_schedule = global_review_label()
         except reviewers.ReviewerError as e:
             log.warning("[%s] 검토자 조회 실패 ch=%s: %s", self.workspace, channel_id, e)
 
@@ -2792,12 +2804,7 @@ class WorkspaceBot:
                 )
                 if rows:
                     who = " ".join(f"<@{r.reviewer_user}>" for r in rows)
-                    done.append(
-                        f"검토자 → {who} · "
-                        + reviewers.schedule_label(
-                            rows[0].schedule_kind, rows[0].weekday, rows[0].send_at
-                        )
-                    )
+                    done.append(f"검토자 → {who} · {global_review_label()}")
                 else:
                     done.append(
                         "검토자 → 전부 해제. **이 채널은 요약 후보를 보내거나 "

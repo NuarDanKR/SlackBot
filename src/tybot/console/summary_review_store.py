@@ -127,40 +127,56 @@ def schedule(
 
 
 def _schedule_status(rows: list[dict], *, now: datetime | None = None) -> dict:
+    """대기·발송 상태를 **전역 회차 하나**로 센다(B-88).
+
+    전에는 채널마다 `send_at`·`schedule_kind`·`weekday` 로 「오늘 보낼 시각이
+    지났나」 를 따로 셌다. 그 컬럼들은 DB 에 호환용으로 남아 있을 뿐 **실행에
+    쓰이지 않는다** — 실제 발송은 화·금 17:00 KST 한 번이다.
+
+    옛 계산을 두면 콘솔이 「08:00 예정 · 8채널 발송 시각 지남 · 회차 0건」 을
+    보여 준다. 그 화면을 본 관리자는 스케줄러가 죽었다고 읽는다. 실제로는
+    화요일이 아니었을 뿐이다. 그래서 여기서는 옛 칸을 **읽지 않는다.**
+    """
     current = now or datetime.now(KST)
     if current.tzinfo is None:
         current = current.replace(tzinfo=KST)
     local = current.astimezone(KST)
+    from ..daily_review import GLOBAL_REVIEW_AT, GLOBAL_REVIEW_WEEKDAYS
     from ..daily_review import due as is_due
-    from ..reviewers import WEEKDAY_LABELS
 
-    waiting: list[tuple[int, time, str]] = []
-    due = 0
-    for row in rows:
-        send_at = row.get("send_at")
-        if send_at is None:
-            continue
-        kind = str(row.get("schedule_kind") or "daily")
-        weekday = row.get("weekday")
-        weekday = int(weekday) if weekday is not None else None
-        if is_due(send_at, local, kind, weekday):
-            due += 1
-            continue
-        if kind == "weekly" and weekday is not None:
-            days = (weekday - local.weekday()) % 7
-            if days == 0 and local.time() >= send_at:
-                days = 7
-            waiting.append((days, send_at, f"{WEEKDAY_LABELS[weekday]} {send_at:%H:%M}"))
-        else:
-            waiting.append((0, send_at, send_at.strftime("%H:%M")))
-    next_send = min(waiting, default=(0, time.min, ""))[2]
+    channels = len(rows)
+    due = channels if is_due(GLOBAL_REVIEW_AT, local, "global") else 0
     return {
-        "channels": len(rows),
+        "channels": channels,
         "due": due,
-        "waiting": len(rows) - due,
-        "nextSendAt": next_send,
+        "waiting": channels - due,
+        "nextSendAt": _next_global_round(local, GLOBAL_REVIEW_WEEKDAYS, GLOBAL_REVIEW_AT),
         "timezone": "Asia/Seoul",
+        # 응답 안에서 출처를 말한다. 화면이 옛 칸을 다시 그리기 시작해도 이 값을
+        # 보면 채널별 시각이 아니라는 것을 알 수 있다.
+        "scheduleSource": "global",
     }
+
+
+_SHORT_WEEKDAYS = "월화수목금토일"
+
+
+def _next_global_round(local: datetime, weekdays: frozenset, at: time) -> str:
+    """다음 전역 회차. **지금 회차가 진행 중이면 그 회차**를 말한다.
+
+    17:00 을 막 지난 화요일에 「다음은 금요일」 이라고 하면, 지금 돌고 있는 회차가
+    화면에서 사라진다. 그날 안이면 늦어도 보낸다(`daily_review.due`)는 규칙과
+    맞춘다.
+    """
+    for offset in range(0, 8):
+        day = local + timedelta(days=offset)
+        if day.weekday() not in weekdays:
+            continue
+        if offset == 0 and local.time() >= at:
+            # 오늘이 회차 날이고 시각이 지났다 — 그날 안이면 지금 회차다.
+            return f"{_SHORT_WEEKDAYS[day.weekday()]} {at:%H:%M} (진행 중)"
+        return f"{_SHORT_WEEKDAYS[day.weekday()]} {at:%H:%M}"
+    return ""
 
 
 def _row(row: dict) -> dict:

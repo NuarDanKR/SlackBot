@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from . import channel_apps
 from .archive.collection_probe import ArchiverChannel
@@ -50,6 +50,44 @@ KST = timezone(timedelta(hours=9))
 
 def _today() -> str:
     return datetime.now(KST).date().isoformat()
+
+
+def _now() -> datetime:
+    """시험이 바꿔 끼우는 자리. 시계를 직접 부르면 요일 판정을 시험할 수 없다."""
+    return datetime.now(KST)
+
+
+def review_schedule_label() -> str:
+    """요약 검토 일정 문구 — **전역 정책 하나뿐**이다(B-88).
+
+    채널별 `send_at`·`schedule_kind` 는 DB 에 호환용으로 남아 있지만 실행에
+    쓰이지 않는다. 그 값을 화면에 보이면 사람은 그것이 먹는 줄 안다.
+    """
+    from .channel_management import global_review_label
+
+    return global_review_label()
+
+
+def first_round_after(day_iso: str) -> datetime | None:
+    """그 날 **다음 날부터** 첫 전역 검토 회차. 날짜를 못 읽으면 `None`.
+
+    검토자를 정한 시각은 날짜까지만 남는다(`reviewers.since`). 화요일에 정했으면
+    그날 17시 회차에 들어갔을 수도, 못 들어갔을 수도 있다. 모르는 쪽을 **늦게
+    잡는다** — 화요일 회차를 기준으로 삼으면, 18시에 정한 사람에게 수요일에
+    「발송이 멈췄다」 는 거짓 빨강이 뜬다. 진짜 고장의 발견이 며칠 늦어지는 것이
+    거짓 경보보다 낫다 — 거짓 경보는 몇 번이면 사람이 빨강을 안 본다.
+    """
+    from .daily_review import GLOBAL_REVIEW_AT, GLOBAL_REVIEW_WEEKDAYS
+
+    try:
+        start = date.fromisoformat(str(day_iso or ""))
+    except ValueError:
+        return None
+    for offset in range(1, 8):
+        day = start + timedelta(days=offset)
+        if day.weekday() in GLOBAL_REVIEW_WEEKDAYS:
+            return datetime.combine(day, GLOBAL_REVIEW_AT, tzinfo=KST)
+    return None
 
 
 @dataclass(frozen=True)
@@ -243,14 +281,13 @@ def check_reviewer(f: HealthFacts) -> Check:
         return Check(
             BAD, "검토자",
             "없습니다 — 이 채널은 요약 후보를 보내거나 반영하지 않습니다.",
-            "`/채널 수정` 에서 검토자와 보낼 시각을 정하세요.",
+            # 시각은 고를 것이 없다(전역 회차). 검토자만 정하면 된다.
+            "`/채널 수정` 에서 검토자를 정하세요.",
         )
     who = " ".join(f"<@{u}>" for u in f.reviewers)
-    return Check(
-        OK,
-        "검토자",
-        f"{who} · {f.review_schedule or ('매일 ' + (f.send_at or '08:00'))}",
-    )
+    # `f.review_schedule`·`f.send_at` 은 **보지 않는다.** 채널별 옛 값이고 실행에
+    # 쓰이지 않는다(B-88). 화면에 보이면 사람은 그 시각에 DM 이 오는 줄 안다.
+    return Check(OK, "검토자", f"{who} · {review_schedule_label()}")
 
 
 def check_digest(f: HealthFacts) -> Check:
@@ -270,9 +307,19 @@ def check_digest(f: HealthFacts) -> Check:
         return Check(UNKNOWN, "검토 DM", "확인하지 못했습니다(발송 이력을 읽지 못함).")
     if f.last_digest:
         return Check(OK, "검토 DM", f"마지막 발송 {f.last_digest}")
-    if f.reviewer_since and f.reviewer_since >= _today():
-        # 오늘 막 정했다. 아직 안 간 것이 정상이다.
-        return Check(OK, "검토 DM", f"오늘 검토자를 정했습니다 — {f.send_at or '08:00'} 이후 발송")
+    # **첫 회차가 아직 안 왔으면 안 간 것이 정상이다**(B-88).
+    #
+    # 전에는 「오늘 정했으면 정상」 이었다. 매일 보내던 시절의 판정이고, 화·금
+    # 회차에서는 틀린다 — 수요일에 정하면 금요일 17시까지 안 가는 것이 맞는데,
+    # 목요일에 「발송 쪽이 멈춰 있습니다」 빨강이 떴다. 정책이 바뀌면서 이 판정은
+    # 표시가 아니라 **거짓 경보**가 됐다.
+    first = first_round_after(f.reviewer_since) if f.reviewer_since else None
+    if first is not None and _now() < first:
+        return Check(
+            OK, "검토 DM",
+            f"검토자를 정했습니다 — 첫 발송은 다음 전역 회차"
+            f"({first:%m-%d} {first:%H:%M} KST)입니다.",
+        )
     return Check(
         BAD, "검토 DM",
         "검토자는 있는데 **한 번도 나가지 않았습니다.** 발송 쪽이 멈춰 있습니다.",

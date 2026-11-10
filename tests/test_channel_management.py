@@ -73,7 +73,8 @@ def test_request_from_view_reads_create_fields():
     assert request.visibility == "private"
     assert request.members == ("U2", "U3")
     assert request.reviewers == ("U1",)
-    assert request.send_at == "09:00"
+    # 옛 화면이 시각을 보내도 **읽지 않는다**(B-88). 실행은 전역 회차가 한다.
+    assert request.send_at == "08:00"
 
 
 def test_owner_store_isolated_by_workspace_and_channel(tmp_path):

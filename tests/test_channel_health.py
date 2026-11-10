@@ -188,7 +188,23 @@ def test_the_name_fields_are_optional():
               if b["type"] == "input"}
     assert inputs["task"] is True
     assert inputs["reviewers"] is True
-    assert inputs["send_at"] is True
+
+
+# --- 검토 일정은 전역 하나 (B-88) ---------------------------------------------
+#
+# 전에는 채널마다 주기·요일·시각을 고르게 했다. 2026-11-10 오너 결정으로 전역 회차
+# 하나(화·금 17:00 KST)로 묶였고, 그 뒤로 이 입력들은 **아무 데도 쓰이지 않으면서
+# 화면에만 남아 있었다.** 사람은 「매일 09:00」 으로 맞춰 두고 그때 DM 을 기다렸다.
+#
+# 아래 시험은 예전 시험을 **뒤집은** 것이다. 지우지 않은 이유: 옛 값이 DB 에 남아
+# 있어 `edit_modal(..., schedule_kind="weekly", weekday=4)` 같은 호출이 실제로
+# 들어온다. 그때 옛 칸이 되살아나지 않는지를 봐야 한다.
+
+LEGACY_INPUTS = ("schedule_kind", "schedule_weekday", "send_at")
+
+
+def _input_ids(modal) -> set[str]:
+    return {b["block_id"] for b in modal["blocks"] if b["type"] == "input"}
 
 
 def test_current_reviewers_are_prefilled():
@@ -197,42 +213,54 @@ def test_current_reviewers_are_prefilled():
 
     blocks = {b["block_id"]: b for b in modal["blocks"] if b["type"] == "input"}
     assert blocks["reviewers"]["element"]["initial_users"] == ["U1", "U2"]
-    assert blocks["send_at"]["element"]["initial_time"] == "10:30"
+    assert "send_at" not in blocks, "옛 검토 시각 입력이 되살아났다"
 
 
-def test_weekly_schedule_is_prefilled():
+@pytest.mark.parametrize(
+    ("kind", "weekday", "send_at"),
+    [("daily", None, "08:00"), ("weekly", 4, "10:30"), ("weekly", 1, "06:00")],
+)
+def test_a_legacy_schedule_in_the_db_does_not_bring_back_the_inputs(kind, weekday, send_at):
+    """DB 에 남은 옛 채널별 일정이 **입력 칸으로 되살아나지 않는다.**
+
+    칸이 보이면 사람은 그 값이 먹는 줄 안다. 실제 발송은 화·금 17시다.
+    """
     modal = edit_modal(
-        "{}",
-        spec=parse(GOOD),
-        reviewers=("U1",),
-        send_at="10:30",
-        schedule_kind="weekly",
-        weekday=4,
+        "{}", spec=parse(GOOD), reviewers=("U1",),
+        send_at=send_at, schedule_kind=kind, weekday=weekday,
     )
 
-    blocks = {b["block_id"]: b for b in modal["blocks"] if b["type"] == "input"}
-    assert blocks["schedule_kind"]["element"]["initial_option"]["value"] == "weekly"
-    assert blocks["schedule_weekday"]["element"]["initial_option"]["value"] == "4"
+    assert not (_input_ids(modal) & set(LEGACY_INPUTS))
 
 
-def test_daily_schedule_does_not_show_a_misleading_weekday_field():
-    modal = edit_modal("{}", spec=parse(GOOD), schedule_kind="daily")
+def test_the_edit_modal_shows_the_global_schedule_as_text():
+    modal = edit_modal("{}", spec=parse(GOOD), schedule_kind="weekly", weekday=4)
 
-    block_ids = {block.get("block_id") for block in modal["blocks"]}
-    assert "schedule_kind" in block_ids
-    assert "schedule_weekday" not in block_ids
-
-
-def test_weekly_schedule_reveals_the_required_weekday_field():
-    modal = edit_modal("{}", spec=parse(GOOD), schedule_kind="weekly", weekday=1)
-
-    weekday = next(
-        block for block in modal["blocks"] if block.get("block_id") == "schedule_weekday"
+    notice = next(
+        b for b in modal["blocks"] if b.get("block_id") == "review_schedule_notice"
     )
-    assert not weekday.get("optional", False)
+    assert notice["type"] == "section", "입력이 아니라 읽기 전용이어야 한다"
+    assert "매주 화·금 17:00 KST" in notice["text"]["text"]
 
 
-def test_schedule_choice_updates_the_open_modal_and_reveals_only_weekly_fields():
+def test_the_global_label_comes_from_the_scheduler_constants(monkeypatch):
+    """문구를 따로 적어 두면 정책이 바뀌는 날 화면만 옛 시각을 말한다."""
+    from datetime import time
+
+    from tybot import daily_review
+
+    monkeypatch.setattr(daily_review, "GLOBAL_REVIEW_WEEKDAYS", frozenset({0, 3}))
+    monkeypatch.setattr(daily_review, "GLOBAL_REVIEW_AT", time(9, 30))
+    from tybot.channel_management import global_review_label
+
+    assert global_review_label() == "매주 월·목 09:30 KST"
+
+
+def test_an_old_open_modal_switching_schedule_kind_rebuilds_without_inputs():
+    """배포 직전에 열려 있던 옛 모달은 아직 `schedule_kind` 선택을 보낸다.
+
+    그 동작이 와도 죽지 않고, 다시 그린 화면에 옛 칸이 없어야 한다.
+    """
     from types import SimpleNamespace
 
     from tybot.slack.pilot import WorkspaceBot
@@ -260,13 +288,9 @@ def test_schedule_choice_updates_the_open_modal_and_reveals_only_weekly_fields()
 
     bot._update_review_schedule_modal(client, body)
 
-    blocks = {block.get("block_id") for block in updates[-1]["view"]["blocks"]}
-    assert "schedule_weekday" in blocks
-
-    body["actions"] = [{"selected_option": {"value": "daily"}}]
-    bot._update_review_schedule_modal(client, body)
-    blocks = {block.get("block_id") for block in updates[-1]["view"]["blocks"]}
-    assert "schedule_weekday" not in blocks
+    rebuilt = updates[-1]["view"]["blocks"]
+    ids = {block.get("block_id") for block in rebuilt if block.get("type") == "input"}
+    assert not (ids & set(LEGACY_INPUTS))
 
 
 def test_channel_managers_are_only_shown_to_people_who_can_delegate():
@@ -288,10 +312,13 @@ def test_edit_fields_use_clear_names_and_follow_the_task_flow():
     labels = {block["block_id"]: block["label"]["text"] for block in inputs}
 
     assert ids.index("task") < ids.index("channel_managers")
-    assert ids.index("send_at") < ids.index("reviewers")
     assert labels["channel_managers"] == "채널 관리자"
-    assert labels["send_at"] == "검토 시각"
     assert labels["reviewers"] == "검토 승인자"
+    # 일정 안내는 검토자 **위**에 읽기 전용으로 온다. 검토자를 고르기 전에
+    # 「언제 DM 이 오나」 를 먼저 알아야 한다.
+    every = [b.get("block_id") for b in modal["blocks"]]
+    assert every.index("review_schedule_notice") < every.index("reviewers")
+    assert "send_at" not in ids
 
 
 def test_create_review_fields_follow_the_same_flow_as_edit():
@@ -300,9 +327,10 @@ def test_create_review_fields_follow_the_same_flow_as_edit():
     ids = [block["block_id"] for block in inputs]
     labels = {block["block_id"]: block["label"]["text"] for block in inputs}
 
-    assert ids.index("schedule_kind") < ids.index("send_at") < ids.index("reviewers")
-    assert labels["send_at"] == "검토 시각"
     assert labels["reviewers"] == "검토 승인자"
+    every = [b.get("block_id") for b in modal["blocks"]]
+    assert every.index("review_schedule_notice") < every.index("reviewers")
+    assert not (set(ids) & set(LEGACY_INPUTS)), "생성 화면에 옛 일정 입력이 남았다"
 
 
 # --- 제출 읽기 ---------------------------------------------------------------
@@ -343,18 +371,25 @@ def test_only_reviewers_changed_means_no_rename():
 
     assert not edit.renames
     assert edit.reviewers == ("U1",)
-    assert edit.send_at == "09:00"
+    # 옛 모달이 시각을 보내도 **읽지 않는다**(B-88).
+    assert edit.send_at == ""
     assert edit.schedule_kind == "daily"
     assert edit.weekday is None
 
 
-def test_weekly_review_schedule_is_read_from_the_edit_modal():
+def test_an_old_modal_submitting_a_weekly_schedule_is_not_read():
+    """뒤집은 시험이다. 예전에는 「주 1회 금요일」 을 읽어 저장했다.
+
+    지금 그 값을 읽어 저장하면 DB 에 「이 채널은 금요일」 이 쌓이고, 다음 사람이
+    그것이 실행된다고 믿는다. 실행 판단은 전역 정책이 한다.
+    """
     edit = edit_from_view(
         _view(reviewers=["U1"], send_at="09:00", schedule_kind="weekly", weekday="4")
     )
 
-    assert edit.schedule_kind == "weekly"
-    assert edit.weekday == 4
+    assert edit.schedule_kind == "daily"
+    assert edit.weekday is None
+    assert edit.send_at == ""
 
 
 def test_a_full_name_is_assembled():
@@ -703,18 +738,27 @@ def test_the_reviewer_rides_along_to_every_channel():
     assert len(made) == 2
     for request in made:
         assert request.reviewers == ("U1", "U2")
-        assert request.send_at == "09:00"
+        # 화면이 시각을 보내도 읽지 않고 호환 기본값을 넣는다(B-88).
+        assert request.send_at == "08:00"
 
 
-def test_weekly_schedule_rides_along_to_every_created_channel():
+def test_no_created_channel_carries_a_per_channel_schedule():
+    """뒤집은 시험이다. 예전에는 주 1회 화요일이 모든 새 채널에 따라 붙었다.
+
+    여러 채널을 한 번에 만들면 같은 옛 값이 채널 수만큼 DB 에 복제되고, 그 값들은
+    **하나도 실행되지 않는다.** 복제된 거짓말은 하나보다 고치기 어렵다.
+    """
     from tybot.channel_management import requests_from_view
 
-    made = requests_from_view(
-        _create_view(schedule_kind="weekly", weekday="1")
-    )
+    view = _create_view(schedule_kind="weekly", weekday="1")
+    view["state"]["values"]["task"]["task"]["value"] = "주간회의\n안전점검"
 
-    assert made[0].schedule_kind == "weekly"
-    assert made[0].weekday == 1
+    made = requests_from_view(view)
+
+    assert len(made) == 2
+    for request in made:
+        assert request.schedule_kind == "daily"
+        assert request.weekday is None
 
 
 def test_the_rename_path_does_not_break_on_the_new_fields():
@@ -790,6 +834,103 @@ def test_reviewer_set_today_is_not_yet_a_failure():
 def test_reviewer_set_long_ago_and_never_sent_is_a_failure():
     facts = _facts(last_digest="", reviewer_since="2026-01-01")
     assert _find(facts, "검토 DM").mark == ch.BAD
+
+
+# --- 첫 회차 전에는 거짓 경보를 띄우지 않는다 (B-88) ---------------------------
+#
+# 매일 보내던 시절에는 「오늘 정했으면 정상, 어제면 고장」 이 맞았다. 화·금
+# 회차에서는 틀린다 — 수요일에 정하면 금요일 17시까지 안 가는 것이 정상인데,
+# 목요일에 「발송 쪽이 멈춰 있습니다」 빨강이 떴다.
+#
+# 2026-11-10(화) · 11-11(수) · 11-12(목) · 11-13(금) · 11-17(화).
+
+
+def _at(monkeypatch, year, month, day, hour, minute=0):
+    from datetime import datetime
+
+    monkeypatch.setattr(
+        ch, "_now", lambda: datetime(year, month, day, hour, minute, tzinfo=ch.KST)
+    )
+
+
+def test_a_reviewer_set_on_wednesday_is_not_a_failure_on_thursday(monkeypatch):
+    """**이 절의 이유.** 예전 판정은 여기서 빨강이었다."""
+    _at(monkeypatch, 2026, 11, 12, 10)
+    check = _find(_facts(last_digest="", reviewer_since="2026-11-11"), "검토 DM")
+
+    assert check.mark == ch.OK
+    assert "다음 전역 회차" in check.detail
+    assert "11-13 17:00 KST" in check.detail
+
+
+def test_after_the_first_round_passes_with_nothing_sent_it_is_a_failure(monkeypatch):
+    """유예는 **첫 회차까지**다. 그 뒤에도 안 갔으면 진짜 고장이다."""
+    _at(monkeypatch, 2026, 11, 13, 17, 1)
+    check = _find(_facts(last_digest="", reviewer_since="2026-11-11"), "검토 DM")
+
+    assert check.mark == ch.BAD
+
+
+def test_a_reviewer_set_on_a_round_day_waits_for_the_next_round(monkeypatch):
+    """정한 시각은 날짜까지만 남는다. 화요일 18시에 정했으면 그날 회차에 못 들었다.
+
+    모르는 쪽을 늦게 잡는다 — 화요일 회차를 기준으로 하면 수요일에 거짓 빨강이
+    뜬다. 진짜 고장의 발견이 며칠 늦어지는 것이 거짓 경보보다 낫다.
+    """
+    _at(monkeypatch, 2026, 11, 11, 9)
+    check = _find(_facts(last_digest="", reviewer_since="2026-11-10"), "검토 DM")
+
+    assert check.mark == ch.OK
+    assert "11-13 17:00 KST" in check.detail
+
+
+def test_a_friday_reviewer_waits_until_the_next_tuesday(monkeypatch):
+    _at(monkeypatch, 2026, 11, 16, 12)
+    check = _find(_facts(last_digest="", reviewer_since="2026-11-13"), "검토 DM")
+
+    assert check.mark == ch.OK
+    assert "11-17 17:00 KST" in check.detail
+
+
+def test_an_unreadable_reviewer_since_falls_back_to_the_failure_check(monkeypatch):
+    """날짜를 못 읽으면 유예를 주지 않는다. 막는 쪽이 기본값이다."""
+    _at(monkeypatch, 2026, 11, 12, 10)
+    check = _find(_facts(last_digest="", reviewer_since="not-a-date"), "검토 DM")
+
+    assert check.mark == ch.BAD
+
+
+def test_the_first_round_follows_the_scheduler_constants(monkeypatch):
+    """유예 계산이 실행 상수를 따른다. 따로 적으면 정책이 바뀌는 날 둘이 갈린다."""
+    from datetime import time
+
+    from tybot import daily_review
+
+    monkeypatch.setattr(daily_review, "GLOBAL_REVIEW_WEEKDAYS", frozenset({0}))
+    monkeypatch.setattr(daily_review, "GLOBAL_REVIEW_AT", time(9, 0))
+
+    first = ch.first_round_after("2026-11-11")
+
+    assert first is not None
+    assert first.weekday() == 0
+    assert (first.hour, first.minute) == (9, 0)
+    assert first.date().isoformat() == "2026-11-16"
+
+
+def test_the_reviewer_line_shows_the_global_schedule_not_the_legacy_one():
+    """DB 의 옛 「매일 10:30」 이 보이면 사람은 그 시각에 DM 을 기다린다."""
+    check = _find(
+        _facts(review_schedule="매일 10:30", send_at="10:30"), "검토자"
+    )
+
+    assert "매주 화·금 17:00 KST" in check.detail
+    assert "10:30" not in check.detail
+
+
+def test_a_missing_reviewer_hint_does_not_ask_for_a_send_time():
+    check = _find(_facts(reviewers=[]), "검토자")
+
+    assert "시각" not in check.fix
 
 
 # --- 요약 검토 Canvas (B-50) ---------------------------------------------------

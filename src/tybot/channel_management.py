@@ -44,6 +44,30 @@ REVIEWER_BLOCK = "reviewers"
 SEND_AT_BLOCK = "send_at"
 SCHEDULE_KIND_BLOCK = "schedule_kind"
 SCHEDULE_WEEKDAY_BLOCK = "schedule_weekday"
+#: 일정 안내 블록. 입력이 아니라 읽기 전용이다(B-88).
+SCHEDULE_NOTICE_BLOCK = "review_schedule_notice"
+
+_SHORT_WEEKDAYS = "월화수목금토일"
+
+
+def global_review_label() -> str:
+    """화면과 상태에 보이는 **유일한** 일정 문구.
+
+    **실행 판단과 같은 상수에서 만든다**(`daily_review.GLOBAL_REVIEW_*`). 문구를
+    따로 적어 두면 정책이 바뀌는 날 실행만 바뀌고 화면은 옛 시각을 말한다 —
+    지금 고치는 고장과 같은 모양이 반대 방향으로 다시 생긴다.
+
+    함수 안에서 불러온다. `daily_review` 가 이 모듈을 (함수 안에서) 쓰므로, 위에서
+    불러오면 둘 중 하나를 고치는 날 순환 import 가 된다.
+    """
+    from .daily_review import GLOBAL_REVIEW_AT, GLOBAL_REVIEW_WEEKDAYS
+
+    days = "·".join(_SHORT_WEEKDAYS[day] for day in sorted(GLOBAL_REVIEW_WEEKDAYS))
+    return f"매주 {days} {GLOBAL_REVIEW_AT:%H:%M} KST"
+
+#: DB 호환용 기본값. **실행에 쓰이지 않는다.**
+LEGACY_SCHEDULE_KIND = "daily"
+LEGACY_SEND_AT = "08:00"
 MANAGER_BLOCK = "channel_managers"
 
 _WEEKDAYS = (
@@ -159,59 +183,54 @@ def _selected_by_action(state: dict, action_id: str) -> tuple[str, dict]:
 
 
 def _review_schedule(state: dict) -> tuple[str, int | None]:
-    kind = (
-        (_selected(state, SCHEDULE_KIND_BLOCK, "schedule_kind").get("selected_option") or {})
-        .get("value", "daily")
-    )
-    if kind == "daily":
-        return "daily", None
-    raw = (
-        (_selected(state, SCHEDULE_WEEKDAY_BLOCK, "schedule_weekday").get("selected_option") or {})
-        .get("value", "")
-    )
-    if kind != "weekly" or not raw.isdigit() or not 0 <= int(raw) <= 6:
-        raise ChannelNameError("주 1회 검토는 요일을 골라 주세요.", SCHEDULE_WEEKDAY_BLOCK)
-    return "weekly", int(raw)
+    """옛 입력이 있어도 **읽지 않는다** (B-88).
+
+    실행 판단은 전역 정책이 한다(`daily_review.GLOBAL_REVIEW_*`). 화면에서 읽어
+    저장하면 DB 에 「이 채널은 매일 09시」 라는 값이 계속 쌓이고, 다음 사람이
+    그 값을 보고 그것이 실행된다고 믿는다.
+
+    돌려주는 것은 **호환용 기본값**이다. 컬럼은 남아 있고 값은 무언가 들어가야
+    한다. 옛 모달(배포 직전에 열려 있던 화면)이 제출돼도 그 값은 버려진다.
+    """
+    return LEGACY_SCHEDULE_KIND, None
 
 
 def _schedule_blocks(schedule_kind: str = "daily", weekday: int | None = None) -> list[dict]:
-    kind = "weekly" if schedule_kind == "weekly" else "daily"
-    day = weekday if weekday is not None and 0 <= weekday <= 6 else 0
-    kind_options = [
-        {"text": {"type": "plain_text", "text": "매일"}, "value": "daily"},
-        {"text": {"type": "plain_text", "text": "주 1회"}, "value": "weekly"},
-    ]
-    day_options = [
-        {"text": {"type": "plain_text", "text": label}, "value": value}
-        for label, value in _WEEKDAYS
-    ]
-    blocks = [
+    """요약 검토 일정을 **보여 주기만** 한다 (B-88).
+
+    전에는 채널마다 주기와 시각을 고르게 했다. 2026-11-10 오너 결정으로 전역
+    회차 하나(화·금 17:00 KST)로 묶였고, 그 뒤로 이 입력들은 **아무 데도 쓰이지
+    않으면서 화면에만 남아 있었다.**
+
+    그 상태가 가장 나쁘다. 사람은 고른 값이 먹는 줄 알고 「매일 09:00」 으로
+    맞춰 두는데 DM 은 화·금 17시에 온다. 그러면 화면을 안 믿게 되고, 옆에 있는
+    **진짜 설정(검토자)** 까지 같이 의심받는다.
+
+    인자는 받되 쓰지 않는다 — 호출부와 옛 DB 값이 그대로 들어와도 깨지지 않게
+    둔다.
+    """
+    return [
         {
-            "type": "input",
-            "block_id": SCHEDULE_KIND_BLOCK,
-            "dispatch_action": True,
-            "label": {"type": "plain_text", "text": "요약 검토 주기"},
-            "element": {
-                "type": "static_select",
-                "action_id": "schedule_kind",
-                "options": kind_options,
-                "initial_option": next(o for o in kind_options if o["value"] == kind),
+            "type": "section",
+            "block_id": SCHEDULE_NOTICE_BLOCK,
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*요약 검토 일정* — {global_review_label()}",
             },
-        }
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "전체 채널이 한 회차로 묶입니다. 채널별로 바꿀 수 없습니다. "
+                        "기한 안에 검토하지 않은 후보는 자동으로 봇 요약이 됩니다."
+                    ),
+                }
+            ],
+        },
     ]
-    if kind == "weekly":
-        blocks.append({
-            "type": "input",
-            "block_id": SCHEDULE_WEEKDAY_BLOCK,
-            "label": {"type": "plain_text", "text": "주 1회 검토 요일"},
-            "element": {
-                "type": "static_select",
-                "action_id": "schedule_weekday",
-                "options": day_options,
-                "initial_option": day_options[day],
-            },
-        })
-    return blocks
 
 
 def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRequest:
@@ -255,9 +274,8 @@ def request_from_view(view: dict, *, include_channel_options: bool) -> ChannelRe
                 "반영되지 않습니다.",
                 REVIEWER_BLOCK,
             )
-        send_at = (
-            _selected(state, SEND_AT_BLOCK, "send_at").get("selected_time") or "08:00"
-        )
+        # 시각을 화면에서 읽지 않는다(B-88). 옛 모달이 제출돼도 버린다.
+        send_at = LEGACY_SEND_AT
         schedule_kind, weekday = _review_schedule(state)
     request = ChannelRequest(
         prefix, org_name, org_code, task, visibility, members, reviewers, send_at,
@@ -473,21 +491,6 @@ def create_modal(
                 },
             },
             *_schedule_blocks(schedule_kind, weekday),
-            {
-                "type": "input",
-                "block_id": SEND_AT_BLOCK,
-                "optional": True,
-                "label": {"type": "plain_text", "text": "검토 시각"},
-                "element": {
-                    "type": "timepicker",
-                    "action_id": "send_at",
-                    "initial_time": "08:00",
-                },
-                "hint": {
-                    "type": "plain_text",
-                    "text": "요약 후보를 KST 기준 이 시각에 DM 으로 보냅니다.",
-                },
-            },
             # 검토 승인자는 **필수**다. 선택으로 두면 요약 후보가 아무에게도 가지 않고
             # 반영되지 않는다. 기본값은 만든 사람 자신이다.
             {
@@ -639,21 +642,6 @@ def edit_modal(
             *_schedule_blocks(schedule_kind, weekday),
             {
                 "type": "input",
-                "block_id": SEND_AT_BLOCK,
-                "optional": True,
-                "label": {"type": "plain_text", "text": "검토 시각"},
-                "element": {
-                    "type": "timepicker",
-                    "action_id": "send_at",
-                    "initial_time": send_at or "08:00",
-                },
-                "hint": {
-                    "type": "plain_text",
-                    "text": "그날 요약 후보를 KST 기준 이 시각에 DM 으로 보냅니다.",
-                },
-            },
-            {
-                "type": "input",
                 "block_id": REVIEWER_BLOCK,
                 "optional": True,
                 "label": {"type": "plain_text", "text": "검토 승인자"},
@@ -705,9 +693,13 @@ def edit_from_view(view: dict) -> ChannelEdit:
     # 검토자 칸이 화면에 있었는가. 없던 화면(옛 모달)의 제출을 「전부 해제」 로
     # 읽으면 검토가 조용히 멈춘다.
     had_block = REVIEWER_BLOCK in state
-    send_at = (
-        _selected(state, SEND_AT_BLOCK, "send_at").get("selected_time") or ""
-    )
+    # 시각을 화면에서 읽지 않는다(B-88). 옛 모달이 제출돼도 버린다.
+    #
+    # 빈 값은 「바꾸지 않음」 이 **아니다.** 검토자를 저장하면
+    # `reviewers.parse_send_at("")` 이 기본값으로 바꿔 DB 의 옛 시각을 덮는다.
+    # 그 컬럼은 호환용이고 실행에 쓰이지 않으므로 덮여도 동작은 같다 — 다만
+    # 「옛 채널별 시각이 DB 에 보존된다」 고 기대하면 틀린다.
+    send_at = ""
     schedule_kind, weekday = _review_schedule(state)
     manager_action = _selected(state, MANAGER_BLOCK, "channel_managers")
     picked_managers = tuple(manager_action.get("selected_users") or ())

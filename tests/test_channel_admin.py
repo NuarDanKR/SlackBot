@@ -326,3 +326,48 @@ def test_result_is_json_ready():
     assert payload["changed"] == ["#a"]
     assert payload["skipped"][0]["channel"] == "#b"
     assert payload["ok"] is False
+
+
+# --- 검토 일정은 전역 하나 (B-88) ----------------------------------------------
+
+
+def test_the_console_shows_the_global_schedule_not_the_channel_one():
+    """DB 에 「매주 수요일 09:00」 이 남아 있어도 콘솔은 전역 일정을 말한다.
+
+    콘솔 화면은 `scheduleLabel` 을 그대로 그린다(`Channels.tsx`). 여기서 옛 값을
+    돌려주면 관리자는 그 시각에 DM 이 가는 줄 안다.
+    """
+    key = (WS, "C1")
+    (row,) = _rows(
+        reviewers={key: [{
+            "reviewer_user": "U2", "send_at": "09:00",
+            "schedule_kind": "weekly", "weekday": 2,
+        }]},
+    )
+
+    assert row.schedule_label == "매주 화·금 17:00 KST"
+    payload = row.to_json()
+    assert payload["scheduleLabel"] == "매주 화·금 17:00 KST"
+    assert payload["scheduleSource"] == "global"
+
+
+def test_legacy_columns_stay_in_the_payload_for_compatibility():
+    """옛 칸은 지우지 않는다 — 읽는 쪽이 아직 있을 수 있다. 다만 `scheduleSource`
+    가 그 값이 실행되지 않는다는 것을 응답 안에서 말한다."""
+    key = (WS, "C1")
+    (row,) = _rows(
+        reviewers={key: [{"reviewer_user": "U2", "send_at": "09:00",
+                          "schedule_kind": "weekly", "weekday": 2}]},
+    )
+
+    payload = row.to_json()
+    assert payload["sendAt"] == "09:00"
+    assert payload["scheduleKind"] == "weekly"
+    assert payload["weekday"] == 2
+
+
+def test_a_channel_without_reviewers_still_reports_the_global_schedule():
+    """일정은 채널의 속성이 아니라 정책이다. 검토자가 없어도 같은 회차가 돈다."""
+    (row,) = _rows()
+
+    assert row.schedule_label == "매주 화·금 17:00 KST"
