@@ -173,16 +173,27 @@ def test_bot_output_is_not_archived_in_dm(tmp_path):
     assert result.skipped_bot == 1
 
 
-def test_pii_screening_still_applies_in_dm(tmp_path):
+def test_pii_masking_still_applies_in_dm(tmp_path):
     """개인이 자기 파일을 올리는 자리라 오히려 걸릴 확률이 높다(원칙 5).
+
+    2026-11-10 오너 결정(B-86)으로 **버리지 않고 가린다.** DM 은 그 사람 한 명의
+    기록이라 버리면 더 아프다 — 본인이 올린 것이 본인 작업공간에서 사라진다.
+    다만 평문은 파일에 남지 않는다.
 
     값은 **형식만 맞춘 가짜**다(뒷자리가 `1000000`). 검사에 걸리는 것은 모양이지
     내용이 아니므로, 실제 번호처럼 보이는 값을 저장소에 남길 이유가 없다.
     """
     result = _dm(tmp_path, text="주민등록번호 900101-1000000 입니다")
 
-    assert result.written == 0
-    assert result.refused
+    assert result.written == 1
+    assert result.refused == []
+    assert result.mask_counts == {"rrn": 1}
+
+    body = result.path.read_text(encoding="utf-8")
+    assert "900101" not in body and "1000000" not in body
+    assert "[주민등록번호1]" in body
+    # DM 문서도 프론트매터에 사실을 남긴다.
+    assert "masked: true" in body.split("---")[1]
 
 
 def test_dm_frontmatter_has_no_channel_acl(tmp_path):
