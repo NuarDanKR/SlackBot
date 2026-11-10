@@ -70,6 +70,8 @@ class Case:
     #: `claim` 일 때 답변 사실로 승격해도 되나. 좌표가 없으면 False.
     expect_promotable: bool = False
     expect_body: str = ""
+    fact_tokens: tuple[str, ...] = field(default_factory=tuple)
+    resolved_evidence: tuple[str, ...] = field(default_factory=tuple)
     why: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
 
@@ -120,6 +122,7 @@ CASES: tuple[Case, ...] = (
         prior_record_id=PRIOR,
         expect_kind=CLAIM,
         expect_promotable=False,
+        fact_tokens=("15억",),
         why=(
             "사람이 말했다는 것은 **출처이지 검증이 아니다**(원칙 7). 원문 좌표가 "
             "없으면 다음 검색의 힌트로만 쓴다 — 승격하면 미검증 문장이 근거 자리에 "
@@ -133,6 +136,8 @@ CASES: tuple[Case, ...] = (
         prior_record_id=PRIOR,
         expect_kind=CLAIM,
         expect_promotable=True,
+        fact_tokens=("12억",),
+        resolved_evidence=("김해외동 현장의 확정 기성금은 12억원이다.",),
         why=(
             "직전 답변이 읽은 원문을 가리키는 정정이다. 그 좌표를 현재 ACL 로 다시 "
             "열어 확인되면 승격한다. **좌표가 승격의 조건이고 사람의 확신이 아니다.**"
@@ -279,11 +284,26 @@ CASES: tuple[Case, ...] = (
         where="dm",
         expect_kind=CLAIM,
         expect_promotable=False,
+        fact_tokens=("김해외동",),
         why=(
             "저장은 된다(그 사람 기억이다). 승격은 안 된다 — 좌표가 없다. "
             "그리고 이 기억은 **그 사람에게만** 주입된다(위협 T3)."
         ),
         tags=("claim", "dm", "T3"),
+    ),
+    Case(
+        name="좌표가 현재 권한에서 열리지 않는 정정",
+        utterance="그 문서 기준 금액은 12억이야",
+        prior_record_id=PRIOR,
+        expect_kind=CLAIM,
+        expect_promotable=False,
+        fact_tokens=("12억",),
+        resolved_evidence=(),
+        why=(
+            "직전 답변에 좌표가 있었더라도 현재 ACL이나 원문 revision 검증에서 열리지 "
+            "않으면 승격할 수 없다. 지칭 표현은 좌표 선택 힌트일 뿐 권한이 아니다."
+        ),
+        tags=("claim", "T4"),
     ),
 
     # --- 6. 주제 전환 ------------------------------------------------------------
@@ -321,8 +341,32 @@ CASES: tuple[Case, ...] = (
             "가장 흔한 피드백성 발언이고 아무 내용이 없다. 이것을 거르지 못하면 "
             "기억 표가 인사말로 찬다(위협 T6)."
         ),
-        tags=("topic-shift",),
+        tags=("topic-shift", "T6"),
     ),
+)
+
+
+@dataclass(frozen=True)
+class MemoryUseCase:
+    """저장 뒤 주입 단계의 ACL·revision·수명·상한 계약."""
+
+    name: str
+    acl_current: bool = True
+    revision_current: bool = True
+    revoked: bool = False
+    expired: bool = False
+    available: int = 1
+    expected_selected: int = 1
+    tags: tuple[str, ...] = field(default_factory=tuple)
+
+
+USE_CASES = (
+    MemoryUseCase("활성 기억", tags=("baseline",)),
+    MemoryUseCase("권한 상실", acl_current=False, expected_selected=0, tags=("T4",)),
+    MemoryUseCase("원문 revision 변경", revision_current=False, expected_selected=0, tags=("T4",)),
+    MemoryUseCase("철회", revoked=True, expected_selected=0, tags=("T7",)),
+    MemoryUseCase("만료", expired=True, expected_selected=0, tags=("T7",)),
+    MemoryUseCase("주입 상한", available=9, expected_selected=5, tags=("T6",)),
 )
 
 
@@ -374,12 +418,17 @@ def test_no_enumerated_preference_can_turn_off_a_contract():
 
 
 def test_a_claim_without_evidence_is_never_promotable():
-    """좌표가 승격의 조건이고 사람의 확신이 아니다(위협 T1)."""
+    """지칭이 아니라 현재 원문에서 사실 토큰이 확인돼야 한다(위협 T1·T4)."""
     for case in CASES:
-        if case.expect_kind == CLAIM and case.expect_promotable:
-            assert "그 문서" in case.utterance or "기준" in case.utterance, (
-                f"{case.name}: 좌표를 가리키는 말 없이 승격 가능으로 적혔다"
-            )
+        if case.expect_kind != CLAIM:
+            continue
+        if not case.resolved_evidence:
+            assert not case.expect_promotable, case.name
+            continue
+        if case.expect_promotable:
+            evidence = "\n".join(case.resolved_evidence)
+            assert case.fact_tokens, f"{case.name}: 검증할 사실 토큰이 없다"
+            assert all(token in evidence for token in case.fact_tokens), case.name
 
 
 def test_only_claims_can_be_promotable():
@@ -410,13 +459,39 @@ def test_the_same_utterance_is_judged_differently_with_and_without_a_prior_turn(
     )
 
 
-@pytest.mark.parametrize("tag", ["T1", "T2", "T3", "T5", "topic-shift", "dm"])
+@pytest.mark.parametrize(
+    "tag", ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "topic-shift", "dm"]
+)
 def test_every_threat_has_at_least_one_case(tag):
     """위협 모델의 각 항목에 사례가 있다.
 
     사례 없는 위협은 문서에만 있는 방어다.
     """
-    assert any(tag in case.tags for case in CASES), tag
+    assert any(tag in case.tags for case in CASES) or any(
+        tag in case.tags for case in USE_CASES
+    ), tag
+
+
+def test_revoked_expired_or_stale_memory_is_never_selected():
+    for case in USE_CASES:
+        unavailable = (
+            not case.acl_current
+            or not case.revision_current
+            or case.revoked
+            or case.expired
+        )
+        if unavailable:
+            assert case.expected_selected == 0, case.name
+
+
+def test_memory_injection_is_capped_at_five_items():
+    for case in USE_CASES:
+        assert case.expected_selected <= min(case.available, 5), case.name
+
+
+def test_t7_revocation_and_expiry_are_both_covered():
+    assert any(case.revoked and "T7" in case.tags for case in USE_CASES)
+    assert any(case.expired and "T7" in case.tags for case in USE_CASES)
 
 
 def test_the_set_is_not_lopsided():
