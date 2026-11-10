@@ -104,3 +104,51 @@ def test_install_creates_console_secret_once():
     assert '! grep -qE "^CONSOLE_SECRET=.{32,}"' in block
     assert "secrets.token_urlsafe(48)" in block
     assert ">> \"$CONF_DIR/tybot.env\"" in block
+
+
+def test_console_used_modules_follow_the_console_entry(tree):
+    _tree(tree, {
+        "src/tybot/reader.py": "from .archive import store\n",
+        "src/tybot/archive/__init__.py": "",
+        "src/tybot/archive/store.py": "",
+        "src/tybot/answer.py": "from .reader import x\n",
+        "src/tybot/console/app.py": "from . import shared, only\nfrom tybot import reader\n",
+    })
+    used = scope.console_used_modules(tree)
+    assert {"tybot.console.app", "tybot.reader", "tybot.archive", "tybot.archive.store",
+            "tybot.console.helper"} <= used
+    assert "tybot.answer" not in used and "tybot.bot" not in used
+
+
+@pytest.mark.parametrize(("changed", "restart"), [
+    (["src/tybot/bot.py"], False),                       # 봇만 쓰는 코드
+    (["src/tybot/bot.py", "tests/t.py", "docs/a.md", "deploy/sql/x.sql"], False),
+    (["src/tybot/console/helper.py"], True),             # 콘솔도 쓴다
+    (["deploy/install.sh"], True),                       # src 밖 실행 파일 — 보수적으로
+    (["requirements.txt"], True),
+    ([], False),
+])
+def test_console_restart(tree, changed, restart):
+    assert scope.console_restart(tree, changed)["restart"] is restart
+
+
+def test_console_restart_on_the_real_tree():
+    assert scope.console_restart(ROOT, ["src/tybot/answer.py"])["restart"] is False
+    assert scope.console_restart(ROOT, ["src/tybot/console/reader.py"])["restart"] is True
+    assert scope.console_restart(ROOT, ["src/tybot/archive/store.py"])["restart"] is True
+
+
+def test_cli_console_restart(tree):
+    out = subprocess.run(
+        [sys.executable, "-I", str(ROOT / "scripts" / "deploy_scope.py"), "--root", str(tree),
+         "--console-restart", "-"],
+        input="src/tybot/bot.py\n", capture_output=True, text=True, check=True)
+    assert json.loads(out.stdout) == {"restart": False, "files": []}
+
+
+def test_bot_deploy_restarts_console_only_when_needed():
+    script = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
+    block = script[script.index("CONSOLE_RESTART=1"):script.index("sleep 5\n\nif systemctl is-active --quiet tybot;")]
+    assert '--console-restart -' in block and 'git diff --name-only "$DEPLOYED" HEAD' in block
+    assert "if ((CONSOLE_RESTART)); then" in block and "systemctl restart tybot-console" in block
+    assert "CONSOLE_RESTART=1\n" in block                 # 기본은 재시작(모르면 재시작)

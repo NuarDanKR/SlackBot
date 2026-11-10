@@ -12,7 +12,7 @@ APP=/opt/tybot
 BRANCH=${TYBOT_BRANCH:-master}
 
 # 배포 범위. 배포 관리 화면의 버튼 둘에 맞춘다(scripts/deploy_scope.py 설명 참고).
-#   all     — 「봇 배포」. 지금까지와 같다: 봇·콘솔 모두 재시작
+#   all     — 「봇 배포」. 봇을 재시작한다. 콘솔은 콘솔이 쓰는 코드가 바뀌었을 때만 재시작
 #   console — 「콘솔 배포」. 바뀐 파일이 전부 콘솔 전용일 때만 진행하고 **콘솔만** 재시작한다.
 #             봇 코드가 섞여 있으면 아무것도 바꾸지 않고 3 으로 끝낸다.
 # 값은 러너가 고정 목록에서만 고른다. 그 밖의 값은 all 로 본다.
@@ -164,9 +164,24 @@ systemctl enable --now tybot-review-dm.timer
 # 다음 날까지 기다린다.
 systemctl enable --now tybot-convert-retry.timer tybot-convert-nightly.timer
 
-# 콘솔은 별도 프로세스이므로 따로 재시작한다.
+# 콘솔은 별도 프로세스다. 봇 배포는 **콘솔이 쓰는 코드가 바뀌었을 때만** 콘솔도 재시작한다
+# (scripts/deploy_scope.py --console-restart). 배포본을 모르거나 판정이 실패하면 재시작한다.
+CONSOLE_RESTART=1
+if [[ -n "$DEPLOYED" ]] && git cat-file -e "${DEPLOYED}^{commit}" 2>/dev/null; then
+  if RESTART_JSON=$(git diff --name-only "$DEPLOYED" HEAD \
+      | "$APP/.venv/bin/python" -I "$SRC/scripts/deploy_scope.py" --root "$SRC" --console-restart -); then
+    RESTART_FILES=$("$APP/.venv/bin/python" -I -c 'import json,sys; print("\n".join(json.load(sys.stdin)["files"]))' <<<"$RESTART_JSON") || RESTART_FILES="(판정 실패)"
+    [[ -n "$RESTART_FILES" ]] || CONSOLE_RESTART=0
+  fi
+fi
 if [[ "$WITH_CONSOLE" == "1" ]] && systemctl is-enabled --quiet tybot-console 2>/dev/null; then
-  systemctl restart tybot-console || log '콘솔 재시작 실패 — journalctl -u tybot-console 확인'
+  if ((CONSOLE_RESTART)); then
+    log "콘솔도 재시작합니다 — 콘솔이 쓰는 코드가 바뀌었습니다:"
+    head -n 10 <<<"${RESTART_FILES:-(배포본 비교 불가)}" | sed 's/^/  /'
+    systemctl restart tybot-console || log '콘솔 재시작 실패 — journalctl -u tybot-console 확인'
+  else
+    log "콘솔은 재시작하지 않습니다 — 바뀐 코드를 콘솔이 쓰지 않습니다"
+  fi
 fi
 
 sleep 5
