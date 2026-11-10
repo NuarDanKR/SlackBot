@@ -139,9 +139,64 @@ sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/probe_slack_lists.p
 
 **다시 실행해야 한다.** 1차 결과는 버린다.
 
+### 2차 실측 (2026-11-10) — **도구는 작동, 질문은 미해결**
+
+```json
+{"files_seen": 18,
+ "filetypes": {"binary":1,"docx":1,"pdf":5,"png":6,"pptx":1,"quip":1,"xlsx":2,"zip":1},
+ "list_count": 0, "list_lookup_failure": "", "lists": []}
+```
+
+파일 18건이 보인다 — **채널 지정·토큰·`files:read` 는 작동한다.** 1차와 달리 이
+0 은 「아무것도 못 봤다」 가 아니다.
+
+그런데 **핵심 질문은 아직 안 풀렸다.** 이 결과는 둘을 구분하지 못한다.
+
+| | 뜻 | 다음에 할 일 |
+|---|---|---|
+| (가) | 이 채널에 Slack List 가 정말 없다 | List 가 붙은 등록 채널로 다시 잰다 |
+| (나) | **Slack List 는 `files.list` 에 아예 안 나온다** | 시작점 설계를 다시 한다 |
+
+(나)이면 이 문서 상단의 전제 — 「List 는 `files.list` 응답에서 `filetype=list` 인
+파일로 표현된다」 — 가 틀린 것이고, B-90 수집 절차 1단계를 통째로 바꿔야 한다.
+
+**공식 문서는 그 전제를 말하지 않는다**(2026-11-10 확인).
+[`files.list`](https://docs.slack.dev/reference/methods/files.list/) 는 `files:read`
+만 요구하고 List 를 돌려준다는 말이 없다.
+[`lists:read`](https://api.slack.com/scopes/lists:read) 는 `slackLists.*` 메서드에만
+붙는다. 둘을 잇는 문장이 없다.
+
+`lists:read` 가 없어서 `files.list` 가 List 를 **숨기는** 것일 수도 있다. Slack 은
+권한 없는 객체를 조용히 빼는 일이 흔하다. 그러면 scope 를 먼저 받아야 재볼 수 있고,
+그건 「확인 전에는 권한을 넓히지 않는다」 와 맞부딪친다.
+
+### 막혔다 — 사람이 한 번 봐야 한다
+
+추측으로 메우지 않는다(계약 §가시성을 추측해서 통과시키지 않는다).
+
+**확인할 것:** Slack UI 에서 그 채널(`C0BTU5LJD7A`)에 **Slack List 가 실제로
+붙어 있는가.** 채널 상단 탭 또는 북마크에서 보인다.
+
+| UI 에 List 가 | 결론 | 다음 |
+|---|---|---|
+| **없다** | (가). 도구는 정상 | List 가 있는 등록 채널로 다시 잰다 |
+| **있다** | (나). `files.list` 는 시작점이 못 된다 | 아래 대안으로 설계 변경 |
+
+### (나)일 때의 대안 (설계만, 구현 전)
+
+1. **채널 북마크**(`bookmarks.list`)에서 List 링크를 얻는다. Slack 은 채널에 붙은
+   List 를 북마크로 단다. 추가 scope `bookmarks:read`
+2. **메시지 이벤트**에서 List 공유를 잡는다. 이미 수집 중인 경로라 scope 가 늘지 않지만,
+   과거에 붙은 List 는 못 잡는다(소급 불가)
+3. 콘솔에 **List ID 를 사람이 등록**한다. scope 가 가장 적게 늘고 범위가 가장
+   명확하다. 대신 사람이 빠뜨리면 그대로 빠진다
+
+셋 다 `slackLists.items.list` 에는 `lists:read` 가 필요하다. 바뀌는 것은 **무엇을
+시작점으로 삼는가**뿐이다.
+
 ---
 
-**아직 유효한 실측이 없다.** 등록 채널 하나가 필요하고, 그것은 서버에서 사람이 한다.
+**유효한 실측은 아직 없다.** 위 확인 한 번이 다음 단계를 가른다.
 
 ### 토큰은 콘솔 DB 에서 온다 (2026-11-10 수정)
 
