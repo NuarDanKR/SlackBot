@@ -109,6 +109,11 @@ class AnswerPrompts:
     specialist: str | None = None
 
 
+def _with_user_memory(prompt: str, ctx: RequestContext) -> str:
+    memory = str(getattr(ctx, "user_memory_prompt", "") or "").strip()
+    return f"{prompt}\n\n{memory}" if memory else prompt
+
+
 def _response_cache_scope(
     ctx: RequestContext,
     hits,
@@ -158,6 +163,10 @@ def _response_cache_scope(
                 else None
             ),
             "preferred_workspaces": sorted(ctx.preferred_workspaces),
+            "user_memory_ids": list(ctx.user_memory_ids),
+            "user_memory_prompt_sha256": hashlib.sha256(
+                ctx.user_memory_prompt.encode("utf-8")
+            ).hexdigest(),
         },
         "evidence": evidence,
     }
@@ -1243,6 +1252,7 @@ class AnswerEngine:
         source_model: str | None,
         source_cost_usd: float,
         cache_scope: str | None = None,
+        user_memory_prompt: str = "",
     ) -> tuple[str, str | None, float, bool]:
         """Apply an optional runtime presentation contract to specialist text.
 
@@ -1254,6 +1264,8 @@ class AnswerEngine:
         original = str(text or "")
         if not prompt:
             return original, source_model, source_cost_usd, False
+        if user_memory_prompt.strip():
+            prompt = f"{prompt}\n\n{user_memory_prompt.strip()}"
         fallback = _specialist_safe_fallback(original)
         try:
             response = self._router.complete(
@@ -1775,6 +1787,7 @@ class AnswerEngine:
                             self._store.root,
                             namespace=self._response_cache_namespace,
                         ),
+                        user_memory_prompt=ctx.user_memory_prompt,
                     )
                 )
                 logger.info(
@@ -1826,7 +1839,7 @@ class AnswerEngine:
             + f"\n</원문>\n\n질문: {question or f'최근 {days}일 진행 상황을 정리해 주세요.'}"
         )
         messages = [
-            Message("system", self._prompts.summary),
+            Message("system", _with_user_memory(self._prompts.summary, ctx)),
             Message("user", summary_prompt),
         ]
         try:
@@ -1908,6 +1921,7 @@ class AnswerEngine:
                             self._store.root,
                             namespace=self._response_cache_namespace,
                         ),
+                        user_memory_prompt=ctx.user_memory_prompt,
                     )
                 )
                 master_interim = False
@@ -1922,7 +1936,10 @@ class AnswerEngine:
                     try:
                         comment = self._router.complete(
                             [
-                                Message("system", self._prompts.interim_advice),
+                                Message(
+                                    "system",
+                                    _with_user_memory(self._prompts.interim_advice, ctx),
+                                ),
                                 Message("user", f"{evidence}질문: {q}"),
                             ],
                             model=model,
@@ -1994,7 +2011,7 @@ class AnswerEngine:
             else "<원문>\n(관련 원문 없음)\n</원문>\n\n"
         )
         messages = [
-            Message("system", self._prompts.advice),
+            Message("system", _with_user_memory(self._prompts.advice, ctx)),
             Message("user", f"{evidence}질문: {q}"),
         ]
         try:
@@ -2453,6 +2470,7 @@ class AnswerEngine:
                         model=model,
                         source_model=special.model,
                         source_cost_usd=special.cost_usd,
+                        user_memory_prompt=ctx.user_memory_prompt,
                     )
                 )
                 logger.info(
@@ -2561,6 +2579,7 @@ class AnswerEngine:
                             self._store.root,
                             namespace=self._response_cache_namespace,
                         ),
+                        user_memory_prompt=ctx.user_memory_prompt,
                     )
                 )
                 logger.info(
@@ -2609,7 +2628,7 @@ class AnswerEngine:
         if visual.any:
             user_content = [{"type": "text", "text": prompt}, *visual.blocks]
         messages = [
-            Message("system", self._prompts.answer),
+            Message("system", _with_user_memory(self._prompts.answer, ctx)),
             Message("user", user_content),
         ]
         try:

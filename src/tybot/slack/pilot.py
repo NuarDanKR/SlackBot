@@ -1808,6 +1808,84 @@ class WorkspaceBot:
             )
         )
 
+    def _remember_user_feedback(
+        self,
+        *,
+        user_id: str,
+        text: str,
+        prior: dict | None,
+    ) -> None:
+        """Persist bounded personal memory without making feedback evidence.
+
+        ``prior`` is the exact QA row already selected for the feedback log.
+        The memory service re-checks workspace/user ownership and fails soft, so
+        this hook cannot widen lineage or make feedback availability affect the
+        answer path.
+        """
+        service = self._user_memory_service()
+        result = service.remember(
+            text,
+            workspace=self.workspace,
+            user_id=user_id,
+            prior=prior,
+        )
+        if result.saved:
+            log.info(
+                "[%s] 사용자 피드백 개인 기억 저장 user=%s kind=%s memory_id=%s",
+                self.workspace,
+                user_id,
+                result.decision.kind,
+                result.memory_id,
+            )
+
+    def _user_memory_service(self):
+        service = getattr(self, "_user_memory_service_obj", None)
+        if service is None:
+            from ..user_memory_service import UserMemoryService
+
+            service = UserMemoryService()
+            self._user_memory_service_obj = service
+        return service
+
+    def _with_user_memory_context(
+        self,
+        ctx: RequestContext,
+        *,
+        user_id: str,
+        question: str,
+    ) -> RequestContext:
+        """Attach exact-user memory after reopening claim coordinates now."""
+        from ..user_memory import claim_matches_evidence
+
+        def claim_is_current(memory) -> bool:
+            # Store rows expose an immutable tuple, while the audit JSON parser
+            # intentionally accepts only lists. Convert at this boundary rather
+            # than weakening the parser used for untrusted log payloads.
+            refs = refs_from_json(list(memory.evidence_refs))
+            if not refs or len(refs) != len(memory.evidence_refs):
+                return False
+            hits, dropped = self.store.resolve_refs(refs, ctx)
+            if dropped or len(hits) != len(refs):
+                return False
+            return claim_matches_evidence(
+                memory, (hit.line.text for hit in hits)
+            )
+
+        memory = self._user_memory_service().context(
+            workspace=self.workspace,
+            user_id=user_id,
+            question=question,
+            claim_is_current=claim_is_current,
+            include_search_hints=False,
+        )
+        if not memory.prompt:
+            return ctx
+        return replace(
+            ctx,
+            user_memory_prompt=memory.prompt,
+            user_memory_ids=memory.memory_ids,
+        )
+
     def _record_slash_feedback(self, *, user_id: str, channel_id: str, text: str) -> str:
         """`/피드백 <내용>` 을 기록하고 사용자에게 확인을 돌려준다."""
         if not text:
@@ -1825,6 +1903,7 @@ class WorkspaceBot:
             action="submitted",
             text=text,
         )
+        self._remember_user_feedback(user_id=user_id, text=text, prior=row)
         # 연결할 답변이 없으면 그 사실을 말한다 - 검토자가 재현하지 못하기 때문이다.
         asked = str(row.get("question") or "").strip() if row else ""
         linked = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if record_id and asked else ""
@@ -3635,6 +3714,11 @@ class WorkspaceBot:
                 ctx = event.get("_tybot_request_context") or self._request_context(
                     client, user_id, channel_id=channel_id, in_channel=in_channel
                 )
+                ctx = self._with_user_memory_context(
+                    ctx,
+                    user_id=str(user_id or ""),
+                    question=text,
+                )
                 # 파일은 권한 경계를 만든 뒤에만 열고 이번 요청의 임시 근거로만 쓴다.
                 # 영속 수집과 후속 질문의 좌표 재개방은 별도 경로다.
                 attached = self._question_file_evidence(event)
@@ -4293,7 +4377,12 @@ class WorkspaceBot:
         """
         recent = self.qa_log.recent_for_user(self.workspace, user_id)
         return {
-            "스레드_밖_지속_기억": False,
+            "이전_봇_답변_지속_기억": False,
+            "구조화된_개인_기억": (
+                "사용자가 직전 답변에 준 일부 선호·용어·정정은 본인 전용으로 저장될 수 있다. "
+                "답변 선호는 형식에만 쓰고, 사실 정정은 현재 권한으로 원문 좌표를 다시 "
+                "확인한 경우에만 사용한다."
+            ),
             "같은_스레드_맥락": (
                 "이전 질문과 답변으로 '그 문서' 같은 지칭어만 해석하고, "
                 "실제 답은 권한 내 원문에서 다시 찾는다."
@@ -4308,6 +4397,56 @@ class WorkspaceBot:
             ],
             "최근_질문_주의": "감사 기록이며 답변 생성에는 쓰이지 않는다. 본인 질문만 보인다.",
         }
+
+    def _personal_memory_command(self, question: str, user_id: str) -> str | None:
+        """Handle exact-user memory inspection and revocation without an LLM."""
+        revoke = re.search(r"기억\s*(?:삭제|철회)\s*#?(\d+)\b", question)
+        service = self._user_memory_service()
+        if revoke:
+            memory_id = int(revoke.group(1))
+            result = service.revoke_result(
+                memory_id,
+                workspace=self.workspace,
+                user_id=user_id,
+                actor=user_id,
+            )
+            if result.unavailable:
+                return "개인 기억 저장소를 지금 확인할 수 없어 철회하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            if result.revoked:
+                return f"개인 기억 #{memory_id}을 철회했습니다. 다음 답변부터 사용하지 않습니다."
+            return f"철회할 수 있는 본인 소유의 활성 기억 #{memory_id}이 없습니다."
+
+        wants_list = bool(
+            re.search(
+                r"(?:내|개인|저장된)\s*(?:선호\s*)?기억|기억\s*(?:목록|보여)",
+                question,
+            )
+        )
+        if not wants_list:
+            return None
+        result = service.list_active(workspace=self.workspace, user_id=user_id)
+        if result.unavailable:
+            return "개인 기억 저장소를 지금 확인할 수 없습니다. 기억이 없다는 뜻은 아닙니다."
+        if not result.memories:
+            return "현재 저장된 개인 기억이 없습니다."
+
+        from ..user_memory import PREFERENCE, PREFERENCE_TEXT, TERM
+
+        lines = ["*저장된 개인 기억* — 본인에게만 적용됩니다."]
+        for memory in result.memories:
+            if memory.kind == PREFERENCE:
+                label = "답변 선호"
+                body = PREFERENCE_TEXT.get(memory.body, memory.body)
+            elif memory.kind == TERM:
+                label = "용어"
+                body = memory.body.replace("=", " → ", 1)
+            else:
+                label = "정정 힌트"
+                body = memory.body
+            expires = memory.expires_at.date().isoformat() if memory.expires_at else "만료일 없음"
+            lines.append(f"• `#{memory.id}` [{label}] {body} (만료 {expires})")
+        lines.append("지우려면 `기억 삭제 번호`라고 입력하세요. 예: `기억 삭제 17`")
+        return "\n".join(lines)
 
     def _visible_workspaces(self) -> frozenset[str]:
         """상태에 보여줄 워크스페이스. 자기 것 + 크로스 열람 허용분.
@@ -4364,6 +4503,9 @@ class WorkspaceBot:
         """
         router = getattr(self.engine, "router", None)
         if kind == "memory":
+            command_reply = self._personal_memory_command(question, user_id)
+            if command_reply is not None:
+                return command_reply
             return write_from_facts(
                 router,
                 question=question,
@@ -4402,14 +4544,10 @@ class WorkspaceBot:
         )
 
     def _memory(self, user_id: str) -> str:
-        """"이전 답변 기억나?" — 설계상 기억하지 않는다는 것을 그대로 말한다.
-
-        매번 아카이브 원문에서 처음부터 찾는 것이 요약 재귀를 막는 장치다(원칙 1).
-        대신 감사 기록에 남은 **본인 질문**은 보여준다.
-        """
+        """Explain the boundary between answer history and structured memory."""
         lines = [
-            "*이전 답변을 스레드 밖까지 기억하지 않습니다.* "
-            "질문마다 아카이브 원문에서 다시 찾습니다.",
+            "*이전 봇 답변 문장은 스레드 밖의 사실 근거로 기억하지 않습니다.* "
+            "질문마다 아카이브 원문을 다시 확인합니다.",
             "",
             "그렇게 만든 이유:",
             "• 제 답변을 다시 근거로 쓰면 틀린 내용이 사실처럼 굳습니다(요약 재귀).",
@@ -4417,6 +4555,11 @@ class WorkspaceBot:
             "",
             "같은 스레드에서 이어 물으면 이전 문답으로 `그 문서` 같은 지칭어를 "
             "해석합니다. 이전 봇 답변 자체를 근거로 쓰지는 않고 원문에서 다시 검증합니다.",
+            "",
+            "다만 직전 답변에 주신 일부 답변 선호·조직 용어·정정은 구조화된 개인 기억으로 "
+            "저장될 수 있습니다. 이는 본인에게만 적용되며, 정정 내용은 현재 권한으로 원문을 "
+            "다시 확인한 경우에만 답변에 사용합니다. `내 기억 보여줘`로 확인하고 "
+            "`기억 삭제 번호`로 철회할 수 있습니다.",
         ]
         recent = self.qa_log.recent_for_user(self.workspace, user_id)
         if recent:
@@ -4439,7 +4582,8 @@ class WorkspaceBot:
                 "• `/권한` — 내 질문이 근거로 삼는 범위",
                 "• `/피드백` — 답변 품질 신고. 선택 화면이 열립니다 "
                 "(`/피드백 <내용>` 으로 바로 보내거나, 답변에 :+1:/:-1: 도 가능)",
-                "• `이전 답변 기억나?` — 기억 여부와 그 이유(매번 원문에서 다시 찾습니다)",
+                "• `이전 답변 기억나?` — 답변 이력과 개인 기억의 경계를 안내",
+                "• `내 기억 보여줘` / `기억 삭제 17` — 본인 개인 기억 확인·철회",
                 "• `--model=claude-opus-4-8 질문` — 모델 지정",
                 "*사실*은 아카이브 원문만 근거로 답합니다. 근거가 없으면 추측하지 않습니다.",
             ]

@@ -161,7 +161,7 @@ def test_unverified_claim_body_never_enters_prompt_and_limits_are_deterministic(
         ],
     ]
 
-    got = memory.build_context(rows)
+    got = memory.build_context(rows, question="김해외고 기성금")
 
     assert "15억" not in got.prompt
     assert got.search_terms == ("김해외동", "기성금")
@@ -177,14 +177,40 @@ def test_claim_with_coordinates_still_needs_current_acl_and_revision_validation(
         kind=memory.CLAIM,
         body="확정 금액은 12억",
         normalized="claim",
+        search_terms=("확정 금액",),
         evidence_refs=({"kind": "archive_line"},),
     )
 
-    denied = memory.build_context([claim], claim_is_current=lambda _row: False)
-    allowed = memory.build_context([claim], claim_is_current=lambda _row: True)
+    denied = memory.build_context(
+        [claim], question="확정 금액", claim_is_current=lambda _row: False
+    )
+    allowed = memory.build_context(
+        [claim], question="확정 금액", claim_is_current=lambda _row: True
+    )
 
     assert "12억" not in denied.prompt
     assert "12억" in allowed.prompt
+
+
+def test_unrelated_claim_is_not_injected_or_counted_as_used():
+    claim = memory.UserMemory(
+        id=9,
+        workspace="tyit",
+        user_id="U1",
+        kind=memory.CLAIM,
+        body="확정 금액은 12억",
+        normalized="claim",
+        search_terms=("확정 금액",),
+        evidence_refs=({"kind": "archive_line"},),
+    )
+
+    got = memory.build_context(
+        [claim], question="건축본부 일정", claim_is_current=lambda _row: True
+    )
+
+    assert got.prompt == ""
+    assert got.search_terms == ()
+    assert got.memory_ids == ()
 
 
 def test_claim_fact_tokens_must_survive_current_source_reopening():

@@ -380,13 +380,16 @@ class MemoryContext:
 def build_context(
     memories: Iterable[UserMemory],
     *,
+    question: str,
     claim_is_current: Callable[[UserMemory], bool] | None = None,
+    include_search_hints: bool = True,
 ) -> MemoryContext:
     """Build bounded data context. A claim requires an external ACL/revision check."""
     lines: list[str] = []
     hints: list[str] = []
     selected: list[int] = []
     used = 0
+    normalized_question = " ".join((question or "").casefold().split())
     for memory in memories:
         if len(selected) >= MAX_MEMORIES:
             break
@@ -398,11 +401,26 @@ def build_context(
             if _SAFE_TERM_RE.fullmatch(source) and _SAFE_TERM_RE.fullmatch(target):
                 line = f"용어: {source!r}는 {target!r}를 뜻함"
         elif memory.kind == CLAIM:
-            for term in memory.search_terms[:MAX_SEARCH_TERMS]:
-                if term not in hints:
-                    hints.append(term)
-            if memory.evidence_refs and claim_is_current and claim_is_current(memory):
+            relevant = any(
+                term.casefold() in normalized_question
+                for term in memory.search_terms
+                if len(term.strip()) > 1
+            )
+            if not relevant:
+                continue
+            current = bool(
+                memory.evidence_refs
+                and claim_is_current
+                and claim_is_current(memory)
+            )
+            if current:
                 line = f"현재 원문으로 확인된 사용자 정정: {memory.body}"
+            elif include_search_hints:
+                for term in memory.search_terms[:MAX_SEARCH_TERMS]:
+                    if term not in hints:
+                        hints.append(term)
+            else:
+                continue
         if not line and memory.kind != CLAIM:
             continue
         encoded = line.encode("utf-8") if line else b""

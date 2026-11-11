@@ -65,6 +65,11 @@ class RequestContext:
     # 관리형 근거 범위를 줄이지 않고 검색 순서만 앞당기는 워크스페이스 힌트.
     # 권한 판정에는 절대 사용하지 않는다.
     preferred_workspaces: frozenset[str] = field(default_factory=frozenset)
+    # Bounded, structured personal memory. This is presentation context, never
+    # evidence, and is populated only after exact-user lookup and current ACL
+    # checks. IDs make cache/audit separation explicit without storing raw text.
+    user_memory_prompt: str = ""
+    user_memory_ids: tuple[int, ...] = ()
 
     @property
     def in_channel(self) -> bool:

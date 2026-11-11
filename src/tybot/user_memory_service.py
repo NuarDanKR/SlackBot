@@ -57,6 +57,18 @@ class RememberResult:
     unavailable: bool = False
 
 
+@dataclass(frozen=True)
+class MemoryListResult:
+    memories: tuple[UserMemory, ...] = ()
+    unavailable: bool = False
+
+
+@dataclass(frozen=True)
+class RevokeResult:
+    revoked: bool = False
+    unavailable: bool = False
+
+
 class UserMemoryService:
     def __init__(self, connector=connect) -> None:
         self._connect = connector
@@ -109,7 +121,9 @@ class UserMemoryService:
         *,
         workspace: str,
         user_id: str,
+        question: str,
         claim_is_current: Callable[[UserMemory], bool],
+        include_search_hints: bool = True,
     ) -> MemoryContext:
         """Load exact-user memory and apply the caller's current evidence check."""
         if not workspace.strip() or not user_id.strip():
@@ -119,7 +133,12 @@ class UserMemoryService:
                 if connection is None:
                     return MemoryContext()
                 memories = Store(connection).active(workspace, user_id)
-                result = build_context(memories, claim_is_current=claim_is_current)
+                result = build_context(
+                    memories,
+                    question=question,
+                    claim_is_current=claim_is_current,
+                    include_search_hints=include_search_hints,
+                )
                 Store(connection).mark_used(
                     result.memory_ids,
                     workspace=workspace,
@@ -139,17 +158,48 @@ class UserMemoryService:
         actor: str,
     ) -> bool:
         """Revoke only an exact-user row; unavailable storage changes nothing."""
+        return self.revoke_result(
+            memory_id,
+            workspace=workspace,
+            user_id=user_id,
+            actor=actor,
+        ).revoked
+
+    def list_active(self, *, workspace: str, user_id: str) -> MemoryListResult:
+        """List only the caller's active rows without treating DB failure as empty."""
+        if not workspace.strip() or not user_id.strip():
+            return MemoryListResult()
         try:
             with self._connect() as connection:
                 if connection is None:
-                    return False
-                return Store(connection).revoke(
+                    return MemoryListResult(unavailable=True)
+                memories = Store(connection).active(workspace, user_id)
+                return MemoryListResult(tuple(memories))
+        except Exception as exc:  # noqa: BLE001 - memory is not required to answer
+            log.warning("개인 기억 목록 조회 실패: %s", exc)
+            return MemoryListResult(unavailable=True)
+
+    def revoke_result(
+        self,
+        memory_id: int,
+        *,
+        workspace: str,
+        user_id: str,
+        actor: str,
+    ) -> RevokeResult:
+        """Revoke an owned row and distinguish absence from unavailable storage."""
+        try:
+            with self._connect() as connection:
+                if connection is None:
+                    return RevokeResult(unavailable=True)
+                revoked = Store(connection).revoke(
                     memory_id,
                     workspace=workspace,
                     user_id=user_id,
                     actor=actor,
                 )
+                return RevokeResult(revoked=revoked)
         except Exception as exc:  # noqa: BLE001 - memory is not required to answer
             log.warning("개인 기억 철회 실패: %s", exc)
-            return False
+            return RevokeResult(unavailable=True)
 

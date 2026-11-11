@@ -111,12 +111,18 @@ def test_context_uses_exact_user_scope_and_callers_current_evidence_check():
         got = UserMemoryService(lambda: connected(connection)).context(
             workspace="tyit",
             user_id="U1",
+            question="확정 금액",
             claim_is_current=checker,
         )
 
     assert got == expected
     store_type.return_value.active.assert_called_once_with("tyit", "U1")
-    build.assert_called_once_with([claim], claim_is_current=checker)
+    build.assert_called_once_with(
+        [claim],
+        question="확정 금액",
+        claim_is_current=checker,
+        include_search_hints=True,
+    )
     store_type.return_value.mark_used.assert_called_once_with(
         (9,), workspace="tyit", user_id="U1"
     )
@@ -128,6 +134,39 @@ def test_context_and_revoke_fail_closed_when_storage_is_unavailable():
     assert service.context(
         workspace="tyit",
         user_id="U1",
+        question="확정 금액",
         claim_is_current=lambda _memory: True,
     ) == MemoryContext()
     assert not service.revoke(1, workspace="tyit", user_id="U1", actor="U1")
+    assert service.list_active(workspace="tyit", user_id="U1").unavailable
+    assert service.revoke_result(
+        1, workspace="tyit", user_id="U1", actor="U1"
+    ).unavailable
+
+
+def test_list_and_revoke_are_scoped_to_the_exact_user():
+    connection = Mock()
+    remembered = UserMemory(
+        id=17,
+        workspace="tyit",
+        user_id="U1",
+        kind="preference",
+        body="format.length=short",
+        normalized="format.length=short",
+    )
+    with patch("tybot.user_memory_service.Store") as store_type:
+        store_type.return_value.active.return_value = [remembered]
+        store_type.return_value.revoke.return_value = True
+        service = UserMemoryService(lambda: connected(connection))
+
+        listed = service.list_active(workspace="tyit", user_id="U1")
+        revoked = service.revoke_result(
+            17, workspace="tyit", user_id="U1", actor="U1"
+        )
+
+    assert listed.memories == (remembered,)
+    assert revoked.revoked
+    store_type.return_value.active.assert_called_once_with("tyit", "U1")
+    store_type.return_value.revoke.assert_called_once_with(
+        17, workspace="tyit", user_id="U1", actor="U1"
+    )
