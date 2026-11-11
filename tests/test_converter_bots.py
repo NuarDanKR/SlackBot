@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from tybot import attachment_review, question_files
+from tybot import attachment_review, conversion_policy, question_files
 from tybot.archive import backfill, converter_bots, files
 from tybot.archive import convert as convert_module
 from tybot.console import env_settings
@@ -28,8 +28,8 @@ def _isolated(monkeypatch, tmp_path):
 
 
 def _enable(monkeypatch, value: str = APP) -> None:
-    monkeypatch.setenv(converter_bots.CONVERTER_APPS_ENV, value)
-    converter_bots.clear_cache()
+    """DB 정본에 앱 ID 를 둔 것과 같다. 정본은 이제 DB 다(B-89 후속)."""
+    conversion_policy.set_override(conversion_policy.from_db([value]))
 
 
 def _app_message(**over) -> dict:
@@ -58,28 +58,17 @@ def test_nothing_is_delegated_until_an_app_is_named():
     assert converter_bots.converted_document_message(_app_message()) is None
 
 
-def test_malformed_ids_are_dropped_not_widened(monkeypatch):
-    # 틀린 값이 「아무 앱이나」 로 넓어지면 원칙 1 의 예외가 열린다.
-    _enable(monkeypatch, f" {APP.lower()} , bot-name, *, ")
-    assert converter_bots.converter_app_ids() == frozenset({APP})
-
-
-def test_console_file_wins_over_the_process_environment(monkeypatch, tmp_path):
-    """수집기는 콘솔 저장 뒤 재시작되지 않는다. 파일을 직접 읽어야 바뀐 값을 안다."""
-    (tmp_path / "managed.env").write_text(
-        f"{converter_bots.CONVERTER_APPS_ENV}={OTHER}\n", encoding="utf-8"
-    )
-    _enable(monkeypatch, APP)
-    assert converter_bots.converter_app_ids() == frozenset({OTHER})
-
-
-def test_the_value_is_cached_and_cleared_on_save(monkeypatch):
-    _enable(monkeypatch, APP)
-    assert converter_bots.converter_app_ids(now=0.0) == frozenset({APP})
-    monkeypatch.setenv(converter_bots.CONVERTER_APPS_ENV, OTHER)
-    assert converter_bots.converter_app_ids(now=1.0) == frozenset({APP})
-    converter_bots.clear_cache()
-    assert converter_bots.converter_app_ids(now=2.0) == frozenset({OTHER})
+def test_malformed_db_ids_are_unknown_not_widened():
+    # 틀린 값이 「아무 앱이나」 로 넓어지면 원칙 1 의 예외가 열린다. 고쳐 읽지도 않는다 —
+    # 정본이 틀리면 모른다고 하고, 모르면 아무 앱의 PDF 도 받지 않는다.
+    policy = conversion_policy.policy_from_row({
+        "rhwp_app_ids": [APP.lower(), "bot-name", "*"],
+        "recheck_limit": 50, "rhwp_grace_hours": 6, "revision": 3,
+    })
+    conversion_policy.set_override(policy)
+    assert converter_bots.converter_app_ids() == frozenset()
+    assert converter_bots.delegation_state() == "unknown"
+    assert converter_bots.converted_document_message(_app_message()) is None
 
 
 def test_console_input_is_validated_as_a_whole():
@@ -144,6 +133,59 @@ def test_hwp_conversion_is_switched_off_only_while_an_app_is_named(monkeypatch):
     assert convert_module.can_convert("pdf") is True
 
 
+@pytest.mark.parametrize("reason", ["db_unavailable", "row_missing", "invalid_value"])
+def test_unknown_policy_is_not_read_as_delegation_off(reason):
+    """DB 장애·행 없음·잘못된 값을 「꺼짐」 으로 읽으면 TYBot 이 HWP 를 직접 변환한다."""
+    conversion_policy.set_override(conversion_policy.unknown(reason))
+    assert converter_bots.conversion_delegated() is False  # 「확실히 켜짐」 도 아니다
+    assert converter_bots.delegation_state() == "unknown"
+    assert convert_module.can_convert("hwp") is False
+    assert convert_module.can_convert("hwpx") is False
+    assert convert_module.can_convert("pdf") is True
+    # 격리 워커는 정책을 모른다 — 형식 처리기만 본다.
+    assert convert_module.has_handler("hwp") is True
+
+
+def test_convert_itself_refuses_hwp_while_the_policy_is_unknown():
+    """큐 재처리는 `can_convert` 를 안 거치고 `convert` 를 부른다. 입구에서 막는다."""
+    from tybot.archive.external_convert import failure_details
+
+    conversion_policy.set_override(conversion_policy.unknown("db_unavailable"))
+    with pytest.raises(convert_module.ConvertError) as caught:
+        convert_module.convert("hwp", b"HWP bytes")
+    assert failure_details(caught.value) == (converter_bots.POLICY_UNKNOWN_CODE, False)
+
+    conversion_policy.set_override(conversion_policy.from_db([APP]))
+    with pytest.raises(convert_module.ConvertError) as caught:
+        convert_module.convert("hwpx", b"HWPX bytes")
+    assert failure_details(caught.value) == (converter_bots.DELEGATED_CODE, False)
+
+
+def test_policy_unknown_hold_is_held_in_the_queue():
+    from tybot import conversion_queue as queue
+
+    assert queue.next_state(converter_bots.POLICY_UNKNOWN_CODE, False, 1) == queue.HELD
+
+
+def test_staged_hwp_is_held_not_converted_while_the_policy_is_unknown(monkeypatch, tmp_path):
+    conversion_policy.set_override(conversion_policy.unknown("row_missing"))
+    monkeypatch.setattr(files, "download_bytes", lambda *a: b"HWP original bytes")
+
+    def must_not_convert(*args):
+        raise AssertionError("HWP must not be converted while delegation is unknown")
+
+    monkeypatch.setattr(files, "convert", must_not_convert)
+    storage = files.attachment_storage(tmp_path / "archive", "tyit", "C0TEST")
+    (item,) = files.stage_attachments(
+        [{"id": "F9", "name": "주간보고.hwp", "filetype": "binary", "size": 18}],
+        "test-token", storage,
+    )
+    assert item.extracted is False
+    assert any(line.startswith("[첨부:변환보류]") for line in item.lines)
+    (attachment,) = attachment_review.scan(tmp_path / "archive")
+    assert attachment.object_path is not None and attachment.object_path.is_file()
+
+
 def test_staged_hwp_is_kept_as_an_original_and_marked_delegated(monkeypatch, tmp_path):
     _enable(monkeypatch)
     monkeypatch.setattr(files, "download_bytes", lambda *a: b"HWP original bytes")
@@ -203,16 +245,14 @@ def test_question_hwp_asks_for_the_converted_pdf(monkeypatch):
 # --- 콘솔 설정 ---------------------------------------------------------------
 
 
-def test_console_validates_and_preserves_the_app_list(monkeypatch):
+def test_env_settings_no_longer_edit_the_app_list_but_keep_the_legacy_value(monkeypatch):
+    """정본은 DB 변환 정책이다. 환경 설정 저장이 전환 기간 fallback 을 지우면 안 된다."""
     base = {"realtimeIngest": True, "autojoinChannels": True, "replyInThread": True}
     monkeypatch.setenv(converter_bots.CONVERTER_APPS_ENV, APP)
-    # 예전 화면은 칸을 보내지 않는다 — 그때 값을 지우면 안 된다.
     assert env_settings._validate(base)[converter_bots.CONVERTER_APPS_ENV] == APP
-    assert env_settings._validate({**base, "converterAppIds": []})[
-        converter_bots.CONVERTER_APPS_ENV
-    ] == ""
-    assert env_settings._validate({**base, "converterAppIds": [OTHER.lower(), APP]})[
-        converter_bots.CONVERTER_APPS_ENV
-    ] == f"{OTHER},{APP}"
-    with pytest.raises(ValueError):
-        env_settings._validate({**base, "converterAppIds": ["rhwp"]})
+    with pytest.raises(ValueError, match="변환 정책"):
+        env_settings._validate({**base, "converterAppIds": [OTHER]})
+    with pytest.raises(ValueError, match="변환 정책"):
+        env_settings._validate({**base, "converterAppIds": []})
+    assert "TYBOT_CONVERTER_APP_IDS" not in env_settings.MANAGED_STATIC_KEYS
+    assert env_settings.snapshot()["converterPolicyMoved"] is True

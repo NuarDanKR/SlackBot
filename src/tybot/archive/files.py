@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 
 from ..pii_screen import ScreenMetadata
 from .convert import ConvertError, can_convert, convert
-from .converter_bots import DELEGATED_CODE, DELEGATED_TYPES, conversion_delegated
+from .converter_bots import DELEGATED_CODE, DELEGATED_TYPES, POLICY_UNKNOWN_CODE, delegation_state
 from .text_normalize import remove_nul
 
 logger = logging.getLogger("tybot.files")
@@ -478,11 +478,14 @@ def stage_attachments(
 
             if f.is_text:
                 extracted = _decode_text(raw, f.size)
-            elif f.filetype in DELEGATED_TYPES and conversion_delegated():
+            elif f.filetype in DELEGATED_TYPES and (delegation := delegation_state()) != "off":
                 # HWP 는 지정된 변환 앱(rhwp)이 PDF 로 바꿔 채널에 올리고, 그 PDF 가
                 # 원문 첨부로 들어온다(2026-11-09 오너 결정). 여기서 또 변환하면 같은
                 # 문서가 두 벌의 근거가 된다. 원본은 위에서 이미 보관했다.
-                error_code = DELEGATED_CODE
+                #
+                # 위임 상태를 **모르면** 변환하지 않고 미룬다(B-89 후속). 정책이 확인되면
+                # 야간 재점검이 「미지원」 판정을 다시 연다.
+                error_code = DELEGATED_CODE if delegation == "on" else POLICY_UNKNOWN_CODE
             elif f.is_convertible:
                 # `convert` 를 **모듈 수준 이름 그대로** 부른다. 다른 함수로
                 # 바꾸면 이 이름을 갈아 끼우던 테스트가 조용히 무력해진다 —
@@ -640,6 +643,9 @@ def stage_attachments(
             # 실패가 아니다. 변환 앱(rhwp)의 PDF 가 따로 들어온다 — 「미지원」 으로
             # 적으면 진단이 조치 대상으로 세고, 사람은 고칠 것이 없는 파일을 찾아 헤맨다.
             label = "변환앱위임"
+        elif state == "unsupported" and error_code == POLICY_UNKNOWN_CODE:
+            # 실패가 아니다. 위임 여부를 몰라 변환을 미뤘다 — 원본은 보관돼 있다.
+            label = "변환보류"
         elif state == "unsupported":
             label = "미지원"
         elif state == "pii_refused":

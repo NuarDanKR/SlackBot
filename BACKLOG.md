@@ -332,8 +332,8 @@ Asia/Seoul** 한 회차로 묶는다. 검토자가 기한 안에 처리하지 �
 
 - [x] 새벽 실행 시각·동시성·회차 상한을 timer 설정으로 제공 — `tybot-convert-nightly.timer`
       03:20(±10분), oneshot 이라 회차는 하나씩이고 작업은 큐 lease 로 한 프로세스만 잡는다.
-      처리 상한은 unit `--limit`, 한 밤 소급 상한은 `TYBOT_CONVERT_RECHECK_LIMIT`(기본 50),
-      rhwp 대기는 `TYBOT_CONVERT_RHWP_GRACE_HOURS`(기본 6)
+      처리 상한은 unit `--limit`. 한 밤 소급 상한(기본 50)·rhwp 대기(기본 6시간)는 아래
+      「변환 정책 DB 이전」 으로 DB 정본에 옮겼다. 실행 시각 03:20 은 timer 에 남긴다
 - [x] 변환 inventory 비교, 선택 재처리, rhwp 결과 대조, 실패 좌표 원장 구현 —
       `--nightly` 한 회차 = 일시 실패 재시도 → **판정 변경**(미지원인데 지금 변환 가능,
       또는 암호·손상·빈 출력인데 기록된 변환기 판이 지금과 다름) → 구버전 성공 재변환 →
@@ -355,6 +355,64 @@ Asia/Seoul** 한 회차로 묶는다. 검토자가 기한 안에 처리하지 �
       과 journal `convert_nightly_metrics` 줄에 남기고 콘솔 「아카이브 진단」 에 표시(전체
       워크스페이스 권한만). 요약 길잡이 후보 축소는 `승인 요약 길잡이 후보 읽음=N 선택=M` 로그로
       남김. **절약 토큰은 미측정** — 길잡이는 원문 줄을 더할 뿐이라 토큰 절감을 따로 셀 기준이 없다
+
+#### 변환 정책 DB 이전 (rhwp 정체성·야간 숫자, Claude/2026-11-11)
+
+rhwp Slack 앱 ID 와 야간 숫자 정책이 `console-managed.env`·환경변수에 흩어져 있었고, 값이
+비면 「위임 꺼짐」 으로 읽혔다. DB 가 잠깐 안 보이면 TYBot 이 HWP 를 직접 변환해 같은 문서가
+rhwp PDF 와 두 벌의 근거가 될 수 있었다. 정본을 DB 한 행(`conversion_runtime_policy`)으로
+옮기고, **모르면 꺼짐이 아니라 「모름」** 으로 다룬다(`src/tybot/conversion_policy.py`).
+
+| 상태 | 뜻 | HWP/HWPX 직접 변환 | 야간 `--apply` |
+|---|---|---|---|
+| `db` | DB 행을 읽었고 값이 바르다. 빈 목록 = 위임 꺼짐 | 꺼짐일 때만 | 가능 |
+| `legacy` | DB 행 없음·DB 안 보임 + 옛 설정에 앱 ID 가 있음(전환 기간) | 막힘 | 거절(종료 3) |
+| `unknown` | DB 미접속·표 없음·행 없음·잘못된 값, 옛 설정도 증명 못 함 | 막힘 | 거절(종료 3) |
+
+- [x] 스키마 `deploy/sql/conversion_policy_schema.sql` — 정본 한 행(`id=1`)과 append-only 감사 표.
+      기본 행을 넣지 않는다. 값 범위는 CHECK(상한 0~1000, 대기 1~168시간, 앱 ID 10개). GRANT:
+      `tyslackai` SELECT·INSERT·UPDATE(감사는 INSERT 만), `tybot_archiver` SELECT. `apply-schema.sh`
+      에서 `conversion_queue_schema.sql` 뒤
+- [x] 단일 정본 — 수집기·변환·질문 첨부·채널 앱 상태·야간 배치가 `conversion_policy.current()`
+      (60초 캐시) 하나를 본다. DB 값이 있으면 언제나 DB 가 이긴다. DB 값이 틀리면 옛 설정으로
+      내려가지 않고 `unknown(invalid_value)`
+- [x] fail-closed — `unknown`·`legacy` 에서 `can_convert`·`convert()` 입구가 HWP/HWPX 를 막는다
+      (큐 재처리는 `converter_policy_unknown` 로 `held`). 수집은 원본을 보관하고 `[첨부:변환보류]`
+      로 남긴다. 질문 첨부 HWP 는 PDF 로 다시 물어 달라고 안내한다. 격리 변환 워커는 DB 가 없어
+      정책 대신 처리기 유무(`has_handler`)만 본다
+- [x] 전환 기간 fallback — DB 가 답하지 못할 때만 옛 `console-managed.env` → `TYBOT_CONVERTER_APP_IDS`
+      → `TYBOT_CONVERT_RECHECK_LIMIT`·`TYBOT_CONVERT_RHWP_GRACE_HOURS` 를 읽는다. 앱 ID 가 하나 이상일
+      때만 쓰이고(빈 값 = 모름), `TYBOT_CONVERT_POLICY_LEGACY=0` 이면 읽지 않는다. 상태가 바뀔 때
+      `변환 정책 state=… sources=…` 로그를 한 번 남긴다(`db` 는 INFO, 나머지는 WARNING)
+- [x] 콘솔 — 「환경변수 설정 > 변환 정책」: 상태·사유·필드별 출처·직접 변환/야간 실행 가능 여부,
+      옛 값 미리 채움, 앱 ID·두 숫자·사유 저장(판 번호로 충돌 409), 감사 이력. `GET/PUT
+      /api/conversion-policy`(admin, 저장은 전체 워크스페이스 관리자, CSRF, 모르는 칸 422). 환경변수
+      화면은 앱 ID 를 더 받지 않고, 저장할 때 옛 값은 fallback 용으로 그대로 옮겨 쓴다
+- [x] 야간 배치 — 회차 시작에 정책을 새로 읽어 상태·출처를 출력하고 지표(`policy`·`blocked_reason`)
+      에 남긴다. `db` 가 아니면 `--apply` 를 거절(종료 3)하고 거절 지표를 쓴다. dry-run 은 돌되
+      모르는 상한은 0 으로 센다. rhwp 미확인 집계는 위임 상태를 모르면 하지 않는다
+- [x] readiness `scripts/check_conversion_policy.py` — 종료 0 = DB 정본(야간 가능) · 3 = 옛 설정 ·
+      1 = 모름. 고치지 않고, 타이머를 켜지 않고, 시크릿을 찍지 않는다
+- [x] 타이머 자동 재시작 금지 — `deploy/update.sh` 가 더는 `tybot-convert-nightly.timer` 를
+      `enable --now` 하지 않는다(재처리 큐 timer 만 켠다). 실행 시각 03:20 은 timer 에 둔다
+- [x] 회귀 시험 `tests/test_conversion_policy.py` — DB 장애·표 없음·행 없음·잘못된 값 14종,
+      fallback 우선순위·전환 종료, 캐시·로그, 저장 충돌·감사, 야간 거절·dry-run, readiness 종료
+      코드, 콘솔 API 권한·CSRF·오류 매핑, 배포 스크립트. 핵심 가드 변이 16개 모두 잡힘. 실DB
+      시험은 `TEST_DATABASE_URL`(또는 `TYBOT_SCHEMA_TEST_DSN`)이 있을 때만 돈다 — 아직 못 돌림
+- [ ] 운영 전환(사람) — 아래 순서. **현재 멈춘 `tybot-convert-nightly.timer` 는 5단계 전까지
+      켜지 않는다**
+  1. 배포 후 `sudo /opt/tybot/deploy/apply-schema.sh` (표·GRANT. 행은 생기지 않는다)
+  2. readiness 로 지금 상태 확인 — 보통 `legacy`(옛 앱 ID 로 동작, 종료 3) 또는 `unknown`(종료 1)
+     `sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_conversion_policy.py`
+  3. 콘솔 「환경변수 설정 > 변환 정책」 에서 미리 채워진 옛 값을 **실제 rhwp 앱 ID**(Slack 앱
+     관리 화면의 App ID)와 대조하고 사유를 적어 저장. 위임을 끌 때만 앱 ID 를 비운다
+  4. readiness 가 종료 0·`state: db`·의도한 위임 상태인지, 야간 dry-run 이 정책 출처 `db` 를
+     찍는지 확인: `… /opt/tybot/scripts/drain_conversion_queue.py --nightly`
+  5. 그 뒤에만 사람이 `sudo systemctl enable --now tybot-convert-nightly.timer`
+  6. 며칠 `db` 로 안정되면 `/etc/tybot/tybot.env` 의 옛 키 셋을 지우고
+     `TYBOT_CONVERT_POLICY_LEGACY=0` 을 넣어 fallback 을 닫는다. 수집기(Hermes archiver)의 DB
+     역할에 `conversion_runtime_policy` SELECT 가 있는지 먼저 확인한다 — 없으면 `table_missing`
+     으로 읽혀 rhwp PDF 를 받지 못한다
 
 ---
 

@@ -11,9 +11,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+from tybot import conversion_policy
 from tybot import conversion_queue as queue
 from tybot import conversion_recheck as recheck
-from tybot.archive import converter_bots
 from tybot.archive.converter_bots import DELEGATED_CODE
 
 NOW = datetime(2026, 11, 11, 18, 30, tzinfo=UTC)  # 03:30 KST
@@ -68,12 +68,12 @@ def _staged(
 
 @pytest.fixture
 def no_delegation(monkeypatch):
-    monkeypatch.setattr(converter_bots, "conversion_delegated", lambda: False)
+    conversion_policy.set_override(conversion_policy.from_db())
 
 
 @pytest.fixture
 def delegation_on(monkeypatch):
-    monkeypatch.setattr(converter_bots, "conversion_delegated", lambda: True)
+    conversion_policy.set_override(conversion_policy.from_db(["A0RHWP00001"]))
 
 
 @pytest.fixture
@@ -136,18 +136,17 @@ def test_changed_code_is_retryable_under_queue_policy():
     assert recheck.CHANGED_CODE not in queue.FORCE_BLOCKED
 
 
-def test_recheck_limit_parsing():
-    assert recheck.recheck_limit({}) == recheck.DEFAULT_RECHECK_LIMIT
-    assert recheck.recheck_limit({recheck.RECHECK_LIMIT_ENV: "7"}) == 7
-    assert recheck.recheck_limit({recheck.RECHECK_LIMIT_ENV: "0"}) == 0
-    assert recheck.recheck_limit({recheck.RECHECK_LIMIT_ENV: "-3"}) == 0
-    assert recheck.recheck_limit({recheck.RECHECK_LIMIT_ENV: "x"}) == recheck.DEFAULT_RECHECK_LIMIT
+def test_recheck_limit_comes_from_the_policy():
+    assert recheck.recheck_limit(conversion_policy.from_db()) == recheck.DEFAULT_RECHECK_LIMIT
+    assert recheck.recheck_limit(conversion_policy.from_db(recheck_limit=7)) == 7
+    assert recheck.recheck_limit(conversion_policy.from_db(recheck_limit=0)) == 0
+    # 모르는 상한으로 소급 분량을 세지 않는다.
+    assert recheck.recheck_limit(conversion_policy.unknown("row_missing")) == 0
 
 
-def test_rhwp_grace_parsing():
-    assert recheck.rhwp_grace({}) == recheck.DEFAULT_RHWP_GRACE
-    assert recheck.rhwp_grace({recheck.RHWP_GRACE_ENV: "2"}) == timedelta(hours=2)
-    assert recheck.rhwp_grace({recheck.RHWP_GRACE_ENV: "0"}) == recheck.DEFAULT_RHWP_GRACE
+def test_rhwp_grace_comes_from_the_policy():
+    assert recheck.rhwp_grace(conversion_policy.from_db()) == recheck.DEFAULT_RHWP_GRACE
+    assert recheck.rhwp_grace(conversion_policy.from_db(rhwp_grace_hours=2)) == timedelta(hours=2)
 
 
 # --- 판정 변경 소급 ------------------------------------------------------------
@@ -422,7 +421,7 @@ def test_nightly_apply_records_metrics_without_names(
     meta.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     _staged(tmp_path, "FU", status="unsupported", error_code="unsupported", name="계약자명단.pdf")
     _staged(tmp_path, "FP", status="pii_refused", error_code="pii_refused")
-    monkeypatch.setenv(recheck.RECHECK_LIMIT_ENV, "10")
+    conversion_policy.set_override(conversion_policy.from_db(recheck_limit=10))
 
     def fake_drain(_archive, *, limit, report=None):
         assert limit == 5
@@ -438,6 +437,10 @@ def test_nightly_apply_records_metrics_without_names(
     assert saved["changed_enqueued"] == 1
     assert saved["excluded_policy"] == 1
     assert saved["recheck_limit"] == 10
+    # 이 회차가 본 정책과 그 출처가 지표에 남는다.
+    assert saved["policy"]["state"] == "db"
+    assert saved["policy"]["sources"]["recheckLimit"] == "db"
+    assert saved["blocked_reason"] == ""
     assert saved["success_rate"] == 0.5
     assert saved["exit_code"] == drain.EXIT_FAILED
     assert {item["file_id"] for item in enqueued} == {"FT", "FU"}
@@ -457,7 +460,7 @@ def test_nightly_outdated_shares_the_recheck_budget(tmp_path, no_delegation, enq
         data = json.loads(meta.read_text(encoding="utf-8"))
         data["conversion_state"] = "succeeded"
         meta.write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setenv(recheck.RECHECK_LIMIT_ENV, "2")
+    conversion_policy.set_override(conversion_policy.from_db(recheck_limit=2))
     monkeypatch.setattr(drain, "drain", lambda *_a, **_k: drain.EXIT_OK)
 
     drain.run_nightly(str(tmp_path / "archive"), apply=True, limit=5)

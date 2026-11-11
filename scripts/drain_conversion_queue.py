@@ -24,7 +24,8 @@
   같은 시각·화자로 새 줄만 덧붙이며 `writer.ingest`의 중복 방지를 거친다.
 - `pii_refused` 는 건드리지 않는다. 정책 제외를 기술 실패처럼 자동 해제하지 않는다.
 
-종료 코드: `0` 정상 · `1` 처리 중 실패한 작업 있음 · `2` 입력·환경 오류
+종료 코드: `0` 정상 · `1` 처리 중 실패한 작업 있음 · `2` 입력·환경 오류 ·
+`3` 변환 정책이 DB 정본에서 확인되지 않아 `--nightly --apply` 를 거절함(B-89 후속)
 """
 from __future__ import annotations
 
@@ -47,6 +48,7 @@ from tybot.envfile import load_env_file
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_INPUT = 2
+EXIT_POLICY = 3
 
 
 def owner_name() -> str:
@@ -855,20 +857,26 @@ def changed_backfill(
     return EXIT_OK
 
 
-def delegation_check(archive_dir: str, *, report=None, now=None) -> int:
+def delegation_check(archive_dir: str, *, policy, report=None, now=None) -> int:
     """rhwp 에 넘겼는데 PDF 가 안 들어온 HWP 를 센다. **변환하지 않는다.**
 
     위임 중에 TYBot 이 직접 변환하면 같은 문서가 두 벌의 근거가 된다. 할 수 있는
     일은 사람에게 알리는 것이다 — 앱이 채널에 없거나 실패했으면 사람이 고친다.
     좌표만 적는다(파일 이름은 적지 않는다).
     """
-    from tybot.archive.converter_bots import conversion_delegated
     from tybot.attachment_review import scan
     from tybot.conversion_recheck import pending_delegations, rhwp_grace
 
     scanned = _active_layout_items(scan(archive_dir), archive_dir)
     delegated = [item for item in scanned if item.delegated]
-    if not conversion_delegated():
+    if policy.delegation == "unknown":
+        # 모르는 위임 상태로 「PDF 미확인」 을 세면, 위임이 실제로 꺼져 있을 때 고칠
+        # 것이 없는 경고가 쌓인다. 세지 않고 모른다고 적는다.
+        print(f"rhwp 위임 상태 모름({policy.reason}) · 위임 기록 {len(delegated)}건 집계 보류")
+        if report is not None:
+            report.rhwp_delegated = len(delegated)
+        return EXIT_OK
+    if policy.delegation == "off":
         # 위임이 꺼졌으면 남은 위임 원본은 `changed_backfill` 이 직접 변환으로 연다.
         print(f"rhwp 위임 꺼짐 · 위임 기록 {len(delegated)}건은 판정 변경으로 처리")
         if report is not None:
@@ -877,7 +885,7 @@ def delegation_check(archive_dir: str, *, report=None, now=None) -> int:
     pending = pending_delegations(
         scanned,
         now=now or datetime.now(UTC),
-        grace=rhwp_grace(),
+        grace=rhwp_grace(policy),
     )
     if report is not None:
         report.rhwp_delegated = len(delegated)
@@ -898,12 +906,38 @@ def run_nightly(archive: str, *, apply: bool, limit: int) -> int:
     순서가 뜻이 있다 — 일시 실패가 먼저다. 사람이 기다리는 것은 대개 방금 실패한
     파일이고, 소급(판정 변경·구버전)은 상한 안에서 남는 몫을 쓴다.
     """
+    from tybot import conversion_policy
     from tybot.conversion_recheck import NightlyReport, recheck_limit, write_report
 
+    # 이 회차의 정책을 **새로** 읽는다. 캐시된 판정으로 소급하지 않는다.
+    conversion_policy.clear_cache()
+    policy = conversion_policy.current()
     report = NightlyReport(
         started_at=datetime.now(UTC).isoformat(timespec="seconds"),
-        recheck_limit=recheck_limit(),
+        recheck_limit=recheck_limit(policy),
+        policy=policy.to_json(),
     )
+    _print_policy(policy)
+    if apply and not policy.nightly_apply_allowed:
+        # 소급은 비용이 드는 쓰기다. 상한·위임 여부의 출처가 DB 정본이 아니면 돌지
+        # 않는다 — 옛 설정으로 돌면 누가 정한 값인지 아무도 답할 수 없다.
+        report.blocked_reason = f"policy_{policy.state}" + (
+            f":{policy.reason}" if policy.reason else ""
+        )
+        report.exit_code = EXIT_POLICY
+        report.finished_at = datetime.now(UTC).isoformat(timespec="seconds")
+        print(
+            "변환 정책이 DB 정본에서 확인되지 않아 야간 apply 를 거절합니다 "
+            f"(state={policy.state}, reason={policy.reason or '-'}). "
+            "콘솔 > 환경변수 설정 > 변환 정책에서 값을 저장한 뒤 다시 실행하세요.",
+            file=sys.stderr,
+        )
+        try:
+            write_report(archive, report)
+        except OSError as exc:
+            print(f"야간 지표를 쓰지 못했습니다: {exc}", file=sys.stderr)
+        print("convert_nightly_metrics " + json.dumps(report.to_json(), ensure_ascii=False))
+        return report.exit_code
     budget = report.recheck_limit
     steps = (
         lambda: nightly_backfill(archive, apply=apply, report=report),
@@ -916,7 +950,7 @@ def run_nightly(archive: str, *, apply: bool, limit: int) -> int:
             else max(0, budget - min(budget, report.changed_candidates)),
             report=report,
         ),
-        lambda: delegation_check(archive, report=report),
+        lambda: delegation_check(archive, policy=policy, report=report),
     )
     for step in steps:
         result = step()
@@ -935,6 +969,21 @@ def run_nightly(archive: str, *, apply: bool, limit: int) -> int:
             print(f"야간 지표를 쓰지 못했습니다: {exc}", file=sys.stderr)
     print("convert_nightly_metrics " + json.dumps(report.to_json(), ensure_ascii=False))
     return report.exit_code
+
+
+def _print_policy(policy) -> None:
+    """정책 상태와 **출처**를 사람이 읽게 한 줄로. 시크릿은 없다."""
+    sources = ", ".join(f"{key}={value}" for key, value in sorted(policy.sources.items()))
+    limit = policy.recheck_limit if policy.known else "모름"
+    grace = f"{policy.rhwp_grace_hours}시간" if policy.known else "모름"
+    print(
+        f"변환 정책: state={policy.state} reason={policy.reason or '-'} "
+        f"rhwp위임={policy.delegation} revision={policy.revision or '-'} "
+        f"소급상한={limit} rhwp대기={grace} · 출처 {sources}"
+    )
+    if not policy.nightly_apply_allowed:
+        # DB 정본이 아니면 위임은 「켜짐(옛 설정)」 이거나 「모름」 이다. 둘 다 직접 변환은 없다.
+        print("  ※ DB 정본이 아니므로 `--apply` 는 거절됩니다. HWP/HWPX 직접 변환도 멈춘 상태입니다.")
 
 
 def show_status() -> int:

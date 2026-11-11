@@ -72,7 +72,7 @@ def request(root: Path, suffix: str, data: bytes, *, timeout: float = 150) -> li
 
 
 def process_one(root: Path, manifest: Path) -> bool:
-    from .convert import can_convert, convert_local
+    from .convert import convert_local, has_handler
 
     if (manifest.parent != root / "in" or manifest.suffix != ".json"
             or not JOB_RE.fullmatch(manifest.name)
@@ -91,7 +91,7 @@ def process_one(root: Path, manifest: Path) -> bool:
             code = "worker_expired"
             raise ValueError("expired")
         suffix = str(job["suffix"])
-        if not can_convert(suffix):
+        if not has_handler(suffix):
             raise ValueError("unsupported suffix")
         lines = convert_local(suffix, source.read_bytes())
         payload = (

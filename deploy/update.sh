@@ -159,10 +159,15 @@ systemctl restart tybot
 # 채널 설정에서 매일 발송한다고 명시하므로 배포가 실행기를 함께 활성화한다.
 systemctl enable --now tybot-review-dm.timer
 
-# 실시간 재처리 큐와 야간 실패 스캔은 한 쌍이다. 전자만 켜면 이미 failed 로
-# 닫힌 파일은 다시 큐에 들어오지 않고, 후자만 켜면 한 번에 처리하지 못한 나머지가
-# 다음 날까지 기다린다.
-systemctl enable --now tybot-convert-retry.timer tybot-convert-nightly.timer
+# 실시간 재처리 큐는 배포가 켠다.
+#
+# **새벽 재점검(tybot-convert-nightly.timer)은 배포가 켜지 않는다**(B-89 후속).
+# 그 회차는 변환 정책(DB 정본: rhwp 위임·소급 상한)으로 소급 재변환을 하는 쓰기다.
+# 멈춰 둔 타이머를 배포가 되살리면, 사람이 DB 값과 rhwp 위임 상태를 확인하기 전에
+# 돈다. readiness(`scripts/check_conversion_policy.py`)를 본 사람이 직접 켠다:
+#   sudo systemctl enable --now tybot-convert-nightly.timer
+# 정책이 DB 정본이 아니면 회차 자체도 `--apply` 를 거절한다(종료 코드 3).
+systemctl enable --now tybot-convert-retry.timer
 
 # 콘솔은 별도 프로세스다. 봇 배포는 **콘솔이 쓰는 코드가 바뀌었을 때만** 콘솔도 재시작한다
 # (scripts/deploy_scope.py --console-restart). 배포본을 모르거나 판정이 실패하면 재시작한다.

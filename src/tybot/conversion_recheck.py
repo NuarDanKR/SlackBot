@@ -26,11 +26,12 @@
 from __future__ import annotations
 
 import json
-import os
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+
+from . import conversion_policy as _policy
 
 #: 변환기가 바뀌어도 다시 열지 않는 코드. 정책 제외와 원본 문제다.
 NEVER_REOPEN = frozenset({"pii_refused", "original_changed", "original_missing"})
@@ -42,37 +43,31 @@ VERDICT_CODES = frozenset({"unsupported", "encrypted", "corrupt", "empty_output"
 CHANGED_CODE = "converter_changed"
 
 #: rhwp 에 넘긴 뒤 PDF 가 들어오기를 기다리는 시간. 넘으면 「미완료」 로 센다.
-DEFAULT_RHWP_GRACE = timedelta(hours=6)
+#: 운영 값은 DB 정본(`conversion_policy`)에서 온다. 여기 있는 것은 기본값이다.
+DEFAULT_RHWP_GRACE = timedelta(hours=_policy.DEFAULT_RHWP_GRACE_HOURS)
 
 #: 한 밤에 「판정 변경」·「구버전」 으로 새로 올리는 작업 상한. 소급은 비용이 드는
 #: 작업이고, 변환기 판을 올린 첫날 밤에 수천 건이 한꺼번에 몰리면 그 밤이 장애가 된다.
 #: 남은 것은 다음 밤에 이어진다 — 큐 키에 변환기 판이 들어가 같은 일을 두 번 하지 않는다.
-DEFAULT_RECHECK_LIMIT = 50
-RECHECK_LIMIT_ENV = "TYBOT_CONVERT_RECHECK_LIMIT"
-RHWP_GRACE_ENV = "TYBOT_CONVERT_RHWP_GRACE_HOURS"
+#: 운영 값은 DB 정본에서 온다(B-89 후속).
+DEFAULT_RECHECK_LIMIT = _policy.DEFAULT_RECHECK_LIMIT
 
 #: 마지막 야간 실행 결과. staging 밑에 두는 이유는 변환 서비스가 쓸 수 있는 곳이
 #: staging·archive 둘뿐이기 때문이다(`tybot-convert-nightly.service` ReadWritePaths).
 REPORT_NAME = "convert-nightly-last.json"
 
 
-def recheck_limit(env: dict | None = None) -> int:
-    """환경에서 상한을 읽는다. 틀린 값은 기본값으로 — 0 은 「소급하지 않음」 이다."""
-    raw = (env if env is not None else os.environ).get(RECHECK_LIMIT_ENV, "")
-    try:
-        value = int(str(raw).strip())
-    except ValueError:
-        return DEFAULT_RECHECK_LIMIT
-    return max(0, value)
+def recheck_limit(policy: _policy.ConversionPolicy) -> int:
+    """정책의 한 밤 소급 상한. 0 은 「소급하지 않음」 이다.
+
+    정책을 **모르면 0** 이다. 미리보기에서도 모르는 상한으로 소급 분량을 세면, 사람은
+    그 숫자를 실제 계획으로 읽는다.
+    """
+    return policy.recheck_limit if policy.known else 0
 
 
-def rhwp_grace(env: dict | None = None) -> timedelta:
-    raw = (env if env is not None else os.environ).get(RHWP_GRACE_ENV, "")
-    try:
-        hours = float(str(raw).strip())
-    except ValueError:
-        return DEFAULT_RHWP_GRACE
-    return timedelta(hours=hours) if hours > 0 else DEFAULT_RHWP_GRACE
+def rhwp_grace(policy: _policy.ConversionPolicy) -> timedelta:
+    return timedelta(hours=policy.rhwp_grace_hours)
 
 
 def verdict_changed(
@@ -178,6 +173,10 @@ class NightlyReport:
     outdated_candidates: int = 0
     outdated_enqueued: int = 0
     recheck_limit: int = DEFAULT_RECHECK_LIMIT
+    #: 이 회차가 본 변환 정책(`ConversionPolicy.to_json`). 출처·상태가 화면에 보인다.
+    policy: dict = field(default_factory=dict)
+    #: apply 를 거절한 사유. 비어 있으면 거절하지 않았다.
+    blocked_reason: str = ""
     deferred_to_next_night: int = 0
     excluded_policy: int = 0
     original_missing: int = 0

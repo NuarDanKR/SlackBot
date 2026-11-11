@@ -24,10 +24,12 @@ MANAGED_STATIC_KEYS = {
     # 보관·삭제된 채널의 원문을 근거로 쓸 것인가(B-51). **기본은 아니다.**
     "INCLUDE_RETIRED_CHANNELS",
     "TYBOT_SPECIALIST_TOOL_SECONDS",
-    # HWP 를 PDF 로 바꿔 올리는 변환 앱(rhwp)의 Slack 앱 ID. 이 앱이 올린 PDF 만
-    # 원문 첨부로 받고, TYBot 은 HWP 를 직접 변환하지 않는다(2026-11-09 오너 결정).
-    "TYBOT_CONVERTER_APP_IDS",
 }
+
+#: 옛 rhwp 앱 ID 키. **이 화면에서 더는 바꾸지 않는다** — 정본은 DB 변환 정책이다
+#: (B-89 후속, `tybot.conversion_policy`). 전환 기간 fallback 이 남도록 파일에 있던
+#: 값은 저장할 때 그대로 옮겨 쓴다.
+LEGACY_CONVERTER_KEY = "TYBOT_CONVERTER_APP_IDS"
 
 
 def _retired_summary() -> dict:
@@ -97,10 +99,8 @@ def snapshot() -> dict:
         "retiredChannels": _retired_summary(),
         "defaultModel": default_model,
         "toolBudgetSeconds": int(parse_tool_seconds(values.get("TYBOT_SPECIALIST_TOOL_SECONDS"))),
-        "converterAppIds": [
-            part.strip() for part in values.get("TYBOT_CONVERTER_APP_IDS", "").split(",")
-            if part.strip()
-        ],
+        # rhwp 앱 ID 는 「변환 정책」(DB 정본)으로 옮겼다. 여기서는 옮겼다는 사실만 알린다.
+        "converterPolicyMoved": True,
         "models": [
             {
                 "id": spec.model,
@@ -129,17 +129,13 @@ def _validate(payload: dict) -> dict[str, str]:
             raise ValueError("자료 조회 시간은 정수여야 합니다.") from exc
     if not MIN_TOOL_SECONDS <= tool_seconds <= MAX_CONFIGURED_TOOL_SECONDS:
         raise ValueError(f"자료 조회 시간은 {MIN_TOOL_SECONDS}~{MAX_CONFIGURED_TOOL_SECONDS}초여야 합니다.")
-    from ..archive.converter_bots import parse_app_ids
-
-    supplied_apps = payload.get("converterAppIds")
-    if supplied_apps is None:
-        converter_apps = current.get("TYBOT_CONVERTER_APP_IDS", "")
-    else:
-        raw_apps = (
-            ",".join(str(item) for item in supplied_apps)
-            if isinstance(supplied_apps, list) else str(supplied_apps)
+    if payload.get("converterAppIds") is not None:
+        raise ValueError(
+            "rhwp 앱 ID 는 환경변수 설정에서 바꾸지 않습니다. "
+            "'변환 정책'(DB 정본)에서 바꾸세요."
         )
-        converter_apps = ",".join(parse_app_ids(raw_apps))
+    # 전환 기간 fallback 을 지우지 않는다. 파일에 있던 옛 값을 그대로 옮겨 쓴다.
+    converter_apps = current.get(LEGACY_CONVERTER_KEY, "")
     return {
         "REALTIME_INGEST": "1" if payload.get("realtimeIngest") else "0",
         "AUTOJOIN_CHANNELS": "1" if payload.get("autojoinChannels") else "0",
@@ -151,7 +147,7 @@ def _validate(payload: dict) -> dict[str, str]:
         ),
         "DEFAULT_MODEL": model,
         "TYBOT_SPECIALIST_TOOL_SECONDS": str(tool_seconds),
-        "TYBOT_CONVERTER_APP_IDS": converter_apps,
+        LEGACY_CONVERTER_KEY: converter_apps,
     }
 
 

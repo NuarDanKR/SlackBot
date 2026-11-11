@@ -3386,6 +3386,18 @@ embedding_router = embedding_routes.build_router(
 )
 app.include_router(embedding_router)
 
+# B-89 후속: 변환 런타임 정책(rhwp 앱 ID·야간 재점검 숫자)의 DB 정본. admin 전용,
+# 저장은 전체 워크스페이스 관리자만. 같은 방식으로 의존성을 주입한다.
+from . import conversion_policy_routes  # noqa: E402
+
+conversion_policy_router = conversion_policy_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(conversion_policy_router)
+
 # 사용자 목록 · 봇 사용 권한(vipbot 등). admin 전용.
 from . import user_access_routes  # noqa: E402
 

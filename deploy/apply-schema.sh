@@ -54,6 +54,7 @@ FILES=(
   specialist_rules_schema.sql
   specialist_runtime_schema.sql
   conversion_queue_schema.sql
+  conversion_policy_schema.sql  # B-89 후속 rhwp 앱 ID·야간 숫자 정본. 행은 넣지 않는다
   archiver_vision_schema.sql  # B-80 dormant policy/approval/budget ledger, default OFF
   archiver_image_description_schema.sql  # B-81 dormant catalog/policy/derived index, default OFF
   conversion_alert_schema.sql
