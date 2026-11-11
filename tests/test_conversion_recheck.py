@@ -226,6 +226,49 @@ def test_changed_backfill_respects_the_nightly_limit(tmp_path, no_delegation, en
     assert report.deferred_to_next_night == 2
 
 
+def test_changed_backfill_counts_a_file_present_in_both_layouts_once(
+    tmp_path, no_delegation, enqueued, monkeypatch
+):
+    """레이아웃 이행 중 같은 Slack 파일 좌표가 회차 상한을 두 번 먹지 않는다."""
+    from dataclasses import replace
+
+    import drain_conversion_queue as drain
+
+    from tybot import attachment_review
+
+    _staged(tmp_path, "F1", status="unsupported", error_code="unsupported")
+    (item,) = attachment_review.scan(tmp_path / "archive")
+    shadow_path = (
+        tmp_path
+        / "archive"
+        / "workspaces"
+        / "pilot"
+        / "channels"
+        / "C1"
+        / "staging"
+        / "F1"
+        / "metadata.json"
+    )
+    shadow_path.parent.mkdir(parents=True)
+    shadow_path.write_text(item.meta_path.read_text(encoding="utf-8"), encoding="utf-8")
+    shadow = replace(item, meta_path=shadow_path)
+    monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
+    monkeypatch.setattr(attachment_review, "scan", lambda _archive: [item, shadow])
+    report = recheck.NightlyReport()
+
+    assert drain._active_layout_items([item, shadow], str(tmp_path / "archive")) == [
+        shadow
+    ]
+
+    drain.changed_backfill(
+        str(tmp_path / "archive"), apply=True, limit=1, report=report
+    )
+
+    assert [row["file_id"] for row in enqueued] == ["F1"]
+    assert report.changed_candidates == 1
+    assert report.deferred_to_next_night == 0
+
+
 def test_changed_backfill_is_a_dry_run(tmp_path, no_delegation, monkeypatch, capsys):
     import drain_conversion_queue as drain
 

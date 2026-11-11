@@ -530,7 +530,11 @@ def nightly_backfill(archive_dir: str, *, apply: bool, report=None) -> int:
     """
     from tybot.attachment_review import scan
 
-    failed = [item for item in scan(archive_dir) if item.conversion_failed]
+    failed = [
+        item
+        for item in _active_layout_items(scan(archive_dir), archive_dir)
+        if item.conversion_failed
+    ]
     retryable = [
         item for item in failed
         if queue.is_retryable(item.error_code, item.retryable)
@@ -611,7 +615,7 @@ def outdated_backfill(
     """
     from tybot.attachment_review import APPROVED, CONVERTED, scan
 
-    scanned = scan(archive_dir)
+    scanned = _active_layout_items(scan(archive_dir), archive_dir)
     # File-only recovery owns its generation pointer; do not enqueue its initial
     # metadata into the legacy message ACK/publication pipeline.
     file_only = [item for item in scanned if (
@@ -715,6 +719,31 @@ def _target_pipeline(filetype: str) -> str:
     return f"{queue.PIPELINE_VERSION}:{converter_name(filetype)}:{converter_version(filetype)}"
 
 
+def _active_layout_items(items, archive_dir: str):
+    """Choose one metadata row per Slack file from the active archive layout.
+
+    During the layout migration the same file can exist under both legacy
+    ``staging/workspaces`` and per-channel shadow staging. Counting both burns
+    the nightly budget twice and can enqueue a digest from a layout that the
+    worker will not open. Prefer the configured layout and keep a deterministic
+    fallback for installations that have only the other copy.
+    """
+    legacy_root = pathlib.Path(archive_dir).parent / "staging" / "workspaces"
+    prefer_shadow = (
+        os.getenv("ARCHIVER_SHADOW_LAYOUT", "").strip().lower()
+        == "per-channel-v1"
+    )
+    selected = {}
+    for item in items:
+        key = (item.workspace, item.channel_id, item.file_id)
+        is_legacy = item.meta_path.is_relative_to(legacy_root)
+        preferred = (not is_legacy) if prefer_shadow else is_legacy
+        current = selected.get(key)
+        if current is None or preferred:
+            selected[key] = item
+    return list(selected.values())
+
+
 def changed_backfill(
     archive_dir: str,
     *,
@@ -735,7 +764,7 @@ def changed_backfill(
     from tybot.attachment_review import scan
     from tybot.conversion_recheck import CHANGED_CODE, verdict_changed
 
-    scanned = scan(archive_dir)
+    scanned = _active_layout_items(scan(archive_dir), archive_dir)
     policy_excluded = 0
     candidates = []
     original_missing = []
@@ -837,7 +866,7 @@ def delegation_check(archive_dir: str, *, report=None, now=None) -> int:
     from tybot.attachment_review import scan
     from tybot.conversion_recheck import pending_delegations, rhwp_grace
 
-    scanned = scan(archive_dir)
+    scanned = _active_layout_items(scan(archive_dir), archive_dir)
     delegated = [item for item in scanned if item.delegated]
     if not conversion_delegated():
         # 위임이 꺼졌으면 남은 위임 원본은 `changed_backfill` 이 직접 변환으로 연다.
