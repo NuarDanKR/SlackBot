@@ -825,7 +825,22 @@ def archive_diagnostics(user: User) -> dict:
         }
         for item in failed[:200]
     ]
+    section["nightlyRecheck"] = _nightly_recheck(user)
     return {"checkedAt": report["checkedAt"], "section": section}
+
+
+def _nightly_recheck(user) -> dict | None:
+    """마지막 새벽 변환 재점검 지표 (B-89). **전체 워크스페이스 권한만** 본다.
+
+    지표는 워크스페이스를 가로지른 합계다. 일부 워크스페이스만 보는 사람에게
+    보여 주면 볼 수 없는 워크스페이스의 실패·위임 건수가 함께 드러난다.
+    아직 돈 적이 없으면 `null` — 「0건」 과 「모른다」 를 섞지 않는다.
+    """
+    if not user.all_workspaces:
+        return None
+    from ..conversion_recheck import read_report
+
+    return read_report(reader.archive_dir())
 
 
 class AttachmentReprocessRequest(BaseModel):

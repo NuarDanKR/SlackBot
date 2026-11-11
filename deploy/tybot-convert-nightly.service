@@ -1,5 +1,5 @@
 [Unit]
-Description=TYBot 실패 첨부 야간 일괄 재시도
+Description=TYBot 새벽 변환 재점검 (일시 실패·판정 변경·구버전 소급, B-89)
 Documentation=file:///opt/tybot/docs/deploy/rocky8.md
 After=network-online.target
 
@@ -11,6 +11,8 @@ WorkingDirectory=/opt/tybot
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=C.UTF-8
 Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+# 한 회차: 일시 실패 재시도 → 판정 변경 → 구버전 재변환(합쳐 TYBOT_CONVERT_RECHECK_LIMIT)
+# → rhwp PDF 미확인 집계 → 큐에서 최대 --limit 건 변환. 지표는 staging/_reports 에 남는다.
 ExecStart=/opt/tybot/.venv/bin/python scripts/drain_conversion_queue.py --nightly --apply --limit 50
 StandardOutput=journal
 StandardError=journal

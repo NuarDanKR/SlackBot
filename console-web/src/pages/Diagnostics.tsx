@@ -33,6 +33,26 @@ export function ArchiveDiagnostics({ user, onToast }: { user: ConsoleUser; onToa
       stagedAt: string
       previewable: boolean
     }[]
+    nightlyRecheck?: {
+      started_at: string
+      finished_at: string
+      retry_enqueued: number
+      changed_candidates: number
+      changed_enqueued: number
+      outdated_candidates: number
+      outdated_enqueued: number
+      recheck_limit: number
+      deferred_to_next_night: number
+      excluded_policy: number
+      original_missing: number
+      rhwp_delegated: number
+      rhwp_pending: number
+      processed: number
+      succeeded: number
+      failed: number
+      success_rate: number | null
+      exit_code: number
+    } | null
   }
   const res = useResource<{ checkedAt: string; section: ArchiveSection }>('/api/diagnostics/archive')
   const [pending, setPending] = useState<ArchiveSection['failedAttachments'][number] | null>(null)
@@ -54,6 +74,7 @@ export function ArchiveDiagnostics({ user, onToast }: { user: ConsoleUser; onToa
   const d = res.data.section
   return <><PageHead crumb="수집 · 아카이브 진단" title="아카이브 진단" note="형식이 깨졌거나 수집이 밀린 원문을 확인합니다." aside={<><CheckedAt value={res.data.checkedAt} /><Level value={d.level} /></>} />
     <Section title="진단 결과"><div className="metrics overview-metrics"><Metric k="수집 문서" v={fmt.int(d.documents)} unit="건" /><Metric k="깨진 문서" v={fmt.int(d.brokenDocuments)} unit="건" /><Metric k="첨부 확인 필요" v={fmt.int(d.attachmentFailures)} unit="건" /><Metric k="수집 밀림" v={fmt.int(d.staleWorkspaces)} unit="개" /></div><Problems items={d.problems} /></Section>
+    {d.nightlyRecheck !== undefined && <Section title="새벽 변환 재점검" lead="매일 새벽 일시 실패·변환기가 바뀐 판정·구버전 변환본을 다시 확인합니다. 민감정보 차단은 다시 열지 않습니다.">{d.nightlyRecheck ? <><div className="metrics overview-metrics"><Metric k="재처리" v={fmt.int(d.nightlyRecheck.processed)} unit="건" /><Metric k="성공률" v={d.nightlyRecheck.success_rate === null ? '-' : `${Math.round(d.nightlyRecheck.success_rate * 100)}`} unit={d.nightlyRecheck.success_rate === null ? '' : '%'} /><Metric k="판정 변경 소급" v={fmt.int(d.nightlyRecheck.changed_enqueued)} unit="건" /><Metric k="구버전 재변환" v={fmt.int(d.nightlyRecheck.outdated_enqueued)} unit="건" /><Metric k="다음 회차로" v={fmt.int(d.nightlyRecheck.deferred_to_next_night)} unit="건" /><Metric k="rhwp PDF 미확인" v={fmt.int(d.nightlyRecheck.rhwp_pending)} unit="건" /></div><p className="hint">마지막 실행 {new Date(d.nightlyRecheck.finished_at || d.nightlyRecheck.started_at).toLocaleString('ko-KR')} · 일시 실패 재시도 {fmt.int(d.nightlyRecheck.retry_enqueued)}건 · 한 밤 소급 상한 {fmt.int(d.nightlyRecheck.recheck_limit)}건 · 정책 제외 {fmt.int(d.nightlyRecheck.excluded_policy)}건 · 원본 없음 {fmt.int(d.nightlyRecheck.original_missing)}건{d.nightlyRecheck.exit_code !== 0 && ' · 일부 작업 실패'}</p></> : <p className="hint">아직 새벽 재점검 기록이 없습니다.</p>}</Section>}
     <Section title="첨부 변환·차단 확인" lead="자동 변환에 실패했거나 민감정보 검사에서 차단된 첨부입니다. 원본은 격리 보관되며 자동으로 외부 LLM에 전송되지 않습니다.">
       <div className="table-wrap"><table className="table"><thead><tr><th>시각</th><th>워크스페이스</th><th>채널</th><th>파일</th><th>실패·차단 사유</th><th>원본·조치</th></tr></thead><tbody>{d.failedAttachments.length ? d.failedAttachments.map((item, index) => { const preview = `/api/diagnostics/archive/attachment-preview?workspace=${encodeURIComponent(item.workspace)}&channel_id=${encodeURIComponent(item.channelId)}&file_id=${encodeURIComponent(item.fileId)}`; const canRetry = user.role === 'admin' && item.status !== 'pii_refused' && item.originalState === 'retained' && item.retryState !== 'queued' && item.retryState !== 'leased'; return <tr key={`${item.workspace}-${item.channelId}-${item.fileId}-${index}`}><td>{fmt.dayClock(item.stagedAt)}</td><td className="mono">{item.workspace}</td><td className="mono">{item.channelId}</td><td>{item.name}<div className="subtle mono">{item.filetype || '-'}</div></td><td>{item.reason}{item.errorCode && <div className="subtle mono">{item.errorCode}</div>}<div className="subtle">{item.originalState === 'retained' ? '원본 보존됨' : item.originalState === 'missing' ? '원본 없음' : '원본 상태 미확인'} · {item.retryState ? `큐 ${item.retryState} · ${item.retryAttempts ?? 0}회` : item.retryable ? '자동 재시도 가능' : '운영자 확인 필요'}</div></td><td><div className="attachment-actions">{item.previewable && <a href={preview} target="_blank" rel="noreferrer">이미지 확인</a>}{item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer">Slack에서 보기</a>}{canRetry && <button className="btn btn-sm btn-quiet" type="button" onClick={() => { setActionError(''); setPending(item) }}>재처리</button>}{!item.previewable && !item.permalink && !canRetry && '-'}</div></td></tr> }) : <tr><td colSpan={6}>확인이 필요한 첨부가 없습니다.</td></tr>}</tbody></table></div>
     </Section>

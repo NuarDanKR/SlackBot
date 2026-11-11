@@ -521,7 +521,7 @@ def backfill(archive_dir: str, *, apply: bool) -> int:
     return EXIT_OK
 
 
-def nightly_backfill(archive_dir: str, *, apply: bool) -> int:
+def nightly_backfill(archive_dir: str, *, apply: bool, report=None) -> int:
     """재시도 가능한 실패만 야간 큐에 다시 올린다.
 
     사람의 ``--backfill`` 은 변환기를 고친 뒤 과거 판정을 다시 시험하는 강제
@@ -546,6 +546,9 @@ def nightly_backfill(archive_dir: str, *, apply: bool) -> int:
         if item.object_path is None or not item.object_path.is_file()
     ]
     candidates = [item for item in located if item not in original_missing]
+    if report is not None:
+        report.retry_candidates = len(candidates)
+        report.original_missing += len(original_missing)
 
     print(
         f"야간 실패 첨부 {len(failed)}건 · 재시도 대상 {len(candidates)}건 · "
@@ -592,11 +595,15 @@ def nightly_backfill(archive_dir: str, *, apply: bool) -> int:
             return EXIT_INPUT
         if job_id:
             added += 1
+    if report is not None:
+        report.retry_enqueued = added
     print(f"야간 재시도 큐 등록 {added}건. 이어서 즉시 변환합니다.")
     return EXIT_OK
 
 
-def outdated_backfill(archive_dir: str, *, apply: bool) -> int:
+def outdated_backfill(
+    archive_dir: str, *, apply: bool, limit: int | None = None, report=None,
+) -> int:
     """현재 변환기보다 오래된 성공 첨부를 새 revision 으로 다시 읽는다.
 
     기존 정본이나 Slack raw 를 덮지 않는다. 큐 pipeline 판이 키에 들어가므로
@@ -633,8 +640,19 @@ def outdated_backfill(archive_dir: str, *, apply: bool) -> int:
             continue
         candidates.append(item)
 
+    if report is not None:
+        report.outdated_candidates = len(candidates)
+        report.original_missing += len(original_missing)
+    deferred = 0
+    if limit is not None and len(candidates) > limit:
+        # 소급은 비용이 든다. 넘친 것은 다음 회차로 — 큐 키에 변환기 판이 들어가
+        # 이미 끝낸 것을 다시 하지 않는다.
+        deferred = len(candidates) - limit
+        candidates = candidates[:limit]
+        if report is not None:
+            report.deferred_to_next_night += deferred
     print(
-        f"구버전 성공 첨부 {len(candidates)}건 · "
+        f"구버전 성공 첨부 {len(candidates) + deferred}건 · "
         f"원본 없음 {len(original_missing)}건 · "
         f"현재판 {len(converted) - len(candidates) - len(original_missing)}건"
     )
@@ -683,11 +701,211 @@ def outdated_backfill(archive_dir: str, *, apply: bool) -> int:
             return EXIT_INPUT
         if job_id:
             added += 1
+    if report is not None:
+        report.outdated_enqueued = added
     print(
         f"새 변환판 큐 등록 {added}건. `drain_conversion_queue.py --apply`를 "
         "실행하거나 변환 타이머를 기다리세요."
     )
     return EXIT_OK
+
+
+def _target_pipeline(filetype: str) -> str:
+    """변환기 판이 들어간 큐 키. 옛 판으로 실패·성공한 행이 새 시도를 가리지 않게 한다."""
+    return f"{queue.PIPELINE_VERSION}:{converter_name(filetype)}:{converter_version(filetype)}"
+
+
+def changed_backfill(
+    archive_dir: str,
+    *,
+    apply: bool,
+    limit: int | None = None,
+    report=None,
+) -> int:
+    """영구 판정(미지원·암호·손상·빈 출력) 중 **변환기가 바뀐 것만** 다시 연다 (B-89).
+
+    `nightly_backfill` 은 일시 실패만 연다. 여기는 그때 「되풀이해도 같다」 고 본
+    판정을 다룬다 — 그 판단의 근거는 그때의 변환기였다. 변환기가 같으면 결과도
+    같으므로 열지 않는다(`conversion_recheck.verdict_changed`).
+
+    `force` 를 쓰지 않는다. 사유 코드(`converter_changed`)가 재시도 가능 코드이고,
+    큐 키에 지금 변환기 판이 들어가 **같은 판으로는 상한(4회)까지만** 돈다.
+    """
+    from tybot.archive.convert import can_convert
+    from tybot.attachment_review import scan
+    from tybot.conversion_recheck import CHANGED_CODE, verdict_changed
+
+    scanned = scan(archive_dir)
+    policy_excluded = 0
+    candidates = []
+    original_missing = []
+    for item in scanned:
+        if item.status == "pii_refused" or item.error_code == "pii_refused":
+            policy_excluded += 1
+            continue
+        if not (item.conversion_failed or item.delegated):
+            continue
+        if not item.channel_id or item.channel_id == "unknown":
+            continue
+        try:
+            meta = json.loads(item.meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not verdict_changed(
+            status=item.status,
+            error_code=item.error_code,
+            recorded_version=str(meta.get("converter_version") or ""),
+            current_version=converter_version(item.filetype),
+            convertible_now=can_convert(item.filetype or ""),
+        ):
+            continue
+        if item.object_path is None or not item.object_path.is_file():
+            original_missing.append(item)
+            continue
+        candidates.append(item)
+
+    total = len(candidates)
+    deferred = 0
+    if limit is not None and total > limit:
+        deferred = total - limit
+        candidates = candidates[:limit]
+    if report is not None:
+        report.changed_candidates = total
+        report.excluded_policy = policy_excluded
+        report.original_missing += len(original_missing)
+        report.deferred_to_next_night += deferred
+
+    print(
+        f"판정 변경 대상 {total}건 · 이번 회차 {len(candidates)}건 · "
+        f"다음 회차로 {deferred}건 · 정책 제외 {policy_excluded}건 · "
+        f"원본 없음 {len(original_missing)}건"
+    )
+    if not candidates:
+        return EXIT_OK
+    if not apply:
+        for item in candidates[:20]:
+            print(
+                f"  {item.workspace}/{item.channel_id}/{item.file_id} "
+                f"{item.name} ({item.error_code or item.status})"
+            )
+        if len(candidates) > 20:
+            print(f"  … 외 {len(candidates) - 20}건")
+        print("\n실제로 재시도하려면 `--nightly --apply` 를 사용하세요.")
+        return EXIT_OK
+
+    added = 0
+    for item in candidates:
+        digest = item.sha256 or ""
+        if not digest:
+            try:
+                digest = hashlib.sha256(item.object_path.read_bytes()).hexdigest()
+            except OSError:
+                print(f"  건너뜀(원본 소실): {item.workspace}/{item.channel_id}/{item.file_id}")
+                continue
+        try:
+            job_id = queue.enqueue(
+                workspace=item.workspace,
+                channel_id=item.channel_id,
+                file_id=item.file_id,
+                original_sha256=digest,
+                error_code=CHANGED_CODE,
+                retryable=True,
+                converter=converter_name(item.filetype),
+                converter_version=converter_version(item.filetype),
+                pipeline_version=_target_pipeline(item.filetype),
+                force=False,
+            )
+        except queue.QueueUnavailable as exc:
+            print(f"큐를 쓸 수 없습니다: {exc}", file=sys.stderr)
+            return EXIT_INPUT
+        if job_id:
+            added += 1
+    if report is not None:
+        report.changed_enqueued = added
+    print(f"판정 변경 큐 등록 {added}건.")
+    return EXIT_OK
+
+
+def delegation_check(archive_dir: str, *, report=None, now=None) -> int:
+    """rhwp 에 넘겼는데 PDF 가 안 들어온 HWP 를 센다. **변환하지 않는다.**
+
+    위임 중에 TYBot 이 직접 변환하면 같은 문서가 두 벌의 근거가 된다. 할 수 있는
+    일은 사람에게 알리는 것이다 — 앱이 채널에 없거나 실패했으면 사람이 고친다.
+    좌표만 적는다(파일 이름은 적지 않는다).
+    """
+    from tybot.archive.converter_bots import conversion_delegated
+    from tybot.attachment_review import scan
+    from tybot.conversion_recheck import pending_delegations, rhwp_grace
+
+    scanned = scan(archive_dir)
+    delegated = [item for item in scanned if item.delegated]
+    if not conversion_delegated():
+        # 위임이 꺼졌으면 남은 위임 원본은 `changed_backfill` 이 직접 변환으로 연다.
+        print(f"rhwp 위임 꺼짐 · 위임 기록 {len(delegated)}건은 판정 변경으로 처리")
+        if report is not None:
+            report.rhwp_delegated = len(delegated)
+        return EXIT_OK
+    pending = pending_delegations(
+        scanned,
+        now=now or datetime.now(UTC),
+        grace=rhwp_grace(),
+    )
+    if report is not None:
+        report.rhwp_delegated = len(delegated)
+        report.rhwp_pending = len(pending)
+        report.rhwp_pending_files = [
+            {"workspace": p.workspace, "channel_id": p.channel_id, "file_id": p.file_id}
+            for p in pending[:50]
+        ]
+    print(f"rhwp 위임 {len(delegated)}건 · PDF 미확인 {len(pending)}건")
+    for p in pending[:20]:
+        print(f"  PDF 미확인: {p.workspace}/{p.channel_id}/{p.file_id}")
+    return EXIT_OK
+
+
+def run_nightly(archive: str, *, apply: bool, limit: int) -> int:
+    """야간 재점검 한 회차 (B-89). 큐에 올린 뒤 같은 실행에서 바로 변환한다.
+
+    순서가 뜻이 있다 — 일시 실패가 먼저다. 사람이 기다리는 것은 대개 방금 실패한
+    파일이고, 소급(판정 변경·구버전)은 상한 안에서 남는 몫을 쓴다.
+    """
+    from tybot.conversion_recheck import NightlyReport, recheck_limit, write_report
+
+    report = NightlyReport(
+        started_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        recheck_limit=recheck_limit(),
+    )
+    budget = report.recheck_limit
+    steps = (
+        lambda: nightly_backfill(archive, apply=apply, report=report),
+        lambda: changed_backfill(archive, apply=apply, limit=budget, report=report),
+        lambda: outdated_backfill(
+            archive,
+            apply=apply,
+            limit=max(0, budget - report.changed_enqueued)
+            if apply
+            else max(0, budget - min(budget, report.changed_candidates)),
+            report=report,
+        ),
+        lambda: delegation_check(archive, report=report),
+    )
+    for step in steps:
+        result = step()
+        if result != EXIT_OK:
+            report.exit_code = result
+            break
+    if apply and report.exit_code == EXIT_OK:
+        report.exit_code = drain(archive, limit=limit, report=report)
+    report.finished_at = datetime.now(UTC).isoformat(timespec="seconds")
+    if apply:
+        # 지표는 실제로 돈 회차만 남긴다. 판정만 본 실행이 「마지막 실행」 을 덮으면
+        # 콘솔이 어젯밤 결과 대신 사람이 방금 본 미리보기를 보여 준다.
+        try:
+            write_report(archive, report)
+        except OSError as exc:
+            print(f"야간 지표를 쓰지 못했습니다: {exc}", file=sys.stderr)
+    print("convert_nightly_metrics " + json.dumps(report.to_json(), ensure_ascii=False))
+    return report.exit_code
 
 
 def show_status() -> int:
@@ -718,7 +936,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--nightly",
         action="store_true",
-        help="재시도 가능한 실패 첨부를 큐에 올리고 즉시 처리한다(야간 배치)",
+        help="야간 재점검: 일시 실패·판정 변경·구버전 성공을 큐에 올리고 즉시 처리한다",
     )
     ap.add_argument(
         "--outdated",
@@ -740,29 +958,35 @@ def main(argv: list[str] | None = None) -> int:
     # 무시되고 현재 디렉터리 밑을 본다.
     archive = args.archive or os.getenv("ARCHIVE_DIR", "./archive")
 
+    selected = sum((args.backfill, args.nightly, args.outdated))
+    if selected > 1:
+        ap.error("--backfill, --nightly, --outdated 는 함께 사용할 수 없습니다")
     try:
-        selected = sum((args.backfill, args.nightly, args.outdated))
-        if selected > 1:
-            ap.error("--backfill, --nightly, --outdated 는 함께 사용할 수 없습니다")
         if args.status:
             return show_status()
         if args.backfill:
             return backfill(archive, apply=args.apply)
         if args.nightly:
-            result = nightly_backfill(archive, apply=args.apply)
-            if result != EXIT_OK or not args.apply:
-                return result
+            return run_nightly(archive, apply=args.apply, limit=args.limit)
         if args.outdated:
             return outdated_backfill(archive, apply=args.apply)
-
-        queue.reclaim_expired()
         if not args.apply:
+            queue.reclaim_expired()
             counts = queue.summary()
             ready = counts.get(queue.QUEUED, 0)
             print(f"대기 중인 작업 {ready}건. 실제로 돌리려면 `--apply` 를 붙이세요.")
             return EXIT_OK
+    except queue.QueueUnavailable as exc:
+        print(f"큐를 쓸 수 없습니다: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    return drain(archive, limit=args.limit)
 
-        jobs = queue.claim(owner_name(), limit=args.limit)
+
+def drain(archive: str, *, limit: int, report=None) -> int:
+    """큐에서 작업을 잡아 변환·원문 반영·색인까지 끝낸다."""
+    try:
+        queue.reclaim_expired()
+        jobs = queue.claim(owner_name(), limit=limit)
     except queue.QueueUnavailable as exc:
         print(f"큐를 쓸 수 없습니다: {exc}", file=sys.stderr)
         return EXIT_INPUT
@@ -809,6 +1033,10 @@ def main(argv: list[str] | None = None) -> int:
             f"ch={job.channel_id} file={job.file_id} attempt={job.attempt_count}"
         )
 
+    if report is not None:
+        report.processed = len(jobs)
+        report.failed = failed
+        report.succeeded = len(jobs) - failed
     print(f"\n처리 {len(jobs)}건 · 실패 {failed}건")
     return EXIT_FAILED if failed else EXIT_OK
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=TYBot 실패 첨부 매일 새벽 일괄 재시도
+Description=TYBot 새벽 변환 재점검 (B-89)
 
 [Timer]
 OnCalendar=*-*-* 03:20:00
