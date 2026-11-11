@@ -156,11 +156,18 @@ def test_common_runtime_refunds_a_request_without_a_successful_answer():
     quota.finalize.assert_not_called()
 
 
+class _PinnedClockQuota(AnswerQuota):
+    """`_handle` 은 시각을 넘기지 않는다. 시험이 벽시계를 두 번 읽으면
+    그 사이에 KST 자정이 지날 때 할당량 날짜가 갈라져 실패한다 — 시계를 고정한다."""
+
+    def reserve(self, *, now=None, **kwargs):
+        return super().reserve(now=now or NOW, **kwargs)
+
+
 def test_common_runtime_stops_before_model_work_when_the_limit_is_full():
-    quota = AnswerQuota(MemoryQuotaStore(), limit=1)
-    runtime_now = datetime.now(UTC)
-    counted = _reserve(quota, 99, now=runtime_now)
-    quota.finalize(counted.reservation_id, now=runtime_now)
+    quota = _PinnedClockQuota(MemoryQuotaStore(), limit=1)
+    counted = _reserve(quota, 99)
+    quota.finalize(counted.reservation_id, now=NOW)
     bot = _workspace_bot(quota)
     bot._handle_request = Mock()
     say = Mock(return_value={"ts": "2.0"})
