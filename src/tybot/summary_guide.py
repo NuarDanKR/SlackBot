@@ -51,6 +51,20 @@ MAX_EXTRA_HITS = 8
 # 한 워크스페이스에서 한 번에 훑는 승인 항목 상한.
 CANDIDATE_LIMIT = 500
 
+#: 질문 낱말을 DB 에서 거를 때 쓰는 낱말 수 상한. 질문 원문이 통째로 오는 경로에서도
+#: SQL 이 끝없이 길어지지 않게 한다. 넘친 낱말은 파이썬 점수에서는 그대로 쓰인다.
+MAX_FILTER_TOKENS = 12
+
+#: 승인 요약 본문의 비교용 식 (B-89). **`summary_index_schema.sql` 의
+#: `approved_summary_body_bigm` 과 글자까지 같아야** pg_bigm 인덱스를 탄다.
+#:
+#: 원문 검색(`search_index.COMPACT_BODY`)과 달리 `lower()` 를 씌운다. 길잡이 점수
+#: (`search_index.score_line`)는 소문자로 바꿔 띄어쓰기를 지운 본문에서 낱말을 찾는다.
+#: DB 에서 거르는 기준이 그보다 좁으면(대소문자를 가리면) 점수로는 맞을 항목이 후보에서
+#: 먼저 빠진다 — 「iPhone」 같은 섞인 표기가 그렇다. 승인 요약은 원문보다 훨씬 적어
+#: 식 인덱스 비용이 작으므로, 원문 쪽처럼 표기 셋을 나열하지 않고 기준을 똑같이 맞춘다.
+SUMMARY_COMPACT_BODY = "lower(replace(a.body, ' ', ''))"
+
 STALE_SOURCE_MISSING = "source_missing"
 STALE_EVIDENCE_MOVED = "evidence_moved"
 
@@ -107,12 +121,41 @@ def _value(row, key: str) -> str:
     return ""
 
 
-def active_items(workspaces: str | Iterable[str], *, conn=None) -> list[GuideItem]:
+def _like_pattern(token: str) -> str:
+    """낱말 하나를 LIKE 패턴으로. 낱말 안의 `%`·`_` 는 글자 그대로 찾는다."""
+    escaped = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def keyword_filter(tokens: Iterable[str] | None) -> tuple[str, dict]:
+    """질문 낱말 중 **하나라도** 든 항목만 남기는 SQL 조각과 값.
+
+    `matched()` 는 낱말이 하나라도 맞아야 점수가 0 보다 크다. 그래서 여기서 「하나라도」
+    로 거르면 **점수로 뽑힐 항목은 하나도 빠지지 않는다** — 줄어드는 것은 어차피 0점인
+    후보뿐이다. 낱말이 없으면 거르지 않는다(빈 문자열).
+    """
+    words = list(dict.fromkeys(
+        str(token).lower().replace(" ", "") for token in (tokens or ()) if str(token).strip()
+    ))[:MAX_FILTER_TOKENS]
+    if not words:
+        return "", {}
+    params = {f"kw{index}": _like_pattern(word) for index, word in enumerate(words)}
+    clause = " OR ".join(f"{SUMMARY_COMPACT_BODY} LIKE %(kw{index})s" for index in range(len(words)))
+    return f"AND ({clause})", params
+
+
+def active_items(
+    workspaces: str | Iterable[str], *, conn=None, tokens: Iterable[str] | None = None,
+) -> list[GuideItem]:
     """길잡이로 쓸 수 있는 사람 승인 또는 자동 승격 항목.
 
     **발행 상태이고, 대체되지 않았고, 근거가 어긋나지 않은 것만** 든다. 사람 승인과
     유예시간 만료 자동 승격은 원산지를 구분해 저장한다. 반려·보류·미응답 폐기 후보와
     정정 모달 입력은 여기에 들어올 길이 없고, 정정 문장(`correction`)은 읽지 않는다.
+
+    `tokens` 를 주면 **DB 에서 먼저 거른다** (B-89). 예전에는 최근 500건을 읽어
+    파이썬에서 점수를 매겼고, 그래서 501번째부터는 아무리 맞아도 길잡이가 되지 못했다.
+    거르는 기준은 `keyword_filter` 가 점수와 같게 맞춘다.
     """
     if isinstance(workspaces, str):
         scopes = [workspaces.strip()] if workspaces.strip() else []
@@ -123,6 +166,7 @@ def active_items(workspaces: str | Iterable[str], *, conn=None) -> list[GuideIte
     handle, owned = (conn, False) if conn is not None else (_connect(), True)
     if handle is None:
         return []
+    keyword_sql, keyword_params = keyword_filter(tokens)
     try:
         with handle.cursor() as cur:
             cur.execute(
@@ -137,10 +181,11 @@ def active_items(workspaces: str | Iterable[str], *, conn=None) -> list[GuideIte
                    AND a.stale_at IS NULL
                    AND c.state IN ('approved', 'auto_bot_summary')
                    AND c.evidence_hash <> ''
+                   {keywords}
                  ORDER BY a.approved_at DESC
                  LIMIT %(lim)s
-                """,
-                {"workspaces": scopes, "lim": CANDIDATE_LIMIT},
+                """.replace("{keywords}", keyword_sql),
+                {"workspaces": scopes, "lim": CANDIDATE_LIMIT, **keyword_params},
             )
             rows = list(cur.fetchall())
     except Exception as exc:  # noqa: BLE001 - 조회 실패는 길잡이 없음으로 내려간다
@@ -309,10 +354,21 @@ def expand(store, ctx, query: str, *, conn=None, limit: int = MAX_EXTRA_HITS) ->
             for doc in docs
             if ctx.may_reach(str(getattr(doc, "workspace", "") or ""))
         })
-    items = active_items(workspaces, conn=conn)
+    from . import search_index
+
+    tokens = search_index.tokens_of(query)
+    if not tokens:
+        # 낱말이 없으면 `matched()` 가 어차피 0건이다. DB 를 열 이유가 없다.
+        return []
+    items = active_items(workspaces, conn=conn, tokens=tokens)
     if not items:
         return []
     picked = matched(query, items)
+    # 후보 축소 지표(B-89). DB 에서 거른 뒤 읽은 수와 그중 점수로 뽑힌 수.
+    logger.info(
+        "승인 요약 길잡이 후보 ws=%s 읽음=%d 선택=%d",
+        getattr(ctx, "workspace", "-"), len(items), len(picked),
+    )
     if not picked:
         return []
 
@@ -347,10 +403,13 @@ def expand(store, ctx, query: str, *, conn=None, limit: int = MAX_EXTRA_HITS) ->
 
 __all__ = [
     "MAX_EXTRA_HITS",
+    "MAX_FILTER_TOKENS",
     "MAX_ITEMS",
+    "SUMMARY_COMPACT_BODY",
     "GuideItem",
     "active_items",
     "expand",
+    "keyword_filter",
     "mark_stale",
     "matched",
 ]

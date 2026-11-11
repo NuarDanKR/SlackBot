@@ -20,6 +20,21 @@ RAW = "미회수 채권 12억원 잔액이 남았습니다"
 APPROVED = "미수금 12억원 잔액이 남았습니다"
 
 
+def _unlike(pattern: str) -> str:
+    """`%낱말%` LIKE 패턴을 글자 그대로의 낱말로 되돌린다(이스케이프 해제)."""
+    body = pattern[1:-1]
+    out, escaped = [], False
+    for ch in body:
+        if escaped:
+            out.append(ch)
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 class _Cursor:
     def __init__(self, conn) -> None:
         self.conn = conn
@@ -37,10 +52,22 @@ class _Cursor:
             self.rows = []
             return
         scopes = set((params or {}).get("workspaces") or [])
-        self.rows = [
+        rows = [
             row for row in self.conn.rows
             if row.get("workspace") in scopes and row.get("evidence_hash")
         ]
+        # B-89: 낱말 조건(`kwN`)과 LIMIT 을 PostgreSQL 과 같은 뜻으로 흉내 낸다.
+        # 본문 식은 lower(replace(body, ' ', '')), 패턴은 `%낱말%`(\ 이스케이프).
+        words = [
+            _unlike(value) for key, value in sorted((params or {}).items())
+            if key.startswith("kw")
+        ]
+        if words:
+            rows = [
+                row for row in rows
+                if any(word in row["body"].replace(" ", "").lower() for word in words)
+            ]
+        self.rows = rows[: int((params or {}).get("lim") or len(rows))]
 
     def fetchall(self):
         return self.rows
@@ -384,3 +411,73 @@ def test_a_guide_line_the_search_missed_is_added_to_the_evidence(tmp_path, monke
     merged = _engine(store)._with_approved_guide("미수금", [], ctx)
 
     assert [hit.line.text for hit in merged] == [RAW]
+
+
+# --- B-89: DB 에서 먼저 거른다 --------------------------------------------------
+
+
+def test_an_old_matching_summary_beyond_the_recent_window_is_still_found(tmp_path):
+    """예전에는 최근 500건만 읽어, 그보다 오래된 승인 요약은 영영 길잡이가 못 됐다."""
+    store = _archive(tmp_path)
+    filler = [
+        _row(store, candidate_id=f"00000000-0000-0000-0000-{index:012d}",
+             body=f"무관한 회의 안내 {index}")
+        for index in range(summary_guide.CANDIDATE_LIMIT + 50)
+    ]
+    conn = _Conn([*filler, _row(store)])  # 맞는 항목은 가장 오래된 자리
+
+    hits = summary_guide.expand(store, _ctx(), "미수금 잔액", conn=conn)
+
+    assert [hit.line.text for hit in hits] == [RAW]
+    sql, params = conn.sql[0]
+    assert "lower(replace(a.body, ' ', '')) LIKE %(kw0)s" in sql
+    assert params["kw0"] == "%미수금%"
+
+
+def test_the_db_filter_never_drops_an_item_the_score_would_pick(tmp_path):
+    """거르는 기준이 점수보다 좁으면 맞을 항목이 후보에서 먼저 빠진다."""
+    from tybot import search_index
+
+    bodies = [
+        "iPhone 지급 대장 정리",      # 섞인 대소문자 — 원문 검색 표기 셋으로는 안 잡힌다
+        "주간 업무 보고 취합",        # 띄어쓰기
+        "PF 대출 약정 변경",
+        "비율 50%_초과 항목",          # LIKE 특수문자
+        "전혀 상관없는 문장",
+    ]
+    for query in ("iphone", "주간업무보고", "pf대출", "50%_초과", "상관", "없는말"):
+        tokens = search_index.tokens_of(query)
+        clause, params = summary_guide.keyword_filter(tokens)
+        words = [_unlike(params[key]) for key in sorted(params)]
+        by_db = {b for b in bodies if any(w in b.replace(" ", "").lower() for w in words)}
+        by_score = {b for b in bodies if search_index.score_line(tokens, query, "", b) > 0}
+        assert by_score <= by_db, query
+        assert clause.startswith("AND (")
+
+
+def test_keyword_filter_escapes_like_wildcards_and_caps_words():
+    _clause, params = summary_guide.keyword_filter(["a%b", "c_d", "e\\f"])
+    assert params == {"kw0": "%a\\%b%", "kw1": "%c\\_d%", "kw2": "%e\\\\f%"}
+    # 본문 식이 lower() 라서 패턴도 소문자·공백 제거여야 맞는다.
+    assert summary_guide.keyword_filter(["iPhone 대장"])[1] == {"kw0": "%iphone대장%"}
+    many = [f"낱말{index}" for index in range(summary_guide.MAX_FILTER_TOKENS + 5)]
+    _clause, capped = summary_guide.keyword_filter(many)
+    assert len(capped) == summary_guide.MAX_FILTER_TOKENS
+
+
+def test_no_words_means_no_filter_and_no_database_call(tmp_path):
+    assert summary_guide.keyword_filter([]) == ("", {})
+    store = _archive(tmp_path)
+    conn = _Conn([_row(store)])
+
+    assert summary_guide.expand(store, _ctx(), "   ", conn=conn) == []
+    assert conn.sql == []
+
+
+def test_a_filtered_guide_still_reopens_the_original_under_current_acl(tmp_path):
+    """DB 에서 걸러 찾았어도 권한 판정은 그대로 원문 재개봉이 한다."""
+    store = _archive(tmp_path)
+    conn = _Conn([_row(store)])
+
+    hits = summary_guide.expand(store, _ctx(channels=()), "미수금", conn=conn)
+    assert hits == []
