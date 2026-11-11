@@ -6,7 +6,9 @@ ROOT = Path(__file__).parents[1]
 def test_worker_unit_uses_dedicated_credential_and_hardening():
     unit = (ROOT / "deploy/tybot-image-description@.service").read_text(encoding="utf-8")
 
-    assert "LoadCredential=tybot-vision-database-url:" in unit
+    assert not any(line.startswith("LoadCredential=") for line in unit.splitlines())
+    assert "TYBOT_VISION_DATABASE_URL_FILE=/etc/tybot/tybot-vision-database-url" in unit
+    assert "WORKSPACE_SECRET_KEY_FILE=/etc/tybot/workspace-secret.key" in unit
     assert "EnvironmentFile=/etc/tybot/archiver.env" in unit
     assert "--workspace %i" in unit
     assert "ProtectSystem=strict" in unit

@@ -53,7 +53,8 @@ VISION_TABLES = {
 }
 VISION_TABLES.update({
     name: "archiver_image_description_schema.sql" for name in (
-        "archiver_image_model_catalog", "archiver_image_description_approval",
+        "archiver_image_provider_secret", "archiver_image_model_catalog",
+        "archiver_image_description_approval",
         "archiver_image_description_clearance", "archiver_image_description_job",
         "archiver_image_description_policy",
         "archiver_image_description_policy_audit", "archiver_image_description_revision",

@@ -21,6 +21,22 @@ def test_the_global_policy_starts_off_without_a_model() -> None:
     assert "INSERT INTO archiver_image_model_catalog" not in sql
 
 
+def test_provider_keys_are_encrypted_scoped_and_only_granted_to_vision() -> None:
+    sql = _sql()
+    table = sql[
+        sql.index("CREATE TABLE IF NOT EXISTS archiver_image_provider_secret") :
+        sql.index("CREATE TABLE IF NOT EXISTS archiver_image_model_catalog")
+    ]
+    assert "ciphertext bytea NOT NULL" in table
+    assert "mask text NOT NULL" in table
+    assert "enabled boolean NOT NULL DEFAULT true" in table
+    assert "API keys" in table
+    assert "archiver_image_provider_secret" in sql[sql.index("REVOKE ALL ON") :]
+    assert "archiver_image_provider_secret" in sql[sql.index("GRANT SELECT") :]
+    assert "TO tyslackai" not in sql
+    assert "TO tybot_archiver" not in sql
+
+
 def test_free_status_needs_a_timestamp_and_revision() -> None:
     sql = _sql()
     assert "NOT zero_cost_verified" in sql
@@ -103,7 +119,7 @@ def test_derived_descriptions_are_labeled_bounded_and_immutable_to_the_role() ->
 
 def test_master_collector_and_public_receive_no_access() -> None:
     sql = _sql()
-    assert "REVOKE ALL ON archiver_image_model_catalog" in sql
+    assert "REVOKE ALL ON archiver_image_provider_secret, archiver_image_model_catalog" in sql
     assert "archiver_image_description_clearance" in sql
     assert "FROM PUBLIC" in sql
     assert "TO tyslackai" not in sql

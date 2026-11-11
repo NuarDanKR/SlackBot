@@ -11,7 +11,6 @@ from pathlib import Path
 from tybot.config import state_dir
 from tybot.gateway.base import ModelSpec
 from tybot.gateway.cost import CostGuard
-from tybot.gateway.providers import build_default_providers
 from tybot.gateway.router import Router
 from tybot.lock import AlreadyRunning, LockUnavailable, instance_lock
 
@@ -22,6 +21,7 @@ from .image_description_runtime import (
     failed_status,
     write_status,
 )
+from .image_description_secret import resolve_provider_key
 from .image_description_store import ImageDescriptionStore
 
 _WORKSPACE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -47,10 +47,24 @@ def _connect(dsn: str):
     )
 
 
-def _router(policy, *, cost_path: Path) -> Router:
-    providers = build_default_providers()
-    if policy.provider not in providers:
-        raise RuntimeError("runtime_provider_unsupported")
+def _provider(name: str, api_key: str):
+    if name == "google":
+        from tybot.gateway.providers.google_provider import GoogleProvider
+
+        return GoogleProvider(api_key)
+    if name == "anthropic":
+        from tybot.gateway.providers.anthropic_provider import AnthropicProvider
+
+        return AnthropicProvider(api_key)
+    if name == "openai":
+        from tybot.gateway.providers.openai_provider import OpenAIProvider
+
+        return OpenAIProvider(api_key)
+    raise RuntimeError("runtime_provider_unsupported")
+
+
+def _router(policy, *, cost_path: Path, api_key: str) -> Router:
+    provider = _provider(policy.provider, api_key)
     spec = ModelSpec(
         model=policy.model,
         provider=policy.provider,
@@ -59,7 +73,7 @@ def _router(policy, *, cost_path: Path) -> Router:
         max_sensitivity=policy.sensitivity,
     )
     return Router(
-        providers={policy.provider: providers[policy.provider]},
+        providers={policy.provider: provider},
         registry={policy.model: spec},
         cost_guard=CostGuard(0.01, state_path=cost_path),
         default_model=policy.model,
@@ -104,6 +118,7 @@ def run_once(
     runtime_root: Path,
     connect=_connect,
     router_factory=_router,
+    secret_resolver=resolve_provider_key,
     revisions=all_revisions,
     now: datetime | None = None,
     limit: int = 50,
@@ -122,9 +137,11 @@ def run_once(
                 ran_at=current.isoformat(),
                 policy_revision=policy.revision,
             )
+        api_key = secret_resolver(connection, policy.provider)
         router = router_factory(
             policy,
             cost_path=runtime_root / "image-description" / "cost-state.json",
+            api_key=api_key,
         )
         batch = run_cleared_batch(
             revisions(archive_root),

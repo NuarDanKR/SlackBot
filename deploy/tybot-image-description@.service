@@ -11,7 +11,10 @@ WorkingDirectory=/opt/tybot
 Environment=TYBOT_ENV_FILE=/etc/tybot/archiver.env
 Environment=STATE_DIR=/var/lib/tybot
 EnvironmentFile=/etc/tybot/archiver.env
-LoadCredential=tybot-vision-database-url:/etc/tybot/tybot-vision-database-url
+# Rocky 8의 systemd 239에는 LoadCredential=이 없다. 값이 아니라 0600 파일
+# 경로만 넘기며 resolver가 권한과 내용을 검사한다.
+Environment=TYBOT_VISION_DATABASE_URL_FILE=/etc/tybot/tybot-vision-database-url
+Environment=WORKSPACE_SECRET_KEY_FILE=/etc/tybot/workspace-secret.key
 ExecStart=/opt/tybot/.venv/bin/python -m tybot.archive.image_description_job --workspace %i
 TimeoutStartSec=900
 TimeoutStopSec=30

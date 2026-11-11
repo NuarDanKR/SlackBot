@@ -56,6 +56,7 @@ def test_disabled_policy_does_not_read_archive_or_build_router(monkeypatch, tmp_
         runtime_root=tmp_path,
         connect=lambda _dsn: Connection(),
         router_factory=lambda *_a, **_k: pytest.fail("router built while disabled"),
+        secret_resolver=lambda *_a: pytest.fail("secret read while disabled"),
         revisions=lambda _root: pytest.fail("archive read while disabled"),
         now=NOW,
     )
@@ -91,6 +92,7 @@ def test_enabled_policy_runs_the_existing_coordinator(monkeypatch, tmp_path):
         runtime_root=tmp_path,
         connect=lambda _dsn: Connection(),
         router_factory=lambda policy, **_kwargs: router,
+        secret_resolver=lambda _connection, provider: "google-key-value" * 2,
         revisions=lambda _root: ["doc"],
         now=NOW,
     )
@@ -122,6 +124,7 @@ def test_unknown_worker_state_cannot_be_reported_as_ok(monkeypatch, tmp_path):
         runtime_root=tmp_path,
         connect=lambda _dsn: Connection(),
         router_factory=lambda *_a, **_k: object(),
+        secret_resolver=lambda _connection, provider: "google-key-value" * 2,
         revisions=lambda _root: [],
         now=NOW,
     )
@@ -153,14 +156,16 @@ def test_archive_root_must_be_absolute(tmp_path):
 
 def test_router_has_one_exact_model_and_no_fallback(monkeypatch, tmp_path):
     provider = object()
-    monkeypatch.setattr(job, "build_default_providers", lambda: {"openai": provider})
+    monkeypatch.setattr(job, "_provider", lambda name, api_key: provider)
     policy = SimpleNamespace(
         provider="openai",
         model="free-vision",
         sensitivity=Sensitivity.INTERNAL,
     )
 
-    router = job._router(policy, cost_path=tmp_path / "cost.json")
+    router = job._router(
+        policy, cost_path=tmp_path / "cost.json", api_key="vision-key-value"
+    )
 
     assert router.default_model == "free-vision"
     assert router.resolve("free-vision", Sensitivity.INTERNAL).provider == "openai"
@@ -176,4 +181,35 @@ def test_unsupported_provider_fails_before_a_model_call(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="runtime_provider_unsupported"):
-        job._router(policy, cost_path=tmp_path / "cost.json")
+        job._router(
+            policy, cost_path=tmp_path / "cost.json", api_key="vision-key-value"
+        )
+
+
+def test_enabled_policy_uses_the_exact_scoped_provider_key(monkeypatch, tmp_path):
+    store = Store(None)
+    seen = {}
+    monkeypatch.setattr(job, "ImageDescriptionStore", lambda _connection: store)
+    monkeypatch.setattr(
+        job,
+        "run_cleared_batch",
+        lambda *_a, **_k: SimpleNamespace(selected=0, skipped=0, items=()),
+    )
+
+    def build(policy, *, api_key, **_kwargs):
+        seen.update(provider=policy.provider, api_key=api_key)
+        return object()
+
+    job.run_once(
+        "tyit",
+        dsn="postgresql://unused",
+        archive_root=tmp_path.resolve(),
+        runtime_root=tmp_path,
+        connect=lambda _dsn: Connection(),
+        router_factory=build,
+        secret_resolver=lambda connection, provider: f"db-secret-for-{provider}",
+        revisions=lambda _root: [],
+        now=NOW,
+    )
+
+    assert seen == {"provider": "openai", "api_key": "db-secret-for-openai"}

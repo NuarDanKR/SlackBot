@@ -2,6 +2,18 @@
 -- Applying this file does NOT activate a model or grant the collector/Master access.
 BEGIN;
 
+CREATE TABLE IF NOT EXISTS archiver_image_provider_secret (
+    provider text PRIMARY KEY
+        CHECK (provider ~ '^[a-z][a-z0-9_-]{1,31}$'),
+    ciphertext bytea NOT NULL,
+    mask text NOT NULL CHECK (mask <> ''),
+    enabled boolean NOT NULL DEFAULT true,
+    updated_by text NOT NULL CHECK (updated_by <> ''),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE archiver_image_provider_secret IS
+    'Vision worker provider API keys. Fernet ciphertext only; decryption key stays outside DB.';
+
 CREATE TABLE IF NOT EXISTS archiver_image_model_catalog (
     provider text NOT NULL CHECK (provider <> ''),
     model text NOT NULL CHECK (model <> ''),
@@ -216,7 +228,7 @@ CREATE TABLE IF NOT EXISTS archiver_image_description_revision (
 CREATE INDEX IF NOT EXISTS archiver_image_description_revision_source
     ON archiver_image_description_revision(workspace, channel_id, file_id, created_at);
 
-REVOKE ALL ON archiver_image_model_catalog,
+REVOKE ALL ON archiver_image_provider_secret, archiver_image_model_catalog,
     archiver_image_description_policy, archiver_image_description_policy_audit,
     archiver_image_description_approval, archiver_image_description_clearance,
     archiver_image_description_job,
@@ -226,7 +238,8 @@ REVOKE ALL ON archiver_image_model_catalog,
 -- Never create roles or grant Master/collector here.
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tybot_vision') THEN
-        GRANT SELECT, INSERT, UPDATE ON TABLE archiver_image_model_catalog,
+        GRANT SELECT, INSERT, UPDATE ON TABLE archiver_image_provider_secret,
+            archiver_image_model_catalog,
             archiver_image_description_policy, archiver_image_description_job
             TO tybot_vision;
         -- Earlier revisions granted table-wide UPDATE here. A narrower GRANT
