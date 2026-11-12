@@ -43,6 +43,8 @@ from ..access import RequestContext
 from ..answer import (
     BOT_MAX_HITS,
     BOT_PER_DOCUMENT_HITS,
+    TYBOT_SPECIALIST_MODEL,
+    VIP_SPECIALIST_MODEL,
     Answer,
     AnswerEngine,
     exhaustive_max_lines,
@@ -4963,7 +4965,9 @@ def _bind_request_live_fetch(ctx, live_fetch):
     return fetch
 
 
-def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=None):
+def specialist_hook(
+    router, store=None, live_fetch=None, external_v3_factory=None, specialist_model: str = ""
+):
     """엔진이 근거를 모은 뒤 부를 훅. **전문 봇 호출의 결말**을 돌려준다.
 
     예전에는 여기서 `route()` 가 LLM 을 **한 번 더** 불러 전문 봇을 골랐다. 그
@@ -5038,6 +5042,7 @@ def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=Non
                 external_v3_factory=(
                     external_v3_factory if master_v2_enabled(workspace) else None
                 ),
+                specialist_model=specialist_model,
             )
         except Exception as exc:
             log.exception("[%s] 전문가 호출 실패: %s", workspace, exc)
@@ -5136,7 +5141,7 @@ def _start_external_v3(configs):
     global _external_v3_tool_server
     _external_v3_tool_server = server
 
-    def factory(chosen, *, workspace, authorization_id, toolbox):
+    def factory(chosen, *, workspace, authorization_id, toolbox, model=""):
         endpoint = endpoints.for_request(chosen.key, workspace)
         identity, secret = credentials.get(chosen.key, endpoint.credential_workspace)
         server.register_credential(identity, secret)
@@ -5149,6 +5154,7 @@ def _start_external_v3(configs):
             credential_id=identity,
             registry=registry,
             transport=UnixSocketTransport(endpoint.socket),
+            model=model,
         )
 
     log.info(
@@ -5199,6 +5205,8 @@ def build_bots() -> list[WorkspaceBot]:
             store=store,
             live_fetch=live_fetch,
             external_v3_factory=external_v3_factory,
+            # B-96: TYBot 이 부르는 전문 봇(Hermes)은 Sonnet.
+            specialist_model=TYBOT_SPECIALIST_MODEL,
         ),
         allow_master_business_answers=lambda ctx: master_v2_enabled(ctx.workspace),
         # B-93: 근거 폭. 문서당 상한·검색어 정리·근거 40줄. 보이는 범위가 작으면 전수 탐색.
@@ -5265,6 +5273,8 @@ def build_bots() -> list[WorkspaceBot]:
                 store=store,
                 live_fetch=live_fetch,
                 external_v3_factory=external_v3_factory,
+                # B-96: VIPBot 이 부르는 전문 봇(Hermes)은 Opus — TYBot 보다 한 단계 위.
+                specialist_model=VIP_SPECIALIST_MODEL,
             ),
         )
         for vip_workspace, vip_bot_token, vip_app_token in vip_connections:

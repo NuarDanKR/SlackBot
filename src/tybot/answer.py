@@ -128,6 +128,12 @@ BOT_PER_DOCUMENT_HITS = 4
 #: VIPBot 은 근거 채널이 관리자가 고른 집합이라 늘 전수로 보고, 종합 질문에 대비해 더 넓게 본다.
 VIP_MAX_HITS = 60
 VIP_PER_DOCUMENT_HITS = 4
+#: 봇 등급별 모델(B-96, 2026-11-12 오너 결정). VIPBot 은 모든 단계가 TYBot 보다 한 단계 위다.
+#: | 단계 | TYBot | VIPBot |  판단(분해·전문 봇 선택) Haiku → Sonnet,  Hermes 등 전문 봇 Sonnet → Opus.
+#: 전문 봇 모델은 Hermes 서버 `allowed_models` 안에 있어야 한다(밖이면 400).
+TYBOT_SPECIALIST_MODEL = "claude-sonnet-5-5"
+VIP_PLANNER_MODEL = "claude-sonnet-5-5"
+VIP_SPECIALIST_MODEL = "claude-opus-5-5"
 #: TYBot 전수 탐색 문턱(보이는 채널 원문 줄 수). 넘으면 DB 색인을 쓴다.
 EXHAUSTIVE_MAX_LINES_ENV = "TYBOT_EXHAUSTIVE_MAX_LINES"
 DEFAULT_EXHAUSTIVE_MAX_LINES = 150_000
@@ -1342,6 +1348,7 @@ class AnswerEngine:
         per_document_hits: int = 0,
         exhaustive_max_lines: int = 0,
         focus_terms: bool = False,
+        planner_model: str = "",
     ) -> None:
         self._store = store
         self._router = router
@@ -1384,6 +1391,8 @@ class AnswerEngine:
         self._exhaustive_max_lines = max(0, int(exhaustive_max_lines))
         # 요청 표현(정리해·표로·설명해주세요)을 검색어에서 뺀다. 전수 탐색을 켜면 함께 켠다.
         self._focus_terms = bool(focus_terms) or self._exhaustive_search
+        # 판단(분해) 모델. 비우면 intent.CLASSIFIER_MODEL(B-96).
+        self._planner_model = str(planner_model or "")
 
     def _output_limit(self, default: int) -> int:
         configured = self._max_output_tokens
@@ -2227,6 +2236,7 @@ class AnswerEngine:
             thread_has_refs=thread_has_refs,
             specialists=specialists,
             allow_rule_fallback=allow_rule_fallback,
+            planner_model=self._planner_model,
         )
 
     @property

@@ -647,6 +647,7 @@ def serve(
     visual: tuple = (),
     active_routes_only: bool = False,
     external_v3_factory=None,
+    specialist_model: str = "",
 ) -> SpecialistOutcome:
     """이 작업을 전문 봇에게 맡긴다. 실패하면 **다음 승인 후보**를 시도한다.
 
@@ -737,6 +738,7 @@ def serve(
             required_capability=str(getattr(task, "required_capability", "") or ""),
             display_hint=display_hint_for(task),
             external_v3_factory=external_v3_factory,
+            specialist_model=specialist_model,
         )
         if answer is not None:
             return SpecialistOutcome(
@@ -1003,6 +1005,7 @@ def _run_one(
     required_capability: str = "",
     display_hint: str = "",
     external_v3_factory=None,
+    specialist_model: str = "",
 ) -> tuple[SpecialistAnswer | None, str, str]:
     """후보 하나를 실제로 부른다. `(답, 사유코드, 미확인 범위)`."""
     import time
@@ -1031,15 +1034,17 @@ def _run_one(
         if external_v3_factory is not None:
             if toolbox is None:
                 raise specialist_adapters.AdapterError("toolbox-unavailable")
+            # 호출자 등급의 모델(B-96). Hermes 서버가 `allowed_models` 로 받을지 정한다.
             adapter = external_v3_factory(
                 chosen,
                 workspace=workspace,
                 authorization_id=authorization_id,
                 toolbox=toolbox,
+                model=specialist_model,
             )
         else:
             adapter = specialist_adapters.build(
-                chosen.adapter, router, model=chosen.model, rules=chosen.rules,
+                chosen.adapter, router, model=specialist_model or chosen.model, rules=chosen.rules,
                 execution_mode=chosen.execution_mode, toolbox=toolbox, live=live,
             )
         authorized = tuple(

@@ -1168,8 +1168,13 @@ def plan(
     thread_has_refs: bool = False,
     specialists=None,
     allow_rule_fallback: bool = True,
+    planner_model: str = "",
 ) -> list[Intent]:
     """확정 명령은 규칙으로, 나머지는 LLM으로 하위질문 목록을 분해한다.
+
+    `planner_model` 은 봇 등급의 판단 모델이다(B-96: TYBot 은 기본 저가 모델, VIPBot 은
+    Sonnet). 비우면 `CLASSIFIER_MODEL`.
+
 
     라벨 하나만 돌려주던 예전 구조에서는 "기억나? 그리고 전산팀은 무슨 일 있어?" 처럼
     두 가지를 물으면 **한쪽이 처리 경로에 도달조차 하지 못했다.** 분해를 분류기 책임으로
@@ -1200,7 +1205,7 @@ def plan(
     # 후보마다 새 시간을 주면 후보 수만큼 느려진다.
     clock = _monotonic
     ends_at = clock() + PLANNER_DEADLINE_SECONDS
-    for model in (CLASSIFIER_MODEL, None):
+    for model in (planner_model or CLASSIFIER_MODEL, None):
         try:
             resp = router.complete(
                 messages,
