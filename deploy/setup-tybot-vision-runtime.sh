@@ -128,7 +128,10 @@ log "대상 확인: $target"
 # ---------------------------------------------------------------------------
 # 그룹은 NOLOGIN 이어야 한다
 # ---------------------------------------------------------------------------
-group_login="$(psql_q "SELECT coalesce((SELECT rolcanlogin FROM pg_roles WHERE rolname='$ROLE_GROUP')::text,'absent')")"
+# `boolean::text` 는 `t`/`f` 가 아니라 `true`/`false` 다(psql 의 표 출력만 t/f 로 보인다).
+# 예전에는 `f` 와 비교해, NOLOGIN 인 그룹을 LOGIN 이라고 거절했다(2026-11-12 서버 실측).
+group_login="$(psql_q "SELECT coalesce((SELECT CASE WHEN rolcanlogin THEN 't' ELSE 'f' END
+                                         FROM pg_roles WHERE rolname='$ROLE_GROUP'),'absent')")"
 [[ "$group_login" != absent ]] || fail "$ROLE_GROUP 역할이 없습니다. deploy/apply-schema.sh 를 먼저 돌리세요"
 [[ "$group_login" == f ]] || fail "$ROLE_GROUP 이 LOGIN 입니다. 그룹에는 접속 자격이 없어야 합니다"
 log "$ROLE_GROUP: NOLOGIN 확인"
@@ -204,7 +207,15 @@ fi
 # ---------------------------------------------------------------------------
 # 확인 — apply 뒤에도, --verify 로도 같은 검사를 돈다
 # ---------------------------------------------------------------------------
-attrs="$(psql_q "SELECT rolcanlogin||rolinherit||rolsuper||rolcreatedb||rolcreaterole||rolreplication||rolbypassrls
+# boolean 끼리는 `||` 로 잇지 못한다(연산자가 없다). 한 글자씩 t/f 로 바꿔 잇는다.
+attrs="$(psql_q "SELECT concat(
+                   CASE WHEN rolcanlogin THEN 't' ELSE 'f' END,
+                   CASE WHEN rolinherit THEN 't' ELSE 'f' END,
+                   CASE WHEN rolsuper THEN 't' ELSE 'f' END,
+                   CASE WHEN rolcreatedb THEN 't' ELSE 'f' END,
+                   CASE WHEN rolcreaterole THEN 't' ELSE 'f' END,
+                   CASE WHEN rolreplication THEN 't' ELSE 'f' END,
+                   CASE WHEN rolbypassrls THEN 't' ELSE 'f' END)
                  FROM pg_roles WHERE rolname='$ROLE_RUNTIME'")"
 if [[ -z "$attrs" ]]; then
   echo "준비 상태: $ROLE_RUNTIME 이 아직 없습니다. 구조만 선 상태입니다."

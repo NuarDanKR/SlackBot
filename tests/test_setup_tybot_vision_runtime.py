@@ -319,3 +319,34 @@ def test_server_commands_use_the_virtualenv_interpreter():
     for line in SOURCE.splitlines():
         if "scripts/check_vision_runtime.py" in line and "python" in line:
             assert "/opt/tybot/.venv/bin/python" in line
+
+
+# --- 2026-11-12 서버 실측: boolean 을 글자로 읽는 방식 -------------------------
+
+
+def _script_code() -> str:
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "deploy/setup-tybot-vision-runtime.sh").read_text(
+        encoding="utf-8"
+    )
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_boolean_columns_are_never_cast_to_text_and_compared_to_f():
+    """`rolcanlogin::text` 는 `false` 다. `f` 와 비교하면 NOLOGIN 그룹이 LOGIN 으로 거절된다."""
+    import re
+
+    code = _script_code()
+    assert not re.search(r"rolcanlogin\s*(FROM[^)]*\))?\s*::\s*text", code)
+    assert "CASE WHEN rolcanlogin THEN 't' ELSE 'f' END" in code
+
+
+def test_boolean_columns_are_never_joined_with_the_concat_operator():
+    """boolean || boolean 은 연산자가 없어 --verify 가 SQL 오류로 끝난다."""
+    import re
+
+    code = _script_code()
+    assert not re.search(r"rol(canlogin|inherit|super|createdb|createrole|replication|bypassrls)\s*\|\|", code)
+    for column in ("rolinherit", "rolsuper", "rolbypassrls"):
+        assert f"CASE WHEN {column} THEN 't' ELSE 'f' END" in code
