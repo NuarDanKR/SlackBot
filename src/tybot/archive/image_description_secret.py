@@ -19,6 +19,7 @@ Slack 토큰용 마스크는 앞 9자·끝 4자를 보였다. provider 키는 �
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
@@ -94,16 +95,36 @@ def save_provider_key(connection, provider: str, key: str, *, actor: str) -> Non
     if not (actor or "").strip():
         raise ImageProviderSecretError("actor_required")
     ciphertext = _fernet().encrypt(value.encode("utf-8"))
+    params = (ciphertext, provider_mask(value), actor.strip(), name)
+    # **`ON CONFLICT DO UPDATE ... EXCLUDED.x` 를 쓰지 않는다.** PostgreSQL 은 EXCLUDED 로
+    # 읽는 열에 SELECT 권한을 요구한다(CVE-2017-15099 수정 이후). 콘솔 계정은 암호문 열을
+    # 읽지 못하게 막아 두었으므로 그 구문은 `permission denied` 가 된다(2026-11-12 실측).
+    # 그래서 UPDATE 를 먼저 하고, 없으면 INSERT 한다. 둘 다 provider 열만 읽는다.
     with connection.cursor() as cur:
-        cur.execute(
-            """INSERT INTO archiver_image_provider_secret
-               (provider,ciphertext,mask,enabled,updated_by)
-               VALUES (%s,%s,%s,true,%s)
-               ON CONFLICT (provider) DO UPDATE SET
-                 ciphertext=EXCLUDED.ciphertext,mask=EXCLUDED.mask,enabled=true,
-                 updated_by=EXCLUDED.updated_by,updated_at=now()""",
-            (name, ciphertext, provider_mask(value), actor.strip()),
-        )
+        cur.execute(_UPDATE_KEY, params)
+        if cur.rowcount == 1:
+            return
+        # 경합으로 INSERT 가 실패해도 바깥 트랜잭션이 죽지 않게 savepoint 로 감싼다.
+        savepoint = getattr(connection, "transaction", None)
+        try:
+            with savepoint() if savepoint else contextlib.nullcontext():
+                cur.execute(_INSERT_KEY, params)
+        except Exception as exc:
+            if getattr(exc, "sqlstate", "") != "23505":  # unique_violation 만 경합이다
+                raise
+            # 그 사이 다른 저장이 먼저 행을 만들었다. 한 번만 UPDATE 로 다시 쓴다.
+            cur.execute(_UPDATE_KEY, params)
+            if cur.rowcount != 1:
+                raise ImageProviderSecretError("provider_secret_missing") from exc
+
+
+_UPDATE_KEY = """UPDATE archiver_image_provider_secret
+   SET ciphertext=%s,mask=%s,enabled=true,updated_by=%s,updated_at=now()
+ WHERE provider=%s"""
+
+_INSERT_KEY = """INSERT INTO archiver_image_provider_secret
+   (ciphertext,mask,enabled,updated_by,provider)
+   VALUES (%s,%s,true,%s,%s)"""
 
 
 def set_provider_key_enabled(

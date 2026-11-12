@@ -27,8 +27,18 @@ class Cursor:
 
     def execute(self, sql, params=()):
         normalized = " ".join(sql.split())
-        if normalized.startswith("INSERT INTO archiver_image_provider_secret"):
-            provider, ciphertext, mask, actor = params
+        if "EXCLUDED" in normalized:  # pragma: no cover - 암호문 SELECT 권한을 요구한다
+            raise AssertionError("ON CONFLICT ... EXCLUDED 는 콘솔 계정에서 permission denied")
+        if normalized.startswith("UPDATE archiver_image_provider_secret SET ciphertext"):
+            ciphertext, mask, actor, provider = params
+            row = self.connection.rows.get(provider)
+            if row:
+                row.update(ciphertext=ciphertext, mask=mask, enabled=True, updated_by=actor)
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+        elif normalized.startswith("INSERT INTO archiver_image_provider_secret"):
+            ciphertext, mask, actor, provider = params
             self.connection.rows[provider] = {
                 "provider": provider,
                 "ciphertext": ciphertext,
@@ -38,7 +48,7 @@ class Cursor:
                 "updated_at": "now",
             }
             self.rowcount = 1
-        elif normalized.startswith("UPDATE archiver_image_provider_secret"):
+        elif normalized.startswith("UPDATE archiver_image_provider_secret SET enabled"):
             enabled, actor, provider = params
             row = self.connection.rows.get(provider)
             if row:
@@ -208,3 +218,16 @@ def test_console_writes_with_its_own_connection_not_the_vision_dsn():
     source = __import__("inspect").getsource(admin._connect)
     assert "DATABASE_URL" in source
     assert "resolve_vision_database_url" not in source
+
+
+def test_replacing_a_key_updates_in_place_without_reading_ciphertext(monkeypatch):
+    """콘솔 계정은 암호문 열 SELECT 가 없다. 교체가 EXCLUDED 를 쓰면 permission denied 다."""
+    monkeypatch.setattr(secret, "_fernet", Cipher)
+    connection = Connection()
+    secret.save_provider_key(connection, "google", "AIza" + "a" * 32, actor="first")
+    secret.save_provider_key(connection, "google", "AIza" + "b" * 32, actor="second")
+    assert len(connection.rows) == 1
+    assert connection.rows["google"]["updated_by"] == "second"
+    assert secret.resolve_provider_key(connection, "google") == "AIza" + "b" * 32
+    for sql in (secret._UPDATE_KEY, secret._INSERT_KEY):
+        assert "EXCLUDED" not in sql and "ON CONFLICT" not in sql
