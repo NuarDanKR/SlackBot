@@ -181,8 +181,14 @@ def test_indexed_sources_include_withheld_revisions_and_can_be_channel_scoped() 
     )
     query = next(event for event in connection.events if isinstance(event, tuple))
     assert "archiver_image_description_revision" in query[0]
+    # 전사만 남은 원본도 이미 처리한 것으로 본다(B-81 후속). 안 그러면 재전송된다.
+    assert "archiver_image_transcript_revision" in query[0]
+    assert (
+        " UNION SELECT workspace,channel_id,original_sha256 "
+        "FROM archiver_image_transcript_revision WHERE workspace=%s AND channel_id=%s"
+    ) in query[0]
     assert "status" not in query[0]
-    assert query[1] == ("tyit", "C1")
+    assert query[1] == ("tyit", "C1", "tyit", "C1")
 
 
 def test_indexed_sources_require_a_workspace() -> None:

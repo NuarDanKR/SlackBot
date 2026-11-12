@@ -802,9 +802,34 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
       자격 표·mask 전용 관리 API, worker exact-key 주입과 일반 키/env fallback 차단을 구현.
       Rocky 8 systemd 239에서 지원하지 않는 `LoadCredential=`도 0600 파일 경로 방식으로
       교체 (2026-11-12, 집중 54건·관련 250건 및 Ruff 통과, 실제 Google 호출은 아직 안 함).
-- [ ] Claude: Google 출력으로 **검색 설명**과 **OCR 전사**를 분리한 계약·평가 세트를 만들고,
-      후보 → worker → 파생 revision → 검색 → 현재 ACL 원본 재개봉을 end-to-end로 연결한다.
-      OCR 전사는 검색 설명 표에 섞지 않고 별도 파생 revision과 좌표·불확실성을 보존한다.
+- [x] Claude: Google 출력으로 **검색 설명**과 **OCR 전사**를 분리한 계약을 만들고,
+      후보 → worker → 파생 revision → 검색 → 현재 ACL 원본 재개봉을 end-to-end로 연결 (2026-11-12).
+      프롬프트 판 `2026-11-12.1`이 한 번의 호출로 `description`과 `transcript`를 따로 받는다.
+      전사는 마스킹(`sensitive_mask`)과 최종 관문(`pii_screen`)을 지나 별도 원장
+      `archiver_image_transcript_revision`(`[AI 텍스트 인식·검색용]`, Vision 전용)에 저장한다.
+      설명에 전사가 옮겨지면 설명을 보류한다. Master는 안전 판정을 지난 텍스트만 담은 투영
+      `image_search_entry`만 읽는다(drift 예외 `MASTER_READ_ONLY`). `image_guide`는 답변 직전에
+      다음을 다시 확인하고 원문 줄(로컬 OCR·채널 첨부 줄)만 근거로 돌려준다.
+      - 투영 PII
+      - 원본 존재·해시·사람 업로드(`load_original`)와 가장 새 정본
+      - 현재 ACL(`visible_docs`)
+
+      모델 실패·timeout·무료 한도 소진이면 revision이 없고 로컬 OCR 검색으로 복귀한다.
+      콘솔 「운영 > 이미지 설명」은 Codex 자격 API(마스크·교체·사용 중지·사유)와 현황을 쓴다.
+      E2E 47건, 변이 16건 검출. 실제 Google 호출과 실DB는 미검증.
+      운영 절차와 남은 판단: `docs/verification/2026-11-12-b81-image-transcript-e2e.md`
+- [ ] Codex 검토: 호출 예외(timeout·429)가 provider 영수증 없이 `unknown/publish_result_unknown`으로
+      닫힌다. `failed/model_timeout`으로 남기려면 비용 가드(미확인 비용 → 무료 카탈로그 자동 차단)와
+      함께 정해야 한다
+- [ ] Codex 검토(자동 보안 리뷰 2026-11-12, Codex 소유 파일이라 Claude는 수정하지 않음):
+  1. Vision provider 키가 워크스페이스 토큰과 같은 Fernet 키(`WORKSPACE_SECRET_KEY_FILE`)로 암호화된다.
+     worker가 Slack 토큰 암호문까지 풀 수 있는 키를 갖는다. Vision 전용 키 파일(0400)로 분리를 검토한다
+  2. `_mask`가 provider 키의 앞뒤를 많이 보일 수 있다(최소 16자). 끝 4자 또는 해시 지문만 보이는 전용 마스크를 검토한다
+  3. `tybot_vision`에 `archiver_image_provider_secret` SELECT·INSERT·UPDATE가 있다. worker는 SELECT만
+     (가능하면 provider·ciphertext·enabled 열 단위로), 쓰기는 콘솔 역할로 분리하는 것을 검토한다
+- [ ] 오너 결정: AI OCR 전사를 로컬 OCR처럼 **인용 가능한 기계 추출**로 올릴지
+      (지금은 검색 길잡이 전용)
+- [ ] VIPBot 답변 엔진에 사진 길잡이 연결, 실제 현장 사진 품질 평가 세트(정책 ON 이후)
 
 > **「LOGIN 계정 준비」 와 「worker 활성화」 는 같은 완료가 아니다.**
 >

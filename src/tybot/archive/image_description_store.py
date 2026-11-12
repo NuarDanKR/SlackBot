@@ -26,6 +26,7 @@ from .image_description_policy import (
     preflight_image_description,
 )
 from .image_model_catalog import FreeQuotaState, ImageModelCatalogEntry
+from .image_transcript import guard_transcript
 
 CONFIG_KEYS = frozenset({
     "model",
@@ -300,10 +301,14 @@ class ImageDescriptionStore:
             if channel_id:
                 where += " AND channel_id=%s"
                 params = (workspace, channel_id)
+            # 전사 revision 만 생긴 원본도 「이미 처리함」 이다 (B-81 후속). 한쪽 표만 보면
+            # 전사만 남은 사진을 자동 배치가 다시 모델에 보낸다.
             cur.execute(
-                "SELECT DISTINCT workspace,channel_id,original_sha256 "
-                "FROM archiver_image_description_revision WHERE " + where,
-                params,
+                "SELECT workspace,channel_id,original_sha256 "
+                "FROM archiver_image_description_revision WHERE " + where
+                + " UNION SELECT workspace,channel_id,original_sha256 "
+                "FROM archiver_image_transcript_revision WHERE " + where,
+                params + params,
             )
             return frozenset(
                 (
@@ -852,6 +857,17 @@ class ImageDescriptionStore:
                         list(decision.uncertainty),
                     ),
                 )
+                self._project(
+                    cur, job, result,
+                    kind="description",
+                    revision_id=revision_id,
+                    status=decision.index_status,
+                    body=" ".join(
+                        part for part in (decision.description, " ".join(decision.tags)) if part
+                    ),
+                    uncertainty=decision.uncertainty,
+                )
+                self._publish_transcript(cur, job, scope, result, revision_id)
             if cost_code:
                 # 한 건만 막고 다음 사진을 또 보내면 「무료라서 켠 기능」이 계속 과금된다.
                 # 사람이 카탈로그를 다시 검증하기 전까지 같은 모델을 fail-closed 한다.
@@ -878,6 +894,95 @@ class ImageDescriptionStore:
                 ),
             )
             return revision_id
+
+    @staticmethod
+    def _publish_transcript(cur, job, scope, result: ImageDescription, description_id: str) -> str:
+        """같은 호출의 **OCR 전사**를 설명과 다른 표·라벨로 저장한다 (B-81 후속).
+
+        설명이 저장될 때만 부른다 — 설명이 규칙 위반으로 막힌 응답의 전사는 믿을 근거가
+        없다. 전사는 마스킹 뒤 최종 관문을 지난 줄만 들어간다(`guard_transcript`).
+        provenance 는 설명과 같은 job·원본 좌표·provider/model/prompt 판을 그대로 문다.
+        """
+        decision = guard_transcript(result.transcript)
+        if not decision.storable:
+            return ""
+        transcript_id = uuid4().hex
+        identity = hashlib.sha256(
+            (str(job["identity_sha256"]) + ":transcript").encode("utf-8")
+        ).hexdigest()
+        cur.execute(
+            """INSERT INTO archiver_image_transcript_revision
+            (id,identity_sha256,job_id,description_revision_id,workspace,channel_id,file_id,
+             original_sha256,image_sha256,prompt_revision,model,provider,status,body,
+             line_count,masked_count,uncertainty,guard_codes)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                transcript_id,
+                identity,
+                job["id"],
+                description_id,
+                result.workspace,
+                result.channel,
+                result.file_id,
+                result.original_sha256,
+                scope["image_sha256"],
+                result.prompt_revision,
+                job["catalog_snapshot"]["model"],
+                job["catalog_snapshot"]["provider"],
+                decision.status,
+                decision.body,
+                decision.line_count,
+                decision.masked_count,
+                list(decision.uncertainty),
+                list(decision.codes),
+            ),
+        )
+        ImageDescriptionStore._project(
+            cur, job, result,
+            kind="transcript",
+            revision_id=transcript_id,
+            status=decision.status,
+            body=decision.body,
+            uncertainty=decision.uncertainty,
+        )
+        return transcript_id
+
+    @staticmethod
+    def _project(cur, job, result: ImageDescription, *, kind: str, revision_id: str,
+                 status: str, body: str, uncertainty) -> None:
+        """Master 가 읽는 **검색 투영**에 한 줄을 더한다 (B-81 후속).
+
+        Vision 원장(job·scope·카탈로그)은 Master 에 열지 않는다. 여기 들어가는 것은
+        안전 판정을 이미 지난 검색 텍스트와 원본 좌표·provenance 뿐이다. 설명이 보류돼
+        태그도 없으면 넣지 않는다 — 찾을 말이 없는 줄은 검색에 쓸모가 없다.
+        """
+        from .image_transcript import LABEL as TRANSCRIPT_LABEL
+
+        text = (body or "").strip()
+        if not text:
+            return
+        cur.execute(
+            """INSERT INTO image_search_entry
+            (id,kind,revision_id,workspace,channel_id,file_id,original_sha256,provider,
+             model,prompt_revision,status,label,body,uncertainty)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                uuid4().hex,
+                kind,
+                revision_id,
+                result.workspace,
+                result.channel,
+                result.file_id,
+                result.original_sha256,
+                job["catalog_snapshot"]["provider"],
+                job["catalog_snapshot"]["model"],
+                result.prompt_revision,
+                status,
+                "[AI 이미지 설명·검색용]" if kind == "description" else TRANSCRIPT_LABEL,
+                text,
+                list(uncertainty),
+            ),
+        )
 
     def mark_unknown(self, job_id: str, *, code: str = "result_unknown") -> None:
         if not re.fullmatch(r"[a-z0-9_]+", code or ""):

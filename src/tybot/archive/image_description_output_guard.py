@@ -70,6 +70,8 @@ CODE_SENSITIVE = "sensitive_uncertainty"
 CODE_UNKNOWN_UNCERTAINTY = "unknown_uncertainty"
 CODE_TAG_DROPPED = "tag_not_in_allow_list"
 CODE_NO_DESCRIPTION = "no_description"
+#: 설명에 사진 속 글자(전사)가 옮겨 적혔다 (B-81 후속). 설명만 보류한다.
+CODE_TRANSCRIPT_LEAK = "description_quotes_transcript"
 
 CODES = (
     CODE_UNKNOWN_STATUS,
@@ -83,6 +85,7 @@ CODES = (
     CODE_UNKNOWN_UNCERTAINTY,
     CODE_TAG_DROPPED,
     CODE_NO_DESCRIPTION,
+    CODE_TRANSCRIPT_LEAK,
 )
 
 #: 이 코드가 붙은 설명은 **본문을 색인하지 않는다.**
@@ -263,6 +266,18 @@ def guard_index_write(result) -> ImageIndexDecision:
         # 모르는 코드가 민감한 것인지 **알 수 없다.** 막는 쪽이 기본값이다.
         codes.append(CODE_UNKNOWN_UNCERTAINTY)
 
+    # 4'. 설명에 전사 글자가 옮겨 적혔으면 **설명만 보류한다** (B-81 후속).
+    #     전사는 다른 표·라벨로 따로 저장된다. 설명 칸까지 그 글자를 실으면 같은
+    #     글자가 「모델의 관찰」 로도 색인되어 출처가 섞인다. 태그는 남긴다.
+    from .image_transcript import leaks_into
+
+    if leaks_into(result.description, getattr(result, "transcript", None)):
+        codes.append(CODE_TRANSCRIPT_LEAK)
+        decision = _decide(result, VERDICT_WITHHOLD, tuple(codes),
+                           tags=tags, uncertainty=known)
+        _log(result, decision)
+        return decision
+
     # 4. 민감 uncertainty 가 하나라도 있으면 **설명 본문을 색인하지 않는다.**
     if unknown or any(u in SENSITIVE_UNCERTAINTY for u in known):
         if not unknown:
@@ -299,6 +314,7 @@ __all__ = [
     "CODE_SENSITIVE",
     "CODE_STATUS_FAILED",
     "CODE_TAG_DROPPED",
+    "CODE_TRANSCRIPT_LEAK",
     "CODE_UNKNOWN_STATUS",
     "CODE_UNKNOWN_UNCERTAINTY",
     "QUALITY_UNCERTAINTY",

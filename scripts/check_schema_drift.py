@@ -60,6 +60,11 @@ VISION_TABLES.update({
         "archiver_image_description_policy_audit", "archiver_image_description_revision",
     )
 })
+# B-81 후속: AI OCR 전사 원장도 Vision 전용이다. Master 에 열지 않는다.
+VISION_TABLES["archiver_image_transcript_revision"] = "archiver_image_transcript_schema.sql"
+# Master 가 **읽기만** 하는 표. Vision worker 가 쓰고 Master 는 검색에서 읽는다.
+# 쓰기 권한이 없는 것이 정상이므로 「봇 권한 없음」 으로 세지 않는다.
+MASTER_READ_ONLY = {"image_search_entry": "archiver_image_transcript_schema.sql"}
 VISION_ROLE = "tybot_vision"
 VISION_REQUIRED = {
     table: {"SELECT", "INSERT"} | (
@@ -222,7 +227,8 @@ def vision_access(conn) -> tuple[list[tuple[str, str, str]], bool]:
 
 def required_bot_access(tables: dict[str, str], denied: set[str]) -> list[str]:
     return sorted(name for name, source in tables.items() if name in denied
-                  and VISION_TABLES.get(name) != source)
+                  and VISION_TABLES.get(name) != source
+                  and MASTER_READ_ONLY.get(name) != source)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -2386,6 +2386,31 @@ class AnswerEngine:
             )
         return merged[: self._max_hits + summary_guide.MAX_EXTRA_HITS]
 
+    def _with_image_guide(self, query: str, hits, ctx) -> list[SearchHit]:
+        """AI 이미지 설명·OCR 전사로 찾은 **사진의 원문 줄**을 검색 후보에 더한다 (B-81 후속).
+
+        설명·전사 문장은 근거로 나가지 않는다. 더해지는 것은 요청자의 현재 권한으로 다시
+        연 원문(로컬 OCR 줄·채널 첨부 줄)이고, 원본 파일이 그대로 있는지도 직전에 다시
+        확인한다(`image_guide.expand`). 실패하면 예전 검색 결과 그대로다.
+        """
+        from . import image_guide
+
+        try:
+            extra = image_guide.expand(self._store, ctx, query)
+        except Exception:
+            logger.warning("사진 길잡이를 쓰지 못했습니다", exc_info=True)
+            return list(hits)
+        if not extra:
+            return list(hits)
+        merged = list(hits)
+        seen = {(str(h.doc.path), h.line.lineno) for h in merged}
+        for hit in extra:
+            key = (str(hit.doc.path), hit.line.lineno)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        return merged[: len(hits) + image_guide.MAX_EXTRA_HITS]
+
     def answer(
         self,
         question: str,
@@ -2431,6 +2456,7 @@ class AnswerEngine:
                     if hits:
                         query = retry
             hits = self._with_approved_guide(query, hits, ctx)
+            hits = self._with_image_guide(query, hits, ctx)
             # 방금 올린 첨부는 **검색 앞에** 둔다. 검색어가 파일 내용과 어긋나도
             # 빠지면 안 되는 근거다 — 사람은 그 파일을 보고 물었다(B-57 §4).
             # 검색을 끄지는 않는다. 「이 목록이 슬랙 어디 있나」 같은 질문은
