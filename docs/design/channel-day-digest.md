@@ -119,7 +119,14 @@ CREATE TABLE channel_day_digest (
 > §7-4 완료 — `src/tybot/digest_guide.py`(`expand`), `AnswerEngine._with_digest_guide`
 > (승인 요약 길잡이 뒤·사진 길잡이 앞, 모든 봇 공통·항상 켜짐 — 표가 없거나 DB 실패면 빈 목록),
 > `tests/test_digest_guide.py`. 줄 점수에 다이제스트 terms 를 더해 낱말이 달라도 그날 줄을
-> 고른다(terms 는 고르는 데만, 답변에 안 실림). **다음은 §7-5(콘솔 API·화면: 대상·분량 미리보기·소급).**
+> 고른다(terms 는 고르는 데만, 답변에 안 실림).
+> §7-5 완료 — API `src/tybot/console/channel_digest_routes.py`(`GET /api/channel-digest`,
+> `POST …/preview`, `POST …/run`), 화면 `console-web/src/pages/ChannelDigest.tsx`
+> (운영 > 검색 다이제스트), `tests/test_channel_digest_console.py`. 실행은 미리보기에서 본
+> 호출 수보다 늘었으면 409, 전체 워크스페이스 관리자만, 감사 `channel_digest_backfill`.
+> 배치는 콘솔이 별도 프로세스로 띄운다(날마다 커밋하므로 중단돼도 이어서 돌릴 수 있다).
+> **웹 화면은 콘솔 개발자 배포가 필요하다.** API 는 TYBot 배포로 들어간다.
+> **다음은 §7-6(서버: 스키마·계정·DSN → dry-run → 오너 확인 → 소급·타이머).**
 >
 > 서버 준비(§7-6 전에, 한 번):
 > 1. 스키마 적용 `sudo /opt/tybot/deploy/apply-schema.sh`

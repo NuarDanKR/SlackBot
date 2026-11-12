@@ -17,6 +17,7 @@ import { EnvSettings } from './pages/EnvSettings'
 import { Harness } from './pages/Harness'
 import { Home } from './pages/Home'
 import { ImageDescriptionPage } from './pages/ImageDescription'
+import { ChannelDigestPage } from './pages/ChannelDigest'
 import { AnswerDashboard, OperationsDashboard, ConsoleDashboard } from './pages/LifecycleDashboards'
 // [라이선스 현황 추가] 메뉴 목록과 경로→화면 연결이 이 파일에만 있어 import·메뉴·화면 연결 세 줄만 더했다.
 import { BotsPage } from './pages/Bots'
@@ -59,6 +60,7 @@ const NAV: NavGroup[] = [
     { path: '/manage/batches', label: '배치 관리', minimum: 'admin' },
     { path: '/manage/embedding', label: '임베딩 색인', minimum: 'admin' },
     { path: '/manage/image-description', label: '이미지 설명', minimum: 'admin' },
+    { path: '/manage/channel-digest', label: '검색 다이제스트', minimum: 'admin' },
     { path: '/manage/deploy', label: '배포 관리', minimum: 'admin' },
     { path: '/manage/workspaces', label: '워크스페이스 관리', minimum: 'admin' },
     { path: '/manage/environment', label: '환경 설정', minimum: 'admin' },
@@ -202,6 +204,7 @@ export default function App() {
       {path === '/manage/batches' && <BatchTimers onToast={toast} />}
       {path === '/manage/embedding' && <EmbeddingIndex onToast={toast} />}
       {path === '/manage/image-description' && <ImageDescriptionPage onToast={toast} workspaces={user.workspaces} />}
+      {path === '/manage/channel-digest' && <ChannelDigestPage onToast={toast} />}
       {path === '/manage/deploy' && <Deploy onToast={toast} />}
       {path === '/manage/workspaces' && <Workspaces selectedKey={location.query.get('workspace')} onToast={toast} />}
       {path === '/manage/environment' && <EnvSettings onToast={toast} />}

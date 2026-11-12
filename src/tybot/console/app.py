@@ -3409,6 +3409,18 @@ conversion_policy_router = conversion_policy_routes.build_router(
 )
 app.include_router(conversion_policy_router)
 
+# B-93 2단계: 채널×일 검색 다이제스트 현황·분량 미리보기·소급. 본문은 내보내지 않는다.
+from . import channel_digest_routes  # noqa: E402
+
+app.include_router(
+    channel_digest_routes.build_router(
+        current_user=current_user,
+        require_admin=_require_admin,
+        check_write_request=_check_write_request,
+        audit_event=_audit_event,
+    )
+)
+
 # 사용자 목록 · 봇 사용 권한(vipbot 등). admin 전용.
 from . import user_access_routes  # noqa: E402
 
