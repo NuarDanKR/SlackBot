@@ -540,7 +540,7 @@ fi
 # 일정 동기화·DM 알림·백필이 통째로 돌지 않는데, 오류가 나지 않으니 몇 주가 지나도
 # 모른다. 그래서 설치 끝에 어떤 것이 꺼져 있는지 이름을 대고 알린다.
 install -d -o tybot -g tybot -m 0700 "$DATA_DIR/file-audit"
-TIMERS=(tybot-update tybot-collect tybot-tidy tybot-index tybot-schedule-sync tybot-schedule-reconcile tybot-schedule-dm tybot-review-dm tybot-convert-retry tybot-convert-nightly tybot-convert-alert tybot-account-sync tybot-file-audit tybot-embedding-index)
+TIMERS=(tybot-update tybot-collect tybot-tidy tybot-index tybot-schedule-sync tybot-schedule-reconcile tybot-schedule-dm tybot-review-dm tybot-convert-retry tybot-convert-nightly tybot-convert-alert tybot-account-sync tybot-file-audit tybot-embedding-index tybot-channel-digest)
 for u in "${TIMERS[@]}"; do
   install -m 0644 "$APP_DIR/deploy/$u.service" "/etc/systemd/system/$u.service"
   install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"

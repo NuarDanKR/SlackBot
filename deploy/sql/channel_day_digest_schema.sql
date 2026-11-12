@@ -13,7 +13,7 @@
 --   tybot_digest  (NOLOGIN 그룹) — 배치가 쓴다. 로그인 계정은 3단계(배치)에서 붙인다
 --   tyslackai     (Master)        — 검색에서 **읽기만** 한다
 --
--- 멱등. apply-schema.sh 가 적용한다.
+-- 멱등. apply-schema.sh 가 bot_source_schema.sql 뒤에 적용한다(그 표를 읽을 권한을 준다).
 
 DO $$
 BEGIN
@@ -78,3 +78,6 @@ GRANT SELECT, INSERT ON channel_day_digest TO tybot_digest;
 -- 배치는 stale 표시만 고친다. 본문·좌표는 고치지 않는다(새 행을 만든다).
 GRANT UPDATE (stale_at, stale_reason, vector_state) ON channel_day_digest TO tybot_digest;
 GRANT SELECT ON channel_day_digest TO tyslackai;
+
+-- 배치는 대상 채널(봇 근거 채널)을 읽는다. 필요한 열만.
+GRANT SELECT (bot, workspace, channel_id, removed_at) ON bot_source_channel TO tybot_digest;

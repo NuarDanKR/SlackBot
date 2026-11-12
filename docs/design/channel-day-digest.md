@@ -111,8 +111,18 @@ CREATE TABLE channel_day_digest (
 > §7-2 완료 — `src/tybot/channel_digest_build.py`(`generate`·`check_output`·`save`·
 > `current_revisions`), `tests/test_channel_digest_build.py`. 출력 검사는 모양·길이(넘으면
 > 버림)·숫자(원문에 있는 것만, `summary_review.NUMBER_RE` 와 같은 규칙)·마스킹→`pii_screen`.
-> **다음은 §7-3(배치 스크립트·timer, 설치 시 비활성).** 배치 DB 로그인 계정은 `tybot_digest`
-> 그룹의 멤버로 새로 만든다(Vision 계정과 같은 방식).
+> §7-3 완료 — `src/tybot/channel_digest_batch.py`(`plan`·`run`·`resolve_dsn`),
+> `scripts/build_channel_digests.py`(기본 dry-run, `--apply`·`--since/--until`·`--max-calls`),
+> `deploy/tybot-channel-digest.service/.timer`(04:10, 설치만·**켜지 않음**, 콘솔 타이머 목록 포함),
+> `tests/test_channel_digest_batch.py`. 모델 `claude-haiku-4-5`, 하루 비용 상한
+> `TYBOT_DIGEST_DAILY_LIMIT_USD`(기본 $5). **다음은 §7-4(`digest_guide` 와 AnswerEngine 연결).**
+>
+> 서버 준비(§7-6 전에, 한 번):
+> 1. 스키마 적용 `sudo /opt/tybot/deploy/apply-schema.sh`
+> 2. 로그인 계정 — `CREATE ROLE tybot_digest_runtime LOGIN IN ROLE tybot_digest;` 뒤 `\password`
+> 3. DSN 파일 `/etc/tybot/tybot-digest-database-url`(tybot 0600),
+>    `postgresql://tybot_digest_runtime:<pw>@127.0.0.1:55432/tyslackai` — **TCP 로**(소켓은 peer 인증이라 실패)
+> 4. dry-run: `sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env TYBOT_DIGEST_DATABASE_URL_FILE=/etc/tybot/tybot-digest-database-url /opt/tybot/.venv/bin/python /opt/tybot/scripts/build_channel_digests.py --since 2026-01-01`
 >
 > 구현 중 정한 것:
 > - 아카이브 배치가 둘이라 채널 디렉터리가 아니라 **(workspace, channel_id)** 로 모은다 —
