@@ -103,6 +103,7 @@ _최종 갱신: 2026-11-12_
 | [B-93](#b-93) | **전 봇 공통 근거 폭 확대 — 전수 탐색·채널×일 요약 길잡이·후속 확장** | **최우선** | 진행중 (Claude/2026-11-12, 1단계부터) | B-56, B-57, B-83, B-88, B-89 |
 | [B-94](#b-94) | **이미지 인식 완료 상태의 Archiver 스레드 알림** | **높음** | 진행중 (Codex/2026-11-12) | B-81, B-86 |
 | [B-95](#b-95) | **VIPBot 다중 워크스페이스 DB 연결** | **최우선** | 진행중 (Codex/2026-11-12) | B-83 |
+| [B-96](#b-96) | **봇 등급별 모델 — VIPBot 한 단계 위(판단 Sonnet·Hermes Opus)** | **높음** | 대기 (B-95 뒤, 오너/2026-11-12) | B-95, B-44 |
 | [B-72](#b-72) | **PF·TY 공용 Hermes의 수집 제거와 단일 아카이브 계약** | **최우선** | 운영 적용·사용 중 (오너 보고/2026-10-27, 범위별 검증 기록 대기) | B-65, B-42, B-68 |
 | [B-74](#b-74) | **단일 서버 Hermes 배포·점검의 전문봇 웹 콘솔 인계** | **최우선 (B-72 다음)** | 준비됨 (오너 결정 2026-10-08) | B-72, B-16, B-38 |
 | [B-75](#b-75) | **Hermes 인스턴스 설정·시크릿의 DB/credential 전환** | **높음 (B-74 연계)** | 준비됨 (오너 결정 2026-10-08) | B-72, B-74, B-16 |
@@ -972,6 +973,36 @@ PII 노출과 봇 출력 재수집 위험이 생긴다.
 않는다.
 
 ---
+
+## B-96
+### 봇 등급별 모델 — VIPBot 한 단계 위(판단 Sonnet·Hermes Opus)
+
+**높음 · 대기 (B-95 뒤, 오너/2026-11-12) · 의존 B-95, B-44**
+
+**오너 결정(2026-11-12).** VIPBot 은 TYBot 보다 모든 단계가 한 단계 위다.
+
+| 단계 | TYBot | VIPBot |
+|---|---|---|
+| 판단(분해·어느 봇을 부를지) | Haiku (`intent.CLASSIFIER_MODEL`) | **Sonnet** |
+| Hermes 답변(요약·내부 기록) | **Sonnet** | Opus |
+| VIPBot 직접 답변 | — | Opus (`vip_profile.APPROVED_MODEL`, 현행 그대로) |
+
+**현재 코드 사실(2026-11-12 확인).**
+- TYBot 판단 모델은 `intent.plan` 이 `CLASSIFIER_MODEL` 로 하드코딩한다. 엔진별로 바꿀 손잡이가 없다
+- Hermes 는 두 길이다. RPC worker(`subbots/hermes/src/rpc/profiles.js`)는 **서버 profiles 의
+  workspace 항목 `model`** 이 정하고(요청 본문이 고르지 못하게 설계됨), 프로세스 내 어댑터는
+  DB `specialist_bot.model` 을 쓴다
+- **독립 VIPBot 런타임(`vipbot_runtime` → `vipbot_engine.build_engine`)은 전문 봇 훅이 없다.**
+  지금 VIPBot 은 Hermes 를 부르지 않고 Opus 로 직접 답한다. 판단 단계도 없다
+
+**할 일.**
+1. TYBot→Hermes Sonnet: 서버 Hermes RPC profiles 의 각 workspace `model` 을
+   `claude-sonnet-5-5` 로(설정 변경. 프로세스 내 어댑터를 쓰는 곳은 DB `specialist_bot.model`)
+2. `intent.plan(model=)`·`AnswerEngine(planner_model=)` 손잡이. 기본값은 지금과 같다
+3. VIPBot 에 판단(Sonnet)과 Hermes 훅을 붙인다. Hermes RPC 는 요청이 모델을 못 고르므로
+   **호출자 등급(tier)** 을 서버 허용 목록으로 둔다 — 예: profile 에 `models: {default, vip}`.
+   요청은 `tier: "vip"` 만 말하고, 서버가 허용한 값만 쓴다(profiles.js 설계 원칙 유지)
+4. B-95(Codex, VIPBot 다중 워크스페이스 런타임)와 같은 파일을 만지므로 그 뒤에 한다
 
 ## B-95
 ### VIPBot 다중 워크스페이스 DB 연결
