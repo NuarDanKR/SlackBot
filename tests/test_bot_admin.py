@@ -565,7 +565,7 @@ def test_the_module_never_reads_ciphertext():
 RUNTIME_READERS = {
     "Master 워크스페이스·토큰": ROOT / "src" / "tybot" / "workspaces.py",
     "Archiver 기동 설정": ROOT / "src" / "tybot" / "archiver_runtime_store.py",
-    "VIPBot 기동 설정": ROOT / "src" / "tybot" / "vipbot_runtime_store.py",
+    "VIPBot 기동 설정": ROOT / "src" / "tybot" / "console" / "bot_identity.py",
     "Master 의 전문 봇 라우팅": ROOT / "src" / "tybot" / "specialist_router.py",
 }
 NEW_TABLES = (
@@ -644,7 +644,7 @@ def test_runtime_reader_status_matches_the_actual_contracts():
 
     assert touched == {
         "Archiver 기동 설정": ["archiver_connection_config"],
-        "VIPBot 기동 설정": ["bot_connection", "vipbot_connection_config"],
+        "VIPBot 기동 설정": ["bot_connection"],
         "Master 의 전문 봇 라우팅": ["specialist_route"],
     }
     assert admin.RUNTIME_READER_STATUS == {

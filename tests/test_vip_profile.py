@@ -11,7 +11,7 @@ from tybot import vip_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "tybot" / "vip_profile.py"
-UNIT = ROOT / "deploy" / "tybot-vipbot.service"
+UNIT = ROOT / "deploy" / "tybot.service"
 
 
 def _code(call) -> str:
@@ -42,12 +42,11 @@ def test_scientific_cost_ceiling_is_explicitly_supported():
     assert profile.daily_limit_usd == 1e-9
 
 
-def test_the_persistent_cost_ledger_has_a_private_systemd_state_directory():
+def test_the_persistent_cost_ledger_is_writable_by_the_shared_runtime():
     unit = UNIT.read_text(encoding="utf-8")
 
     assert vip_profile.COST_STATE_PATH == "/var/lib/tybot-vipbot/cost-state.json"
-    assert "StateDirectory=tybot-vipbot" in unit
-    assert "StateDirectoryMode=0750" in unit
+    assert "/var/lib/tybot-vipbot" in unit
 
 
 @pytest.mark.parametrize(

@@ -122,7 +122,7 @@ def _with_user_memory(prompt: str, ctx: RequestContext) -> str:
 
 
 #: 근거 폭 기본값(B-93, 모든 봇 공통). 엔진 기본값은 시험 호환을 위해 그대로 두고, 운영 봇을
-#: 만드는 자리(`slack/pilot.py`·`vipbot_engine.py`·`vip_workspace.py`)가 이 값을 넘긴다.
+#: 만드는 자리(`slack/pilot.py`·`vip_workspace.py`)가 이 값을 넘긴다.
 BOT_MAX_HITS = 40
 BOT_PER_DOCUMENT_HITS = 4
 #: VIPBot 은 근거 채널이 관리자가 고른 집합이라 늘 전수로 보고, 종합 질문에 대비해 더 넓게 본다.

@@ -158,24 +158,27 @@ def test_per_document_zero_keeps_the_old_ranking(tmp_path, monkeypatch):
 
 
 def test_the_vip_engine_turns_exhaustive_search_on(monkeypatch, tmp_path):
-    from tybot import vipbot_engine
+    from tybot import vip_workspace
 
+    monkeypatch.setattr(
+        vip_workspace.Router,
+        "from_default_registry",
+        lambda **_kwargs: SimpleNamespace(),
+    )
     profile = SimpleNamespace(
-        model="claude-sonnet-5-5",
+        model="claude-opus-5-5",
         daily_limit_usd=10.0,
         cost_state_path=tmp_path / "c.json",
         prompts=None,
         max_output_tokens=1024,
     )
-    engine = vipbot_engine.build_engine(
-        archive_dir=tmp_path,
+    engine = vip_workspace.build_engine(
+        store=SimpleNamespace(),
         profile=profile,
-        anthropic_api_key="sk-ant-test",
-        provider_factory=lambda **_k: SimpleNamespace(name="anthropic"),
     )
     assert engine._exhaustive_search is True
-    assert engine._per_document_hits == vipbot_engine.VIP_PER_DOCUMENT_HITS
-    assert engine._max_hits == vipbot_engine.VIP_MAX_HITS > 20
+    assert engine._per_document_hits == answer_module.VIP_PER_DOCUMENT_HITS
+    assert engine._max_hits == answer_module.VIP_MAX_HITS > 20
 
 
 def test_the_tybot_default_engine_is_unchanged():
@@ -244,8 +247,7 @@ def test_every_production_bot_passes_the_common_width():
     assert "per_document_hits=BOT_PER_DOCUMENT_HITS" in pilot
     assert "exhaustive_max_lines=exhaustive_max_lines()" in pilot
     assert "focus_terms=True" in pilot
-    for name in ("vipbot_engine.py", "vip_workspace.py"):
-        source = (root / name).read_text(encoding="utf-8")
-        assert "exhaustive_search=True" in source, name
-        assert "per_document_hits=VIP_PER_DOCUMENT_HITS" in source, name
-        assert "max_hits=VIP_MAX_HITS" in source, name
+    source = (root / "vip_workspace.py").read_text(encoding="utf-8")
+    assert "exhaustive_search=True" in source
+    assert "per_document_hits=VIP_PER_DOCUMENT_HITS" in source
+    assert "max_hits=VIP_MAX_HITS" in source

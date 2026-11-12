@@ -66,7 +66,7 @@ def build_engine(
         response_cache_namespace="vipbot",
         # B-96: 판단(분해·전문 봇 선택)은 Sonnet — TYBot(Haiku)보다 한 단계 위.
         planner_model=VIP_PLANNER_MODEL,
-        # B-93: vipbot_engine 과 같은 근거 폭. 두 경로가 갈리면 같은 VIP 질문의 답이 갈린다.
+        # B-93: 관리자가 정한 VIP 근거 범위는 모두 훑는다.
         max_hits=VIP_MAX_HITS,
         exhaustive_search=True,
         per_document_hits=VIP_PER_DOCUMENT_HITS,

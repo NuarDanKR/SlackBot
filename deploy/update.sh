@@ -153,12 +153,17 @@ if [[ "$SCOPE" == "console" ]]; then
   exit 0
 fi
 
-# VIPBot is now a DB-discovered branch of the TYBot runtime.  A legacy
-# standalone process would open the same Socket Mode credentials twice and
-# split events between two consumers, so stop it before the shared runtime.
+# VIPBot is a DB-discovered branch of the TYBot runtime. Remove the retired
+# standalone unit so nobody can accidentally start a second Socket consumer.
+# Its configuration and state remain untouched for audit/recovery.
 if systemctl is-active --quiet tybot-vipbot.service 2>/dev/null; then
   log "기존 단독 VIPBot을 중지하고 TYBot 공통 런타임으로 전환합니다"
   systemctl stop tybot-vipbot.service
+fi
+if [[ -e /etc/systemd/system/tybot-vipbot.service ]]; then
+  rm -f /etc/systemd/system/tybot-vipbot.service
+  systemctl daemon-reload
+  log "폐기된 단독 VIPBot systemd 유닛을 제거했습니다"
 fi
 systemctl restart tybot
 

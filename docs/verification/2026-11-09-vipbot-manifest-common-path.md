@@ -1,5 +1,8 @@
 # VIPBot 매니페스트·전달 계약을 공통 답변 경로에 맞춤
 
+> **폐기된 절체 기록(2026-11-12).** 공유 `tybot.service` 분기가 운영 정본이며
+> 독립 `tybot-vipbot.service`와 실행 코드는 삭제됐다. 아래 절차를 다시 실행하지 않는다.
+
 상태: 매니페스트·시험만 변경. **운영 변경 없음** — `tybot-vipbot.service` 는
 그대로 돌고 있고 `VIPBOT_SHARED_RUNTIME_ENABLED` 는 계속 `0` 이다.
 Slack 앱 설정은 아직 손대지 않았다(§4 가 절차다).

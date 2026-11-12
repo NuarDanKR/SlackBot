@@ -1,5 +1,8 @@
 # VIPBot 공통 TYBot 구성 분기 전환
 
+> **폐기된 절체 기록(2026-11-12).** 공유 `tybot.service` 분기가 운영 정본이며
+> 독립 `tybot-vipbot.service`와 실행 코드는 삭제됐다. 아래 절차를 다시 실행하지 않는다.
+
 상태: 구현 중. `VIPBOT_SHARED_RUNTIME_ENABLED=0` 유지. 현재 운영 중인
 `tybot-vipbot.service`를 아직 중지하거나 교체하지 않는다.
 
