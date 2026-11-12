@@ -42,10 +42,16 @@ SYSTEM_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것�
 3. 사람 발언과 문서 내용은 구분해서 쓴다. 숫자가 엇갈리면 두 시점을 함께 표기한다.
    누군가의 평가·의견·판단을 옮길 때는 발언자와 날짜를 함께 적고, 봇 자신의
    평가처럼 바꾸어 쓰지 않는다.
-4. <원문>으로 답할 수 없으면 "아카이브에서 근거를 찾지 못했습니다"라고만 답한다.
+4. <원문>에 질문과 관련된 내용이 **일부라도** 있으면 그것으로 답한다. 원문에 있는 것은
+   그대로 보이고, 원문에서 확인되지 않는 부분만 끝에 "원문에서 확인되지 않음: …"으로 짧게
+   밝힌다. 질문과 표현이 달라도(재무목표↔경영목표·가이던스·KPI, 자금수지↔자금계획·시재)
+   같은 내용이면 근거로 쓴다. 이때도 1·2번은 그대로다 — 원문에 없는 숫자를 채우지 않는다.
+   **관련 내용이 하나도 없을 때만** "아카이브에서 근거를 찾지 못했습니다"라고 답한다.
+   일부를 답하면서 첫 문장을 "근거를 찾지 못했습니다"로 시작하지 않는다.
 5. 답변은 한국어, 간결하게. 출처 줄은 시스템이 붙이므로 네가 쓰지 않는다.
 6. 출력은 Slack 메시지다. `#` 제목과 `**굵게**`는 Slack에서 글자 그대로 보이니 쓰지 않는다.
    굵게는 별표 하나(*굵게*), 목록은 `• `, 구분선은 쓰지 않는다.
+7. 누군가 봇에게 같은 것을 **물어본 기록**(질문 문장 자체)은 근거가 아니다. 답이 든 줄만 쓴다.
 """
 
 SUMMARY_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것보다 나쁘다.
@@ -168,6 +174,43 @@ def focus_query(question: str) -> str:
         if word not in REQUEST_WORDS:
             kept.append(word)
     return " ".join(dict.fromkeys(kept or tokens))
+
+
+#: 질문 메아리 판정: 이 길이를 넘는 줄은 질문이 아니라 본문으로 본다.
+_ECHO_MAX_CHARS = 200
+#: 질문 낱말 중 이 비율 이상이 줄에 있으면 「같은 질문」 으로 본다.
+_ECHO_COVERAGE = 0.8
+#: 메아리를 거를 여유분. 같은 질문을 여러 번 한 DM 이면 메아리가 이만큼 섞인다.
+_ECHO_SPARE = 20
+
+
+def is_question_echo(query: str, text: str) -> bool:
+    """이 줄이 **누군가 봇에게 같은 것을 물어본 기록**인가 (2026-11-12 실측).
+
+    DM·채널에 남은 사람의 이전 질문(「…재무목표 Top5를 정리해 표로 설명」)은 질문 낱말을
+    전부 가지고 있어 점수가 가장 높다. 그 줄이 근거 자리를 차지하면 모델은 「원문에는 요청한
+    기록만 있다」 며 근거 없음으로 닫는다.
+
+    셋 다 맞을 때만 메아리다 — 짧고, 요청 표현(정리해·설명·알려주세요·?)이 있고, 질문
+    낱말을 거의 다 가진 줄. 「2026년 재무목표 1 부채비율 200% 이하」 같은 본문은 남는다.
+    """
+    from . import search_index
+
+    body = (text or "").strip()
+    if not body or len(body) > _ECHO_MAX_CHARS:
+        return False
+    words = set()
+    for token in search_index.tokens_of(body):
+        match = _LATIN_JOSA.match(token)
+        words.add(match.group(1) if match else token)
+    if not (words & REQUEST_WORDS) and not body.endswith("?"):
+        return False
+    wanted = list(dict.fromkeys(search_index.tokens_of(focus_query(query))))
+    if len(wanted) < 2:
+        return False
+    compact = body.lower().replace(" ", "")
+    covered = sum(1 for word in wanted if word in compact)
+    return covered / len(wanted) >= _ECHO_COVERAGE
 
 
 def _response_cache_scope(
@@ -2463,14 +2506,18 @@ class AnswerEngine:
             and not self._exhaustive_max_lines
         ):
             return self._store.search(query, ctx, limit=self._max_hits)
+        # 질문 메아리(같은 것을 물어본 기록)를 빼고도 근거 수가 줄지 않게 넉넉히 받아 거른다.
         hits = self._store.search(
-            query, ctx, limit=self._max_hits,
+            query, ctx, limit=self._max_hits + _ECHO_SPARE,
             exhaustive=self._exhaustive_search, per_document=self._per_document_hits,
             exhaustive_max_lines=self._exhaustive_max_lines,
         )
+        kept = [hit for hit in hits if not is_question_echo(query, hit.line.text)]
+        echoes = len(hits) - len(kept)
+        hits = kept[: self._max_hits]
         logger.info(
-            "answer 전수 탐색 ws=%s hits=%d docs=%d q=%r",
-            ctx.workspace, len(hits), len({str(h.doc.path) for h in hits}), query,
+            "answer 근거 폭 ws=%s hits=%d docs=%d echoes=%d q=%r",
+            ctx.workspace, len(hits), len({str(h.doc.path) for h in hits}), echoes, query,
         )
         return hits
 

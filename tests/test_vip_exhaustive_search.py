@@ -233,7 +233,8 @@ def test_tybot_focuses_terms_and_passes_the_common_width():
     engine._search(answer_module.focus_query(Q), _ctx())
     assert seen["q"] == "태영건설 2026년 연말 달성해야 재무목표 top5"
     assert seen["per_document"] == 4 and seen["exhaustive_max_lines"] == 150_000
-    assert seen["limit"] == 40
+    # 질문 메아리를 거를 여유분을 더 받아 40줄로 자른다.
+    assert seen["limit"] == 40 + answer_module._ECHO_SPARE
 
 
 def test_every_production_bot_passes_the_common_width():
