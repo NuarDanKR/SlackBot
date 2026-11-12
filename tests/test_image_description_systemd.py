@@ -8,7 +8,11 @@ def test_worker_unit_uses_dedicated_credential_and_hardening():
 
     assert not any(line.startswith("LoadCredential=") for line in unit.splitlines())
     assert "TYBOT_VISION_DATABASE_URL_FILE=/etc/tybot/tybot-vision-database-url" in unit
-    assert "WORKSPACE_SECRET_KEY_FILE=/etc/tybot/workspace-secret.key" in unit
+    # 2026-11-12 보안 리뷰: worker 는 Vision 전용 키만 받는다. 워크스페이스 토큰 키는 없다.
+    assert "VISION_PROVIDER_SECRET_KEY_FILE=/etc/tybot/vision-provider-secret.key" in unit
+    assert "WORKSPACE_SECRET_KEY" not in "\n".join(
+        line for line in unit.splitlines() if not line.lstrip().startswith("#")
+    )
     assert "EnvironmentFile=/etc/tybot/archiver.env" in unit
     assert "--workspace %i" in unit
     assert "ProtectSystem=strict" in unit

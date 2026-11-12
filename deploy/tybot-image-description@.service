@@ -14,7 +14,9 @@ EnvironmentFile=/etc/tybot/archiver.env
 # Rocky 8의 systemd 239에는 LoadCredential=이 없다. 값이 아니라 0600 파일
 # 경로만 넘기며 resolver가 권한과 내용을 검사한다.
 Environment=TYBOT_VISION_DATABASE_URL_FILE=/etc/tybot/tybot-vision-database-url
-Environment=WORKSPACE_SECRET_KEY_FILE=/etc/tybot/workspace-secret.key
+# Vision provider 자격 **전용** 키. 워크스페이스 Slack 토큰 키는 이 worker 에 주지 않는다
+# (2026-11-12 보안 리뷰). 0400 tybot 소유 파일이며 install.sh 가 없을 때만 만든다.
+Environment=VISION_PROVIDER_SECRET_KEY_FILE=/etc/tybot/vision-provider-secret.key
 ExecStart=/opt/tybot/.venv/bin/python -m tybot.archive.image_description_job --workspace %i
 TimeoutStartSec=900
 TimeoutStopSec=30

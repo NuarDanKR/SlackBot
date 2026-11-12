@@ -238,10 +238,15 @@ REVOKE ALL ON archiver_image_provider_secret, archiver_image_model_catalog,
 -- Never create roles or grant Master/collector here.
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tybot_vision') THEN
-        GRANT SELECT, INSERT, UPDATE ON TABLE archiver_image_provider_secret,
-            archiver_image_model_catalog,
+        GRANT SELECT, INSERT, UPDATE ON TABLE archiver_image_model_catalog,
             archiver_image_description_policy, archiver_image_description_job
             TO tybot_vision;
+        -- 2026-11-12 보안 리뷰: worker 는 provider 자격을 **읽기만** 한다. 예전 판이 준
+        -- 표 전체 SELECT·INSERT·UPDATE 는 좁은 GRANT 로 사라지지 않으므로 먼저 회수한다.
+        -- 키를 쓰는 것은 콘솔(아래 tyslackai)의 일이다.
+        REVOKE ALL ON TABLE archiver_image_provider_secret FROM tybot_vision;
+        GRANT SELECT (provider, ciphertext, enabled)
+            ON TABLE archiver_image_provider_secret TO tybot_vision;
         -- Earlier revisions granted table-wide UPDATE here. A narrower GRANT
         -- does not remove that privilege, so revoke it before adding columns.
         REVOKE UPDATE ON TABLE archiver_image_description_approval
@@ -256,6 +261,15 @@ DO $$ BEGIN
             ON TABLE archiver_image_description_clearance TO tybot_vision;
         GRANT SELECT, INSERT ON TABLE archiver_image_description_policy_audit,
             archiver_image_description_revision TO tybot_vision;
+    END IF;
+    -- 콘솔(Master DSN)은 provider 자격을 **쓰고 마스크만 읽는다.** 암호문 열은 읽지 못한다.
+    -- 이 표 하나에만 주는 열 단위 권한이다. 다른 Vision 표에는 여전히 아무 권한도 없다.
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
+        REVOKE ALL ON TABLE archiver_image_provider_secret FROM tyslackai;
+        GRANT SELECT (provider, mask, enabled, updated_by, updated_at),
+              INSERT (provider, ciphertext, mask, enabled, updated_by),
+              UPDATE (ciphertext, mask, enabled, updated_by, updated_at)
+            ON TABLE archiver_image_provider_secret TO tyslackai;
     END IF;
 END $$;
 COMMIT;

@@ -821,12 +821,25 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [ ] Codex 검토: 호출 예외(timeout·429)가 provider 영수증 없이 `unknown/publish_result_unknown`으로
       닫힌다. `failed/model_timeout`으로 남기려면 비용 가드(미확인 비용 → 무료 카탈로그 자동 차단)와
       함께 정해야 한다
-- [ ] Codex 검토(자동 보안 리뷰 2026-11-12, Codex 소유 파일이라 Claude는 수정하지 않음):
-  1. Vision provider 키가 워크스페이스 토큰과 같은 Fernet 키(`WORKSPACE_SECRET_KEY_FILE`)로 암호화된다.
-     worker가 Slack 토큰 암호문까지 풀 수 있는 키를 갖는다. Vision 전용 키 파일(0400)로 분리를 검토한다
-  2. `_mask`가 provider 키의 앞뒤를 많이 보일 수 있다(최소 16자). 끝 4자 또는 해시 지문만 보이는 전용 마스크를 검토한다
-  3. `tybot_vision`에 `archiver_image_provider_secret` SELECT·INSERT·UPDATE가 있다. worker는 SELECT만
-     (가능하면 provider·ciphertext·enabled 열 단위로), 쓰기는 콘솔 역할로 분리하는 것을 검토한다
+- [x] 자동 보안 리뷰 3건 반영(2026-11-12, 오너 승인으로 Claude가 Codex 소유 자격 경로 수정)
+  1. **전용 키:** Vision provider 키는 `VISION_PROVIDER_SECRET_KEY_FILE`
+     (`/etc/tybot/vision-provider-secret.key`, 0400) 전용 Fernet 키로만 암호화한다.
+     - 워크스페이스 키로 내려가지 않는다.
+     - worker unit 에서 `WORKSPACE_SECRET_KEY_FILE` 을 뺐다.
+     - install.sh 가 키가 없을 때만 만든다.
+  2. **마스크:** 끝 4자와 SHA-256 지문 8자만 보인다. 최소 길이는 20자다.
+  3. **역할 분리:** worker(`tybot_vision`)는 `provider·ciphertext·enabled` 열 SELECT 만 갖는다.
+     - 콘솔은 Vision DSN 대신 콘솔 `DATABASE_URL`(`tyslackai`)로 쓴다.
+     - 콘솔은 마스크·상태 열 SELECT 와 INSERT·UPDATE 만 갖고, **암호문 열은 못 읽는다**.
+     - drift 검사기가 두 역할의 정확한 열 권한을 대조한다.
+  - **운영 전환:**
+    1. 배포한다. 이때 install/update 가 키 파일을 만든다.
+    2. `sudo /opt/tybot/deploy/apply-schema.sh` 로 권한을 회수하고 다시 준다.
+    3. `check_schema_drift.py` 로 대조한다.
+    4. **콘솔 「운영 > 이미지 설명」 에서 Vision 키를 다시 넣는다.** 예전 키는 워크스페이스 키로
+       암호화돼 있어 새 키로 풀리지 않는다(`provider_secret_unreadable` → 작업 보류, 외부 호출 0).
+    5. `/etc/tybot/archiver.env` 에 `WORKSPACE_SECRET_KEY` 가 있는지 확인한다. 있으면 worker 가
+       여전히 그 값을 환경으로 받으므로, 수집기에 필요한지 먼저 확인한 뒤 뺀다.
 - [ ] 오너 결정: AI OCR 전사를 로컬 OCR처럼 **인용 가능한 기계 추출**로 올릴지
       (지금은 검색 길잡이 전용)
 - [ ] VIPBot 답변 엔진에 사진 길잡이 연결, 실제 현장 사진 품질 평가 세트(정책 ON 이후)

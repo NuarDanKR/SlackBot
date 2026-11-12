@@ -83,6 +83,21 @@ VISION_COLUMN_REQUIRED = {
     "archiver_image_description_clearance": {
         "UPDATE": {"revoked_at", "revoked_by", "revoke_reason"},
     },
+    # 2026-11-12 보안 리뷰: worker 는 provider 자격을 **세 열만 읽는다.** 쓰기는 콘솔 몫이다.
+    "archiver_image_provider_secret": {
+        "SELECT": {"provider", "ciphertext", "enabled"},
+    },
+}
+VISION_REQUIRED["archiver_image_provider_secret"] = set()
+# 콘솔(Master DSN)이 provider 자격에 갖는 **정확한** 열 권한. 암호문 열 SELECT 는 없다.
+# 이 표 밖의 Vision 표에 Master 권한이 있으면 여전히 drift 다.
+MASTER_ROLE = "tyslackai"
+MASTER_COLUMN_REQUIRED = {
+    "archiver_image_provider_secret": {
+        "SELECT": {"provider", "mask", "enabled", "updated_by", "updated_at"},
+        "INSERT": {"provider", "ciphertext", "mask", "enabled", "updated_by"},
+        "UPDATE": {"ciphertext", "mask", "enabled", "updated_by", "updated_at"},
+    },
 }
 
 # 스키마 파일이 선언하는 것들. **주석 처리된 줄은 제외한다** — 예시로 적어 둔 GRANT 나
@@ -204,7 +219,10 @@ def vision_access(conn) -> tuple[list[tuple[str, str, str]], bool]:
         required = role == VISION_ROLE and privilege in VISION_REQUIRED[table]
         expected_columns = (
             VISION_COLUMN_REQUIRED.get(table, {}).get(privilege, set())
-            if role == VISION_ROLE else set()
+            if role == VISION_ROLE
+            else MASTER_COLUMN_REQUIRED.get(table, {}).get(privilege, set())
+            if role == MASTER_ROLE
+            else set()
         )
         # Required table privileges cannot be replaced with partial column grants.
         if required and not table_allowed:

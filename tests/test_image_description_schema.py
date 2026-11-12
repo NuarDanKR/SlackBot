@@ -32,8 +32,21 @@ def test_provider_keys_are_encrypted_scoped_and_only_granted_to_vision() -> None
     assert "enabled boolean NOT NULL DEFAULT true" in table
     assert "API keys" in table
     assert "archiver_image_provider_secret" in sql[sql.index("REVOKE ALL ON") :]
-    assert "archiver_image_provider_secret" in sql[sql.index("GRANT SELECT") :]
-    assert "TO tyslackai" not in sql
+    code = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+    # 2026-11-12 보안 리뷰: worker 는 세 열만 읽는다. 쓰기 권한이 없다.
+    assert (
+        "GRANT SELECT (provider, ciphertext, enabled)\n"
+        "            ON TABLE archiver_image_provider_secret TO tybot_vision;"
+    ) in code
+    assert "REVOKE ALL ON TABLE archiver_image_provider_secret FROM tybot_vision;" in code
+    vision_block = code[code.index("rolname = 'tybot_vision'") : code.index("rolname = 'tyslackai'")]
+    assert "INSERT, UPDATE ON TABLE archiver_image_provider_secret" not in vision_block
+    assert "archiver_image_provider_secret,\n" not in vision_block
+    # 콘솔은 쓰고 마스크만 읽는다. **암호문 열 SELECT 는 없다.**
+    master_block = code[code.index("rolname = 'tyslackai'") :]
+    select = master_block[master_block.index("GRANT SELECT (") : master_block.index("INSERT (")]
+    assert "ciphertext" not in select
+    assert "ON TABLE archiver_image_provider_secret TO tyslackai;" in master_block
     assert "TO tybot_archiver" not in sql
 
 
@@ -122,6 +135,9 @@ def test_master_collector_and_public_receive_no_access() -> None:
     assert "REVOKE ALL ON archiver_image_provider_secret, archiver_image_model_catalog" in sql
     assert "archiver_image_description_clearance" in sql
     assert "FROM PUBLIC" in sql
-    assert "TO tyslackai" not in sql
+    # Master 에게 주는 것은 provider 자격 표의 **열 단위 권한 하나**뿐이다(콘솔 쓰기 경로).
+    code = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+    master_grants = [line for line in code.splitlines() if "TO tyslackai" in line]
+    assert master_grants == ["            ON TABLE archiver_image_provider_secret TO tyslackai;"]
     assert "TO tybot_archiver" not in sql
     assert "CREATE ROLE" not in sql

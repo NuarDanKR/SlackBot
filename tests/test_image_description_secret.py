@@ -121,3 +121,90 @@ def test_invalid_secret_input_is_rejected(provider, key, code):
     with pytest.raises(secret.ImageProviderSecretError, match=code):
         secret.save_provider_key(Connection(), provider, key, actor="admin@example.com")
 
+
+
+# --- 2026-11-12 보안 리뷰: 전용 키·좁은 마스크 --------------------------------
+
+import os  # noqa: E402
+
+from cryptography.fernet import Fernet  # noqa: E402
+
+KEY = "AIza" + "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+
+
+def _key_file(tmp_path, monkeypatch, *, mode=0o400):
+    path = tmp_path / "vision-provider-secret.key"
+    path.write_text(Fernet.generate_key().decode(), encoding="ascii")
+    os.chmod(path, mode)
+    monkeypatch.setenv(secret.KEY_FILE_ENV, str(path))
+    return path
+
+
+def test_round_trip_uses_only_the_dedicated_key(tmp_path, monkeypatch):
+    _key_file(tmp_path, monkeypatch)
+    # 워크스페이스 키가 있어도 쓰지 않는다.
+    monkeypatch.setenv("WORKSPACE_SECRET_KEY", Fernet.generate_key().decode())
+    connection = Connection()
+    secret.save_provider_key(connection, "google", KEY, actor="admin@example.com")
+    assert secret.resolve_provider_key(connection, "google") == KEY
+
+
+def test_no_dedicated_key_never_falls_back_to_the_workspace_key(tmp_path, monkeypatch):
+    monkeypatch.setenv(secret.KEY_FILE_ENV, str(tmp_path / "missing.key"))
+    monkeypatch.setenv("WORKSPACE_SECRET_KEY", Fernet.generate_key().decode())
+    with pytest.raises(secret.ImageProviderSecretError, match="provider_secret_key_unavailable"):
+        secret.save_provider_key(Connection(), "google", KEY, actor="admin@example.com")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="파일 권한 비트는 POSIX 에서만 의미가 있다")
+def test_a_group_readable_key_file_is_refused(tmp_path, monkeypatch):
+    _key_file(tmp_path, monkeypatch, mode=0o640)
+    with pytest.raises(secret.ImageProviderSecretError, match="provider_secret_key_permissions"):
+        secret.save_provider_key(Connection(), "google", KEY, actor="admin@example.com")
+
+
+def test_a_row_encrypted_with_the_old_workspace_key_is_unreadable_not_guessed(
+    tmp_path, monkeypatch
+):
+    """예전 판은 워크스페이스 키로 암호화했다. 새 키로 못 풀면 **보류**다 — 콘솔에서 다시 넣는다."""
+    _key_file(tmp_path, monkeypatch)
+    old = Fernet(Fernet.generate_key())
+    connection = Connection()
+    connection.rows["google"] = {
+        "provider": "google", "ciphertext": old.encrypt(KEY.encode()), "mask": "x",
+        "enabled": True, "updated_by": "admin", "updated_at": "now",
+    }
+    with pytest.raises(secret.ImageProviderSecretError, match="provider_secret_unreadable"):
+        secret.resolve_provider_key(connection, "google")
+
+
+def test_the_mask_shows_only_the_tail_and_a_fingerprint(monkeypatch):
+    monkeypatch.setattr(secret, "_fernet", Cipher)
+    connection = Connection()
+    secret.save_provider_key(connection, "google", KEY, actor="admin@example.com")
+    mask = connection.rows["google"]["mask"]
+    assert mask.startswith("…" + KEY[-4:] + " (sha256:")
+    assert KEY[:9] not in mask and KEY[4:12] not in mask
+    visible = mask.split(" ", 1)[0].lstrip("…")
+    assert len(visible) == 4
+
+
+def test_short_provider_keys_are_refused():
+    with pytest.raises(secret.ImageProviderSecretError, match="provider_key_invalid"):
+        secret.save_provider_key(Connection(), "google", "A" * 19, actor="admin@example.com")
+
+
+def test_the_module_no_longer_imports_the_workspace_key():
+    source = (
+        __import__("pathlib").Path(secret.__file__).read_text(encoding="utf-8")
+    )
+    assert "workspace_store" not in source
+    assert "WORKSPACE_SECRET_KEY" not in source.split('"""', 2)[2]
+
+
+def test_console_writes_with_its_own_connection_not_the_vision_dsn():
+    from tybot.console import image_description_secret_admin as admin
+
+    source = __import__("inspect").getsource(admin._connect)
+    assert "DATABASE_URL" in source
+    assert "resolve_vision_database_url" not in source

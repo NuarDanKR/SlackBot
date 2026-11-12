@@ -181,3 +181,60 @@ def test_custom_current_bot_role_is_not_exempt_from_isolation(drift):
                                            privilege='SELECT', allowed=True, column_allowed=False)],
                                 roles=('custom_bot',))
     assert problems == [('custom_bot', 'archiver_vision_job', 'unexpected_select')]
+
+
+# --- 2026-11-12 보안 리뷰: provider 자격 표의 역할 분리 ------------------------
+
+SECRET = 'archiver_image_provider_secret'
+WORKER_SELECT = ['provider', 'ciphertext', 'enabled']
+MASTER = {
+    'SELECT': ['provider', 'mask', 'enabled', 'updated_by', 'updated_at'],
+    'INSERT': ['provider', 'ciphertext', 'mask', 'enabled', 'updated_by'],
+    'UPDATE': ['ciphertext', 'mask', 'enabled', 'updated_by', 'updated_at'],
+}
+
+
+def _secret_row(role, privilege, columns, allowed=False):
+    return dict(role_name=role, table_name=SECRET, privilege=privilege, allowed=allowed,
+                column_allowed=bool(columns), allowed_columns=columns)
+
+
+def test_split_provider_secret_grants_are_valid(drift):
+    rows = [_secret_row('tybot_vision', 'SELECT', WORKER_SELECT)]
+    rows += [_secret_row('tyslackai', priv, cols) for priv, cols in MASTER.items()]
+    assert check_access(drift, rows) == ([], True)
+
+
+@pytest.mark.parametrize('privilege', ['INSERT', 'UPDATE'])
+def test_the_worker_writing_provider_keys_is_drift(drift, privilege):
+    rows = [_secret_row('tybot_vision', 'SELECT', WORKER_SELECT),
+            _secret_row('tybot_vision', privilege, ['ciphertext'])]
+    problems, _ = check_access(drift, rows)
+    assert problems == [('tybot_vision', SECRET, 'unexpected_' + privilege.lower())]
+
+
+def test_the_worker_reading_masks_or_audit_columns_is_drift(drift):
+    rows = [_secret_row('tybot_vision', 'SELECT', [*WORKER_SELECT, 'mask'])]
+    problems, _ = check_access(drift, rows)
+    assert problems == [('tybot_vision', SECRET, 'unexpected_select')]
+
+
+def test_the_console_reading_ciphertext_is_drift(drift):
+    rows = [_secret_row('tyslackai', 'SELECT', [*MASTER['SELECT'], 'ciphertext'])]
+    rows += [_secret_row('tyslackai', priv, MASTER[priv]) for priv in ('INSERT', 'UPDATE')]
+    problems, _ = check_access(drift, rows)
+    assert problems == [('tyslackai', SECRET, 'unexpected_select')]
+
+
+def test_a_table_wide_master_grant_on_the_secret_is_drift(drift):
+    rows = [_secret_row('tyslackai', 'SELECT', MASTER['SELECT'], allowed=True)]
+    problems, _ = check_access(drift, rows)
+    assert ('tyslackai', SECRET, 'unexpected_select') in problems
+
+
+def test_master_still_has_no_access_to_other_vision_tables(drift):
+    problems, _ = check_access(drift, [dict(
+        role_name='tyslackai', table_name='archiver_image_description_job', privilege='SELECT',
+        allowed=False, column_allowed=True, allowed_columns=['id'],
+    )])
+    assert problems == [('tyslackai', 'archiver_image_description_job', 'unexpected_select')]

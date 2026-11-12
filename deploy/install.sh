@@ -501,6 +501,15 @@ if [[ "${WITH_CONSOLE:-0}" == "1" && ! -f "$WS_KEY_FILE" ]]; then
     | install -o tybot -g tybot -m 0400 /dev/stdin "$WS_KEY_FILE"
   echo "  → 워크스페이스 암호화 키 생성: $WS_KEY_FILE (백업 대상입니다)"
 fi
+# B-81 Vision provider 자격 **전용** 키. 워크스페이스 키와 나눈다 — Vision worker 가 Slack
+# 토큰 암호문을 풀 수 있는 키를 들고 돌지 않게(2026-11-12 보안 리뷰). 역시 덮지 않는다.
+VISION_KEY_FILE="$CONF_DIR/vision-provider-secret.key"
+if [[ ! -f "$VISION_KEY_FILE" ]]; then
+  "$APP_DIR/.venv/bin/python" \
+    -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" \
+    | install -o tybot -g tybot -m 0400 /dev/stdin "$VISION_KEY_FILE"
+  echo "  → Vision provider 자격 키 생성: $VISION_KEY_FILE (백업 대상입니다)"
+fi
 if [[ "${WITH_CONSOLE:-0}" == "1" ]] \
    && ! grep -qE "^WORKSPACE_SECRET_KEY(_FILE)?=.+" "$CONF_DIR/tybot.env"; then
   sed -i -E "/^WORKSPACE_SECRET_KEY_FILE=[[:space:]]*$/d" "$CONF_DIR/tybot.env"
