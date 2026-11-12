@@ -104,6 +104,24 @@ CREATE TABLE channel_day_digest (
 
 ## 7. 구현 순서 (이어받는 사람용)
 
+> **진행(2026-11-12, Claude):** §7-1 완료 — `deploy/sql/channel_day_digest_schema.sql`
+> (apply-schema 등록, 쓰기 그룹 `tybot_digest`·Master SELECT), `src/tybot/channel_digest.py`
+> (`collect_channel_days(root, workspace, channel_id)`·`revision`·`digest_id`·`render_input`),
+> `tests/test_channel_digest_input.py`.
+> §7-2 완료 — `src/tybot/channel_digest_build.py`(`generate`·`check_output`·`save`·
+> `current_revisions`), `tests/test_channel_digest_build.py`. 출력 검사는 모양·길이(넘으면
+> 버림)·숫자(원문에 있는 것만, `summary_review.NUMBER_RE` 와 같은 규칙)·마스킹→`pii_screen`.
+> **다음은 §7-3(배치 스크립트·timer, 설치 시 비활성).** 배치 DB 로그인 계정은 `tybot_digest`
+> 그룹의 멤버로 새로 만든다(Vision 계정과 같은 방식).
+>
+> 구현 중 정한 것:
+> - 아카이브 배치가 둘이라 채널 디렉터리가 아니라 **(workspace, channel_id)** 로 모은다 —
+>   `workspaces/<ws>/channels/<id>__*/raw`(수집기 v2)와 `<ws>/<id>__*/archive/raw`(Archiver).
+>   파일 머리의 workspace·channel_id 가 다르면 넣지 않는다
+> - 첨부 날짜는 **메시지 ts 의 KST 날짜**. ts 없는 첨부는 어느 날에도 넣지 않는다
+> - Master 는 SELECT 만 가지므로 §5 의 「질문 시 해시가 다르면 stale 표시」 는 **이번 질문에서
+>   쓰지 않기만** 하고, `stale_at` 표시는 배치가 한다
+
 1. 스키마 `deploy/sql/channel_day_digest_schema.sql`, 입력 수집과 지문
    (`src/tybot/channel_digest.py`), 순수 함수로 시험
 2. 생성: 프롬프트·출력 검사·저장. LLM 은 대역 router 로 시험

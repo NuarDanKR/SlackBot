@@ -49,6 +49,7 @@ FILES=(
   summary_review_schema.sql
   summary_review_canvas_schema.sql   # B-50. summary_review_candidate 를 참조한다
   summary_index_schema.sql    # B-89 승인 요약 키워드 색인·vector_state(parked)
+  channel_day_digest_schema.sql  # B-93 채널×일 검색 길잡이. 근거 아님, Master 읽기 전용
   llm_secret_schema.sql
   specialist_routing_schema.sql
   specialist_rules_schema.sql
