@@ -97,7 +97,7 @@ Q = "태영건설에서 2026년 연말까지 반드시 달성해야 할 재무�
 
 
 def test_focus_query_drops_request_words_and_latin_josa():
-    assert answer_module.focus_query(Q) == "태영건설 2026년 연말 달성해야 재무목표 top5"
+    assert answer_module.focus_query(Q) == "2026년 연말 달성해야 재무목표 top5"
     # 다 빼면 비는 질문은 원래 낱말을 쓴다.
     assert answer_module.focus_query("정리해줘") == "정리해줘"
 
@@ -231,7 +231,7 @@ def test_tybot_focuses_terms_and_passes_the_common_width():
     engine._store = SimpleNamespace(search=lambda q, ctx, **kw: seen.update(q=q, **kw) or [])
     assert engine._focus_terms is True and engine._exhaustive_search is False
     engine._search(answer_module.focus_query(Q), _ctx())
-    assert seen["q"] == "태영건설 2026년 연말 달성해야 재무목표 top5"
+    assert seen["q"] == "2026년 연말 달성해야 재무목표 top5"
     assert seen["per_document"] == 4 and seen["exhaustive_max_lines"] == 150_000
     # 질문 메아리를 거를 여유분을 더 받아 40줄로 자른다.
     assert seen["limit"] == 40 + answer_module._ECHO_SPARE

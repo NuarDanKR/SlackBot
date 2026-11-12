@@ -155,6 +155,10 @@ REQUEST_WORDS = frozenset({
     "반드시", "가능한", "가능하면", "자세히", "간단히",
 })
 
+#: 회사 이름은 거의 모든 문서에 있어 검색어로는 잡음이다(2026-11-12 실측: 「태영건설 근무규정」
+#: 이 사업법인관리 첨부를 끌어왔다). 질문이 회사 이름뿐이면 그대로 쓴다.
+COMPANY_WORDS = frozenset({"태영건설", "태영", "㈜태영건설", "(주)태영건설"})
+
 _LATIN_JOSA = re.compile(r"^([a-z0-9][a-z0-9.\-]*)(?:을|를|은|는|이|가|의|에|로|으로|와|과|도|만)$")
 
 
@@ -171,7 +175,7 @@ def focus_query(question: str) -> str:
     for token in tokens:
         match = _LATIN_JOSA.match(token)
         word = match.group(1) if match else token
-        if word not in REQUEST_WORDS:
+        if word not in REQUEST_WORDS and word not in COMPANY_WORDS:
             kept.append(word)
     return " ".join(dict.fromkeys(kept or tokens))
 
@@ -2422,8 +2426,11 @@ class AnswerEngine:
                 task=task,
             )
         else:
-            # advice 도 같은 길로 보낸다. 판단 요청이라고 범위를 넓히면 그 순간
-            # 이 질문은 더 이상 후속 질문이 아니다.
+            # **후속 질문도 범위에 갇히지 않는다**(2026-11-12 오너 결정, 설계 §10 폐기).
+            # 이어 묻는 사람은 맥락과 다른 제3의 질문을 할 수 있다. 「연말 현금시재」 를
+            # 「재무목표」 답의 40줄 안에서만 찾다가 근거 없음이 났다(이강석 14:17·14:19).
+            # 자기 낱말을 가진 질문은 현재 권한으로 새로 찾고, 이전 근거를 함께 둔다.
+            hits = self._widen_followup(q, ctx, intent, hits)
             ans = self.answer(
                 q, ctx, terms=list(intent.terms), evidence_hits=hits, task=task
             )
@@ -2520,6 +2527,53 @@ class AnswerEngine:
             ctx.workspace, len(hits), len({str(h.doc.path) for h in hits}), echoes, query,
         )
         return hits
+
+    def _widen_followup(self, question: str, ctx, intent, prior) -> list[SearchHit]:
+        """후속 질문 근거 = 이전 근거 중 이번 낱말에 맞는 줄 → 새 검색 → 나머지 이전 근거.
+
+        주제어가 없는 지칭(「방금 그거 표로」)은 이전 근거 그대로다 — 넓힐 낱말이 없다.
+        새 검색은 `self._search` 라 현재 권한(`visible_docs`)만 본다. 이전 답의 문장은 쓰지
+        않고 원문 줄만 더한다(원칙 1).
+        """
+        from . import search_index
+
+        terms = [t for t in (intent.terms or ()) if t]
+        if not terms:
+            return list(prior)
+        query = " ".join(terms)
+        if self._focus_terms:
+            query = focus_query(query)
+        try:
+            fresh = self._search(query, ctx)
+        except Exception:
+            logger.warning("후속 질문 재검색 실패 — 이전 근거로 답합니다", exc_info=True)
+            return list(prior)
+        tokens = search_index.tokens_of(query)
+
+        def _matches(hit) -> bool:
+            return bool(
+                tokens
+                and search_index.score_line(tokens, query, hit.line.speaker, hit.line.text)
+            )
+
+        def _key(hit):
+            return (str(hit.line.source_path or hit.doc.path), hit.line.lineno)
+
+        ordered = [h for h in prior if _matches(h)] + list(fresh)
+        ordered += [h for h in prior if not _matches(h)]
+        merged: list[SearchHit] = []
+        seen: set = set()
+        for hit in ordered:
+            key = _key(hit)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        limit = max(self._max_hits, len(prior))
+        logger.info(
+            "followup 재검색 ws=%s prior=%d fresh=%d merged=%d q=%r",
+            ctx.workspace, len(prior), len(fresh), min(len(merged), limit), query,
+        )
+        return merged[:limit]
 
     def _with_image_guide(self, query: str, hits, ctx) -> list[SearchHit]:
         """AI 이미지 설명·OCR 전사로 찾은 **사진의 원문 줄**을 검색 후보에 더한다 (B-81 후속).
