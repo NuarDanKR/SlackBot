@@ -115,6 +115,28 @@ def runtime_tokens(workspace: str, bot_key: str) -> tuple[str, str]:
     return bot_token, app_token
 
 
+def runtime_workspaces(bot_key: str, *, repo: BotRepo | None = None) -> list[str]:
+    """Return workspaces with a complete, verified, enabled Socket Mode pair.
+
+    This is deliberately a metadata-only discovery step.  Secrets are decrypted
+    one workspace at a time by :func:`runtime_tokens`, after the caller has
+    decided which runtimes to build.
+    """
+    rows = (repo or default_repo()).connections()
+    return sorted(
+        {
+            str(row.get("workspace") or "").strip().lower()
+            for row in rows
+            if str(row.get("bot_key") or "") == bot_key
+            and str(row.get("connector_type") or "") == "slack_socket"
+            and str(row.get("state") or "") == "enabled"
+            and row.get("identity_ok") is True
+            and int(row.get("token_count") or 0) == 2
+            and str(row.get("workspace") or "").strip()
+        }
+    )
+
+
 def verify_connection(
     workspace: str,
     bot_key: str,

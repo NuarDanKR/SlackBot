@@ -5061,6 +5061,50 @@ def _require_distinct_runtime_tokens(
         raise ConfigError("VIPBot Slack credentials duplicate a TYBot connection")
 
 
+def _vip_runtime_credentials(
+    configs: list[WorkspaceConfig],
+    *,
+    allowed_workspaces: set[str] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Load each verified VIPBot connection without coupling their failures."""
+    from ..console.bot_identity import runtime_tokens, runtime_workspaces
+
+    try:
+        workspaces = runtime_workspaces("vipbot")
+    except Exception as exc:
+        log.error("VIPBot connection discovery failed err=%s", type(exc).__name__)
+        return []
+
+    loaded: list[tuple[str, str, str]] = []
+    seen_bot_tokens: set[str] = set()
+    seen_app_tokens: set[str] = set()
+    for workspace in workspaces:
+        if allowed_workspaces is not None and workspace not in allowed_workspaces:
+            log.error(
+                "VIPBot connection ignored for unmanaged workspace ws=%s", workspace
+            )
+            continue
+        try:
+            bot_token, app_token = runtime_tokens(workspace, "vipbot")
+            _require_distinct_runtime_tokens(
+                configs, bot_token=bot_token, app_token=app_token
+            )
+        except Exception as exc:
+            log.error(
+                "VIPBot connection unavailable ws=%s err=%s",
+                workspace,
+                type(exc).__name__,
+            )
+            continue
+        if bot_token in seen_bot_tokens or app_token in seen_app_tokens:
+            log.error("VIPBot duplicate credentials ignored ws=%s", workspace)
+            continue
+        seen_bot_tokens.add(bot_token)
+        seen_app_tokens.add(app_token)
+        loaded.append((workspace, bot_token, app_token))
+    return loaded
+
+
 _external_v3_tool_server = None
 
 
@@ -5184,46 +5228,33 @@ def build_bots() -> list[WorkspaceBot]:
         live_bots[cfg.key] = bot
         bots.append(bot)
 
-    if _truthy(os.getenv("VIPBOT_SHARED_RUNTIME_ENABLED", "0")):
-        from ..console.bot_identity import runtime_tokens
-        from ..console.workspace_store import list_workspaces
-        from ..vip_profile import load_profile, question_for_engine
-        from ..vip_workspace import build_engine as build_vip_engine
-        from ..vip_workspace import context_resolver
+    from ..console.workspace_store import list_workspaces
+    from ..vip_profile import load_profile, question_for_engine
+    from ..vip_workspace import build_engine as build_vip_engine
+    from ..vip_workspace import context_resolver
 
-        vip_workspace = str(os.getenv("VIPBOT_WORKSPACE") or "").strip().lower()
-        if vip_workspace not in labels:
-            raise ConfigError(
-                "VIPBOT_WORKSPACE must name an existing managed workspace"
-            )
-        vip_bot_token, vip_app_token = runtime_tokens(vip_workspace, "vipbot")
-        _require_distinct_runtime_tokens(
-            configs, bot_token=vip_bot_token, app_token=vip_app_token
+    managed_labels = dict(labels)
+    try:
+        managed_labels.update(
+            {
+                str(row["key"]): str(row.get("label") or row["key"])
+                for row in list_workspaces()
+                if row.get("state") != "disabled"
+            }
         )
+    except Exception as exc:
+        log.warning(
+            "VIPBot workspace labels unavailable; active runtime labels only err=%s",
+            type(exc).__name__,
+        )
+    vip_connections = _vip_runtime_credentials(
+        configs, allowed_workspaces=set(managed_labels)
+    )
+    if vip_connections:
         vip_profile = load_profile()
-        managed_labels = dict(labels)
-        try:
-            managed_labels.update(
-                {
-                    str(row["key"]): str(row.get("label") or row["key"])
-                    for row in list_workspaces()
-                    if row.get("state") != "disabled"
-                }
-            )
-        except Exception as exc:
-            log.warning(
-                "VIPBot workspace labels unavailable; active runtime labels only err=%s",
-                type(exc).__name__,
-            )
         vip_qa_log = QALog(
             os.getenv("VIPBOT_QA_LOG_DIR", "/var/lib/tybot-vipbot/qa"),
             write_md=_truthy(os.getenv("QA_LOG_MD", "1")),
-        )
-        vip_cfg = WorkspaceConfig(
-            key=vip_workspace,
-            label=f"{labels[vip_workspace]} VIPBot",
-            bot_token=vip_bot_token,
-            app_token=vip_app_token,
         )
         vip_engine = build_vip_engine(
             store=store,
@@ -5236,24 +5267,31 @@ def build_bots() -> list[WorkspaceBot]:
                 external_v3_factory=external_v3_factory,
             ),
         )
-        vip_bot = WorkspaceBot(
-            vip_cfg,
-            store=store,
-            engine=vip_engine,
-            qa_log=vip_qa_log,
-            archive_dir=archive_dir,
-            request_context_resolver=context_resolver(vip_workspace),
-            question_transform=question_for_engine,
-            bot_name="vipbot",
-            realtime=False,
-            autojoin=False,
-            operational_owner=False,
-            private_answers=True,
-            answer_quota=answer_quota,
-        )
-        vip_bot.path_problems = problems
-        vip_bot.workspace_labels = managed_labels
-        bots.append(vip_bot)
+        for vip_workspace, vip_bot_token, vip_app_token in vip_connections:
+            vip_cfg = WorkspaceConfig(
+                key=vip_workspace,
+                label=f"{managed_labels[vip_workspace]} VIPBot",
+                bot_token=vip_bot_token,
+                app_token=vip_app_token,
+            )
+            vip_bot = WorkspaceBot(
+                vip_cfg,
+                store=store,
+                engine=vip_engine,
+                qa_log=vip_qa_log,
+                archive_dir=archive_dir,
+                request_context_resolver=context_resolver(vip_workspace),
+                question_transform=question_for_engine,
+                bot_name="vipbot",
+                realtime=False,
+                autojoin=False,
+                operational_owner=False,
+                private_answers=True,
+                answer_quota=answer_quota,
+            )
+            vip_bot.path_problems = problems
+            vip_bot.workspace_labels = managed_labels
+            bots.append(vip_bot)
     return bots
 
 

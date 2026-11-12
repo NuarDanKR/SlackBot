@@ -153,6 +153,13 @@ if [[ "$SCOPE" == "console" ]]; then
   exit 0
 fi
 
+# VIPBot is now a DB-discovered branch of the TYBot runtime.  A legacy
+# standalone process would open the same Socket Mode credentials twice and
+# split events between two consumers, so stop it before the shared runtime.
+if systemctl is-active --quiet tybot-vipbot.service 2>/dev/null; then
+  log "기존 단독 VIPBot을 중지하고 TYBot 공통 런타임으로 전환합니다"
+  systemctl stop tybot-vipbot.service
+fi
 systemctl restart tybot
 
 # 검토자를 지정해도 발송 타이머가 꺼져 있으면 아무 DM도 가지 않는다. 이 기능은

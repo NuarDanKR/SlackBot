@@ -696,7 +696,7 @@ def test_the_vip_branch_only_passes_configuration_to_the_common_bot():
     from tybot.slack import pilot
 
     source = inspect.getsource(pilot.build_bots)
-    branch = source[source.index("VIPBOT_SHARED_RUNTIME_ENABLED") :]
+    branch = source[source.index("vip_connections = _vip_runtime_credentials") :]
     for name in (
         "request_context_resolver",
         "question_transform",

@@ -967,6 +967,33 @@ PII 노출과 봇 출력 재수집 위험이 생긴다.
 
 ---
 
+## B-95
+### VIPBot 다중 워크스페이스 DB 연결
+
+**최우선 · 진행중 (Codex/2026-11-12) · 의존 B-83**
+
+공유 TYBot 런타임 안에서 VIPBot을 한 워크스페이스로 제한하던
+`VIPBOT_WORKSPACE` 선택을 제거한다. 콘솔 DB의 `bot_connection` 가운데
+`bot_key='vipbot'`, `state='enabled'`, `identity_ok=true`이고 bot/app 토큰 쌍이
+완전한 워크스페이스를 모두 기동한다.
+
+- 모델·답변 엔진·예산·QA 저장소는 같은 VIPBot 제품 분기로 공유한다.
+- Slack Socket Mode 연결과 요청 컨텍스트/권한 판정은 워크스페이스별로 분리한다.
+- 비활성·신원 미검증·토큰 불완전 연결은 기동하지 않는다.
+- 한 연결의 복호화·설정 오류는 해당 워크스페이스만 제외하고 TYBot과 다른 VIPBot
+  연결은 계속 기동한다.
+- TYBot 토큰과 같거나 다른 VIPBot 연결이 이미 쓰는 bot/app 토큰 중 하나라도
+  같으면 중복 Socket Mode 세션을 만들지 않는다.
+- 공유 런타임의 워크스페이스 정본은 DB다. `.env`의 `VIPBOT_WORKSPACE`는 더 이상
+  읽지 않는다. 기존 단독 `tybot-vipbot.service`는 호환을 위해 단일 워크스페이스
+  계약을 유지한다.
+
+완료 조건: `tyit`, `mgmt` 등 둘 이상의 검증된 VIPBot 연결이 한 TYBot 프로세스에서
+각각 Socket Mode 세션을 만들고, 한 연결 실패가 다른 연결을 막지 않으며, 각 요청이
+자기 워크스페이스의 사용자 권한과 DM 전달 정책을 적용한다.
+
+---
+
 ## B-80
 ### Archiver PDF와 HWP 복구 및 Vision 모델 관리
 **우선 높음 · 진행중 (Codex/2026-10-19) · 연계 B-46, B-65, B-73 · 콘솔 WC-21**

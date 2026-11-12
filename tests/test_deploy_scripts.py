@@ -26,6 +26,16 @@ def test_update_restarts_bot_after_install():
     assert script.index(install) < script.index(restart)
 
 
+def test_update_stops_the_legacy_vipbot_before_shared_runtime_restart():
+    script = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
+
+    stop = "systemctl stop tybot-vipbot.service"
+    restart = "systemctl restart tybot"
+    assert "systemctl is-active --quiet tybot-vipbot.service" in script
+    assert stop in script
+    assert script.index(restart, script.index(stop)) > script.index(stop)
+
+
 def test_install_hides_onboarding_hints_during_update():
     script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
 
