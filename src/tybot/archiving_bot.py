@@ -11,7 +11,14 @@ from pathlib import Path
 
 from slack_sdk.errors import SlackApiError
 
-from .archive import attachment_ack, channel_membership, ingest_ack, shadow_paths, writer
+from .archive import (
+    attachment_ack,
+    channel_membership,
+    image_description_notification,
+    ingest_ack,
+    shadow_paths,
+    writer,
+)
 from .archive.archiving_state import IngestState
 from .archive.attachment_writer import raw_lines_for
 from .archive.attachment_writer import write_docs as write_attachment_docs
@@ -41,6 +48,28 @@ class ArchiverWorkspace:
     allowed_channels: frozenset[str]
     separate_attachments: bool = False
     bot_user_id: str = ""
+
+
+def deliver_image_description_notice(client, cfg: ArchiverWorkspace, notice) -> bool:
+    """Post only a fixed completion status after a current membership check."""
+    if notice.channel_id not in cfg.allowed_channels:
+        log.warning("[%s] image notice discarded: unregistered channel=%s", cfg.key, notice.channel_id)
+        return True
+    try:
+        info = client.conversations_info(channel=notice.channel_id).get("channel") or {}
+        if not info.get("is_member"):
+            log.warning("[%s] image notice discarded: not a member channel=%s", cfg.key, notice.channel_id)
+            return True
+        client.chat_postMessage(
+            channel=notice.channel_id,
+            thread_ts=notice.message_ts,
+            text=notice.text,
+            client_msg_id=notice.client_msg_id,
+        )
+        return True
+    except SlackApiError:
+        log.warning("[%s] image notice delivery deferred channel=%s", cfg.key, notice.channel_id)
+        return False
 
 
 def validate_slack_identity(cfg: ArchiverWorkspace, identity: dict) -> None:
@@ -741,6 +770,16 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
             cfg.key, recovered["applied"], recovered["left"],
         )
 
+    def image_notice_loop() -> None:
+        while not stop.is_set():
+            outcome = image_description_notification.drain(
+                cfg.key, lambda notice: deliver_image_description_notice(app.client, cfg, notice)
+            )
+            if outcome["sent"] or outcome["invalid"]:
+                log.info("[%s] image notice outbox sent=%s left=%s invalid=%s", cfg.key,
+                         outcome["sent"], outcome["left"], outcome["invalid"])
+            stop.wait(15)
+
     @app.event("message")
     def on_message(event, client):
         try:
@@ -757,6 +796,11 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         target=_membership_sync_loop,
         args=(app.client, repo, cfg.key, stop, interval),
         name=f"archiver-membership-{cfg.key}",
+        daemon=True,
+    )
+    notice_thread = threading.Thread(
+        target=image_notice_loop,
+        name=f"archiver-image-notice-{cfg.key}",
         daemon=True,
     )
     dm_thread = None
@@ -791,6 +835,7 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
             daemon=True,
         )
     sync_thread.start()
+    notice_thread.start()
     if dm_thread is not None:
         dm_thread.start()
     if backfill_thread is not None:
@@ -800,6 +845,7 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     finally:
         stop.set()
         sync_thread.join(timeout=1)
+        notice_thread.join(timeout=1)
         if dm_thread is not None:
             dm_thread.join(timeout=1)
         if backfill_thread is not None:

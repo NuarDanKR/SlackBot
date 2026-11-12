@@ -116,11 +116,12 @@ class ManagedStore(Store):
 
 
 def _run(monkeypatch, docs=None, store=None, **over):
+    dispatch_result = over.pop(
+        "dispatch_result", ImageDescriptionRun("job-1", "published", revision_id="revision-1")
+    )
     monkeypatch.setattr(
         "tybot.archive.image_description_coordinator.dispatch_reserved_image",
-        lambda *_args, **_kwargs: ImageDescriptionRun(
-            "job-1", "published", revision_id="revision-1"
-        ),
+        lambda *_args, **_kwargs: dispatch_result,
     )
     args = {
         "workspace": "tyit",
@@ -138,6 +139,32 @@ def _run(monkeypatch, docs=None, store=None, **over):
     }
     args.update(over)
     return run_approved_batch([_doc()] if docs is None else docs, **args)
+
+
+def test_published_revision_enqueues_only_a_coordinate_completion_notice(monkeypatch):
+    noticed = []
+    batch = _run(
+        monkeypatch,
+        docs=[_doc(message_ts="1700000000.123456")],
+        completion_notifier=noticed.append,
+    )
+
+    assert batch.items[0].revision_id == "revision-1"
+    assert noticed == [batch.items[0]]
+    assert noticed[0].message_ts == "1700000000.123456"
+
+
+def test_no_revision_never_enqueues_a_completion_notice(monkeypatch):
+    noticed = []
+
+    _run(
+        monkeypatch,
+        docs=[_doc(message_ts="1700000000.123456")],
+        completion_notifier=noticed.append,
+        dispatch_result=ImageDescriptionRun("job-1", "closed_without_revision"),
+    )
+
+    assert noticed == []
 
 
 def test_an_approved_candidate_is_reserved_then_dispatched(monkeypatch):

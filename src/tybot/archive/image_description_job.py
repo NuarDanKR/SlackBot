@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 from collections import Counter
@@ -16,6 +17,7 @@ from tybot.lock import AlreadyRunning, LockUnavailable, instance_lock
 
 from .attachment_reader import all_revisions
 from .image_description_coordinator import run_cleared_batch
+from .image_description_notification import ImageDescriptionNotice, enqueue
 from .image_description_runtime import (
     ImageDescriptionRuntimeStatus,
     failed_status,
@@ -25,6 +27,7 @@ from .image_description_secret import resolve_provider_key
 from .image_description_store import ImageDescriptionStore
 
 _WORKSPACE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+log = logging.getLogger("tybot.archive.image_description_job")
 _SAFE_CODES = {
     "runtime_busy",
     "runtime_config_invalid",
@@ -143,6 +146,17 @@ def run_once(
             cost_path=runtime_root / "image-description" / "cost-state.json",
             api_key=api_key,
         )
+        def notify(item) -> None:
+            # The worker owns no Slack token.  Store only fixed status and
+            # source coordinates for the Archiver's later delivery.
+            queued = enqueue(ImageDescriptionNotice(
+                job_id=item.job_id,
+                workspace=item.workspace,
+                channel_id=item.channel_id,
+                message_ts=item.message_ts,
+            ), root=runtime_root)
+            if not queued:
+                log.warning("image completion notice was not queued ws=%s job=%s", item.workspace, item.job_id)
         batch = run_cleared_batch(
             revisions(archive_root),
             workspace=workspace,
@@ -152,6 +166,7 @@ def run_once(
             dispatch_expires_at=current + timedelta(seconds=DISPATCH_TTL_SECONDS),
             now=current,
             limit=limit,
+            completion_notifier=notify,
         )
     return _summary(workspace, policy.revision, batch)
 

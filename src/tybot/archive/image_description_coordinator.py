@@ -6,6 +6,7 @@ one-shot worker 실행을 순서대로 잇는다. 이 모듈은 승인을 만들
 """
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -34,6 +35,7 @@ class ImageDescriptionBatchItem:
     channel_id: str
     file_id: str
     state: str
+    message_ts: str = ""
     code: str = ""
     job_id: str = ""
     revision_id: str = ""
@@ -67,6 +69,7 @@ def _item(
         workspace=candidate.workspace,
         channel_id=candidate.channel_id,
         file_id=candidate.file_id,
+        message_ts=candidate.message_ts,
         state=state,
         code=code,
         job_id=job_id,
@@ -111,6 +114,7 @@ def run_approved_batch(
     approval_id_for,
     checks_for,
     dispatch_expires_at: datetime,
+    completion_notifier=None,
     limit: int = 50,
 ) -> ImageDescriptionBatch:
     """현재 정본에서 승인된 후보만 한 번씩 실행한다.
@@ -199,15 +203,20 @@ def run_approved_batch(
                 )
             )
             continue
-        items.append(
-            _item(
-                candidate,
-                run.state,
-                code=run.code,
-                job_id=run.job_id,
-                revision_id=run.revision_id,
-            )
+        item = _item(
+            candidate,
+            run.state,
+            code=run.code,
+            job_id=run.job_id,
+            revision_id=run.revision_id,
         )
+        items.append(item)
+        # Notification is only an acknowledgement of an already-published
+        # search projection.  It never changes the worker result and cannot
+        # cause a second provider call when its local outbox is unavailable.
+        if run.revision_id and candidate.message_ts and completion_notifier is not None:
+            with contextlib.suppress(Exception):
+                completion_notifier(item)
 
     return ImageDescriptionBatch(
         selected=len(selection.candidates),
@@ -227,6 +236,7 @@ def run_cleared_batch(
     dispatch_expires_at: datetime,
     now: datetime,
     limit: int = 50,
+    completion_notifier=None,
 ) -> ImageDescriptionBatch:
     """DB 정책과 사람 안전 판정을 다시 읽어 승인된 원본만 실행한다.
 
@@ -300,6 +310,7 @@ def run_cleared_batch(
         approval_id_for=approval_id_for,
         checks_for=checks_for,
         dispatch_expires_at=dispatch_expires_at,
+        completion_notifier=completion_notifier,
         limit=limit,
     )
 

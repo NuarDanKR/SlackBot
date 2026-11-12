@@ -35,5 +35,5 @@ ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true
 ReadOnlyPaths=/var/lib/tybot/archive
-ReadWritePaths=/var/lib/tybot/image-description
+ReadWritePaths=/var/lib/tybot/image-description /var/lib/tybot/image-description-notify
 
