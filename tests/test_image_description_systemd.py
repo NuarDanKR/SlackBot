@@ -11,8 +11,15 @@ def test_worker_unit_uses_dedicated_credential_and_hardening():
     # 2026-11-12 보안 리뷰: worker 는 Vision 전용 키만 받는다. 워크스페이스 토큰 키는 없다.
     assert "VISION_PROVIDER_SECRET_KEY_FILE=/etc/tybot/vision-provider-secret.key" in unit
     assert "WORKSPACE_SECRET_KEY" not in "\n".join(
-        line for line in unit.splitlines() if not line.lstrip().startswith("#")
+        line
+        for line in unit.splitlines()
+        if not line.lstrip().startswith("#") and not line.startswith("UnsetEnvironment=")
     )
+    # archiver.env 에서 들어오는 워크스페이스 키·Master DB 접속은 지우고, 키 파일은 가린다.
+    unset = next(line for line in unit.splitlines() if line.startswith("UnsetEnvironment="))
+    for name in ("WORKSPACE_SECRET_KEY_FILE", "WORKSPACE_SECRET_KEY", "DATABASE_URL", "PGPASSFILE"):
+        assert name in unset.split("=", 1)[1].split()
+    assert "InaccessiblePaths=-/etc/tybot/workspace-secret.key" in unit
     assert "EnvironmentFile=/etc/tybot/archiver.env" in unit
     assert "--workspace %i" in unit
     assert "ProtectSystem=strict" in unit
