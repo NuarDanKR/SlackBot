@@ -14,6 +14,11 @@ WorkingDirectory=/opt/tybot
 # 콘솔 전용 값(CONSOLE_USERS 등)도 같은 파일에 둔다.
 EnvironmentFile=/etc/tybot/tybot.env
 
+# B-81 이미지 설명 화면은 Vision 전용 계정으로만 붙는다(`console/vision_dsn.py`).
+# DATABASE_URL 로 내려가지 않으므로 이 경로가 없으면 화면이 vision_database_credential_*
+# 로 실패한다. 값이 아니라 0600 tybot 파일 경로만 넘긴다(systemd 239: LoadCredential 없음).
+Environment=TYBOT_VISION_DATABASE_URL_FILE=/etc/tybot/tybot-vision-database-url
+
 # 루프백에만 연다 (B-35, 2026-09-22).
 #
 # 2026-09-01 부터 `--host 0.0.0.0` 로 사내망 전체에 평문으로 열려 있었다. 로그인

@@ -96,11 +96,13 @@ if [[ "$MODE" == plan ]]; then
 
 DSN 은 **URI 형식**이고 접속 user 가 $ROLE_RUNTIME 이어야 한다. 콘솔이 구조로
 확인하고 다르면 거절한다 — 글자가 달라도 관리자 계정으로 붙으면 소용없다.
-  postgresql://$ROLE_RUNTIME:<비밀번호>@/$DB?host=/run/postgresql&port=$PORT
+  postgresql://$ROLE_RUNTIME:<비밀번호>@127.0.0.1:$PORT/$DB
   (host=… user=… 키워드 형식은 받지 않는다. ?user= 로 덮어쓴 것도 거절한다)
+  **소켓(host=/run/postgresql)으로 적지 않는다.** 소켓은 peer 인증이라 OS 계정
+  tybot 과 DB 계정 이름이 달라 「Peer authentication failed」 가 난다(2026-11-12 실측).
+  비밀번호 인증을 쓰는 TCP 루프백으로 붙는다. 비밀번호 특수문자는 URL 인코딩한다.
 
-콘솔 서비스에는 둘 중 하나로 넘긴다:
-  LoadCredential=tybot-vision-database-url:/etc/tybot/tybot-vision-database-url
+콘솔·worker unit 은 파일 경로를 넘긴다(Rocky 8 systemd 239 에는 LoadCredential= 이 없다):
   TYBOT_VISION_DATABASE_URL_FILE=/etc/tybot/tybot-vision-database-url
 
 확인:
