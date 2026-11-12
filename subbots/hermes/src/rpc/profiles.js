@@ -5,9 +5,14 @@
  * {
  *   "tyit": { "domain": "pf-construction", "api_key_file": "/etc/hermes-rpc-shared/keys/tyit" },
  *   "mgmt": { "domain": "enterprise",      "api_key_file": "/etc/hermes-rpc-shared/keys/mgmt",
- *             "model": "claude-opus-5-5", "effort": "high" }
+ *             "model": "claude-sonnet-5-5", "effort": "high",
+ *             "allowed_models": ["claude-sonnet-5-5", "claude-opus-5-5"] }
  * }
  * ```
+ *
+ * `allowed_models`(선택, 2026-11-12): 요청이 `model` 로 고를 수 있는 모델. 봇 등급마다 다르게
+ * 부른다 — TYBot 은 Sonnet, VIPBot 은 Opus. `model` 은 요청이 안 고를 때의 기본값이고 늘
+ * 허용된다. 목록 밖 모델을 요청하면 기본값으로 바꾸지 않고 400 이다.
  *
  * ## 허용 목록이 **서버 쪽에 있다**
  *
@@ -41,8 +46,8 @@ export const WORKSPACE_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const FORBIDDEN_KEYS = ['api_key', 'apikey', 'apiKey', 'key', 'secret', 'token', 'password'];
 
 /** 쓸 수 있는 필드. 모르는 필드는 거절한다 — 오타가 조용히 무시되면 설정이 거짓말을 한다. */
-const ALLOWED_KEYS = ['domain', 'api_key_file', 'model', 'effort', 'max_tokens', 'max_iterations',
-  'review_model', 'review_max_tokens', 'review_effort'];
+const ALLOWED_KEYS = ['domain', 'api_key_file', 'model', 'allowed_models', 'effort', 'max_tokens',
+  'max_iterations', 'review_model', 'review_max_tokens', 'review_effort'];
 
 export class ProfilesError extends Error {
   constructor(message) {
@@ -166,6 +171,13 @@ export function loadProfiles(file, { read = fs.readFileSync, readKey = readApiKe
       const apiKey = readKey(keyFile);
 
       const model = String(entry.model || 'claude-opus-5-5').trim();
+      // 호출자가 고를 수 있는 모델(2026-11-12). TYBot 은 Sonnet, VIPBot 은 Opus 를 보낸다.
+      // 없으면 지금처럼 `model` 하나만 받는다 — 목록을 넣기 전까지 동작이 바뀌지 않는다.
+      const allowedModels = entry.allowed_models === undefined ? [] : entry.allowed_models;
+      if (!Array.isArray(allowedModels)
+        || allowedModels.some((id) => typeof id !== 'string' || !/^[a-z0-9][a-z0-9.-]{0,63}$/.test(id))) {
+        throw new ProfilesError('`allowed_models` 는 모델 id 문자열 배열이어야 합니다.');
+      }
       const effort = String(entry.effort || 'high').trim();
       const maxTokens = entry.max_tokens === undefined ? 8000 : Number(entry.max_tokens);
       const maxIterations = entry.max_iterations === undefined ? 12 : Number(entry.max_iterations);
@@ -181,6 +193,7 @@ export function loadProfiles(file, { read = fs.readFileSync, readKey = readApiKe
         apiKey,
         apiKeyFile: keyFile,
         model: Object.freeze({ id: model, maxTokens, effort }),
+        allowedModels: Object.freeze([...new Set(allowedModels)]),
         reviewModel: reviewModelFor({ id: model }, {
           model: entry.review_model, maxTokens: entry.review_max_tokens, effort: entry.review_effort,
         }),

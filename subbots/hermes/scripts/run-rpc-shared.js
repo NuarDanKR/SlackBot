@@ -69,6 +69,7 @@ export function answererFor(profile, { toolSocketPath, secret, console: log }) {
     // 사내 사람에게 「사업장」 이라고 말하게 된다.
     renderPrompt: ({ maxOutputChars }) => renderRpcPrompt({ domain: profile.domain, maxOutputChars }),
     model: profile.model,
+    allowedModels: profile.allowedModels || [],
     maxIterations: profile.maxIterations,
     terms: lazyTerms(profile.domain),
     console: log,

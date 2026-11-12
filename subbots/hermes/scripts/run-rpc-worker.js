@@ -52,6 +52,7 @@ export function wireWorker(cfg, { toolSocketPath = TOOL_SOCKET_PATH, console: lo
     }),
     renderPrompt: ({ maxOutputChars }) => renderRpcPrompt({ domain: cfg.domain, maxOutputChars }),
     model: cfg.model,
+    allowedModels: cfg.allowedModels || [],
     maxIterations: cfg.maxIterations,
     terms,
     console: log,

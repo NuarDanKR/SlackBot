@@ -60,6 +60,8 @@ export const STATUSES = Object.freeze([
 
 /** 근거 ID 모양. 저쪽 `_EVIDENCE_ID_RE` 와 같다 — broker 가 `e1` 부터 센다. */
 export const EVIDENCE_ID_RE = /^e[0-9]{1,4}$/;
+/** 요청이 고를 수 있는 모델 id 모양. **고를 수 있는 값은 서버 허용 목록이 정한다** — 여기는 모양만. */
+export const MODEL_ID_RE = /^[a-z0-9][a-z0-9.-]{0,63}$/;
 
 /**
  * 응답 본문에 있으면 **우리가 먼저 버린다.**
@@ -182,6 +184,13 @@ export function parseAnswerRequest(raw) {
   ]) {
     if (!value) throw new WireViolation(`요청에 ${name} 이 없습니다.`);
   }
+  // 호출자가 고른 모델(선택). 봇 등급마다 다른 모델을 쓴다 — TYBot 은 Sonnet, VIPBot 은
+  // Opus(2026-11-12 오너 결정). 키·domain 은 여전히 요청이 고르지 못한다. 모델도 서버
+  // 프로필의 `allowed_models` 안에서만 받는다(`server.js` 가 대조).
+  const model = str(payload.model).trim();
+  if (payload.model !== undefined && !MODEL_ID_RE.test(model)) {
+    throw new WireViolation('요청의 model 모양이 올바르지 않습니다.');
+  }
 
   const tools = payload.tools;
   if (!tools || typeof tools !== 'object') throw new WireViolation('요청에 tools 가 없습니다.');
@@ -231,7 +240,7 @@ export function parseAnswerRequest(raw) {
   const budget = tools.budget && typeof tools.budget === 'object' ? tools.budget : {};
 
   return Object.freeze({
-    requestId, workspace, authorizationId, question, token,
+    requestId, workspace, authorizationId, question, token, model,
     allow: Object.freeze(allow),
     evidence: Object.freeze(evidence),
     followUp: Object.freeze(followUp),

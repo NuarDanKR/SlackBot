@@ -197,6 +197,14 @@ export function createRpcServer({
       return fail(res, 400);
     }
 
+    /* **요청 모델은 서버 허용 목록 안에서만** 받는다(2026-11-12). 밖이면 조용히 기본
+     * 모델로 바꾸지 않고 거절한다 — 바꾸면 VIPBot 이 Opus 를 골랐는데 Sonnet 이 답해도
+     * 아무도 모르고, 등급 설정이 틀린 사실이 드러나지 않는다. */
+    if (!isReview && request.model && !forThis.allowsModel?.(request.model)) {
+      log?.warn?.(`[rpc] 허용되지 않은 모델 요청을 거절했습니다: ${request.workspace} ${request.model}`);
+      return fail(res, 400);
+    }
+
     /* **Q&A 와 검토가 같은 `inFlight` 를 쓴다.** 둘을 나누면 같은 `request_id` 가
      * 양쪽에 하나씩 들어올 수 있고, 그때 취소는 둘 중 하나만 끊는다 — 어느 쪽인지는
      * 부르는 쪽이 모른다(인계 §request_id 중복 거절·취소 공유). */
