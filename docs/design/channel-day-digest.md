@@ -115,7 +115,11 @@ CREATE TABLE channel_day_digest (
 > `scripts/build_channel_digests.py`(기본 dry-run, `--apply`·`--since/--until`·`--max-calls`),
 > `deploy/tybot-channel-digest.service/.timer`(04:10, 설치만·**켜지 않음**, 콘솔 타이머 목록 포함),
 > `tests/test_channel_digest_batch.py`. 모델 `claude-haiku-4-5`, 하루 비용 상한
-> `TYBOT_DIGEST_DAILY_LIMIT_USD`(기본 $5). **다음은 §7-4(`digest_guide` 와 AnswerEngine 연결).**
+> `TYBOT_DIGEST_DAILY_LIMIT_USD`(기본 $5).
+> §7-4 완료 — `src/tybot/digest_guide.py`(`expand`), `AnswerEngine._with_digest_guide`
+> (승인 요약 길잡이 뒤·사진 길잡이 앞, 모든 봇 공통·항상 켜짐 — 표가 없거나 DB 실패면 빈 목록),
+> `tests/test_digest_guide.py`. 줄 점수에 다이제스트 terms 를 더해 낱말이 달라도 그날 줄을
+> 고른다(terms 는 고르는 데만, 답변에 안 실림). **다음은 §7-5(콘솔 API·화면: 대상·분량 미리보기·소급).**
 >
 > 서버 준비(§7-6 전에, 한 번):
 > 1. 스키마 적용 `sudo /opt/tybot/deploy/apply-schema.sh`

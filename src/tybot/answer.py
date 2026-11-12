@@ -2547,6 +2547,34 @@ class AnswerEngine:
             )
         return merged[: self._max_hits + summary_guide.MAX_EXTRA_HITS]
 
+    def _with_digest_guide(self, query: str, hits, ctx) -> list[SearchHit]:
+        """채널×일 다이제스트가 가리킨 날의 **원문 줄**을 검색 후보 뒤에 더한다(B-93 2단계).
+
+        질문 낱말과 문서 낱말이 다를 때(재무목표↔경영목표) 그날 원문을 찾게 한다. 다이제스트
+        문장은 근거로 나가지 않는다 — 더해지는 것은 현재 권한으로 연 원문 줄이다.
+        """
+        from . import digest_guide
+
+        try:
+            extra = digest_guide.expand(self._store, ctx, query)
+        except Exception:
+            logger.warning("다이제스트 길잡이를 쓰지 못했습니다", exc_info=True)
+            return list(hits)
+        if not extra:
+            return list(hits)
+        merged = list(hits)
+        seen = {(str(h.line.source_path or h.doc.path), h.line.lineno) for h in merged}
+        for hit in extra:
+            key = (str(hit.line.source_path or hit.doc.path), hit.line.lineno)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        if len(merged) > len(hits):
+            logger.info(
+                "다이제스트 길잡이로 원문 %d줄을 더했다 ws=%s", len(merged) - len(hits), ctx.workspace,
+            )
+        return merged[: len(hits) + digest_guide.MAX_EXTRA_HITS]
+
     def _search(self, query: str, ctx) -> list[SearchHit]:
         """엔진 설정(전수 탐색·문서당 상한)을 적용한 검색. 기본 설정이면 예전과 같다."""
         if (
@@ -2690,6 +2718,7 @@ class AnswerEngine:
                     if hits:
                         query = retry
             hits = self._with_approved_guide(query, hits, ctx)
+            hits = self._with_digest_guide(query, hits, ctx)
             hits = self._with_image_guide(query, hits, ctx)
             # 방금 올린 첨부는 **검색 앞에** 둔다. 검색어가 파일 내용과 어긋나도
             # 빠지면 안 되는 근거다 — 사람은 그 파일을 보고 물었다(B-57 §4).
