@@ -114,6 +114,39 @@ def _with_user_memory(prompt: str, ctx: RequestContext) -> str:
     return f"{prompt}\n\n{memory}" if memory else prompt
 
 
+#: 검색어에서 뺄 **요청 표현**. 답의 모양을 말할 뿐 무엇을 찾는지는 말하지 않는다.
+#: 남겨 두면 「정리」·「표」·「설명」 이 많이 든 문서가 근거 자리를 차지한다(2026-11-12
+#: VIPBot 실측: 같은 질문이 새 ESG 문서에 밀려 재무목표 문서를 놓쳤다).
+REQUEST_WORDS = frozenset({
+    "정리", "정리해", "정리해서", "정리해줘", "정리해주세요",
+    "표", "표로", "표로서",
+    "설명", "설명해", "설명해줘", "설명해주세요", "설명하라",
+    "알려줘", "알려주세요", "말해줘", "보여줘", "찾아줘", "작성해", "작성해줘", "작성해주세요",
+    "요약", "요약해", "요약해줘", "요약해주세요", "해주세요", "해줘", "주세요",
+    "반드시", "가능한", "가능하면", "자세히", "간단히",
+})
+
+_LATIN_JOSA = re.compile(r"^([a-z0-9][a-z0-9.\-]*)(?:을|를|은|는|이|가|의|에|로|으로|와|과|도|만)$")
+
+
+def focus_query(question: str) -> str:
+    """검색에 쓸 낱말만. 요청 표현을 빼고, `top5를` 같은 영문·숫자 뒤 조사를 뗀다.
+
+    다 빼면 아무것도 안 남는 질문(「정리해줘」)은 원래 낱말을 그대로 쓴다 — 검색어가
+    비면 「근거 없음」 이 된다.
+    """
+    from . import search_index
+
+    tokens = search_index.tokens_of(question)
+    kept = []
+    for token in tokens:
+        match = _LATIN_JOSA.match(token)
+        word = match.group(1) if match else token
+        if word not in REQUEST_WORDS:
+            kept.append(word)
+    return " ".join(dict.fromkeys(kept or tokens))
+
+
 def _response_cache_scope(
     ctx: RequestContext,
     hits,
@@ -1203,6 +1236,8 @@ class AnswerEngine:
         max_output_tokens: int | None = None,
         workspace_labels: Mapping[str, str] | None = None,
         response_cache_namespace: str = "tybot",
+        exhaustive_search: bool = False,
+        per_document_hits: int = 0,
     ) -> None:
         self._store = store
         self._router = router
@@ -1236,6 +1271,11 @@ class AnswerEngine:
         self._sensitivity = sensitivity
         self._max_hits = max_hits
         self._max_lines_per_channel = max_lines_per_channel
+        # 전수 탐색(색인 후보 창을 거치지 않고 보이는 문서 전부를 점수 매김)과 문서당
+        # 근거 줄 상한. VIPBot 이 켠다 — 근거 채널이 관리자가 고른 집합이라 훑을 범위가
+        # 정해져 있고, 「근거 없음」 이 가장 비싼 실패다.
+        self._exhaustive_search = bool(exhaustive_search)
+        self._per_document_hits = max(0, int(per_document_hits))
 
     def _output_limit(self, default: int) -> int:
         configured = self._max_output_tokens
@@ -2386,6 +2426,20 @@ class AnswerEngine:
             )
         return merged[: self._max_hits + summary_guide.MAX_EXTRA_HITS]
 
+    def _search(self, query: str, ctx) -> list[SearchHit]:
+        """엔진 설정(전수 탐색·문서당 상한)을 적용한 검색. 기본 설정이면 예전과 같다."""
+        if not self._exhaustive_search and not self._per_document_hits:
+            return self._store.search(query, ctx, limit=self._max_hits)
+        hits = self._store.search(
+            query, ctx, limit=self._max_hits,
+            exhaustive=self._exhaustive_search, per_document=self._per_document_hits,
+        )
+        logger.info(
+            "answer 전수 탐색 ws=%s hits=%d docs=%d q=%r",
+            ctx.workspace, len(hits), len({str(h.doc.path) for h in hits}), query,
+        )
+        return hits
+
     def _with_image_guide(self, query: str, hits, ctx) -> list[SearchHit]:
         """AI 이미지 설명·OCR 전사로 찾은 **사진의 원문 줄**을 검색 후보에 더한다 (B-81 후속).
 
@@ -2441,14 +2495,17 @@ class AnswerEngine:
         else:
             # 2겹: 색인이 아니라 원문 라인을 연다.
             query = " ".join(terms) if terms else q
-            hits = self._store.search(query, ctx, limit=self._max_hits)
+            if self._exhaustive_search:
+                # 요청 표현(「정리해·표로·설명해주세요」)은 찾을 대상이 아니다.
+                query = focus_query(query)
+            hits = self._search(query, ctx)
             if not hits and terms:
                 # 분류기가 고른 핵심어가 문서 표현과 어긋나면 0건이 된다. 사람이 쓴
                 # 질문에는 다른 낱말이 더 있다 — 「근거 없음」 으로 닫기 전에 그 낱말로
                 # **같은 권한 범위에서** 한 번 더 찾는다. 범위는 넓히지 않는다.
                 retry = _question_retry_query(q, terms)
                 if retry:
-                    hits = self._store.search(retry, ctx, limit=self._max_hits)
+                    hits = self._search(retry, ctx)
                     logger.info(
                         "answer 핵심어 0건 -> 질문 낱말로 재검색 terms=%r hits=%d ws=%s",
                         terms, len(hits), ctx.workspace,
