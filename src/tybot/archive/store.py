@@ -1158,6 +1158,7 @@ class ArchiveStore:
         channels: frozenset[str] | None = None,
         exhaustive: bool = False,
         per_document: int = 0,
+        exhaustive_max_lines: int = 0,
     ) -> list[SearchHit]:
         """근거 줄 찾기. 색인(DB)을 먼저 보고, 못 보면 파일을 훑는다.
 
@@ -1167,6 +1168,10 @@ class ArchiveStore:
 
         `per_document` 가 0 보다 크면 한 문서가 차지하는 줄 수를 그만큼으로 묶는다.
         한 문서가 상위 자리를 독차지하면, 같은 질문에 답이 될 다른 문서가 밀려난다.
+
+        `exhaustive_max_lines` 가 0 보다 크면 **보이는 채널 원문 줄 수가 그 이하일 때만**
+        전수 탐색으로 간다(B-93). 범위가 아카이브 전체인 질문(임원·전체 권한)을 매번 파이썬으로
+        다 훑으면 수 초~수십 초가 걸리고 메모리가 터진 적이 있다(2026-11-02).
 
         **권한은 여기서, 코드가 판정한다**(`visible_docs`). 색인에는 이미 통과한
         채널 목록만 넘긴다 — 판정을 SQL 로 옮기면 ACL 이 두 곳으로 갈라진다(원칙 3).
@@ -1188,6 +1193,13 @@ class ArchiveStore:
             # 먼저 권한을 적용한 문서에서 범위를 더 좁힌다. 반대로 이 인자로
             # visible_docs 밖 문서를 열 수는 없다.
             docs = [doc for doc in docs if doc.channel in channels]
+        if not exhaustive and exhaustive_max_lines > 0:
+            visible_lines = sum(len(doc.raw_lines) for doc in docs)
+            exhaustive = visible_lines <= exhaustive_max_lines
+            logger.info(
+                "검색 경로 %s visible_lines=%d max=%d",
+                "전수" if exhaustive else "색인", visible_lines, exhaustive_max_lines,
+            )
         if exhaustive:
             return self._scan_attachment_fallback(
                 query, tokens, docs, ctx, limit, channels, per_document=per_document

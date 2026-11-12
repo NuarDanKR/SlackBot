@@ -40,7 +40,13 @@ from .. import (
     summary_review,
 )
 from ..access import RequestContext
-from ..answer import Answer, AnswerEngine
+from ..answer import (
+    BOT_MAX_HITS,
+    BOT_PER_DOCUMENT_HITS,
+    Answer,
+    AnswerEngine,
+    exhaustive_max_lines,
+)
 from ..archive import writer
 from ..archive.attachment_writer import raw_lines_for
 from ..archive.attachment_writer import write_docs as write_attachment_docs
@@ -5151,6 +5157,11 @@ def build_bots() -> list[WorkspaceBot]:
             external_v3_factory=external_v3_factory,
         ),
         allow_master_business_answers=lambda ctx: master_v2_enabled(ctx.workspace),
+        # B-93: 근거 폭. 문서당 상한·검색어 정리·근거 40줄. 보이는 범위가 작으면 전수 탐색.
+        max_hits=BOT_MAX_HITS,
+        per_document_hits=BOT_PER_DOCUMENT_HITS,
+        exhaustive_max_lines=exhaustive_max_lines(),
+        focus_terms=True,
     )
     answer_quota = AnswerQuota.from_env()
 

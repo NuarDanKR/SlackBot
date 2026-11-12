@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from collections import Counter
 from collections.abc import Mapping
@@ -112,6 +113,28 @@ class AnswerPrompts:
 def _with_user_memory(prompt: str, ctx: RequestContext) -> str:
     memory = str(getattr(ctx, "user_memory_prompt", "") or "").strip()
     return f"{prompt}\n\n{memory}" if memory else prompt
+
+
+#: 근거 폭 기본값(B-93, 모든 봇 공통). 엔진 기본값은 시험 호환을 위해 그대로 두고, 운영 봇을
+#: 만드는 자리(`slack/pilot.py`·`vipbot_engine.py`·`vip_workspace.py`)가 이 값을 넘긴다.
+BOT_MAX_HITS = 40
+BOT_PER_DOCUMENT_HITS = 4
+#: VIPBot 은 근거 채널이 관리자가 고른 집합이라 늘 전수로 보고, 종합 질문에 대비해 더 넓게 본다.
+VIP_MAX_HITS = 60
+VIP_PER_DOCUMENT_HITS = 4
+#: TYBot 전수 탐색 문턱(보이는 채널 원문 줄 수). 넘으면 DB 색인을 쓴다.
+EXHAUSTIVE_MAX_LINES_ENV = "TYBOT_EXHAUSTIVE_MAX_LINES"
+DEFAULT_EXHAUSTIVE_MAX_LINES = 150_000
+
+
+def exhaustive_max_lines(environ=None) -> int:
+    """설정값. 틀린 값은 기본값, 0 은 「전수 탐색 끔」."""
+    raw = (os.environ if environ is None else environ).get(EXHAUSTIVE_MAX_LINES_ENV, "")
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return DEFAULT_EXHAUSTIVE_MAX_LINES
+    return max(0, value)
 
 
 #: 검색어에서 뺄 **요청 표현**. 답의 모양을 말할 뿐 무엇을 찾는지는 말하지 않는다.
@@ -1238,6 +1261,8 @@ class AnswerEngine:
         response_cache_namespace: str = "tybot",
         exhaustive_search: bool = False,
         per_document_hits: int = 0,
+        exhaustive_max_lines: int = 0,
+        focus_terms: bool = False,
     ) -> None:
         self._store = store
         self._router = router
@@ -1276,6 +1301,10 @@ class AnswerEngine:
         # 정해져 있고, 「근거 없음」 이 가장 비싼 실패다.
         self._exhaustive_search = bool(exhaustive_search)
         self._per_document_hits = max(0, int(per_document_hits))
+        # 0 이면 끔. 0 보다 크면 보이는 채널 줄 수가 그 이하일 때만 전수 탐색(B-93).
+        self._exhaustive_max_lines = max(0, int(exhaustive_max_lines))
+        # 요청 표현(정리해·표로·설명해주세요)을 검색어에서 뺀다. 전수 탐색을 켜면 함께 켠다.
+        self._focus_terms = bool(focus_terms) or self._exhaustive_search
 
     def _output_limit(self, default: int) -> int:
         configured = self._max_output_tokens
@@ -2428,11 +2457,16 @@ class AnswerEngine:
 
     def _search(self, query: str, ctx) -> list[SearchHit]:
         """엔진 설정(전수 탐색·문서당 상한)을 적용한 검색. 기본 설정이면 예전과 같다."""
-        if not self._exhaustive_search and not self._per_document_hits:
+        if (
+            not self._exhaustive_search
+            and not self._per_document_hits
+            and not self._exhaustive_max_lines
+        ):
             return self._store.search(query, ctx, limit=self._max_hits)
         hits = self._store.search(
             query, ctx, limit=self._max_hits,
             exhaustive=self._exhaustive_search, per_document=self._per_document_hits,
+            exhaustive_max_lines=self._exhaustive_max_lines,
         )
         logger.info(
             "answer 전수 탐색 ws=%s hits=%d docs=%d q=%r",
@@ -2495,7 +2529,7 @@ class AnswerEngine:
         else:
             # 2겹: 색인이 아니라 원문 라인을 연다.
             query = " ".join(terms) if terms else q
-            if self._exhaustive_search:
+            if self._focus_terms:
                 # 요청 표현(「정리해·표로·설명해주세요」)은 찾을 대상이 아니다.
                 query = focus_query(query)
             hits = self._search(query, ctx)

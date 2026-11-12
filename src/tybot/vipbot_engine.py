@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .access import RequestContext
-from .answer import AnswerEngine
+from .answer import VIP_MAX_HITS, VIP_PER_DOCUMENT_HITS, AnswerEngine
 from .archive.store import ArchiveStore
 from .gateway.providers.anthropic_provider import AnthropicProvider
 from .gateway.router import Router
@@ -16,11 +16,6 @@ ARCHIVE_UNCONFIGURED = "vipbot_archive_unconfigured"
 ARCHIVE_UNREADABLE = "vipbot_archive_unreadable"
 MODEL_CREDENTIAL_INVALID = "vipbot_model_credential_invalid"
 
-#: VIPBot 근거 줄 수. TYBot 기본(20)보다 넓게 본다 — 종합 질문(「Top5 를 표로」)은 여러
-#: 문서를 함께 봐야 답이 된다(2026-11-12 오너 요청: 가능한 전수 탐색).
-VIP_MAX_HITS = 60
-#: 한 문서가 차지하는 근거 줄 상한. 새 문서 하나가 상위 자리를 독차지하지 않게 한다.
-VIP_PER_DOCUMENT_HITS = 4
 
 
 class VipbotEngineError(RuntimeError):

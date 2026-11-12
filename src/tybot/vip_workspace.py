@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 
 from .access import RequestContext
-from .answer import AnswerEngine
+from .answer import VIP_MAX_HITS, VIP_PER_DOCUMENT_HITS, AnswerEngine
 from .archive.store import ArchiveStore
 from .db import connect as db_connect
 from .gateway.router import Router
@@ -64,6 +64,10 @@ def build_engine(
         workspace_labels=workspace_labels,
         allow_master_business_answers=lambda ctx: bool(ctx.evidence_sources),
         response_cache_namespace="vipbot",
+        # B-93: vipbot_engine 과 같은 근거 폭. 두 경로가 갈리면 같은 VIP 질문의 답이 갈린다.
+        max_hits=VIP_MAX_HITS,
+        exhaustive_search=True,
+        per_document_hits=VIP_PER_DOCUMENT_HITS,
     )
 
 

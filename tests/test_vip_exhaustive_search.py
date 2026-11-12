@@ -191,3 +191,60 @@ def test_the_tybot_default_engine_is_unchanged():
 def test_request_words_never_include_a_subject_word(word):
     for subject in ("재무", "목표", "부채", "매출", "공정", "현장", "기성"):
         assert subject not in word
+
+
+# --- B-93 1단계: 모든 봇 공통 -------------------------------------------------
+
+
+def test_small_scopes_scan_everything_and_large_scopes_use_the_index(tmp_path, monkeypatch):
+    store = _archive(tmp_path)
+    used: list[str] = []
+
+    def window(*_a, **_k):
+        used.append("index")
+        return []
+
+    monkeypatch.setattr(search_index, "candidates", window)
+    store.search("재무목표", _ctx(), limit=10, exhaustive_max_lines=10_000)
+    assert used == []  # 작은 범위 → 전수
+    store.search("재무목표", _ctx(), limit=10, exhaustive_max_lines=1)
+    assert used == ["index"]  # 큰 범위 → 색인
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("", 150_000), ("5000", 5000), ("0", 0), ("-3", 0), ("x", 150_000)],
+)
+def test_exhaustive_threshold_setting(raw, expected):
+    env = {answer_module.EXHAUSTIVE_MAX_LINES_ENV: raw} if raw else {}
+    assert answer_module.exhaustive_max_lines(env) == expected
+
+
+def test_tybot_focuses_terms_and_passes_the_common_width():
+    seen = {}
+    engine = answer_module.AnswerEngine(
+        SimpleNamespace(), SimpleNamespace(),
+        max_hits=answer_module.BOT_MAX_HITS,
+        per_document_hits=answer_module.BOT_PER_DOCUMENT_HITS,
+        exhaustive_max_lines=150_000, focus_terms=True,
+    )
+    engine._store = SimpleNamespace(search=lambda q, ctx, **kw: seen.update(q=q, **kw) or [])
+    assert engine._focus_terms is True and engine._exhaustive_search is False
+    engine._search(answer_module.focus_query(Q), _ctx())
+    assert seen["q"] == "태영건설 2026년 연말 달성해야 재무목표 top5"
+    assert seen["per_document"] == 4 and seen["exhaustive_max_lines"] == 150_000
+    assert seen["limit"] == 40
+
+
+def test_every_production_bot_passes_the_common_width():
+    """운영 봇을 만드는 세 자리가 모두 B-93 설정을 넘긴다. 하나라도 빠지면 그 봇만 좁게 본다."""
+    root = Path(__file__).resolve().parents[1] / "src/tybot"
+    pilot = (root / "slack/pilot.py").read_text(encoding="utf-8")
+    assert "per_document_hits=BOT_PER_DOCUMENT_HITS" in pilot
+    assert "exhaustive_max_lines=exhaustive_max_lines()" in pilot
+    assert "focus_terms=True" in pilot
+    for name in ("vipbot_engine.py", "vip_workspace.py"):
+        source = (root / name).read_text(encoding="utf-8")
+        assert "exhaustive_search=True" in source, name
+        assert "per_document_hits=VIP_PER_DOCUMENT_HITS" in source, name
+        assert "max_hits=VIP_MAX_HITS" in source, name
