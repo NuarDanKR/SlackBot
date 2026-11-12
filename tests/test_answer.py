@@ -7,7 +7,7 @@ import pytest
 
 from tybot import documents
 from tybot.access import RequestContext
-from tybot.answer import AnswerEngine, parse_model_flag
+from tybot.answer import Answer, AnswerEngine, parse_model_flag
 from tybot.archive.store import ArchiveDoc, ArchiveStore, RawLine, SearchHit
 from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity
 from tybot.gateway.router import Router
@@ -71,6 +71,30 @@ def test_answer_attaches_citation(engine):
     assert "출처:" in ans.to_slack()
     # 근거는 원문 라인이어야 한다
     assert "3억 2천만원" in fake.calls[0][1].content
+
+
+def test_repeated_channel_citations_are_one_date_range_and_links_stay_visible():
+    answer = Answer(
+        "요약입니다.",
+        [
+            "#기획팀, 📄2026-11-01.md(2026-11-01)",
+            "#기획팀, 📄2026-11-03.md(2026-11-03)",
+            "#기획팀, 📄2026-11-12.md(2026-11-12)",
+            "#재무팀, 📄2026-11-05.md(2026-11-05)",
+            "📎<https://example.slack.com/files/F1|계획서.pdf 원본>",
+        ],
+        "model",
+        0.0,
+        4,
+        "answered",
+    )
+
+    shown = answer.to_slack()
+
+    assert shown.count("• #기획팀") == 1
+    assert "• #기획팀 (2026-11-01~2026-11-12)" in shown
+    assert "• #재무팀 (2026-11-05)" in shown
+    assert "📎<https://example.slack.com/files/F1|계획서.pdf 원본>" in shown
 
 
 def test_same_user_and_current_evidence_reuse_the_exact_answer(engine):

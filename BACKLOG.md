@@ -992,8 +992,12 @@ PII 노출과 봇 출력 재수집 위험이 생긴다.
 - Hermes 는 두 길이다. RPC worker(`subbots/hermes/src/rpc/profiles.js`)는 **서버 profiles 의
   workspace 항목 `model`** 이 정하고(요청 본문이 고르지 못하게 설계됨), 프로세스 내 어댑터는
   DB `specialist_bot.model` 을 쓴다
-- **독립 VIPBot 런타임(`vipbot_runtime` → `vipbot_engine.build_engine`)은 전문 봇 훅이 없다.**
-  지금 VIPBot 은 Hermes 를 부르지 않고 Opus 로 직접 답한다. 판단 단계도 없다
+- VIPBot 구현이 **둘**이다. ① 독립 런타임(`tybot-vipbot.service` → `vipbot_runtime` →
+  `vipbot_engine.build_engine`, B-83): 격리 우선으로 먼저 만들었고 전문 봇 훅·판단 단계가 없다.
+  ② 공유 경로(`vip_workspace.build_engine`, B-95): TYBot 과 같은 파이프라인에 권한
+  (`vip_access`)·근거 채널·모델·예산만 VIP 것으로 바꾼다. Hermes 훅도 붙어 있다
+- **오너 목표(2026-11-12): VIPBot 은 TYBot 과 같고 권한·출처 채널만 다르다** → ②가 정본이다.
+  B-95 완료 뒤 ①을 내린다. 그러면 B-96 은 ②에 손잡이 둘(판단 모델·Hermes 등급)만 넣으면 된다
 
 **할 일.**
 1. TYBot→Hermes Sonnet: 서버 Hermes RPC profiles 의 각 workspace `model` 을

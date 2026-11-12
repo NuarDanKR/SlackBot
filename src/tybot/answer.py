@@ -663,7 +663,7 @@ class Answer:
             parts.append(note)
         if self.citations:
             srcs = "\n".join(
-                f"• {_display_citation(c)}" for c in dict.fromkeys(self.citations)
+                f"• {citation}" for citation in _display_citations(self.citations)
             )
             parts.append(f"출처:\n{srcs}")
         return "\n\n".join(parts)
@@ -681,6 +681,38 @@ def _display_citation(citation: str) -> str:
         return citation
     date = match.group("date")
     return f"{match.group('channel')} ({date})" if date else match.group("channel")
+
+
+def _display_citations(citations: list[str]) -> list[str]:
+    """Collapse repeated archive sources into one channel and date range.
+
+    Slack has no native collapsible section.  Keep the minimum verifiable source
+    summary in the message and leave line-level detail to ``근거 보기``.  Links
+    and non-archive citations are never folded because each may open a different
+    original.
+    """
+    channels: dict[str, set[str]] = {}
+    other: list[str] = []
+    for citation in dict.fromkeys(citations):
+        match = ARCHIVE_MD_CITATION_RE.match(citation.strip())
+        if not match:
+            other.append(citation)
+            continue
+        channel = match.group("channel")
+        dates = channels.setdefault(channel, set())
+        if match.group("date"):
+            dates.add(match.group("date"))
+
+    compact: list[str] = []
+    for channel, date_values in channels.items():
+        dates = sorted(date_values)
+        if not dates:
+            compact.append(channel)
+        elif len(dates) == 1:
+            compact.append(f"{channel} ({dates[0]})")
+        else:
+            compact.append(f"{channel} ({dates[0]}~{dates[-1]})")
+    return [*compact, *other]
 
 
 def parse_model_flag(text: str) -> tuple[str | None, str]:
