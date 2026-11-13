@@ -41,7 +41,9 @@ MAX_FILTER_TOKENS = 12
 
 #: 색인 식. `deploy/sql/channel_day_digest_schema.sql` 의 색인과 **글자까지 같아야** 한다.
 #: 다르면 오류 없이 전체 스캔이 된다.
-DIGEST_COMPACT_TEXT = "lower(replace(body || ' ' || array_to_string(terms, ' '), ' ', ''))"
+DIGEST_COMPACT_TEXT = (
+    "lower(replace(body || ' ' || channel_day_digest_terms_text(terms), ' ', ''))"
+)
 
 
 def _connect():

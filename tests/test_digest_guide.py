@@ -111,9 +111,26 @@ def test_the_index_expression_matches_the_schema():
     sql = (Path(__file__).resolve().parents[1] / "deploy/sql/channel_day_digest_schema.sql").read_text(
         encoding="utf-8"
     )
-    expr = "lower(replace(body || ' ' || array_to_string(terms, ' '), ' ', ''))"
+    expr = (
+        "lower(replace(body || ' ' || channel_day_digest_terms_text(terms), ' ', ''))"
+    )
     assert expr == digest_guide.DIGEST_COMPACT_TEXT
     assert sql.count(f"(({expr})") == 2  # bigm·trgm 둘 다
+
+
+def test_the_digest_index_uses_a_narrow_immutable_array_serializer():
+    sql = (Path(__file__).resolve().parents[1] / "deploy/sql/channel_day_digest_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    function = sql.split(
+        "CREATE OR REPLACE FUNCTION channel_day_digest_terms_text", 1
+    )[1].split("COMMENT ON FUNCTION", 1)[0]
+    assert "value text[]" in function
+    assert "IMMUTABLE" in function
+    assert "PARALLEL SAFE" in function
+    index_sql = sql.split("-- 키워드 색인.", 1)[1]
+    assert "array_to_string(terms" not in index_sql
+    assert index_sql.count("channel_day_digest_terms_text(terms)") == 2
 
 
 def test_the_engine_appends_guide_lines_after_search(monkeypatch):

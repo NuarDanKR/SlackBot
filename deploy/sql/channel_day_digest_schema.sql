@@ -49,6 +49,20 @@ CREATE TABLE IF NOT EXISTS channel_day_digest (
 COMMENT ON TABLE channel_day_digest IS
     'B-93 2단계. 채널×일 검색 길잡이. 본문은 근거가 아니다 — 원문 좌표를 현재 권한으로 다시 연다.';
 
+-- `array_to_string(anyarray, text)`는 text[] 입력에서도 PostgreSQL 카탈로그상
+-- IMMUTABLE이 아니어서 표현식 인덱스에서 거절된다. 이 함수는 입력을 text[]로,
+-- 구분자를 한 칸으로 고정한 결정적 직렬화만 제공한다.
+CREATE OR REPLACE FUNCTION channel_day_digest_terms_text(value text[])
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+STRICT
+AS $$ SELECT array_to_string(value, ' ') $$;
+
+COMMENT ON FUNCTION channel_day_digest_terms_text(text[]) IS
+    '채널×일 다이제스트 검색 인덱스용 text[] 결정적 직렬화(공백 구분).';
+
 -- 현재 판 조회: 같은 (workspace, channel_id, day) 에서 stale 아닌 행.
 CREATE INDEX IF NOT EXISTS channel_day_digest_current
     ON channel_day_digest (workspace, channel_id, day)
@@ -62,13 +76,13 @@ BEGIN
         DROP INDEX IF EXISTS channel_day_digest_text_trgm_fallback;
         CREATE INDEX IF NOT EXISTS channel_day_digest_text_bigm
             ON channel_day_digest USING gin
-            ((lower(replace(body || ' ' || array_to_string(terms, ' '), ' ', ''))) gin_bigm_ops)
+            ((lower(replace(body || ' ' || channel_day_digest_terms_text(terms), ' ', ''))) gin_bigm_ops)
             WHERE stale_at IS NULL;
     ELSE
         EXECUTE 'CREATE EXTENSION IF NOT EXISTS pg_trgm';
         CREATE INDEX IF NOT EXISTS channel_day_digest_text_trgm_fallback
             ON channel_day_digest USING gin
-            ((lower(replace(body || ' ' || array_to_string(terms, ' '), ' ', ''))) gin_trgm_ops)
+            ((lower(replace(body || ' ' || channel_day_digest_terms_text(terms), ' ', ''))) gin_trgm_ops)
             WHERE stale_at IS NULL;
         RAISE WARNING 'pg_bigm 이 없어 다이제스트 색인을 pg_trgm 으로 대체했다. 2글자 낱말은 인덱스를 타지 못한다.';
     END IF;

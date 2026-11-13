@@ -54,7 +54,7 @@ CREATE TABLE channel_day_digest (
     created_at        timestamptz NOT NULL DEFAULT now(),
     UNIQUE (workspace, channel_id, day, revision)
 );
--- 검색: lower(replace(body || ' ' || array_to_string(terms,' '), ' ', '')) pg_bigm/trgm 색인
+-- 검색: lower(replace(body || ' ' || channel_day_digest_terms_text(terms), ' ', '')) pg_bigm/trgm 색인
 -- 현재 판: 같은 (workspace, channel_id, day) 에서 stale 아닌 가장 새 revision
 ```
 
