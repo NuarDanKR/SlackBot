@@ -510,9 +510,13 @@ def disable_routes_outside(cur, specialist: str, workspaces, actor: str) -> int:
     return int(cur.rowcount or 0)
 
 
-def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "", result: str = "", limit: int = 200) -> list[dict]:
+def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "", result: str = "",
+               bot: str = "", limit: int = 200) -> list[dict]:
     clauses: list[str] = []
     params: list[object] = []
+    if bot:
+        clauses.append("bot = %s")
+        params.append(bot)
     if allowed is not None:
         clauses.append("workspace = any(%s)")
         params.append(sorted(allowed))
@@ -529,7 +533,7 @@ def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "
             cur.execute(
                 f"""SELECT id, at, workspace, specialist, routing_reason, confidence,
                            result, elapsed_ms, cost_usd, error_code, qa_record_id,
-                           decision_id, task_index, task_kind, required_capability
+                           decision_id, task_index, task_kind, required_capability, bot
                       FROM specialist_call {where} ORDER BY at DESC LIMIT %s""",
                 params,
             )
@@ -543,7 +547,7 @@ def list_calls(*, allowed: set[str] | frozenset[str] | None, specialist: str = "
 def record_call(*, workspace: str, specialist: str, routing_reason: str, confidence: float | None,
                 result: str, elapsed_ms: int, cost_usd: float, error_code: str = "",
                 qa_record_id: str = "", decision_id: str = "", task_index: int = 0,
-                task_kind: str = "", required_capability: str = "") -> None:
+                task_kind: str = "", required_capability: str = "", bot: str = "") -> None:
     """Record non-sensitive routing metadata for a specialist adapter."""
     if result not in {
         "success", "fallback", "error", "contract_violation", "evidence_insufficient"
@@ -555,12 +559,13 @@ def record_call(*, workspace: str, specialist: str, routing_reason: str, confide
                 """INSERT INTO specialist_call
                     (workspace, specialist, routing_reason, confidence, result,
                      elapsed_ms, cost_usd, error_code, qa_record_id, decision_id,
-                     task_index, task_kind, required_capability)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                     task_index, task_kind, required_capability, bot)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (workspace, specialist, routing_reason[:200], confidence, result,
                  max(0, elapsed_ms), max(0, cost_usd), error_code[:100],
                  qa_record_id.strip().lower(), decision_id.strip().lower(),
-                 max(0, int(task_index)), task_kind[:40], required_capability[:100]),
+                 max(0, int(task_index)), task_kind[:40], required_capability[:100],
+                 (bot or "").strip().lower()[:40]),
             )
     except Exception as exc:
         raise SpecialistStoreError(f"전문 봇 호출 기록 저장 실패: {exc}") from exc

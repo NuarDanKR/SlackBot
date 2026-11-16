@@ -1464,14 +1464,17 @@ def specialist_calls(
     user: User,
     specialist: str = "",
     result: str = "",
+    bot: str = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict:
+    """봇 분류 상태. `bot` 으로 TYBot·VIPBot 호출을 가른다(`tybot`·`vipbot`)."""
     _require_developer(user)
     try:
         rows = specialist_store.list_calls(
             allowed=None if user.all_workspaces else user.workspaces,
             specialist=specialist.strip().lower(),
             result=result.strip().lower(),
+            bot=bot.strip().lower()[:40],
             limit=limit,
         )
     except specialist_store.SpecialistStoreError as exc:
@@ -1489,6 +1492,8 @@ def specialist_calls(
                 "taskIndex": int(row.get("task_index") or 0),
                 "taskKind": str(row.get("task_kind") or ""),
                 "requiredCapability": str(row.get("required_capability") or ""),
+                # 빈 값은 봇을 남기기 전 기록이다(또는 Slack 밖에서 부른 호출).
+                "bot": str(row.get("bot") or ""),
             }
             for row in rows
         ]

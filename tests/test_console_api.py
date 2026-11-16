@@ -2903,3 +2903,24 @@ def test_admin_chooses_console_or_bot_deploy(client, monkeypatch):
     assert client.put("/api/deployment/request", json={}, headers=headers).status_code == 200
     assert seen == ["console", "all", "all"]
     assert client.put("/api/deployment/request", json={"scope": "root"}, headers=headers).status_code == 422
+
+
+def test_specialist_calls_can_be_split_by_bot(client, monkeypatch):
+    """봇 분류 상태에서 TYBot·VIPBot 호출을 가른다."""
+    seen: list[dict] = []
+
+    def fake(**kwargs):
+        seen.append(kwargs)
+        return [{
+            "id": 8, "at": "2026-11-16T09:00:00+09:00", "workspace": "mgmt", "specialist": "hermes",
+            "routing_reason": "", "confidence": None, "result": "success", "elapsed_ms": 1,
+            "cost_usd": 0, "error_code": "", "qa_record_id": "", "decision_id": "",
+            "task_index": 0, "task_kind": "", "required_capability": "", "bot": "vipbot",
+        }]
+
+    monkeypatch.setattr(console_app.specialist_store, "list_calls", fake)
+    response = client.get("/api/specialist-calls?bot=VIPBot", headers=member(client))
+
+    assert response.status_code == 200
+    assert seen[0]["bot"] == "vipbot"
+    assert response.json()["calls"][0]["bot"] == "vipbot"
