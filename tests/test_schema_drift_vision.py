@@ -238,3 +238,11 @@ def test_master_still_has_no_access_to_other_vision_tables(drift):
         allowed=False, column_allowed=True, allowed_columns=['id'],
     )])
     assert problems == [('tyslackai', 'archiver_image_description_job', 'unexpected_select')]
+
+
+def test_channel_day_digest_is_master_read_only(drift):
+    """B-93: 다이제스트는 tybot_digest 가 쓰고 Master 는 읽기만 한다 — 쓰기 권한이 없는 게 정상이다."""
+    declared = {'channel_day_digest': 'channel_day_digest_schema.sql'}
+    assert drift['required_bot_access'](declared, {'channel_day_digest'}) == []
+    schema = (SCRIPT.parents[1] / 'deploy/sql/channel_day_digest_schema.sql').read_text(encoding='utf-8')
+    assert 'GRANT SELECT ON channel_day_digest TO tyslackai;' in schema
