@@ -64,7 +64,11 @@ VISION_TABLES.update({
 VISION_TABLES["archiver_image_transcript_revision"] = "archiver_image_transcript_schema.sql"
 # Master 가 **읽기만** 하는 표. Vision worker 가 쓰고 Master 는 검색에서 읽는다.
 # 쓰기 권한이 없는 것이 정상이므로 「봇 권한 없음」 으로 세지 않는다.
-MASTER_READ_ONLY = {"image_search_entry": "archiver_image_transcript_schema.sql"}
+MASTER_READ_ONLY = {
+    "image_search_entry": "archiver_image_transcript_schema.sql",
+    # B-93: 채널×일 다이제스트는 배치(tybot_digest)가 쓰고 Master 는 검색에서 읽기만 한다.
+    "channel_day_digest": "channel_day_digest_schema.sql",
+}
 VISION_ROLE = "tybot_vision"
 VISION_REQUIRED = {
     table: {"SELECT", "INSERT"} | (
