@@ -67,6 +67,23 @@ _qa_record_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+# 어느 Slack 봇(TYBot·VIPBot)이 받은 질문인지. 두 봇이 같은 워크스페이스·같은 전문 봇을
+# 쓰므로 워크스페이스만으로는 콘솔 「봇 분류 상태」 에서 가를 수 없다.
+_answer_bot: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "specialist_answer_bot", default=""
+)
+
+
+@contextlib.contextmanager
+def bind_answer_bot(bot_name: str):
+    """이 실행 문맥의 분류 기록에 답한 봇 이름(`tybot`·`vipbot`)을 남긴다."""
+    token = _answer_bot.set((bot_name or "").strip().lower()[:40])
+    try:
+        yield
+    finally:
+        _answer_bot.reset(token)
+
+
 @contextlib.contextmanager
 def bind_qa_record(record_id: str):
     """이 실행 문맥의 분류 기록을 QA 원본 한 건에 연결한다."""
@@ -549,6 +566,7 @@ def record(decision: Decision, *, workspace: str, elapsed_ms: int, cost_usd: flo
             cost_usd=cost_usd,
             error_code="no-adapter" if decision.specialist else "",
             qa_record_id=_qa_record_id.get(),
+            bot=_answer_bot.get(),
         )
     except Exception as exc:  # noqa: BLE001 - 기록 실패가 답변을 막으면 안 된다
         log.warning("라우팅 판정을 남기지 못했습니다: %s", exc)
@@ -1200,6 +1218,7 @@ def _run_one(
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
             error_code="" if ok else (error_code or "adapter-build"),
             qa_record_id=_qa_record_id.get(),
+            bot=_answer_bot.get(),
             decision_id=decision_id,
             task_index=task_index,
             task_kind=task_kind,

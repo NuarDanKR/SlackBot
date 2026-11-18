@@ -3761,7 +3761,8 @@ class WorkspaceBot:
                 except Exception as exc:
                     log.exception("[%s] 후속 질문 해석 실패: %s", self.workspace, exc)
                     followup = None
-            with specialist_router.bind_qa_record(qa_record_id):
+            with specialist_router.bind_qa_record(qa_record_id), \
+                    specialist_router.bind_answer_bot(self.bot_name):
                 ans = self.engine.respond(
                     q, ctx, task, followup=followup, task=master_task,
                     seed_hits=question_file_hits,

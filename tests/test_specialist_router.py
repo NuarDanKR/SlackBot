@@ -363,3 +363,29 @@ def test_the_cache_stops_a_database_hit_per_question(monkeypatch):
 
     assert calls["n"] == 1, "실패도 캐시한다 — 안 하면 DB 가 죽은 동안 매 질문 재시도한다"
     sr.clear_cache()
+
+
+def test_routing_record_keeps_the_answering_bot(monkeypatch):
+    """TYBot·VIPBot 은 같은 워크스페이스·전문 봇을 쓴다. 어느 봇이 받은 질문인지 남긴다."""
+    from tybot.console import specialist_store
+
+    written: list[dict] = []
+    monkeypatch.setattr(specialist_store, "record_call", lambda **kw: written.append(kw))
+    decision = sr.Decision(HERMES, 0.91, "회의록 질문", "claude-haiku-4-5")
+
+    with sr.bind_answer_bot("VIPBot"):
+        sr.record(decision, workspace="mgmt", elapsed_ms=12)
+    sr.record(decision, workspace="mgmt", elapsed_ms=13)
+
+    assert written[0]["bot"] == "vipbot"
+    assert written[1]["bot"] == "", "다음 요청으로 이전 봇 이름이 새면 안 된다"
+
+
+def test_the_slack_answer_path_binds_the_bot_name():
+    """봇 이름은 질문을 받은 Slack 봇이 묶는다 — 엔진은 두 봇이 공유한다."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "src/tybot/slack/pilot.py").read_text(encoding="utf-8")
+    block = source[source.index("with specialist_router.bind_qa_record(qa_record_id)"):]
+    block = block[:block.index("self.engine.respond(")]
+    assert "specialist_router.bind_answer_bot(self.bot_name)" in block
