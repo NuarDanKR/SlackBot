@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from scripts import invite_archiver_to_master_channels as invite
 
 
@@ -54,7 +56,7 @@ def test_apply_invites_archiver_identity_to_every_missing_channel():
     ])
     archiver = Client([_page([])], user_id="U_ARCH")
 
-    result = invite.invite_missing(master, archiver, apply=True)
+    result = invite.invite_missing(master, archiver, apply=True, live_switch_on=True)
 
     assert result.invited == 2
     assert master.invites == [("C1", "U_ARCH"), ("G2", "U_ARCH")]
@@ -64,7 +66,7 @@ def test_one_failure_does_not_prevent_the_remaining_invites():
     master = Client([_page([{"id": "C1"}, {"id": "C2"}])], failures={"C1": "no_permission"})
     archiver = Client([_page([])], user_id="U_ARCH")
 
-    result = invite.invite_missing(master, archiver, apply=True)
+    result = invite.invite_missing(master, archiver, apply=True, live_switch_on=True)
 
     assert result.invited == 1
     assert result.failed == (("C1", "no_permission"),)
@@ -76,7 +78,7 @@ def test_archiver_identity_is_required_before_writing():
     archiver = Client([_page([])])
 
     try:
-        invite.invite_missing(master, archiver, apply=True)
+        invite.invite_missing(master, archiver, apply=True, live_switch_on=True)
     except RuntimeError as exc:
         assert "user_id" in str(exc)
     else:
@@ -114,3 +116,57 @@ def test_invite_script_does_not_use_the_archiver_runtime_database_role():
 
     assert "archiver_runtime_store" not in source
     assert "load_runtime_config" not in source
+
+
+def test_operator_held_channels_are_not_invited():
+    """사람이 멈춘 채널은 초대해도 paused 로 남는다 — 아예 초대하지 않고 따로 센다."""
+    master = Client([_page([{"id": "C1"}, {"id": "C2"}])])
+    archiver = Client([_page([])], user_id="U_ARCH")
+
+    result = invite.invite_missing(
+        master, archiver, apply=True, held_ids=frozenset({"C2"}), live_switch_on=True,
+    )
+
+    assert master.invites == [("C1", "U_ARCH")]
+    assert (result.candidates, result.held, result.invited) == (1, 1, 1)
+
+
+@pytest.mark.parametrize("switch", [False, None])
+def test_apply_is_refused_unless_the_live_switch_is_known_on(switch):
+    """꺼진 채 초대하면 등록이 보류되고 Master 가 계속 쓴다 — 초대한 의미가 없다."""
+    master = Client([_page([{"id": "C1"}])])
+    archiver = Client([_page([])], user_id="U_ARCH")
+
+    with pytest.raises(invite.LiveSwitchOff):
+        invite.invite_missing(master, archiver, apply=True, live_switch_on=switch)
+    assert master.invites == []
+
+
+def test_dry_run_does_not_need_the_live_switch():
+    master = Client([_page([{"id": "C1"}])])
+    archiver = Client([_page([])], user_id="U_ARCH")
+
+    result = invite.invite_missing(master, archiver, apply=False, live_switch_on=None)
+
+    assert result.candidates == 1 and master.invites == []
+
+
+def test_collection_state_reads_holds_and_the_switch_with_the_console_repo():
+    from fake_archiving_repo import FakeArchivingRepo
+
+    repo = FakeArchivingRepo()
+    repo.given_channel("tyit", "C1", "paused", membership="joined", operator_hold=True)
+    repo.given_channel("tyit", "C2", "active", owner="archiver",
+                       cutover_ts="1700000000.000000", membership="joined")
+    repo.given_flag("archiver_writes_live", True)
+
+    held, live = invite._collection_state("tyit", repo=repo)
+
+    assert held == frozenset({"C1"}) and live is True
+
+
+def test_invite_script_no_longer_speaks_of_shadow_collection():
+    source = invite.Path(invite.__file__).read_text(encoding="utf-8").lower()
+
+    assert "shadow" not in source.replace("shadow 수집 폐기", "")
+    assert "그림자" not in source

@@ -33,7 +33,7 @@ class ArchivingRepo(Protocol):
     def channel_state(self, workspace: str, channel_id: str) -> dict | None: ...
     def save_channel_state(self, row: dict) -> None: ...
     def channels(self, workspace: str) -> list[dict]: ...
-    def save_membership(self, row: dict) -> None: ...
+    def save_membership(self, row: dict) -> str: ...
     def mark_channel_event(self, workspace: str, channel_id: str) -> bool: ...
     def set_operator_hold(self, row: dict) -> int: ...
     def flags(self, workspace: str, channel_ids: list[str]) -> list[dict]: ...
@@ -144,14 +144,15 @@ class PostgresArchivingRepo:
             )
             return [dict(row) for row in cur.fetchall()]
 
-    def save_membership(self, row: dict) -> None:
-        """초대 기반 동기화가 쓰는 자리. **모드와 멤버십을 한 문장에** 쓴다.
+    def save_membership(self, row: dict) -> str:
+        """초대 기반 동기화가 쓰는 자리. **모드·멤버십·주인·좌표를 한 문장에** 쓴다.
 
         나눠 쓰면 「참여 중인데 멈춘」 과 「빠졌는데 도는」 순간이 생기고, 그 순간
         수집 여부를 화면에서 설명할 수 없다.
 
-        `writer_owner` 는 건드리지 않는다 — 운영 원문의 주인은 사람이 사유와 함께
-        바꾸는 것이고, 동기화 잡이 할 일이 아니다.
+        주인·인수 좌표는 DB 함수가 정한다(2026-11-18 shadow 폐기). 신규·재초대는
+        `active`·`archiver`, 이미 Archiver 몫이면 좌표 보존, 스위치가 꺼져 있으면
+        `deferred`/`off`. 결과 모드를 돌려준다.
         """
         with self._cursor() as cur:
             cur.execute(
@@ -160,29 +161,66 @@ class PostgresArchivingRepo:
                     %(workspace)s, %(channel_id)s, %(mode)s, %(membership)s,
                     %(channel_name)s, %(is_private)s, %(updated_by)s,
                     %(audit)s, %(reason)s
-                )
+                ) AS outcome
                 """,
                 row,
             )
+            result = cur.fetchone()
+        if not result:
+            return ""
+        value = result.get("outcome") if hasattr(result, "get") else result[0]
+        return str(value or "")
 
     def set_operator_hold(self, row: dict) -> int:
         """사람이 그 채널 수집을 끄거나 켠다. **재초대가 이 결정을 뒤집지 않는다.**
 
-        끄면 `paused`, 켜면 참여 중일 때만 `shadow` 로 돌아간다 — 봇이 없는 채널을
-        켜 봐야 권한 오류만 쌓인다.
+        끄면 `paused`(주인·좌표 유지). 켜면 참여 중일 때만 **운영 수집**으로 돌아간다
+        (2026-11-18 shadow 폐기) — `archiver_save_membership` 과 같은 규칙이다.
+
+        - 이미 Archiver 몫 → `active`, 좌표 보존
+        - Master 몫 + 전역 스위치 켜짐 → `active`·`archiver`·새 좌표(정착 시간 뒤)
+        - Master 몫 + 스위치 꺼짐 → `off`(Master 가 씀). 넘기면 아무도 안 쓴다
+
+        봇이 없는 채널을 켜 봐야 권한 오류만 쌓이므로 그때는 모드를 두고 표식만 푼다.
+        잠금은 모드 변경과 같은 advisory 키다 — 초대 동기화와 엇갈리지 않는다.
         """
         with self._cursor() as cur:
             cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"archive-mode:{row['workspace']}/{row['channel_id']}",),
+            )
+            cur.execute(
                 """
-                UPDATE archive_channel_mode
+                WITH live AS (
+                    SELECT coalesce(bool_or(enabled), false) AS on_
+                      FROM archive_feature_flag
+                     WHERE name = 'archiver_writes_live'
+                       AND scope = 'global' AND scope_key = ''
+                ), plan AS (
+                    SELECT m.workspace, m.channel_id,
+                           (NOT %(hold)s AND m.membership = 'joined'
+                            AND m.writer_owner = 'master' AND live.on_) AS take_over,
+                           archive_settled_cutover_ts() AS fresh_cutover
+                      FROM archive_channel_mode m, live
+                     WHERE m.workspace = %(workspace)s AND m.channel_id = %(channel_id)s
+                )
+                UPDATE archive_channel_mode m
                    SET operator_hold = %(hold)s,
                        mode = CASE
                            WHEN %(hold)s THEN 'paused'
-                           WHEN membership = 'joined' THEN 'shadow'
-                           ELSE mode
+                           WHEN m.membership <> 'joined' THEN m.mode
+                           WHEN m.writer_owner = 'archiver' OR plan.take_over THEN 'active'
+                           ELSE 'off'
                        END,
+                       writer_owner = CASE WHEN plan.take_over THEN 'archiver'
+                                           ELSE m.writer_owner END,
+                       cutover_ts = CASE WHEN plan.take_over THEN plan.fresh_cutover
+                                         ELSE m.cutover_ts END,
+                       cutover_at = CASE WHEN plan.take_over THEN now()
+                                         ELSE m.cutover_at END,
                        updated_at = now(), updated_by = %(actor)s
-                 WHERE workspace = %(workspace)s AND channel_id = %(channel_id)s
+                  FROM plan
+                 WHERE m.workspace = plan.workspace AND m.channel_id = plan.channel_id
                 """,
                 row,
             )

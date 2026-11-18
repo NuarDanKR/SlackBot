@@ -88,9 +88,21 @@ Hermes는 그대로 둔다. 첨부 분리 스위치가 꺼져 있으면 기존 T
 `attachment_reader_ready`가 확인된 뒤에만 켤 수 있고, 켜지면 첨부 정본을 먼저
 쓴 뒤 raw에는 참조만 남긴다. TYBot 검색에는 아직 연결하지 않는다.
 기동 직후와 5분마다 Slack 참여 채널을 DB와 동기화한다. 동기화 전에 첫 이벤트가
-오더라도 그 채널의 실제 참여 여부를 확인한 뒤 `shadow`로 등록하고 수집한다.
-앱을 채널에서 빼면 `paused`, 다시 초대하면 `shadow`로 돌아오며, 콘솔에서 사람이
-중지한 채널(`operator_hold`)은 재초대로 되살아나지 않는다.
+오더라도 그 채널의 실제 참여 여부를 확인한 뒤 등록한다.
+
+> **2026-11-18 오너 결정 — shadow 수집 폐기.** 초대는 곧 운영 수집이다. 새로 초대된
+> 채널은 `active` · `writer_owner=archiver` 로 등록되고, 인수 좌표(`cutover_ts`)는 DB 가
+> **등록 시각 + 60초**로 박는다. Master 는 판정 캐시(30초)가 끝나면 그 채널 쓰기를
+> 멈추고, Archiver 는 좌표가 지난 뒤부터 쓴다 — 두 봇이 동시에 쓰는 순간이 없다. 그
+> 사이(최대 60초)는 비는 구간이며 범위가 `cutover_at`~`cutover_ts` 로 남는다.
+>
+> - 앱을 채널에서 빼면 `paused`(주인·좌표 유지). 다시 초대하면 `active` 로 돌아오고,
+>   이미 Archiver 몫이던 채널은 **기존 좌표를 그대로** 쓴다
+> - 콘솔에서 사람이 중지한 채널(`operator_hold`)은 재초대로 되살아나지 않는다(`paused`)
+> - 전역 스위치 `archiver_writes_live` 가 꺼져 있으면 신규 채널은 등록하지 않고
+>   (`deferred`, Master 가 계속 씀), Master 몫이던 기존 행은 `off` 로 둔다
+>
+> 적용 후 확인: `deploy/checks/archiver_no_shadow_channels.sql`(읽기 전용, 위반 시 실패)
 
 Archiving Bot의 수집 범위는 **앱이 초대된 공개·비공개 채널**이다. TYBot Master의
 채널 이름 규칙은 적용하지 않는다. 따라서 이름 규칙에 맞지 않는 채널도 앱을
@@ -99,7 +111,9 @@ Archiving Bot의 수집 범위는 **앱이 초대된 공개·비공개 채널**�
 
 기존 Master 참여 채널에 Archiver를 일괄 초대할 때는 Master의 채널 멤버십을
 정본으로 삼는다. 토큰을 명령행에 넣지 않고 서버 설정에서 읽으며, 기본 실행은
-미리보기다.
+미리보기다. 초대된 채널은 다음 동기화(최대 5분)에서 **바로 운영 수집**으로 등록된다.
+`operator_hold` 채널은 초대하지 않고 따로 세며, 전역 스위치 `archiver_writes_live` 가
+켜져 있지 않거나 확인되지 않으면 `--apply` 를 거부한다(종료 코드 3).
 
 ```bash
 sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env \

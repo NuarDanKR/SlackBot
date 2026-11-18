@@ -33,11 +33,17 @@ Master 가 기본값인 이유는 **전환 전 상태가 그것**이기 때문�
 Archiver 는 긍정 응답이 있을 때만 운영 경로에 쓴다 — 그래서 어느 순간에도 둘이
 동시에 참이 되지 않는다.
 
-## cutover_ts 는 여기서 거르지 않는다
+## cutover_ts 로 메시지를 가르지 않는다 — 단, 미래 좌표는 「아직 아님」 이다
 
 인수 좌표는 **대조용 기록**이다. 런타임에서 메시지마다 ts 로 주인을 가르면 같은
 채널에 대해 두 가지 판정 기준이 생기고, 경계에서 어느 쪽도 안 쓰는 구간이 만들어
 지기 쉽다. 판정은 채널 단위 하나로 두고, 인수 전후 대조는 좌표로 나중에 한다.
+
+예외 하나(2026-11-18, shadow 폐기). 초대·재초대로 Master 몫이 Archiver 로 넘어갈 때
+DB 는 좌표를 **등록 시각 + 정착 시간**(미래)으로 박는다. 그 시각이 오기 전에는
+Archiver 가 채널 단위로 **쓰지 않는다** — Master 가 캐시(`CACHE_SECONDS`) 때문에 아직
+쓰고 있을 수 있어서다. 메시지 ts 가 아니라 **지금 시각**과 비교하므로 판정 기준은
+여전히 하나다. 좌표가 지나면 평소대로 채널 단위로 판정한다.
 
 ## 여기서 하지 않는 것
 
@@ -88,6 +94,7 @@ def decide(
     *,
     archiver_flag: bool = False,
     degraded: bool = False,
+    now: float | None = None,
 ) -> Decision:
     """순수 판정. **표를 읽지 않는다** — 읽은 결과를 받는다.
 
@@ -117,6 +124,18 @@ def decide(
             reason="채널은 인수됐지만 전역 스위치(archiver_writes_live)가 꺼져 있습니다.",
             mode=state.mode, owner=state.writer_owner, cutover_ts=state.cutover_ts,
         )
+    if actor == WriterOwner.ARCHIVER and mine:
+        settle_until = _cutover_epoch(state.cutover_ts)
+        current = time.time() if now is None else now
+        if settle_until is not None and current < settle_until:
+            # Master 가 아직 캐시로 쓰고 있을 수 있다. 쓰면 두 writer 다.
+            return Decision(
+                allowed=False, actor=actor,
+                reason=(
+                    f"인수 정착 대기 중입니다({state.cutover_ts} 이후 Archiver 가 씁니다)."
+                ),
+                mode=state.mode, owner=state.writer_owner, cutover_ts=state.cutover_ts,
+            )
     if mine:
         reason = f"{state.mode} 채널의 운영 writer 입니다."
     elif state.mode == ChannelMode.PAUSED:
@@ -130,6 +149,14 @@ def decide(
         allowed=mine, actor=actor, reason=reason,
         mode=state.mode, owner=state.writer_owner, cutover_ts=state.cutover_ts,
     )
+
+
+def _cutover_epoch(cutover_ts: str) -> float | None:
+    """Slack ts 형식 좌표를 초로. 읽을 수 없으면 None(정착 판정을 하지 않는다)."""
+    try:
+        return float(cutover_ts) if cutover_ts else None
+    except ValueError:
+        return None
 
 
 def state_from_row(workspace: str, channel_id: str, row: dict | None) -> ChannelState | None:

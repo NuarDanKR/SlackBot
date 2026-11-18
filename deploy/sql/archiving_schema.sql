@@ -157,10 +157,72 @@ CREATE INDEX IF NOT EXISTS archive_config_audit_recent ON archive_config_audit (
 CREATE INDEX IF NOT EXISTS archive_config_audit_channel
     ON archive_config_audit (workspace, channel_id, at DESC);
 
+-- ---------------------------------------------------------------------------
+-- 초대 = 운영 수집 (2026-11-18 오너 결정: shadow 수집 완전 폐기)
+-- ---------------------------------------------------------------------------
+-- 전에는 초대된 채널을 `shadow` 로 등록했다. 그림자 기간이 끝났고, 그림자로 들어온
+-- 채널은 사람이 다시 인수해야 운영 수집이 됐다 — 그 사이 운영 원문은 Master 몫으로
+-- 남아 「초대했는데 Archiver 가 안 쓴다」 가 반복됐다. 이제 초대는 곧 **운영 수집**이다.
+--
+-- ## 신규 채널의 인수 좌표(cutover_ts) — 「등록 시각 + 정착 60초」
+--
+-- `cutover_ts` 는 「이 ts **이후**가 Archiver 몫」 이다(위 표 설명). 신규 채널은 사람이
+-- 고른 좌표가 없으므로 **DB 가 등록 순간에 정한다**: `clock_timestamp() + 60초` 를 Slack
+-- ts 형식(`초.마이크로초`)으로.
+--
+-- 왜 미래인가. Master 는 채널 주인 판정을 `write_owner.CACHE_SECONDS`(30초) 동안 들고
+-- 있다. 등록 직후 Master 는 아직 「행 없음 = 내 것」 으로 쓰고 있을 수 있다. 그 순간
+-- Archiver 가 바로 쓰면 **두 writer** 다. 그래서 Archiver 는 `cutover_ts` 가 지나기 전에는
+-- 운영 원문에 쓰지 않는다(`write_owner.decide`). 60초는 `handover.DRAIN_SETTLE_SECONDS`
+-- (캐시의 두 배)와 같다 — 콘솔 인수와 같은 규칙이다(「겹침 대신 빔」).
+--
+--   등록 ─(≤30초: Master 캐시 만료)─▶ Master 멈춤 ─(빈 구간)─▶ cutover_ts ─▶ Archiver
+--
+-- 빈 구간은 `cutover_at`(등록 시각) ~ `cutover_ts` 로 **범위가 기록된다.** 보통 봇
+-- 참여 알림뿐이고, 사람 발언이 있으면 그 범위를 소급으로 메운다.
+--
+-- 이미 Archiver 몫이던 채널(나갔다 재초대)은 **기존 좌표를 보존한다.** 좌표를 새로 박으면
+-- 「언제부터 이 봇 몫이었나」 가 지워진다.
+--
+-- ## 전역 스위치가 꺼져 있으면 옮기지 않는다
+--
+-- `archiver_writes_live` 가 꺼진 채로 Master 몫을 Archiver 로 넘기면 Master 는 멈추고
+-- Archiver 는 쓰지 않는다 — **아무도 안 쓰는** 채널이 된다. 그래서 스위치가 꺼져 있으면
+-- 신규 채널은 등록하지 않고(`deferred`, Master 가 계속 씀), Master 몫이던 기존 행은
+-- `off`(Master 가 씀)로 둔다. 스위치가 켜진 뒤 다음 동기화가 `active` 로 옮긴다.
+CREATE OR REPLACE FUNCTION archive_settled_cutover_ts() RETURNS text
+LANGUAGE sql
+VOLATILE
+SET search_path = public, pg_temp
+AS $$
+    SELECT to_char(
+        extract(epoch FROM clock_timestamp() + interval '60 seconds'),
+        'FM0000000000.000000'
+    )
+$$;
+
 -- Archiver runtime은 설정 표 UPDATE 권한을 받지 않는다. 대신 초대 동기화에 필요한
--- 칸만 이 함수로 쓴다. 호출자가 mode='active'를 건네도 기존 active가 아닌 행을
--- 승격할 수 없고, writer_owner/cutover/operator_hold는 전혀 바꾸지 않는다.
-CREATE OR REPLACE FUNCTION archiver_save_membership(
+-- 칸만 이 함수로 쓴다.
+--
+-- 규칙(이 순서로 판정):
+--   1. 잠금 — 콘솔 모드 변경(`archiving_repo.channel_state`)과 **같은 advisory 키**를 잡는다.
+--      동기화와 콘솔 인수가 한 채널에서 엇갈려 끼어들지 못한다. 행이 없을 때도 잡히므로
+--      두 동기화(주기·이벤트)가 같은 신규 채널을 동시에 INSERT 하지 않는다
+--   2. 빠짐(left)·operator_hold·명시적 paused 요청 → `paused`. 주인·좌표는 그대로
+--   3. 이미 Archiver 몫 → `active`. 좌표 보존
+--   4. Master 몫(off·paused·옛 shadow) + 스위치 켜짐 → `active`·`archiver`·새 좌표(앞으로만)
+--   5. Master 몫 + 스위치 꺼짐 → `off`(Master 가 씀)
+--   6. 신규 + 스위치 켜짐 → `active`·`archiver`·새 좌표. 꺼짐 → 등록 안 함(`deferred`)
+--
+-- `shadow` 는 **저장하지 않는다.** 요청값 `shadow` 는 배포 순서(스키마 → 코드) 동안 옛
+-- 코드가 보낼 수 있어 받아 주되 `active` 와 같게 다룬다. 결과 모드를 돌려준다.
+--
+-- 반환형이 void → text 로 바뀌어 CREATE OR REPLACE 로는 못 바꾼다. 재적용이 안전하도록
+-- 매번 지우고 만든다(권한은 이 파일 끝 §8 이 같은 트랜잭션에서 다시 준다).
+DROP FUNCTION IF EXISTS archiver_save_membership(
+    text, text, text, text, text, boolean, text, boolean, text
+);
+CREATE FUNCTION archiver_save_membership(
     p_workspace text,
     p_channel_id text,
     p_requested_mode text,
@@ -170,24 +232,37 @@ CREATE OR REPLACE FUNCTION archiver_save_membership(
     p_actor text,
     p_audit boolean,
     p_reason text
-) RETURNS void
+) RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
     current_row archive_channel_mode%ROWTYPE;
+    live_on boolean;
     next_mode text;
+    next_owner text;
+    next_cutover text;
+    next_cutover_at timestamptz;
+    fresh_cutover text;
 BEGIN
-    IF p_workspace = '' OR p_channel_id = '' THEN
+    IF coalesce(p_workspace, '') = '' OR coalesce(p_channel_id, '') = '' THEN
         RAISE EXCEPTION 'workspace and channel_id are required';
     END IF;
-    IF p_requested_mode NOT IN ('shadow', 'active', 'paused') THEN
+    IF p_requested_mode NOT IN ('active', 'paused', 'shadow') THEN
         RAISE EXCEPTION 'membership sync cannot request mode %', p_requested_mode;
     END IF;
     IF p_membership NOT IN ('joined', 'left') THEN
         RAISE EXCEPTION 'membership sync cannot write membership %', p_membership;
     END IF;
+
+    PERFORM pg_advisory_xact_lock(
+        hashtext('archive-mode:' || p_workspace || '/' || p_channel_id)
+    );
+
+    SELECT coalesce(bool_or(enabled), false) INTO live_on
+      FROM archive_feature_flag
+     WHERE name = 'archiver_writes_live' AND scope = 'global' AND scope_key = '';
 
     SELECT * INTO current_row
       FROM archive_channel_mode
@@ -195,38 +270,63 @@ BEGIN
      FOR UPDATE;
 
     IF NOT FOUND THEN
-        IF p_membership <> 'joined' OR p_requested_mode <> 'shadow' THEN
-            RAISE EXCEPTION 'a new invited channel must start in shadow mode';
+        IF p_membership <> 'joined' OR p_requested_mode = 'paused' THEN
+            RAISE EXCEPTION 'a new invited channel must be registered as joined/active';
         END IF;
+        IF NOT live_on THEN
+            -- 행을 만들지 않으면 Master 가 계속 쓴다(write_owner: 행 없음 = Master).
+            RETURN 'deferred';
+        END IF;
+        fresh_cutover := archive_settled_cutover_ts();
         INSERT INTO archive_channel_mode
-            (workspace, channel_id, mode, membership, membership_checked_at,
-             channel_name, is_private, updated_by)
+            (workspace, channel_id, mode, writer_owner, cutover_ts, cutover_at,
+             membership, membership_checked_at, channel_name, is_private, updated_by)
         VALUES
-            (p_workspace, p_channel_id, 'shadow', 'joined', now(),
-             p_channel_name, p_is_private, p_actor);
+            (p_workspace, p_channel_id, 'active', 'archiver', fresh_cutover, now(),
+             'joined', now(), p_channel_name, p_is_private, p_actor);
         IF p_audit THEN
             INSERT INTO archive_config_audit
                 (actor, subject, workspace, channel_id, field,
                  old_value, new_value, reason)
             VALUES
                 (p_actor, 'channel_membership', p_workspace, p_channel_id,
-                 'membership', '', 'joined/shadow', p_reason);
+                 'membership', '', 'joined/active', p_reason),
+                (p_actor, 'channel_membership', p_workspace, p_channel_id,
+                 'writer_owner', '', 'archiver@' || fresh_cutover,
+                 'new invited channel; settle 60s after registration');
         END IF;
-        RETURN;
+        RETURN 'active';
     END IF;
 
-    next_mode := CASE
-        WHEN current_row.operator_hold OR p_membership = 'left' THEN 'paused'
-        WHEN p_requested_mode = 'paused' THEN 'paused'
-        WHEN current_row.mode = 'active' THEN 'active'
-        ELSE 'shadow'
-    END;
-    IF p_requested_mode = 'active' AND current_row.mode <> 'active' THEN
-        RAISE EXCEPTION 'membership sync cannot promote a channel to active';
+    next_owner := current_row.writer_owner;
+    next_cutover := current_row.cutover_ts;
+    next_cutover_at := current_row.cutover_at;
+
+    IF p_membership = 'left' OR current_row.operator_hold OR p_requested_mode = 'paused' THEN
+        next_mode := 'paused';
+    ELSIF current_row.writer_owner = 'archiver' THEN
+        next_mode := 'active';
+    ELSIF live_on THEN
+        next_mode := 'active';
+        next_owner := 'archiver';
+        fresh_cutover := archive_settled_cutover_ts();
+        -- 좌표는 앞으로만 간다(archiving_state.plan_mode_change 와 같은 규칙).
+        IF current_row.cutover_ts ~ '^[0-9]+(\.[0-9]+)?$'
+           AND current_row.cutover_ts::numeric > fresh_cutover::numeric THEN
+            next_cutover := current_row.cutover_ts;
+        ELSE
+            next_cutover := fresh_cutover;
+            next_cutover_at := now();
+        END IF;
+    ELSE
+        next_mode := 'off';
     END IF;
 
     UPDATE archive_channel_mode
        SET mode = next_mode,
+           writer_owner = next_owner,
+           cutover_ts = next_cutover,
+           cutover_at = next_cutover_at,
            membership = p_membership,
            membership_checked_at = now(),
            channel_name = p_channel_name,
@@ -234,7 +334,10 @@ BEGIN
            updated_at = now(),
            updated_by = p_actor
      WHERE workspace = p_workspace AND channel_id = p_channel_id;
-    IF p_audit THEN
+
+    -- 바뀐 것만 남긴다. 스위치가 꺼진 동안 매 동기화가 같은 줄을 쌓으면 진짜 변경이 묻힌다.
+    IF p_audit AND (current_row.membership IS DISTINCT FROM p_membership
+                    OR current_row.mode IS DISTINCT FROM next_mode) THEN
         INSERT INTO archive_config_audit
             (actor, subject, workspace, channel_id, field,
              old_value, new_value, reason)
@@ -243,6 +346,18 @@ BEGIN
              'membership', current_row.membership || '/' || current_row.mode,
              p_membership || '/' || next_mode, p_reason);
     END IF;
+    IF current_row.writer_owner IS DISTINCT FROM next_owner THEN
+        INSERT INTO archive_config_audit
+            (actor, subject, workspace, channel_id, field,
+             old_value, new_value, reason)
+        VALUES
+            (p_actor, 'channel_membership', p_workspace, p_channel_id,
+             'writer_owner',
+             current_row.writer_owner || '@' || coalesce(nullif(current_row.cutover_ts, ''), '-'),
+             next_owner || '@' || next_cutover,
+             're-invited channel; settle 60s after registration');
+    END IF;
+    RETURN next_mode;
 END
 $$;
 

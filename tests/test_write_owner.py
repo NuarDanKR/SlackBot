@@ -298,3 +298,51 @@ def test_the_master_gate_matches_the_table(mode, owner, expected):
                          "cutover_ts": "1.000100"})
 
     assert lookup.master_may_write(CH).allowed is expected
+
+
+# --- 초대·재초대 인수의 정착 대기 (2026-11-18, shadow 폐기) -----------------------
+#
+# 신규 채널은 DB 가 cutover_ts 를 「등록 시각 + 60초」 로 박는다. Master 는 판정을
+# CACHE_SECONDS(30초) 동안 들고 있으므로, 그 사이 Archiver 가 쓰면 두 writer 다.
+
+SETTLING = _state(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1790000060.000000")
+
+
+def test_the_archiver_waits_until_a_future_cutover_passes():
+    early = decide(SETTLING, WriterOwner.ARCHIVER, archiver_flag=True, now=1790000059.9)
+    late = decide(SETTLING, WriterOwner.ARCHIVER, archiver_flag=True, now=1790000060.0)
+
+    assert not early and "정착" in early.reason
+    assert late
+
+
+@pytest.mark.parametrize("now", [1790000000.0, 1790000030.0, 1790000059.0, 1790000061.0])
+def test_a_settling_hand_over_never_has_two_writers(now):
+    """Master 가 아직 캐시로 「행 없음 = 내 것」 을 믿는 동안 Archiver 는 쓰지 않는다.
+
+    등록 시각 1790000000, Master 캐시 상한 30초 → Master 는 늦어도 1790000030 에 멈춘다.
+    Archiver 는 1790000060 부터 쓴다. 어느 시각에도 둘이 동시에 참이 아니다.
+    """
+    from tybot.archive.write_owner import CACHE_SECONDS
+
+    registered = 1790000000.0
+    master_may_still_write = now < registered + CACHE_SECONDS  # 낡은 캐시: 행 없음
+    archiver = decide(SETTLING, WriterOwner.ARCHIVER, archiver_flag=True, now=now)
+
+    assert not (master_may_still_write and archiver.allowed)
+
+
+def test_a_past_cutover_is_not_delayed():
+    """기존 active 채널의 좌표(과거)는 지금처럼 바로 쓴다 — 좌표 보존 재초대 포함."""
+    assert decide(ACTIVE, WriterOwner.ARCHIVER, archiver_flag=True, now=1790000000.0)
+
+
+def test_an_unreadable_cutover_does_not_invent_a_delay():
+    odd = _state(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "legacy-coordinate")
+
+    assert decide(odd, WriterOwner.ARCHIVER, archiver_flag=True, now=1.0)
+
+
+def test_the_master_never_writes_a_settling_channel():
+    """정착 대기 중에도 Master 몫으로 돌아가지 않는다 — 비는 구간이지 겹치는 구간이 아니다."""
+    assert not decide(SETTLING, WriterOwner.MASTER, now=1790000000.0)

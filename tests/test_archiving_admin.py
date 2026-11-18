@@ -496,7 +496,38 @@ def test_turning_collection_off_pauses_the_channel(repo):
     assert row["mode"] == "paused"
 
 
-def test_turning_it_back_on_returns_to_shadow(repo):
+def test_turning_it_back_on_hands_a_master_channel_to_live_collection(repo):
+    """hold 해제는 shadow 로 돌아가지 않는다(2026-11-18 shadow 폐기)."""
+    repo.given_channel("tyit", "C1", mode="paused", membership="joined",
+                       operator_hold=True)
+    repo.given_flag("archiver_writes_live", True)
+
+    admin.set_collection_hold(
+        "tyit", "C1", False, actor=admin.Actor("dan", "다시 필요함"), repo=repo,
+    )
+
+    row = repo.channel_rows[("tyit", "C1")]
+    assert row["operator_hold"] is False
+    assert (row["mode"], row["writer_owner"]) == ("active", "archiver")
+    assert row["cutover_ts"]
+
+
+def test_turning_it_back_on_keeps_an_archiver_cutover(repo):
+    repo.given_channel("tyit", "C1", mode="paused", owner="archiver",
+                       cutover_ts="1700000000.000000", membership="joined",
+                       operator_hold=True)
+
+    admin.set_collection_hold(
+        "tyit", "C1", False, actor=admin.Actor("dan", "다시 필요함"), repo=repo,
+    )
+
+    row = repo.channel_rows[("tyit", "C1")]
+    assert (row["mode"], row["writer_owner"], row["cutover_ts"]) == (
+        "active", "archiver", "1700000000.000000",
+    )
+
+
+def test_turning_it_back_on_with_the_switch_off_leaves_master_writing(repo):
     repo.given_channel("tyit", "C1", mode="paused", membership="joined",
                        operator_hold=True)
 
@@ -505,8 +536,7 @@ def test_turning_it_back_on_returns_to_shadow(repo):
     )
 
     row = repo.channel_rows[("tyit", "C1")]
-    assert row["operator_hold"] is False
-    assert row["mode"] == "shadow"
+    assert (row["mode"], row["writer_owner"]) == ("off", "master")
 
 
 def test_resuming_a_channel_the_bot_left_does_not_start_collection(repo):
