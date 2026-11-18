@@ -29,6 +29,7 @@ from tybot.archive.image_description import ImageDescription, ImageUsage
 from tybot.archive.image_description_policy import ImageDescriptionDispatch
 from tybot.archive.image_description_source import ImageCandidate
 from tybot.archive.image_description_store import ImageDescriptionDenied
+from tybot.gateway.base import Sensitivity
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-pixels" * 4
 WS, CH, FID = "tyit", "C0TEST0001", "F0TEST0001"
@@ -115,7 +116,8 @@ class FakeStore:
                 prompt_revision="p1", model="m", provider="p",
                 max_output_tokens=256, expires_at=LATER, active=True,
             ),
-            model="m", provider="p", max_output_tokens=256, timeout_seconds=20.0,
+            model="m", provider="p", sensitivity=Sensitivity.PUBLIC,
+            max_output_tokens=256, timeout_seconds=20.0,
         )
 
     def finish_and_publish(self, job_id, result):

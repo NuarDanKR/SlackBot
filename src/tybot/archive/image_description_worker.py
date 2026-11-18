@@ -45,6 +45,7 @@ def dispatch_reserved_image(
             router=router,
             model=grant.model,
             provider=grant.provider,
+            sensitivity=grant.sensitivity,
             max_output_tokens=grant.max_output_tokens,
             timeout_seconds=grant.timeout_seconds,
         )

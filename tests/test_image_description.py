@@ -103,13 +103,14 @@ def _say(**over) -> str:
 
 
 def _run(*responses, image=None, max_output_tokens=400, timeout_seconds=20.0,
-         router=None):
+         router=None, sensitivity=Sensitivity.CONFIDENTIAL):
     box = router or FakeRouter(*responses)
     out = idesc.describe_image(
         image or _image(),
         router=box,
         model=MODEL,
         provider=PROVIDER,
+        sensitivity=sensitivity,
         max_output_tokens=max_output_tokens,
         timeout_seconds=timeout_seconds,
     )
@@ -338,6 +339,12 @@ def test_the_caps_are_handed_to_the_router():
 
 
 # --- 사진 안의 지시문 ---------------------------------------------------------
+
+
+def test_a_public_policy_stays_public_at_the_router_boundary():
+    _, box = _run(_Resp(_say()), sensitivity=Sensitivity.PUBLIC)
+
+    assert box.calls[0]["sensitivity"] is Sensitivity.PUBLIC
 
 
 def test_our_instruction_is_the_last_word_after_the_image():

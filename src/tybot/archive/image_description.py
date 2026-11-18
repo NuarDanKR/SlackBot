@@ -53,6 +53,8 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from tybot.gateway.base import Sensitivity
+
 from . import image_transcript as _transcript
 from .image_transcript import ImageTranscript, parse_transcript
 
@@ -480,6 +482,7 @@ def describe_image(
     provider: str,
     max_output_tokens: int,
     timeout_seconds: float,
+    sensitivity: Sensitivity = Sensitivity.CONFIDENTIAL,
 ) -> ImageDescription:
     """사진 한 장을 색인한다. **호출은 한 번뿐이고 폴백하지 않는다.**
 
@@ -489,18 +492,19 @@ def describe_image(
     예외를 밖으로 내지 않는다 — 입력 계약 위반(`ImageInputError`)만 예외다.
     모델이 터지든 시간이 끝나든 **결과 객체로** 돌려줘야 원장이 그 사실을 적는다.
     """
-    from ..gateway.base import Message, Sensitivity
+    from ..gateway.base import Message
 
     _check_input(image)
     if (not isinstance(model, str) or not model.strip()
             or not isinstance(provider, str) or not provider.strip()
             or type(max_output_tokens) is not int or max_output_tokens <= 0
             or type(timeout_seconds) not in (int, float)
-            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0
+            or not isinstance(sensitivity, Sensitivity)):
         raise ImageInputError("승인 모델 또는 호출 상한이 올바르지 않습니다")
     try:
-        spec = router.resolve(model, Sensitivity.CONFIDENTIAL)
-        scoped_router = router.restricted_to(model, sensitivity=Sensitivity.CONFIDENTIAL)
+        spec = router.resolve(model, sensitivity)
+        scoped_router = router.restricted_to(model, sensitivity=sensitivity)
     except Exception:  # noqa: BLE001 - 조회 실패는 외부 호출 전에 닫는다
         raise ImageInputError("승인 모델을 준비할 수 없습니다") from None
     if spec.provider != provider:
@@ -516,7 +520,7 @@ def describe_image(
             messages,
             model=model,
             # 사내 사진이다. 기밀 이하만 처리하는 모델로 제한한다.
-            sensitivity=Sensitivity.CONFIDENTIAL,
+            sensitivity=sensitivity,
             max_tokens=max_output_tokens,
             timeout_seconds=timeout_seconds,
         )

@@ -108,6 +108,7 @@ def _describe(response) -> idesc.ImageDescription:
         router=_Router(response),
         model=MODEL,
         provider=PROVIDER,
+                sensitivity=Sensitivity.PUBLIC,
         max_output_tokens=1024,
         timeout_seconds=20,
     )
@@ -630,7 +631,8 @@ def test_model_failure_publishes_nothing_and_local_ocr_still_answers(tmp_path, r
         ImageDescriptionStore(ledger).finish_and_publish("job-1", result)
     except ImageDescriptionDenied:
         # 호출 예외(timeout·429)는 provider 영수증이 없어 원장이 거절하고 롤백한다.
-        # worker 는 그 job 을 unknown 으로 닫고 재전송하지 않는다(dispatch_reserved_image).
+        # worker 는 provider 영수증 없는 호출 실패도 terminal failed 로 닫고
+        # 재전송하지 않는다(dispatch_reserved_image).
         assert ledger.events[-1] == "rollback"
     assert ledger.inserts("archiver_image_description_revision") == []
     assert ledger.inserts("archiver_image_transcript_revision") == []
@@ -734,10 +736,13 @@ def test_a_worker_timeout_closes_the_job_without_a_revision_or_a_resend():
             calls.append(("unknown", code))
 
     router = _Router(ProviderTimeout("timeout"))
-    with pytest.raises(worker.ImageDescriptionWorkerError):
-        worker.dispatch_reserved_image(_Store(), "job-1", _image(), router=router, checks={})
+    run = worker.dispatch_reserved_image(
+        _Store(), "job-1", _image(), router=router, checks={}
+    )
     assert router.calls == 1
-    assert calls == ["begin", "publish", ("unknown", "publish_result_unknown")]
+    assert run.state == "closed_without_revision"
+    assert run.revision_id == ""
+    assert calls == ["begin", "publish"]
 
 
 def test_the_answer_path_actually_calls_the_image_guide():

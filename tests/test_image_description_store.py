@@ -9,8 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from tybot.archive.image_description import (
+    ERROR_MODEL_ERROR,
+    ERROR_MODEL_TIMEOUT,
     PROMPT_REVISION,
     STATUS_DESCRIBED,
+    STATUS_FAILED,
     STATUS_UNCERTAIN,
     ImageDescription,
     ImageUsage,
@@ -476,6 +479,28 @@ def test_an_unknown_cost_blocks_publication_and_disables_the_free_claim() -> Non
     assert not _inserts(connection)
     job_update = next(event for event in _updates(connection) if "description_job" in event[0])
     assert job_update[1][0:2] == ("blocked", "cost_unverified")
+    catalog_update = next(event for event in _updates(connection) if "model_catalog" in event[0])
+    assert catalog_update[1] == ("approved-provider", "free-vision-v1")
+
+
+@pytest.mark.parametrize("error_code", [ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR])
+def test_a_transport_failure_without_a_provider_receipt_is_terminal_and_disables_free_claim(
+    error_code: str,
+) -> None:
+    connection = ScriptedConnection([GLOBAL, JOB])
+    result = _result(
+        status=STATUS_FAILED,
+        description="",
+        tags=(),
+        error_code=error_code,
+        usage=ImageUsage(model="free-vision-v1", elapsed_ms=30_000),
+    )
+
+    assert ImageDescriptionStore(connection).finish_and_publish("job-1", result) == ""
+    assert not _inserts(connection)
+    job_update = next(event for event in _updates(connection) if "description_job" in event[0])
+    assert job_update[1][0:2] == ("failed", f"{error_code},cost_unverified")
+    assert job_update[1][2:4] == (None, None)
     catalog_update = next(event for event in _updates(connection) if "model_catalog" in event[0])
     assert catalog_update[1] == ("approved-provider", "free-vision-v1")
 

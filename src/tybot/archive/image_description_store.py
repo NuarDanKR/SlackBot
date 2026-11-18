@@ -16,7 +16,13 @@ from uuid import uuid4
 
 from tybot.gateway.base import Sensitivity
 
-from .image_description import ImageDescription, ImageInput
+from .image_description import (
+    ERROR_MODEL_ERROR,
+    ERROR_MODEL_TIMEOUT,
+    STATUS_FAILED,
+    ImageDescription,
+    ImageInput,
+)
 from .image_description_clearance import SafetyAssessment
 from .image_description_output_guard import guard_index_write
 from .image_description_policy import (
@@ -51,6 +57,7 @@ class ImageDescriptionGrant:
     dispatch: ImageDescriptionDispatch
     model: str
     provider: str
+    sensitivity: Sensitivity
     max_output_tokens: int
     timeout_seconds: float
 
@@ -762,6 +769,7 @@ class ImageDescriptionStore:
                 dispatch=receipt,
                 model=policy.model,
                 provider=policy.provider,
+                sensitivity=policy.sensitivity,
                 max_output_tokens=policy.max_output_tokens,
                 timeout_seconds=float(policy.timeout_seconds),
             )
@@ -795,12 +803,29 @@ class ImageDescriptionStore:
                 raise ImageDescriptionDenied("result_scope_mismatch")
 
             usage = result.usage
-            if bool(usage.model) != bool(usage.provider):
-                raise ImageDescriptionDenied("result_identity_invalid")
             expected_identity = (
                 job["catalog_snapshot"]["model"],
                 job["catalog_snapshot"]["provider"],
             )
+            # A transport exception has no provider receipt, so it must not claim
+            # an actual provider.  It is still a terminal failed call: the dispatch
+            # was committed before the request, and retrying could charge twice.
+            # Keep the useful failure code, but disable the catalog's free claim
+            # because the cost is unknowable without a receipt.
+            unreceipted_transport_failure = (
+                result.status == STATUS_FAILED
+                and result.error_code in {ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR}
+                and usage.model == expected_identity[0]
+                and not usage.provider
+                and usage.input_tokens is None
+                and usage.output_tokens is None
+                and usage.cost_usd is None
+                and not result.description
+                and not result.tags
+                and not result.uncertainty
+            )
+            if bool(usage.model) != bool(usage.provider) and not unreceipted_transport_failure:
+                raise ImageDescriptionDenied("result_identity_invalid")
             if decision.storable and (usage.model, usage.provider) != expected_identity:
                 raise ImageDescriptionDenied("result_identity_invalid")
             for value in (usage.input_tokens, usage.output_tokens):
@@ -822,7 +847,9 @@ class ImageDescriptionStore:
                 else "blocked"
             )
             codes = (
-                (cost_code,)
+                tuple(filter(None, (result.error_code, cost_code)))
+                if unreceipted_transport_failure
+                else (cost_code,)
                 if cost_code
                 else decision.codes
                 if decision.storable
@@ -885,7 +912,7 @@ class ImageDescriptionStore:
                 (
                     state,
                     ",".join(codes),
-                    usage.model or None,
+                    usage.model if usage.provider else None,
                     usage.provider or None,
                     usage.input_tokens,
                     usage.output_tokens,

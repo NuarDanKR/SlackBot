@@ -14,6 +14,7 @@ from tybot.archive.image_description import (
     ImageInputError,
     ImageUsage,
 )
+from tybot.gateway.base import Sensitivity
 
 IMAGE = ImageInput("tyit", "C12345678", "F12345678", "a" * 64, b"image", "image/png")
 RESULT = ImageDescription(
@@ -46,6 +47,7 @@ class Store:
         return SimpleNamespace(
             model="free-vision-v1",
             provider="approved-provider",
+            sensitivity=Sensitivity.PUBLIC,
             max_output_tokens=256,
             timeout_seconds=30,
         )
@@ -77,6 +79,7 @@ def test_one_reserved_job_makes_exactly_one_model_call(monkeypatch):
     )
     assert len(calls) == 1
     assert calls[0][1]["model"] == "free-vision-v1"
+    assert calls[0][1]["sensitivity"] is Sensitivity.PUBLIC
     assert run.state == "published" and run.revision_id == "revision-1"
     assert [event[0] for event in store.events] == ["begin", "finish"]
 
