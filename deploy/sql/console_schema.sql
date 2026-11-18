@@ -419,12 +419,9 @@ ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS required_capability text NO
 -- 어느 Slack 봇이 받은 질문인지(tybot·vipbot). 두 봇이 같은 워크스페이스·전문 봇을 쓴다.
 -- 빈 값은 이 열이 생기기 전 기록이다.
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS bot text NOT NULL DEFAULT '';
--- 이 열이 생기기 전 VIPBot 호출을 되찾는다. B-96(2026-11-12 16:01 KST)부터 Hermes 를
--- Opus 로 부르는 것은 VIPBot 뿐이다(TYBot 은 Sonnet). 그 전 기록은 가를 근거가 없어 비워 둔다.
--- 멱등: 빈 값만 채운다.
-UPDATE specialist_call SET bot = 'vipbot'
- WHERE bot = '' AND at >= TIMESTAMPTZ '2026-11-12 16:00:00+09'
-   AND routing_reason LIKE '%model=claude-opus-5-5%';
+-- 열이 생기기 전 기록을 모델 이름(Opus)으로 VIPBot 에 채우던 보정은 뺐다(2026-11-18).
+-- TYBot 도 `--model=claude-opus-…` 로 물으면 Opus 를 써서 TYBot 질문이 VIPBot 으로 잘못
+-- 표시됐다. 이미 채운 기록은 scripts/fix_specialist_call_bot.py 가 감사기록으로 바로잡는다.
 CREATE INDEX IF NOT EXISTS specialist_call_bot_at ON specialist_call (bot, at DESC);
 ALTER TABLE specialist_call DROP CONSTRAINT IF EXISTS specialist_call_task_index_check;
 ALTER TABLE specialist_call ADD CONSTRAINT specialist_call_task_index_check

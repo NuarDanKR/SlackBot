@@ -724,9 +724,10 @@ def list_answer_records(
     workspace: str = "",
     result: str = "",
     asker: str = "",
+    bot: str = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict:
-    """답변 현황과 원본 목록 메타데이터.
+    """답변 현황과 원본 목록 메타데이터. `bot` 으로 TYBot·VIPBot 을 가른다.
 
     관리자는 전체를 보고, 그 외 사용자는 본인 질문과 자신이 지정된 검토 채널만 본다.
     질문·답변 본문은 목록에 절대 싣지 않는다.
@@ -742,6 +743,7 @@ def list_answer_records(
         workspace=workspace,
         result=result,
         asker=asker,
+        bot=bot.strip().lower()[:40],
     )
     feedback = answer_records.feedback_rows(
         max(1, (reader._now().date() - period_start).days + 1)
@@ -772,6 +774,8 @@ def answer_record_detail(record_key: str, response: Response, user: User) -> dic
     row, _scope = answer_records.find_visible(user, record_key)
     if row is None:
         raise HTTPException(status_code=404, detail="열람할 수 있는 질문·답변 기록이 없습니다.")
+    # VIPBot 질문은 질문한 본인만 본문을 본다. 그 외에는 처리 기록만.
+    show_body = answer_records.body_visible(row, user)
     _audit_event(
         actor=user.email,
         category="answer-record",
@@ -780,11 +784,11 @@ def answer_record_detail(record_key: str, response: Response, user: User) -> dic
         target_id=record_key,
         workspace=str(row.get("workspace") or ""),
         outcome="succeeded",
-        metadata={"viewer": "admin" if user.is_admin else "reviewer"},
+        metadata={"viewer": "admin" if user.is_admin else "reviewer", "body": show_body},
     )
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
-    return answer_records.detail(row, answer_records.feedback_rows())
+    return answer_records.detail(row, answer_records.feedback_rows(), show_body=show_body)
 
 
 @app.get("/api/diagnostics/archive")
