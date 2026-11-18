@@ -2884,6 +2884,8 @@ def test_collected_docs_counts_only_lines_inside_the_period(env):
     later = {d["channel"]: d for d in reader.collected_docs(since="2999-01-01 00:00")}
     fin = "#팀_자금(ABB540)_주간보고"
     assert full[fin]["lines"] == 3 and full[fin]["attachmentLines"] == 1
+    assert full[fin]["attachments"] == 1 and full[fin]["messages"] == 2
+    assert later[fin]["messages"] == 0 and later[fin]["attachments"] == 0
     assert week[fin]["lines"] == 3 and week[fin]["attachmentLines"] == 1 and week[fin]["documents"] == 1
     assert later[fin]["lines"] == 0 and later[fin]["attachmentLines"] == 0 and later[fin]["documents"] == 0
     assert reader._in_period("2026-11-05 09:12", "2026-11-01 00:00")
