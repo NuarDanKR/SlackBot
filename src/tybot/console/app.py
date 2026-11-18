@@ -774,6 +774,8 @@ def answer_record_detail(record_key: str, response: Response, user: User) -> dic
     row, _scope = answer_records.find_visible(user, record_key)
     if row is None:
         raise HTTPException(status_code=404, detail="열람할 수 있는 질문·답변 기록이 없습니다.")
+    # VIPBot 질문은 질문한 본인만 본문을 본다. 그 외에는 처리 기록만.
+    show_body = answer_records.body_visible(row, user)
     _audit_event(
         actor=user.email,
         category="answer-record",
@@ -782,11 +784,11 @@ def answer_record_detail(record_key: str, response: Response, user: User) -> dic
         target_id=record_key,
         workspace=str(row.get("workspace") or ""),
         outcome="succeeded",
-        metadata={"viewer": "admin" if user.is_admin else "reviewer"},
+        metadata={"viewer": "admin" if user.is_admin else "reviewer", "body": show_body},
     )
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
-    return answer_records.detail(row, answer_records.feedback_rows())
+    return answer_records.detail(row, answer_records.feedback_rows(), show_body=show_body)
 
 
 @app.get("/api/diagnostics/archive")

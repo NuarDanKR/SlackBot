@@ -61,3 +61,30 @@ def test_same_folder_is_not_read_twice(tmp_path, monkeypatch):
     monkeypatch.setenv("VIPBOT_QA_LOG_DIR", str(ty))
     rows, _ = answer_records.visible_records(_admin(), start=date(2026, 11, 1), end=date(2026, 11, 30))
     assert len(rows) == 1 and answer_records.answer_bot(rows[0]) == "tybot"
+
+
+def test_vip_body_is_hidden_from_everyone_but_the_asker(tmp_path, monkeypatch):
+    _dirs(tmp_path, monkeypatch)
+    row, _ = answer_records.find_visible(_admin(), "b" * 32)
+    row["citations"] = ["인사안.xlsx"]
+    row["task_traces"] = [{"task_kind": "summary", "query": "본문 조각", "result": "ok"}]
+
+    monkeypatch.setattr(answer_records, "review_scope", lambda email: answer_records.ReviewScope())
+    assert not answer_records.body_visible(row, _admin())
+    hidden = answer_records.detail(row, [], show_body=False)
+    assert hidden["bodyHidden"] is True
+    assert hidden["question"] == hidden["answer"] == "" and hidden["citations"] == []
+    assert hidden["taskTraces"] == [{"task_kind": "summary", "result": "ok"}]
+    assert hidden["bot"] == "vipbot" and hidden["model"] == "-"
+
+    asker = answer_records.ReviewScope(own_users=frozenset({("mgmt", "U1")}))
+    monkeypatch.setattr(answer_records, "review_scope", lambda email: asker)
+    assert answer_records.body_visible(row, _admin())
+
+
+def test_tybot_body_stays_visible(tmp_path, monkeypatch):
+    _dirs(tmp_path, monkeypatch)
+    monkeypatch.setattr(answer_records, "review_scope", lambda email: answer_records.ReviewScope())
+    row, _ = answer_records.find_visible(_admin(), "a" * 32)
+    assert answer_records.body_visible(row, _admin())
+    assert answer_records.detail(row, [])["bodyHidden"] is False

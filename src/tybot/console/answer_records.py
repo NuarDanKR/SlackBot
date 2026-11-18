@@ -126,6 +126,26 @@ def answer_bot(row: dict) -> str:
     return str(row.get(BOT_KEY) or "tybot")
 
 
+#: 본문을 가린 VIP 기록에서도 보여 주는 작업 기록 키 — 처리 경로만, 내용은 없다.
+_TRACE_KEYS = (
+    "task_index", "task_kind", "required_capability", "routing_confidence",
+    "final_responder", "attempted_specialists", "result", "error_code",
+)
+
+
+def body_visible(row: dict, user: ConsoleUser) -> bool:
+    """질문·답변 본문을 보여 줘도 되는가.
+
+    VIPBot(경영진) 질문은 **질문한 본인만** 본문을 본다. 관리자·검토자는 시각·모델·결과·
+    근거 건수 같은 처리 기록만 본다(2026-11-18 결정). 본인 확인은 회사 이메일 → 사번 →
+    Slack ID 매핑으로만 한다 — 확인이 안 되면 가린다.
+    """
+    if answer_bot(row) != "vipbot":
+        return True
+    own = review_scope(user.email).own_users
+    return (str(row.get("workspace") or ""), str(row.get("user") or "")) in own
+
+
 def _visible(row: dict, user: ConsoleUser, scope: ReviewScope) -> bool:
     workspace = str(row.get("workspace") or "")
     if user.is_admin:
@@ -277,7 +297,7 @@ def find_visible(user: ConsoleUser, key: str) -> tuple[dict | None, ReviewScope]
     return None, scope
 
 
-def detail(row: dict, feedback: list[dict]) -> dict:
+def detail(row: dict, feedback: list[dict], *, show_body: bool = True) -> dict:
     raw_id = str(row.get("record_id") or "")
     events = [item for item in feedback if str(item.get("qa_record_id") or "") == raw_id]
     resolved = {
@@ -303,7 +323,7 @@ def detail(row: dict, feedback: list[dict]) -> dict:
                 "handledNote": str((done or {}).get("text") or ""),
             }
         )
-    return {
+    out = {
         "recordKey": record_key(row),
         "bot": answer_bot(row),
         "at": str(row.get("ts") or ""),
@@ -336,3 +356,12 @@ def detail(row: dict, feedback: list[dict]) -> dict:
         "specialistErrorCode": str(row.get("specialist_error_code") or ""),
         "feedback": visible_feedback,
     }
+    out["bodyHidden"] = not show_body
+    if not show_body:
+        out.update(
+            question="", answer="", citations=[],
+            taskTraces=[{key: trace.get(key) for key in _TRACE_KEYS if key in trace}
+                        for trace in out["taskTraces"] if isinstance(trace, dict)],
+            feedback=[{**item, "text": "", "handledNote": ""} for item in out["feedback"]],
+        )
+    return out
