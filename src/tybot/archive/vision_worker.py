@@ -36,6 +36,7 @@ def dispatch_reserved_page(
             provider=grant.provider,
             max_output_tokens=grant.max_output_tokens,
             timeout_seconds=grant.timeout_seconds,
+            sensitivity=grant.sensitivity,
         )
     except VisionInputError:
         store.finish(job_id, actual_usd=Decimal("0"))

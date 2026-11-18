@@ -25,6 +25,7 @@ from .image_description_runtime import (
 )
 from .image_description_secret import resolve_provider_key
 from .image_description_store import ImageDescriptionStore
+from .vision_sensitivity import request_sensitivity
 
 _WORKSPACE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 log = logging.getLogger("tybot.archive.image_description_job")
@@ -73,7 +74,8 @@ def _router(policy, *, cost_path: Path, api_key: str) -> Router:
         provider=policy.provider,
         input_price_per_mtok=0.0,
         output_price_per_mtok=0.0,
-        max_sensitivity=policy.sensitivity,
+        # 요청과 같은 계약 값(`vision_sensitivity.request_sensitivity`). 둘이 갈리면 Router 가 막는다.
+        max_sensitivity=request_sensitivity(policy.sensitivity),
     )
     return Router(
         providers={policy.provider: provider},

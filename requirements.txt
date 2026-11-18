@@ -20,6 +20,8 @@ openpyxl==3.1.5
 python-docx==1.2.0
 python-pptx==1.0.2
 pypdf==6.16.1
+# B-80: 실패·미확인 PDF 쪽만 PNG 로 그린다(Vision 전사 입력). 없으면 렌더링 없이 닫힌다.
+pypdfium2==4.30.0
 defusedxml==0.7.1
 
 # --- 위 패키지의 전이 의존성 (재현성 고정) ---

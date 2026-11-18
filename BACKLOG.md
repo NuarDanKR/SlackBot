@@ -807,6 +807,13 @@ TYIT 정기보고 채널의 XLSX 네 건은 변환·아카이브에 성공했지
       identity에 넣는다. 같은 원본을 다시 설명해도 기존 원본·설명을 덮지 않는다.
 - [ ] 설명은 `[AI 이미지 설명·검색용]` 파생 자료로 분리한다. 원문 메시지나 사람이
       작성한 첨부 본문으로 저장하지 않고, 그 설명 문장 자체를 사실 근거로 인용하지 않는다.
+> **2026-11-19 오너 결정 — 일반 업무 문서의 Google Vision 전송 허용.** 당사는 일반 업무 문서를
+> 별도 기밀로 분류하지 않는다. 일반 업무 이미지·PDF 는 정책/카탈로그 민감도 표기 불일치로
+> 막지 않는다(`public`·`internal` = 같은 일반 업무 단계, `confidential` 은 그대로 차단).
+> PII·민감 문서 차단, OCR 불완전 ≠ 안전, 원본 불변, 파생 전사, 페이지별 중복 호출·재청구 금지,
+> provider 오류 시 자동 재시도 금지는 **완화하지 않는다.** B-80·B-81 공통 계약:
+> [vision-sensitivity-contract.md](docs/design/vision-sensitivity-contract.md)
+
 - [ ] 수집 ACK와 이미지 설명 작업 상태를 분리한다. 모델 장애·무료 한도 소진·정책
       OFF여도 원본 수집은 성공할 수 있고, 설명은 `대기/완료/불확실/실패/차단`으로 남긴다.
 - [ ] 질문 시 현재 권한으로 원본 사진을 다시 열어 설명·비교하고 사진 좌표를 출처로 붙인다.
@@ -910,9 +917,9 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
       콘솔 「운영 > 이미지 설명」은 Codex 자격 API(마스크·교체·사용 중지·사유)와 현황을 쓴다.
       E2E 47건, 변이 16건 검출. 실제 Google 호출과 실DB는 미검증.
       운영 절차와 남은 판단: `docs/verification/2026-11-12-b81-image-transcript-e2e.md`
-- [ ] Codex 검토: 호출 예외(timeout·429)가 provider 영수증 없이 `unknown/publish_result_unknown`으로
-      닫힌다. `failed/model_timeout`으로 남기려면 비용 가드(미확인 비용 → 무료 카탈로그 자동 차단)와
-      함께 정해야 한다
+- [x] Codex: 호출 예외(timeout·429)는 provider 영수증을 꾸며 내지 않고
+      `failed/model_timeout` 또는 `failed/model_error`로 닫는다. 사용량·비용을 확인할 수 없으므로
+      파생 revision은 만들지 않고 해당 무료 카탈로그를 자동 차단한다(2026-11-18).
 - [x] 자동 보안 리뷰 3건 반영(2026-11-12, 오너 승인으로 Claude가 Codex 소유 자격 경로 수정)
   1. **전용 키:** Vision provider 키는 `VISION_PROVIDER_SECRET_KEY_FILE`
      (`/etc/tybot/vision-provider-secret.key`, 0400) 전용 Fernet 키로만 암호화한다.
@@ -1097,6 +1104,13 @@ HWP를 그대로 Vision 모델에 보내거나 확장자를 PDF로 바꾸지 않
 채널마다 예약 시각과 일일/주간 주기가 달라 통합 발송 시각 정책부터 결정해야 한다.
 이번에는 백로그에만 남기고 구현하지 않는다. 기존 채널별 예약·DM·상태 알림은 유지한다.
 
+> **2026-11-19 오너 결정 — 일반 업무 문서의 Google Vision 전송 허용.** 당사는 일반 업무 문서를
+> 별도 기밀로 분류하지 않는다. 일반 업무 이미지·PDF 는 정책/카탈로그 민감도 표기 불일치로
+> 막지 않는다(`public`·`internal` = 같은 일반 업무 단계, `confidential` 은 그대로 차단).
+> PII·민감 문서 차단, OCR 불완전 ≠ 안전, 원본 불변, 파생 전사, 페이지별 중복 호출·재청구 금지,
+> provider 오류 시 자동 재시도 금지는 **완화하지 않는다.** B-80·B-81 공통 계약:
+> [vision-sensitivity-contract.md](docs/design/vision-sensitivity-contract.md)
+
 - [ ] 하루 한 번 수신자별 시각 또는 기존 예약 회차별 통합 중 정책 결정
 - [ ] 주간/일일 혼합, 늦게 생성된 후보, 정상 0건/오류 상태의 통합 기준 결정
 - [ ] 수신자가 실제 검토자로 등록된 채널만 결합하고 워크스페이스 간 내용은 섞지 않음
@@ -1115,6 +1129,21 @@ HWP를 그대로 Vision 모델에 보내거나 확장자를 PDF로 바꾸지 않
 한 폴더를 더 구체적인 폴더로 교체하거나 상하위 조직을 추론해 넓히는 것이 아니다.
 운영에서 대표 조직에 연결된 폴더만 조회되고, 실제 일정이 등록되는 별도 조직의
 폴더는 대상에서 누락된 사례가 있다. 원본 개인별 멤버십은 아직 확인하지 않았다.
+- [~] Claude(2026-11-19, **미커밋·오너 검토 대기**): 운영 연결 코어.
+  - 후보 `archive/vision_candidates.py`: staged metadata 의 `missing_units`·`unverified_units` 쪽만.
+    원본 없음·XLS 등 비 PDF·PII/정책 격리·PII 알림(부분 검사 fail-closed)·검사 결과 모름·쪽 판정 없음·
+    목록 상한(50) 도달은 대기열에 넣지 않는다
+  - 렌더 `archive/vision_pdf_render.py`: 요청 쪽만 PNG(pypdfium2). **서버에 pypdfium2 가 없으면
+    `RendererUnavailable` 로 닫는다 — 의존성 추가는 오너 결정 대기**
+  - 실행 `archive/vision_pdf_batch.py`(`dry_run`·`apply` 분리) + `scripts/vision_pdf_backfill.py`
+    (기본 dry-run, apply 는 실행자·사유·쪽 상한·쪽당 예약 금액 필수)
+  - 파생 revision 표 `archiver_vision_page_revision`(job 당 1건, 마스킹→최종 관문, 원문 불변)·
+    `VisionStore.record_page`, 대조기 Vision 전용 등록
+  - 민감도: 공통 계약 [vision-sensitivity-contract.md](docs/design/vision-sensitivity-contract.md).
+    카탈로그는 B-81 과 같은 `archiver_image_model_catalog` 를 읽는다
+  - 시험: `tests/test_vision_pdf_backfill.py`, `tests/test_vision_sensitivity.py`, 실제 DB 시험은
+    `tests/test_vision_store_db.py`(TYBOT_SCHEMA_TEST_DSN 필요 — 이 세션에서는 미실행)
+  - 남은 것: 서버 31건 dry-run 실측, pypdfium2 결정, 쪽당 예약 금액(검증된 요금), 파생 전사의 검색 투영
 
 현재 `V_TYSLACK_EMP`는 `DEPARTMENTMANAGECODE` 한 컬럼을 `org_code`로 내보내고,
 `schedule_dm.RECIPIENT_CTE`는 그 값과 `schedule_folder_org.org_code`를 일치시킨다.

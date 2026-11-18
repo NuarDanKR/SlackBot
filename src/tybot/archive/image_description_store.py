@@ -33,6 +33,7 @@ from .image_description_policy import (
 )
 from .image_model_catalog import FreeQuotaState, ImageModelCatalogEntry
 from .image_transcript import guard_transcript
+from .vision_sensitivity import request_sensitivity
 
 CONFIG_KEYS = frozenset({
     "model",
@@ -769,7 +770,8 @@ class ImageDescriptionStore:
                 dispatch=receipt,
                 model=policy.model,
                 provider=policy.provider,
-                sensitivity=policy.sensitivity,
+                # 계약 값으로 넘긴다 — 운영 Router 의 모델 상한과 같은 값이다(2026-11-19).
+                sensitivity=request_sensitivity(policy.sensitivity),
                 max_output_tokens=policy.max_output_tokens,
                 timeout_seconds=float(policy.timeout_seconds),
             )

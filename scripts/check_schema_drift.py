@@ -49,6 +49,8 @@ VISION_TABLES = {
     name: "archiver_vision_schema.sql" for name in (
         "archiver_vision_approval", "archiver_vision_job",
         "archiver_vision_policy", "archiver_vision_policy_audit",
+        # B-80 운영 연결(2026-11-19): 페이지 전사 파생 revision. Vision 전용, append-only.
+        "archiver_vision_page_revision",
     )
 }
 VISION_TABLES.update({
@@ -68,6 +70,8 @@ MASTER_READ_ONLY = {
     "image_search_entry": "archiver_image_transcript_schema.sql",
     # B-93: 채널×일 다이제스트는 배치(tybot_digest)가 쓰고 Master 는 검색에서 읽기만 한다.
     "channel_day_digest": "channel_day_digest_schema.sql",
+    # B-80: PDF 페이지 전사 검색 투영. Vision 이 쓰고 Master 는 읽기만 한다.
+    "pdf_page_search_entry": "archiver_vision_schema.sql",
 }
 VISION_ROLE = "tybot_vision"
 VISION_REQUIRED = {

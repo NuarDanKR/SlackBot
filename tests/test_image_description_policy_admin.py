@@ -345,7 +345,6 @@ def test_a_global_activation_must_stand_on_its_own():
     ({"zero_cost_verified": False}, "model_zero_cost_not_verified"),
     ({"credential_ready": False}, "model_credential_not_ready"),
     ({"allowed_regions": ["us-central1"]}, "model_region_not_allowed"),
-    ({"max_sensitivity": "public"}, "model_sensitivity_not_allowed"),
     ({"quota_state": "exhausted", "quota_remaining": 0}, "model_quota_exhausted"),
     ({"quota_state": "unknown", "quota_remaining": None}, "model_quota_unknown"),
     ({"verified_at": NOW - timedelta(days=30)}, "model_verification_stale"),
@@ -356,6 +355,23 @@ def test_only_a_verified_free_vision_model_can_be_turned_on(over, blocker):
     said = refuse(request(config={}), catalog=[catalog_row(**over)])
     assert said.code == "activation_blocked"
     assert blocker in said.blockers
+    assert Store.calls == []
+
+
+def test_a_public_catalog_accepts_general_business_policy():
+    """오너 결정(2026-11-19): 정책 internal·카탈로그 public 은 표기 차이일 뿐 막지 않는다."""
+    said = save(request(config={}), catalog=[catalog_row(max_sensitivity="public")])
+    assert said.revision == "rev-new"
+    assert len(Store.calls) == 1
+
+
+def test_a_confidential_policy_is_still_refused_on_a_general_business_catalog():
+    said = refuse(
+        request(config={"sensitivity": "confidential"}),
+        catalog=[catalog_row(max_sensitivity="internal")],
+    )
+    assert said.code == "activation_blocked"
+    assert "model_sensitivity_not_allowed" in said.blockers
     assert Store.calls == []
 
 

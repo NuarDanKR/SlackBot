@@ -437,6 +437,7 @@ def extract_page(
     provider: str,
     max_output_tokens: int,
     timeout_seconds: float,
+    sensitivity=None,
 ) -> VisionPageResult:
     """페이지 한 장을 전사한다. **호출은 한 번뿐이고 폴백하지 않는다.**
 
@@ -448,16 +449,21 @@ def extract_page(
     """
     from ..gateway.base import Message, Sensitivity
 
+    # 정책 민감도를 그대로 쓴다(`vision_sensitivity` 계약, 2026-11-19). 안 주면 기밀 —
+    # 호출부가 값을 빠뜨려도 넓은 쪽으로 열리지 않고 일반 업무 Router 에서 닫힌다.
+    if sensitivity is None:
+        sensitivity = Sensitivity.CONFIDENTIAL
     _check_input(page)
     if (not isinstance(model, str) or not model.strip()
             or not isinstance(provider, str) or not provider.strip()
             or type(max_output_tokens) is not int or max_output_tokens <= 0
             or type(timeout_seconds) not in (int, float)
-            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0
+            or not isinstance(sensitivity, Sensitivity)):
         raise VisionInputError("승인 모델 또는 호출 상한이 올바르지 않습니다")
     try:
-        spec = router.resolve(model, Sensitivity.CONFIDENTIAL)
-        scoped_router = router.restricted_to(model, sensitivity=Sensitivity.CONFIDENTIAL)
+        spec = router.resolve(model, sensitivity)
+        scoped_router = router.restricted_to(model, sensitivity=sensitivity)
     except Exception:  # noqa: BLE001 - 조회 실패는 외부 호출 전에 닫는다
         raise VisionInputError("승인 모델을 준비할 수 없습니다") from None
     if spec.provider != provider:
@@ -472,8 +478,7 @@ def extract_page(
         resp = scoped_router.complete(
             messages,
             model=model,
-            # 사내 문서 원본이다. 기밀 이하만 처리하는 모델로 제한한다.
-            sensitivity=Sensitivity.CONFIDENTIAL,
+            sensitivity=sensitivity,
             max_tokens=max_output_tokens,
             timeout_seconds=timeout_seconds,
         )

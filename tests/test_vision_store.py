@@ -9,6 +9,7 @@ import pytest
 from test_vision_policy import APPROVAL, NOW, PAGE, POLICY, RESERVATION
 
 from tybot.archive.vision_store import VisionDenied, VisionStore, approval_scope, identity, money
+from tybot.gateway.base import Sensitivity
 
 
 @pytest.mark.parametrize('value', [True, False, '-1', 'NaN', 'Infinity', '-Infinity', None, 'bad'])
@@ -68,7 +69,8 @@ def test_dispatch_transaction_exits_before_return():
 
 def test_missing_trusted_checks_are_fail_closed():
     assert VisionStore._source({}) == dict(source_verified=False, rendering_verified=False,
-                                         access_verified=False, pii_blocked=True)
+                                         access_verified=False, pii_blocked=True,
+                                         catalog_max_sensitivity=None)
     assert VisionStore._catalog({}) == dict(capability_verified=False, credential_ready=False)
 
 
@@ -79,7 +81,9 @@ def test_schema_is_dormant_and_registered_without_collector_grants():
     assert 'identity_sha256 text NOT NULL UNIQUE' in schema
     assert 'TO tybot_vision' in schema
     assert 'TO tybot_archiver' not in schema
-    assert 'TO tyslackai' not in schema
+    # Master 는 검색 투영 하나만 **읽는다**(B-80 2026-11-19). 원장·revision 은 열지 않는다.
+    master = [line.strip() for line in schema.splitlines() if 'TO tyslackai' in line]
+    assert master == ['GRANT SELECT ON TABLE pdf_page_search_entry TO tyslackai;']
     assert 'archiver_vision_schema.sql' in (root / 'deploy/apply-schema.sh').read_text(encoding='utf-8')
 
 
@@ -126,7 +130,8 @@ LOCAL = dict(revision='local', enabled=True, config={})
 BOUND = replace(APPROVAL, policy_revision='global:local')
 APPROVAL_ROW = dict(expires_at=BOUND.expires_at, revoked_at=None, scope=approval_scope(BOUND))
 CHECKS = dict(capability_verified=True, credential_ready=True, source_verified=True,
-              rendering_verified=True, access_verified=True, pii_blocked=False)
+              rendering_verified=True, access_verified=True, pii_blocked=False,
+              catalog_max_sensitivity=Sensitivity.PUBLIC)
 
 
 def job_row(**overrides):

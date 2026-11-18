@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+from tybot.gateway.base import Sensitivity
+
 from .vision_extract import BASIS_ORIGINAL, BASIS_RENDERED, VisionPageInput
+from .vision_sensitivity import GENERAL_BUSINESS, catalog_allows
 
 _HASH = re.compile(r"[a-f0-9]{64}")
 
@@ -30,6 +33,8 @@ class VisionPolicy:
     max_image_bytes: int = 0
     max_output_tokens: int = 0
     timeout_seconds: float = 0
+    #: 문서 민감도. 일반 업무 문서가 기본이다(오너 결정 2026-11-19, `vision_sensitivity`).
+    sensitivity: Sensitivity = GENERAL_BUSINESS
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,7 @@ def preflight(
     rendering_verified: bool = False,
     access_verified: bool = False,
     pii_blocked: bool = True,
+    catalog_max_sensitivity: Sensitivity | None = None,
 ) -> Preflight:
     """Check immutable page coordinates before any gateway call.
 
@@ -135,6 +141,14 @@ def preflight(
         return reject("vision_capability_unverified")
     if policy.credential_ready is not True:
         return reject("credential_unavailable")
+    # 정책과 모델 카탈로그는 같은 민감도 계약으로 비교한다(B-81 과 같은 규칙). 카탈로그 값을
+    # 모르면 보내지 않는다. public·internal 은 같은 일반 업무 단계라 표기 차이로 막지 않는다.
+    if not isinstance(policy.sensitivity, Sensitivity):
+        return reject("policy_invalid")
+    if not isinstance(catalog_max_sensitivity, Sensitivity):
+        return reject("catalog_sensitivity_unverified")
+    if not catalog_allows(catalog_max_sensitivity, policy.sensitivity):
+        return reject("sensitivity_not_allowed")
     if access_verified is not True:
         return reject("access_unverified")
     if pii_blocked is not False:

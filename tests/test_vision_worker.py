@@ -7,6 +7,7 @@ from test_vision_policy import PAGE, RESERVATION
 from tybot.archive import vision_extract as vx
 from tybot.archive.vision_store import VisionDenied, VisionDispatch
 from tybot.archive.vision_worker import dispatch_reserved_page
+from tybot.gateway.base import Sensitivity
 
 CHECKS = dict(
     capability_verified=True,
@@ -15,6 +16,7 @@ CHECKS = dict(
     rendering_verified=True,
     access_verified=True,
     pii_blocked=False,
+    catalog_max_sensitivity=Sensitivity.PUBLIC,
 )
 
 

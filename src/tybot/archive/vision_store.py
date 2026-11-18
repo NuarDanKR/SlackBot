@@ -15,11 +15,14 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
+from tybot.gateway.base import Sensitivity
+
 from .vision_policy import PageApproval, PageReservation, VisionPolicy, preflight
+from .vision_sensitivity import GENERAL_BUSINESS, request_sensitivity
 
 CONFIG_KEYS = frozenset({
     'model', 'provider', 'max_image_bytes', 'max_output_tokens', 'timeout_seconds',
-    'daily_usd', 'job_usd', 'max_concurrency',
+    'daily_usd', 'job_usd', 'max_concurrency', 'sensitivity',
 })
 
 
@@ -36,6 +39,8 @@ class VisionDispatch:
     provider: str
     max_output_tokens: int
     timeout_seconds: float
+    #: Router·provider 경계에 넘길 계약 값(`vision_sensitivity.request_sensitivity`).
+    sensitivity: Sensitivity = GENERAL_BUSINESS
 
 
 def money(value) -> Decimal:
@@ -115,7 +120,13 @@ class VisionStore:
         if not local or not workspace:
             raise VisionDenied('policy_unavailable')
         config = global_row['config'] | local['config']
+        try:
+            # 일반 업무가 기본(오너 결정 2026-11-19). 틀린 값은 짐작하지 않고 정책 무효다.
+            sensitivity = Sensitivity(config.get('sensitivity', GENERAL_BUSINESS.value))
+        except ValueError:
+            raise VisionDenied('policy_invalid') from None
         policy = VisionPolicy(
+            sensitivity=sensitivity,
             workspace=workspace, revision=global_row['revision'] + ':' + local['revision'],
             enabled=global_row['enabled'], workspace_enabled=local['enabled'],
             capability_verified=capability_verified, credential_ready=credential_ready,
@@ -250,9 +261,12 @@ class VisionStore:
 
     @staticmethod
     def _source(checks):
-        return {k: checks.get(k, k == 'pii_blocked') for k in (
+        source = {k: checks.get(k, k == 'pii_blocked') for k in (
             'source_verified', 'rendering_verified', 'access_verified', 'pii_blocked'
         )}
+        # 서버 카탈로그가 확인한 모델 민감도 상한. 없으면 preflight 가 막는다.
+        source['catalog_max_sensitivity'] = checks.get('catalog_max_sensitivity')
+        return source
 
     def begin_dispatch(self, job_id: str, page, *, checks: dict) -> VisionDispatch:
         """Commit before I/O; crash after this point is NOT automatically retried.
@@ -281,6 +295,7 @@ class VisionStore:
                 provider=policy.provider,
                 max_output_tokens=policy.max_output_tokens,
                 timeout_seconds=float(policy.timeout_seconds),
+                sensitivity=request_sensitivity(policy.sensitivity),
             )
 
     def finish(self, job_id: str, *, actual_usd: Decimal | None):
@@ -293,6 +308,94 @@ class VisionStore:
                         ('unknown' if actual is None else 'settled', actual, job_id))
             if not cur.fetchone():
                 raise VisionDenied('job_not_dispatched')
+
+    def record_page(self, job_id: str, result, *, channel_id: str) -> str:
+        """한 job 의 전사 결과를 **파생 revision** 으로 남긴다(원본·원문 MD 는 그대로).
+
+        - 정산된(`settled`)·결과 미확정(`unknown`) job 만 받는다 — 보내지 않은 job 의 결과는 없다
+        - 결과 좌표가 job 좌표와 다르면 거절한다(다른 쪽 결과가 이 쪽에 붙지 않게)
+        - 본문은 `sensitive_mask` 로 가린 뒤 `pii_screen` 최종 관문을 지난 것만. 관문에 걸리면
+          본문 없이 `withheld` 로 남긴다(원칙 5)
+        - job 하나에 결과 하나(`job_id` UNIQUE). 같은 페이지를 다시 적지 않는다
+        - `channel_id` 는 호출부가 **방금 수집 범위를 조회해 맞춘** 채널이다(`vision_pdf_batch.access_code`)
+        - 성공 전사는 같은 트랜잭션에서 검색 투영(`pdf_page_search_entry`)에도 들어간다
+        """
+        from ..pii_screen import screen_line
+        from ..sensitive_mask import mask_sensitive
+
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            raise VisionDenied('channel_required')
+        with self._transaction(), self.connection.cursor() as cur:
+            self._lock(cur)
+            cur.execute('SELECT * FROM archiver_vision_job WHERE id=%s FOR UPDATE', (job_id,))
+            job = cur.fetchone()
+            if not job or job['state'] not in ('settled', 'unknown'):
+                raise VisionDenied('job_not_finished')
+            scope = job['scope']
+            coordinates = (
+                result.workspace, result.file_id, result.original_sha256, result.page_number,
+                result.page_basis, result.rendered_sha256 or result.original_sha256,
+                result.renderer_version,
+            )
+            if coordinates != (
+                scope['workspace'], scope['file_id'], scope['original_sha256'],
+                scope['page_number'], scope['page_basis'], scope['rendered_sha256'],
+                scope['renderer_version'],
+            ):
+                raise VisionDenied('result_scope_mismatch')
+            status, body, codes, masked = result.status, '', [], 0
+            if result.ok and result.markdown.strip():
+                masked_result = mask_sensitive(result.markdown)
+                masked = sum(masked_result.counts.values())
+                lines = masked_result.text.splitlines()
+                if any(screen_line(line) for line in lines):
+                    status, codes = 'withheld', ['pii_screen_blocked']
+                else:
+                    body = masked_result.text.strip()
+            elif result.ok:
+                status, codes = 'failed', ['empty_output']
+            else:
+                status = 'failed'
+            if result.error_code:
+                codes.append(result.error_code)
+            revision_id = uuid4().hex
+            cur.execute(
+                """INSERT INTO archiver_vision_page_revision
+                (id,job_id,workspace,channel_id,file_id,original_sha256,page_number,page_basis,
+                 rendered_sha256,renderer_version,image_sha256,model,provider,status,body,
+                 unreadable,codes,masked_count)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (revision_id, job_id, scope['workspace'], channel_id.strip(), scope['file_id'],
+                 scope['original_sha256'], scope['page_number'], scope['page_basis'],
+                 scope['rendered_sha256'], scope['renderer_version'], scope['image_sha256'],
+                 scope['model'], scope['provider'], status, body,
+                 list(result.unreadable), codes, masked),
+            )
+            self._project(cur, revision_id=revision_id)
+            return revision_id
+
+    #: 성공 전사 → 검색 투영. 이미 있으면 건너뛴다(revision_id UNIQUE) — 소급을 몇 번 돌려도 같다.
+    _PROJECT = '''INSERT INTO pdf_page_search_entry
+        (id, revision_id, workspace, channel_id, file_id, page_number, original_sha256,
+         renderer_version, provider, model, status, body, unreadable)
+        SELECT md5(r.id || ':search'), r.id, r.workspace, r.channel_id, r.file_id,
+               r.page_number, r.original_sha256, r.renderer_version, r.provider, r.model,
+               r.status, r.body, r.unreadable
+          FROM archiver_vision_page_revision r
+         WHERE r.status IN ('extracted', 'uncertain') AND r.body <> ''
+           AND (%(revision_id)s::text IS NULL OR r.id = %(revision_id)s::text)
+        ON CONFLICT (revision_id) DO NOTHING'''
+
+    @classmethod
+    def _project(cls, cur, *, revision_id: str | None) -> int:
+        cur.execute(cls._PROJECT, {'revision_id': revision_id})
+        return cur.rowcount or 0
+
+    def project_pages(self) -> int:
+        """이미 저장된 성공 전사를 검색 투영에 소급한다. 멱등 — 새로 들어간 줄 수를 돌려준다."""
+        with self._transaction(), self.connection.cursor() as cur:
+            self._lock(cur)
+            return self._project(cur, revision_id=None)
 
     def cancel(self, job_id: str):
         with self._transaction(), self.connection.cursor() as cur:

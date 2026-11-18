@@ -725,7 +725,8 @@ def test_a_worker_timeout_closes_the_job_without_a_revision_or_a_resend():
         def begin_dispatch(self, job_id, image, *, checks):
             calls.append("begin")
             return SimpleNamespace(
-                model=MODEL, provider=PROVIDER, max_output_tokens=1024, timeout_seconds=20.0,
+                model=MODEL, provider=PROVIDER, sensitivity=Sensitivity.PUBLIC,
+                max_output_tokens=1024, timeout_seconds=20.0,
             )
 
         def finish_and_publish(self, job_id, result):
