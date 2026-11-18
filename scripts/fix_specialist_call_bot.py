@@ -29,15 +29,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-
-VIP_QA_DEFAULT = "/var/lib/tybot-vipbot/qa"
-
 
 def record_ids(directory: Path) -> set[str]:
     """그 폴더 감사기록(`qa-YYYY-MM.jsonl`)의 record_id 전부. 본문은 보지 않는다."""
@@ -86,11 +82,11 @@ def main(argv: list[str] | None = None) -> int:
     from tybot.envfile import load_env_file
 
     load_env_file()   # QA_LOG_DIR·DATABASE_URL 은 /etc/tybot/tybot.env 에 있다
-    from tybot.console.reader import qa_log_dir
+    from tybot.console.reader import qa_log_dir, vip_qa_log_dir
     from tybot.console.workspace_store import _connect
 
     tybot_ids = record_ids(qa_log_dir())
-    vip_ids = record_ids(Path(os.getenv("VIPBOT_QA_LOG_DIR", VIP_QA_DEFAULT)))
+    vip_ids = record_ids(vip_qa_log_dir())
     print(f"감사기록 record_id: TYBot {len(tybot_ids)}건 · VIPBot {len(vip_ids)}건")
     if not tybot_ids:
         print("TYBot 감사기록을 찾지 못했습니다 — QA_LOG_DIR 을 확인하세요. 아무것도 바꾸지 않습니다.")

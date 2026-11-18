@@ -724,9 +724,10 @@ def list_answer_records(
     workspace: str = "",
     result: str = "",
     asker: str = "",
+    bot: str = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict:
-    """답변 현황과 원본 목록 메타데이터.
+    """답변 현황과 원본 목록 메타데이터. `bot` 으로 TYBot·VIPBot 을 가른다.
 
     관리자는 전체를 보고, 그 외 사용자는 본인 질문과 자신이 지정된 검토 채널만 본다.
     질문·답변 본문은 목록에 절대 싣지 않는다.
@@ -742,6 +743,7 @@ def list_answer_records(
         workspace=workspace,
         result=result,
         asker=asker,
+        bot=bot.strip().lower()[:40],
     )
     feedback = answer_records.feedback_rows(
         max(1, (reader._now().date() - period_start).days + 1)

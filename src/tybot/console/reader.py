@@ -56,6 +56,15 @@ def qa_log_dir() -> Path:
     return Path(os.getenv("QA_LOG_DIR", "./qa-log"))
 
 
+#: VIPBot 감사기록 폴더. 봇(`slack/pilot.py`)과 같은 기본값을 쓴다.
+VIPBOT_QA_LOG_DEFAULT = "/var/lib/tybot-vipbot/qa"
+
+
+def vip_qa_log_dir() -> Path:
+    """VIPBot 질문·답변 감사기록. TYBot 과 폴더가 다르다."""
+    return Path(os.getenv("VIPBOT_QA_LOG_DIR", VIPBOT_QA_LOG_DEFAULT))
+
+
 def harness_dir() -> Path:
     return Path(os.getenv("HARNESS_DIR", str(archive_dir().parent / "harness")))
 
