@@ -49,6 +49,8 @@ class ChannelRow:
     documents: int = 0
     lines: int = 0
     attachment_lines: int = 0
+    messages: int = 0
+    attachments: int = 0
     last_ingested: str = ""
     answers: int = 0
     last_answer: str = ""
@@ -95,6 +97,8 @@ class ChannelRow:
             "documents": self.documents,
             "lines": self.lines,
             "attachmentLines": self.attachment_lines,
+            "messages": self.messages,
+            "attachments": self.attachments,
             "lastIngestedAt": self.last_ingested,
             "answers": self.answers,
             "lastAnswerAt": self.last_answer,
@@ -155,6 +159,8 @@ def build_rows(
         row.documents += int(doc.get("documents", 1))
         row.lines += int(doc.get("lines") or 0)
         row.attachment_lines += int(doc.get("attachmentLines") or 0)
+        row.messages += int(doc.get("messages") or 0)
+        row.attachments += int(doc.get("attachments") or 0)
         last = str(doc.get("lastIngestedAt") or "")
         if last > row.last_ingested:
             row.last_ingested = last
