@@ -1293,6 +1293,14 @@ def _blocks_from_hits(hits: list[SearchHit], ctx) -> tuple[list, list, list, int
         doc_citations: list[str] = []
         seen: set[tuple[str, str]] = set()
         for hit in group:
+            if getattr(hit, "revision_id", ""):
+                # PDF 쪽 전사(B-80) — 출처는 원본 PDF 의 **그 쪽**이고 파생 표시가 붙는다.
+                # 파일 단위로 묶으면 다른 쪽이 한 출처로 뭉개진다.
+                cited = hit.citation(with_workspace=workspace != ctx.workspace)
+                if ("vision", cited) not in seen:
+                    seen.add(("vision", cited))
+                    doc_citations.append(cited)
+                continue
             source = hit.line.source_path or hit.doc.path
             date = (hit.line.ts or "").split()[0] if hit.line.ts else ""
             key = (str(source), date)
@@ -1845,6 +1853,22 @@ class AnswerEngine:
             citations.extend(doc_citations)
             specialist_parts.append((block, doc_citations, recent_hits))
 
+        if not scoped:
+            # PDF 쪽 전사(B-80)는 **명시적 문서 질의**일 때만 찾는다 — 주제어(`terms`)나
+            # 문서 이름(`document_query`)이 있을 때. 기간 요약 전체에 전 쪽을 여는 길은
+            # 두지 않는다. 찾는 폭은 `pdf_vision_guide.MAX_PAGES` 로 묶인다.
+            vision_hits = self._summary_vision_hits(
+                [*(terms or []), *wanted_docs], ctx,
+                workspace_filter=workspace_filter, cutoff=cutoff,
+            )
+            if vision_hits:
+                v_blocks, v_citations, v_parts, v_total = _blocks_from_hits(vision_hits, ctx)
+                blocks.extend(v_blocks)
+                citations.extend(v_citations)
+                specialist_parts.extend(v_parts)
+                summary_hits.extend(vision_hits)
+                total += v_total
+
         if not blocks and scoped:
             # 좁혀 물었는데 근거가 안 남았다. **채널 목록으로 넓히지 않는다** —
             # 넓히면 사용자는 자기 질문의 답이 아닌 것을 답으로 받는다(설계 §13).
@@ -2052,6 +2076,10 @@ class AnswerEngine:
         model, q = parse_model_flag(question)
         query = " ".join(terms) if terms else q
         found = self._store.search(query, ctx, limit=self._max_hits) if query else []
+        if query:
+            # 판단의 **사내 사실** 근거도 같은 문을 지난다 — 텍스트가 없는 PDF 쪽은 전사가
+            # 유일한 본문이다(B-80). 낱말이 맞는 쪽만, 상한 안에서.
+            found = self._with_pdf_vision_guide(query, found, ctx)
         hits = self._with_seed(extra_hits, found)
 
         if self._specialist is not None:
@@ -2695,6 +2723,29 @@ class AnswerEngine:
                 seen.add(key)
                 merged.append(hit)
         return merged[: len(hits) + pdf_vision_guide.MAX_PAGES]
+
+    def _summary_vision_hits(
+        self, words, ctx, *, workspace_filter=None, cutoff: str = ""
+    ) -> list[SearchHit]:
+        """요약 경로의 PDF 쪽 전사 근거. 낱말이 없으면 찾지 않는다(전 쪽을 열지 않는다).
+
+        워크스페이스 필터·기간은 다른 요약 근거와 같은 기준으로 자른다. 실패는 닫힌다.
+        """
+        from . import pdf_vision_guide
+
+        query = " ".join(str(w) for w in words or () if str(w).strip())
+        if not query:
+            return []
+        try:
+            found = pdf_vision_guide.expand(self._store, ctx, query)
+        except Exception:
+            logger.warning("PDF 전사 길잡이를 쓰지 못했습니다(요약)", exc_info=True)
+            return []
+        return [
+            hit for hit in found
+            if (not workspace_filter or hit.doc.workspace in workspace_filter)
+            and (not cutoff or (hit.line.ts or "")[:10] >= cutoff)
+        ][: pdf_vision_guide.MAX_PAGES]
 
     def answer(
         self,

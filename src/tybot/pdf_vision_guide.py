@@ -22,7 +22,9 @@
 사람이 출처를 눌러 원본 쪽과 대조할 수 있어야 한다(원칙 2).
 
 `extracted` 만 근거다. `uncertain` 은 투영에 있어도 쓰지 않는다 — 같은 쪽의 **가장 새
-revision** 이 extracted 가 아니면 옛 extracted 로 되돌아가지도 않는다.
+revision** 이 extracted 가 아니면 옛 extracted 로 되돌아가지도 않는다. 실패·보류 revision 은
+투영에 **본문 없는 묘비**로 들어오고(`VisionStore._PROJECT`), 그것이 최신 판이면 그 쪽은
+최초 검색·후속 질문 양쪽에서 빠진다. 판의 순서는 투영 시각이 아니라 원장 revision 시각이다.
 
 ## 후속 질문
 
@@ -52,6 +54,7 @@ import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .archive.store import RawLine, SearchHit
@@ -179,6 +182,16 @@ _COLUMNS = """e.revision_id, e.workspace, e.channel_id, e.file_id, e.page_number
               e.original_sha256, e.status, e.body, e.created_at"""
 
 
+def _stamp(value) -> str:
+    """판 순서 비교용 시각. datetime 은 UTC 마이크로초까지 고정 폭으로 — 문자열 비교가
+    시간 순서와 같아야 한다(세션 시간대·소수 자릿수에 흔들리지 않게)."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return str(value or "")
+
+
 def _entry(row) -> PageEntry | None:
     try:
         entry = PageEntry(
@@ -190,7 +203,7 @@ def _entry(row) -> PageEntry | None:
             original_sha256=str(row.get("original_sha256") or ""),
             status=str(row.get("status") or ""),
             body=str(row.get("body") or ""),
-            created_at=str(row.get("created_at") or ""),
+            created_at=_stamp(row.get("created_at")),
         )
     except (TypeError, ValueError):
         return None
@@ -223,22 +236,23 @@ def active_entries(scopes: set[tuple[str, str]], *, tokens, conn) -> list[PageEn
     keyword_sql, keyword_params = keyword_filter(tokens)
     if not scopes or not keyword_sql:
         return []
-    workspaces = sorted({ws for ws, _ in scopes})
-    channels = sorted({ch for _, ch in scopes})
+    # 워크스페이스·채널을 따로 ANY 로 걸면 (A,ch2)·(B,ch1) 같은 **보이지 않는 조합**이 후보
+    # 상한(LIMIT)을 먹는다. 정확한 좌표 쌍으로 LIMIT 전에 자른다.
+    pairs = sorted(scopes)
     with conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT {_COLUMNS}
               FROM pdf_page_search_entry e
-             WHERE e.workspace = ANY(%(workspaces)s)
-               AND e.channel_id = ANY(%(channels)s)
+             WHERE (e.workspace, e.channel_id) IN
+                   (SELECT * FROM unnest(%(scope_ws)s::text[], %(scope_ch)s::text[]))
                AND e.status IN ('extracted', 'uncertain')
                {keyword_sql}
              ORDER BY e.created_at DESC
              LIMIT %(lim)s
             """,
-            {"workspaces": workspaces, "channels": channels, "lim": CANDIDATE_LIMIT,
-             **keyword_params},
+            {"scope_ws": [ws for ws, _ in pairs], "scope_ch": [ch for _, ch in pairs],
+             "lim": CANDIDATE_LIMIT, **keyword_params},
         )
         rows = list(cur.fetchall())
     picked = [e for e in (_entry(r) for r in rows) if e is not None]

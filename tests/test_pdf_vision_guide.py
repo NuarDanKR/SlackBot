@@ -124,10 +124,10 @@ class _PageConn:
                         v[1:-1].replace("\\%", "%").replace("\\_", "_").replace("\\\\", "\\")
                         for k, v in sorted(params.items()) if k.startswith("kw")
                     ]
+                    pairs = set(zip(params["scope_ws"], params["scope_ch"], strict=True))
                     self.rows = [
                         r for r in conn.rows
-                        if r["workspace"] in params["workspaces"]
-                        and r["channel_id"] in params["channels"]
+                        if (r["workspace"], r["channel_id"]) in pairs
                         and r["status"] in ("extracted", "uncertain")
                         and any(w in r["body"].replace(" ", "").lower() for w in words)
                     ]
@@ -175,8 +175,31 @@ def test_first_question_finds_the_page_and_labels_it_as_a_derived_transcript(sto
 def test_only_visible_channels_are_queried(store):
     conn = _PageConn([_row()])
     guide.expand(store, _ctx(), "계약금액", conn=conn)
-    params = conn.sql[0][1]
-    assert params["workspaces"] == [WS] and params["channels"] == [CH]
+    sql, params = conn.sql[0]
+    assert params["scope_ws"] == [WS] and params["scope_ch"] == [CH]
+    # 좌표 **쌍**으로 LIMIT 전에 자른다. ws·채널을 따로 ANY 로 걸지 않는다.
+    assert "unnest(%(scope_ws)s::text[], %(scope_ch)s::text[])" in sql
+    assert "= ANY(" not in sql
+    assert sql.index("unnest(%(scope_ws)s") < sql.index("LIMIT")
+
+
+def test_cross_pairs_of_visible_workspaces_and_channels_are_not_queried(tmp_path):
+    """(A,ch1)·(B,ch2) 가 보이면 (A,ch2)·(B,ch1) 은 후보가 아니다 — LIMIT 을 먹지 않는다."""
+    pairs = {("A", "C1"), ("B", "C2")}
+    rows = [
+        _row(workspace="A", channel_id="C2", revision_id="cross-1"),
+        _row(workspace="B", channel_id="C1", revision_id="cross-2"),
+        _row(workspace="A", channel_id="C1", revision_id="ok-1"),
+    ]
+    got = guide.active_entries(pairs, tokens=["계약금액"], conn=_PageConn(rows))
+    assert [e.revision_id for e in got] == ["ok-1"]
+
+
+def test_evidence_ref_kind_literal_names_vision_page():
+    import typing
+
+    kinds = typing.get_args(typing.get_type_hints(EvidenceRef)["kind"])
+    assert set(kinds) == {"archive_line", "live_message", VISION_PAGE}
 
 
 # --- 2. TYBot·VIPBot 같은 답변 경로 -----------------------------------------
@@ -222,6 +245,67 @@ def test_tybot_and_vipbot_answer_through_the_same_path(store, monkeypatch, ctx):
     # QA 로그에 들어가는 참조에 전사 문장이 없다
     logged = json.dumps(refs_to_json(answer.evidence_refs), ensure_ascii=False)
     assert "3억" not in logged and "계약금액" not in logged and "지급 조건" not in logged
+
+
+@pytest.mark.parametrize("ctx", [_ctx(), _vip()], ids=["tybot", "vipbot"])
+def test_document_set_summary_uses_the_page_transcript(store, monkeypatch, ctx):
+    """명시적 문서 질의(`document_query`·`terms`) 요약도 같은 근거·같은 출처·같은 좌표."""
+    conn = _PageConn([_row()])
+    monkeypatch.setattr(guide, "_connect", lambda: conn)
+    engine, provider = _engine(store)
+
+    answer = engine.summarize(ctx, question="하도급계약서 계약금액 정리해줘",
+                              terms=["계약금액"], document_query=["하도급계약서"],
+                              all_time=True)
+
+    assert answer.reason == "answered"
+    prompt = provider.calls[0][1].content
+    assert "[AI 문서 전사·파생 · PDF 3쪽]" in prompt and "3억 2천만원" in prompt
+    assert any(f"{PDF_NAME} 3쪽" in c and "AI 문서 전사·파생" in c for c in answer.citations)
+    refs = [r for r in answer.evidence_refs if r.kind == VISION_PAGE]
+    assert [(r.revision_id, r.page_number) for r in refs] == [(REV, 3)]
+
+
+def test_a_plain_period_summary_does_not_open_page_transcripts(store, monkeypatch):
+    """낱말 없는 기간 요약은 전 쪽을 열지 않는다 — DB 에 붙지도 않는다."""
+    opened = []
+    monkeypatch.setattr(guide, "_connect", lambda: opened.append(1) or _PageConn([_row()]))
+    engine, provider = _engine(store)
+    engine.summarize(_ctx(), all_time=True)
+    assert opened == []
+    assert all("AI 문서 전사" not in m.content for call in provider.calls for m in call)
+
+
+def test_summary_page_transcripts_respect_the_workspace_filter(store, monkeypatch):
+    monkeypatch.setattr(guide, "_connect", lambda: _PageConn([_row()]))
+    engine, _ = _engine(store)
+    assert engine._summary_vision_hits(["계약금액"], _ctx(),
+                                       workspace_filter=frozenset({"other"})) == []
+    assert len(engine._summary_vision_hits(["계약금액"], _ctx())) == 1
+    assert engine._summary_vision_hits([], _ctx()) == []
+
+
+@pytest.mark.parametrize("ctx", [_ctx(), _vip()], ids=["tybot", "vipbot"])
+def test_advice_uses_the_page_transcript_as_an_in_house_fact(store, monkeypatch, ctx):
+    monkeypatch.setattr(guide, "_connect", lambda: _PageConn([_row()]))
+    engine, provider = _engine(store)
+
+    answer = engine.advise("계약금액 기준으로 보면 지급 조건이 적정한지 판단해줘", ctx,
+                           terms=["계약금액", "지급"])
+
+    prompt = " ".join(m.content for m in provider.calls[0])
+    assert "[AI 문서 전사·파생 · PDF 3쪽]" in prompt and "3억 2천만원" in prompt
+    assert answer.reason == "advice"
+    assert any(f"{PDF_NAME} 3쪽" in c and "AI 문서 전사·파생" in c for c in answer.citations)
+
+
+def test_summary_follow_up_cites_the_page_not_the_file(store, monkeypatch):
+    _, refs = _follow_refs(store, _ctx())
+    monkeypatch.setattr(guide, "_connect", lambda: _PageConn([_row()]))
+    hits, _ = store.resolve_refs(refs, _ctx())
+    engine, _ = _engine(store)
+    answer = engine.summarize(_ctx(), question="다시 정리", evidence_hits=hits)
+    assert any(f"{PDF_NAME} 3쪽" in c and "AI 문서 전사·파생" in c for c in answer.citations)
 
 
 # --- 3. 범위 밖 차단 ---------------------------------------------------------
@@ -326,6 +410,40 @@ def test_a_newer_uncertain_revision_does_not_fall_back_to_an_older_extracted(sto
              created_at="2026-11-19 02:00:00+00"),
     ]
     assert guide.expand(store, _ctx(), "계약금액", conn=_PageConn(rows)) == []
+
+
+@pytest.mark.parametrize("status", ["failed", "withheld"])
+def test_a_newer_tombstone_blocks_the_older_extracted_in_search_and_follow_up(
+    store, monkeypatch, status
+):
+    """최신 판이 실패·보류 묘비(본문 없음)면 옛 extracted 는 검색에도 후속에도 없다."""
+    _, refs = _follow_refs(store, _ctx())
+    tomb = _row(revision_id="rev-page3-0002", status=status, body="",
+                created_at="2026-11-19 02:00:00+00")
+    rows = [_row(), tomb]
+    assert guide.expand(store, _ctx(), "계약금액", conn=_PageConn(rows)) == []
+    monkeypatch.setattr(guide, "_connect", lambda: _PageConn(rows))
+    hits, dropped = store.resolve_refs(refs, _ctx())
+    assert hits == [] and dropped == [guide.DROP_PROJECTION]
+
+
+def test_revision_order_uses_the_real_timestamp_not_its_text_shape(store):
+    """DB 가 돌려주는 datetime 은 UTC 고정 폭으로 비교한다(시간대·소수 자릿수 무관)."""
+    from datetime import timedelta, timezone
+
+    old = datetime(2026, 11, 19, 10, 0, 0, tzinfo=UTC)
+    # 같은 순간 뒤의 판을 다른 시간대(+09:00)로 표현 — 글자로는 「더 작아」 보인다.
+    newer = (old + timedelta(seconds=1)).astimezone(timezone(timedelta(hours=-9)))
+    rows = [
+        _row(created_at=old),
+        _row(revision_id="rev-page3-0002", status="failed", body="", created_at=newer),
+    ]
+    assert guide.expand(store, _ctx(), "계약금액", conn=_PageConn(rows)) == []
+    rows = [
+        _row(created_at=old.replace(microsecond=1)),
+        _row(revision_id="rev-page3-0002", status="failed", body="", created_at=old),
+    ]
+    assert len(guide.expand(store, _ctx(), "계약금액", conn=_PageConn(rows))) == 1
 
 
 def test_verify_refuses_a_non_extracted_entry_directly(store):

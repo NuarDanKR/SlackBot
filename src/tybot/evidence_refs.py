@@ -82,7 +82,7 @@ def safe_relative_path(value: str) -> str:
 class EvidenceRef:
     """원문 한 줄을 **다시 열 수 있는** 좌표. 원문 자체는 들지 않는다."""
 
-    kind: Literal["archive_line", "live_message"]
+    kind: Literal["archive_line", "live_message", "vision_page"]
     workspace: str
     channel_id: str
     document_path: str = ""  # ARCHIVE_DIR 기준 상대 경로

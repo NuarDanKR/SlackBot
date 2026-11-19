@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--file", action="append", default=[], help="Slack 파일 ID 로 좁히기")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--project", action="store_true",
-                    help="이미 저장된 성공 전사를 검색 투영에 소급(멱등, 모델 호출 없음)")
+                    help="이미 저장된 전사(실패·보류는 본문 없는 묘비)를 검색 투영에 소급(멱등, 모델 호출 없음)")
     ap.add_argument("--actor", default="")
     ap.add_argument("--reason", default="")
     ap.add_argument("--max-pages", type=int, default=0)

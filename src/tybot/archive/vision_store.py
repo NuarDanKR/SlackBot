@@ -318,7 +318,8 @@ class VisionStore:
           본문 없이 `withheld` 로 남긴다(원칙 5)
         - job 하나에 결과 하나(`job_id` UNIQUE). 같은 페이지를 다시 적지 않는다
         - `channel_id` 는 호출부가 **방금 수집 범위를 조회해 맞춘** 채널이다(`vision_pdf_batch.access_code`)
-        - 성공 전사는 같은 트랜잭션에서 검색 투영(`pdf_page_search_entry`)에도 들어간다
+        - 같은 트랜잭션에서 검색 투영(`pdf_page_search_entry`)에도 들어간다. 실패·보류는
+          본문 없는 묘비다 — 옛 성공 전사가 최신 판인 척하지 않게
         """
         from ..pii_screen import screen_line
         from ..sensitive_mask import mask_sensitive
@@ -374,15 +375,27 @@ class VisionStore:
             self._project(cur, revision_id=revision_id)
             return revision_id
 
-    #: 성공 전사 → 검색 투영. 이미 있으면 건너뛴다(revision_id UNIQUE) — 소급을 몇 번 돌려도 같다.
+    #: 전사 revision → 검색 투영. 이미 있으면 건너뛴다(revision_id UNIQUE) — 소급을 몇 번
+    #: 돌려도 같다.
+    #:
+    #: - 실패·보류(failed·withheld)도 **본문 없는 묘비**로 들어간다. 그래야 Master 가 그 쪽의
+    #:   최신 판이 실패·보류임을 알고 옛 extracted 를 쓰지 않는다. 묘비의 body·unreadable 은
+    #:   여기서 비운다 — 원장 제약과 별개로 민감 본문이 Master 로 넘어갈 길을 두지 않는다
+    #: - created_at 은 **원장 revision 시각**을 복사한다. 소급 투영 시각이 들어가면 나중에
+    #:   투영된 옛 판이 새 판보다 새것으로 보인다
     _PROJECT = '''INSERT INTO pdf_page_search_entry
         (id, revision_id, workspace, channel_id, file_id, page_number, original_sha256,
-         renderer_version, provider, model, status, body, unreadable)
+         renderer_version, provider, model, status, body, unreadable, created_at)
         SELECT md5(r.id || ':search'), r.id, r.workspace, r.channel_id, r.file_id,
                r.page_number, r.original_sha256, r.renderer_version, r.provider, r.model,
-               r.status, r.body, r.unreadable
+               r.status,
+               CASE WHEN r.status IN ('extracted', 'uncertain') THEN r.body ELSE '' END,
+               CASE WHEN r.status IN ('extracted', 'uncertain') THEN r.unreadable
+                    ELSE '{}'::text[] END,
+               r.created_at
           FROM archiver_vision_page_revision r
-         WHERE r.status IN ('extracted', 'uncertain') AND r.body <> ''
+         WHERE (r.status IN ('failed', 'withheld')
+                OR (r.status IN ('extracted', 'uncertain') AND r.body <> ''))
            AND (%(revision_id)s::text IS NULL OR r.id = %(revision_id)s::text)
         ON CONFLICT (revision_id) DO NOTHING'''
 
@@ -392,7 +405,7 @@ class VisionStore:
         return cur.rowcount or 0
 
     def project_pages(self) -> int:
-        """이미 저장된 성공 전사를 검색 투영에 소급한다. 멱등 — 새로 들어간 줄 수를 돌려준다."""
+        """이미 저장된 전사 revision(묘비 포함)을 검색 투영에 소급한다. 멱등 — 새 줄 수."""
         with self._transaction(), self.connection.cursor() as cur:
             self._lock(cur)
             return self._project(cur, revision_id=None)
