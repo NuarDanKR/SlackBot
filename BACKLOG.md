@@ -111,7 +111,7 @@ _최종 갱신: 2026-11-12_
 | [B-77](#b-77) | 토픽별 누적 요약 저장소 | 중 | 대기 (오너 요청/2026-10-15) | B-37, B-50, B-56, B-76 |
 | [B-78](#b-78) | 일정 DM의 명시적 개인 캘린더 ACL 반영 | 높음 | 구현 진행중 · 서버 검증 대기 (Codex/2026-10-15) | B-05, B-33 |
 | [B-79](#b-79) | 검토자별 여러 채널 요약 검토 DM 통합 | 중 | 대기 · 발송 시각 정책 결정 필요 (오너/2026-10-15) | B-50 |
-| [B-80](#b-80) | Archiver PDF/HWP 복구와 Vision 모델·예산 관리 | 높음 | 진행중 (Claude/2026-11-19, 배포 차단 결함 수정·요약/판단 연결 커밋 · 서버 스키마 재적용·dry-run·요금 실측 대기) | B-46, B-65, B-73 |
+| [B-80](#b-80) | Archiver PDF/HWP 복구와 Vision 모델·예산 관리 | 높음 | 진행중 (Claude/2026-11-19, 요금표 정산·정책 콘솔·PII 판정 충돌 보류 커밋 · 콘솔에서 정책 입력 → 소량 apply 대기) | B-46, B-65, B-73 |
 | [B-81](#b-81) | 건설 현장 사진 검색 색인·원본 질의응답 | **높음 (다음 작업)** | 진행중 (Codex+Claude/2026-11-12, 운영 연결 재개) | B-80, B-41, B-53 |
 | [B-82](#b-82) | 전문봇 조회 시간 예산·긴 XLSX 분할 열람 | 높음 | 코드 구현·운영 검증 대기 (Codex/2026-10-21) | B-41, B-76 |
 | [B-83](#b-83) | **VIPBot — TYBot 공통 답변과 별도 사용자·근거 채널 권한** | **최우선** | 진행중 (Codex+Claude/2026-11-05) | B-05, B-41, B-44 |
@@ -1175,10 +1175,38 @@ HWP를 그대로 Vision 모델에 보내거나 확장자를 PDF로 바꾸지 않
     연결. TYBot·VIPBot 공통. `EvidenceRef.kind` Literal 에 `vision_page`
   - 폐기 PostgreSQL 16: extracted→failed/withheld 검색·옛 참조 복원 0건, 투영 삭제 후 소급해도 원장
     순서 유지, 옛 투영 표 제자리 업그레이드 — 통과. 변이 시험(묘비 제거·투영 시각·최신판 무시) 모두 검출
-- [ ] 서버 배포 전 필수: `sudo /opt/tybot/deploy/apply-schema.sh` 로 `archiver_vision_schema.sql` 재적용
-  (묘비 소급·시각 정정) → `check_schema_drift.py`
-- [ ] 남은 것: 서버 31건 dry-run 실측 → 쪽당 예약 금액(검증된 요금) 결정 → 소수 쪽 apply → 원본과
-  수치·표 대조(아래 운영 승인 항목) → 범위 확대
+- [x] 서버 스키마 재적용·드리프트 확인 완료(오너, 2026-11-19)
+- [x] 서버 dry-run(2026-11-19): 문서 436 · 보낼 문서 200 · 보낼 쪽 812(같은 채널 중복 제외 약 796).
+  eligible 200 · not_pdf 107 · screen_unknown 111(대부분 mgmt `C0BRAE7B3KN`·`C0BRMFMT8T0` 옛 metadata) ·
+  screen_notice 14 · list_truncated 4. 쪽 사유는 missing 약 650 · unverified 약 160
+- [x] Claude(2026-11-19, `3681068`·`07226a5`): **실제 비용이 0 원으로 정산되던 결함.** Vision Router 는
+  단가 0 ModelSpec 으로 만들고 Google provider 는 늘 `cost_usd=0.0` 이라, 정산 `actual_usd` 가 0 → 일일
+  예산(정산분은 실제액 합산)이 사실상 무력했다.
+  - 정책 설정에 요금표 `input_usd_per_mtok`·`output_usd_per_mtok`. 없으면 예약 거절(`tariff_unconfigured`),
+    예약액이 출력 상한 비용보다 작으면 거절(`reservation_below_tariff`)
+  - 정산 = 예약 때 묶인 요금표 × 응답 토큰. gateway `cost_usd` 는 쓰지 않는다. 토큰이 없거나 0 이면
+    0 원이 아니라 `unknown`(예약액 유지). Google 사고 토큰(`thoughtsTokenCount`)을 출력에 포함
+  - B-81 이미지 설명은 무료 한도(건수) 카탈로그 설계라 이 결함과 무관하다
+- [x] Claude(2026-11-19, `7e8d533`): **B-80 정책 콘솔.** 정책 행을 쓰는 길이 콘솔·스크립트 어디에도 없어 apply 가
+  `policy_unavailable` 로 막혔다. 운영 › 이미지 설명 화면에 「PDF 쪽 전사 (B-80)」 섹션 —
+  모델·요금표·쪽당 상한·하루 예산·동시 상한, 켜기 전 차단 사유, 오늘 사용액, 작업 좌표·예약/실제 금액.
+  API `GET /api/archiver/pdf-vision`·`PUT /api/archiver/pdf-vision/policy`(관리자·CSRF·사유 필수·감사).
+  전역 행은 전체 권한 관리자만. 저장은 허가가 아니다(모델 호출·소급 시작 없음)
+  - 보안 검토 반영: provider·model·요금표는 **전역 행 전용**(콘솔 `config_global_only`, 원장 `reserve`
+    `workspace_override_forbidden`·요금표는 전역 행에서 읽음). 0 원 요금표는 요금표가 아니다 — 일부 워크스페이스
+    관리자가 요금을 0 으로 덮어써 전역 하루 예산을 우회하는 길을 막는다
+- [x] Claude(2026-11-19, `7e8d533`): **PII 판정이 엇갈린 파일은 보류**(`screen_conflict`). 같은 파일의 한 정본은
+  `passed`, 다른 정본은 알림·모름·격리면 통과한 쪽도 보내지 않는다(dry-run 의 `F0C8HETC917`·
+  `F0C0MFB44MR`·`F0C0TM2TU8J`·`F0C0FMK9MLJ`·`F0C0KCK984C`). 같은 채널의 같은 계획은 한 번만 센다
+- [ ] 콘솔에서 전역·`tyit` 정책 입력(요금표는 provider 공식 가격표로 확인) → 소량 apply(문서 2건·6쪽,
+  missing·unverified 각 1건) → 원장 실제액·로그 토큰으로 쪽당 비용 실측
+- [ ] **여러 채널에 공유된 같은 파일**은 원장 identity 에 채널이 없어 첫 채널에만 revision·투영이 생긴다
+  (`F0CDT782V7V`·`F0C0FMK9MLJ`·`F0C0KCK984C`). 투영 키를 (revision, channel) 로 넓히고 답변 직전
+  검증을 채널별로 — 재청구 없이 다른 채널에도 근거가 되게
+- [ ] **`screen_unknown` 111건 로컬 재검사**를 콘솔에서: 채널을 고르고 분량을 먼저 센 뒤
+  `file_reconversion` 으로 재변환·PII 재검사(외부 전송 없음). 통과분만 다음 dry-run 대상
+- [ ] `list_truncated` 4건: metadata 쪽 목록 상한(50) — 재변환으로 전체 목록을 얻은 뒤 다룬다
+- [ ] 남은 것: 원본과 수치·표 대조(아래 운영 승인 항목) → 범위 확대
 
 현재 `V_TYSLACK_EMP`는 `DEPARTMENTMANAGECODE` 한 컬럼을 `org_code`로 내보내고,
 `schedule_dm.RECIPIENT_CTE`는 그 값과 `schedule_folder_org.org_code`를 일치시킨다.
