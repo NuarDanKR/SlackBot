@@ -53,6 +53,9 @@ WRITE_PATHS: dict[str, str] = {
     "src/tybot/archive/dm_consumer.py": "out-of-scope",
     # v1 -> v2 이행. 채널 단위가 아니라 아카이브 전체를 옮긴다.
     "src/tybot/archive/migrate.py": "out-of-scope",
+    # 격리한 옛 아카이브를 현재 레이아웃으로 합치는 오프라인 이행 도구. Slack 을
+    # 읽지 않고, 좌표·ACL·첨부 revision 사전검사를 모두 통과해야만 쓴다.
+    "src/tybot/archive/legacy_promote.py": "out-of-scope",
     # 레이아웃 실측. 임시 경로에만 쓴다.
     "scripts/archive_layout_bench.py": "out-of-scope",
     # 시험 fixture 생성기. **명령줄로 받은 디렉터리에만** 쓴다 — 운영 아카이브 경로를
