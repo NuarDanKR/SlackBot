@@ -15,7 +15,7 @@ fastapi 가 없다. 그런데 이 파일이 최상단에서 fastapi 를 import �
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1814,7 +1814,8 @@ def test_specialist_call_links_to_the_exact_qa_record(client, monkeypatch):
         }],
     )
 
-    response = client.get("/api/specialist-calls", headers=member(client))
+    # 전문 봇을 지정하면 직접 답한 질문은 섞이지 않는다.
+    response = client.get("/api/specialist-calls?specialist=legal", headers=member(client))
 
     assert response.status_code == 200
     assert response.json()["calls"][0]["qaRecordKey"] == "qa-exact-7"
@@ -2926,3 +2927,30 @@ def test_specialist_calls_can_be_split_by_bot(client, monkeypatch):
     assert response.status_code == 200
     assert seen[0]["bot"] == "vipbot"
     assert response.json()["calls"][0]["bot"] == "vipbot"
+
+
+def test_specialist_calls_include_direct_answers(client, monkeypatch):
+    """VIPBot·TYBot 이 직접 답한 질문도 봇 분류 상태에 그 봇으로 나온다."""
+    call = {
+        "id": 9, "at": datetime(2026, 11, 19, 11, 8, tzinfo=UTC), "workspace": "tyit",
+        "specialist": "hermes", "routing_reason": "", "confidence": 0.8, "result": "success",
+        "elapsed_ms": 1, "cost_usd": 0, "error_code": "", "qa_record_id": "c" * 32,
+        "decision_id": "", "task_index": 0, "task_kind": "", "required_capability": "", "bot": "vipbot",
+    }
+    monkeypatch.setattr(console_app.specialist_store, "list_calls", lambda **_kw: [call])
+    direct = {
+        "id": "qa:" + "d" * 32, "at": datetime(2026, 11, 19, 11, 9, tzinfo=UTC),
+        "workspace": "tyit", "specialist": "", "result": "direct", "qaRecordKey": "d" * 32, "bot": "vipbot",
+    }
+    seen: list[dict] = []
+    monkeypatch.setattr(console_app.answer_records, "direct_answer_rows",
+                        lambda **kw: seen.append(kw) or [direct])
+
+    calls = client.get("/api/specialist-calls", headers=member(client)).json()["calls"]
+    assert [c["result"] for c in calls] == ["direct", "success"]      # 시각순
+    assert seen[0]["exclude_keys"] == {"c" * 32}
+
+    only = client.get("/api/specialist-calls?result=direct", headers=member(client)).json()["calls"]
+    assert [c["result"] for c in only] == ["direct"]
+    hermes = client.get("/api/specialist-calls?specialist=hermes", headers=member(client)).json()["calls"]
+    assert [c["result"] for c in hermes] == ["success"]

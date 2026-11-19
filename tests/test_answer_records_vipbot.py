@@ -5,7 +5,7 @@ import json
 from datetime import date
 
 from tybot.console import answer_records
-from tybot.console.auth import ADMIN, ConsoleUser
+from tybot.console.auth import ADMIN, DEVELOPER, ConsoleUser
 
 
 def _write(directory, rows):
@@ -24,6 +24,11 @@ def _row(rid, ts, **over):
 
 def _admin():
     return ConsoleUser(email="a@taeyoung.com", name="관리자", role=ADMIN, workspaces=frozenset(), all_workspaces=True)
+
+
+def _reviewer():
+    return ConsoleUser(email="r@taeyoung.com", name="개발자", role=DEVELOPER, workspaces=frozenset({"mgmt"}),
+                       all_workspaces=False)
 
 
 def _dirs(tmp_path, monkeypatch):
@@ -70,7 +75,8 @@ def test_vip_body_is_hidden_from_everyone_but_the_asker(tmp_path, monkeypatch):
     row["task_traces"] = [{"task_kind": "summary", "query": "본문 조각", "result": "ok"}]
 
     monkeypatch.setattr(answer_records, "review_scope", lambda email: answer_records.ReviewScope())
-    assert not answer_records.body_visible(row, _admin())
+    assert answer_records.body_visible(row, _admin())          # 관리자는 본다
+    assert not answer_records.body_visible(row, _reviewer())   # 그 밖의 계정은 가린다
     hidden = answer_records.detail(row, [], show_body=False)
     assert hidden["bodyHidden"] is True
     assert hidden["question"] == hidden["answer"] == "" and hidden["citations"] == []
@@ -79,7 +85,7 @@ def test_vip_body_is_hidden_from_everyone_but_the_asker(tmp_path, monkeypatch):
 
     asker = answer_records.ReviewScope(own_users=frozenset({("mgmt", "U1")}))
     monkeypatch.setattr(answer_records, "review_scope", lambda email: asker)
-    assert answer_records.body_visible(row, _admin())
+    assert answer_records.body_visible(row, _reviewer())       # 질문한 본인은 본다
 
 
 def test_tybot_body_stays_visible(tmp_path, monkeypatch):
@@ -88,3 +94,21 @@ def test_tybot_body_stays_visible(tmp_path, monkeypatch):
     row, _ = answer_records.find_visible(_admin(), "a" * 32)
     assert answer_records.body_visible(row, _admin())
     assert answer_records.detail(row, [])["bodyHidden"] is False
+
+
+def test_direct_answers_join_the_routing_list(tmp_path, monkeypatch):
+    """봇 분류 상태 — 전문 봇 없이 답한 질문도 답변 봇과 함께 나온다."""
+    _dirs(tmp_path, monkeypatch)
+    rows = answer_records.direct_answer_rows(exclude_keys=set(), allowed=None)
+    assert [(r["bot"], r["result"], r["specialist"]) for r in rows] == [
+        ("tybot", "direct", ""), ("vipbot", "direct", ""),
+    ]
+    assert rows[0]["at"] > rows[1]["at"]              # 최신이 먼저
+    assert "question" not in rows[0]                  # 본문은 싣지 않는다
+
+    only_vip = answer_records.direct_answer_rows(exclude_keys=set(), allowed=None, bot="vipbot")
+    assert [r["qaRecordKey"] for r in only_vip] == ["b" * 32]
+    # 이미 전문 봇 호출로 잡힌 질문은 두 번 나오지 않는다
+    assert answer_records.direct_answer_rows(exclude_keys={"a" * 32, "b" * 32}, allowed=None) == []
+    # 볼 수 없는 워크스페이스는 뺀다
+    assert answer_records.direct_answer_rows(exclude_keys=set(), allowed={"civil"}) == []

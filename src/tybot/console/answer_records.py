@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from ..answer_status import answer_failed, failure_code
@@ -136,11 +136,14 @@ _TRACE_KEYS = (
 def body_visible(row: dict, user: ConsoleUser) -> bool:
     """질문·답변 본문을 보여 줘도 되는가.
 
-    VIPBot(경영진) 질문은 **질문한 본인만** 본문을 본다. 관리자·검토자는 시각·모델·결과·
-    근거 건수 같은 처리 기록만 본다(2026-11-18 결정). 본인 확인은 회사 이메일 → 사번 →
-    Slack ID 매핑으로만 한다 — 확인이 안 되면 가린다.
+    VIPBot(경영진) 질문 본문은 **콘솔 관리자와 질문한 본인**만 본다. 검토자 등 그 밖의
+    계정은 시각·모델·결과·근거 건수 같은 처리 기록만 본다. 관리자도 담당 워크스페이스
+    밖의 기록은 애초에 열 수 없다(`find_visible`). 열람은 감사기록에 남는다.
+    (2026-11-18 「본인만」 → 2026-11-19 「관리자 + 본인」, 오너 결정)
+
+    본인 확인은 회사 이메일 → 사번 → Slack ID 매핑으로만 한다 — 확인이 안 되면 가린다.
     """
-    if answer_bot(row) != "vipbot":
+    if answer_bot(row) != "vipbot" or user.is_admin:
         return True
     own = review_scope(user.email).own_users
     return (str(row.get("workspace") or ""), str(row.get("user") or "")) in own
@@ -364,4 +367,82 @@ def detail(row: dict, feedback: list[dict], *, show_body: bool = True) -> dict:
                         for trace in out["taskTraces"] if isinstance(trace, dict)],
             feedback=[{**item, "text": "", "handledNote": ""} for item in out["feedback"]],
         )
+    return out
+
+
+#: 봇 분류 상태에서 전문 봇 없이 답한 질문의 결과 값.
+DIRECT_RESULT = "direct"
+
+
+def _parse_at(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def direct_answer_rows(
+    *,
+    exclude_keys: set[str],
+    allowed: frozenset[str] | set[str] | None,
+    bot: str = "",
+    limit: int = 200,
+) -> list[dict]:
+    """전문 봇(Hermes)을 부르지 않고 봇이 **직접** 답한 질문 — 봇 분류 상태용.
+
+    봇 분류 상태는 원래 전문 봇 호출(`specialist_call`)만 보였다. 그러면 VIPBot·TYBot 이
+    스스로 답한 질문(짧은 질문, 이어 묻기 재검색, 조언 답변, 자료 없음 등)은 어느 봇이
+    받았는지 그 화면에 남지 않는다. 감사기록(TYBot·VIPBot 폴더)에서 읽어, 이미 호출로
+    잡힌 질문(`exclude_keys`)을 빼고 같은 모양으로 돌려준다. 본문은 담지 않는다.
+    """
+    out: list[dict] = []
+    for row in reversed(_all_records()):
+        key = record_key(row)
+        if key in exclude_keys:
+            continue
+        workspace = str(row.get("workspace") or "")
+        if allowed is not None and workspace not in allowed:
+            continue
+        answered_by = answer_bot(row)
+        if bot and answered_by != bot:
+            continue
+        at = _parse_at(row.get("ts"))
+        if at is None:
+            continue
+        intent = str(row.get("intent_kind") or "")
+        source = str(row.get("intent_source") or "")
+        model = str(row.get("model") or "-")
+        reason = str(row.get("reason") or "")
+        out.append({
+            "id": f"qa:{key}",
+            "at": at,
+            "workspace": workspace,
+            "specialist": "",
+            "routingReason": " ".join(
+                part for part in (
+                    "direct",
+                    f"intent={intent}" if intent else "",
+                    f"source={source}" if source else "",
+                    f"model={model}",
+                    f"reason={reason}" if reason else "",
+                ) if part
+            ),
+            "confidence": None,
+            "result": DIRECT_RESULT,
+            "answerResult": answer_result(row),
+            "elapsedMs": int(row.get("elapsed_ms") or 0),
+            "costUsd": float(row.get("cost_usd") or 0),
+            "errorCode": failure_code(row),
+            "qaRecordKey": key,
+            "decisionId": "",
+            "taskIndex": 0,
+            "taskKind": intent,
+            "requiredCapability": "",
+            "bot": answered_by,
+        })
+        if len(out) >= limit:
+            break
     return out
