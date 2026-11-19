@@ -113,7 +113,7 @@ def test_natural_language_feedback_uses_the_same_log(tmp_path):
     (event,) = _events(tmp_path)
     assert event["qa_record_id"] == rec.record_id
     assert event["text"].startswith("과거 자료보다")
-    assert "피드백으로 판단" in reply
+    assert "피드백으로 기록" in reply
 
 
 def test_feedback_is_offered_to_personal_memory_with_the_exact_prior_row(tmp_path):

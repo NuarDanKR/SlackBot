@@ -14,6 +14,9 @@ log = logging.getLogger("tybot.canvas_answer")
 # 어느 문서인지 구별할 수 없었다. 수집 제외 판정에는 계속 쓴다(옛 문서가 남아 있다).
 TITLE = "TYBot 정식 답변"
 AUTO_CANVAS_LINES = 25
+#: Canvas 를 기본으로 쓰는 봇(VIPBot)의 자동 전환 기준. 임원 보고는 짧아도 문서로
+#: 받는 편이 읽기 쉽다는 오너 결정(2026-11-19)이다.
+PREFERRED_CANVAS_LINES = 8
 
 # 본문 **첫 블록**. 제목 자리가 아니라 여기에 둔다 — Slack 은 Canvas 제목을 따로
 # 보여 주므로 본문 H1 은 같은 제목을 두 번 보여 줄 뿐이었다.
@@ -54,10 +57,65 @@ def disclaimer(bot_name: str = "tybot") -> str:
     )
 
 
-def automatic(body: str, request: str) -> bool:
-    if re.search(r"(메시지로|메시지에|캔버스\s*(말고|쓰지|사용하지))", request):
+# 「표로」 를 원한다는 표현. `대표로`·`발표를` 처럼 앞 글자가 붙은 낱말은 뺀다.
+TABLE_REQUEST_RE = re.compile(
+    r"(?<![가-힣])표\s*(?:로|를|을|와|과|랑|\s*형태|\s*형식)|테이블|\btable\b",
+    re.IGNORECASE,
+)
+# 「자세히·문서로」 받고 싶다는 표현. Canvas 를 기본으로 쓰는 봇에서만 본다.
+DETAIL_REQUEST_RE = re.compile(
+    r"상세|자세히|자세하게|정리|순위|top\s*\d+|보고서|리포트|report|비교|목록|일람",
+    re.IGNORECASE,
+)
+# 사용자가 Canvas 를 **원하지 않는다**고 말한 경우. 이것이 모든 규칙보다 세다.
+OPT_OUT_RE = re.compile(
+    r"(메시지로|메시지에|캔버스\s*(말고|쓰지|사용하지)|canvas\s*(말고|없이))",
+    re.IGNORECASE,
+)
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_RULE_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+
+
+def has_markdown_table(body: str) -> bool:
+    """본문에 Markdown 표가 있나. 메시지로 보내면 글머리표로 풀려 표가 사라진다."""
+    lines = (body or "").splitlines()
+    return any(
+        _TABLE_ROW_RE.match(lines[i]) and _TABLE_RULE_RE.match(lines[i + 1])
+        for i in range(len(lines) - 1)
+    )
+
+
+def automatic(
+    body: str,
+    request: str,
+    *,
+    prefer_canvas: bool = False,
+    avoid_canvas: bool = False,
+    table_preferred: bool = False,
+) -> bool:
+    """명시 요청이 없어도 Canvas 로 보낼지.
+
+    - 사용자가 「메시지로」·「캔버스 말고」 라고 했으면 언제나 메시지다
+    - **표를 원했고 답에 표가 있으면** 모든 봇이 Canvas 로 보낸다. 메시지는 표를
+      글머리표로 풀어 버려(`evidence_view.fix_markdown_tables`), 요청한 표가 없어진다
+    - `prefer_canvas`(VIPBot) 는 상세·순위·보고 요청이거나 답이 조금만 길어도 Canvas
+    - 그 밖에는 답이 길 때만(`AUTO_CANVAS_LINES`)
+
+    `avoid_canvas`·`table_preferred` 는 본인이 남긴 형식 선호(B-91)다. 이번 요청에
+    명시한 말이 없을 때만 기본값을 바꾼다.
+    """
+    request = request or ""
+    if OPT_OUT_RE.search(request) or avoid_canvas:
         return False
-    return answer_line_count(body) > AUTO_CANVAS_LINES
+    table = has_markdown_table(body)
+    if table and (TABLE_REQUEST_RE.search(request) or table_preferred):
+        return True
+    lines = answer_line_count(body)
+    if prefer_canvas:
+        if table or TABLE_REQUEST_RE.search(request) or DETAIL_REQUEST_RE.search(request):
+            return True
+        return lines > PREFERRED_CANVAS_LINES
+    return lines > AUTO_CANVAS_LINES
 
 
 def answer_line_count(body: str) -> int:
@@ -94,11 +152,29 @@ def message(body: str) -> str:
         text = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", text)
         parts[index] = text
     return "".join(parts)
+# 명시적인 Canvas 지시. 예전에는 「캔버스로 답변/작성」 한 모양만 잡아서
+# 「canvas와 표를 써서 정리해줘」·「Canvas로 정리」·「캔버스에 만들어줘」 가 전부
+# 새고, 그 뒤 판단이 LLM 의 「확신 없으면 message」 에 맡겨졌다(2026-11-19 VIPBot).
+#
+# 모양: (캔버스|canvas) + 조사 + [표/문서/양식 + 조사] + 만드는 동사(어미까지).
+# 「캔버스 내용도 읽어?」 처럼 **읽는** 동사는 넣지 않는다 — 그건 근거 범위 질문이다.
+_CANVAS_VERB = r"(?:써|쓰|사용|작성|정리|만들|보여|답변|답해|답하|올려|그려|담아|넣어|옮겨)"
 REQUEST_RE = re.compile(
-    r"(?:캔버스로\s*(?:답변|작성)(?:해\s*줘|해주세요|해줘|해)?|"
+    r"(?:(?:캔버스|canvas)\s*(?:으로|로|에다|에|와|과|이랑|랑|를|을)?\s*"
+    r"(?:(?:표|문서|양식|형식|형태)\s*(?:으로|로|를|을|와|과|랑)?\s*)?"
+    + _CANVAS_VERB + r"[가-힣]*|"
     r"메시지\s*말고\s*정식\s*답변(?:해\s*줘|해주세요|해줘|해)?|"
     r"양식으로\s*답변(?:해\s*줘|해주세요|해줘|해)?)",
     re.IGNORECASE,
+)
+# 지시 **바로 뒤**가 이런 말이면 지시가 아니다. 「canvas 사용해 답변하라는데 왜
+# 안 해?」 는 불만이고, 「캔버스 쓰는 법 알려줘」 는 사용법 질문이다. 둘 다 Canvas
+# 를 만들 일이 아니고, 지시로 읽어 문장에서 지우면 그 질문의 뜻이 망가진다.
+_NOT_A_REQUEST_TAIL_RE = re.compile(
+    r"^\s*(?:법|방법)(?![가-힣])|"
+    r"^.{0,12}?(?:라는데|라고\s*했|라니까|랬는데|했는데|하는데|왜|이유|"
+    r"안\s*(?:해|하|돼|되|써)|못\s*(?:해|하)|는\s*법|는\s*방법|어떻게|"
+    r"할\s*수|가능|되나|되니|되냐|돼\?)"
 )
 SLACK_LINK_RE = re.compile(r"<(?P<url>https?://[^>|]+)\|(?P<label>[^>]+)>")
 TABLE_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
@@ -112,10 +188,23 @@ class CanvasResult:
 
 
 def parse_request(text: str) -> tuple[bool, str]:
-    """명시적 Canvas 지시를 제거해 검색어를 오염시키지 않는다."""
-    matched = bool(REQUEST_RE.search(text or ""))
-    cleaned = REQUEST_RE.sub(" ", text or "")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.!?\t\r\n")
+    """명시적 Canvas 지시를 제거해 검색어를 오염시키지 않는다.
+
+    불만·사용법 질문 안의 「canvas 사용해」 는 지시가 아니다 — 지우지도 않는다.
+    """
+    source = text or ""
+    kept: list[str] = []
+    matched = False
+    cursor = 0
+    for found in REQUEST_RE.finditer(source):
+        if _NOT_A_REQUEST_TAIL_RE.match(source[found.end():]):
+            continue
+        matched = True
+        kept.append(source[cursor:found.start()])
+        kept.append(" ")
+        cursor = found.end()
+    kept.append(source[cursor:])
+    cleaned = re.sub(r"\s+", " ", "".join(kept)).strip(" ,.!?\t\r\n")
     return matched, cleaned
 
 

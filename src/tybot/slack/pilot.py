@@ -66,7 +66,7 @@ from ..archive.store import ArchiveDoc, ArchiveStore, RawLine, SearchHit
 from ..archive.write_owner import OwnerLookup
 from ..archive.writer import KST
 from ..attachment_trace import confirm_archived
-from ..audit import QALog, QARecord
+from ..audit import DM_CONTEXT_MINUTES, THREAD_TURNS, QALog, QARecord
 from ..autojoin import on_channel_event, sweep
 from ..bot_access import DENY_MESSAGE
 from ..canvas_answer import create as create_answer_canvas
@@ -131,6 +131,7 @@ from ..intent import (
     Intent,
     apply_dm_feedback_context,
     carry_dm_subject_context,
+    is_bare_command,
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
@@ -401,6 +402,21 @@ CHANNEL_SCOPE_NOTICE = (
 MAX_THREAD_CONTEXT_CHARS = 6000
 
 
+def display_request(tasks) -> master_planner.ArtifactRequest:
+    """여러 작업 중 **표시 요청 하나**를 고른다. 어느 작업이든 Canvas 를 원하면 그것.
+
+    첫 작업만 보면 「위 답변을 참고해서, … Top 5를 canvas와 표로 정리해줘」 처럼
+    앞 절이 맥락이고 뒤 절이 지시인 질문에서 Canvas 요청이 사라진다(2026-11-19).
+    """
+    items = list(tasks or [])
+    if not items:
+        return master_planner.ArtifactRequest()
+    return next(
+        (item.artifact for item in items if item.artifact.wants_canvas),
+        items[0].artifact,
+    )
+
+
 def _carry_context(answers: list, last):
     """복합 답변이 다음 턴에 물려줄 **좌표를 합친 Answer**.
 
@@ -518,6 +534,7 @@ class WorkspaceBot:
         operational_owner: bool = True,
         private_answers: bool = False,
         answer_quota=None,
+        prefer_canvas: bool = False,
     ) -> None:
         from slack_bolt import App
 
@@ -543,6 +560,9 @@ class WorkspaceBot:
         self._question_transform = question_transform or (lambda question: question)
         self.operational_owner = operational_owner
         self.private_answers = private_answers
+        # Canvas 를 기본으로 쓰는 봇(VIPBot). 상세·순위·표 요청이나 조금 긴 답을
+        # Canvas 로 보낸다(2026-11-19 오너 결정). 표시 형식만 바꾸고 근거는 같다.
+        self.prefer_canvas = prefer_canvas
         self.answer_quota = answer_quota
         # 전 채널·전 워크스페이스 통합조회 허용 사용자. 채널 멤버십과 워크스페이스 경계를 모두 우회한다.
         self.exec_users = {
@@ -1822,7 +1842,7 @@ class WorkspaceBot:
         user_id: str,
         text: str,
         prior: dict | None,
-    ) -> None:
+    ) -> bool:
         """Persist bounded personal memory without making feedback evidence.
 
         ``prior`` is the exact QA row already selected for the feedback log.
@@ -1845,6 +1865,7 @@ class WorkspaceBot:
                 result.decision.kind,
                 result.memory_id,
             )
+        return bool(result.saved)
 
     def _user_memory_service(self):
         service = getattr(self, "_user_memory_service_obj", None)
@@ -1892,6 +1913,7 @@ class WorkspaceBot:
             ctx,
             user_memory_prompt=memory.prompt,
             user_memory_ids=memory.memory_ids,
+            user_preferences=tuple(getattr(memory, "preferences", ()) or ()),
         )
 
     def _record_slash_feedback(self, *, user_id: str, channel_id: str, text: str) -> str:
@@ -1911,20 +1933,87 @@ class WorkspaceBot:
             action="submitted",
             text=text,
         )
-        self._remember_user_feedback(user_id=user_id, text=text, prior=row)
+        memory_saved = self._remember_user_feedback(user_id=user_id, text=text, prior=row)
         # 연결할 답변이 없으면 그 사실을 말한다 - 검토자가 재현하지 못하기 때문이다.
         asked = str(row.get("question") or "").strip() if row else ""
         linked = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if record_id and asked else ""
+        self._last_feedback_entry = {
+            "linked_question": asked[:60] if record_id and asked else "",
+            "memory_saved": bool(memory_saved),
+        }
         return feedback_thanks("correction", linked=linked)
 
     def _record_natural_feedback(
         self, *, user_id: str, channel_id: str, text: str
     ) -> str:
-        """일반 문장으로 준 TYBot 개선 의견도 `/피드백`과 같은 원장에 남긴다."""
+        """일반 문장으로 준 개선 의견·불만도 `/피드백`과 같은 원장에 남긴다.
+
+        **접수 문구로 닫지 않는다**(2026-11-19 오너). 「피드백으로 판단했습니다」 만
+        돌려주면 사람은 왜 그렇게 됐는지도, 다음에 어떻게 하면 되는지도 모른다.
+        기록은 코드가 하고, 답 문장은 LLM 이 **코드가 만든 사실만으로** 쓴다 —
+        공감하고, 왜 그렇게 동작했는지와 원하는 결과를 얻는 방법을 안내한다.
+        """
+        self._last_feedback_entry = {}
         recorded = self._record_slash_feedback(
             user_id=user_id, channel_id=channel_id, text=text
         )
-        return "요청 내용을 TYBot 답변 품질 피드백으로 판단했습니다.\n" + recorded
+        entry = dict(getattr(self, "_last_feedback_entry", {}) or {})
+        fallback = f"말씀하신 내용을 {self._display_name()} 답변 품질 피드백으로 기록했습니다.\n" + recorded
+        return write_from_facts(
+            getattr(getattr(self, "engine", None), "router", None),
+            question=text,
+            facts=self._feedback_facts(entry),
+            fallback=fallback,
+        )
+
+    def _display_name(self) -> str:
+        from ..canvas_answer import display_name
+
+        return display_name(self.bot_name)
+
+    def _format_facts(self) -> dict:
+        """답변 형식(Canvas·표·메시지)이 **실제로** 어떻게 정해지는지. 코드와 같은 값이다."""
+        from ..canvas_answer import AUTO_CANVAS_LINES, PREFERRED_CANVAS_LINES
+
+        prefer = bool(getattr(self, "prefer_canvas", False))
+        return {
+            "Canvas_명시_요청": (
+                "'캔버스로 정리해줘', 'canvas와 표로 작성해줘'처럼 말하면 Canvas 문서로 답한다."
+            ),
+            "표_요청": (
+                "표로 정리해 달라고 했고 답에 표가 있으면 Canvas로 보낸다. "
+                "Slack 메시지는 표를 그릴 수 없어 목록으로 풀리기 때문이다."
+            ),
+            "기본_형식": (
+                f"상세·순위·보고·비교 요청이나 {PREFERRED_CANVAS_LINES}줄을 넘는 답은 Canvas로 보낸다."
+                if prefer
+                else f"{AUTO_CANVAS_LINES}줄을 넘는 긴 답은 Canvas로 보낸다."
+            ),
+            "메시지로_받기": "'메시지로 답해줘'라고 하면 Canvas를 만들지 않는다.",
+            "이전_답변_다시_정리": (
+                "같은 스레드나 DM에서 '위 답변을 캔버스로 다시 정리해줘'라고 하면 직전 질문의 "
+                "원문 근거를 다시 찾아 정리한다. 이전 답변 문장을 그대로 옮기지는 않는다."
+            ),
+        }
+
+    def _feedback_facts(self, entry: dict) -> dict:
+        return {
+            "봇": self._display_name(),
+            "할_일": (
+                "사용자의 불만·개선 의견에 짧게 공감하고, 왜 그렇게 동작했을 수 있는지를 "
+                "아래 답변_형식_규칙 안에서만 설명한 뒤, 원하는 결과를 얻는 방법을 한두 개 안내한다. "
+                "규칙에 없는 원인을 지어내지 않는다."
+            ),
+            "피드백_기록": "답변 품질 피드백으로 기록했다. 검토자가 본다.",
+            "연결한_직전_질문": entry.get("linked_question") or "없음",
+            "개인_선호_저장": (
+                "본인 전용 선호로 저장했다. 다음 답변 형식에 반영한다."
+                if entry.get("memory_saved")
+                else "개인 선호로는 저장하지 않았다."
+            ),
+            "답변_형식_규칙": self._format_facts(),
+            "추가_도움": "`도움말`이라고 보내면 전체 명령을 볼 수 있다.",
+        }
 
     def _handle_correction(self, event: dict, say) -> bool:
         text = correction_text(_clean(event.get("text", "")))
@@ -3403,8 +3492,19 @@ class WorkspaceBot:
             from ..canvas_answer import automatic, message
 
             answer_supports_canvas = ans is not None and ans.reason in ("answered", "advice")
+            # 본인이 남긴 형식 선호(B-91). 명시 요청이 없을 때의 기본값만 바꾼다.
+            prefs = frozenset(getattr(ctx, "user_preferences", ()) or ()) if ctx else frozenset()
             use_canvas = answer_supports_canvas and (
-                artifact.wants_canvas or automatic(reply, raw_text)
+                artifact.wants_canvas
+                or automatic(
+                    reply, raw_text,
+                    prefer_canvas=(
+                        bool(getattr(self, "prefer_canvas", False))
+                        or "format.canvas=prefer" in prefs
+                    ),
+                    avoid_canvas="format.canvas=avoid" in prefs,
+                    table_preferred="format.table=prefer" in prefs,
+                )
             )
             private_delivery = bool(
                 getattr(self, "private_answers", False) and in_channel
@@ -3697,7 +3797,11 @@ class WorkspaceBot:
         # 표시 요청은 **첫 작업의 것**을 쓴다. 복합 질문이라도 산출물은 하나이고,
         # 작업마다 다른 형식으로 만들면 한 문서 안에서 형식이 뒤섞인다.
         if decision.tasks:
-            artifact = decision.tasks[0].artifact
+            # 산출물은 하나다. 다만 **첫 작업만** 보면 「위 답변을 참고해서, … Top 5를
+            # canvas와 표로 정리해줘」 처럼 앞 절이 맥락이고 뒤 절이 지시인 질문에서
+            # Canvas 요청이 사라진다(2026-11-19 VIPBot). 어느 작업이든 Canvas 를
+            # 원하면 그 표시 요청을 쓴다.
+            artifact = display_request(decision.tasks)
         sections: list[str] = []
         answers: list = []
         ctx: RequestContext | None = None
@@ -4393,8 +4497,16 @@ class WorkspaceBot:
                 "확인한 경우에만 사용한다."
             ),
             "같은_스레드_맥락": (
-                "이전 질문과 답변으로 '그 문서' 같은 지칭어만 해석하고, "
-                "실제 답은 권한 내 원문에서 다시 찾는다."
+                f"같은 스레드에서는 최근 {THREAD_TURNS}개 문답의 질문과 원문 근거 좌표를 이어 받는다. "
+                "'그 문서', '위 답변' 같은 지칭을 이해하고, 실제 답은 권한 내 원문에서 다시 찾는다."
+            ),
+            "DM_맥락": (
+                f"봇과의 DM에서는 스레드가 아니어도 최근 {DM_CONTEXT_MINUTES // 60}시간의 "
+                f"본인 문답(최대 {THREAD_TURNS}개)을 이어 받는다. 이어진 질문인지는 매번 판단한다."
+            ),
+            "맥락_요약": (
+                "대화 맥락(무엇을 물었는지·어떤 근거였는지)은 이어진다. "
+                "다만 이전 답변 문장 자체를 사실 근거로 다시 쓰지는 않는다."
             ),
             "이유": [
                 "봇 답변을 다시 근거로 쓰면 틀린 내용이 사실처럼 굳는다(요약 재귀).",
@@ -4534,7 +4646,17 @@ class WorkspaceBot:
         if kind == "help":
             if asks_about_our_sources:
                 return SOURCE_SCOPE_ANSWER
-            return self._help()
+            # 「도움말」·「명령어」 처럼 짧게 부르면 전체 목록이다. 문장으로 물으면
+            # **그 질문에 맞춰** LLM 이 답한다(2026-11-19 오너). 전체 목록을 덤프하면
+            # 「캔버스로 받으려면?」 같은 질문에 답이 없다.
+            if is_bare_command(question):
+                return self._help()
+            return write_from_facts(
+                router,
+                question=question,
+                facts=self._help_facts(),
+                fallback=self._help(),
+            )
         if kind == "smalltalk":
             return write_from_facts(
                 router,
@@ -4576,6 +4698,19 @@ class WorkspaceBot:
             lines += [f"• {ts[5:16].replace('T', ' ')}  {q}" for ts, q in recent]
             lines.append("(기록용이며 답변 생성에는 쓰이지 않습니다. 본인 질문만 표시됩니다.)")
         return "\n".join(lines)
+
+    def _help_facts(self) -> dict:
+        """도움말 질문에 줄 사실. 명령 목록은 `_help()` 와 **같은 문자열**을 쓴다."""
+        return {
+            "봇": self._display_name(),
+            "역할": "사내 Slack 아카이브 원문만 근거로 답하고, 근거가 없으면 추측하지 않는다.",
+            "명령_목록": [
+                line.removeprefix("• ") for line in self._help().splitlines()[1:]
+                if line.startswith("• ")
+            ],
+            "답변_형식_규칙": self._format_facts(),
+            "추가_도움": "`도움말`이라고 보내면 전체 명령을 볼 수 있다.",
+        }
 
     def _help(self) -> str:
         return "\n".join(
@@ -5299,6 +5434,7 @@ def build_bots() -> list[WorkspaceBot]:
                 operational_owner=False,
                 private_answers=True,
                 answer_quota=answer_quota,
+                prefer_canvas=True,
             )
             vip_bot.path_problems = problems
             vip_bot.workspace_labels = managed_labels

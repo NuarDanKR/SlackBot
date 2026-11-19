@@ -70,6 +70,8 @@ class RequestContext:
     # checks. IDs make cache/audit separation explicit without storing raw text.
     user_memory_prompt: str = ""
     user_memory_ids: tuple[int, ...] = ()
+    # 본인 형식 선호 키. 답변 **표시 형식**(Canvas·메시지)에만 쓰고 근거·권한에는 안 쓴다.
+    user_preferences: tuple[str, ...] = ()
 
     @property
     def in_channel(self) -> bool:

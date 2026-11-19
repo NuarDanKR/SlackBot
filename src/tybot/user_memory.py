@@ -36,6 +36,8 @@ MAX_SEARCH_TERMS = 8
 TTL_DAYS = {PREFERENCE: 180, TERM: 90, CLAIM: 30}
 
 PREFERENCE_TEXT = {
+    "format.canvas=prefer": "Canvas 문서로 받기를 선호함",
+    "format.canvas=avoid": "Canvas 없이 메시지로 받기를 선호함",
     "format.table=avoid": "표를 피함",
     "format.table=prefer": "표를 선호함",
     "format.length=short": "짧은 답변을 선호함",
@@ -89,7 +91,21 @@ class MemoryDecision:
         return self.kind in KINDS and bool(self.body)
 
 
+_CANVAS_WORD_RE = re.compile(r"캔버스|canvas", re.IGNORECASE)
+_CANVAS_AVOID_RE = re.compile(
+    r"(?:캔버스|canvas)\s*(?:는|은)?\s*(?:말고|빼|쓰지\s*마|만들지\s*마|없이|필요\s*없)|"
+    r"메시지로\s*(?:만|답|줘|받)",
+    re.IGNORECASE,
+)
+
+
 def _preference(text: str) -> str:
+    # Canvas 는 표·글머리표보다 먼저 본다. 「표와 canvas로 답하라는데 왜 안 해?」 는
+    # 표 선호이기 전에 **문서로 받고 싶다**는 말이다(2026-11-19 VIPBot).
+    if _CANVAS_AVOID_RE.search(text):
+        return "format.canvas=avoid"
+    if _CANVAS_WORD_RE.search(text):
+        return "format.canvas=prefer"
     if "글머리표" in text or "불릿" in text:
         return "format.bullets=prefer"
     if re.search(r"표\s*(?:말고|말구|쓰지|빼|제외|피해)", text):
@@ -375,6 +391,8 @@ class MemoryContext:
     search_terms: tuple[str, ...] = ()
     memory_ids: tuple[int, ...] = ()
     prompt_bytes: int = 0
+    #: 선택된 형식 선호 키(`format.canvas=prefer` 등). 표시 형식 판정에만 쓴다.
+    preferences: tuple[str, ...] = ()
 
 
 def build_context(
@@ -388,6 +406,7 @@ def build_context(
     lines: list[str] = []
     hints: list[str] = []
     selected: list[int] = []
+    preferences: list[str] = []
     used = 0
     normalized_question = " ".join((question or "").casefold().split())
     for memory in memories:
@@ -430,6 +449,8 @@ def build_context(
             lines.append(line)
             used += len(encoded)
         selected.append(memory.id)
+        if memory.kind == PREFERENCE and memory.body in PREFERENCE_TEXT:
+            preferences.append(memory.body)
     prompt = ""
     if lines:
         prompt = (
@@ -444,4 +465,5 @@ def build_context(
         search_terms=tuple(hints),
         memory_ids=tuple(selected),
         prompt_bytes=used,
+        preferences=tuple(dict.fromkeys(preferences)),
     )
