@@ -111,7 +111,7 @@ _최종 갱신: 2026-11-12_
 | [B-77](#b-77) | 토픽별 누적 요약 저장소 | 중 | 대기 (오너 요청/2026-10-15) | B-37, B-50, B-56, B-76 |
 | [B-78](#b-78) | 일정 DM의 명시적 개인 캘린더 ACL 반영 | 높음 | 구현 진행중 · 서버 검증 대기 (Codex/2026-10-15) | B-05, B-33 |
 | [B-79](#b-79) | 검토자별 여러 채널 요약 검토 DM 통합 | 중 | 대기 · 발송 시각 정책 결정 필요 (오너/2026-10-15) | B-50 |
-| [B-80](#b-80) | Archiver PDF/HWP 복구와 Vision 모델·예산 관리 | 높음 | 진행중 (Claude/2026-11-19, 전송·저장·투영·답변 연결 커밋 · 서버 dry-run·요금 실측 대기) | B-46, B-65, B-73 |
+| [B-80](#b-80) | Archiver PDF/HWP 복구와 Vision 모델·예산 관리 | 높음 | 진행중 (Claude/2026-11-19, 배포 차단 결함 수정·요약/판단 연결 커밋 · 서버 스키마 재적용·dry-run·요금 실측 대기) | B-46, B-65, B-73 |
 | [B-81](#b-81) | 건설 현장 사진 검색 색인·원본 질의응답 | **높음 (다음 작업)** | 진행중 (Codex+Claude/2026-11-12, 운영 연결 재개) | B-80, B-41, B-53 |
 | [B-82](#b-82) | 전문봇 조회 시간 예산·긴 XLSX 분할 열람 | 높음 | 코드 구현·운영 검증 대기 (Codex/2026-10-21) | B-41, B-76 |
 | [B-83](#b-83) | **VIPBot — TYBot 공통 답변과 별도 사용자·근거 채널 권한** | **최우선** | 진행중 (Codex+Claude/2026-11-05) | B-05, B-41, B-44 |
@@ -1158,9 +1158,25 @@ HWP를 그대로 Vision 모델에 보내거나 확장자를 PDF로 바꾸지 않
   - 수집 입구가 이미 봇·앱 메시지를 버리고 **지정 변환 앱의 PDF 만** 받는다(`collect`·`converter_bots`).
     그 PDF 는 사람이 올린 HWP 의 변환본이다. 이 값을 요구하면 HWP 계열과 옛 PDF 전부가 빠져
     「가능한 모든 문서를 정확한 텍스트로」 라는 목표와 반대가 된다. 봇 출력 되먹임은 수집 입구가 막는다
-- [ ] 후속 제안(오너 결정 필요): B-81 이미지 설명도 같은 근거로 「사람 업로드 확인」 대신 **수집 입구
-  판정**(봇·앱 메시지 배제)으로 바꾸면 옛 사진·파일 목록 소급 사진까지 범위에 들어온다.
-  B-81 경로는 이번에 고치지 않았다
+- [x] 오너 결정(2026-11-19) · Claude(`7200ca1`): **B-81 이미지도 같은 기준.** 판정은
+  `archive/vision_provenance.admitted_by_collection` 한 곳 — 좌표가 온전하고 TYBot·VIPBot 답변
+  Canvas 표식이 없는 정본. 선별기·원본 로더·승인/clearance 콘솔이 이것을 부른다. 옛 사진·히스토리
+  재수집·파일 목록 소급 사진이 범위에 들어온다. `human_upload_confirmed` 는 기록만 하고 판정에
+  쓰지 않는다. 오류·건너뜀 코드 이름은 콘솔·원장 호환을 위해 그대로 둔다.
+  우리 봇이 이미지·PDF 를 올리는 기능이 생기면 **그 입구에서** 표식을 남기고 이 함수가 거절해야 한다
+- [x] Claude(2026-11-19, `3061fe8`): **배포 차단 결함 수정**(c2f903e 검증 지적).
+  - 실패·보류 revision 도 `pdf_page_search_entry` 에 **본문 없는 묘비**로 투영(body·unreadable 항상 빈 값,
+    DB 제약 `pdf_page_search_entry_body_by_status`). 최신 판이 failed·withheld·uncertain 이면 옛
+    extracted 는 최초 검색·후속 복원 양쪽에서 빠진다
+  - 투영 `created_at` = 원장 revision 시각. 스키마 재적용이 기존 행 시각 정정·제약 교체·묘비 소급을
+    멱등으로 한다
+  - `active_entries` 를 (workspace, channel) **정확한 좌표 쌍**(unnest)으로 LIMIT 전에 제한
+  - `summarize()`(명시적 `terms`·`document_query` 일 때만, 상한 4쪽)·`advise()` 의 사내 사실 근거에도
+    연결. TYBot·VIPBot 공통. `EvidenceRef.kind` Literal 에 `vision_page`
+  - 폐기 PostgreSQL 16: extracted→failed/withheld 검색·옛 참조 복원 0건, 투영 삭제 후 소급해도 원장
+    순서 유지, 옛 투영 표 제자리 업그레이드 — 통과. 변이 시험(묘비 제거·투영 시각·최신판 무시) 모두 검출
+- [ ] 서버 배포 전 필수: `sudo /opt/tybot/deploy/apply-schema.sh` 로 `archiver_vision_schema.sql` 재적용
+  (묘비 소급·시각 정정) → `check_schema_drift.py`
 - [ ] 남은 것: 서버 31건 dry-run 실측 → 쪽당 예약 금액(검증된 요금) 결정 → 소수 쪽 apply → 원본과
   수치·표 대조(아래 운영 승인 항목) → 범위 확대
 
