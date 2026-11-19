@@ -108,7 +108,7 @@ def _describe(response) -> idesc.ImageDescription:
         router=_Router(response),
         model=MODEL,
         provider=PROVIDER,
-                sensitivity=Sensitivity.PUBLIC,
+        sensitivity=Sensitivity.PUBLIC,
         max_output_tokens=1024,
         timeout_seconds=20,
     )
