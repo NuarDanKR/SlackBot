@@ -3383,6 +3383,17 @@ image_description_policy_router = image_description_policy_routes.build_router(
 )
 app.include_router(image_description_policy_router)
 
+# B-80 PDF 쪽 Vision 전사 — 정책·요금표·예산과 현황. 정산 근거(요금표)를 콘솔에서 고친다.
+from . import pdf_vision_routes  # noqa: E402
+
+pdf_vision_router = pdf_vision_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(pdf_vision_router)
+
 # B-81 Vision provider API 키는 전용 DB에 암호화하고 mask만 조회한다.
 from . import image_description_secret_routes  # noqa: E402
 

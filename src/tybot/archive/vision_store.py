@@ -32,6 +32,9 @@ CONFIG_KEYS = frozenset({
 #: 계산되는데, Vision 경로는 단가 0 으로 Router 를 만들고(Google provider 는 늘 0.0)
 #: 그러면 실제 청구와 무관하게 0 원으로 정산되어 일일 예산이 소진되지 않는다.
 TARIFF_KEYS = ('input_usd_per_mtok', 'output_usd_per_mtok')
+#: 요금표는 모델에 묶이고 전역 하루 예산의 근거다 — **전역 행만** 정한다. 워크스페이스 행이
+#: 덮어쓰면 그 워크스페이스 관리자가 요금 0 으로 전역 예산을 우회할 수 있다.
+GLOBAL_ONLY_KEYS = frozenset({'provider', 'model', *TARIFF_KEYS})
 
 
 class VisionDenied(RuntimeError):
@@ -72,9 +75,11 @@ def tariff(config: dict) -> tuple[Decimal, Decimal] | None:
     if not all(key in config for key in TARIFF_KEYS):
         return None
     try:
-        return tuple(money(config[key]) for key in TARIFF_KEYS)  # type: ignore[return-value]
+        rates = tuple(money(config[key]) for key in TARIFF_KEYS)
     except VisionDenied:
         return None
+    # 0 원 요금표는 정산을 0 으로 만든다 — 무료 모델은 B-81 의 건수 한도 경로다.
+    return rates if all(rate > 0 for rate in rates) else None  # type: ignore[return-value]
 
 
 def money(value) -> Decimal:
@@ -251,7 +256,11 @@ class VisionStore:
                 raise VisionDenied('reservation_expiry_invalid')
             if amount > money(config.get('job_usd', 0)):
                 raise VisionDenied('job_budget_exceeded')
-            rates = tariff(config)
+            global_config = global_row['config'] or {}
+            if any(config.get(k) != global_config.get(k) for k in GLOBAL_ONLY_KEYS):
+                # 워크스페이스 행이 모델·요금표를 덮어썼다. 전역 예산의 근거가 갈라진다.
+                raise VisionDenied('workspace_override_forbidden')
+            rates = tariff(global_config)
             if rates is None:
                 # 요금표 없이 보내면 정산할 수 없다. 모르는 비용을 0 으로 적지 않는다.
                 raise VisionDenied('tariff_unconfigured')
@@ -331,7 +340,7 @@ class VisionStore:
             cur.execute("UPDATE archiver_vision_job SET state='dispatching', dispatched_at=now() WHERE id=%s",
                         (job_id,))
             # 정산 요금표는 **예약 때 묶인 값**이다. 그 사이 정책이 바뀌어도 이 job 은 그대로.
-            snapshot = (job.get('policy_snapshot') or {}).get('effective') or {}
+            snapshot = (job.get('policy_snapshot') or {}).get('global_config') or {}
             rates = tariff(snapshot)
             return VisionDispatch(
                 reservation=receipt,

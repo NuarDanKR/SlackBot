@@ -220,7 +220,230 @@ function StatusSection({ workspace }: { workspace: string }) {
   )
 }
 
-export function ImageDescriptionPage({ onToast, workspaces }: { onToast: (message: string) => void; workspaces: string[] }) {
+/* ---------- B-80 PDF 쪽 전사: 정책·요금표·예산 ---------- */
+
+interface PdfVisionJob {
+  id: string
+  state: string
+  fileId: string
+  page: number
+  reservedUsd: string | null
+  actualUsd: string | null
+  createdAt: string
+  finishedAt: string | null
+}
+
+interface PdfVisionSnapshot {
+  workspace: string
+  policy: {
+    revision: string
+    globalEnabled: boolean
+    workspaceEnabled: boolean
+    workspaceRowExists: boolean
+    global: Record<string, unknown>
+    workspace: Record<string, unknown>
+    effective: Record<string, unknown>
+    tariffConfigured: boolean
+    blockers: string[]
+  }
+  todayChargedUsd: string | null
+  counts: Record<string, number>
+  jobs: PdfVisionJob[]
+}
+
+/** 화면 칸 → 원장 설정 키. 숫자 칸은 정수/실수, 금액은 문자열(정밀도)로 보냅니다.
+ *  globalOnly: 모델·요금표는 전역 예산의 근거라 전역 행에서만 고칩니다(서버도 막습니다). */
+const PDF_FIELDS: { key: string; label: string; kind: 'text' | 'int' | 'float' | 'usd'; hint?: string; globalOnly?: boolean }[] = [
+  { key: 'provider', label: 'Provider', kind: 'text', hint: 'google · anthropic · openai', globalOnly: true },
+  { key: 'model', label: '모델', kind: 'text', globalOnly: true },
+  { key: 'input_usd_per_mtok', label: '입력 요금 (USD / 1M tokens)', kind: 'usd', hint: 'provider 공식 가격표에서 확인한 값 · 0 불가', globalOnly: true },
+  { key: 'output_usd_per_mtok', label: '출력 요금 (USD / 1M tokens)', kind: 'usd', hint: '사고(thinking) 토큰 포함 출력 단가 · 0 불가', globalOnly: true },
+  { key: 'job_usd', label: '쪽당 예약 상한 (USD)', kind: 'usd', hint: '출력 상한 × 출력 요금 이상이어야 합니다' },
+  { key: 'daily_usd', label: '하루 예산 (USD)', kind: 'usd', hint: '전역 행에 반드시 있어야 합니다' },
+  { key: 'max_output_tokens', label: '출력 토큰 상한', kind: 'int' },
+  { key: 'max_image_bytes', label: '쪽 이미지 최대 바이트', kind: 'int' },
+  { key: 'timeout_seconds', label: '시간 제한 (초)', kind: 'float' },
+  { key: 'max_concurrency', label: '동시 작업 상한', kind: 'int', hint: '전역 행에 반드시 있어야 합니다' },
+]
+
+const PDF_JOB_STATE: Record<string, { tone: 'ok' | 'watch' | 'bad' | 'plain'; text: string }> = {
+  settled: { tone: 'ok', text: '정산' },
+  unknown: { tone: 'bad', text: '비용 미확정' },
+  reserved: { tone: 'plain', text: '예약' },
+  dispatching: { tone: 'plain', text: '전송 중' },
+  cancelled: { tone: 'plain', text: '취소' },
+}
+
+const PDF_BLOCKER: Record<string, string> = {
+  job_usd_below_output_bound: '쪽당 예약 상한이 「출력 토큰 상한 × 출력 요금」 보다 작습니다. 이대로면 모든 예약이 거절됩니다.',
+}
+
+function blockerText(code: string): string {
+  if (PDF_BLOCKER[code]) return PDF_BLOCKER[code]
+  const override = code.match(/^workspace_overrides_(.+)$/)
+  if (override) return `워크스페이스 행이 ${override[1]} 를 덮어쓰고 있습니다. 모델·요금표는 전역 행만 정합니다.`
+  if (['provider', 'model', 'input_usd_per_mtok', 'output_usd_per_mtok'].includes(code)) return `${code} 는 전역 기본값에서만 고칠 수 있습니다.`
+  const globalKey = code.match(/^activation_requires_global_(.+)$/)
+  if (globalKey) return `전역 행에 ${globalKey[1]} 가 필요합니다.`
+  const key = code.match(/^activation_requires_(.+)$/)
+  if (key) return `${key[1]} 이(가) 설정되지 않았습니다.`
+  return code
+}
+
+function PdfVisionSection({ workspace, canEditGlobal, onToast }: { workspace: string; canEditGlobal: boolean; onToast: (message: string) => void }) {
+  const snapshot = useResource<PdfVisionSnapshot>(`/api/archiver/pdf-vision?workspace=${encodeURIComponent(workspace)}`)
+  const [scope, setScope] = useState<'workspace' | 'global'>('workspace')
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<{ message: string; blockers: string[] } | null>(null)
+  const [confirm, setConfirm] = useState(false)
+
+  if (snapshot.loading && !snapshot.data) return <Loading what="PDF 쪽 전사 현황을" />
+  if (snapshot.error && !snapshot.data) return <Failed what="PDF 쪽 전사 현황을" detail={snapshot.error.message} onRetry={snapshot.reload} />
+  const data = snapshot.data
+  if (!data) return null
+
+  const row = scope === 'global' ? data.policy.global : data.policy.workspace
+  const rowEnabled = scope === 'global' ? data.policy.globalEnabled : data.policy.workspaceEnabled
+  const effectiveEnabled = enabled ?? rowEnabled
+  const effective = data.policy.effective
+  const revision = data.policy.revision
+
+  function config(): Record<string, unknown> {
+    const out: Record<string, unknown> = {}
+    for (const field of PDF_FIELDS) {
+      const raw = (draft[field.key] ?? '').trim()
+      if (!raw) continue
+      if (field.kind === 'int') out[field.key] = Number.parseInt(raw, 10)
+      else if (field.kind === 'float') out[field.key] = Number(raw)
+      else out[field.key] = raw
+    }
+    return out
+  }
+
+  async function save() {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.put('/api/archiver/pdf-vision/policy', {
+        workspace: scope === 'global' ? '' : workspace,
+        expectedRevision: revision,
+        enabled: effectiveEnabled,
+        config: config(),
+        reason: reason.trim(),
+      })
+      setDraft({})
+      setEnabled(null)
+      setReason('')
+      snapshot.reload()
+      onToast('PDF 쪽 전사 정책을 저장했습니다. 저장만으로 모델이 호출되거나 소급이 시작되지는 않습니다.')
+    } catch (caught) {
+      if (caught instanceof ApiError) setError({ message: caught.message, blockers: caught.refusal?.blockers ?? [] })
+      else setError({ message: String(caught), blockers: [] })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function placeholder(key: string): string {
+    if (row[key] !== undefined) return `지금 ${String(row[key])}`
+    if (effective[key] !== undefined) return `상속 ${String(effective[key])}`
+    return '비어 있음'
+  }
+
+  return (
+    <Section
+      title="PDF 쪽 전사 (B-80) — 정책·요금표·예산"
+      lead={
+        '로컬 추출·OCR 이 못 읽은 PDF 쪽만 Vision 모델로 보냅니다. 비용은 「응답 토큰 × 여기 적은 요금표」 로 정산합니다 — ' +
+        'gateway 가 말하는 비용은 쓰지 않습니다. 요금표가 없으면 켤 수 없고, 토큰을 모르면 0 원이 아니라 「비용 미확정」 으로 남습니다.'
+      }
+    >
+      <div className="form-row">
+        {data.policy.globalEnabled && data.policy.workspaceEnabled ? <Chip tone="ok">켜짐</Chip> : <Chip tone="watch">꺼짐(기본)</Chip>}
+        {data.policy.tariffConfigured ? <Chip tone="ok">요금표 있음</Chip> : <Chip tone="bad">요금표 없음</Chip>}
+        <span className="hint">모델 {String(effective.provider ?? '-')}/{String(effective.model ?? '-')}</span>
+        <span className="hint">오늘 사용(예약 포함) ${data.todayChargedUsd ?? '0'} / 하루 ${String(effective.daily_usd ?? '-')}</span>
+        <span className="hint mono">판 {revision}</span>
+      </div>
+      {data.policy.blockers.length > 0 && (
+        <div className="notice watch">
+          <div className="notice-kind">켜기 전에 필요한 것</div>
+          <ul>{data.policy.blockers.map((code) => <li key={code}>{blockerText(code)}</li>)}</ul>
+        </div>
+      )}
+      {error && (
+        <div className="notice bad">
+          <div className="notice-kind">저장 실패</div>
+          <div>{error.message}</div>
+          {error.blockers.length > 0 && <ul>{error.blockers.map((code) => <li key={code}>{blockerText(code)}</li>)}</ul>}
+        </div>
+      )}
+      <div className="card card-pad model-setting">
+        <div className="form-row">
+          <label className="field-label" htmlFor="pdf-scope">고칠 행</label>
+          <select id="pdf-scope" className="input" value={scope}
+            onChange={(e) => { setScope(e.target.value as 'workspace' | 'global'); setDraft({}); setEnabled(null) }}>
+            <option value="workspace">{workspace} (워크스페이스)</option>
+            {canEditGlobal && <option value="global">전역 기본값 (모든 워크스페이스 · 전체 권한 관리자만)</option>}
+          </select>
+          <label className="nowrap">
+            <input type="checkbox" checked={effectiveEnabled} onChange={(e) => setEnabled(e.target.checked)} /> 이 행 켜기
+          </label>
+        </div>
+        {scope === 'workspace' && <div className="hint">모델·요금표는 전역 기본값에서만 고칩니다.</div>}
+        {PDF_FIELDS.filter((field) => scope === 'global' || !field.globalOnly).map((field) => (
+          <div className="field" key={field.key}>
+            <label className="field-label" htmlFor={`pdf-${field.key}`}>{field.label}</label>
+            <input id={`pdf-${field.key}`} className="input mono"
+              inputMode={field.kind === 'text' ? 'text' : 'decimal'}
+              placeholder={placeholder(field.key)}
+              value={draft[field.key] ?? ''}
+              onChange={(e) => setDraft({ ...draft, [field.key]: e.target.value })} />
+            {field.hint && <div className="hint">{field.hint}</div>}
+          </div>
+        ))}
+        <div className="field">
+          <label className="field-label" htmlFor="pdf-reason">변경 사유 (감사 기록, 필수)</label>
+          <input id="pdf-reason" className="input" maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} />
+        </div>
+        <div className="form-row">
+          <button className="btn btn-primary" disabled={busy || !reason.trim()} onClick={() => setConfirm(true)}>저장</button>
+          <span className="hint">빈 칸은 지금 값을 그대로 둡니다.</span>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <thead><tr><th>상태</th><th>파일 · 쪽</th><th>예약</th><th>실제</th><th>시각</th></tr></thead>
+          <tbody>
+            {data.jobs.length === 0 && <tr><td colSpan={5} className="hint">작업이 없습니다.</td></tr>}
+            {data.jobs.map((job) => {
+              const state = PDF_JOB_STATE[job.state] ?? { tone: 'plain' as const, text: job.state }
+              return (
+                <tr key={job.id}>
+                  <td><Chip tone={state.tone}>{state.text}</Chip></td>
+                  <td className="mono">{job.fileId} · {job.page}쪽</td>
+                  <td className="mono">${job.reservedUsd ?? '-'}</td>
+                  <td className="mono">{job.actualUsd !== null ? `$${job.actualUsd}` : '미확정'}</td>
+                  <td>{fmt.dayClock(job.finishedAt ?? job.createdAt)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      <ConfirmDialog open={confirm}
+        title={scope === 'global' ? '전역 PDF 전사 정책을 바꿀까요?' : `${workspace} PDF 전사 정책을 바꿀까요?`}
+        detail="저장만으로 모델이 호출되거나 소급이 시작되지는 않습니다. 실행자와 사유는 감사 기록에 남습니다."
+        confirmLabel="저장" busy={busy} onCancel={() => setConfirm(false)}
+        onConfirm={() => { void save().finally(() => setConfirm(false)) }} />
+    </Section>
+  )
+}
+
+export function ImageDescriptionPage({ onToast, workspaces, canEditGlobal = true }: { onToast: (message: string) => void; workspaces: string[]; canEditGlobal?: boolean }) {
   const [workspace, setWorkspace] = useState(workspaces[0] ?? '')
   return (
     <>
@@ -240,6 +463,7 @@ export function ImageDescriptionPage({ onToast, workspaces }: { onToast: (messag
         </select>
       </div>
       {workspace ? <StatusSection workspace={workspace} /> : <div className="hint">워크스페이스를 고르세요.</div>}
+      {workspace && <PdfVisionSection key={workspace} workspace={workspace} canEditGlobal={canEditGlobal} onToast={onToast} />}
     </>
   )
 }

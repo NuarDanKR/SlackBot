@@ -95,6 +95,31 @@ def test_a_deleted_original_object_is_original_missing(archive):
     assert doc.code == vc.ORIGINAL_MISSING
 
 
+def _plan(channel, file_id, code, pages=((2, "missing"),), sha=PDF_SHA):
+    return vc.DocumentPlan(WS, channel, file_id, f"{file_id}.pdf", sha, None, code,
+                           tuple(vc.PageCandidate(n, r) for n, r in pages))
+
+
+@pytest.mark.parametrize("blocking", [vc.SCREEN_UNKNOWN, vc.SCREEN_NOTICE, vc.POLICY_ISOLATED])
+@pytest.mark.parametrize("other_channel", [CH, "C0OTHER0001"])
+def test_a_file_with_a_conflicting_pii_screen_is_held_everywhere(blocking, other_channel):
+    """한 정본은 통과, 다른 정본은 알림·모름·격리 → 통과한 쪽도 보내지 않는다(fail-closed)."""
+    out = vc._reconcile([_plan(CH, "F1", vc.ELIGIBLE), _plan(other_channel, "F1", blocking, ())])
+    held = [p for p in out if p.channel_id == CH and p.code != blocking]
+    assert [(p.code, p.pages) for p in held] == [(vc.SCREEN_CONFLICT, ())]
+    assert not any(p.eligible for p in out)
+
+
+def test_duplicate_plans_in_one_channel_count_once_but_other_files_stay():
+    out = vc._reconcile([
+        _plan(CH, "F1", vc.ELIGIBLE), _plan(CH, "F1", vc.ELIGIBLE),
+        _plan("C0OTHER0001", "F1", vc.ELIGIBLE),  # 다른 채널은 따로 센다
+        _plan(CH, "F2", vc.ELIGIBLE),
+    ])
+    assert [(p.channel_id, p.file_id) for p in out] == [
+        (CH, "F1"), ("C0OTHER0001", "F1"), (CH, "F2")]
+
+
 def test_fully_converted_documents_are_not_listed(archive):
     _stage(archive, "F0DONE00001", conversion_state="succeeded")
     assert vc.plan(archive) == []

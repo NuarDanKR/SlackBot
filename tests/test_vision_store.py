@@ -173,6 +173,8 @@ def test_rejected_reservation_never_inserts_or_commits(extra_replies, code):
     # 요금표가 없으면 정산할 수 없다 — 0 으로 메우지 않는다
     ({k: v for k, v in CONFIG.items() if k != 'output_usd_per_mtok'}, '0.1', 'tariff_unconfigured'),
     (CONFIG | {'input_usd_per_mtok': 'abc'}, '0.1', 'tariff_unconfigured'),
+    # 0 원 요금표는 정산을 0 으로 만든다 — 예산 우회
+    (CONFIG | {'output_usd_per_mtok': '0'}, '0.1', 'tariff_unconfigured'),
     # 출력 상한(2000 tok × $10/M = $0.02)보다 작은 예약은 보수적 상한이 아니다
     (CONFIG, '0.019', 'reservation_below_tariff'),
 ])
@@ -187,7 +189,8 @@ def test_reservation_requires_a_tariff_and_a_bound_that_covers_it(config, amount
 
 
 def test_dispatch_carries_the_tariff_bound_at_reservation_not_the_current_one():
-    snapshot = {'effective': CONFIG | {'input_usd_per_mtok': '2', 'output_usd_per_mtok': '20'}}
+    snapshot = {'global_config': CONFIG | {'input_usd_per_mtok': '2', 'output_usd_per_mtok': '20'},
+                'effective': CONFIG | {'input_usd_per_mtok': '0.0001', 'output_usd_per_mtok': '0.0001'}}
     conn = ScriptedConnection([GLOBAL, job_row(policy_snapshot=snapshot), LOCAL, APPROVAL_ROW])
     grant = VisionStore(conn).begin_dispatch('job', PAGE, checks=CHECKS)
     assert (grant.input_usd_per_mtok, grant.output_usd_per_mtok) == (Decimal('2'), Decimal('20'))
@@ -195,6 +198,19 @@ def test_dispatch_carries_the_tariff_bound_at_reservation_not_the_current_one():
     assert grant.charge_usd(1000, 0) is None  # usage 누락을 공짜로 읽지 않는다
     assert grant.charge_usd(1000, 500) == Decimal('0.012')
     assert grant.charge_usd(None, 500) is None
+
+
+@pytest.mark.parametrize('override', [
+    {'output_usd_per_mtok': '0.0001'}, {'model': 'cheaper-model'}, {'provider': 'other'},
+])
+def test_a_workspace_row_cannot_override_the_model_or_tariff(override):
+    """워크스페이스 관리자가 요금표·모델을 바꾸면 전역 하루 예산의 근거가 갈라진다."""
+    conn = ScriptedConnection([GLOBAL, {'now': NOW}, LOCAL | {'config': override}, APPROVAL_ROW])
+    with pytest.raises(VisionDenied):
+        VisionStore(conn).reserve(PAGE, approval_id=BOUND.approval_id,
+                                 amount_usd=Decimal('0.1'), expires_at=RESERVATION.expires_at,
+                                 checks=CHECKS)
+    assert not any(isinstance(e, tuple) and 'INSERT INTO' in e[0] for e in conn.events)
 
 
 def test_an_old_reservation_without_a_tariff_settles_as_unknown_not_zero():

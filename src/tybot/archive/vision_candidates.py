@@ -20,6 +20,15 @@
 | `coverage_unknown` | 쪽 단위 판정이 없다(옛 metadata). 다시 변환해 판정한 뒤에 다룬다 |
 | `list_truncated` | 실패 쪽 목록이 metadata 상한(50)에 닿았다 — 전체 목록이 아니므로 고르지 않는다 |
 | `no_failed_pages` | 모든 쪽을 로컬에서 읽었다 |
+| `screen_conflict` | 같은 파일의 다른 정본이 PII 알림·모름·격리다 — 한쪽이 통과여도 보내지 않는다 |
+
+## 같은 파일이 여러 번 잡힐 때
+
+staged metadata 는 같은 Slack 파일을 여러 번 남길 수 있다(재수집·여러 메시지에 공유).
+- **판정이 엇갈리면 막는다.** 한 정본은 `passed`, 다른 정본은 알림·모름·격리라면 그 파일은
+  아직 사람이 보지 않은 것이다. 통과한 쪽만 믿고 보내지 않는다(fail-closed)
+- **같은 채널의 같은 계획은 하나로 센다.** 원장은 같은 쪽을 두 번 예약하지 않지만(identity
+  UNIQUE), dry-run 숫자가 부풀면 예산·상한을 잘못 정한다
 """
 from __future__ import annotations
 
@@ -38,6 +47,10 @@ SCREEN_UNKNOWN = "screen_unknown"
 COVERAGE_UNKNOWN = "coverage_unknown"
 LIST_TRUNCATED = "list_truncated"
 NO_FAILED_PAGES = "no_failed_pages"
+SCREEN_CONFLICT = "screen_conflict"
+
+#: 이 판정이 같은 파일의 다른 정본에 있으면 통과한 정본도 보내지 않는다.
+_SCREEN_HOLD = frozenset({SCREEN_NOTICE, SCREEN_UNKNOWN, POLICY_ISOLATED})
 
 #: 쪽을 고르는 이유.
 REASON_MISSING = "missing"
@@ -145,9 +158,29 @@ def plan(archive_dir: Path | str, *, workspace: str = "", file_ids=()) -> list[D
         if attachment.conversion_state not in {"partial", "failed"}:
             continue
         out.append(plan_document(attachment))
-    return sorted(out, key=lambda d: (d.workspace, d.channel_id, d.file_id))
+    return sorted(_reconcile(out), key=lambda d: (d.workspace, d.channel_id, d.file_id))
+
+
+def _reconcile(plans: list[DocumentPlan]) -> list[DocumentPlan]:
+    """같은 파일의 여러 정본: 판정이 엇갈리면 막고, 같은 채널의 같은 계획은 하나로."""
+    from dataclasses import replace
+
+    held = {(p.workspace, p.file_id) for p in plans if p.code in _SCREEN_HOLD}
+    seen: set[tuple] = set()
+    out: list[DocumentPlan] = []
+    for plan in plans:
+        if plan.eligible and (plan.workspace, plan.file_id) in held:
+            plan = replace(plan, code=SCREEN_CONFLICT, pages=())
+        key = (plan.workspace, plan.channel_id, plan.file_id, plan.original_sha256,
+               plan.code, plan.pages)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(plan)
+    return out
 
 
 __all__ = [
-    "ELIGIBLE", "METADATA_PAGE_CAP", "DocumentPlan", "PageCandidate", "plan", "plan_document",
+    "ELIGIBLE", "METADATA_PAGE_CAP", "SCREEN_CONFLICT", "DocumentPlan", "PageCandidate", "plan",
+    "plan_document",
 ]
