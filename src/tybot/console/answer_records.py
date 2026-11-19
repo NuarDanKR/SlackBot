@@ -136,11 +136,14 @@ _TRACE_KEYS = (
 def body_visible(row: dict, user: ConsoleUser) -> bool:
     """질문·답변 본문을 보여 줘도 되는가.
 
-    VIPBot(경영진) 질문은 **질문한 본인만** 본문을 본다. 관리자·검토자는 시각·모델·결과·
-    근거 건수 같은 처리 기록만 본다(2026-11-18 결정). 본인 확인은 회사 이메일 → 사번 →
-    Slack ID 매핑으로만 한다 — 확인이 안 되면 가린다.
+    VIPBot(경영진) 질문 본문은 **콘솔 관리자와 질문한 본인**만 본다. 검토자 등 그 밖의
+    계정은 시각·모델·결과·근거 건수 같은 처리 기록만 본다. 관리자도 담당 워크스페이스
+    밖의 기록은 애초에 열 수 없다(`find_visible`). 열람은 감사기록에 남는다.
+    (2026-11-18 「본인만」 → 2026-11-19 「관리자 + 본인」, 오너 결정)
+
+    본인 확인은 회사 이메일 → 사번 → Slack ID 매핑으로만 한다 — 확인이 안 되면 가린다.
     """
-    if answer_bot(row) != "vipbot":
+    if answer_bot(row) != "vipbot" or user.is_admin:
         return True
     own = review_scope(user.email).own_users
     return (str(row.get("workspace") or ""), str(row.get("user") or "")) in own
