@@ -1020,11 +1020,15 @@ class ArchiveStore:
         **복원에 실패했다고 채널 전체 검색으로 넓히지 않는다.** 호출자가 판단한다 —
         조용히 넓히면 사용자는 좁은 질문을 했는데 넓은 답을 받고, 그 사실을 알 수 없다.
         """
-        from ..evidence_refs import ARCHIVE_LINE, content_hash, safe_relative_path
+        from ..evidence_refs import ARCHIVE_LINE, VISION_PAGE, content_hash, safe_relative_path
 
         items = list(refs or ())
         if not items:
             return [], []
+        # PDF 쪽 전사 좌표(B-80)는 아카이브 줄이 아니다. DB 투영·현재 정본·원본 해시를
+        # 처음부터 다시 확인하는 쪽(`pdf_vision_guide.resolve_refs`)에 맡긴다.
+        vision_items = [r for r in items if getattr(r, "kind", "") == VISION_PAGE]
+        items = [r for r in items if getattr(r, "kind", "") != VISION_PAGE]
 
         # 1. 권한이 경로 조회보다 먼저다.
         #
@@ -1132,6 +1136,21 @@ class ArchiveStore:
                 drop("hash_mismatch")
                 continue
             hits.append(SearchHit(doc=doc, line=line, score=1))
+
+        if vision_items:
+            from .. import pdf_vision_guide
+
+            try:
+                vision_hits, vision_dropped = pdf_vision_guide.resolve_refs(
+                    self, ctx, vision_items
+                )
+            except Exception:
+                logger.warning("PDF 전사 좌표 복원 실패", exc_info=True)
+                vision_hits, vision_dropped = [], ["vision_db_unavailable"]
+            hits.extend(vision_hits)
+            for code in vision_dropped:
+                drop(code)
+            items = [*items, *vision_items]
 
         logger.info(
             "refs 복원 ws=%s ch=%s 요청=%d 복원=%d 줄밀림=%d 제외=%s",

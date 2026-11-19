@@ -2670,6 +2670,32 @@ class AnswerEngine:
                 merged.append(hit)
         return merged[: len(hits) + image_guide.MAX_EXTRA_HITS]
 
+    def _with_pdf_vision_guide(self, query: str, hits, ctx) -> list[SearchHit]:
+        """PDF 쪽 Vision 전사(`extracted`)를 근거 후보에 더한다 (B-80).
+
+        로컬 추출·OCR 이 실패한 쪽의 유일한 본문이라 전사 문장 자체가 근거다. 줄마다
+        `[AI 문서 전사·파생 · PDF N쪽]` 이 붙고 출처는 원본 PDF 의 그 쪽이다. 요청자의
+        현재 권한·현재 정본 좌표·원본 해시를 직전에 다시 확인한다(`pdf_vision_guide`).
+        DB 장애·검증 실패면 예전 검색 결과 그대로다.
+        """
+        from . import pdf_vision_guide
+
+        try:
+            extra = pdf_vision_guide.expand(self._store, ctx, query)
+        except Exception:
+            logger.warning("PDF 전사 길잡이를 쓰지 못했습니다", exc_info=True)
+            return list(hits)
+        if not extra:
+            return list(hits)
+        merged = list(hits)
+        seen = {(str(h.doc.path), h.line.lineno) for h in merged}
+        for hit in extra:
+            key = (str(hit.doc.path), hit.line.lineno)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        return merged[: len(hits) + pdf_vision_guide.MAX_PAGES]
+
     def answer(
         self,
         question: str,
@@ -2720,6 +2746,7 @@ class AnswerEngine:
             hits = self._with_approved_guide(query, hits, ctx)
             hits = self._with_digest_guide(query, hits, ctx)
             hits = self._with_image_guide(query, hits, ctx)
+            hits = self._with_pdf_vision_guide(query, hits, ctx)
             # 방금 올린 첨부는 **검색 앞에** 둔다. 검색어가 파일 내용과 어긋나도
             # 빠지면 안 되는 근거다 — 사람은 그 파일을 보고 물었다(B-57 §4).
             # 검색을 끄지는 않는다. 「이 목록이 슬랙 어디 있나」 같은 질문은

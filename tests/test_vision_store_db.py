@@ -299,3 +299,40 @@ def test_existing_revisions_can_be_projected_again_idempotently(database):
     assert store.project_pages() == 1
     assert store.project_pages() == 0  # 다시 돌려도 같다
     assert conn.execute('SELECT count(*) AS n FROM pdf_page_search_entry').fetchone()['n'] == 1
+
+
+def test_the_master_guide_reads_real_projection_rows_and_follow_up_coordinates(database):
+    """B-80 답변 경로의 SQL 을 실제 투영 행으로 돈다(낱말·같은 쪽 최신·revision 좌표)."""
+    from tybot import pdf_vision_guide as guide
+    from tybot.archive.vision_extract import STATUS_UNCERTAIN
+
+    store, connect, revision = database
+    _, first = _sent(store, revision, actual=Decimal('0'))
+    rev1 = store.record_page(first.reservation_id, _result(), channel_id='C0TEST0001')
+    conn = connect()
+    scopes = {(PAGE.workspace, 'C0TEST0001')}
+
+    (entry,) = guide.active_entries(scopes, tokens=['기성'], conn=conn)
+    assert (entry.revision_id, entry.file_id, entry.page_number, entry.original_sha256,
+            entry.status) == (rev1, PAGE.file_id, PAGE.page_number, PAGE.original_sha256,
+                              'extracted')
+    assert guide.active_entries({(PAGE.workspace, 'C0OTHER001')}, tokens=['기성'], conn=conn) == []
+    assert guide.active_entries(scopes, tokens=['없는낱말'], conn=conn) == []
+    assert set(guide.entries_by_revision([rev1], conn=conn)) == {rev1}
+
+    # 같은 쪽의 더 새 revision(uncertain)이 나오면 옛 extracted 는 근거도 좌표도 아니다.
+    from hashlib import sha256
+
+    newer = replace(PAGE, image=b'synthetic-page-v2', renderer_version='v2')
+    approval = replace(APPROVAL, approval_id=uuid4().hex, policy_revision=revision,
+                       image_sha256=sha256(newer.image).hexdigest(), renderer_version='v2',
+                       expires_at=datetime.now(UTC) + timedelta(minutes=10))
+    store.approve(approval, actor='test')
+    second = reserve(store, approval, newer)
+    store.begin_dispatch(second.reservation_id, newer, checks=CHECKS)
+    store.finish(second.reservation_id, actual_usd=Decimal('0'))
+    store.record_page(second.reservation_id,
+                      _result(newer, status=STATUS_UNCERTAIN, markdown='판독 불명 기성'),
+                      channel_id='C0TEST0001')
+    assert guide.active_entries(scopes, tokens=['기성'], conn=conn) == []
+    assert guide.entries_by_revision([rev1], conn=conn) == {}
