@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -1471,20 +1471,29 @@ def specialist_calls(
     bot: str = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict:
-    """봇 분류 상태. `bot` 으로 TYBot·VIPBot 호출을 가른다(`tybot`·`vipbot`)."""
+    """봇 분류 상태 — 질문마다 어느 봇이 받았고 전문 봇을 불렀는지.
+
+    전문 봇 호출(`specialist_call`)에 **직접 답한 질문**(감사기록)을 합쳐 시각순으로 준다.
+    `bot` 으로 TYBot·VIPBot 을, `result=direct` 로 직접 답한 질문만 가른다.
+    """
     _require_developer(user)
-    try:
-        rows = specialist_store.list_calls(
-            allowed=None if user.all_workspaces else user.workspaces,
-            specialist=specialist.strip().lower(),
-            result=result.strip().lower(),
-            bot=bot.strip().lower()[:40],
-            limit=limit,
-        )
-    except specialist_store.SpecialistStoreError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {
-        "calls": [
+    specialist_key = specialist.strip().lower()
+    result_key = result.strip().lower()
+    bot_key = bot.strip().lower()[:40]
+    allowed = None if user.all_workspaces else user.workspaces
+    rows: list[dict] = []
+    if result_key != answer_records.DIRECT_RESULT:
+        try:
+            rows = specialist_store.list_calls(
+                allowed=allowed,
+                specialist=specialist_key,
+                result=result_key,
+                bot=bot_key,
+                limit=limit,
+            )
+        except specialist_store.SpecialistStoreError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    calls = [
             {
                 "id": str(row["id"]), "at": row["at"], "workspace": row["workspace"],
                 "specialist": row["specialist"], "routingReason": row["routing_reason"],
@@ -1498,10 +1507,33 @@ def specialist_calls(
                 "requiredCapability": str(row.get("required_capability") or ""),
                 # 빈 값은 봇을 남기기 전 기록이다(또는 Slack 밖에서 부른 호출).
                 "bot": str(row.get("bot") or ""),
+                "answerResult": "",
             }
             for row in rows
-        ]
-    }
+    ]
+    if not specialist_key and result_key in ("", answer_records.DIRECT_RESULT):
+        called = {call["qaRecordKey"] for call in calls if call["qaRecordKey"]}
+        try:
+            # 전문 봇 호출 쪽 기록이 비어 있는 오래된 질문에는 그 호출의 봇을 모른다.
+            # 직접 답한 질문의 봇은 감사기록 폴더가 정답이다.
+            calls.extend(answer_records.direct_answer_rows(
+                exclude_keys=called, allowed=allowed, bot=bot_key, limit=limit,
+            ))
+        except OSError as exc:
+            logger.warning("직접 답변 기록을 읽지 못했습니다: %s", exc)
+        calls.sort(key=lambda call: _sort_at(call["at"]), reverse=True)
+        calls = calls[:limit]
+    return {"calls": calls}
+
+
+def _sort_at(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 @app.post("/api/specialists/requests")
