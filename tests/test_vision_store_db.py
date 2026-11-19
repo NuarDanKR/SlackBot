@@ -30,7 +30,7 @@ CHECKS = dict(capability_verified=True, credential_ready=True, source_verified=T
               catalog_max_sensitivity=Sensitivity.PUBLIC)
 CONFIG = dict(model=APPROVAL.model, provider=APPROVAL.provider, max_image_bytes=1024,
               max_output_tokens=2000, timeout_seconds=30, daily_usd='0.15', job_usd='0.1',
-              max_concurrency=4)
+              max_concurrency=4, input_usd_per_mtok='1', output_usd_per_mtok='10')
 
 
 @pytest.fixture

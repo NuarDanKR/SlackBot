@@ -23,7 +23,15 @@ from .vision_sensitivity import GENERAL_BUSINESS, request_sensitivity
 CONFIG_KEYS = frozenset({
     'model', 'provider', 'max_image_bytes', 'max_output_tokens', 'timeout_seconds',
     'daily_usd', 'job_usd', 'max_concurrency', 'sensitivity',
+    'input_usd_per_mtok', 'output_usd_per_mtok',
 })
+
+#: 운영자가 확인해 적은 모델 요금표(USD / 1M tokens). **정산은 이 값으로만 한다.**
+#:
+#: gateway 응답의 `cost_usd` 는 쓰지 않는다. 그 값은 Router 에 넣은 ModelSpec 단가로
+#: 계산되는데, Vision 경로는 단가 0 으로 Router 를 만들고(Google provider 는 늘 0.0)
+#: 그러면 실제 청구와 무관하게 0 원으로 정산되어 일일 예산이 소진되지 않는다.
+TARIFF_KEYS = ('input_usd_per_mtok', 'output_usd_per_mtok')
 
 
 class VisionDenied(RuntimeError):
@@ -41,6 +49,28 @@ class VisionDispatch:
     timeout_seconds: float
     #: Router·provider 경계에 넘길 계약 값(`vision_sensitivity.request_sensitivity`).
     sensitivity: Sensitivity = GENERAL_BUSINESS
+    #: 예약 시점에 묶인 요금표. 없으면(옛 예약) 정산은 「모름」 이다 — 0 이 아니다.
+    input_usd_per_mtok: Decimal | None = None
+    output_usd_per_mtok: Decimal | None = None
+
+    def charge_usd(self, input_tokens, output_tokens) -> Decimal | None:
+        """토큰 × 요금표. 토큰이나 요금표 하나라도 모르면 None(모름)."""
+        if self.input_usd_per_mtok is None or self.output_usd_per_mtok is None:
+            return None
+        if not all(type(t) is int and t >= 0 for t in (input_tokens, output_tokens)):
+            return None
+        return (Decimal(input_tokens) * self.input_usd_per_mtok
+                + Decimal(output_tokens) * self.output_usd_per_mtok) / Decimal(1_000_000)
+
+
+def tariff(config: dict) -> tuple[Decimal, Decimal] | None:
+    """설정의 요금표. 둘 다 있고 유효할 때만. 모르면 None — 0 으로 메우지 않는다."""
+    if not all(key in config for key in TARIFF_KEYS):
+        return None
+    try:
+        return tuple(money(config[key]) for key in TARIFF_KEYS)  # type: ignore[return-value]
+    except VisionDenied:
+        return None
 
 
 def money(value) -> Decimal:
@@ -217,6 +247,13 @@ class VisionStore:
                 raise VisionDenied('reservation_expiry_invalid')
             if amount > money(config.get('job_usd', 0)):
                 raise VisionDenied('job_budget_exceeded')
+            rates = tariff(config)
+            if rates is None:
+                # 요금표 없이 보내면 정산할 수 없다. 모르는 비용을 0 으로 적지 않는다.
+                raise VisionDenied('tariff_unconfigured')
+            if amount < Decimal(policy.max_output_tokens or 0) * rates[1] / Decimal(1_000_000):
+                # 출력 상한만으로도 넘는 예약은 보수적인 상한이 아니다.
+                raise VisionDenied('reservation_below_tariff')
             scope = approval_scope(approval)
             cur.execute('SELECT id FROM archiver_vision_job WHERE identity_sha256=%s',
                         (identity(scope),))
@@ -289,6 +326,9 @@ class VisionStore:
                 raise VisionDenied(verdict.code)
             cur.execute("UPDATE archiver_vision_job SET state='dispatching', dispatched_at=now() WHERE id=%s",
                         (job_id,))
+            # 정산 요금표는 **예약 때 묶인 값**이다. 그 사이 정책이 바뀌어도 이 job 은 그대로.
+            snapshot = (job.get('policy_snapshot') or {}).get('effective') or {}
+            rates = tariff(snapshot)
             return VisionDispatch(
                 reservation=receipt,
                 model=policy.model,
@@ -296,6 +336,8 @@ class VisionStore:
                 max_output_tokens=policy.max_output_tokens,
                 timeout_seconds=float(policy.timeout_seconds),
                 sensitivity=request_sensitivity(policy.sensitivity),
+                input_usd_per_mtok=rates[0] if rates else None,
+                output_usd_per_mtok=rates[1] if rates else None,
             )
 
     def finish(self, job_id: str, *, actual_usd: Decimal | None):

@@ -124,7 +124,7 @@ class ScriptedConnection:
 
 CONFIG = dict(model=POLICY.model, provider=POLICY.provider, max_image_bytes=1024,
               max_output_tokens=2000, timeout_seconds=30, daily_usd='1', job_usd='0.2',
-              max_concurrency=2)
+              max_concurrency=2, input_usd_per_mtok='1', output_usd_per_mtok='10')
 GLOBAL = dict(revision='global', enabled=True, config=CONFIG)
 LOCAL = dict(revision='local', enabled=True, config={})
 BOUND = replace(APPROVAL, policy_revision='global:local')
@@ -167,6 +167,39 @@ def test_rejected_reservation_never_inserts_or_commits(extra_replies, code):
                                  checks=CHECKS)
     assert conn.events[-1] == 'rollback'
     assert not any(isinstance(e, tuple) and 'INSERT INTO' in e[0] for e in conn.events)
+
+
+@pytest.mark.parametrize(('config', 'amount', 'code'), [
+    # 요금표가 없으면 정산할 수 없다 — 0 으로 메우지 않는다
+    ({k: v for k, v in CONFIG.items() if k != 'output_usd_per_mtok'}, '0.1', 'tariff_unconfigured'),
+    (CONFIG | {'input_usd_per_mtok': 'abc'}, '0.1', 'tariff_unconfigured'),
+    # 출력 상한(2000 tok × $10/M = $0.02)보다 작은 예약은 보수적 상한이 아니다
+    (CONFIG, '0.019', 'reservation_below_tariff'),
+])
+def test_reservation_requires_a_tariff_and_a_bound_that_covers_it(config, amount, code):
+    conn = ScriptedConnection([GLOBAL | {'config': config}, {'now': NOW}, LOCAL, APPROVAL_ROW])
+    with pytest.raises(VisionDenied, match=code):
+        VisionStore(conn).reserve(PAGE, approval_id=BOUND.approval_id,
+                                 amount_usd=Decimal(amount), expires_at=RESERVATION.expires_at,
+                                 checks=CHECKS)
+    assert conn.events[-1] == 'rollback'
+    assert not any(isinstance(e, tuple) and 'INSERT INTO' in e[0] for e in conn.events)
+
+
+def test_dispatch_carries_the_tariff_bound_at_reservation_not_the_current_one():
+    snapshot = {'effective': CONFIG | {'input_usd_per_mtok': '2', 'output_usd_per_mtok': '20'}}
+    conn = ScriptedConnection([GLOBAL, job_row(policy_snapshot=snapshot), LOCAL, APPROVAL_ROW])
+    grant = VisionStore(conn).begin_dispatch('job', PAGE, checks=CHECKS)
+    assert (grant.input_usd_per_mtok, grant.output_usd_per_mtok) == (Decimal('2'), Decimal('20'))
+    assert grant.charge_usd(1_000_000, 0) == Decimal('2')
+    assert grant.charge_usd(1000, 500) == Decimal('0.012')
+    assert grant.charge_usd(None, 500) is None
+
+
+def test_an_old_reservation_without_a_tariff_settles_as_unknown_not_zero():
+    conn = ScriptedConnection([GLOBAL, job_row(), LOCAL, APPROVAL_ROW])
+    grant = VisionStore(conn).begin_dispatch('job', PAGE, checks=CHECKS)
+    assert grant.charge_usd(1000, 500) is None
 
 
 def test_dispatch_rechecks_then_commits_and_does_not_call_a_model():

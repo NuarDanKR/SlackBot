@@ -36,6 +36,8 @@ class Store:
             provider="anthropic",
             max_output_tokens=321,
             timeout_seconds=12.5,
+            input_usd_per_mtok=Decimal("1"),
+            output_usd_per_mtok=Decimal("10"),
         )
 
     def finish(self, job_id, *, actual_usd):
@@ -46,7 +48,8 @@ class Store:
 
 def test_committed_grant_controls_the_only_model_call_and_cost_settlement():
     store = Store()
-    router = FakeRouter(_Resp(_payload(), cost_usd=0.0042))
+    # gateway 가 말하는 비용(0.0042)이 아니라 예약 때 묶인 요금표 × 토큰으로 정산한다.
+    router = FakeRouter(_Resp(_payload(), input_tokens=1200, output_tokens=300, cost_usd=0.0042))
 
     got = dispatch_reserved_page(store, "job-1", PAGE, checks=CHECKS, router=router)
 
@@ -55,7 +58,28 @@ def test_committed_grant_controls_the_only_model_call_and_cost_settlement():
     assert router.calls[0]["model"] == "claude-sonnet-5-5"
     assert router.calls[0]["max_tokens"] == 321
     assert router.calls[0]["timeout_seconds"] == 12.5
-    assert store.events[-1] == ("finish", "job-1", Decimal("0.0042"))
+    assert store.events[-1] == ("finish", "job-1", Decimal("0.0042"))  # 1200×1 + 300×10 / 1M
+
+
+def test_a_zero_priced_gateway_cost_is_not_a_zero_charge():
+    """Vision Router 는 단가 0 으로 만든다(Google 은 늘 0.0). 그 0 을 믿으면 예산이 안 줄어든다."""
+    store = Store()
+    router = FakeRouter(_Resp(_payload(), input_tokens=2000, output_tokens=1000, cost_usd=0.0))
+
+    dispatch_reserved_page(store, "job-1", PAGE, checks=CHECKS, router=router)
+
+    assert store.events[-1] == ("finish", "job-1", Decimal("0.012"))
+
+
+def test_without_a_tariff_the_charge_is_unknown_even_if_the_gateway_names_one():
+    store = Store()
+    store.begin_dispatch = lambda job_id, page, *, checks: VisionDispatch(
+        RESERVATION, "claude-sonnet-5-5", "anthropic", 321, 12.5)
+    router = FakeRouter(_Resp(_payload(), cost_usd=0.0))
+
+    dispatch_reserved_page(store, "job-1", PAGE, checks=CHECKS, router=router)
+
+    assert store.events[-1] == ("finish", "job-1", None)
 
 
 def test_denied_dispatch_never_calls_or_settles_a_model():

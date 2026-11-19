@@ -117,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--actor", default="")
     ap.add_argument("--reason", default="")
     ap.add_argument("--max-pages", type=int, default=0)
-    ap.add_argument("--amount-usd", default="", help="쪽당 예약 상한(검증된 요금 기준, 0 불가)")
+    ap.add_argument("--amount-usd", default="",
+                    help="쪽당 예약 상한(USD, 0 불가). 정책 요금표로 본 출력 상한 비용보다 작으면 거절")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 

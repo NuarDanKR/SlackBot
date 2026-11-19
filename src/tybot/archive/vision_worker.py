@@ -24,7 +24,9 @@ def dispatch_reserved_page(
 
     A model/provider error may happen after transmission.  If the gateway did
     not return trustworthy usage, the ledger remains ``unknown`` rather than
-    recording a false zero.  ``VisionInputError`` is raised only before the
+    recording a false zero.  The charge is ``tokens x tariff`` bound at
+    reservation time; the gateway's own ``cost_usd`` is ignored (a zero-priced
+    Router spec makes it 0 regardless of the real bill).  ``VisionInputError`` is raised only before the
     gateway call, so that path can be settled as a known zero-cost rejection.
     """
     grant = store.begin_dispatch(job_id, page, checks=checks)
@@ -48,9 +50,10 @@ def dispatch_reserved_page(
         store.finish(job_id, actual_usd=None)
         raise
 
-    actual = None
-    if result.usage.cost_usd is not None:
-        actual = Decimal(str(result.usage.cost_usd))
+    # gateway 의 cost_usd 는 믿지 않는다 — Router 단가가 0 이면 0 이 나온다.
+    # 예약 때 묶인 요금표 × 응답 토큰. 하나라도 모르면 None(모름, 예약액 유지).
+    charge = getattr(grant, "charge_usd", None)
+    actual = charge(result.usage.input_tokens, result.usage.output_tokens) if charge else None
     store.finish(job_id, actual_usd=actual)
     return result
 
