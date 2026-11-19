@@ -48,7 +48,8 @@ def database():
 
     def connect():
         conn = psycopg.connect(DSN, autocommit=True, row_factory=dict_row)
-        conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(name)))
+        # 확장(pg_trgm·pg_bigm)은 public 에 있다 — 운영과 같이 보이게 public 을 뒤에 둔다.
+        conn.execute(sql.SQL('SET search_path TO {}, public').format(sql.Identifier(name)))
         conn.execute("SET statement_timeout='10s'")
         connections.append(conn)
         return conn

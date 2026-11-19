@@ -103,6 +103,9 @@ def conn():
             for name in SCHEMAS:
                 cur.execute((SQL / name).read_text(encoding="utf-8"))
             cur.execute(f"TRUNCATE {', '.join(TABLES)} CASCADE")
+            # TRUNCATE 가 스키마의 전역 정책 씨앗 행('', 'initial')까지 지운다 — 다시 심는다.
+            for name in SCHEMAS:
+                cur.execute((SQL / name).read_text(encoding="utf-8"))
         yield connection
     finally:
         connection.close()
@@ -134,7 +137,7 @@ def _ready(conn) -> tuple[ImageDescriptionStore, str]:
     now = datetime.now(UTC)
     global_rev = store.save_policy(
         "",
-        expected_revision=None,
+        expected_revision="initial",
         enabled=True,
         config={
             "model": MODEL,
