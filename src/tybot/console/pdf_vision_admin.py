@@ -33,8 +33,10 @@ from ..archive.vision_store import (
     CONFIG_KEYS,
     GLOBAL_ONLY_KEYS,
     TARIFF_KEYS,
+    WORKSPACE_LOCKED_KEYS,
     VisionDenied,
     VisionStore,
+    global_sensitivity,
     tariff,
 )
 from ..gateway.base import Sensitivity
@@ -168,7 +170,8 @@ def _validate(request: PolicyChangeRequest) -> None:
             raise PdfVisionAdminError(f"config_invalid_{key}")
     if request.workspace != GLOBAL:
         # 모델·요금표는 전역 예산의 근거다. 워크스페이스 관리자가 바꾸면 전역 예산을 우회한다.
-        overridden = tuple(sorted(set(request.config) & GLOBAL_ONLY_KEYS))
+        # 민감도도 같다 — 낮추면 전역이 막은 모델 카탈로그를 통과한다(2026-11-19 보안 검토).
+        overridden = tuple(sorted(set(request.config) & WORKSPACE_LOCKED_KEYS))
         if overridden:
             raise PdfVisionAdminError("config_global_only", blockers=overridden)
 
@@ -181,6 +184,9 @@ def activation_blockers(*, global_config: dict, merged: dict) -> tuple[str, ...]
                  if k not in global_config or not VALIDATORS[k](global_config[k])]
     blockers += [f"workspace_overrides_{k}" for k in sorted(GLOBAL_ONLY_KEYS)
                  if k in merged and merged.get(k) != global_config.get(k)]
+    expected = global_sensitivity(global_config)
+    if str(merged.get("sensitivity", expected)) != expected:
+        blockers.append("workspace_overrides_sensitivity")
     if blockers:
         return tuple(blockers)
     rates = tariff(merged)

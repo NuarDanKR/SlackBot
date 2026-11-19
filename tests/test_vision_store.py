@@ -261,3 +261,20 @@ def test_effective_policy_inherits_without_master_and_preserves_provenance():
     assert sources['model'] == 'workspace'
     assert sources['provider'] == 'global'
     assert not policy.capability_verified and not policy.credential_ready
+
+
+@pytest.mark.parametrize('value', ['public', 'confidential'])
+def test_a_workspace_row_cannot_change_the_sensitivity(value):
+    """민감도를 낮추면 전역이 막은 모델 카탈로그를 통과한다(2026-11-19 보안 검토).
+
+    예약·전송 모두 `_effective` 를 지나므로 거기서 막는다. 높이는 것도 갈라진 정책이다.
+    """
+    conn = ScriptedConnection([GLOBAL, {'now': NOW}, LOCAL | {'config': {'sensitivity': value}},
+                               APPROVAL_ROW])
+    with pytest.raises(VisionDenied) as caught:
+        VisionStore(conn).reserve(PAGE, approval_id=BOUND.approval_id,
+                                 amount_usd=Decimal('0.1'), expires_at=RESERVATION.expires_at,
+                                 checks=CHECKS)
+    assert str(caught.value) == 'workspace_override_forbidden' or \
+        getattr(caught.value, 'code', '') == 'workspace_override_forbidden'
+    assert not any(isinstance(e, tuple) and 'INSERT INTO' in e[0] for e in conn.events)

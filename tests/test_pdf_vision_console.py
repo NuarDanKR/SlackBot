@@ -329,3 +329,21 @@ def test_conflict_is_409_and_save_audits_with_the_logged_in_actor(monkeypatch):
         put(_body(), _request(), _user())
     assert caught.value.status_code == 409
 
+
+
+def test_a_workspace_row_cannot_set_the_sensitivity():
+    """민감도를 낮추면 전역이 막은 모델 카탈로그를 통과한다(2026-11-19 보안 검토)."""
+    with pytest.raises(admin.PdfVisionAdminError) as caught:
+        admin.save_policy_change(
+            _req(config={"sensitivity": "public"}), connect=lambda: pytest.fail("db")
+        )
+    assert (caught.value.code, caught.value.blockers) == ("config_global_only", ("sensitivity",))
+
+
+def test_activation_is_blocked_while_a_workspace_sensitivity_diverges():
+    blockers = admin.activation_blockers(
+        global_config={"sensitivity": "internal"}, merged={"sensitivity": "public"},
+    )
+    assert "workspace_overrides_sensitivity" in blockers
+    same = admin.activation_blockers(global_config={}, merged={})
+    assert "workspace_overrides_sensitivity" not in same

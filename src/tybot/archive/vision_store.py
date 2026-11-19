@@ -35,6 +35,15 @@ TARIFF_KEYS = ('input_usd_per_mtok', 'output_usd_per_mtok')
 #: 요금표는 모델에 묶이고 전역 하루 예산의 근거다 — **전역 행만** 정한다. 워크스페이스 행이
 #: 덮어쓰면 그 워크스페이스 관리자가 요금 0 으로 전역 예산을 우회할 수 있다.
 GLOBAL_ONLY_KEYS = frozenset({'provider', 'model', *TARIFF_KEYS})
+#: 워크스페이스 행이 **값을 갖지 못하는** 칸. 모델·요금표에 더해 민감도도 전역만 정한다 —
+#: 워크스페이스 관리자가 민감도를 낮추면 전역이 막은 모델 카탈로그(`catalog_allows`)를
+#: 통과한다(2026-11-19 보안 검토). 민감도는 기본값(일반 업무)이 있어 전역 행에 없어도 된다.
+WORKSPACE_LOCKED_KEYS = GLOBAL_ONLY_KEYS | {'sensitivity'}
+
+
+def global_sensitivity(global_config: dict | None) -> str:
+    """전역 행이 정한 민감도. 없으면 일반 업무(오너 결정 2026-11-19)."""
+    return str((global_config or {}).get('sensitivity', GENERAL_BUSINESS.value))
 
 
 class VisionDenied(RuntimeError):
@@ -159,6 +168,11 @@ class VisionStore:
         if not local or not workspace:
             raise VisionDenied('policy_unavailable')
         config = global_row['config'] | local['config']
+        # 민감도는 전역 행만 정한다. 워크스페이스 값이 전역과 다르면(낮추든 높이든) 정책이
+        # 갈라진 것이다 — 예약·전송 어느 경로에서도 보내지 않는다.
+        expected = global_sensitivity(global_row['config'])
+        if str(local['config'].get('sensitivity', expected)) != expected:
+            raise VisionDenied('workspace_override_forbidden')
         try:
             # 일반 업무가 기본(오너 결정 2026-11-19). 틀린 값은 짐작하지 않고 정책 무효다.
             sensitivity = Sensitivity(config.get('sensitivity', GENERAL_BUSINESS.value))
