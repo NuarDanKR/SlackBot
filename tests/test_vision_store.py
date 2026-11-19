@@ -191,7 +191,8 @@ def test_dispatch_carries_the_tariff_bound_at_reservation_not_the_current_one():
     conn = ScriptedConnection([GLOBAL, job_row(policy_snapshot=snapshot), LOCAL, APPROVAL_ROW])
     grant = VisionStore(conn).begin_dispatch('job', PAGE, checks=CHECKS)
     assert (grant.input_usd_per_mtok, grant.output_usd_per_mtok) == (Decimal('2'), Decimal('20'))
-    assert grant.charge_usd(1_000_000, 0) == Decimal('2')
+    assert grant.charge_usd(500_000, 50_000) == Decimal('2')
+    assert grant.charge_usd(1000, 0) is None  # usage 누락을 공짜로 읽지 않는다
     assert grant.charge_usd(1000, 500) == Decimal('0.012')
     assert grant.charge_usd(None, 500) is None
 

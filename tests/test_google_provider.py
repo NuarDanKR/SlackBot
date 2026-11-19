@@ -71,3 +71,20 @@ def test_google_provider_refuses_model_path_injection():
 
     with pytest.raises(ValueError, match="google_model_invalid"):
         provider.complete(spec, [Message("user", "hello")])
+
+
+def test_google_thinking_tokens_count_as_billed_output():
+    """Gemini 는 사고 토큰을 출력으로 청구한다. 빼면 Vision 정산이 적게 센다."""
+    class Thinking(Response):
+        def read(self):
+            return json.dumps({
+                "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 4,
+                                  "thoughtsTokenCount": 30},
+            }).encode()
+
+    provider = GoogleProvider("AIza" + "x" * 32, opener=lambda *_a, **_k: Thinking())
+    spec = ModelSpec("gemini-2.5-flash", "google", 0, 0, Sensitivity.PUBLIC)
+    result = provider.complete(spec, [Message("user", "hello")])
+
+    assert (result.input_tokens, result.output_tokens) == (12, 34)

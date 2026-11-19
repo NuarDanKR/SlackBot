@@ -59,6 +59,10 @@ class VisionDispatch:
             return None
         if not all(type(t) is int and t >= 0 for t in (input_tokens, output_tokens)):
             return None
+        if input_tokens == 0 or output_tokens == 0:
+            # 쪽 이미지를 보낸 호출은 입력이 0 일 수 없고, 응답이 있으면 출력도 0 이 아니다.
+            # provider 는 usage 가 빠지면 0 으로 채운다 — 그 0 을 「공짜」 로 읽지 않는다.
+            return None
         return (Decimal(input_tokens) * self.input_usd_per_mtok
                 + Decimal(output_tokens) * self.output_usd_per_mtok) / Decimal(1_000_000)
 

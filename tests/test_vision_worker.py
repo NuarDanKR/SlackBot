@@ -71,6 +71,17 @@ def test_a_zero_priced_gateway_cost_is_not_a_zero_charge():
     assert store.events[-1] == ("finish", "job-1", Decimal("0.012"))
 
 
+@pytest.mark.parametrize(("in_tok", "out_tok"), [(0, 300), (1200, 0), (0, 0)])
+def test_missing_usage_reported_as_zero_is_unknown_not_free(in_tok, out_tok):
+    """provider 는 usage 가 빠지면 토큰을 0 으로 채운다. 그 0 으로 정산하면 예산이 새어 나간다."""
+    store = Store()
+    router = FakeRouter(_Resp(_payload(), input_tokens=in_tok, output_tokens=out_tok))
+
+    dispatch_reserved_page(store, "job-1", PAGE, checks=CHECKS, router=router)
+
+    assert store.events[-1] == ("finish", "job-1", None)
+
+
 def test_without_a_tariff_the_charge_is_unknown_even_if_the_gateway_names_one():
     store = Store()
     store.begin_dispatch = lambda job_id, page, *, checks: VisionDispatch(

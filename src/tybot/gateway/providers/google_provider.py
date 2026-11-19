@@ -115,7 +115,9 @@ class GoogleProvider:
             model=spec.model,
             provider=self.name,
             input_tokens=int(usage.get("promptTokenCount") or 0),
-            output_tokens=int(usage.get("candidatesTokenCount") or 0),
+            # 사고(thinking) 토큰도 출력으로 청구된다. 빼면 비용을 적게 센다.
+            output_tokens=int(usage.get("candidatesTokenCount") or 0)
+            + int(usage.get("thoughtsTokenCount") or 0),
             cost_usd=0.0,
             raw=body,
             stop_reason=str(candidate.get("finishReason") or ""),
