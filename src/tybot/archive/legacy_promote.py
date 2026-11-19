@@ -17,7 +17,12 @@ from pathlib import Path
 from ..pii_screen import screen_document
 from ..sensitive_mask import mask_sensitive
 from . import attachment_doc, attachment_reader, writer
-from .shadow_paths import ShadowPathError, archive_dir, dm_archive_dir
+from .shadow_paths import (
+    ShadowPathError,
+    archive_dir,
+    dm_archive_dir,
+    existing_channel_root,
+)
 from .store import ArchiveDoc, RawLine, SchemaError, load_doc
 
 
@@ -237,10 +242,13 @@ def _raw_plans(
     list[_RawPlan],
     dict[tuple[str, str], Path],
     dict[tuple[str, str], tuple[str, frozenset[str]]],
+    dict[tuple[str, str, str], tuple[str, frozenset[str]]],
 ]:
     plans: list[_RawPlan] = []
     channels: dict[tuple[str, str], Path] = {}
     policies: dict[tuple[str, str], tuple[str, frozenset[str]]] = {}
+    # DM 첨부도 **그 DM 원문의 정책**에 묶는다. (workspace, user, conversation) 단위.
+    dm_policies: dict[tuple[str, str, str], tuple[str, frozenset[str]]] = {}
     paths = sorted(source.glob("*/channels/*/raw/*.md"))
     paths += sorted(source.glob("*/dm/*/raw/*.md"))
     for path in paths:
@@ -282,6 +290,13 @@ def _raw_plans(
                 target = dm_archive_dir(
                     destination, workspace, dm_user, doc.channel_id
                 )
+                dm_key = (workspace, dm_user, doc.channel_id)
+                dm_policy = (doc.visibility, doc.acl)
+                if dm_key in dm_policies and dm_policies[dm_key] != dm_policy:
+                    raise LegacyPromotionError(
+                        "legacy documents for one DM have different policies"
+                    )
+                dm_policies[dm_key] = dm_policy
             if _contains_symlink(destination, target):
                 raise LegacyPromotionError("destination path contains a symlink")
             if not _same_policy(doc, target):
@@ -298,7 +313,7 @@ def _raw_plans(
         report.source_messages += len(messages)
         report.pending_messages += pending
         plans.append(_RawPlan(path, target, doc, messages, pending, dm_user))
-    return plans, channels, policies
+    return plans, channels, policies, dm_policies
 
 
 def _copy_plans(
@@ -307,7 +322,15 @@ def _copy_plans(
     channels: dict[tuple[str, str], Path],
     policies: dict[tuple[str, str], tuple[str, frozenset[str]]],
     report: PromotionReport,
+    dm_policies: dict[tuple[str, str, str], tuple[str, frozenset[str]]] | None = None,
 ) -> list[_CopyPlan]:
+    """첨부 정본 복사 계획. **접근 정책을 확정하지 못하면 복사하지 않는다**(fail-closed).
+
+    첨부는 자기 프론트매터의 visibility·ACL 을 들고 간다. 대조할 채널·DM 정책이
+    없을 때 그대로 복사하면, 옛 첨부가 들고 온 더 넓은 정책이 운영 아카이브에
+    들어간다(2026-11-19 보안 검토).
+    """
+    dm_policies = dm_policies or {}
     plans: list[_CopyPlan] = []
     paths = sorted(source.glob("*/channels/*/attachments/*/*.md"))
     paths += sorted(source.glob("*/dm/*/attachments/*/*.md"))
@@ -325,13 +348,15 @@ def _copy_plans(
             target_root = channels.get((workspace, channel_id))
             policy = policies.get((workspace, channel_id))
             if target_root is None:
-                matches = sorted(
-                    item
-                    for item in (destination / workspace).glob(f"{channel_id}__*")
-                    if item.is_dir() and not item.is_symlink()
-                )
-                if len(matches) == 1:
-                    target_root = matches[0] / "archive"
+                # 운영 쪽에서 찾는다. ID·워크스페이스 형식, 여러 디렉터리, symlink 는
+                # `existing_channel_root` 가 막는다 — 경로 조각을 glob 에 그대로 넣지 않는다.
+                try:
+                    target_root = existing_channel_root(
+                        destination, workspace, channel_id
+                    ) / "archive"
+                except ShadowPathError:
+                    target_root = None
+                if target_root is not None:
                     raw = sorted((target_root / "raw").glob("*.md"))
                     if raw:
                         live_doc = load_doc(raw[0])
@@ -339,6 +364,11 @@ def _copy_plans(
             if target_root is None:
                 report.blocked.append(
                     f"{_relative(path, source)}: no unambiguous live channel target"
+                )
+                continue
+            if policy is None:
+                report.blocked.append(
+                    f"{_relative(path, source)}: no access policy for target channel"
                 )
                 continue
             suffix = Path(*relative.parts[4:])
@@ -360,6 +390,11 @@ def _copy_plans(
                 acl=policy[1] if policy else None,
             )
             if relative.parts[1] == "dm":
+                dm_policy = dm_policies.get((workspace, user_id, loaded.channel_id))
+                if dm_policy is None:
+                    raise LegacyPromotionError("no DM document plan for this attachment")
+                if (loaded.visibility, loaded.acl) != dm_policy:
+                    raise LegacyPromotionError("attachment and DM access policies differ")
                 target_root = dm_archive_dir(
                     destination, workspace, user_id, loaded.channel_id
                 )
@@ -398,8 +433,8 @@ def promote(
     live = Path(destination)
     _validate_roots(source, live)
     report = PromotionReport(apply=apply)
-    raw_plans, channels, policies = _raw_plans(source, live, report)
-    copy_plans = _copy_plans(source, live, channels, policies, report)
+    raw_plans, channels, policies, dm_policies = _raw_plans(source, live, report)
+    copy_plans = _copy_plans(source, live, channels, policies, report, dm_policies)
     if not apply or report.blocked:
         return report
 

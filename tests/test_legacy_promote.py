@@ -348,3 +348,90 @@ def test_source_and_destination_must_be_disjoint(tmp_path, nested):
 
     with pytest.raises(legacy_promote.LegacyPromotionError, match="disjoint"):
         legacy_promote.promote(source, live)
+
+
+def test_an_attachment_without_a_determinable_channel_policy_is_not_copied(tmp_path):
+    """운영 채널은 있는데 원문이 없으면 대조할 정책이 없다 — 복사하지 않는다(fail-closed)."""
+    source, live = _roots(tmp_path)
+    (live / WS / f"{CID}__{CHANNEL}" / "archive" / "raw").mkdir(parents=True)
+    attachment = (
+        source / WS / "channels" / CID / "attachments" / "F12345678" / "rev.md"
+    )
+    _legacy_attachment(attachment, "본문", acl="다른채널")
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert not report.ok
+    assert "no access policy for target channel" in report.blocked[0]
+    assert not list(live.rglob("attachments/*/*.md"))
+
+
+def test_a_malformed_channel_directory_is_not_globbed(tmp_path):
+    source, live = _roots(tmp_path)
+    attachment = (
+        source / WS / "channels" / "C*" / "attachments" / "F12345678" / "rev.md"
+    )
+    try:
+        _legacy_attachment(attachment, "본문")
+    except OSError:
+        return  # 파일 시스템이 `*` 를 허용하지 않으면 이 경로는 생길 수 없다
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert not report.ok
+    assert _hashes(live) == {}
+
+
+def _dm_attachment(source: Path, *, user_id: str, conversation: str, acl: str) -> Path:
+    path = source / WS / "dm" / user_id / "attachments" / "F12345678" / "rev.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        attachment_doc.render(
+            attachment_doc.AttachmentDoc(
+                workspace=WS, channel_id=conversation, channel=f"DM:{user_id}",
+                file_id="F12345678", name="개인메모.txt", revision="rev",
+                visibility="private", acl=frozenset({acl}) if acl else frozenset(),
+                text="개인 첨부", conversion_state=attachment_doc.CONVERTED,
+            )
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_dm_attachment_without_its_dm_document_is_not_copied(tmp_path):
+    source, live = _roots(tmp_path)
+    _dm_attachment(source, user_id="U12345678", conversation="D12345678", acl="")
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert not report.ok
+    assert "no DM document plan" in report.blocked[0]
+    assert _hashes(live) == {}
+
+
+def test_a_dm_attachment_cannot_carry_a_different_policy(tmp_path):
+    source, live = _roots(tmp_path)
+    user_id = "U12345678"
+    _legacy_doc(source, channel_id="D12345678", channel=f"DM:{user_id}", acl="",
+                dm_user=user_id)
+    _dm_attachment(source, user_id=user_id, conversation="D12345678", acl="공사팀")
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert not report.ok
+    assert any("DM access policies differ" in item for item in report.blocked)
+    assert _hashes(live) == {}
+
+
+def test_a_dm_attachment_matching_its_dm_document_is_copied(tmp_path):
+    source, live = _roots(tmp_path)
+    user_id = "U12345678"
+    _legacy_doc(source, channel_id="D12345678", channel=f"DM:{user_id}", acl="",
+                dm_user=user_id)
+    _dm_attachment(source, user_id=user_id, conversation="D12345678", acl="")
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert report.ok, report.blocked
+    assert list((live / WS / "dm" / user_id).rglob("attachments/F12345678/rev.md"))
