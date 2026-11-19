@@ -111,7 +111,7 @@ _최종 갱신: 2026-11-12_
 | [B-77](#b-77) | 토픽별 누적 요약 저장소 | 중 | 대기 (오너 요청/2026-10-15) | B-37, B-50, B-56, B-76 |
 | [B-78](#b-78) | 일정 DM의 명시적 개인 캘린더 ACL 반영 | 높음 | 구현 진행중 · 서버 검증 대기 (Codex/2026-10-15) | B-05, B-33 |
 | [B-79](#b-79) | 검토자별 여러 채널 요약 검토 DM 통합 | 중 | 대기 · 발송 시각 정책 결정 필요 (오너/2026-10-15) | B-50 |
-| [B-80](#b-80) | Archiver PDF/HWP 복구와 Vision 모델·예산 관리 | 높음 | 진행중 (Codex/2026-10-19, 정책·예약 원장 구현 · worker 미연결) | B-46, B-65, B-73 |
+| [B-80](#b-80) | Archiver PDF/HWP 복구와 Vision 모델·예산 관리 | 높음 | 진행중 (Claude/2026-11-19, 전송·저장·투영·답변 연결 커밋 · 서버 dry-run·요금 실측 대기) | B-46, B-65, B-73 |
 | [B-81](#b-81) | 건설 현장 사진 검색 색인·원본 질의응답 | **높음 (다음 작업)** | 진행중 (Codex+Claude/2026-11-12, 운영 연결 재개) | B-80, B-41, B-53 |
 | [B-82](#b-82) | 전문봇 조회 시간 예산·긴 XLSX 분할 열람 | 높음 | 코드 구현·운영 검증 대기 (Codex/2026-10-21) | B-41, B-76 |
 | [B-83](#b-83) | **VIPBot — TYBot 공통 답변과 별도 사용자·근거 채널 권한** | **최우선** | 진행중 (Codex+Claude/2026-11-05) | B-05, B-41, B-44 |
@@ -1129,21 +1129,40 @@ HWP를 그대로 Vision 모델에 보내거나 확장자를 PDF로 바꾸지 않
 한 폴더를 더 구체적인 폴더로 교체하거나 상하위 조직을 추론해 넓히는 것이 아니다.
 운영에서 대표 조직에 연결된 폴더만 조회되고, 실제 일정이 등록되는 별도 조직의
 폴더는 대상에서 누락된 사례가 있다. 원본 개인별 멤버십은 아직 확인하지 않았다.
-- [~] Claude(2026-11-19, **미커밋·오너 검토 대기**): 운영 연결 코어.
+- [x] Claude(2026-11-19, `a96280f`): 운영 연결 코어.
   - 후보 `archive/vision_candidates.py`: staged metadata 의 `missing_units`·`unverified_units` 쪽만.
     원본 없음·XLS 등 비 PDF·PII/정책 격리·PII 알림(부분 검사 fail-closed)·검사 결과 모름·쪽 판정 없음·
     목록 상한(50) 도달은 대기열에 넣지 않는다
-  - 렌더 `archive/vision_pdf_render.py`: 요청 쪽만 PNG(pypdfium2). **서버에 pypdfium2 가 없으면
-    `RendererUnavailable` 로 닫는다 — 의존성 추가는 오너 결정 대기**
+  - 렌더 `archive/vision_pdf_render.py`: 요청 쪽만 PNG. `pypdfium2==4.30.0` 을 배포 의존성에 고정,
+    실제 렌더 smoke 시험
   - 실행 `archive/vision_pdf_batch.py`(`dry_run`·`apply` 분리) + `scripts/vision_pdf_backfill.py`
-    (기본 dry-run, apply 는 실행자·사유·쪽 상한·쪽당 예약 금액 필수)
-  - 파생 revision 표 `archiver_vision_page_revision`(job 당 1건, 마스킹→최종 관문, 원문 불변)·
-    `VisionStore.record_page`, 대조기 Vision 전용 등록
-  - 민감도: 공통 계약 [vision-sensitivity-contract.md](docs/design/vision-sensitivity-contract.md).
-    카탈로그는 B-81 과 같은 `archiver_image_model_catalog` 를 읽는다
-  - 시험: `tests/test_vision_pdf_backfill.py`, `tests/test_vision_sensitivity.py`, 실제 DB 시험은
-    `tests/test_vision_store_db.py`(TYBOT_SCHEMA_TEST_DSN 필요 — 이 세션에서는 미실행)
-  - 남은 것: 서버 31건 dry-run 실측, pypdfium2 결정, 쪽당 예약 금액(검증된 요금), 파생 전사의 검색 투영
+    (기본 dry-run, apply 는 실행자·사유·쪽 상한·쪽당 예약 금액 필수). 전송 전 등록 채널·수집 범위
+    (`archive_channel_mode`, Master 읽기 전용)·원본 좌표를 실제 조회한다
+  - 파생 revision `archiver_vision_page_revision`(job 당 1건, 마스킹→최종 관문, 원문 불변) →
+    Master 읽기 전용 투영 `pdf_page_search_entry`(성공 전사만, `--project` 로 멱등 소급)
+  - 민감도: 공통 계약 [vision-sensitivity-contract.md](docs/design/vision-sensitivity-contract.md)
+- [x] Claude(2026-11-19, `8e802ac`): 폐기 PostgreSQL 16 에서 DB 시험 실행(B-81 5건 + Vision 16건 통과).
+  시험 준비 결함 2건(B-81 정책 씨앗 행 TRUNCATE, 전용 스키마의 pg_trgm 검색 경로)만 고쳤다
+- [x] Claude(2026-11-19, `c2f903e`): **답변 근거 연결.** `pdf_vision_guide` 가 최초 질문에서 투영을
+  찾고, TYBot·VIPBot 공통 답변 경로(`_with_pdf_vision_guide`)로 들어간다.
+  - `extracted` 만 근거(같은 쪽 최신 revision 이 아니면 옛 extracted 로 되돌아가지 않음)
+  - 직전 재검증: 현재 visible 채널·정본 ACL(VIP `evidence_sources` 포함) · 현재 AttachmentDoc 의
+    file_id·original_sha256·상태 · 원본 PDF 자리·해시·`%PDF` · PII 재검사
+  - 근거 줄 `[AI 문서 전사·파생 · PDF N쪽]`, 출처 `📄원본.pdf N쪽(날짜) · [AI 문서 전사·파생]`
+  - 후속 질문: `EvidenceRef(kind=vision_page)` 에 revision_id·file_id·page·original_sha256 만
+    (전사 문장·지문 없음). 다음 질문에서 DB·권한·원본을 처음부터 다시 확인
+  - DB 오류·투영 누락/대체·좌표 불일치·권한 변경은 fail-closed, 기존 검색은 그대로
+- [x] 오너 결정(2026-11-19): **PDF 쪽 전사는 「사람 업로드 확인」 을 요구하지 않는다.**
+  - 그 값(`human_upload_confirmed`)은 실시간 수집이 Slack 이벤트에서 `user` 가 있고 `bot_id`·`app_id`·
+    변환 앱 표식이 없을 때만 참으로 적는다. 2026-10-27 이전 문서·파일 목록 소급·변환 앱 PDF 는 거짓이다
+  - 수집 입구가 이미 봇·앱 메시지를 버리고 **지정 변환 앱의 PDF 만** 받는다(`collect`·`converter_bots`).
+    그 PDF 는 사람이 올린 HWP 의 변환본이다. 이 값을 요구하면 HWP 계열과 옛 PDF 전부가 빠져
+    「가능한 모든 문서를 정확한 텍스트로」 라는 목표와 반대가 된다. 봇 출력 되먹임은 수집 입구가 막는다
+- [ ] 후속 제안(오너 결정 필요): B-81 이미지 설명도 같은 근거로 「사람 업로드 확인」 대신 **수집 입구
+  판정**(봇·앱 메시지 배제)으로 바꾸면 옛 사진·파일 목록 소급 사진까지 범위에 들어온다.
+  B-81 경로는 이번에 고치지 않았다
+- [ ] 남은 것: 서버 31건 dry-run 실측 → 쪽당 예약 금액(검증된 요금) 결정 → 소수 쪽 apply → 원본과
+  수치·표 대조(아래 운영 승인 항목) → 범위 확대
 
 현재 `V_TYSLACK_EMP`는 `DEPARTMENTMANAGECODE` 한 컬럼을 `org_code`로 내보내고,
 `schedule_dm.RECIPIENT_CTE`는 그 값과 `schedule_folder_org.org_code`를 일치시킨다.

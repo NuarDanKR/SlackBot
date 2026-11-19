@@ -43,7 +43,7 @@ REV = "rev-page3-0001"
 
 def _archive(root: Path, *, sha: str = SHA, with_object: bool = True, pdf: bytes = PDF,
              state: str = attachment_doc.PARTIAL, channel: str = CHANNEL,
-             channel_id: str = CH) -> None:
+             channel_id: str = CH, human: bool = True) -> None:
     """채널 원문(첨부 줄) + 부분 변환 첨부 정본 + 원본 PDF."""
     writer.ingest(
         root, workspace=WS, channel=channel, channel_id=channel_id, acl=[channel],
@@ -60,7 +60,7 @@ def _archive(root: Path, *, sha: str = SHA, with_object: bool = True, pdf: bytes
         revision="rev0000000001", visibility="private", acl=frozenset({channel}),
         text="1쪽 표지 하도급계약서", conversion_state=state,
         message_ts="1794000000.000100", filetype="pdf", sha256=sha,
-        staged_at="2026-11-12T01:00:00+00:00", human_upload_confirmed=True,
+        staged_at="2026-11-12T01:00:00+00:00", human_upload_confirmed=human,
     )
     path = root / doc.relative_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,6 +286,18 @@ def test_a_file_that_is_not_a_pdf_is_refused(tmp_path):
     _archive(root, pdf=fake, sha=hashlib.sha256(fake).hexdigest())
     rows = [_row(original_sha256=hashlib.sha256(fake).hexdigest())]
     assert guide.expand(ArchiveStore(root), _ctx(), "계약금액", conn=_PageConn(rows)) == []
+
+
+def test_a_converter_app_or_legacy_pdf_without_the_human_flag_is_still_evidence(tmp_path):
+    """오너 결정 2026-11-19: PDF 쪽 전사는 「사람 업로드 확인」 을 요구하지 않는다.
+
+    변환 앱 PDF(사람이 올린 HWP 의 변환본)·옛 문서·파일 목록 소급은 그 값이 거짓이다.
+    봇 출력 되먹임은 수집 입구(봇·앱 메시지 배제)가 막는다.
+    """
+    root = tmp_path / "archive"
+    _archive(root, human=False)
+    hits = guide.expand(ArchiveStore(root), _ctx(), "계약금액", conn=_PageConn([_row()]))
+    assert len(hits) == 1
 
 
 # --- 5. PII 재검사 -----------------------------------------------------------
