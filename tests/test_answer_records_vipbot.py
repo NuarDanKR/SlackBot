@@ -88,3 +88,21 @@ def test_tybot_body_stays_visible(tmp_path, monkeypatch):
     row, _ = answer_records.find_visible(_admin(), "a" * 32)
     assert answer_records.body_visible(row, _admin())
     assert answer_records.detail(row, [])["bodyHidden"] is False
+
+
+def test_direct_answers_join_the_routing_list(tmp_path, monkeypatch):
+    """봇 분류 상태 — 전문 봇 없이 답한 질문도 답변 봇과 함께 나온다."""
+    _dirs(tmp_path, monkeypatch)
+    rows = answer_records.direct_answer_rows(exclude_keys=set(), allowed=None)
+    assert [(r["bot"], r["result"], r["specialist"]) for r in rows] == [
+        ("tybot", "direct", ""), ("vipbot", "direct", ""),
+    ]
+    assert rows[0]["at"] > rows[1]["at"]              # 최신이 먼저
+    assert "question" not in rows[0]                  # 본문은 싣지 않는다
+
+    only_vip = answer_records.direct_answer_rows(exclude_keys=set(), allowed=None, bot="vipbot")
+    assert [r["qaRecordKey"] for r in only_vip] == ["b" * 32]
+    # 이미 전문 봇 호출로 잡힌 질문은 두 번 나오지 않는다
+    assert answer_records.direct_answer_rows(exclude_keys={"a" * 32, "b" * 32}, allowed=None) == []
+    # 볼 수 없는 워크스페이스는 뺀다
+    assert answer_records.direct_answer_rows(exclude_keys=set(), allowed={"civil"}) == []
