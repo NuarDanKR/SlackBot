@@ -7,7 +7,7 @@
 2. **`pii_blocked=False` 를 우리가 적지 않는다.** 호출자만 말할 수 있고,
    안 말하면 닫힌 기본값이 그대로 간다.
 3. **증명한 것만 참으로 적는다.** `source_verified`·`bot_generated` 는 로더가
-   해시와 `human_upload_confirmed` 를 확인한 **뒤에만** 이 자리에 온다.
+   해시와 수집 입구 판정(`vision_provenance`)을 확인한 **뒤에만** 이 자리에 온다.
 4. **예외 본문이 밖으로 안 나간다.** 저장소 거절은 코드, 그 밖은 형만.
 5. **실패가 재전송으로 바뀌지 않는다.** dispatch 뒤 실패는 worker 가 닫는다.
 
@@ -224,7 +224,7 @@ def test_only_what_the_loader_proved_is_marked_true(archive):
 
     said = store.reserved[0]["checks"]
     assert said["source_verified"] is True, "해시를 다시 잰 뒤다"
-    assert said["bot_generated"] is False, "human_upload_confirmed 를 본 뒤다"
+    assert said["bot_generated"] is False, "수집 입구 판정을 본 뒤다"
     assert said["access_verified"] is True
     assert said["pii_blocked"] is False
 
@@ -279,7 +279,7 @@ def test_a_load_failure_never_reserves(archive):
     """로드가 막히면 **예약도 모델도 없다.**"""
     store, router = FakeStore(), FakeRouter()
     out = _run(archive, store=store, router=router,
-               doc=_doc(human_upload_confirmed=False))
+               doc=_doc(name="현장 정리 · TYBot"))
 
     assert out.stage == runner.STAGE_LOAD
     assert out.error_code == "human_upload_unconfirmed"
@@ -308,7 +308,9 @@ def test_a_reserve_refusal_never_calls_the_model(archive):
 
 
 def test_the_stage_says_where_it_stopped(archive):
-    assert _run(archive, doc=_doc(human_upload_confirmed=False)).stage == runner.STAGE_LOAD
+    assert _run(archive, doc=_doc(name="현장 정리 · TYBot")).stage == runner.STAGE_LOAD
+    # 실시간 수집 플래그가 없어도(옛 사진·소급 사진) 끝까지 간다
+    assert _run(archive, doc=_doc(human_upload_confirmed=False)).stage == runner.STAGE_DONE
     assert _run(
         archive, store=FakeStore(reserve_error=ImageDescriptionDenied("x_y")),
     ).stage == runner.STAGE_RESERVE

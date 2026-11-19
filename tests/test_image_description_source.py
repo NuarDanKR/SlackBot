@@ -158,13 +158,17 @@ def test_an_unknown_uploader_is_not_a_candidate():
     assert _reasons(out) == {SKIP_NOT_HUMAN}
 
 
-def test_only_canonical_provenance_supplies_human_file_ids():
+def test_collection_admission_supplies_the_file_ids():
+    """실시간 플래그가 없어도 수집 입구를 지난 정본이면 대상이다(2026-11-19).
+    봇 출력 표식·좌표 결손은 빠진다."""
     docs = [
         _doc(file_id="F1", human_upload_confirmed=True),
         _doc(file_id="F2", sha256="b" * 64),
+        _doc(file_id="F3", sha256="c" * 64, name="현장 정리 · TYBot"),
+        _doc(file_id="F4", sha256="d" * 64, channel_id=""),
     ]
 
-    assert confirmed_human_file_ids(docs) == frozenset({"F1"})
+    assert confirmed_human_file_ids(docs) == frozenset({"F1", "F2"})
 
 
 def test_only_the_named_files_become_candidates():

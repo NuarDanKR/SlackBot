@@ -562,13 +562,18 @@ def test_another_workspace_entry_is_never_queried(tmp_path):
     "archive_kw",
     [
         {"with_object": False},  # 원본이 사라졌다
-        {"human": False},  # 사람 업로드가 확인되지 않는다
         {"sha": "c" * 64},  # 정본의 해시가 투영과 다르다(재수집으로 바뀜)
     ],
 )
 def test_a_photo_whose_original_cannot_be_reverified_is_dropped(tmp_path, archive_kw):
     store, conn = _end_to_end(tmp_path, **archive_kw)
     assert image_guide.expand(store, _ctx(), "타워크레인", conn=conn) == []
+
+
+def test_a_photo_without_the_live_human_flag_is_still_found(tmp_path):
+    """옛 사진·파일 목록 소급 사진 — 수집 입구를 지났으면 근거 길잡이가 된다(2026-11-19)."""
+    store, conn = _end_to_end(tmp_path, human=False)
+    assert image_guide.expand(store, _ctx(), "타워크레인", conn=conn)
 
 
 def test_a_changed_original_byte_is_dropped(tmp_path):

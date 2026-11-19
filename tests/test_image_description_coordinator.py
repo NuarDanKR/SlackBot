@@ -192,11 +192,12 @@ def test_an_existing_revision_is_not_loaded_or_reserved(monkeypatch):
     assert not store.reserved
 
 
-def test_missing_human_provenance_never_reaches_the_loader(monkeypatch):
+def test_a_bot_generated_file_never_reaches_the_loader(monkeypatch):
+    """봇 출력 표식이 있는 정본은 후보가 아니다(수집 입구 판정, 2026-11-19)."""
     loaded = []
     batch = _run(
         monkeypatch,
-        docs=[_doc(human_upload_confirmed=False)],
+        docs=[_doc(name="현장 정리 · TYBot")],
         load_image=lambda *_args: loaded.append(True),
     )
 

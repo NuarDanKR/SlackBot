@@ -34,8 +34,8 @@ revision** 이 extracted 가 아니면 옛 extracted 로 되돌아가지도 않�
 
 ## 「사람 업로드 확인」 은 요구하지 않는다 (오너 결정 2026-11-19)
 
-이미지 설명(B-81)은 정본의 `human_upload_confirmed` 가 참일 때만 쓴다. PDF 쪽 전사는 요구하지
-않는다. 그 값은 실시간 수집이 이벤트에서 확인했을 때만 참이라, 변환 앱 PDF(사람이 올린 HWP 의
+PDF 쪽 전사도 이미지 설명(B-81)도 정본의 `human_upload_confirmed` 를 요구하지 않는다
+(이미지 쪽 판정은 `archive.vision_provenance`). 그 값은 실시간 수집이 이벤트에서 확인했을 때만 참이라, 변환 앱 PDF(사람이 올린 HWP 의
 변환본)·옛 문서·파일 목록 소급은 모두 거짓이다. 요구하면 정확히 텍스트로 만들려던 문서 대부분이
 빠진다. 봇 출력 되먹임은 **수집 입구**가 막는다 — 봇·앱 메시지는 버리고 지정 변환 앱의 PDF 만
 받는다(`collect`, `archive.converter_bots`).
