@@ -65,13 +65,26 @@ def test_feedback_classification_is_closed_and_requires_lineage(
     assert got.body == body
 
 
-def test_a_claim_is_promoted_only_when_fact_tokens_are_in_reopened_evidence():
-    unverified = memory.classify_feedback(
+def test_a_before_after_correction_is_a_shared_correction_not_personal_memory():
+    # 2026-11-20 오너 결정: 「무엇에서 무엇으로」 읽히는 정정은 개인 기억 표가 아니라
+    # 원문 권한자 모두에게 보이는 정정 원장으로 간다.
+    got = memory.classify_feedback(
         "그 문서 기준으로는 15억이 아니라 12억이야",
         prior_record_id="r1",
     )
+
+    assert got.kind == memory.CORRECTION
+    assert got.normalized == "15억→12억"
+    assert not got.stores
+
+
+def test_a_claim_is_promoted_only_when_fact_tokens_are_in_reopened_evidence():
+    unverified = memory.classify_feedback(
+        "그 문서 기준 확정 금액은 12억이야",
+        prior_record_id="r1",
+    )
     verified = memory.classify_feedback(
-        "그 문서 기준으로는 15억이 아니라 12억이야",
+        "그 문서 기준 확정 금액은 12억이야",
         prior_record_id="r1",
         resolved_evidence=("기존 15억원에서 확정 12억원으로 정정했다.",),
     )

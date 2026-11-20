@@ -72,6 +72,10 @@ class RequestContext:
     user_memory_ids: tuple[int, ...] = ()
     # 본인 형식 선호 키. 답변 **표시 형식**(Canvas·메시지)에만 쓰고 근거·권한에는 안 쓴다.
     user_preferences: tuple[str, ...] = ()
+    # 사람이 남긴 사실 정정(2026-11-20). 요청자가 **지금** 원문 좌표를 전부 열 수 있는
+    # 정정만 들어온다. 근거가 아니다 — 답변이 같은 문서를 읽었을 때 끝에 정정자·날짜와
+    # 함께 붙이는 표시 후보다(`fact_correction.FactCorrection`).
+    fact_corrections: tuple = ()
 
     @property
     def in_channel(self) -> bool:

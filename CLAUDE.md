@@ -85,6 +85,9 @@ TYBot 이 **마스터**다. 저가 모델이 어느 전문 봇에게 물을지�
    > 설계: [`docs/design/pii-guardrail-and-canvas-artifacts.md`](docs/design/pii-guardrail-and-canvas-artifacts.md)
 6. **시크릿은 저장소 밖** — 토큰/API키는 서버 설정·시크릿 매니저에만. 저장소엔 `.env.example`만.
 7. **사람 발언 ↔ 문서 분리** — 숫자가 엇갈리면 문서 우선하되 두 시점 함께 표기.
+   사람이 남긴 사실 정정(「15억이 아니라 12억」)은 원문을 바꾸지 않고, 그 원문을 지금
+   볼 수 있는 사람의 답변 끝에 **정정자·날짜·전 → 후**로 붙는다(2026-11-20 오너 결정).
+   설계: [`docs/design/personal-memory-threat-model.md`](docs/design/personal-memory-threat-model.md) §8
 
 > **2026-09-11 (오너 결정) — 「아카이브된 것만」 에서 「아카이브 + 실시간」 으로.**
 >

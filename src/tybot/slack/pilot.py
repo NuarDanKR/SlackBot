@@ -417,6 +417,74 @@ def display_request(tasks) -> master_planner.ArtifactRequest:
     )
 
 
+#: 피드백 처리 중간값. Socket Mode 이벤트는 스레드 풀에서 동시에 돈다 — 인스턴스 속성에
+#: 두면 한 사람의 정정 문장이 다른 사람의 답 문장에 섞인다. 스레드마다 따로 둔다.
+_FEEDBACK_STATE = threading.local()
+
+
+def _memory_saved_fact(entry: dict) -> str:
+    """피드백 답 문장에 넘기는 사실 — 무엇이 저장됐고 어디에 쓰이는지."""
+    if not entry.get("memory_saved"):
+        return "개인 기억으로는 저장하지 않았다."
+    if entry.get("memory_kind") == "claim":
+        return (
+            "본인 전용 메모로 저장했다. DM 이나 원문 좌표가 없는 답에서 한 정정은 "
+            "다른 사람에게 보이지 않는다."
+        )
+    if entry.get("memory_kind") == "instruction":
+        return (
+            "본인 전용 요청으로 저장했다. 다음 답변부터 말투·구성·형식에 반영한다. "
+            "근거·출처·권한 규칙과 부딪히는 부분은 따르지 않는다. "
+            "`내 기억 보여줘`로 확인하고 `기억 삭제 번호`로 지울 수 있다."
+        )
+    return "본인 전용 선호로 저장했다. 다음 답변 형식에 반영한다."
+
+
+#: 정정을 공유하지 못한 이유 → 사람이 할 수 있는 일.
+_CORRECTION_REASON_TEXT = {
+    "no_evidence": (
+        "정정한 답변에 연결된 원문 좌표가 없어 다른 사람에게는 표시하지 않습니다 "
+        "(누가 봐도 되는지 정할 수 없습니다)."
+    ),
+    "corrector_cannot_open": (
+        "정정한 답변의 원문을 지금 권한으로 열 수 없어 공유 정정으로 남기지 않았습니다."
+    ),
+    "dm_private": "DM 에서 한 정정은 본인 기록이라 다른 사람에게 표시하지 않습니다.",
+    "private_source": (
+        "정정한 답변이 질문 첨부나 실시간 대화를 근거로 써서, 그 근거를 볼 수 없는 분께도 "
+        "보일 수 있어 공유 정정으로 남기지 않았습니다."
+    ),
+    "unavailable": "정정 저장소를 지금 쓸 수 없어 공유 정정으로 남기지 못했습니다. 잠시 후 다시 남겨 주세요.",
+}
+
+
+def _correction_fact(entry: dict) -> str:
+    change = entry.get("correction_change") or ""
+    if entry.get("correction_saved"):
+        return (
+            f"사실 정정({change})으로 기록했다. 이 원문을 볼 수 있는 사람이 관련 질문을 하면 "
+            "답변 끝에 정정한 사람·날짜·정정 전후 값이 원문 값과 함께 표시된다. "
+            "원문 자체는 바뀌지 않는다."
+        )
+    reason = entry.get("correction_reason") or ""
+    if reason in _CORRECTION_REASON_TEXT:
+        return f"사실 정정({change})으로 읽었지만 " + _CORRECTION_REASON_TEXT[reason]
+    return "사실 정정은 없었다."
+
+
+def _correction_reply(result) -> str:
+    """스레드 `정정:` 의 확인 문장 한 줄. 정정으로 읽히지 않았으면 빈 문자열."""
+    if result is None or result.reason == "not_correction":
+        return ""
+    change = f"{result.before} → {result.after}" if result.before else ""
+    if result.saved:
+        return (
+            f"✏️ 정정({change})을 남겼습니다. 이 원문을 볼 수 있는 분이 관련 질문을 하면 "
+            "답변 끝에 정정하신 분·날짜와 함께 표시됩니다. 원문은 바뀌지 않습니다."
+        )
+    return _CORRECTION_REASON_TEXT.get(result.reason, "")
+
+
 def _carry_context(answers: list, last):
     """복합 답변이 다음 턴에 물려줄 **좌표를 합친 Answer**.
 
@@ -1857,6 +1925,7 @@ class WorkspaceBot:
             user_id=user_id,
             prior=prior,
         )
+        _FEEDBACK_STATE.memory_kind = str(result.decision.kind) if result.saved else ""
         if result.saved:
             log.info(
                 "[%s] 사용자 피드백 개인 기억 저장 user=%s kind=%s memory_id=%s",
@@ -1866,6 +1935,66 @@ class WorkspaceBot:
                 result.memory_id,
             )
         return bool(result.saved)
+
+    def _fact_correction_service(self):
+        service = getattr(self, "_fact_correction_service_obj", None)
+        if service is None:
+            from ..user_memory_service import FactCorrectionService
+
+            service = FactCorrectionService()
+            self._fact_correction_service_obj = service
+        return service
+
+    def _record_fact_correction(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        text: str,
+        prior: dict | None,
+    ):
+        """사실 정정을 원장에 남긴다(2026-11-20 오너 결정).
+
+        정정은 원문 권한자 **모두**에게 보이므로, 정정자도 지금 그 원문 좌표를
+        전부 열 수 있어야 한다. 권한 없는 사람이 정정 문장으로 내용을 퍼뜨리는
+        길을 막는다(원칙 3). 판정은 답변과 같은 `resolve_refs` 다.
+        """
+        client = getattr(getattr(self, "app", None), "client", None)
+
+        def can_open(raw_refs: list[dict]) -> bool:
+            refs = refs_from_json(list(raw_refs))
+            if not refs or len(refs) != len(raw_refs):
+                return False
+            ctx = self._request_context(
+                client,
+                user_id,
+                channel_id=channel_id,
+                in_channel=bool(channel_id) and not channel_id.startswith("D"),
+            )
+            hits, dropped = self.store.resolve_refs(refs, ctx)
+            return not dropped and len(hits) == len(refs)
+
+        try:
+            name = self._user_name(client, user_id) if client is not None else user_id
+        except Exception:
+            name = user_id
+        result = self._fact_correction_service().record(
+            text,
+            workspace=self.workspace,
+            corrector_id=user_id,
+            corrector_name=name,
+            prior=prior,
+            can_open=can_open,
+        )
+        log.info(
+            "[%s] 사실 정정 user=%s saved=%s reason=%s id=%s",
+            self.workspace,
+            user_id,
+            result.saved,
+            result.reason,
+            result.correction_id,
+        )
+        return result
 
     def _user_memory_service(self):
         service = getattr(self, "_user_memory_service_obj", None)
@@ -1907,13 +2036,30 @@ class WorkspaceBot:
             claim_is_current=claim_is_current,
             include_search_hints=False,
         )
-        if not memory.prompt:
+
+        def correction_visible(item) -> bool:
+            # 보는 사람이 정정한 답변의 원문 좌표를 **지금 전부** 열 수 있어야 한다.
+            # 채널 질문이면 그 채널로 고정된 ctx 이므로 다른 채널 정정은 안 보인다.
+            refs = refs_from_json(list(item.evidence_refs))
+            if not refs or len(refs) != len(item.evidence_refs):
+                return False
+            hits, dropped = self.store.resolve_refs(refs, ctx)
+            return not dropped and len(hits) == len(refs)
+
+        corrections = self._fact_correction_service().context(
+            workspace=self.workspace,
+            question=question,
+            visible=correction_visible,
+        )
+        prompt = "\n\n".join(part for part in (memory.prompt, corrections.prompt) if part)
+        if not prompt:
             return ctx
         return replace(
             ctx,
-            user_memory_prompt=memory.prompt,
+            user_memory_prompt=prompt,
             user_memory_ids=memory.memory_ids,
             user_preferences=tuple(getattr(memory, "preferences", ()) or ()),
+            fact_corrections=tuple(corrections.items),
         )
 
     def _record_slash_feedback(self, *, user_id: str, channel_id: str, text: str) -> str:
@@ -1933,13 +2079,30 @@ class WorkspaceBot:
             action="submitted",
             text=text,
         )
+        _FEEDBACK_STATE.memory_kind = ""
         memory_saved = self._remember_user_feedback(user_id=user_id, text=text, prior=row)
+        correction = None
+        if not memory_saved:
+            from ..fact_correction import parse_change
+
+            if parse_change(text) is not None:
+                correction = self._record_fact_correction(
+                    user_id=user_id, channel_id=channel_id, text=text, prior=row
+                )
         # 연결할 답변이 없으면 그 사실을 말한다 - 검토자가 재현하지 못하기 때문이다.
         asked = str(row.get("question") or "").strip() if row else ""
         linked = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if record_id and asked else ""
-        self._last_feedback_entry = {
+        _FEEDBACK_STATE.entry = {
             "linked_question": asked[:60] if record_id and asked else "",
             "memory_saved": bool(memory_saved),
+            "memory_kind": getattr(_FEEDBACK_STATE, "memory_kind", "") if memory_saved else "",
+            "correction_saved": bool(correction and correction.saved),
+            "correction_reason": correction.reason if correction else "",
+            "correction_change": (
+                f"{correction.before} → {correction.after}"
+                if correction and correction.before
+                else ""
+            ),
         }
         return feedback_thanks("correction", linked=linked)
 
@@ -1953,11 +2116,11 @@ class WorkspaceBot:
         기록은 코드가 하고, 답 문장은 LLM 이 **코드가 만든 사실만으로** 쓴다 —
         공감하고, 왜 그렇게 동작했는지와 원하는 결과를 얻는 방법을 안내한다.
         """
-        self._last_feedback_entry = {}
+        _FEEDBACK_STATE.entry = {}
         recorded = self._record_slash_feedback(
             user_id=user_id, channel_id=channel_id, text=text
         )
-        entry = dict(getattr(self, "_last_feedback_entry", {}) or {})
+        entry = dict(getattr(_FEEDBACK_STATE, "entry", {}) or {})
         fallback = f"말씀하신 내용을 {self._display_name()} 답변 품질 피드백으로 기록했습니다.\n" + recorded
         return write_from_facts(
             getattr(getattr(self, "engine", None), "router", None),
@@ -2006,11 +2169,8 @@ class WorkspaceBot:
             ),
             "피드백_기록": "답변 품질 피드백으로 기록했다. 검토자가 본다.",
             "연결한_직전_질문": entry.get("linked_question") or "없음",
-            "개인_선호_저장": (
-                "본인 전용 선호로 저장했다. 다음 답변 형식에 반영한다."
-                if entry.get("memory_saved")
-                else "개인 선호로는 저장하지 않았다."
-            ),
+            "개인_선호_저장": _memory_saved_fact(entry),
+            "사실_정정": _correction_fact(entry),
             "답변_형식_규칙": self._format_facts(),
             "추가_도움": "`도움말`이라고 보내면 전체 명령을 볼 수 있다.",
         }
@@ -2043,6 +2203,19 @@ class WorkspaceBot:
             action="submitted",
             text=text,
         )
+        # 「15억이 아니라 12억」 처럼 무엇에서 무엇으로 읽히면 원문 권한자 모두에게
+        # 정정자·날짜와 함께 보이는 정정으로 남긴다(2026-11-20 오너 결정).
+        shared = None
+        from ..fact_correction import parse_change
+
+        if parse_change(text) is not None:
+            shared = self._record_fact_correction(
+                user_id=str(event.get("user") or ""),
+                channel_id=channel_id,
+                text=text,
+                prior=row,
+            )
+        shared_note = _correction_reply(shared)
         # **접수하고 끝내지 않는다**(2026-09-18 문제 패킷 QA e8463a7b).
         #
         # 예전에는 기록하고 "반영하겠습니다" 로 닫았다. 틀렸다고 알려준 사람은
@@ -2055,6 +2228,7 @@ class WorkspaceBot:
         if ACTION_RE.search(text):
             say(
                 text="정정 의견을 기록했습니다. 말씀하신 방향으로 다시 찾아보겠습니다."
+                + (f"\n{shared_note}" if shared_note else "")
                 + (f"\n{note}" if note else ""),
                 thread_ts=thread_ts,
             )
@@ -2065,6 +2239,7 @@ class WorkspaceBot:
             return True
         say(
             text="정정 의견을 기록했습니다. 답변 품질 검토에 반영하겠습니다."
+            + (f"\n{shared_note}" if shared_note else "")
             + (f"\n{note}" if note else ""),
             thread_ts=thread_ts,
         )
@@ -3894,6 +4069,25 @@ class WorkspaceBot:
         if dropped:
             sections.append(truncated_notice(dropped))
 
+        # 사람이 남긴 정정 — 근거를 찾아 답한 경우에만 붙인다. 거절·안내 답변에
+        # 붙이면 근거 없이 정정 값만 전하는 꼴이 된다.
+        candidates = tuple(getattr(ctx, "fact_corrections", ()) or ()) if ctx else ()
+        if candidates:
+            from ..fact_correction import overlaps, render_notice
+
+            # 이번 답변이 정정한 답변과 **같은 문서**를 읽었을 때만 붙인다. 낱말만
+            # 겹친 답에 붙이면 그 답의 근거와 무관한 정정이 사실처럼 보인다.
+            answer_refs = refs_to_json(
+                [ref for a in answers for ref in (getattr(a, "evidence_refs", None) or ())],
+                limit=10_000,
+            )
+            shown = [item for item in candidates if overlaps(item, answer_refs)]
+            if shown:
+                sections.append(render_notice(shown))
+                self._fact_correction_service().mark_shown(
+                    [item.id for item in shown], workspace=self.workspace
+                )
+
         # 감사기록에는 처리한 의도를 전부 남긴다(예: "memory+summary").
         merged = Intent(
             kind="+".join(dict.fromkeys(x.kind for x in tasks)),
@@ -4521,6 +4715,17 @@ class WorkspaceBot:
 
     def _personal_memory_command(self, question: str, user_id: str) -> str | None:
         """Handle exact-user memory inspection and revocation without an LLM."""
+        revoke_correction = re.search(r"정정\s*(?:삭제|철회)\s*#?(\d+)\b", question)
+        if revoke_correction:
+            correction_id = int(revoke_correction.group(1))
+            outcome = self._fact_correction_service().revoke_own(
+                correction_id, workspace=self.workspace, corrector_id=user_id
+            )
+            if outcome.unavailable:
+                return "정정 저장소를 지금 확인할 수 없어 철회하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            if outcome.revoked:
+                return f"정정 #{correction_id}을 철회했습니다. 다음 답변부터 표시하지 않습니다."
+            return f"철회할 수 있는 본인의 활성 정정 #{correction_id}이 없습니다."
         revoke = re.search(r"기억\s*(?:삭제|철회)\s*#?(\d+)\b", question)
         service = self._user_memory_service()
         if revoke:
@@ -4539,7 +4744,8 @@ class WorkspaceBot:
 
         wants_list = bool(
             re.search(
-                r"(?:내|개인|저장된)\s*(?:선호\s*)?기억|기억\s*(?:목록|보여)",
+                r"(?:내|개인|저장된)\s*(?:선호\s*)?기억|기억\s*(?:목록|보여)|"
+                r"(?:내가\s*(?:남긴|한)|내)\s*정정|정정\s*목록",
                 question,
             )
         )
@@ -4548,10 +4754,31 @@ class WorkspaceBot:
         result = service.list_active(workspace=self.workspace, user_id=user_id)
         if result.unavailable:
             return "개인 기억 저장소를 지금 확인할 수 없습니다. 기억이 없다는 뜻은 아닙니다."
+        own = self._fact_correction_service().list_own(
+            workspace=self.workspace, corrector_id=user_id
+        )
+        from ..fact_correction import slack_escape
+
+        correction_lines: list[str] = []
+        if own.corrections:
+            correction_lines.append(
+                "*내가 남긴 정정* — 원문을 볼 수 있는 모든 분의 관련 답변에 이름과 함께 표시됩니다."
+            )
+            for item in own.corrections:
+                expires = item.expires_at.date().isoformat() if item.expires_at else "만료일 없음"
+                subject = f"「{slack_escape(item.subject)}」 " if item.subject else ""
+                correction_lines.append(
+                    f"• `#{item.id}` {subject}{slack_escape(item.before)} → "
+                    f"{slack_escape(item.after)} "
+                    f"(표시 {item.show_count}회, 만료 {expires})"
+                )
+            correction_lines.append("지우려면 `정정 삭제 번호`라고 입력하세요.")
         if not result.memories:
+            if correction_lines:
+                return "\n".join(["현재 저장된 개인 기억이 없습니다.", *correction_lines])
             return "현재 저장된 개인 기억이 없습니다."
 
-        from ..user_memory import PREFERENCE, PREFERENCE_TEXT, TERM
+        from ..user_memory import INSTRUCTION, PREFERENCE, PREFERENCE_TEXT, TERM
 
         lines = ["*저장된 개인 기억* — 본인에게만 적용됩니다."]
         for memory in result.memories:
@@ -4561,13 +4788,16 @@ class WorkspaceBot:
             elif memory.kind == TERM:
                 label = "용어"
                 body = memory.body.replace("=", " → ", 1)
+            elif memory.kind == INSTRUCTION:
+                label = "답변 요청"
+                body = slack_escape(memory.body)
             else:
                 label = "정정 힌트"
-                body = memory.body
+                body = slack_escape(memory.body)
             expires = memory.expires_at.date().isoformat() if memory.expires_at else "만료일 없음"
             lines.append(f"• `#{memory.id}` [{label}] {body} (만료 {expires})")
         lines.append("지우려면 `기억 삭제 번호`라고 입력하세요. 예: `기억 삭제 17`")
-        return "\n".join(lines)
+        return "\n".join([*lines, *correction_lines])
 
     def _visible_workspaces(self) -> frozenset[str]:
         """상태에 보여줄 워크스페이스. 자기 것 + 크로스 열람 허용분.

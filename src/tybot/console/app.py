@@ -3426,6 +3426,17 @@ pdf_vision_router = pdf_vision_routes.build_router(
 )
 app.include_router(pdf_vision_router)
 
+# 사람이 남긴 사실 정정(2026-11-20) — 원문 권한자 모두에게 보이므로 관리자가 보고 철회한다.
+from . import fact_correction_routes  # noqa: E402
+
+fact_correction_router = fact_correction_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(fact_correction_router)
+
 # B-81 Vision provider API 키는 전용 DB에 암호화하고 mask만 조회한다.
 from . import image_description_secret_routes  # noqa: E402
 

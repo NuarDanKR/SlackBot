@@ -70,6 +70,7 @@ FILES=(
   bot_source_schema.sql       # 봇 근거 채널(채널 ID 단위)
   channel_day_digest_schema.sql  # B-93 채널×일 검색 길잡이. 근거 아님, Master 읽기 전용. bot_source 뒤
   user_memory_schema.sql      # B-91 사용자별 구조화 피드백 기억
+  fact_correction_schema.sql  # 사람이 남긴 사실 정정. 원문 권한자에게 정정자와 함께 표시
   vipbot_access_schema.sql    # VIPBot 전용 권한·근거 읽기 창구
   console_account_sync_schema.sql  # 콘솔 계정 자동 관리. console_user 에 열을 더한다
   console_password_schema.sql  # 임시 비밀번호(TYBot DM 발급). console_user 에 열을 더한다
