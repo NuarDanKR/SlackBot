@@ -92,6 +92,7 @@ _최종 갱신: 2026-11-12_
 
 | ID | 제목 | 우선 | 상태 | 의존 |
 |---|---|---|---|---|
+| [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · 1단계 분담) | B-65, B-68, B-94, B-98 |
 | [B-85](#b-85) | **답변 캐시와 사용자별 TYBot/VIPBot 일일 성공 답변 10회 제한** | **최우선** | 완료 (Codex/2026-11-10) | B-19, B-27b, B-83 |
 | [B-86](#b-86) | **PII·민감정보 결정적 마스킹 후 아카이브·답변 허용** | **최우선** | 완료 (Claude/2026-11-10) | B-07, B-49, B-70 |
 | [B-87](#b-87) | **`/채널 상태` 필수 앱 참여 진단 — Archiver·TYBot·rhwp·Hermes** | **최우선** | 완료 (Claude/2026-11-11) | B-37, B-65, B-72 |
@@ -185,6 +186,70 @@ _최종 갱신: 2026-11-12_
 | [B-69](#b-69) | **같은 분·동일 본문인 별개 Slack 메시지 누락 방지** | **긴급** | 준비됨 (Claude 검증 요청 예정) | B-65 |
 | [B-70](#b-70) | **봇 대화·DM 원문·첨부 90일 보존 집행** | **높음** | 준비됨 (오너 결정 2026-10-02, 구현 전) | B-57, B-68 |
 | [B-71](#b-71) | **콘솔 보존 기간 설정·영구 보관 선택** | 중 | 준비됨 (콘솔 분리 작업 후) | B-08, B-70 |
+
+---
+
+## B-99
+### 섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로
+
+**최우선 (긴급·운영 장애) · 진행중 (Claude 총괄/2026-11-20) · 의존 B-65, B-68, B-94, B-98**
+
+**왜 (2026-11-20 장애).** `tybot-archiving-shadow@tyit` 가 16:14부터 10초마다 재시작했다
+(`ArchiverConfigError: live archive root still contains legacy workspace: tyit`). Archiver 는
+운영 루트에 옛 `ARCHIVE_DIR/workspaces/<ws>` 가 있으면 기동을 거부하는데, **Master 가 그
+디렉터리를 계속 만든다.** 11-19 15:16 사용자 DM 1건이 `workspaces/tyit/dm/<user>/raw` 로
+쓰였고 그 뒤 첫 재시작에서 수집·이미지 알림이 모두 멈췄다. 5개 워크스페이스 전부에 같은
+디렉터리가 있었다(civil·mgmt·tyit `dm`, archi·invest `channels`). 지금 떠 있는 Archiver 는
+그 디렉터리가 생기기 전에 기동해서 살아 있을 뿐 **재시작하면 같이 죽는다.**
+
+**임시 조치(오너 서버 실행, 2026-11-20).** 옛 디렉터리 20개 파일을
+`/var/lib/tybot/archive-legacy-quarantine-20261120/workspaces` 로 **이동**(삭제 없음).
+B-98 이행 도구로 병합할 대상이다. 서버 유닛이 옛 판이라 `ReadWritePaths` 에
+`/var/lib/tybot/image-description-notify` 가 없어 B-94 알림이 조용히 실패했다 → 저장소
+유닛을 다시 설치.
+
+**오너 결정(2026-11-20).** 섀도는 없앤다. 「옛 writer 가 정본이고 Archiver 는 비교용」 인
+구조가 남아 있는 한 두 쓰기 경로가 서로를 죽인다.
+
+#### 지금 옛 배치에 쓰는 곳 (조사 2026-11-20)
+
+| 쓰는 곳 | 프로세스 | 막는 장치 |
+|---|---|---|
+| `slack/pilot.py` `_ingest_dm` → `writer.dm_dir` | Master | **없음** — DM 마다 |
+| `slack/pilot.py` `_ingest_live`·`_ingest_channel`, `collect.py` `collect_workspace` | Master·`tybot-collect` 타이머 | `master_may_write` — 소유 기록 없음·DB 실패면 **허용** |
+| `scripts/drain_conversion_queue.py` 원문 줄 추가(비분리 분기)·`write_docs(channel_archive=None)` | `tybot-convert-retry`·`-nightly` | **없음** |
+| `scripts/backfill_channel_history.py`·`sync_channel_files.py`·`convert_staged_attachments.py` | 수동 | 기본 `--archive=ARCHIVE_DIR` |
+
+#### 1단계 — 장애 재발 차단 (긴급)
+
+- [ ] **A. Master DM** — `_ingest_dm` 을 운영 루트의 새 DM 배치(`shadow_paths.dm_archive_dir`,
+      `<ws>/dm/<user>/archive`)로 쓴다. 검색(`store._files`)은 두 배치를 이미 읽는다. 옛
+      `writer.dm_dir` 기본 경로는 **운영 루트에서 쓰지 못하게** 막는다 — 담당 Claude
+- [ ] **B. Master 채널 쓰기 fail-closed** — `write_owner.decide` 에서 소유 기록 없음·DB 조회
+      실패를 Master 허용이 아니라 **거절**로. 2026-11-18 전 채널이 Archiver 소유다.
+      `collect.py`·`_ingest_live`·`_ingest_channel`·수동 스크립트 기본값 — 담당 하위 에이전트
+- [ ] **C. 변환 재처리의 옛 배치 분기 차단** — `drain_conversion_queue.py` 비분리 분기·
+      `channel_archive=None` 일 때 옛 경로로 쓰지 말고 건너뛰며 코드로 남긴다 — 담당 하위 에이전트
+- [ ] **D. Archiver 관측** — 이미지 알림 drain 이 잠금/IO 실패를 삼키지 말고 경고 로그.
+      옛 디렉터리 감지 시 오류 메시지에 경로와 「B-98 격리 후 재시작」 안내 — 담당 Claude
+- [ ] **E. 배포 점검** — 설치된 systemd 유닛이 저장소 판과 다르면 진단에서 드러나게
+      (`scripts/check_env.py` 또는 배포 확인 스크립트) — 담당 Claude
+- [ ] 회귀 시험: 어떤 Master 경로도 운영 루트 아래 `workspaces/` 를 만들지 않는다(쓰기 경로 목록
+      `tests/test_write_paths_inventory.py` 갱신 포함)
+
+#### 2단계 — 섀도 제거
+
+- [ ] Archiver `shadow` 모드 수집·섀도 루트(`ARCHIVER_SHADOW_DIR`·`shadow_archive_dir`)·
+      `ingest_ack.SHADOW` 제거. 채널 모드는 `off|active|paused` 만
+- [ ] DM 인계 소비자가 섀도 루트가 아니라 운영 루트에 쓴다. Master DM 쓰기는 인계로 일원화할지 결정
+- [ ] 콘솔·스키마 CHECK(`archive_channel_mode.mode`, `written_to`, supervisor `desired_mode`)에서 `shadow` 제거
+      — 남은 행 0 확인(`deploy/checks/archiver_no_shadow_channels.sql`) 뒤
+- [ ] 유닛 `tybot-archiving-shadow@` → `tybot-archiver@`, `LOCK_DIR`·`ReadWritePaths` 정리, 전환 절차
+- [ ] 섀도 전용 스크립트·진단(`shadow_root`, `migrate_shadow_root`, file_audit/recovery 의 shadow_root 인자) 정리
+- [ ] 격리한 `archive-legacy-quarantine-20261120` 을 B-98 도구로 dry-run → apply
+
+**완료 조건.** Master·타이머·스크립트 어느 것도 운영 루트에 `workspaces/` 를 만들지 않고,
+5개 Archiver 를 동시에 재시작해도 모두 `active`, 섀도 경로·모드가 코드와 DB 에 없다.
 
 ---
 
