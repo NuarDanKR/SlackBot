@@ -162,10 +162,11 @@ def test_dispatch_identity_ignores_only_a_policy_resave() -> None:
 
 
 def test_missing_fresh_checks_are_fail_closed() -> None:
+    # PII 판별은 전제가 아니다(2026-11-20). 나머지 사실은 모르면 막는다.
     assert ImageDescriptionStore._checks({}) == {
         "source_verified": False,
         "access_verified": False,
-        "pii_blocked": True,
+        "pii_blocked": False,
         "bot_generated": True,
     }
 

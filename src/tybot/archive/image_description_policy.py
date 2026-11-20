@@ -1,8 +1,16 @@
 """이미지 설명 외부 전송 직전의 fail-closed 판정.
 
-DB·파일·네트워크를 읽지 않는다. worker가 현재 ACL/원본/PII/카탈로그 사실과
-영속 승인·dispatch 영수증을 새로 읽어 전달해야 한다. ``ready``는 호출 권한이지
+DB·파일·네트워크를 읽지 않는다. worker가 현재 ACL/원본/카탈로그 사실과
+dispatch 영수증을 새로 읽어 전달해야 한다. ``ready``는 호출 권한이지
 설명 생성 성공이나 원본 수집 성공을 뜻하지 않는다.
+
+**2026-11-20 오너 결정 — 이미지별 PII 판별·건별 승인은 전제가 아니다.**
+Archiver 정본 이미지(PNG/JPEG/WebP)는 Vision 정책 ON·현재 ACL·정본 좌표와 원본
+해시·봇 출력 제외·승인된 무료 모델과 quota 아래에서 보낸다. 승인(`approval`)이
+없으면 dispatch 는 **정책 판에 결속**된다 — 영수증의 좌표·정책 판·프롬프트 판·
+모델이 지금 값과 하나라도 다르면 호출하지 않는다. 옛 승인 행이 주어지면 예전처럼
+검사한다(호환). 반환 텍스트는 저장 전 마스킹·출력 가드를 그대로 지난다.
+B-80 문서 페이지(`vision_policy`)는 이 결정과 무관하다.
 """
 from __future__ import annotations
 
@@ -108,7 +116,7 @@ def preflight_image_description(
     now: datetime,
     source_verified: bool = False,
     access_verified: bool = False,
-    pii_blocked: bool = True,
+    pii_blocked: bool = False,
     bot_generated: bool = True,
 ) -> ImageDescriptionPreflight:
     """모든 좌표와 현재 사실을 대조한다. 하나라도 모르면 호출하지 않는다."""
@@ -144,6 +152,7 @@ def preflight_image_description(
         return reject("source_unverified")
     if access_verified is not True:
         return reject("access_unverified")
+    # PII 판별은 전제가 아니다(2026-11-20). 다만 호출자가 **막으라고 명시**하면 막는다.
     if pii_blocked is not False:
         return reject("pii_blocked")
     if bot_generated is not False:
@@ -176,12 +185,12 @@ def preflight_image_description(
     if not decision.eligible:
         return ImageDescriptionPreflight("blocked", decision.blockers[0])
 
-    if approval is None:
-        return ImageDescriptionPreflight("approval_required", "approval_missing")
-    if approval.revoked is not False or not approval.approval_id:
-        return reject("approval_revoked")
-    if not _future(approval.expires_at, now):
-        return reject("approval_expired")
+    if approval is not None:
+        # 옛 건별 승인(호환). 주어졌다면 예전 규칙을 그대로 지킨다.
+        if approval.revoked is not False or not approval.approval_id:
+            return reject("approval_revoked")
+        if not _future(approval.expires_at, now):
+            return reject("approval_expired")
     expected_approval = (
         image.workspace,
         image.channel,
@@ -192,18 +201,20 @@ def preflight_image_description(
         policy.model,
         policy.provider,
     )
-    actual_approval = (
-        approval.workspace,
-        approval.channel,
-        approval.file_id,
-        approval.original_sha256,
-        approval.policy_revision,
-        approval.prompt_revision,
-        approval.model,
-        approval.provider,
-    )
-    if actual_approval != expected_approval:
-        return reject("approval_scope_mismatch")
+    if approval is not None:
+        actual_approval = (
+            approval.workspace,
+            approval.channel,
+            approval.file_id,
+            approval.original_sha256,
+            approval.policy_revision,
+            approval.prompt_revision,
+            approval.model,
+            approval.provider,
+        )
+        if actual_approval != expected_approval:
+            return reject("approval_scope_mismatch")
+    approval_id = approval.approval_id if approval is not None else ""
 
     if dispatch is None:
         return ImageDescriptionPreflight("quota_held", "dispatch_unavailable")
@@ -213,7 +224,7 @@ def preflight_image_description(
         return reject("dispatch_expired")
     image_sha256 = hashlib.sha256(image.image).hexdigest()
     expected_dispatch = (
-        approval.approval_id,
+        approval_id,
         *expected_approval,
         image_sha256,
         policy.max_output_tokens,

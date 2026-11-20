@@ -106,6 +106,24 @@ def approval_scope(approval: ImageDescriptionApproval) -> dict:
     return data
 
 
+def policy_scope(image: ImageInput, policy, prompt_revision: str) -> dict:
+    """승인 없는 dispatch 의 scope. **`approval_scope` 와 같은 키**다.
+
+    키가 같아야 `dispatch_identity` 가 옛 승인 작업과 같은 원본을 같은 작업으로 본다 —
+    승인 경로와 정책 경로가 같은 bytes 를 두 번 보내지 않는다.
+    """
+    return {
+        "workspace": image.workspace,
+        "channel": image.channel,
+        "file_id": image.file_id,
+        "original_sha256": image.original_sha256,
+        "policy_revision": policy.revision,
+        "prompt_revision": prompt_revision,
+        "model": policy.model,
+        "provider": policy.provider,
+    }
+
+
 def dispatch_identity(scope: dict) -> str:
     """승인 갱신·정책 저장만으로 같은 bytes를 다시 보내지 않는다."""
     stable = {key: value for key, value in scope.items() if key != "policy_revision"}
@@ -618,7 +636,7 @@ class ImageDescriptionStore:
     def _receipt(job) -> ImageDescriptionDispatch:
         return ImageDescriptionDispatch(
             dispatch_id=job["id"],
-            approval_id=job["approval_id"],
+            approval_id=job["approval_id"] or "",
             max_output_tokens=job["max_output_tokens"],
             expires_at=job["expires_at"],
             active=job["state"] == "reserved",
@@ -627,8 +645,10 @@ class ImageDescriptionStore:
 
     @staticmethod
     def _checks(checks: dict) -> dict:
+        # `pii_blocked` 는 전제가 아니다(2026-11-20). 말이 없으면 막지 않고, 명시하면 막는다.
+        # `bot_generated` 는 여전히 모르면 막는다.
         return {
-            key: checks.get(key, key in ("pii_blocked", "bot_generated"))
+            key: checks.get(key, key == "bot_generated")
             for key in ("source_verified", "access_verified", "pii_blocked", "bot_generated")
         }
 
@@ -636,7 +656,7 @@ class ImageDescriptionStore:
         self,
         image: ImageInput,
         *,
-        approval_id: str,
+        approval_id: str = "",
         prompt_revision: str,
         expires_at: datetime,
         checks: dict,
@@ -647,7 +667,8 @@ class ImageDescriptionStore:
             now = cur.fetchone()["now"]
             policy, config, _ = self._effective(cur, global_row, image.workspace)
             catalog = self._catalog(cur, policy)
-            approval = self._approval(cur, approval_id)
+            # 건별 승인은 선택이다(2026-11-20). 없으면 정책 판에 결속된 dispatch 다.
+            approval = self._approval(cur, approval_id) if approval_id else None
             verdict = preflight_image_description(
                 image,
                 policy=policy,
@@ -660,12 +681,18 @@ class ImageDescriptionStore:
             )
             if verdict.code != "dispatch_unavailable":
                 raise ImageDescriptionDenied(verdict.code)
-            if expires_at.utcoffset() is None or not now < expires_at <= approval.expires_at:
+            if (
+                expires_at.utcoffset() is None
+                or not now < expires_at
+                or (approval is not None and expires_at > approval.expires_at)
+            ):
                 raise ImageDescriptionDenied("dispatch_expiry_invalid")
 
-            scope = approval_scope(approval) | {
-                "image_sha256": hashlib.sha256(image.image).hexdigest()
-            }
+            scope = (
+                approval_scope(approval)
+                if approval is not None
+                else policy_scope(image, policy, prompt_revision)
+            ) | {"image_sha256": hashlib.sha256(image.image).hexdigest()}
             identity = dispatch_identity(scope)
             cur.execute(
                 "SELECT id FROM archiver_image_description_job WHERE identity_sha256=%s",
@@ -716,7 +743,7 @@ class ImageDescriptionStore:
                 (
                     job_id,
                     identity,
-                    approval_id,
+                    approval_id or None,
                     image.workspace,
                     policy.revision,
                     prompt_revision,
@@ -753,7 +780,9 @@ class ImageDescriptionStore:
                 image,
                 policy=policy,
                 catalog=catalog,
-                approval=self._approval(cur, job["approval_id"]),
+                approval=(
+                    self._approval(cur, job["approval_id"]) if job["approval_id"] else None
+                ),
                 dispatch=receipt,
                 prompt_revision=job["prompt_revision"],
                 now=job["now"],

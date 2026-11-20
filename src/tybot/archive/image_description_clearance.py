@@ -241,6 +241,35 @@ def clear_for_dispatch(
     return Clearance(workspace, channel_id, file_id, True, False, "")
 
 
+def verify_current_access(candidate, *, doc) -> str:
+    """사람 도장 없이 **지금 정본**으로 보내도 되나(2026-11-20 오너 결정). 빈 문자열이면 된다.
+
+    PII 판별·건별 승인은 묻지 않는다. 남는 것은 정본이 지금도 같은 원본을 가리키는지와
+    현재 권한을 **아는지**다. 모르는 권한은 「공개」 가 아니다(원칙 3) — 파생 설명은 이
+    ACL 을 물고 색인되므로, 모르는 ACL 로 만든 설명은 누가 볼지 정할 수 없다.
+    """
+    workspace = _text(getattr(candidate, "workspace", ""))
+    channel_id = _text(getattr(candidate, "channel_id", ""))
+    file_id = _text(getattr(candidate, "file_id", ""))
+    if doc is None:
+        return DOC_MISSING
+    if (
+        not workspace
+        or _text(getattr(doc, "workspace", "")) != workspace
+        or _text(getattr(doc, "channel_id", "")) != channel_id
+        or _text(getattr(doc, "file_id", "")) != file_id
+    ):
+        return DOC_COORDINATE_MISMATCH
+    expected = _digest(getattr(candidate, "original_sha256", ""))
+    if not _SHA256.match(expected) or _digest(getattr(doc, "sha256", "")) != expected:
+        return ORIGINAL_SHA256_MISMATCH
+    if not _text(getattr(doc, "visibility", "")):
+        return VISIBILITY_UNKNOWN
+    if not _acl(getattr(doc, "acl", None)):
+        return ACL_UNKNOWN
+    return ""
+
+
 def _text(value) -> str:
     return str(value or "").strip()
 
@@ -297,4 +326,5 @@ __all__ = [
     "Clearance",
     "SafetyAssessment",
     "clear_for_dispatch",
+    "verify_current_access",
 ]

@@ -176,7 +176,9 @@ function StatusSection({ workspace }: { workspace: string }) {
         {data.policy.effectiveEnabled ? <Chip tone="ok">정책 켜짐</Chip> : <Chip tone="watch">정책 꺼짐(기본)</Chip>}
         <span className="hint mono">정책 판 {data.policy.revision}</span>
         <span className="hint">모델 {data.policy.provider || '-'}/{data.policy.model || '-'}</span>
-        <span className="hint">활성 승인 {data.counts.activeApprovals} · 활성 clearance {data.counts.activeClearances}</span>
+        <span className="hint" title="2026-11-20 부터 사진별 승인·PII clearance 없이 정책만으로 보냅니다. 옛 기록은 감사용으로 남습니다.">
+          옛 건별 승인 {data.counts.activeApprovals} · 옛 clearance {data.counts.activeClearances} (필수 아님)
+        </span>
       </div>
       <div className="table-wrap">
         <table className="table">
@@ -451,7 +453,8 @@ export function ImageDescriptionPage({ onToast, workspaces, canEditGlobal = true
         crumb="운영 · 이미지 설명"
         title="이미지 설명·텍스트 인식 (B-81)"
         note={
-          '수집 때 로컬 OCR 이 먼저 끝나고, 승인된 사진만 무료 Vision 모델이 검색 설명과 텍스트 인식을 보완합니다. ' +
+          '수집 때 로컬 OCR 이 먼저 끝나고, 정책이 켜진 워크스페이스의 정본 사진은 사진별 승인 없이 무료 Vision 모델이 ' +
+          '검색 설명과 텍스트 인식을 보완합니다(현재 ACL·원본 해시·봇 산출물 제외·무료 quota 는 그대로 확인). ' +
           '모델 장애·무료 한도 소진이어도 원본 수집은 그대로이며 검색은 로컬 OCR 로 돌아갑니다.'
         }
       />

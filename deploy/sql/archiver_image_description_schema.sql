@@ -170,7 +170,8 @@ CREATE INDEX IF NOT EXISTS archiver_image_description_clearance_lookup
 CREATE TABLE IF NOT EXISTS archiver_image_description_job (
     id text PRIMARY KEY,
     identity_sha256 text NOT NULL UNIQUE CHECK (identity_sha256 ~ '^[a-f0-9]{64}$'),
-    approval_id text NOT NULL REFERENCES archiver_image_description_approval(id),
+    -- 2026-11-20 오너 결정: 건별 승인은 선택이다. NULL 이면 정책 판에 결속된 dispatch 다.
+    approval_id text REFERENCES archiver_image_description_approval(id),
     workspace text NOT NULL CHECK (workspace <> ''),
     policy_revision text NOT NULL CHECK (policy_revision <> ''),
     prompt_revision text NOT NULL CHECK (prompt_revision <> ''),
@@ -197,6 +198,8 @@ CREATE TABLE IF NOT EXISTS archiver_image_description_job (
            OR finished_at IS NOT NULL),
     CHECK ((actual_model IS NULL) = (actual_provider IS NULL))
 );
+-- 이미 설치된 서버: 건별 승인 없는 작업을 받게 한다(2026-11-20). 옛 행과 FK 는 그대로다.
+ALTER TABLE archiver_image_description_job ALTER COLUMN approval_id DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS archiver_image_description_job_status
     ON archiver_image_description_job(workspace, state, created_at);
 

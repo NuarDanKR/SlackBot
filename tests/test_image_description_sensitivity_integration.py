@@ -152,8 +152,10 @@ def test_a_public_catalog_blocks_confidential_policies_before_reservation():
 
 @pytest.mark.parametrize("policy_level", [Sensitivity.PUBLIC, Sensitivity.INTERNAL])
 def test_general_business_policies_pass_a_public_catalog(policy_level):
-    """오너 결정(2026-11-19): 표기 불일치(public↔internal)로 막지 않는다. 승인 단계까지 간다."""
-    assert _preflight(policy_level, Sensitivity.PUBLIC).code == "approval_missing"
+    """오너 결정(2026-11-19): 표기 불일치(public↔internal)로 막지 않는다.
+
+    2026-11-20 부터 건별 승인은 전제가 아니므로 예약(dispatch) 단계까지 간다."""
+    assert _preflight(policy_level, Sensitivity.PUBLIC).code == "dispatch_unavailable"
 
 
 def test_pii_blocking_is_not_relaxed_by_the_owner_decision():

@@ -207,6 +207,13 @@ def guard_transcript(
         if result.text != line:
             masked += 1
     body = "\n".join(masked_lines)
+    # 차량 번호 전사는 계속 금지다(2026-11-20 오너 결정 5). 프롬프트는 `[번호판]` 으로
+    # 적으라고 하지만 부탁이지 보장이 아니다 — 번호판 모양이 남으면 전사를 저장하지 않는다.
+    from .image_description_output_guard import _PLATE_RE
+
+    if any(_PLATE_RE.search(line) for line in masked_lines):
+        logger.info("image_transcript_guard plate lines=%d", len(masked_lines))
+        return TranscriptDecision(storable=False, codes=(CODE_PII_BLOCKED,))
     screened = screen_document(body, filename=filename)
     if screened.blocked or any(screen_line(line) for line in masked_lines):
         logger.info("image_transcript_guard blocked lines=%d", len(masked_lines))

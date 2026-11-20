@@ -138,7 +138,6 @@ def test_catalog_freshness_is_rechecked_at_dispatch_time() -> None:
 @pytest.mark.parametrize(
     ("approval", "code"),
     [
-        (None, "approval_missing"),
         (replace(APPROVAL, revoked=True), "approval_revoked"),
         (replace(APPROVAL, expires_at=NOW), "approval_expired"),
         (replace(APPROVAL, prompt_revision="old-prompt"), "approval_scope_mismatch"),
@@ -147,6 +146,46 @@ def test_catalog_freshness_is_rechecked_at_dispatch_time() -> None:
 )
 def test_approval_is_bound_to_the_exact_source_and_revisions(approval, code) -> None:
     assert _run(approval=approval).code == code
+
+
+# --- 2026-11-20 오너 결정: 건별 승인·PII 판별은 전제가 아니다 -------------
+
+POLICY_DISPATCH = replace(DISPATCH, approval_id="")
+
+
+def test_no_approval_and_no_pii_assessment_is_ready_when_policy_bound() -> None:
+    verdict = preflight_image_description(
+        image=IMAGE, policy=POLICY, catalog=CATALOG, approval=None,
+        dispatch=POLICY_DISPATCH, prompt_revision=PROMPT_REVISION, now=NOW,
+        source_verified=True, access_verified=True, bot_generated=False,
+    )
+    assert verdict.ready
+
+
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        replace(POLICY_DISPATCH, policy_revision="global-1:tyit-1"),
+        replace(POLICY_DISPATCH, model="other-model"),
+        replace(POLICY_DISPATCH, prompt_revision="old-prompt"),
+        replace(POLICY_DISPATCH, original_sha256="b" * 64),
+        # 옛 승인에 묶인 영수증을 승인 없이 쓰지 않는다.
+        DISPATCH,
+    ],
+)
+def test_policy_bound_dispatch_must_match_the_current_policy(dispatch) -> None:
+    assert _run(approval=None, dispatch=dispatch).code == "dispatch_scope_mismatch"
+
+
+def test_policy_off_still_blocks_without_an_approval() -> None:
+    verdict = _run(
+        approval=None, dispatch=POLICY_DISPATCH, policy=replace(POLICY, enabled=False)
+    )
+    assert verdict.code == "image_description_disabled"
+
+
+def test_explicit_pii_block_is_still_honoured() -> None:
+    assert _run(approval=None, dispatch=POLICY_DISPATCH, pii_blocked=True).code == "pii_blocked"
 
 
 @pytest.mark.parametrize(
