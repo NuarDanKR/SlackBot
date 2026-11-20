@@ -51,7 +51,7 @@ class ArchiverWorkspace:
 
 
 def deliver_image_description_notice(client, cfg: ArchiverWorkspace, notice) -> bool:
-    """Post only a fixed completion status after a current membership check."""
+    """Post the completion reply (fixed status, or the published recognition) after a current membership check."""
     if notice.channel_id not in cfg.allowed_channels:
         log.warning("[%s] image notice discarded: unregistered channel=%s", cfg.key, notice.channel_id)
         return True

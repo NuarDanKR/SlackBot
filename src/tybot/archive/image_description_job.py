@@ -17,7 +17,7 @@ from tybot.lock import AlreadyRunning, LockUnavailable, instance_lock
 
 from .attachment_reader import all_revisions
 from .image_description_coordinator import run_cleared_batch
-from .image_description_notification import ImageDescriptionNotice, enqueue
+from .image_description_notification import ImageDescriptionNotice, enqueue, load_recognition
 from .image_description_runtime import (
     ImageDescriptionRuntimeStatus,
     failed_status,
@@ -149,13 +149,23 @@ def run_once(
             api_key=api_key,
         )
         def notify(item) -> None:
-            # The worker owns no Slack token.  Store only fixed status and
-            # source coordinates for the Archiver's later delivery.
+            # The worker owns no Slack token.  It queues the source coordinates
+            # and the *published* recognition (guard-approved description, tags
+            # and masked OCR) so the uploader can check it (owner 2026-11-20).
+            # A failed lookup still sends the fixed completion text.
+            try:
+                recognition = load_recognition(connection, item.revision_id)
+            except Exception:  # noqa: BLE001 - DB detail stays out of the notice
+                log.warning(
+                    "image recognition lookup failed ws=%s job=%s", item.workspace, item.job_id
+                )
+                recognition = {}
             queued = enqueue(ImageDescriptionNotice(
                 job_id=item.job_id,
                 workspace=item.workspace,
                 channel_id=item.channel_id,
                 message_ts=item.message_ts,
+                **recognition,
             ), root=runtime_root)
             if not queued:
                 log.warning("image completion notice was not queued ws=%s job=%s", item.workspace, item.job_id)
