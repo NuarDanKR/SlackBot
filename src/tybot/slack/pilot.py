@@ -3771,12 +3771,6 @@ class WorkspaceBot:
                         self.workspace, code, len(reply), exc,
                     )
                     canvas = None
-                    # **조용히 메시지로 바꾸지 않는다.** 표를 달라고 했는데 글머리표가
-                    # 오면 사람은 봇이 요청을 무시했다고 읽는다(2026-11-20 VIPBot).
-                    fallback_kw["text"] = (
-                        f"{fallback_kw['text']}\n\n_Canvas를 만들지 못해 메시지로 보냈습니다"
-                        f"(사유: {code}). 표는 메시지에서 목록으로 표시됩니다._"
-                    )
                     kw = fallback_kw
             elif ans is not None:
                 # **성공 + 다시 열 좌표**가 있을 때만 버튼이 붙는다(인계 §6.1).

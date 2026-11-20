@@ -217,7 +217,9 @@ def _question_block(question: str) -> str:
     return f"## 요청한 질문\n> {escaped}"
 
 
-def markdown(body: str, *, bot_name: str = "tybot", question: str = "") -> str:
+def markdown(
+    body: str, *, bot_name: str = "tybot", question: str = "", flat_lists: bool = False
+) -> str:
     """Slack mrkdwn을 Canvas용 Markdown으로 바꾸고 답변·근거 구조를 보존한다.
 
     **본문에 H1 제목을 넣지 않는다.** Slack 이 Canvas 제목을 따로 보여 주므로
@@ -228,11 +230,98 @@ def markdown(body: str, *, bot_name: str = "tybot", question: str = "") -> str:
     converted = re.sub(r"(?m)^\*([^*\n]+)\*:?\s*$", r"## \1", converted)
     converted = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"**\1**", converted)
     converted = _split_large_tables(converted)
+    converted = _flatten_lists(converted) if flat_lists else _unmix_nested_lists(converted)
     blocks = [disclaimer(bot_name)]
     if asked := _question_block(question):
         blocks.append(asked)
     blocks.append(converted)
     return "\n\n".join(blocks) + "\n"
+
+
+# --- Canvas 목록 ---------------------------------------------------------------
+#
+# Slack Canvas 는 **목록 안에 다른 종류의 목록**을 받지 않는다. 번호 목록 아래
+# 글머리표가 오면 `canvas_creation_failed: Unsupported list type (bullet) within
+# numbered list` 로 문서 생성 자체가 실패한다(2026-11-20 VIPBot 운영). 모델은 이
+# 모양(「1. 사안 / - 세부」)을 자주 쓰므로 보내기 전에 맞춘다.
+LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>[-*+]|\d{1,3}[.)])\s+(?P<text>.*)$")
+FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _list_kind(marker: str) -> str:
+    return "number" if marker[0].isdigit() else "bullet"
+
+
+def _indent_width(indent: str) -> int:
+    return len(indent.replace("\t", "    "))
+
+
+def _has_mixed_nesting(lines: list[str]) -> bool:
+    stack: list[tuple[int, str]] = []
+    fenced = False
+    for line in lines:
+        if FENCE_RE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        item = LIST_ITEM_RE.match(line)
+        if not item:
+            if line.strip() and not line.startswith((" ", "\t")):
+                stack.clear()
+            continue
+        width = _indent_width(item.group("indent"))
+        kind = _list_kind(item.group("marker"))
+        while stack and stack[-1][0] >= width:
+            stack.pop()
+        if stack and stack[-1][1] != kind:
+            return True
+        stack.append((width, kind))
+    return False
+
+
+def _numbered_as_bullet(line: str) -> str:
+    item = LIST_ITEM_RE.match(line)
+    if not item or _list_kind(item.group("marker")) != "number":
+        return line
+    number = item.group("marker").rstrip(".)")
+    return f"{item.group('indent')}- **{number}.** {item.group('text')}"
+
+
+def _unmix_nested_lists(text: str) -> str:
+    """섞인 중첩이 있으면 번호 항목을 「- **1.** 내용」 글머리표로 바꾼다.
+
+    번호는 글자로 남아 읽는 사람에게는 같고, 목록 종류는 하나가 된다. 섞인 곳이
+    없으면 손대지 않는다 — 평범한 번호 목록은 그대로 번호 목록이다.
+    """
+    lines = text.split("\n")
+    if not _has_mixed_nesting(lines):
+        return text
+    out, fenced = [], False
+    for line in lines:
+        if FENCE_RE.match(line):
+            fenced = not fenced
+        out.append(line if fenced else _numbered_as_bullet(line))
+    return "\n".join(out)
+
+
+def _flatten_lists(text: str) -> str:
+    """마지막 수단 — 모든 목록을 한 단계 글머리표로 편다. 들여쓰기는 「· 」 로 남긴다."""
+    out, fenced = [], False
+    for line in text.split("\n"):
+        if FENCE_RE.match(line):
+            fenced = not fenced
+            out.append(line)
+            continue
+        item = None if fenced else LIST_ITEM_RE.match(line)
+        if not item:
+            out.append(line)
+            continue
+        depth = _indent_width(item.group("indent")) // 2
+        marker = item.group("marker")
+        label = f"**{marker.rstrip('.)')}.** " if _list_kind(marker) == "number" else ""
+        out.append(f"- {'· ' * depth}{label}{item.group('text')}")
+    return "\n".join(out)
 
 
 def _table_cells(line: str) -> list[str]:
@@ -297,13 +386,29 @@ def create(
     ID 를 기록해 **다시 수집하지 않게** 한다(원칙 1). 기록에 실패해도 Canvas 는
     만든다 — 제목 접미사와 Disclaimer 가 남은 방어선이다.
     """
-    response = client.canvases_create(
-        title=title.strip() or f"{display_name(bot_name)} 정식 답변",
-        document_content={
-            "type": "markdown",
-            "markdown": markdown(body, bot_name=bot_name, question=question),
-        },
-    )
+    canvas_title = title.strip() or f"{display_name(bot_name)} 정식 답변"
+    try:
+        response = client.canvases_create(
+            title=canvas_title,
+            document_content={
+                "type": "markdown",
+                "markdown": markdown(body, bot_name=bot_name, question=question),
+            },
+        )
+    except Exception as exc:
+        # Slack 이 Markdown 구조를 거부했다(`canvas_creation_failed`). 내용은 그대로
+        # 두고 목록만 평평하게 펴서 **한 번만** 다시 보낸다. 다른 오류는 그대로 올린다.
+        if _slack_error(exc) != "canvas_creation_failed":
+            raise
+        response = client.canvases_create(
+            title=canvas_title,
+            document_content={
+                "type": "markdown",
+                "markdown": markdown(
+                    body, bot_name=bot_name, question=question, flat_lists=True
+                ),
+            },
+        )
     canvas_id = str(response.get("canvas_id") or response.get("file_id") or "")
     if not canvas_id:
         raise RuntimeError("Slack canvases.create 응답에 canvas_id가 없습니다")
@@ -314,6 +419,14 @@ def create(
     if provenance:
         remember_generated(canvas_id, **provenance)
     return CanvasResult(canvas_id, permalink)
+
+
+def _slack_error(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    try:
+        return str((response.get("error") if response is not None else "") or "")
+    except Exception:  # noqa: BLE001 - 응답 모양을 모르면 코드 없음
+        return ""
 
 
 # --- 생성 Canvas 기록 ---------------------------------------------------------

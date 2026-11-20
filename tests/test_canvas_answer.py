@@ -1,5 +1,8 @@
 from unittest.mock import Mock
 
+import pytest
+
+from tybot import canvas_answer
 from tybot.canvas_answer import (
     DISCLAIMER,
     TITLE,
@@ -124,3 +127,82 @@ def test_create_uses_the_vip_fallback_title_and_question():
     sent = client.canvases_create.call_args.kwargs
     assert sent["title"] == "VIPBot 정식 답변"
     assert "무엇을 했어?" in sent["document_content"]["markdown"]
+
+
+# --- 섞인 중첩 목록 (2026-11-20 운영: canvas_creation_failed) -------------------
+
+MIXED = """**사안별 보충**
+
+1. **보증채무 현실화**: 같은 날 올라온 두 문서의 숫자가 다릅니다.
+   - 사업 리스트는 구로 지산 632억으로 적었습니다.
+   - PF 처리방안은 구로 634억으로 적었습니다.
+2. **차입금**: 산업은행 한도 1,500억은 아직 쓰지 않았습니다.
+"""
+
+
+def _body_lists(md: str) -> list[str]:
+    from tybot.canvas_answer import LIST_ITEM_RE
+
+    return [line for line in md.splitlines() if LIST_ITEM_RE.match(line)]
+
+
+def test_bullets_under_numbered_items_become_one_list_kind():
+    from tybot.canvas_answer import _has_mixed_nesting
+
+    md = canvas_answer.markdown(MIXED)
+
+    assert not _has_mixed_nesting(md.splitlines())
+    assert "- **1.** **보증채무 현실화**" in md
+    assert "   - 사업 리스트는 구로 지산 632억으로 적었습니다." in md
+    assert "- **2.** **차입금**" in md
+
+
+def test_numbered_under_bullets_is_also_unmixed():
+    from tybot.canvas_answer import _has_mixed_nesting
+
+    md = canvas_answer.markdown("- 자금\n  1. 첫째\n  2. 둘째\n")
+
+    assert not _has_mixed_nesting(md.splitlines())
+    assert "  - **1.** 첫째" in md
+
+
+def test_plain_numbered_lists_and_code_blocks_are_untouched():
+    plain = "1. 하나\n2. 둘\n\n```\n1. 코드\n   - 그대로\n```\n"
+
+    md = canvas_answer.markdown(plain)
+
+    assert "1. 하나\n2. 둘" in md
+    assert "```\n1. 코드\n   - 그대로\n```" in md
+
+
+def test_create_retries_once_with_flat_lists_when_slack_rejects_the_markdown():
+    class SlackError(Exception):
+        def __init__(self, code):
+            super().__init__(code)
+            self.response = {"error": code}
+
+    client = Mock()
+    client.canvases_create.side_effect = [
+        SlackError("canvas_creation_failed"),
+        {"canvas_id": "F-2"},
+    ]
+    client.files_info.return_value = {"file": {"permalink": "https://x/F-2"}}
+
+    got = canvas_answer.create(client, MIXED)
+
+    assert got.canvas_id == "F-2"
+    second = client.canvases_create.call_args_list[1].kwargs["document_content"]["markdown"]
+    assert not [line for line in _body_lists(second) if line.startswith((" ", "\t"))]
+    assert "- · 사업 리스트는" in second
+
+
+def test_create_does_not_retry_other_slack_errors():
+    class SlackError(Exception):
+        response = {"error": "not_authed"}  # noqa: RUF012
+
+    client = Mock()
+    client.canvases_create.side_effect = SlackError("x")
+
+    with pytest.raises(SlackError):
+        canvas_answer.create(client, MIXED)
+    assert client.canvases_create.call_count == 1
