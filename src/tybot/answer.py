@@ -30,6 +30,7 @@ from .intent import (
     parse_period,
     plan,
 )
+from .prior_answer import with_prior_answer
 
 logger = logging.getLogger("tybot.answer")
 
@@ -2125,7 +2126,9 @@ class AnswerEngine:
                                     "system",
                                     _with_user_memory(self._prompts.interim_advice, ctx),
                                 ),
-                                Message("user", f"{evidence}질문: {q}"),
+                                Message(
+                                    "user", with_prior_answer(f"{evidence}질문: {q}", task)
+                                ),
                             ],
                             model=model,
                             sensitivity=self._sensitivity,
@@ -2197,7 +2200,7 @@ class AnswerEngine:
         )
         messages = [
             Message("system", _with_user_memory(self._prompts.advice, ctx)),
-            Message("user", f"{evidence}질문: {q}"),
+            Message("user", with_prior_answer(f"{evidence}질문: {q}", task)),
         ]
         try:
             resp = self._router.complete(
@@ -2496,6 +2499,13 @@ class AnswerEngine:
                 task=task,
             )
         else:
+            # 직전 봇 답변을 **지칭 해석용**으로 함께 넘긴다(2026-11-20 오너 결정).
+            # 「위 Top 10 중 …」 은 봇이 고른 목록을 가리킨다. 이 문장은 근거가 아니고,
+            # 직전 답변의 원문 좌표를 지금 전부 다시 연 경우에만 온다(`editing_text`).
+            if followup.editing_text and task is not None and hasattr(task, "prior_answer"):
+                from dataclasses import replace
+
+                task = replace(task, prior_answer=followup.editing_text)
             # **후속 질문도 범위에 갇히지 않는다**(2026-11-12 오너 결정, 설계 §10 폐기).
             # 이어 묻는 사람은 맥락과 다른 제3의 질문을 할 수 있다. 「연말 현금시재」 를
             # 「재무목표」 답의 40줄 안에서만 찾다가 근거 없음이 났다(이강석 14:17·14:19).
@@ -2904,7 +2914,9 @@ class AnswerEngine:
         withheld, attachment_notes = _withheld_attachments(self._store.root, hits)
         partial = _partial_attachments(self._store.root, hits)
         visual = _visual_originals(self._store.root, hits)
-        prompt = f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"
+        prompt = with_prior_answer(
+            f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}", task
+        )
         note_block = _attachment_note_block(attachment_notes)
         if note_block:
             prompt = f"{prompt}\n\n{note_block}"

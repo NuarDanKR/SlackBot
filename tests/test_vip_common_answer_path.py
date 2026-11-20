@@ -712,3 +712,22 @@ def test_the_vip_branch_only_passes_configuration_to_the_common_bot():
     assert "autojoin=False" in branch
     assert "operational_owner=False" in branch
     assert "private_answers=True" in branch
+
+
+def test_a_failed_canvas_says_so_instead_of_silently_flattening_tables(monkeypatch):
+    """표를 요청했는데 Canvas 가 실패하면 조용히 글머리표로 바꾸지 않는다(2026-11-20)."""
+
+    class SlackError(Exception):
+        response = {"error": "invalid_arguments"}
+
+    def fail(client, body, **kw):
+        raise SlackError("boom")
+
+    monkeypatch.setattr("tybot.slack.pilot.create_answer_canvas", fail)
+    bot = _bot([Intent("summary", question="주간 현황")], [_answered()], vip=False)
+
+    _, sent = _handle(bot, "주간 현황을 캔버스로 답변해", client=_client())
+
+    text = sent[-1]["text"]
+    assert "Canvas를 만들지 못해 메시지로 보냈습니다" in text
+    assert "invalid_arguments" in text

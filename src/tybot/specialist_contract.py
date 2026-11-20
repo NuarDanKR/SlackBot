@@ -318,6 +318,8 @@ class SpecialistRequest:
     # 그 길이 「업무 답변은 전문 봇만」 규칙의 가장 큰 구멍이었다.
     visual: tuple = ()
     editing_text: str = ""
+    # 직전 봇 답변 — 지칭 해석용, 근거 아님(`tybot.prior_answer`).
+    prior_answer: str = ""
     # 이 요청 하나의 시계. **어댑터·Gateway·도구 루프가 같은 값을 본다**(장애 §2.1).
     # 없으면 `execute()` 가 기본 예산으로 하나 만든다.
     deadline: Deadline | None = None

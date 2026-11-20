@@ -752,6 +752,7 @@ def serve(
             decision_id=decision_id,
             task_index=int(getattr(task, "task_index", 0) or 0),
             editing_text=str(getattr(task, "editing_text", "") or ""),
+            prior_answer=str(getattr(task, "prior_answer", "") or ""),
             task_kind=str(getattr(task, "kind", "") or ""),
             required_capability=str(getattr(task, "required_capability", "") or ""),
             display_hint=display_hint_for(task),
@@ -1019,6 +1020,7 @@ def _run_one(
     decision_id: str = "",
     task_index: int = 0,
     editing_text: str = "",
+    prior_answer: str = "",
     task_kind: str = "",
     required_capability: str = "",
     display_hint: str = "",
@@ -1082,6 +1084,7 @@ def _run_one(
             allow_empty_evidence=chosen.execution_mode == "tools" or external_v3_factory is not None,
             visual=tuple(visual or ()),
             editing_text=editing_text,
+            prior_answer=prior_answer,
             display_hint=display_hint,
             # **하나의 시계.** 어댑터·Gateway·Provider·도구 루프가 같은 값을 본다
             # (2026-09-16 장애). 재시도마다 새로 주지 않는다.
@@ -1130,6 +1133,7 @@ def _run_one(
                     allow_empty_evidence=chosen.execution_mode == "tools",
                     visual=tuple(visual or ()),
                     editing_text=editing_text,
+                    prior_answer=prior_answer,
                     display_hint=REFUSAL_CORRECTION,
                     # 실행 거부 보정도 최초 요청과 **같은 시계**를 쓴다. 새 시계를
                     # 만들면 첫 호출 뒤 다시 최대 90초를 쓰는 이전 장애가 재발한다.

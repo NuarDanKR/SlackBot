@@ -485,6 +485,16 @@ def _correction_reply(result) -> str:
     return _CORRECTION_REASON_TEXT.get(result.reason, "")
 
 
+def _slack_error_code(exc: Exception) -> str:
+    """Slack API 오류 코드(`invalid_arguments` 등). 모르면 예외 이름."""
+    response = getattr(exc, "response", None)
+    try:
+        code = response.get("error") if response is not None else ""
+    except Exception:
+        code = ""
+    return str(code or type(exc).__name__)[:60]
+
+
 def _carry_context(answers: list, last):
     """복합 답변이 다음 턴에 물려줄 **좌표를 합친 Answer**.
 
@@ -3755,8 +3765,18 @@ class WorkspaceBot:
                     if delivery_channel and not delivery_channel.startswith("D"):
                         grant_canvas_channel(client, canvas.canvas_id, delivery_channel)
                 except Exception as exc:
-                    log.exception("[%s] Canvas 답변 생성 실패: %s", self.workspace, exc)
+                    code = _slack_error_code(exc)
+                    log.exception(
+                        "[%s] Canvas 답변 생성 실패 code=%s chars=%d: %s",
+                        self.workspace, code, len(reply), exc,
+                    )
                     canvas = None
+                    # **조용히 메시지로 바꾸지 않는다.** 표를 달라고 했는데 글머리표가
+                    # 오면 사람은 봇이 요청을 무시했다고 읽는다(2026-11-20 VIPBot).
+                    fallback_kw["text"] = (
+                        f"{fallback_kw['text']}\n\n_Canvas를 만들지 못해 메시지로 보냈습니다"
+                        f"(사유: {code}). 표는 메시지에서 목록으로 표시됩니다._"
+                    )
                     kw = fallback_kw
             elif ans is not None:
                 # **성공 + 다시 열 좌표**가 있을 때만 버튼이 붙는다(인계 §6.1).
