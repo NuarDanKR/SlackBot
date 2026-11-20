@@ -130,10 +130,10 @@ def connect():
             owner.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
 
 
-def _run(connect, members, *, dry_run=False, unread=None):
+def _run(connect, members, *, dry_run=False, unread=None, accounts=True):
     with connect() as conn:
         return account_sync.sync(conn, SlackSnapshot(members=members, unread=unread or {}),
-                                 actor="test", dry_run=dry_run)
+                                 actor="test", dry_run=dry_run, accounts=accounts)
 
 
 def _accounts(connect):
@@ -224,3 +224,48 @@ def test_people_list_shows_presence_and_managed(connect, monkeypatch):
     assert a["console"]["managed"] is True and a["console"]["active"] is False
     assert a["console"]["stopReason"] == "slack_gone"
     assert people["E4"]["slack"] == [] if "E4" in people else True
+
+
+@needs_db
+def test_names_only_links_and_marks_presence_without_touching_accounts(connect):
+    """Slack 명단만 — 사용 중/삭제 표시와 사번 잇기만 하고 계정은 그대로다(2026-11-20)."""
+    before = _accounts(connect)
+    result = _run(connect, SLACK, accounts=False)
+    assert result["mode"] == "names"
+    assert result["linked"] == 2
+    assert result["counts"]["created"] == 0 and result["created"] == []
+    assert result["presence"] == {"mgmt": {"live": 2, "gone": 0}, "tyit": {"live": 2, "gone": 0}}
+    assert _accounts(connect) == before                       # 계정은 하나도 안 바뀐다
+    assert result["runId"] > 0
+    runs = account_sync.recent_runs(connect=connect)
+    assert runs[0]["mode"] == "names" and runs[0]["linked"] == 2
+
+    # 나간 사람은 「삭제」 로 남는다
+    gone = _run(connect, {"mgmt": {"UC": "c@ty.co.kr"}, "tyit": {"UB": "b@ty.co.kr"}}, accounts=False)
+    assert gone["presence"] == {"mgmt": {"live": 1, "gone": 1}, "tyit": {"live": 1, "gone": 1}}
+    assert _accounts(connect) == before
+
+
+@needs_db
+def test_names_only_preview_writes_nothing(connect):
+    result = _run(connect, SLACK, accounts=False, dry_run=True)
+    assert result["linked"] == 2 and "runId" not in result
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM slack_presence")
+        assert cur.fetchone()["n"] == 0
+
+
+def test_names_only_flag_reaches_the_sync(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(account_sync, "fetch_slack", lambda tokens, cf=None: SlackSnapshot(members={"aaa": {}}))
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(account_sync, "sync", lambda conn, snap, **kw: seen.update(kw) or {"counts": {}})
+    account_sync.run(actor="a", dry_run=True, tokens={"aaa": "t"}, connect=_Conn, accounts=False)
+    assert seen["accounts"] is False
