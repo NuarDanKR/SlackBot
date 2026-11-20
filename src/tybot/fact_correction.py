@@ -33,6 +33,7 @@ from .sensitive_mask import mask_sensitive
 TTL_DAYS = 90
 MAX_VALUE_CHARS = 40
 MAX_VALUE_WORDS = 3
+MAX_NAME_VALUE_CHARS = 20
 MAX_SUBJECT_CHARS = 60
 MAX_BODY_CHARS = 300
 MAX_SEARCH_TERMS = 8
@@ -188,6 +189,15 @@ def _valid(before: str, after: str) -> Change | None:
         return None
     # 값은 「11월 5일」·「김해외동 2공구」 정도다. 문장 길이면 값이 아니라 지시다.
     if len(before.split()) > MAX_VALUE_WORDS or len(after.split()) > MAX_VALUE_WORDS:
+        return None
+    # 값의 모양을 좁힌다(허용 목록). 숫자 값이면 둘 다 숫자를 품어야 하고, 이름 값이면
+    # 둘 다 짧은 이름(2낱말·20자)이어야 한다. 문장이 값 자리로 들어오지 못한다.
+    numeric = [bool(re.search(r"\d", v)) for v in (before, after)]
+    if numeric[0] != numeric[1]:
+        return None
+    if not numeric[0] and any(
+        len(v) > MAX_NAME_VALUE_CHARS or len(v.split()) > 2 for v in (before, after)
+    ):
         return None
     # 값은 다른 사람의 프롬프트에 데이터로 들어간다. 지시처럼 읽히는 낱말은 받지 않는다.
     if _INSTRUCTION_WORD_RE.search(before) or _INSTRUCTION_WORD_RE.search(after):
@@ -522,8 +532,18 @@ def slack_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render_notice(items: Iterable[FactCorrection]) -> str:
-    lines = [describe(item) for item in items]
+def render_notice(items: Iterable[FactCorrection], *, viewer_channel_id: str = "") -> str:
+    """`viewer_channel_id` — 지금 질문이 온 채널. 질문 원문(「무엇을」)은 **그 질문이 오간
+    채널에서 물을 때만** 보인다. 원문 좌표를 열 수 있어도 질문이 오간 채널을 못 볼 수
+    있다(VIPBot 근거 채널·DM 의 넓은 범위). 그 밖에서는 「이전 답변」 으로만 적는다."""
+    lines = [
+        describe(
+            item,
+            with_subject=bool(viewer_channel_id)
+            and item.source_channel_id == viewer_channel_id,
+        )
+        for item in items
+    ]
     if not lines:
         return ""
     return "\n".join(

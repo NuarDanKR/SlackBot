@@ -172,6 +172,7 @@ def _item(id_=1, terms=("김해외동", "기성금"), refs=(REF,)):
         after="12억",
         body="15억이 아니라 12억",
         search_terms=terms,
+        source_channel_id="C1",
         evidence_refs=refs,
         created_at=datetime(2026, 11, 20, tzinfo=UTC),
     )
@@ -205,7 +206,7 @@ def test_at_most_three_corrections_are_shown():
 
 
 def test_notice_says_who_when_what_and_how():
-    notice = fc.render_notice([_item()])
+    notice = fc.render_notice([_item()], viewer_channel_id="C1")
 
     assert "홍길동 · 2026-11-20 · 「김해외동 기성금 얼마야」 답변: 15억 → 12억" in notice
     assert "원문" in notice
@@ -572,3 +573,24 @@ def test_retrieval_requests_are_not_standing_instructions():
         memory.classify_feedback("출처 없이 답해줘", prior_record_id="r1").reason
         == memory.CONTRACT_BREACH
     )
+
+
+def test_question_text_is_shown_only_in_the_channel_where_it_was_asked():
+    item = _item()
+
+    assert "김해외동 기성금 얼마야" in fc.render_notice([item], viewer_channel_id="C1")
+    for viewer in ("C2", ""):
+        notice = fc.render_notice([item], viewer_channel_id=viewer)
+        assert "얼마야" not in notice and "이전 답변: 15억 → 12억" in notice
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "15억에서 확인 불가 상태로 정정",  # 숫자 → 문장
+        "김철수가 아니라 12억이야",  # 이름 → 숫자
+        "김철수에서 아주 길고 긴 이름의 협력업체로 정정",  # 이름 값이 문장
+    ],
+)
+def test_before_and_after_must_share_a_value_shape(text):
+    assert fc.parse_change(text) is None

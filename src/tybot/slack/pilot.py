@@ -4083,7 +4083,11 @@ class WorkspaceBot:
             )
             shown = [item for item in candidates if overlaps(item, answer_refs)]
             if shown:
-                sections.append(render_notice(shown))
+                sections.append(render_notice(
+                    shown,
+                    viewer_channel_id=str(getattr(ctx, "channel_id", "") or "")
+                    if in_channel else "",
+                ))
                 self._fact_correction_service().mark_shown(
                     [item.id for item in shown], workspace=self.workspace
                 )
