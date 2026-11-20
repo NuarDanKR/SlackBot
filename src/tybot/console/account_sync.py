@@ -94,10 +94,16 @@ def _person(row: dict, workspaces=()) -> dict:
             "workspaces": sorted(workspaces)}
 
 
-def sync(conn, snap: SlackSnapshot, *, actor: str, dry_run: bool) -> dict:
-    """한 회차. `conn` 은 autocommit 이 아닌 연결 — 미리 보기면 끝에서 되돌린다."""
+def sync(conn, snap: SlackSnapshot, *, actor: str, dry_run: bool, accounts: bool = True) -> dict:
+    """한 회차. `conn` 은 autocommit 이 아닌 연결 — 미리 보기면 끝에서 되돌린다.
+
+    `accounts=False` 는 **Slack 명단만** 맞춘다 — 1~3단계(명단 읽기 · 사용 중/삭제 표시 ·
+    사번 잇기)만 하고 게스트 계정은 만들거나 멈추지 않는다(2026-11-20). 사람·VIP 권한자
+    화면의 Slack 칸을 실제 멤버에 맞추려는데 계정까지 생기면 곤란해서 나눴다.
+    """
     read_ws = sorted(snap.members)
     result: dict = {
+        "mode": "accounts" if accounts else "names",
         "dryRun": dry_run,
         "readWorkspaces": read_ws,
         "unreadWorkspaces": dict(sorted(snap.unread.items())),
@@ -141,6 +147,31 @@ def sync(conn, snap: SlackSnapshot, *, actor: str, dry_run: bool) -> dict:
                 cur.execute(identity.UPSERT_SQL,
                             {"workspace": ws, "slack_user": uid, "emp_no": rows[0]["emp_no"]})
                 result["linked"] += cur.rowcount
+
+        if not accounts:
+            result["counts"] = {"created": 0, "reactivated": 0, "stopped": 0,
+                                "workspacesChanged": 0, "protected": 0, "manualRetired": 0,
+                                "linked": result["linked"]}
+            cur.execute(
+                """SELECT workspace, count(*) FILTER (WHERE active) AS live,
+                          count(*) FILTER (WHERE NOT active) AS gone
+                     FROM slack_presence WHERE workspace = ANY(%s) GROUP BY workspace""",
+                (read_ws,),
+            )
+            result["presence"] = {r["workspace"]: {"live": r["live"], "gone": r["gone"]}
+                                  for r in cur.fetchall()}
+            if not dry_run:
+                cur.execute(
+                    """INSERT INTO account_sync_run
+                         (actor, created, reactivated, stopped, workspaces_changed, linked,
+                          failed_workspaces, stops_skipped, detail)
+                       VALUES (%s, 0, 0, 0, 0, %s, %s, false, %s::jsonb)
+                       RETURNING id, started_at""",
+                    (actor, result["linked"], sorted(snap.unread),
+                     _json({"mode": "names", "unread": snap.unread, "presence": result["presence"]})),
+                )
+                result["runId"] = cur.fetchone()["id"]
+            return _finish(conn, result, dry_run)
 
         # 4·5. 대상 계산
         cur.execute(
@@ -267,11 +298,16 @@ def sync(conn, snap: SlackSnapshot, *, actor: str, dry_run: bool) -> dict:
             )
             row = cur.fetchone()
             result["runId"] = row["id"]
+    return _finish(conn, result, dry_run)
+
+
+def _finish(conn, result: dict, dry_run: bool) -> dict:
     if dry_run:
         conn.rollback()
     else:
         conn.commit()
-    logger.info("콘솔 계정 동기화(%s) — %s", "미리 보기" if dry_run else "적용", result["counts"])
+    logger.info("콘솔 계정 동기화(%s · %s) — %s", result.get("mode"),
+                "미리 보기" if dry_run else "적용", result["counts"])
     return result
 
 
@@ -293,7 +329,8 @@ def _connect():
         raise AccountSyncError("database_unavailable") from exc
 
 
-def run(*, actor: str, dry_run: bool, connect=None, tokens=None, client_factory=None) -> dict:
+def run(*, actor: str, dry_run: bool, connect=None, tokens=None, client_factory=None,
+        accounts: bool = True) -> dict:
     """Slack 을 읽고 한 회차를 돈다. Slack 은 DB 트랜잭션 밖에서 먼저 읽는다."""
     if tokens is None:
         from .license_store import linked_workspaces
@@ -304,7 +341,7 @@ def run(*, actor: str, dry_run: bool, connect=None, tokens=None, client_factory=
         raise AccountSyncError("slack_unavailable")
     try:
         with (connect or _connect)() as conn:
-            return sync(conn, snap, actor=actor, dry_run=dry_run)
+            return sync(conn, snap, actor=actor, dry_run=dry_run, accounts=accounts)
     except AccountSyncError:
         raise
     except Exception as exc:
@@ -317,7 +354,8 @@ def recent_runs(limit: int = 20, *, connect=None) -> list[dict]:
         with (connect or _connect)() as conn, conn.cursor() as cur:
             cur.execute(
                 """SELECT id, started_at, actor, created, reactivated, stopped,
-                          workspaces_changed, linked, failed_workspaces, stops_skipped
+                          workspaces_changed, linked, failed_workspaces, stops_skipped,
+                          coalesce(detail->>'mode', 'accounts') AS mode
                      FROM account_sync_run ORDER BY started_at DESC LIMIT %s""",
                 (limit,),
             )
@@ -325,7 +363,8 @@ def recent_runs(limit: int = 20, *, connect=None) -> list[dict]:
                 {"id": r["id"], "startedAt": r["started_at"], "actor": r["actor"],
                  "created": r["created"], "reactivated": r["reactivated"], "stopped": r["stopped"],
                  "workspacesChanged": r["workspaces_changed"], "linked": r["linked"],
-                 "failedWorkspaces": list(r["failed_workspaces"]), "stopsSkipped": r["stops_skipped"]}
+                 "failedWorkspaces": list(r["failed_workspaces"]), "stopsSkipped": r["stops_skipped"],
+                 "mode": r["mode"]}
                 for r in cur.fetchall()
             ]
     except AccountSyncError:
@@ -341,17 +380,20 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="콘솔 계정 자동 관리(Slack → 게스트 계정)")
     parser.add_argument("--apply", action="store_true", help="실제로 반영한다. 없으면 미리 보기")
+    parser.add_argument("--names-only", action="store_true",
+                        help="Slack 명단·사번 연결만 맞추고 게스트 계정은 건드리지 않는다")
     args = parser.parse_args(argv)
     load_env_file()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        result = run(actor="timer:tybot-account-sync", dry_run=not args.apply)
+        result = run(actor="timer:tybot-account-sync", dry_run=not args.apply,
+                     accounts=not args.names_only)
     except AccountSyncError as exc:
         print(f"동기화 실패: {exc}")
         return 1
     print(("적용" if args.apply else "미리 보기"), result["counts"],
           "읽지 못함:", result["unreadWorkspaces"] or "없음")
-    if args.apply:
+    if args.apply and not args.names_only:
         # 임시 비밀번호: 기한 지난 발급을 닫고, 닫힌 발급의 DM 을 Slack 에서 지운다.
         from . import password_issue
 
