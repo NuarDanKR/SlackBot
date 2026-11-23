@@ -4427,15 +4427,24 @@ class WorkspaceBot:
             if not msgs:
                 return staged
             channel = writer.dm_channel(user_id)
+            dm_channel_id = str(event.get("channel") or "")
+            # 운영 루트의 **개인별 DM 배치**(`<ws>/dm/<user>/archive`)에 쓴다(B-99).
+            # 옛 `workspaces/<ws>/dm/<user>` 에 쓰면 Archiver 가 그 디렉터리를 보고 기동을
+            # 거부한다 — 2026-11-20 DM 한 건으로 tyit 수집이 멈췄다. 검색은 이 배치를 읽는다.
+            from ..archive.shadow_paths import dm_archive_dir
+
             r = writer.ingest(
                 self.archive_dir,
                 workspace=self.workspace,
                 channel=channel,
-                channel_id=str(event.get("channel") or ""),
+                channel_id=dm_channel_id,
                 messages=msgs,
                 # 채널 멤버십으로는 열리지 않는다. 여는 열쇠는 `dm_user` 하나다.
                 acl=[],
                 dm_user=user_id,
+                dm_directory=dm_archive_dir(
+                    self.archive_dir, self.workspace, user_id, dm_channel_id
+                ),
             )
         except Exception as e:
             log.exception("[%s] DM 수집 실패 user=%s: %s", self.workspace, user_id, e)

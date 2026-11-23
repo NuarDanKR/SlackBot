@@ -161,10 +161,17 @@ def main(argv: list[str] | None = None) -> int:
             "--apply가 없으면 대상만 표시한다"
         ),
     )
+    ap.add_argument(
+        "--archive", default="",
+        help=(
+            "아카이브 루트(기본 ARCHIVE_DIR). 운영 루트에서는 옛 배치로 쓰지 않으므로"
+            " --apply 가 거절된다(B-99) — 오프라인 사본에만 쓴다"
+        ),
+    )
     args = ap.parse_args(argv)
 
     load_env_file()
-    root = Path(archive_dir())
+    root = Path(args.archive or archive_dir())
     if not root.is_dir():
         print(f"아카이브 경로가 없습니다: {root}")
         return 1
@@ -273,6 +280,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # --- 실제로 채운다 --------------------------------------------------------
+    # 이 스크립트는 옛 배치(`workspaces/<ws>/channels/.../raw`)에 덧붙인다. 운영 루트에
+    # 그 배치를 쓰면 Archiver 가 다음 기동을 거부한다(B-99). 파일을 하나도 바꾸기 전에
+    # 멈추고, 성공(0)으로 끝내지 않는다.
+    targets = {ws_doc or item.workspace for item, (_, _, _, ws_doc) in todo}
+    blocked = sorted(ws for ws in targets if writer.legacy_layout_refusal(root, ws))
+    if blocked:
+        print()
+        print("=== 거절")
+        print(f"  운영 아카이브 루트({root})에는 옛 배치로 쓰지 않습니다"
+              f" — code={writer.LegacyLayoutRefused.code}")
+        print(f"  대상 워크스페이스: {', '.join(blocked)}")
+        print("  Archiver 정본은 변환 재처리(drain_conversion_queue)가 채운다.")
+        return 1
+
     done = 0
     failed: list[tuple[str, str]] = []
     refused_total = 0

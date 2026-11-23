@@ -739,8 +739,13 @@ def _live_archive_root(workspace: str, env: dict[str, str] | None = None) -> Pat
     # Keep the same-workspace guard to avoid two canonical layouts for its data.
     legacy = live_root / "workspaces" / workspace
     if legacy.exists() or legacy.is_symlink():
+        # 원인과 조치를 같이 적는다(B-99). 2026-11-20 Master 의 옛 DM 쓰기가 이 디렉터리를
+        # 다시 만들었고, 메시지만으로는 무엇을 해야 하는지 알 수 없었다.
         raise ArchiverConfigError(
-            f"live archive root still contains legacy workspace: {workspace}"
+            f"live archive root still contains legacy workspace: {workspace} "
+            f"({legacy}). Move it out (do not delete) to an "
+            "archive-legacy-quarantine-<date>/workspaces directory, merge it with "
+            "scripts/promote_legacy_archive.py (B-98), then restart. See BACKLOG B-99."
         )
     return live_root
 
@@ -775,7 +780,7 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
             outcome = image_description_notification.drain(
                 cfg.key, lambda notice: deliver_image_description_notice(app.client, cfg, notice)
             )
-            if outcome["sent"] or outcome["invalid"]:
+            if outcome["sent"] or outcome["invalid"] or outcome.get("error"):
                 log.info("[%s] image notice outbox sent=%s left=%s invalid=%s", cfg.key,
                          outcome["sent"], outcome["left"], outcome["invalid"])
             stop.wait(15)

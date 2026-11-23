@@ -2,10 +2,15 @@
 
 신규 경로는 ``workspaces/<workspace>/channels/<channel-id>__<name>/raw/YYYY-MM-DD.md``다.
 봇 출력은 저장하지 않고, 원문은 기존 라인을 보존한 채 뒤에만 추가한다.
+
+**운영 루트에서는 이 옛 배치를 만들지 않는다**(B-99). 운영 루트의 쓰기는 Archiver
+배치(`channel_directory`·`dm_directory`)만 받고, 기본 경로로 떨어지면
+`LegacyLayoutRefused` 로 거절한다 — `is_live_archive_root` 참조.
 """
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -40,6 +45,23 @@ PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 class ArchiveRefused(ValueError):
     """아카이브 금지 대상."""
+
+
+class LegacyLayoutRefused(ArchiveRefused):
+    """운영 루트에 옛 배치(`<root>/workspaces/...`)를 만들려는 쓰기(B-99).
+
+    Archiver 는 운영 루트에 `workspaces/<ws>` 가 있으면 기동을 거부한다
+    (`archiving_bot._live_archive_root`). 2026-11-20 Master 의 DM 한 건이 그 디렉터리를
+    만들었고, 다음 재시작에서 그 워크스페이스 수집이 통째로 멈췄다.
+
+    줄 단위 거절(`IngestResult.refused`)로 돌려주지 않는 이유: 그 칸은 「이 줄은
+    민감정보라 뺐다」 는 뜻이고 부르는 쪽 대부분이 경고 한 줄로 넘긴다. 이 거절은
+    **쓰기 경로 자체가 틀렸다**는 뜻이라 조용히 넘어가면 안 된다.
+
+    메시지에는 고정 코드와 워크스페이스 키만 싣는다 — 채널 이름·사람·본문은 없다.
+    """
+
+    code = "legacy-layout-live-root"
 
 
 @dataclass(frozen=True)
@@ -120,6 +142,49 @@ def dm_dir(root: Path | str, workspace: str, user_id: str) -> Path:
     개인 기록을 보지 않는다.
     """
     return Path(root) / "workspaces" / _slugify(workspace) / "dm" / _slugify(user_id)
+
+
+def is_live_archive_root(root: Path | str, workspace: str | None = None) -> bool:
+    """`root` 가 **운영 아카이브 루트**인가(B-99).
+
+    둘 중 하나면 운영 루트로 본다.
+
+    1. 환경의 `ARCHIVE_DIR` 과 같은 디렉터리다 — Master·타이머·수동 스크립트가 모두
+       이 값으로 운영 루트를 찾고, Archiver 도 같은 값을 읽는다(`_live_archive_root`).
+    2. 그 워크스페이스의 새 배치(`<root>/<workspace>/`)가 이미 있다 — Archiver 가 쓰는
+       루트다. `ARCHIVE_DIR` 없이 `--archive` 로 운영 경로를 직접 준 수동 실행도 잡힌다.
+       한 워크스페이스가 두 배치를 동시에 갖는 것이 바로 Archiver 가 거부하는 상태다.
+
+    판정이 틀리는 방향은 「운영 루트인데 아니라고 본다」 쪽만 위험하므로, 확인할 수
+    없는 경로(해석 실패)는 운영 루트로 본다.
+    """
+    try:
+        resolved = Path(root).expanduser().resolve()
+    except OSError:
+        return True
+    configured = (os.environ.get("ARCHIVE_DIR") or "").strip()
+    if configured:
+        try:
+            if Path(configured).expanduser().resolve() == resolved:
+                return True
+        except OSError:
+            return True
+    if workspace:
+        key = str(workspace).strip()
+        if key and key not in {".", ".."} and "/" not in key and "\\" not in key:
+            candidate = resolved / key
+            if candidate.is_dir() and not candidate.is_symlink():
+                return True
+    return False
+
+
+def legacy_layout_refusal(root: Path | str, workspace: str) -> str | None:
+    """옛 배치 쓰기를 거절해야 하면 **고정 코드**, 아니면 None.
+
+    쓰기 전에 미리 물어볼 수 있게 따로 둔다 — 수집 잡이 Slack 을 읽고 나서 거절당하면
+    rate limit 만 쓰고 버린다.
+    """
+    return LegacyLayoutRefused.code if is_live_archive_root(root, workspace) else None
 
 
 def doc_path(
@@ -325,6 +390,16 @@ def ingest(
         dm_user or not Path(channel_directory).resolve().is_relative_to(Path(root).resolve())
     ):
         raise ValueError("channel directory must be inside the archive root")
+    if channel_directory is None and dm_directory is None:
+        # **옛 배치 기본 경로**(`channel_dir`·`dm_dir`)다. 운영 루트에서는 쓰지 않는다
+        # (B-99). 오프라인 도구·시험이 별도 루트에 쓰는 것은 그대로 둔다.
+        code = legacy_layout_refusal(root, workspace)
+        if code:
+            raise LegacyLayoutRefused(
+                f"{code}: refusing legacy workspaces/ layout under the live archive root"
+                f" (ws={_slugify(workspace)}, kind={'dm' if dm_user else 'channel'});"
+                " pass channel_directory/dm_directory for the Archiver layout"
+            )
     if dm_directory is not None:
         # DM 디렉터리는 **그 사람이 특정될 때만** 쓴다. `dm_user` 가 없으면 문서에
         # `dm_user:` 가 안 들어가고, 그 문서는 경로만 개인 공간이고 권한은 채널

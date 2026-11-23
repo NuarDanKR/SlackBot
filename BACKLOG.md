@@ -92,7 +92,7 @@ _최종 갱신: 2026-11-12_
 
 | ID | 제목 | 우선 | 상태 | 의존 |
 |---|---|---|---|---|
-| [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · 1단계 분담) | B-65, B-68, B-94, B-98 |
+| [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · **1단계 완료, 배포 대기** · 2단계 대기) | B-65, B-68, B-94, B-98 |
 | [B-85](#b-85) | **답변 캐시와 사용자별 TYBot/VIPBot 일일 성공 답변 10회 제한** | **최우선** | 완료 (Codex/2026-11-10) | B-19, B-27b, B-83 |
 | [B-86](#b-86) | **PII·민감정보 결정적 마스킹 후 아카이브·답변 허용** | **최우선** | 완료 (Claude/2026-11-10) | B-07, B-49, B-70 |
 | [B-87](#b-87) | **`/채널 상태` 필수 앱 참여 진단 — Archiver·TYBot·rhwp·Hermes** | **최우선** | 완료 (Claude/2026-11-11) | B-37, B-65, B-72 |
@@ -222,19 +222,30 @@ B-98 이행 도구로 병합할 대상이다. 서버 유닛이 옛 판이라 `Re
 
 #### 1단계 — 장애 재발 차단 (긴급)
 
-- [ ] **A. Master DM** — `_ingest_dm` 을 운영 루트의 새 DM 배치(`shadow_paths.dm_archive_dir`,
+- [x] **A. Master DM** — `_ingest_dm` 을 운영 루트의 새 DM 배치(`shadow_paths.dm_archive_dir`,
       `<ws>/dm/<user>/archive`)로 쓴다. 검색(`store._files`)은 두 배치를 이미 읽는다. 옛
-      `writer.dm_dir` 기본 경로는 **운영 루트에서 쓰지 못하게** 막는다 — 담당 Claude
-- [ ] **B. Master 채널 쓰기 fail-closed** — `write_owner.decide` 에서 소유 기록 없음·DB 조회
+      `writer.dm_dir` 기본 경로는 **운영 루트에서 쓰지 못하게** 막는다 — Claude 2026-11-20
+      (`tests/test_master_dm_layout.py`)
+- [x] **B. Master 채널 쓰기 fail-closed** — `write_owner.decide` 에서 소유 기록 없음·DB 조회
       실패를 Master 허용이 아니라 **거절**로. 2026-11-18 전 채널이 Archiver 소유다.
-      `collect.py`·`_ingest_live`·`_ingest_channel`·수동 스크립트 기본값 — 담당 하위 에이전트
-- [ ] **C. 변환 재처리의 옛 배치 분기 차단** — `drain_conversion_queue.py` 비분리 분기·
-      `channel_archive=None` 일 때 옛 경로로 쓰지 말고 건너뛰며 코드로 남긴다 — 담당 하위 에이전트
-- [ ] **D. Archiver 관측** — 이미지 알림 drain 이 잠금/IO 실패를 삼키지 말고 경고 로그.
+      `collect.py`·`_ingest_live`·`_ingest_channel`·수동 스크립트 기본값 — 하위 에이전트 2026-11-20.
+      `write_owner.decide` 는 행 없음·조회 실패에 `no-owner-row`·`owner-lookup-failed` 로 거절.
+      `writer.ingest` 는 운영 루트(`ARCHIVE_DIR` 또는 `<root>/<ws>/` 존재)에서 옛 배치 기본
+      경로로 떨어지면 `LegacyLayoutRefused`. collect·backfill·sync·convert_staged 는 미리
+      물어 실패로 센다(`tests/test_no_legacy_workspaces_writes.py`). `convert_staged_attachments.py
+      --apply` 는 이제 운영 루트에서 항상 거절된다(오프라인 사본 `--archive` 만)
+- [x] **C. 변환 재처리의 옛 배치 분기 차단** — `drain_conversion_queue.py` 비분리 분기·
+      `channel_archive=None` 일 때 옛 경로로 쓰지 말고 건너뛰며 코드로 남긴다 — 하위 에이전트
+      2026-11-20. `channel_archive_for` 가 채널별 경로를 직접 찾고, 못 찾으면
+      `channel_archive_unresolved`(재시도 없음). 쓰기는 항상 채널별 경로
+      (`tests/test_drain_conversion_channel_layout.py`)
+- [x] **D. Archiver 관측** — 이미지 알림 drain 이 잠금/IO 실패를 삼키지 말고 경고 로그.
       옛 디렉터리 감지 시 오류 메시지에 경로와 「B-98 격리 후 재시작」 안내 — 담당 Claude
-- [ ] **E. 배포 점검** — 설치된 systemd 유닛이 저장소 판과 다르면 진단에서 드러나게
-      (`scripts/check_env.py` 또는 배포 확인 스크립트) — 담당 Claude
-- [ ] 회귀 시험: 어떤 Master 경로도 운영 루트 아래 `workspaces/` 를 만들지 않는다(쓰기 경로 목록
+- [x] **E. 배포 점검** — 설치된 systemd 유닛이 저장소 판과 다르면 진단에서 드러나게
+      (`scripts/check_env.py` 또는 배포 확인 스크립트) — Claude 2026-11-20.
+      **`deploy/install.sh` 가 Archiver 유닛을 설치하지 않았고** 알림 디렉터리도 만들지 않았다 →
+      둘 다 추가. `scripts/check_unit_drift.py` 가 설치된 유닛과 `deploy/` 를 대조
+- [x] 회귀 시험: 어떤 Master 경로도 운영 루트 아래 `workspaces/` 를 만들지 않는다(쓰기 경로 목록
       `tests/test_write_paths_inventory.py` 갱신 포함)
 
 #### 2단계 — 섀도 제거

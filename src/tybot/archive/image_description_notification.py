@@ -17,6 +17,7 @@ the image and it is never re-collected as evidence (principle 1).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -25,6 +26,8 @@ from pathlib import Path
 
 from tybot.lock import AlreadyRunning, FileLock, LockUnavailable
 from tybot.sensitive_mask import contains_sensitive, mask_sensitive
+
+log = logging.getLogger("tybot.archive.image_description_notification")
 
 _WORKSPACE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _CHANNEL = re.compile(r"^[CG][A-Z0-9]{8,}$")
@@ -294,8 +297,14 @@ def drain(workspace: str, deliver, *, root: Path | str | None = None) -> dict[st
     try:
         lock.acquire(timeout=20)
         lines = path.read_text(encoding="utf-8").splitlines()
-    except (AlreadyRunning, LockUnavailable, OSError):
-        return {"sent": 0, "left": 0, "invalid": 0}
+    except (AlreadyRunning, LockUnavailable, OSError) as exc:
+        # **조용히 넘기지 않는다**(B-99). 2026-11-20 운영 유닛의 `ReadWritePaths` 에 이
+        # 디렉터리가 빠져 잠금 파일을 못 열었는데, 로그가 없어 알림이 왜 안 가는지 몰랐다.
+        log.warning(
+            "image notice outbox unreadable ws=%s reason=%s path=%s",
+            workspace, type(exc).__name__, path.parent,
+        )
+        return {"sent": 0, "left": 0, "invalid": 0, "error": 1}
 
     sent, invalid, left = 0, 0, []
     seen: set[str] = set()

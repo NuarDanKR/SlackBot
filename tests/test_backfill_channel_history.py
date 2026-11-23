@@ -8,6 +8,27 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import backfill_channel_history as history
+import pytest
+
+from tybot.archive.archiving_state import ChannelMode, ChannelState, WriterOwner
+from tybot.archive.write_owner import decide
+
+
+class _MasterOwns:
+    """B-99 부터 주인 기록이 없으면 Master 는 쓰지 않는다. 여기서는 허용된 채널을 전제로 둔다."""
+
+    def __init__(self, workspace) -> None:
+        self.workspace = workspace
+
+    def master_may_write(self, channel_id):
+        state = ChannelState(self.workspace, channel_id, ChannelMode.OFF, WriterOwner.MASTER)
+        return decide(state, WriterOwner.MASTER)
+
+
+@pytest.fixture(autouse=True)
+def _master_owned_offline_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(history, "OwnerLookup", _MasterOwns)
+    monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path / "live-elsewhere"))
 
 
 class FakeClient:

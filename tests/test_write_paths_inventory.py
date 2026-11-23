@@ -123,6 +123,37 @@ def test_the_gated_paths_actually_call_the_gate():
         assert GATE_CALL.search(source), name
 
 
+#: `ARCHIVE_DIR`(운영 루트)를 기본값으로 받아 **옛 배치**(`channel_directory` 없이)로
+#: 쓰는 Master·수동 경로. Slack 을 읽거나 파일을 바꾸기 **전에** 운영 루트인지 물어야
+#: 한다(B-99). `writer.ingest` 도 같은 판정으로 거절하지만, 거기까지 가면 Slack 호출·
+#: 변환 비용을 이미 쓴 뒤이고 실패가 예외 로그 한 줄로만 남는다.
+#:
+#: `pilot.py` 는 여기 없다 — 채널은 `master_may_write`, DM 은 `dm_directory` 로 가고,
+#: 남은 자리는 `writer.ingest` 경비가 막는다. `drain_conversion_queue.py` 는 B-99 C 몫이다.
+LEGACY_LAYOUT_PREFLIGHT = (
+    "src/tybot/collect.py",
+    "scripts/backfill_channel_history.py",
+    "scripts/sync_channel_files.py",
+    "scripts/convert_staged_attachments.py",
+)
+PREFLIGHT_CALL = re.compile(r"legacy_layout_refusal\s*\(")
+
+
+def test_legacy_layout_writers_ask_about_the_live_root_first():
+    for name in LEGACY_LAYOUT_PREFLIGHT:
+        source = (REPO / name).read_text(encoding="utf-8")
+
+        assert PREFLIGHT_CALL.search(source), name
+
+
+def test_the_writer_guards_its_legacy_fallback():
+    """마지막 관문. 옛 기본 경로로 떨어지는 쓰기는 `ingest` 안에서 운영 루트를 묻는다."""
+    source = (REPO / "src/tybot/archive/writer.py").read_text(encoding="utf-8")
+
+    assert "raise LegacyLayoutRefused(" in source
+    assert PREFLIGHT_CALL.search(source)
+
+
 def test_the_detector_finds_a_real_call():
     """탐지기 자체의 양성 시험. 아무것도 못 찾으면 목록이 비고 시험이 통과한다."""
     assert calls_ingest("r = writer.ingest(root, workspace='w')")

@@ -194,3 +194,23 @@ def test_load_recognition_without_a_revision_keeps_the_fixed_text():
     assert load_recognition(_Conn([None, None]), "d" * 32) == {}
     assert load_recognition(_Conn([]), "not-a-revision") == {}
     assert _notice().text.startswith("✅ 이미지 설명·텍스트 인식 완료")
+
+
+def test_an_unreadable_outbox_is_logged_not_silently_skipped(tmp_path, monkeypatch, caplog):
+    """B-99: 2026-11-20 운영 유닛이 이 디렉터리를 읽기 전용으로 막았는데 로그가 없었다."""
+    import logging
+
+    from tybot.archive import image_description_notification as mod
+
+    assert enqueue(_notice(), root=tmp_path)
+
+    def refuse(self, *, timeout=0.0, poll=0.05):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(mod.FileLock, "acquire", refuse)
+    with caplog.at_level(logging.WARNING):
+        result = drain("tyit", lambda _item: True, root=tmp_path)
+
+    assert result["sent"] == 0 and result["error"] == 1
+    assert "image notice outbox unreadable" in caplog.text
+    assert outbox_path("tyit", root=tmp_path).is_file()

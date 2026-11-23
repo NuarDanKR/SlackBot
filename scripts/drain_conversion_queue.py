@@ -23,6 +23,9 @@
 - **아카이브의 기존 원문 줄을 고치지 않는다.** 재변환 결과는 기존 첨부 표시와
   같은 시각·화자로 새 줄만 덧붙이며 `writer.ingest`의 중복 방지를 거친다.
 - `pii_refused` 는 건드리지 않는다. 정책 제외를 기술 실패처럼 자동 해제하지 않는다.
+- **옛 배치(`<root>/workspaces/...`)에 쓰지 않는다**(B-99). 원문 줄과 첨부 정본은
+  채널별 디렉터리(`<root>/<ws>/<채널ID>__<이름>/archive`)에만 쓴다. 그 자리를
+  찾지 못하면 쓰지 않고 `channel_archive_unresolved` 로 닫는다.
 
 종료 코드: `0` 정상 · `1` 처리 중 실패한 작업 있음 · `2` 입력·환경 오류 ·
 `3` 변환 정책이 DB 정본에서 확인되지 않아 `--nightly --apply` 를 거절함(B-89 후속)
@@ -49,6 +52,10 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_INPUT = 2
 EXIT_POLICY = 3
+
+#: 채널별 아카이브를 찾지 못해 원문·정본을 쓰지 않았다(B-99). 되풀이해도 같은
+#: 결과다 — 채널 디렉터리는 사람이 확인해야 생긴다. 고친 뒤 재처리는 명시 요청으로.
+CHANNEL_ARCHIVE_UNRESOLVED = "channel_archive_unresolved"
 
 
 def owner_name() -> str:
@@ -192,6 +199,35 @@ def _write_meta(meta_path: pathlib.Path, meta: dict, *, status: str, code: str, 
     tmp_preview.replace(preview)
 
 
+def channel_archive_for(archive_dir: str, job: queue.Job) -> pathlib.Path | None:
+    """이 작업의 채널별 아카이브(`<root>/<ws>/<채널ID>__<이름>/archive`). 없으면 `None`.
+
+    **옛 배치로 물러서지 않는다**(B-99). 2026-11-20 장애 — 재처리가 원문 한 줄을
+    `<root>/workspaces/<ws>/...` 에 덧붙였고, 그 디렉터리가 생기자 Archiver 가
+    옛 배치가 남았다고 보고 기동을 거부했다. 그래서 경로는 여기서 **직접** 정한다.
+    writer 의 가드에 기대지 않는다 — 가드가 빠지거나 바뀌어도 이 잡은 옛 자리에
+    쓰지 않아야 한다.
+
+    이미 있는 채널 디렉터리만 쓴다. 이름을 지어 새로 만들면 채널 ID 하나에
+    디렉터리가 둘 생기고, 그때부터 `channel_root` 가 그 채널을 거부한다.
+    """
+    from tybot.archive.shadow_paths import (
+        ShadowPathError,
+        existing_channel_root,
+        refuse_symlinked_chain,
+    )
+
+    root = pathlib.Path(archive_dir)
+    try:
+        archive = existing_channel_root(root, job.workspace, job.channel_id) / "archive"
+        refuse_symlinked_chain(root, archive)
+    except (ShadowPathError, ValueError, OSError):
+        return None
+    if not archive.is_dir() or not archive.resolve().is_relative_to(root.resolve()):
+        return None
+    return archive
+
+
 def publish_reconversion(
     archive_dir: str,
     meta_path: pathlib.Path,
@@ -228,6 +264,17 @@ def publish_reconversion(
     if not rows:
         return False, "empty_output", False
 
+    # 쓸 자리부터 정한다. 못 정하면 아무것도 쓰지 않는다 — 원문 줄도, 정본도.
+    channel_archive = channel_archive_for(archive_dir, job)
+    if channel_archive is None:
+        # 좌표만 남긴다. 파일 이름·본문은 로그에 싣지 않는다.
+        print(
+            f"채널별 아카이브를 찾지 못해 쓰지 않습니다: job={job.id} "
+            f"ws={job.workspace} ch={job.channel_id} file={job.file_id}",
+            file=sys.stderr,
+        )
+        return False, CHANNEL_ARCHIVE_UNRESOLVED, False
+
     store = ArchiveStore(pathlib.Path(archive_dir))
     expected_ts = ""
     raw_origin = str(meta.get("origin_message_ts") or "")
@@ -262,9 +309,6 @@ def publish_reconversion(
     if len(coordinates) != 1:
         return False, "archive_origin_ambiguous", False
     doc, source = candidates[0]
-    channel_archive = (
-        doc.path.parent.parent if doc.path.parent.parent.name == "archive" else None
-    )
 
     staged = SimpleNamespace(
         file_id=job.file_id,
@@ -306,18 +350,13 @@ def publish_reconversion(
         if states.get(job.file_id) != "archived":
             return False, "archive_write_unconfirmed", True
         try:
-            refreshed = ArchiveStore(pathlib.Path(archive_dir))
-            if channel_archive:
-                from tybot.archive.attachment_doc import _safe
+            from tybot.archive.attachment_doc import _safe
 
-                canonical_path = (
-                    channel_archive / "attachments" / _safe(current.file_id)
-                    / f"{_safe(current.revision)}.md"
-                ).resolve()
-            else:
-                canonical_path = (
-                    pathlib.Path(archive_dir) / current.relative_path()
-                ).resolve()
+            refreshed = ArchiveStore(pathlib.Path(archive_dir))
+            canonical_path = (
+                channel_archive / "attachments" / _safe(current.file_id)
+                / f"{_safe(current.revision)}.md"
+            ).resolve()
             docs = [
                 item
                 for item in refreshed.docs()
@@ -355,6 +394,7 @@ def publish_reconversion(
         channel=doc.channel,
         channel_id=job.channel_id,
         messages=messages,
+        channel_directory=channel_archive,
     )
     if result.refused:
         return False, "pii_refused", False

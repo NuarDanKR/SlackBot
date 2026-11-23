@@ -18,20 +18,27 @@
 「주인이 하나」 라는 값만으로는 부족하다. 표를 못 읽는 순간이 오기 때문이다.
 그때 두 봇이 각자 「아마 내 것」 이라고 판단하면 둘 다 쓴다.
 
-그래서 **모르는 상태의 기본값을 서로 반대로** 둔다.
+그래서 **모르는 상태에서는 둘 다 쓰지 않는다**(B-99, 2026-11-20 — fail-closed).
 
 | 상황 | Master | Archiver |
 |---|---|---|
-| 표에 행이 없다 | **쓴다** | 안 쓴다 |
-| DB 를 못 읽는다 | **쓴다**(degraded) | 안 쓴다 |
+| 표에 행이 없다 | **안 쓴다** | 안 쓴다 |
+| DB 를 못 읽는다 | **안 쓴다**(degraded) | 안 쓴다 |
 | `off` · `shadow` | 쓴다 | 안 쓴다(그림자에만) |
 | `active` | 안 쓴다 | 쓴다 |
 | `paused` | 안 쓴다 | 안 쓴다 |
 
-Master 가 기본값인 이유는 **전환 전 상태가 그것**이기 때문이다. 반대로 두면 DB 가
-잠깐 끊긴 사이 운영 수집이 통째로 멈추고, 그 멈춤은 오류로 보이지 않는다.
-Archiver 는 긍정 응답이 있을 때만 운영 경로에 쓴다 — 그래서 어느 순간에도 둘이
-동시에 참이 되지 않는다.
+예전에는 행이 없거나 DB 를 못 읽으면 Master 가 썼다(「전환 전 상태가 그것」).
+2026-11-18 에 전 채널이 Archiver 소유가 된 뒤로 그 기본값은 **옛 배치
+`workspaces/<ws>/channels` 를 운영 루트에 다시 만드는 문**이 됐고, Archiver 는 그
+디렉터리를 보면 기동을 거부한다(2026-11-20 장애). 놓친 대화는 Archiver 소급이
+메우지만, 운영 루트에 생긴 옛 배치는 다음 재시작에서 수집 전체를 멈춘다.
+
+Master 는 표에 **자기 몫이라는 긍정 응답**이 있을 때만 쓴다. Archiver 도 같다 —
+그래서 어느 순간에도 둘이 동시에 참이 되지 않는다.
+
+로그에는 사람이 읽는 `reason` 과 함께 **코드**(`Decision.code`)를 남긴다. 코드는
+채널 이름·메시지 같은 원문을 담지 않는 고정 문자열이다.
 
 ## cutover_ts 로 메시지를 가르지 않는다 — 단, 미래 좌표는 「아직 아님」 이다
 
@@ -83,6 +90,8 @@ class Decision:
     cutover_ts: str = ""
     #: 표를 못 읽고 기본값으로 판단했나. 이 값이 오래 참이면 인수가 반영되지 않는다.
     degraded: bool = False
+    #: 원문이 없는 고정 사유 코드. 로그·집계는 이 값으로 가른다.
+    code: str = ""
 
     def __bool__(self) -> bool:
         return self.allowed
@@ -98,23 +107,24 @@ def decide(
 ) -> Decision:
     """순수 판정. **표를 읽지 않는다** — 읽은 결과를 받는다.
 
-    `state` 가 `None` 이면 아직 이 채널을 아무도 옮기지 않은 것이다(또는 표를 못
-    읽은 것이다). 그 상태의 주인은 Master 다 — 전환 전 상태가 그것이기 때문이다.
+    `state` 가 `None` 이면 표에 행이 없거나(또는 읽을 수 없는 행이거나) 표를 못
+    읽은 것이다. **누구도 쓰지 않는다**(B-99 fail-closed) — 모르는 채널에 Master 가
+    쓰면 운영 루트에 옛 배치가 생기고 Archiver 가 기동을 거부한다.
 
     Archiver 는 전역 스위치(`archiver_writes_live`)까지 켜져야 쓴다. 채널만 보면
     사고 때 한 번에 내릴 차단기가 없고, 전역만 보면 채널 하나 문제가 전체를 멈춘다.
     """
     if state is None:
-        allowed = actor == WriterOwner.MASTER
+        if degraded:
+            return Decision(
+                allowed=False, actor=actor,
+                reason="채널 주인 표를 읽지 못해 운영 원문에 쓰지 않습니다(fail-closed).",
+                degraded=True, code="owner-lookup-failed",
+            )
         return Decision(
-            allowed=allowed,
-            actor=actor,
-            reason=(
-                "아직 인수하지 않은 채널이라 Master 가 씁니다."
-                if allowed else
-                "인수 기록이 없는 채널입니다. Archiver 는 운영 원문에 쓰지 않습니다."
-            ),
-            degraded=degraded,
+            allowed=False, actor=actor,
+            reason="채널 주인 기록이 없어 운영 원문에 쓰지 않습니다(fail-closed).",
+            code="no-owner-row",
         )
 
     mine = owns_write(state, actor)
@@ -123,6 +133,7 @@ def decide(
             allowed=False, actor=actor,
             reason="채널은 인수됐지만 전역 스위치(archiver_writes_live)가 꺼져 있습니다.",
             mode=state.mode, owner=state.writer_owner, cutover_ts=state.cutover_ts,
+            code="archiver-switch-off",
         )
     if actor == WriterOwner.ARCHIVER and mine:
         settle_until = _cutover_epoch(state.cutover_ts)
@@ -135,19 +146,24 @@ def decide(
                     f"인수 정착 대기 중입니다({state.cutover_ts} 이후 Archiver 가 씁니다)."
                 ),
                 mode=state.mode, owner=state.writer_owner, cutover_ts=state.cutover_ts,
+                code="cutover-settling",
             )
     if mine:
         reason = f"{state.mode} 채널의 운영 writer 입니다."
+        code = "owner"
     elif state.mode == ChannelMode.PAUSED:
         reason = "일시 중지된 채널이라 양쪽 모두 운영 원문에 쓰지 않습니다."
+        code = "paused"
     else:
         reason = (
             f"{state.cutover_ts or '인수 좌표 없음'} 이후 이 채널의 운영 writer 는"
             f" {state.writer_owner} 입니다."
         )
+        code = "not-owner"
     return Decision(
         allowed=mine, actor=actor, reason=reason,
         mode=state.mode, owner=state.writer_owner, cutover_ts=state.cutover_ts,
+        code=code,
     )
 
 
@@ -176,9 +192,11 @@ def state_from_row(workspace: str, channel_id: str, row: dict | None) -> Channel
             cutover_ts=str(row.get("cutover_ts") or ""),
         )
     except (KeyError, ValueError) as exc:
+        # 행 값을 로그에 그대로 싣지 않는다 — 예외 종류만.
         log.warning(
-            "채널 모드 행을 읽지 못해 기본값으로 판단한다 ws=%s ch=%s: %s",
-            workspace, channel_id, exc,
+            "채널 모드 행을 읽지 못해 쓰지 않는 쪽으로 판단한다 code=owner-row-invalid"
+            " ws=%s ch=%s err=%s",
+            workspace, channel_id, type(exc).__name__,
         )
         return None
 
@@ -186,9 +204,9 @@ def state_from_row(workspace: str, channel_id: str, row: dict | None) -> Channel
 class OwnerLookup:
     """표를 읽어 판정한다. **읽지 못해도 예외를 올리지 않는다.**
 
-    DB 장애로 수집이 죽으면 그날 대화가 통째로 빠진다. 대신 기본값(Master)으로
-    판단하고 `degraded` 를 세워 둔다 — 인수한 채널이 잠시 Master 로 되돌아가는
-    것은 중복이지 누락이 아니고, 중복은 `dedupe_key` 가 거른다.
+    대신 `degraded` 를 세우고 **쓰지 않는 쪽**으로 판단한다(B-99). 예전에는 Master 가
+    썼는데, 그 쓰기가 운영 루트에 옛 배치를 만들어 Archiver 를 멈췄다. 놓친 구간은
+    Archiver 가 소급으로 메운다 — 멈춘 Archiver 는 아무것도 메우지 못한다.
     """
 
     def __init__(self, workspace: str, *, connect=None, cache_seconds: float = CACHE_SECONDS,
@@ -223,9 +241,11 @@ class OwnerLookup:
                     )
                     row = cur.fetchone()
         except Exception as exc:  # noqa: BLE001 - DB 장애로 수집이 죽지 않는다
+            # 예외 본문은 SQL 값·접속 정보를 담을 수 있어 종류만 남긴다.
             log.warning(
-                "채널 주인 조회 실패라 기본값으로 판단한다 ws=%s ch=%s: %s",
-                self.workspace, channel_id, exc,
+                "채널 주인 조회 실패라 쓰지 않는 쪽으로 판단한다 code=owner-lookup-failed"
+                " ws=%s ch=%s err=%s",
+                self.workspace, channel_id, type(exc).__name__,
             )
             return None, True
         return state_from_row(self.workspace, channel_id, row), False
@@ -259,6 +279,7 @@ class OwnerLookup:
             return Decision(
                 allowed=False, actor=WriterOwner.MASTER,
                 reason="Master channel archive writes disabled by operator",
+                code="operator-disabled",
             )
         return self.decide(channel_id, WriterOwner.MASTER)
 

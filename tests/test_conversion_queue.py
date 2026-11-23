@@ -9,6 +9,7 @@
 2. **재처리가 자료를 줄이지 않는다.** 재변환이 실패해도 원본과 이전 산출물은
    그대로 남는다.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from tybot import conversion_queue as queue
 
 SCHEMA = Path(__file__).resolve().parent.parent / "deploy" / "sql" / "conversion_queue_schema.sql"
+#: 채널별 배치(`shadow_paths`)가 받아들이는 채널 ID. 재처리는 이 배치에만 쓴다(B-99).
+CH = "C0TESTCH01"
 
 
 # =============================================================================
@@ -153,14 +156,19 @@ def test_a_queue_outage_does_not_stop_attachment_collection(monkeypatch, caplog)
 
     monkeypatch.setattr(queue, "enqueue", boom)
     storage = files.AttachmentStorage(
-        staging_dir=Path("s"), objects_dir=Path("o"),
-        workspace="pilot", channel_id="C1",
+        staging_dir=Path("s"),
+        objects_dir=Path("o"),
+        workspace="pilot",
+        channel_id="C1",
     )
 
     with caplog.at_level("WARNING"):
         files.queue_retry(
-            storage, file_id="F1", original_sha256="abc",
-            error_code="converter_timeout", retryable=True,
+            storage,
+            file_id="F1",
+            original_sha256="abc",
+            error_code="converter_timeout",
+            retryable=True,
         )
 
     assert "재처리 큐에 올리지 못했다" in caplog.text
@@ -172,13 +180,18 @@ def test_a_non_retryable_failure_is_not_queued(monkeypatch):
     calls = []
     monkeypatch.setattr(queue, "enqueue", lambda **kw: calls.append(kw))
     storage = files.AttachmentStorage(
-        staging_dir=Path("s"), objects_dir=Path("o"),
-        workspace="pilot", channel_id="C1",
+        staging_dir=Path("s"),
+        objects_dir=Path("o"),
+        workspace="pilot",
+        channel_id="C1",
     )
 
     files.queue_retry(
-        storage, file_id="F1", original_sha256="abc",
-        error_code="pii_refused", retryable=False,
+        storage,
+        file_id="F1",
+        original_sha256="abc",
+        error_code="pii_refused",
+        retryable=False,
     )
 
     assert calls == []
@@ -193,8 +206,11 @@ def test_a_job_without_coordinates_is_not_queued(monkeypatch):
     storage = files.AttachmentStorage(staging_dir=Path("s"), objects_dir=Path("o"))
 
     files.queue_retry(
-        storage, file_id="F1", original_sha256="abc",
-        error_code="converter_timeout", retryable=True,
+        storage,
+        file_id="F1",
+        original_sha256="abc",
+        error_code="converter_timeout",
+        retryable=True,
     )
 
     assert calls == []
@@ -221,10 +237,17 @@ def _staged(tmp_path, *, status="download_or_extract_failed", body=b"hello world
     obj = d / "original.txt"
     obj.write_bytes(body)
     (d / "metadata.json").write_text(
-        json.dumps({
-            "name": "보고서.txt", "filetype": "txt", "status": status,
-            "object_path": str(obj), "error": "이전 실패", "extracted": False,
-        }, ensure_ascii=False),
+        json.dumps(
+            {
+                "name": "보고서.txt",
+                "filetype": "txt",
+                "status": status,
+                "object_path": str(obj),
+                "error": "이전 실패",
+                "extracted": False,
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     return d / "metadata.json"
@@ -321,7 +344,8 @@ def test_reprocessing_a_pii_line_blocks_the_whole_file(tmp_path, monkeypatch):
 
     meta_path = _staged(tmp_path)
     monkeypatch.setattr(
-        convert_mod, "convert",
+        convert_mod,
+        "convert",
         lambda ft, raw: ["정상 줄", "주민등록번호 900101-1234567"],
     )
 
@@ -350,36 +374,42 @@ def test_reconversion_is_not_complete_until_archived_and_indexed(tmp_path, monke
     import drain_conversion_queue as drain
 
     from tybot import search_index
-    from tybot.archive import writer
+    from tybot.archive import shadow_paths, writer
     from tybot.archive.store import ArchiveStore
 
     archive = tmp_path / "archive"
+    channel_archive = shadow_paths.archive_dir(archive, "pilot", CH, "#팀-전산_test")
     when = datetime(2026, 9, 14, 9, 0, tzinfo=writer.KST)
     writer.ingest(
         archive,
         workspace="pilot",
         channel="#팀-전산_test",
-        channel_id="C1",
-        messages=[writer.IncomingMessage(
-            ts=when,
-            speaker="홍길동",
-            text="[첨부:처리실패] 보고서.txt (txt, 1KB)",
-        )],
+        channel_id=CH,
+        messages=[
+            writer.IncomingMessage(
+                ts=when,
+                speaker="홍길동",
+                text="[첨부:처리실패] 보고서.txt (txt, 1KB)",
+            )
+        ],
         acl=["#팀-전산_test"],
+        channel_directory=channel_archive,
     )
     meta_path = _staged(tmp_path)
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta.update({
-        "slack_file_id": "F1",
-        "declared_size": 1024,
-        "origin_message_ts": str(when.timestamp()),
-        "conversion_state": "succeeded",
-        "sha256": "abcdef1234567890",
-        "converter_name": "txt:primary",
-        "converter_version": "1",
-        "converter_config": {},
-        "converted_at": "2026-09-14T00:00:00+00:00",
-    })
+    meta.update(
+        {
+            "slack_file_id": "F1",
+            "declared_size": 1024,
+            "origin_message_ts": str(when.timestamp()),
+            "conversion_state": "succeeded",
+            "sha256": "abcdef1234567890",
+            "converter_name": "txt:primary",
+            "converter_version": "1",
+            "converter_config": {},
+            "converted_at": "2026-09-14T00:00:00+00:00",
+        }
+    )
     meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     (meta_path.parent / "extracted.md").write_text(
         "<!-- 로컬 재변환본 -->\n# 보고서.txt\n\n표 1행\n",
@@ -390,7 +420,7 @@ def test_reconversion_is_not_complete_until_archived_and_indexed(tmp_path, monke
     job = queue.Job(
         id=1,
         workspace="pilot",
-        channel_id="C1",
+        channel_id=CH,
         file_id="F1",
         original_sha256="",
         pipeline_version="1",
@@ -404,6 +434,10 @@ def test_reconversion_is_not_complete_until_archived_and_indexed(tmp_path, monke
 
     lines = [line.text for doc in ArchiveStore(archive).docs() for line in doc.raw_lines]
     assert lines.count("[첨부추출:보고서.txt] 표 1행") == 1
+    # 덧붙인 줄은 채널별 원문에만 있다. 옛 배치는 생기지 않는다(B-99).
+    raw = "\n".join(p.read_text(encoding="utf-8") for p in (channel_archive / "raw").glob("*.md"))
+    assert "[첨부추출:보고서.txt] 표 1행" in raw
+    assert not (archive / "workspaces").exists()
     saved = json.loads(meta_path.read_text(encoding="utf-8"))
     assert saved["archive_state"] == "archived"
     assert saved["index_state"] == "succeeded"
@@ -416,17 +450,18 @@ def test_separated_reconversion_writes_only_the_canonical_document(tmp_path, mon
     import drain_conversion_queue as drain
 
     from tybot import search_index
-    from tybot.archive import writer
+    from tybot.archive import shadow_paths, writer
     from tybot.archive.store import ArchiveStore
 
     archive = tmp_path / "archive"
+    channel_archive = shadow_paths.archive_dir(archive, "pilot", CH, "#팀-전산_test")
     when = datetime(2026, 9, 14, 9, 0, tzinfo=writer.KST)
     reference = "[첨부:처리실패] 보고서.txt (txt, 1KB) · id:F1"
     writer.ingest(
         archive,
         workspace="pilot",
         channel="#팀-전산_test",
-        channel_id="C1",
+        channel_id=CH,
         messages=[
             writer.IncomingMessage(
                 ts=when,
@@ -436,6 +471,7 @@ def test_separated_reconversion_writes_only_the_canonical_document(tmp_path, mon
             )
         ],
         acl=["#팀-전산_test"],
+        channel_directory=channel_archive,
     )
     meta_path = _staged(tmp_path)
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -469,7 +505,7 @@ def test_separated_reconversion_writes_only_the_canonical_document(tmp_path, mon
     job = queue.Job(
         id=1,
         workspace="pilot",
-        channel_id="C1",
+        channel_id=CH,
         file_id="F1",
         original_sha256="",
         pipeline_version="1",
@@ -485,16 +521,16 @@ def test_separated_reconversion_writes_only_the_canonical_document(tmp_path, mon
     ]
     assert source_lines.count(reference) == 1
     assert not any("정본에만 있을 내용" in line for line in source_lines)
-    canonical = list(archive.glob("workspaces/pilot/channels/C1/attachments/F1/*.md"))
+    canonical = list((channel_archive / "attachments" / "F1").glob("*.md"))
     assert len(canonical) == 1
+    # 정본은 채널별 자리에만 있다. 옛 배치는 생기지 않는다(B-99).
+    assert not (archive / "workspaces").exists()
     assert "정본에만 있을 내용" in canonical[0].read_text(encoding="utf-8")
     assert indexed
     assert len(reconciled) == 2
 
 
-def test_successful_retries_reconcile_the_message_ack_from_canonical_files(
-    tmp_path, monkeypatch
-):
+def test_successful_retries_reconcile_the_message_ack_from_canonical_files(tmp_path, monkeypatch):
     """판정은 `ack_reconcile` 이 한다. 여기서 셈을 다시 쓰지 않는다.
 
     전에는 이 자리가 **정본 개수만** 세었다. 그래서 미지원·변환 실패 정본도
@@ -528,20 +564,30 @@ def test_successful_retries_reconcile_the_message_ack_from_canonical_files(
             encoding="utf-8",
         )
         docs[file_id] = SimpleNamespace(
-            workspace="pilot", channel_id="C1", message_ts="1.0001", file_id=file_id,
-            conversion_state="succeeded", text=f"{file_id} 본문", source_path=canonical,
+            workspace="pilot",
+            channel_id="C1",
+            message_ts="1.0001",
+            file_id=file_id,
+            conversion_state="succeeded",
+            text=f"{file_id} 본문",
+            source_path=canonical,
         )
 
     monkeypatch.setattr(
-        ack_reconcile, "docs_by_message",
+        ack_reconcile,
+        "docs_by_message",
         lambda root: {("pilot", "C1", "1.0001"): list(docs.values())},
     )
     monkeypatch.setattr(
         ingest_ack,
         "read",
         lambda *_: ingest_ack.AckStatus(
-            IngestProgress(IngestState.PARTIAL, attachment_total=2, attachment_ready=1,
-                           error_code="attachment-pending"),
+            IngestProgress(
+                IngestState.PARTIAL,
+                attachment_total=2,
+                attachment_ready=1,
+                error_code="attachment-pending",
+            ),
             written_to="shadow",
         ),
     )
@@ -582,8 +628,14 @@ def test_a_retry_does_not_reconcile_an_archive_it_cannot_place(tmp_path, monkeyp
     calls = []
     monkeypatch.setattr(ingest_ack, "advance", lambda **kwargs: calls.append(kwargs))
     job = queue.Job(
-        id=1, workspace="pilot", channel_id="C1", file_id="F2", original_sha256="",
-        pipeline_version="1", state="leased", attempt_count=1,
+        id=1,
+        workspace="pilot",
+        channel_id="C1",
+        file_id="F2",
+        original_sha256="",
+        pipeline_version="1",
+        state="leased",
+        attempt_count=1,
     )
 
     drain._reconcile_ingest_ack(tmp_path, job, "1.0001")
@@ -601,8 +653,14 @@ def test_a_job_coordinate_cannot_escape_the_staging_root(tmp_path):
     import drain_conversion_queue as drain
 
     job = queue.Job(
-        id=1, workspace="../../etc", channel_id="..", file_id="../passwd",
-        original_sha256="", pipeline_version="1", state="queued", attempt_count=0,
+        id=1,
+        workspace="../../etc",
+        channel_id="..",
+        file_id="../passwd",
+        original_sha256="",
+        pipeline_version="1",
+        state="queued",
+        attempt_count=0,
     )
 
     path = drain.staging_meta(str(tmp_path / "archive"), job)
@@ -620,8 +678,14 @@ def test_shadow_queue_finds_staging_beneath_the_channel(tmp_path, monkeypatch):
     channel = root / "tyit" / "C12345678__first-name"
     channel.mkdir(parents=True)
     job = queue.Job(
-        id=1, workspace="tyit", channel_id="C12345678", file_id="F123",
-        original_sha256="", pipeline_version="1", state="queued", attempt_count=0,
+        id=1,
+        workspace="tyit",
+        channel_id="C12345678",
+        file_id="F123",
+        original_sha256="",
+        pipeline_version="1",
+        state="queued",
+        attempt_count=0,
     )
 
     assert drain.staging_meta(str(root), job) == channel / "staging" / "F123" / "metadata.json"
@@ -632,13 +696,21 @@ def test_shadow_queue_records_bad_channel_path_and_continues(tmp_path, monkeypat
 
     monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
     job = queue.Job(
-        id=7, workspace="tyit", channel_id="C12345678", file_id="F123",
-        original_sha256="", pipeline_version="1", state="queued", attempt_count=0,
+        id=7,
+        workspace="tyit",
+        channel_id="C12345678",
+        file_id="F123",
+        original_sha256="",
+        pipeline_version="1",
+        state="queued",
+        attempt_count=0,
     )
     failures = []
     monkeypatch.setattr(drain.queue, "reclaim_expired", lambda: 0)
     monkeypatch.setattr(drain.queue, "claim", lambda *args, **kwargs: [job])
-    monkeypatch.setattr(drain.queue, "fail", lambda *args, **kwargs: failures.append((args, kwargs)))
+    monkeypatch.setattr(
+        drain.queue, "fail", lambda *args, **kwargs: failures.append((args, kwargs))
+    )
     monkeypatch.setattr(drain, "load_env_file", lambda: None)
 
     assert drain.main(["--apply", "--archive", str(tmp_path)]) == drain.EXIT_FAILED
@@ -665,8 +737,12 @@ def test_a_forced_enqueue_still_refuses_policy_exclusions(monkeypatch):
     monkeypatch.setattr(queue, "_connect", lambda: called.append(1))
 
     got = queue.enqueue(
-        workspace="pilot", channel_id="C1", file_id="F1",
-        error_code="pii_refused", retryable=True, force=True,
+        workspace="pilot",
+        channel_id="C1",
+        file_id="F1",
+        error_code="pii_refused",
+        retryable=True,
+        force=True,
     )
 
     assert got is None
@@ -715,14 +791,10 @@ def test_backfill_forces_because_the_old_verdict_used_the_old_converter(tmp_path
     assert seen and seen[0]["force"] is True
 
 
-def test_backfill_does_not_queue_an_attachment_without_its_original(
-    tmp_path, monkeypatch, capsys
-):
+def test_backfill_does_not_queue_an_attachment_without_its_original(tmp_path, monkeypatch, capsys):
     import drain_conversion_queue as drain
 
-    _staged_review(
-        tmp_path, "F1", status="download_or_extract_failed", original=False
-    )
+    _staged_review(tmp_path, "F1", status="download_or_extract_failed", original=False)
     added = []
     monkeypatch.setattr(queue, "enqueue", lambda **kw: added.append(kw) or 1)
 
@@ -752,9 +824,7 @@ def test_backfill_does_not_queue_an_attachment_with_an_unknown_channel(
     assert "채널 미확인 1건" in capsys.readouterr().out
 
 
-def test_nightly_backfill_queues_only_retryable_failures(
-    tmp_path, monkeypatch, capsys
-):
+def test_nightly_backfill_queues_only_retryable_failures(tmp_path, monkeypatch, capsys):
     """무인 배치는 변환기 crash 같은 일시 실패만 다시 연다."""
     import drain_conversion_queue as drain
 
@@ -803,9 +873,7 @@ def test_nightly_backfill_is_a_dry_run_without_apply(tmp_path, monkeypatch, caps
     assert "--nightly --apply" in capsys.readouterr().out
 
 
-def test_outdated_backfill_queues_only_old_successful_conversions(
-    tmp_path, monkeypatch, capsys
-):
+def test_outdated_backfill_queues_only_old_successful_conversions(tmp_path, monkeypatch, capsys):
     import drain_conversion_queue as drain
 
     _staged_review(
@@ -866,8 +934,14 @@ def test_outdated_backfill_uses_format_versions_and_new_job_keys(tmp_path, monke
         ("FPDFNEW", "pdf", "4", "succeeded"),
         ("FXLSX", "xlsx", "2", "succeeded"),
     ]:
-        _staged_review(tmp_path, file_id, status="converted", conversion_state=state,
-                       converter_version=version, filetype=kind)
+        _staged_review(
+            tmp_path,
+            file_id,
+            status="converted",
+            conversion_state=state,
+            converter_version=version,
+            filetype=kind,
+        )
     added = []
 
     def enqueue(**kwargs):
@@ -892,11 +966,19 @@ def test_outdated_backfill_skips_file_only_receipts(tmp_path, monkeypatch, capsy
     original = base / "objects/F123/original.pdf"
     original.parent.mkdir(parents=True)
     original.write_bytes(b"pdf")
-    (staged / "metadata.json").write_text(json.dumps({
-        "slack_file_id": "F123", "name": "minutes.pdf", "filetype": "pdf",
-        "status": "converted", "conversion_state": "partial", "converter_version": "2",
-        "object_path": str(original),
-    }))
+    (staged / "metadata.json").write_text(
+        json.dumps(
+            {
+                "slack_file_id": "F123",
+                "name": "minutes.pdf",
+                "filetype": "pdf",
+                "status": "converted",
+                "conversion_state": "partial",
+                "converter_version": "2",
+                "object_path": str(original),
+            }
+        )
+    )
     receipt = base / "file-inventory/F123.json"
     receipt.parent.mkdir()
     receipt.write_text("{}")
@@ -907,12 +989,8 @@ def test_outdated_backfill_skips_file_only_receipts(tmp_path, monkeypatch, capsy
 
 def test_nightly_unit_requeues_and_can_publish_to_the_archive():
     root = Path(__file__).resolve().parent.parent
-    service = (root / "deploy" / "tybot-convert-nightly.service").read_text(
-        encoding="utf-8"
-    )
-    timer = (root / "deploy" / "tybot-convert-nightly.timer").read_text(
-        encoding="utf-8"
-    )
+    service = (root / "deploy" / "tybot-convert-nightly.service").read_text(encoding="utf-8")
+    timer = (root / "deploy" / "tybot-convert-nightly.timer").read_text(encoding="utf-8")
 
     assert "--nightly --apply" in service
     assert "ReadWritePaths=/var/lib/tybot/staging /var/lib/tybot/archive" in service
@@ -935,21 +1013,34 @@ def _staged_review(
 ) -> None:
     """`attachment_review.scan()` 이 읽는 모양으로 하나 만든다."""
     d = (
-        tmp_path / "staging" / "workspaces" / "pilot" / "channels" / channel_id
-        / "attachments" / file_id
+        tmp_path
+        / "staging"
+        / "workspaces"
+        / "pilot"
+        / "channels"
+        / channel_id
+        / "attachments"
+        / file_id
     )
     d.mkdir(parents=True, exist_ok=True)
     object_path = d / "original.pdf"
     if original:
         object_path.write_bytes(b"pdf")
     (d / "metadata.json").write_text(
-        json.dumps({
-            "name": f"{file_id}.{filetype}", "filetype": filetype, "status": status,
-            "error_code": error_code, "retryable": retryable, "sha256": "abc123",
-            "conversion_state": conversion_state,
-            "converter_version": converter_version,
-            "object_path": str(object_path),
-        }, ensure_ascii=False),
+        json.dumps(
+            {
+                "name": f"{file_id}.{filetype}",
+                "filetype": filetype,
+                "status": status,
+                "error_code": error_code,
+                "retryable": retryable,
+                "sha256": "abc123",
+                "conversion_state": conversion_state,
+                "converter_version": converter_version,
+                "object_path": str(object_path),
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -1025,8 +1116,11 @@ def test_automatic_enqueue_does_not_revive_an_exhausted_job(monkeypatch):
     conns = _fake_db(monkeypatch, [[]])
 
     job_id = queue.enqueue(
-        workspace="mgmt", channel_id="C1", file_id="F1",
-        original_sha256="abc", error_code="converter_timeout",
+        workspace="mgmt",
+        channel_id="C1",
+        file_id="F1",
+        original_sha256="abc",
+        error_code="converter_timeout",
         retryable=True,
     )
 
@@ -1041,9 +1135,13 @@ def test_explicit_enqueue_can_retry_after_the_automatic_cap(monkeypatch):
     conns = _fake_db(monkeypatch, [[{"id": 26}]])
 
     job_id = queue.enqueue(
-        workspace="mgmt", channel_id="C1", file_id="F1",
-        original_sha256="abc", error_code="converter_timeout",
-        retryable=True, force=True,
+        workspace="mgmt",
+        channel_id="C1",
+        file_id="F1",
+        original_sha256="abc",
+        error_code="converter_timeout",
+        retryable=True,
+        force=True,
     )
 
     assert job_id == 26
@@ -1058,20 +1156,37 @@ def test_an_open_breaker_stops_the_worker_from_claiming_its_jobs(monkeypatch):
     """
     opened = datetime.now(UTC) - timedelta(seconds=30)
     job_row = {
-        "id": 7, "workspace": "pilot", "channel_id": "C1", "file_id": "F1",
-        "original_sha256": "abc", "pipeline_version": "1", "state": "leased",
-        "attempt_count": 1, "error_code": "converter_crashed",
-        "converter": "hwp5txt", "converter_version": "1.2", "next_attempt_at": None,
+        "id": 7,
+        "workspace": "pilot",
+        "channel_id": "C1",
+        "file_id": "F1",
+        "original_sha256": "abc",
+        "pipeline_version": "1",
+        "state": "leased",
+        "attempt_count": 1,
+        "error_code": "converter_crashed",
+        "converter": "hwp5txt",
+        "converter_version": "1.2",
+        "next_attempt_at": None,
     }
-    conns = _fake_db(monkeypatch, [
-        # 1) open_breakers() 의 SELECT
-        [{"converter": "hwp5txt", "converter_version": "1.2",
-          "state": "open", "opened_at": opened}],
-        # 2) claim 의 UPDATE ... RETURNING
-        [job_row],
-        # 3) 되돌리는 UPDATE
-        [],
-    ])
+    conns = _fake_db(
+        monkeypatch,
+        [
+            # 1) open_breakers() 의 SELECT
+            [
+                {
+                    "converter": "hwp5txt",
+                    "converter_version": "1.2",
+                    "state": "open",
+                    "opened_at": opened,
+                }
+            ],
+            # 2) claim 의 UPDATE ... RETURNING
+            [job_row],
+            # 3) 되돌리는 UPDATE
+            [],
+        ],
+    )
 
     jobs = queue.claim("host:1")
 
@@ -1091,16 +1206,33 @@ def test_a_breaker_past_its_probe_window_lets_the_job_through(monkeypatch):
     """사람이 고쳤을 수 있다. 한 건은 흘려 보내 확인한다."""
     opened = datetime.now(UTC) - timedelta(seconds=queue.BREAKER_PROBE_SECONDS + 60)
     job_row = {
-        "id": 7, "workspace": "pilot", "channel_id": "C1", "file_id": "F1",
-        "original_sha256": "abc", "pipeline_version": "1", "state": "leased",
-        "attempt_count": 1, "error_code": "", "converter": "hwp5txt",
-        "converter_version": "1.2", "next_attempt_at": None,
+        "id": 7,
+        "workspace": "pilot",
+        "channel_id": "C1",
+        "file_id": "F1",
+        "original_sha256": "abc",
+        "pipeline_version": "1",
+        "state": "leased",
+        "attempt_count": 1,
+        "error_code": "",
+        "converter": "hwp5txt",
+        "converter_version": "1.2",
+        "next_attempt_at": None,
     }
-    _fake_db(monkeypatch, [
-        [{"converter": "hwp5txt", "converter_version": "1.2",
-          "state": "open", "opened_at": opened}],
-        [job_row],
-    ])
+    _fake_db(
+        monkeypatch,
+        [
+            [
+                {
+                    "converter": "hwp5txt",
+                    "converter_version": "1.2",
+                    "state": "open",
+                    "opened_at": opened,
+                }
+            ],
+            [job_row],
+        ],
+    )
 
     jobs = queue.claim("host:1")
 
@@ -1110,9 +1242,17 @@ def test_a_breaker_past_its_probe_window_lets_the_job_through(monkeypatch):
 def test_claiming_still_works_when_the_breaker_table_cannot_be_read(monkeypatch):
     """회로를 못 읽는 것이 재처리를 통째로 멈추는 이유가 되면 안 된다."""
     job_row = {
-        "id": 9, "workspace": "pilot", "channel_id": "C1", "file_id": "F2",
-        "original_sha256": "", "pipeline_version": "1", "state": "leased",
-        "attempt_count": 1, "error_code": "", "converter": "", "converter_version": "",
+        "id": 9,
+        "workspace": "pilot",
+        "channel_id": "C1",
+        "file_id": "F2",
+        "original_sha256": "",
+        "pipeline_version": "1",
+        "state": "leased",
+        "attempt_count": 1,
+        "error_code": "",
+        "converter": "",
+        "converter_version": "",
         "next_attempt_at": None,
     }
     calls = {"n": 0}
