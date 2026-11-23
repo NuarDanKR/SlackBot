@@ -96,8 +96,8 @@ def _fresh_check_blocker(checks: object) -> str:
         )
     if checks.get("access_verified") is not True:
         return "access_unverified"
-    # PII 판별은 전제가 아니다. 호출자가 명시적으로 막았을 때만 막는다.
-    if checks.get("pii_blocked", False) is not False:
+    # 빠진 키는 막는다. 정책 경로는 `pii_blocked=False` 를 명시한다.
+    if checks.get("pii_blocked") is not False:
         return "pii_blocked"
     if checks.get("bot_generated") is not False:
         return "bot_generated"
@@ -163,7 +163,7 @@ def run_approved_batch(
             continue
         # `clearance_code` is a coordinator decision aid, not a dispatch fact.
         # Keep the two caller facts and two loader-derived facts only.
-        checks = {key: checks.get(key, False) for key in _STORE_CHECKS}
+        checks = {key: checks.get(key) for key in _STORE_CHECKS}
         approval_id = ""
         if approval_id_for is not None:
             try:
@@ -262,12 +262,16 @@ def run_cleared_batch(
         if policy.enabled is not True or policy.workspace_enabled is not True:
             return {
                 "access_verified": False,
+                "pii_blocked": True,
                 "bot_generated": False,
                 "clearance_code": "image_description_disabled",
             }
         code = verify_current_access(candidate, doc=doc)
         return {
             "access_verified": code == "",
+            # 이미지별 PII 판별은 전송 전제가 아니다(2026-11-20 오너 결정). 기본값에
+            # 기대지 않고 이 자리에서 명시한다 — 반환 텍스트는 저장 전 마스킹·가드를 지난다.
+            "pii_blocked": False,
             "bot_generated": False,
             "clearance_code": code,
         }

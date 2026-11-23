@@ -157,9 +157,18 @@ def test_no_approval_and_no_pii_assessment_is_ready_when_policy_bound() -> None:
     verdict = preflight_image_description(
         image=IMAGE, policy=POLICY, catalog=CATALOG, approval=None,
         dispatch=POLICY_DISPATCH, prompt_revision=PROMPT_REVISION, now=NOW,
-        source_verified=True, access_verified=True, bot_generated=False,
+        source_verified=True, access_verified=True, pii_blocked=False, bot_generated=False,
     )
     assert verdict.ready
+
+
+def test_an_omitted_pii_fact_is_not_read_as_cleared() -> None:
+    verdict = preflight_image_description(
+        image=IMAGE, policy=POLICY, catalog=CATALOG, approval=None,
+        dispatch=POLICY_DISPATCH, prompt_revision=PROMPT_REVISION, now=NOW,
+        source_verified=True, access_verified=True, bot_generated=False,
+    )
+    assert verdict.code == "pii_blocked"
 
 
 @pytest.mark.parametrize(

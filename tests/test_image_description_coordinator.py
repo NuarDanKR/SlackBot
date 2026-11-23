@@ -470,6 +470,17 @@ def test_unknown_fresh_check_is_rejected_instead_of_silently_dropped(monkeypatch
     assert store.reserved == []
 
 
+def test_omitted_pii_fact_is_blocked_before_the_original_opens(monkeypatch):
+    store = Store()
+    batch = _run(
+        monkeypatch,
+        store=store,
+        checks_for=lambda *_args: {"access_verified": True, "bot_generated": False},
+    )
+    assert batch.items[0].code == "pii_blocked"
+    assert store.reserved == []
+
+
 def test_legacy_approval_path_still_requires_its_approval(monkeypatch):
     """옛 건별 승인 경로(호환)는 승인 조회를 주면 예전처럼 동작한다."""
     store = Store()

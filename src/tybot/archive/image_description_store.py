@@ -645,10 +645,10 @@ class ImageDescriptionStore:
 
     @staticmethod
     def _checks(checks: dict) -> dict:
-        # `pii_blocked` 는 전제가 아니다(2026-11-20). 말이 없으면 막지 않고, 명시하면 막는다.
-        # `bot_generated` 는 여전히 모르면 막는다.
+        # 빠진 사실은 닫힌 쪽으로 읽는다. 이미지 정책 경로는 `pii_blocked=False` 를
+        # **명시해서** 넘긴다(2026-11-20 오너 결정) — 키가 빠진 것과 같지 않다.
         return {
-            key: checks.get(key, key == "bot_generated")
+            key: checks.get(key, key in ("pii_blocked", "bot_generated"))
             for key in ("source_verified", "access_verified", "pii_blocked", "bot_generated")
         }
 

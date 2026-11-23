@@ -116,7 +116,7 @@ def preflight_image_description(
     now: datetime,
     source_verified: bool = False,
     access_verified: bool = False,
-    pii_blocked: bool = False,
+    pii_blocked: bool = True,
     bot_generated: bool = True,
 ) -> ImageDescriptionPreflight:
     """모든 좌표와 현재 사실을 대조한다. 하나라도 모르면 호출하지 않는다."""
@@ -152,7 +152,8 @@ def preflight_image_description(
         return reject("source_unverified")
     if access_verified is not True:
         return reject("access_unverified")
-    # PII 판별은 전제가 아니다(2026-11-20). 다만 호출자가 **막으라고 명시**하면 막는다.
+    # 이미지별 PII 판별은 전제가 아니다(2026-11-20). 그래도 **말하지 않은 것을 통과로
+    # 읽지 않는다** — 호출자가 `pii_blocked=False` 를 명시해야 한다(기본값은 닫힘).
     if pii_blocked is not False:
         return reject("pii_blocked")
     if bot_generated is not False:
