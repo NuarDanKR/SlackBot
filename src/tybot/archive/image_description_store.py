@@ -124,11 +124,18 @@ def policy_scope(image: ImageInput, policy, prompt_revision: str) -> dict:
     }
 
 
-def dispatch_identity(scope: dict, *, max_output_tokens: int | None = None) -> str:
+def dispatch_identity(
+    scope: dict,
+    *,
+    max_output_tokens: int | None = None,
+    catalog_verification_revision: str | None = None,
+) -> str:
     """승인 갱신·정책 저장만으로 같은 bytes를 다시 보내지 않는다."""
     stable = {key: value for key, value in scope.items() if key != "policy_revision"}
     if max_output_tokens is not None:
         stable["max_output_tokens"] = max_output_tokens
+    if catalog_verification_revision is not None:
+        stable["catalog_verification_revision"] = catalog_verification_revision
     body = json.dumps(stable, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(body.encode()).hexdigest()
 
@@ -695,7 +702,11 @@ class ImageDescriptionStore:
                 if approval is not None
                 else policy_scope(image, policy, prompt_revision)
             ) | {"image_sha256": hashlib.sha256(image.image).hexdigest()}
-            identity = dispatch_identity(scope, max_output_tokens=policy.max_output_tokens)
+            identity = dispatch_identity(
+                scope,
+                max_output_tokens=policy.max_output_tokens,
+                catalog_verification_revision=catalog.verification_revision,
+            )
             cur.execute(
                 "SELECT id FROM archiver_image_description_job WHERE identity_sha256=%s",
                 (identity,),

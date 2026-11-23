@@ -163,6 +163,9 @@ def test_dispatch_identity_ignores_only_a_policy_resave() -> None:
     assert dispatch_identity(SCOPE, max_output_tokens=256) != dispatch_identity(
         SCOPE, max_output_tokens=4096
     )
+    assert dispatch_identity(
+        SCOPE, catalog_verification_revision="catalog-before-503"
+    ) != dispatch_identity(SCOPE, catalog_verification_revision="catalog-after-503")
 
 
 def test_missing_fresh_checks_are_fail_closed() -> None:
