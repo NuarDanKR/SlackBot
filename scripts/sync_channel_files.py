@@ -108,7 +108,7 @@ def sync_workspace(
 
     client = WebClient(token=cfg.bot_token)
     stats = {"channels": 0, "listed": 0, "known": 0, "missing": 0, "collected": 0,
-             "written": 0, "failed": 0, "refused_owner": 0}
+             "written": 0, "failed": 0, "refused_owner": 0, "refused_layout": 0}
     gate = owner or OwnerLookup(cfg.key)
     try:
         channels = member_channels(client)
@@ -131,6 +131,15 @@ def sync_workspace(
             print(f"[{cfg.key}] {name}({channel_id}) · 인수된 채널이라 건너뜁니다"
                   f" — {verdict.reason}")
             stats["refused_owner"] += 1
+            continue
+        # 원문 반영은 옛 배치(`workspaces/<ws>/channels`)로 쓴다. 운영 루트면 Archiver 가
+        # 다음 기동을 거부하므로 **반영할 때만** 막는다 — 조회(dry-run)는 쓰지 않는다(B-99).
+        refusal = writer.legacy_layout_refusal(archive, cfg.key) if apply else None
+        if refusal:
+            print(f"[{cfg.key}] {name}({channel_id}) · 운영 아카이브 루트라 옛 배치로"
+                  f" 반영하지 않습니다 — code={refusal}")
+            stats["refused_layout"] += 1
+            stats["failed"] += 1
             continue
         storage = attachment_storage(archive, cfg.key, channel_id)
         result = scan(client, channel_id, storage)

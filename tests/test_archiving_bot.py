@@ -1,10 +1,12 @@
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fake_archiving_repo import FakeArchivingRepo
 
 from tybot import archiving_bot
+from tybot.archive.image_description_notification import ImageDescriptionNotice
 
 
 def test_archiver_manifest_disables_messages_tab_and_dm_subscription():
@@ -25,6 +27,7 @@ def test_shadow_unit_can_write_live_archive_only_when_runtime_gates_allow_it():
     assert set(writable) == {
         "/var/lib/tybot/archiver-shadow",
         "/var/lib/tybot/state/ingest-ack-outbox",
+            "/var/lib/tybot/image-description-notify",
         "-/var/lib/tybot/state/dm-handoff",
         "-/var/lib/tybot/archive",
     }
@@ -38,6 +41,41 @@ def test_shadow_unit_uses_shared_bootstrap_but_isolates_workspace_runtime():
     assert "Environment=ARCHIVER_WORKSPACE=%i\n" in unit
     assert "Environment=LOCK_DIR=/var/lib/tybot/archiver-shadow/%i/.locks\n" in unit
     assert "archiver-%i.env" not in unit
+
+
+def test_image_description_notice_posts_only_a_fixed_thread_status():
+    cfg = archiving_bot.ArchiverWorkspace(
+        key="tyit", bot_token="bot", app_token="app", team_id="T12345678",
+        master_bot_user_id="U_MASTER", allowed_channels=frozenset({"C12345678"}),
+    )
+    client = Mock()
+    client.conversations_info.return_value = {"channel": {"is_member": True}}
+    notice = ImageDescriptionNotice(
+        job_id="a" * 32, workspace="tyit", channel_id="C12345678",
+        message_ts="1700000000.123456",
+    )
+
+    assert archiving_bot.deliver_image_description_notice(client, cfg, notice) is True
+    client.chat_postMessage.assert_called_once_with(
+        channel="C12345678", thread_ts="1700000000.123456",
+        text="✅ 이미지 설명·텍스트 인식 완료 — 검색 보조 정보로 반영되었습니다.",
+        client_msg_id=notice.client_msg_id,
+    )
+
+
+def test_image_description_notice_never_posts_outside_the_registered_channel():
+    cfg = archiving_bot.ArchiverWorkspace(
+        key="tyit", bot_token="bot", app_token="app", team_id="T12345678",
+        master_bot_user_id="U_MASTER", allowed_channels=frozenset(),
+    )
+    client = Mock()
+    notice = ImageDescriptionNotice(
+        job_id="a" * 32, workspace="tyit", channel_id="C12345678",
+        message_ts="1700000000.123456",
+    )
+
+    assert archiving_bot.deliver_image_description_notice(client, cfg, notice) is True
+    client.chat_postMessage.assert_not_called()
 
 
 def _env(tmp_path: Path) -> dict[str, str]:

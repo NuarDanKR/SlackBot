@@ -371,3 +371,12 @@ def test_a_channel_without_reviewers_still_reports_the_global_schedule():
     (row,) = _rows()
 
     assert row.schedule_label == "매주 화·금 17:00 KST"
+
+
+def test_rows_sum_message_and_attachment_counts():
+    rows = _rows([
+        _doc(channel="#수집됨", channel_id="C1", messages=3, attachments=1),
+        _doc(channel="#수집됨", channel_id="C1", messages=2, attachments=0),
+    ])
+    row = rows[0].to_json()
+    assert row["messages"] == 5 and row["attachments"] == 1

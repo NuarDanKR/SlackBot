@@ -33,6 +33,7 @@ import inspect
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
@@ -696,7 +697,7 @@ def test_the_vip_branch_only_passes_configuration_to_the_common_bot():
     from tybot.slack import pilot
 
     source = inspect.getsource(pilot.build_bots)
-    branch = source[source.index("VIPBOT_SHARED_RUNTIME_ENABLED") :]
+    branch = source[source.index("vip_connections = _vip_runtime_credentials") :]
     for name in (
         "request_context_resolver",
         "question_transform",
@@ -712,3 +713,25 @@ def test_the_vip_branch_only_passes_configuration_to_the_common_bot():
     assert "autojoin=False" in branch
     assert "operational_owner=False" in branch
     assert "private_answers=True" in branch
+
+
+def test_a_failed_canvas_falls_back_to_the_message_and_logs_the_slack_code(
+    monkeypatch, caplog
+):
+    """Canvas 가 실패해도 답은 메시지로 간다. 사유는 답변이 아니라 로그에 남긴다(2026-11-20)."""
+
+    class SlackError(Exception):
+        response: ClassVar[dict] = {"error": "invalid_arguments"}
+
+    def fail(client, body, **kw):
+        raise SlackError("boom")
+
+    monkeypatch.setattr("tybot.slack.pilot.create_answer_canvas", fail)
+    bot = _bot([Intent("summary", question="주간 현황")], [_answered()], vip=False)
+
+    with caplog.at_level("ERROR"):
+        _, sent = _handle(bot, "주간 현황을 캔버스로 답변해", client=_client())
+
+    assert "Canvas를 만들지 못해" not in sent[-1]["text"]
+    assert "출처:" in sent[-1]["text"]
+    assert "code=invalid_arguments" in caplog.text

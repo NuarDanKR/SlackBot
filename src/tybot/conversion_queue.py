@@ -73,6 +73,8 @@ TERMINAL_CODES = frozenset({
 HOLD_CODES = frozenset({
     "converter_missing",
     "converter_policy_denied",
+    # B-89 후속: rhwp 위임 여부를 몰라 HWP 직접 변환을 막았다. 파일 문제가 아니다.
+    "converter_policy_unknown",
 })
 
 # 사람이 명시적으로 요청해도 큐에 넣지 않는 코드.

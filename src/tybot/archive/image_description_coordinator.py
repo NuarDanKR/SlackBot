@@ -1,17 +1,23 @@
 """B-81 이미지 설명 배치의 보수적인 연결 계층.
 
-정본 후보 선별, 이미 발행된 원본 제외, 원본 bytes 재검증, 기존 승인에 따른 예약,
-one-shot worker 실행을 순서대로 잇는다. 이 모듈은 승인을 만들거나 정책을 켜지 않고,
-실패를 재시도하지 않으며, 결과에 원본 bytes·설명 본문·경로를 넣지 않는다.
+정본 후보 선별, 이미 발행된 원본 제외, 원본 bytes 재검증, 정책 결속 예약,
+one-shot worker 실행을 순서대로 잇는다. 이 모듈은 정책을 켜지 않고, 승인 행을
+만들지 않으며(가짜 `pii_cleared` 행 포함), 실패를 재시도하지 않고, 결과에 원본
+bytes·설명 본문·경로를 넣지 않는다.
+
+2026-11-20 오너 결정: 이미지별 PII clearance 와 건별 외부 전송 approval 은 런타임
+전제가 아니다. 정책 ON·현재 ACL·정본 좌표와 원본 해시·봇 출력 제외·무료 모델과
+quota·중복 방지는 그대로다.
 """
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
 
 from .image_description import PROMPT_REVISION, ImageInput
-from .image_description_clearance import clear_for_dispatch
+from .image_description_clearance import verify_current_access
 from .image_description_original import load_original
 from .image_description_runner import CALLER_CHECKS
 from .image_description_source import (
@@ -34,6 +40,7 @@ class ImageDescriptionBatchItem:
     channel_id: str
     file_id: str
     state: str
+    message_ts: str = ""
     code: str = ""
     job_id: str = ""
     revision_id: str = ""
@@ -67,6 +74,7 @@ def _item(
         workspace=candidate.workspace,
         channel_id=candidate.channel_id,
         file_id=candidate.file_id,
+        message_ts=candidate.message_ts,
         state=state,
         code=code,
         job_id=job_id,
@@ -88,6 +96,7 @@ def _fresh_check_blocker(checks: object) -> str:
         )
     if checks.get("access_verified") is not True:
         return "access_unverified"
+    # 빠진 키는 막는다. 정책 경로는 `pii_blocked=False` 를 명시한다.
     if checks.get("pii_blocked") is not False:
         return "pii_blocked"
     if checks.get("bot_generated") is not False:
@@ -108,12 +117,16 @@ def run_approved_batch(
     store,
     router,
     load_image,
-    approval_id_for,
     checks_for,
     dispatch_expires_at: datetime,
+    approval_id_for=None,
+    completion_notifier=None,
     limit: int = 50,
 ) -> ImageDescriptionBatch:
-    """현재 정본에서 승인된 후보만 한 번씩 실행한다.
+    """현재 정본에서 보낼 수 있는 후보만 한 번씩 실행한다.
+
+    ``approval_id_for`` 는 옛 건별 승인 경로(호환)다. 주지 않으면 정책 판에 결속된
+    예약을 한다 — 승인 행을 찾지도 만들지도 않는다.
 
     ``load_image(candidate, doc)`` 는 관리 경로에서 bytes와 해시를 다시 확인한
     :class:`ImageInput`을 돌려줘야 한다. ``checks_for`` 는 실행 직전의 ACL·PII·
@@ -151,14 +164,16 @@ def run_approved_batch(
         # `clearance_code` is a coordinator decision aid, not a dispatch fact.
         # Keep the two caller facts and two loader-derived facts only.
         checks = {key: checks.get(key) for key in _STORE_CHECKS}
-        try:
-            approval_id = approval_id_for(candidate)
-        except Exception:  # noqa: BLE001 - DB/provider 본문 없이 고정 코드만 보낸다.
-            items.append(_item(candidate, "blocked", code="approval_lookup_failed"))
-            continue
-        if not approval_id:
-            items.append(_item(candidate, "approval_required", code="approval_missing"))
-            continue
+        approval_id = ""
+        if approval_id_for is not None:
+            try:
+                approval_id = approval_id_for(candidate)
+            except Exception:  # noqa: BLE001 - DB/provider 본문 없이 고정 코드만 보낸다.
+                items.append(_item(candidate, "blocked", code="approval_lookup_failed"))
+                continue
+            if not approval_id:
+                items.append(_item(candidate, "approval_required", code="approval_missing"))
+                continue
         try:
             image = load_image(candidate, doc)
         except Exception as exc:  # noqa: BLE001 - 본문 없는 코드로 접는다
@@ -199,15 +214,20 @@ def run_approved_batch(
                 )
             )
             continue
-        items.append(
-            _item(
-                candidate,
-                run.state,
-                code=run.code,
-                job_id=run.job_id,
-                revision_id=run.revision_id,
-            )
+        item = _item(
+            candidate,
+            run.state,
+            code=run.code,
+            job_id=run.job_id,
+            revision_id=run.revision_id,
         )
+        items.append(item)
+        # Notification is only an acknowledgement of an already-published
+        # search projection.  It never changes the worker result and cannot
+        # cause a second provider call when its local outbox is unavailable.
+        if run.revision_id and candidate.message_ts and completion_notifier is not None:
+            with contextlib.suppress(Exception):
+                completion_notifier(item)
 
     return ImageDescriptionBatch(
         selected=len(selection.candidates),
@@ -227,27 +247,16 @@ def run_cleared_batch(
     dispatch_expires_at: datetime,
     now: datetime,
     limit: int = 50,
+    completion_notifier=None,
 ) -> ImageDescriptionBatch:
-    """DB 정책과 사람 안전 판정을 다시 읽어 승인된 원본만 실행한다.
+    """DB 정책과 현재 정본을 다시 읽어 보낼 수 있는 원본만 실행한다.
 
-    정책·clearance는 모델 호출 권한의 서로 다른 축이다. 이 함수는 현재 정책을 한 번
-    읽고, 후보마다 그 정책과 정확히 결속된 active clearance를 조회한 뒤에만 원본을
-    연다. :func:`run_approved_batch`와 저장소가 예약 시 같은 사실을 다시 검사하므로,
-    중간에 정책이나 승인이 바뀌면 호출은 닫히는 쪽으로 끝난다.
+    이 함수는 현재 정책을 한 번 읽고, 후보마다 정본 좌표·원본 해시·현재 ACL 을 확인한
+    뒤에만 원본을 연다. 이미지별 PII clearance·건별 approval 은 조회하지 않는다
+    (2026-11-20 오너 결정). :func:`run_approved_batch`와 저장소가 예약·dispatch 시
+    정책 판을 다시 대조하므로, 중간에 정책이 바뀌면 호출은 닫히는 쪽으로 끝난다.
     """
     policy, _config, _sources = store.effective_policy(workspace)
-
-    def approval_id_for(candidate) -> str:
-        return store.active_approval_id(
-            workspace=candidate.workspace,
-            channel=candidate.channel_id,
-            file_id=candidate.file_id,
-            original_sha256=candidate.original_sha256,
-            provider=policy.provider,
-            model=policy.model,
-            policy_revision=policy.revision,
-            prompt_revision=PROMPT_REVISION,
-        )
 
     def checks_for(candidate, doc) -> dict:
         if policy.enabled is not True or policy.workspace_enabled is not True:
@@ -257,27 +266,14 @@ def run_cleared_batch(
                 "bot_generated": False,
                 "clearance_code": "image_description_disabled",
             }
-        assessment = store.active_clearance(
-            workspace=candidate.workspace,
-            channel_id=candidate.channel_id,
-            file_id=candidate.file_id,
-            original_sha256=candidate.original_sha256,
-            provider=policy.provider,
-            model=policy.model,
-            policy_revision=policy.revision,
-        )
-        clearance = clear_for_dispatch(
-            candidate,
-            doc=doc,
-            assessment=assessment,
-            provider=policy.provider,
-            model=policy.model,
-            policy_revision=policy.revision,
-            now=now,
-        )
-        return clearance.as_checks() | {
+        code = verify_current_access(candidate, doc=doc)
+        return {
+            "access_verified": code == "",
+            # 이미지별 PII 판별은 전송 전제가 아니다(2026-11-20 오너 결정). 기본값에
+            # 기대지 않고 이 자리에서 명시한다 — 반환 텍스트는 저장 전 마스킹·가드를 지난다.
+            "pii_blocked": False,
             "bot_generated": False,
-            "clearance_code": clearance.code,
+            "clearance_code": code,
         }
 
     def open_original(candidate, doc) -> ImageInput:
@@ -297,9 +293,9 @@ def run_cleared_batch(
         store=store,
         router=router,
         load_image=open_original,
-        approval_id_for=approval_id_for,
         checks_for=checks_for,
         dispatch_expires_at=dispatch_expires_at,
+        completion_notifier=completion_notifier,
         limit=limit,
     )
 

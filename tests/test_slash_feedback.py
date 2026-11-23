@@ -113,7 +113,41 @@ def test_natural_language_feedback_uses_the_same_log(tmp_path):
     (event,) = _events(tmp_path)
     assert event["qa_record_id"] == rec.record_id
     assert event["text"].startswith("과거 자료보다")
-    assert "피드백으로 판단" in reply
+    assert "피드백으로 기록" in reply
+
+
+def test_feedback_is_offered_to_personal_memory_with_the_exact_prior_row(tmp_path):
+    bot = _bot(tmp_path)
+    rec = _answered(bot)
+    memory = Mock()
+    memory.remember.return_value = Mock(saved=True, memory_id=7)
+    memory.remember.return_value.decision.kind = "preference"
+    bot._user_memory_service_obj = memory
+
+    bot._record_slash_feedback(
+        user_id="U1", channel_id="C1", text="앞으로 간단하게 답해줘"
+    )
+
+    memory.remember.assert_called_once()
+    args, kwargs = memory.remember.call_args
+    assert args == ("앞으로 간단하게 답해줘",)
+    assert kwargs["workspace"] == "pilot"
+    assert kwargs["user_id"] == "U1"
+    assert kwargs["prior"]["record_id"] == rec.record_id
+    assert kwargs["prior"]["user"] == "U1"
+
+
+def test_feedback_without_a_prior_answer_cannot_gain_lineage(tmp_path):
+    bot = _bot(tmp_path)
+    memory = Mock()
+    memory.remember.return_value = Mock(saved=False)
+    bot._user_memory_service_obj = memory
+
+    bot._record_slash_feedback(
+        user_id="U1", channel_id="C1", text="앞으로 간단하게 답해줘"
+    )
+
+    assert memory.remember.call_args.kwargs["prior"] is None
 
 
 def test_last_answer_lookup_ignores_other_channels(tmp_path):

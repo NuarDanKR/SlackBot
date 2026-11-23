@@ -416,6 +416,13 @@ ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS decision_id text NOT NULL D
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS task_index integer NOT NULL DEFAULT 0;
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS task_kind text NOT NULL DEFAULT '';
 ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS required_capability text NOT NULL DEFAULT '';
+-- 어느 Slack 봇이 받은 질문인지(tybot·vipbot). 두 봇이 같은 워크스페이스·전문 봇을 쓴다.
+-- 빈 값은 이 열이 생기기 전 기록이다.
+ALTER TABLE specialist_call ADD COLUMN IF NOT EXISTS bot text NOT NULL DEFAULT '';
+-- 열이 생기기 전 기록을 모델 이름(Opus)으로 VIPBot 에 채우던 보정은 뺐다(2026-11-18).
+-- TYBot 도 `--model=claude-opus-…` 로 물으면 Opus 를 써서 TYBot 질문이 VIPBot 으로 잘못
+-- 표시됐다. 이미 채운 기록은 scripts/fix_specialist_call_bot.py 가 감사기록으로 바로잡는다.
+CREATE INDEX IF NOT EXISTS specialist_call_bot_at ON specialist_call (bot, at DESC);
 ALTER TABLE specialist_call DROP CONSTRAINT IF EXISTS specialist_call_task_index_check;
 ALTER TABLE specialist_call ADD CONSTRAINT specialist_call_task_index_check
     CHECK (task_index >= 0);

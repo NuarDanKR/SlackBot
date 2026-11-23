@@ -93,10 +93,14 @@ kind 를 하나 고른다:
   (예: "이전에 네가 했던 답변 기억나?", "아까 뭐라고 했지?", "우리 대화 기억해?",
    "맥락 유지돼?", "내가 전에 물어본 거 알아?")
   주의: 봇의 연결·가동 상태(status)와 다르다. '기억·이전 답변·대화 맥락'을 묻는 것만 memory 다.
-- help: **봇 자신의** 사용법·명령어·기능을 묻는 질문 (예: "뭘 할 수 있어?", "명령어 알려줘")
+- help: **봇 자신의** 사용법·명령어·기능을 묻는 질문 (예: "뭘 할 수 있어?", "명령어 알려줘",
+  "캔버스로 받으려면 어떻게 해?")
   주의: 업무 방식에 대한 조언 요청은 help 가 아니라 advice 다
-- feedback: TYBot의 이전 답변·검색 방식·근거 선택이 틀렸거나 개선되어야 한다는 의견
-  (예: "과거 자료 말고 최신 자료를 가져오는 게 좋겠어", "방금 답변은 다른 현장 내용이야")
+  주의: 봇이 **요청대로 하지 않았다는 불만·항의**는 help 가 아니라 feedback 이다.
+  질문 모양("왜 ~ 안 해?", "~하라는데 이유가 뭐야?")이어도 봇 동작을 탓하면 feedback 이다.
+- feedback: TYBot의 이전 답변·검색 방식·근거 선택·**답변 형식**이 틀렸거나 개선되어야 한다는 의견
+  (예: "과거 자료 말고 최신 자료를 가져오는 게 좋겠어", "방금 답변은 다른 현장 내용이야",
+   "표와 canvas로 답하라는데 자꾸 안 하는 이유가 뭐야?", "왜 맨날 메시지로만 답해?")
   주의: 업무 자체의 개선 방향을 묻는 질문은 advice 다. TYBot 동작에 대한 의견만 feedback 이다.
 - summary: 특정 키워드가 아니라 **범위 전체의 내용·진행 상황**을 알고 싶은 질문
   (예: "요약해줘", "이번주 어땠어", "무슨 일 있었어", "프로젝트 어디까지 갔어",
@@ -188,6 +192,7 @@ CANVAS_CAPABILITY_RE = re.compile(
 # "이전에 네가 했던 답변" 류가 '(너) ... 상태' 패턴에 걸려 status 로 새는 일이 있었다.
 MEMORY_RE = re.compile(
     r"(기억(나|해|하|되|할|은|을|이)|까먹|잊었|"
+    r"(?:내|개인|저장된)\s*(?:선호\s*)?기억|기억\s*(?:목록|보여|삭제|철회)|"
     r"이전\s*(에)?\s*(한|했던|말한|답변|대화)|아까\s*(뭐|한|했던|말)|방금\s*(뭐|한|말)|"
     r"previous\s*(answer|reply)|"
     r"(대화|답변|맥락|컨텍스트|context)\s*(를|을|이)?\s*(유지|기억|저장|남|알)|"
@@ -844,6 +849,18 @@ def plan_by_rule(text: str) -> list[Intent]:
 
 _DETERMINISTIC_PLAN_KINDS = frozenset({"status", "help", "ingest", "ingest_all"})
 
+#: 규칙으로 확정해도 되는 「짧은 명령」 의 최대 길이(공백·구두점·멘션 제외).
+#: `도움말`·`상태`·`연결 상태 확인해줘` 는 들어오고, 문장으로 된 질문·불만은
+#: 넘는다. 넘으면 LLM 이 맥락과 함께 판단한다(2026-11-19 오너: 불만을 기계가
+#: 접수하지 말고 LLM 이 판단해 안내한다).
+BARE_COMMAND_MAX_CHARS = 12
+_COMMAND_NOISE_RE = re.compile(r"<@[^>]+>|[\s?!.,~…·]+")
+
+
+def is_bare_command(text: str) -> bool:
+    """사람이 명령어처럼 짧게 친 것인가. 문장이면 거짓이다."""
+    return 0 < len(_COMMAND_NOISE_RE.sub("", text or "")) <= BARE_COMMAND_MAX_CHARS
+
 
 def _deterministic_plan(text: str) -> list[Intent] | None:
     """LLM이 더할 의미가 없는 **단일 의도**만 확정한다.
@@ -857,6 +874,11 @@ def _deterministic_plan(text: str) -> list[Intent] | None:
         return None
     task = classify_by_rule(body)
     if task.kind not in _DETERMINISTIC_PLAN_KINDS:
+        return None
+    # 도움말·상태는 **짧은 명령**일 때만 규칙으로 확정한다. 「표와 canvas 사용해
+    # 답변하라는데 왜 자꾸 안 해?」 가 `HELP_RE` 에 걸려 맥락도 안 보고 전체 사용법이
+    # 나갔다(2026-11-19 VIPBot). 불만인지 사용법 질문인지는 LLM 이 맥락과 함께 본다.
+    if task.kind in ("help", "status") and not is_bare_command(body):
         return None
     # Canvas·첨부·폴더를 근거로 읽는지 묻는 것은 단순 사용법이 아니라 **읽기
     # 범위 계약**이다. 이전 대화의 생략형도 있어 planner가 맥락과 함께 판정한다.
@@ -1167,8 +1189,13 @@ def plan(
     thread_has_refs: bool = False,
     specialists=None,
     allow_rule_fallback: bool = True,
+    planner_model: str = "",
 ) -> list[Intent]:
     """확정 명령은 규칙으로, 나머지는 LLM으로 하위질문 목록을 분해한다.
+
+    `planner_model` 은 봇 등급의 판단 모델이다(B-96: TYBot 은 기본 저가 모델, VIPBot 은
+    Sonnet). 비우면 `CLASSIFIER_MODEL`.
+
 
     라벨 하나만 돌려주던 예전 구조에서는 "기억나? 그리고 전산팀은 무슨 일 있어?" 처럼
     두 가지를 물으면 **한쪽이 처리 경로에 도달조차 하지 못했다.** 분해를 분류기 책임으로
@@ -1199,7 +1226,7 @@ def plan(
     # 후보마다 새 시간을 주면 후보 수만큼 느려진다.
     clock = _monotonic
     ends_at = clock() + PLANNER_DEADLINE_SECONDS
-    for model in (CLASSIFIER_MODEL, None):
+    for model in (planner_model or CLASSIFIER_MODEL, None):
         try:
             resp = router.complete(
                 messages,

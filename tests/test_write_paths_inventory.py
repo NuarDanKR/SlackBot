@@ -53,6 +53,9 @@ WRITE_PATHS: dict[str, str] = {
     "src/tybot/archive/dm_consumer.py": "out-of-scope",
     # v1 -> v2 이행. 채널 단위가 아니라 아카이브 전체를 옮긴다.
     "src/tybot/archive/migrate.py": "out-of-scope",
+    # 격리한 옛 아카이브를 현재 레이아웃으로 합치는 오프라인 이행 도구. Slack 을
+    # 읽지 않고, 좌표·ACL·첨부 revision 사전검사를 모두 통과해야만 쓴다.
+    "src/tybot/archive/legacy_promote.py": "out-of-scope",
     # 레이아웃 실측. 임시 경로에만 쓴다.
     "scripts/archive_layout_bench.py": "out-of-scope",
     # 시험 fixture 생성기. **명령줄로 받은 디렉터리에만** 쓴다 — 운영 아카이브 경로를
@@ -118,6 +121,37 @@ def test_the_gated_paths_actually_call_the_gate():
         source = (REPO / name).read_text(encoding="utf-8")
 
         assert GATE_CALL.search(source), name
+
+
+#: `ARCHIVE_DIR`(운영 루트)를 기본값으로 받아 **옛 배치**(`channel_directory` 없이)로
+#: 쓰는 Master·수동 경로. Slack 을 읽거나 파일을 바꾸기 **전에** 운영 루트인지 물어야
+#: 한다(B-99). `writer.ingest` 도 같은 판정으로 거절하지만, 거기까지 가면 Slack 호출·
+#: 변환 비용을 이미 쓴 뒤이고 실패가 예외 로그 한 줄로만 남는다.
+#:
+#: `pilot.py` 는 여기 없다 — 채널은 `master_may_write`, DM 은 `dm_directory` 로 가고,
+#: 남은 자리는 `writer.ingest` 경비가 막는다. `drain_conversion_queue.py` 는 B-99 C 몫이다.
+LEGACY_LAYOUT_PREFLIGHT = (
+    "src/tybot/collect.py",
+    "scripts/backfill_channel_history.py",
+    "scripts/sync_channel_files.py",
+    "scripts/convert_staged_attachments.py",
+)
+PREFLIGHT_CALL = re.compile(r"legacy_layout_refusal\s*\(")
+
+
+def test_legacy_layout_writers_ask_about_the_live_root_first():
+    for name in LEGACY_LAYOUT_PREFLIGHT:
+        source = (REPO / name).read_text(encoding="utf-8")
+
+        assert PREFLIGHT_CALL.search(source), name
+
+
+def test_the_writer_guards_its_legacy_fallback():
+    """마지막 관문. 옛 기본 경로로 떨어지는 쓰기는 `ingest` 안에서 운영 루트를 묻는다."""
+    source = (REPO / "src/tybot/archive/writer.py").read_text(encoding="utf-8")
+
+    assert "raise LegacyLayoutRefused(" in source
+    assert PREFLIGHT_CALL.search(source)
 
 
 def test_the_detector_finds_a_real_call():

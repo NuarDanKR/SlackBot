@@ -108,7 +108,18 @@ def test_apply_publishes_each_file_before_starting_the_next(tmp_path, monkeypatc
         SimpleNamespace(WebClient=lambda **kwargs: SimpleNamespace()),
     )
 
-    stats = sync.sync_workspace(cfg, str(tmp_path), apply=True, pace=0)
+    # B-99: 주인 기록이 없으면 Master 는 쓰지 않고, 운영 루트에는 옛 배치로 쓰지 않는다.
+    # 이 시험은 파일 순서를 보므로 Master 몫 채널·별도 루트를 전제로 둔다.
+    from tybot.archive.archiving_state import ChannelMode, ChannelState, WriterOwner
+    from tybot.archive.write_owner import decide
+
+    owner = SimpleNamespace(master_may_write=lambda channel_id: decide(
+        ChannelState("pilot", channel_id, ChannelMode.OFF, WriterOwner.MASTER),
+        WriterOwner.MASTER,
+    ))
+    monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path / "live-elsewhere"))
+
+    stats = sync.sync_workspace(cfg, str(tmp_path), apply=True, pace=0, owner=owner)
 
     assert events == [
         ("collect", "F1"),

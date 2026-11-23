@@ -9,8 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from tybot.archive.image_description import (
+    ERROR_MODEL_ERROR,
+    ERROR_MODEL_TIMEOUT,
     PROMPT_REVISION,
     STATUS_DESCRIBED,
+    STATUS_FAILED,
     STATUS_UNCERTAIN,
     ImageDescription,
     ImageUsage,
@@ -159,6 +162,7 @@ def test_dispatch_identity_ignores_only_a_policy_resave() -> None:
 
 
 def test_missing_fresh_checks_are_fail_closed() -> None:
+    # 빠진 사실은 전부 닫힌 쪽이다. 이미지 정책 경로는 `pii_blocked=False` 를 명시한다.
     assert ImageDescriptionStore._checks({}) == {
         "source_verified": False,
         "access_verified": False,
@@ -181,8 +185,14 @@ def test_indexed_sources_include_withheld_revisions_and_can_be_channel_scoped() 
     )
     query = next(event for event in connection.events if isinstance(event, tuple))
     assert "archiver_image_description_revision" in query[0]
+    # 전사만 남은 원본도 이미 처리한 것으로 본다(B-81 후속). 안 그러면 재전송된다.
+    assert "archiver_image_transcript_revision" in query[0]
+    assert (
+        " UNION SELECT workspace,channel_id,original_sha256 "
+        "FROM archiver_image_transcript_revision WHERE workspace=%s AND channel_id=%s"
+    ) in query[0]
     assert "status" not in query[0]
-    assert query[1] == ("tyit", "C1")
+    assert query[1] == ("tyit", "C1", "tyit", "C1")
 
 
 def test_indexed_sources_require_a_workspace() -> None:
@@ -470,6 +480,28 @@ def test_an_unknown_cost_blocks_publication_and_disables_the_free_claim() -> Non
     assert not _inserts(connection)
     job_update = next(event for event in _updates(connection) if "description_job" in event[0])
     assert job_update[1][0:2] == ("blocked", "cost_unverified")
+    catalog_update = next(event for event in _updates(connection) if "model_catalog" in event[0])
+    assert catalog_update[1] == ("approved-provider", "free-vision-v1")
+
+
+@pytest.mark.parametrize("error_code", [ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR])
+def test_a_transport_failure_without_a_provider_receipt_is_terminal_and_disables_free_claim(
+    error_code: str,
+) -> None:
+    connection = ScriptedConnection([GLOBAL, JOB])
+    result = _result(
+        status=STATUS_FAILED,
+        description="",
+        tags=(),
+        error_code=error_code,
+        usage=ImageUsage(model="free-vision-v1", elapsed_ms=30_000),
+    )
+
+    assert ImageDescriptionStore(connection).finish_and_publish("job-1", result) == ""
+    assert not _inserts(connection)
+    job_update = next(event for event in _updates(connection) if "description_job" in event[0])
+    assert job_update[1][0:2] == ("failed", f"{error_code},cost_unverified")
+    assert job_update[1][2:4] == (None, None)
     catalog_update = next(event for event in _updates(connection) if "model_catalog" in event[0])
     assert catalog_update[1] == ("approved-provider", "free-vision-v1")
 

@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -724,9 +724,10 @@ def list_answer_records(
     workspace: str = "",
     result: str = "",
     asker: str = "",
+    bot: str = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict:
-    """답변 현황과 원본 목록 메타데이터.
+    """답변 현황과 원본 목록 메타데이터. `bot` 으로 TYBot·VIPBot 을 가른다.
 
     관리자는 전체를 보고, 그 외 사용자는 본인 질문과 자신이 지정된 검토 채널만 본다.
     질문·답변 본문은 목록에 절대 싣지 않는다.
@@ -742,6 +743,7 @@ def list_answer_records(
         workspace=workspace,
         result=result,
         asker=asker,
+        bot=bot.strip().lower()[:40],
     )
     feedback = answer_records.feedback_rows(
         max(1, (reader._now().date() - period_start).days + 1)
@@ -772,6 +774,8 @@ def answer_record_detail(record_key: str, response: Response, user: User) -> dic
     row, _scope = answer_records.find_visible(user, record_key)
     if row is None:
         raise HTTPException(status_code=404, detail="열람할 수 있는 질문·답변 기록이 없습니다.")
+    # VIPBot 질문은 질문한 본인만 본문을 본다. 그 외에는 처리 기록만.
+    show_body = answer_records.body_visible(row, user)
     _audit_event(
         actor=user.email,
         category="answer-record",
@@ -780,11 +784,11 @@ def answer_record_detail(record_key: str, response: Response, user: User) -> dic
         target_id=record_key,
         workspace=str(row.get("workspace") or ""),
         outcome="succeeded",
-        metadata={"viewer": "admin" if user.is_admin else "reviewer"},
+        metadata={"viewer": "admin" if user.is_admin else "reviewer", "body": show_body},
     )
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
-    return answer_records.detail(row, answer_records.feedback_rows())
+    return answer_records.detail(row, answer_records.feedback_rows(), show_body=show_body)
 
 
 @app.get("/api/diagnostics/archive")
@@ -1464,20 +1468,32 @@ def specialist_calls(
     user: User,
     specialist: str = "",
     result: str = "",
+    bot: str = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict:
+    """봇 분류 상태 — 질문마다 어느 봇이 받았고 전문 봇을 불렀는지.
+
+    전문 봇 호출(`specialist_call`)에 **직접 답한 질문**(감사기록)을 합쳐 시각순으로 준다.
+    `bot` 으로 TYBot·VIPBot 을, `result=direct` 로 직접 답한 질문만 가른다.
+    """
     _require_developer(user)
-    try:
-        rows = specialist_store.list_calls(
-            allowed=None if user.all_workspaces else user.workspaces,
-            specialist=specialist.strip().lower(),
-            result=result.strip().lower(),
-            limit=limit,
-        )
-    except specialist_store.SpecialistStoreError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {
-        "calls": [
+    specialist_key = specialist.strip().lower()
+    result_key = result.strip().lower()
+    bot_key = bot.strip().lower()[:40]
+    allowed = None if user.all_workspaces else user.workspaces
+    rows: list[dict] = []
+    if result_key != answer_records.DIRECT_RESULT:
+        try:
+            rows = specialist_store.list_calls(
+                allowed=allowed,
+                specialist=specialist_key,
+                result=result_key,
+                bot=bot_key,
+                limit=limit,
+            )
+        except specialist_store.SpecialistStoreError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    calls = [
             {
                 "id": str(row["id"]), "at": row["at"], "workspace": row["workspace"],
                 "specialist": row["specialist"], "routingReason": row["routing_reason"],
@@ -1489,10 +1505,35 @@ def specialist_calls(
                 "taskIndex": int(row.get("task_index") or 0),
                 "taskKind": str(row.get("task_kind") or ""),
                 "requiredCapability": str(row.get("required_capability") or ""),
+                # 빈 값은 봇을 남기기 전 기록이다(또는 Slack 밖에서 부른 호출).
+                "bot": str(row.get("bot") or ""),
+                "answerResult": "",
             }
             for row in rows
-        ]
-    }
+    ]
+    if not specialist_key and result_key in ("", answer_records.DIRECT_RESULT):
+        called = {call["qaRecordKey"] for call in calls if call["qaRecordKey"]}
+        try:
+            # 전문 봇 호출 쪽 기록이 비어 있는 오래된 질문에는 그 호출의 봇을 모른다.
+            # 직접 답한 질문의 봇은 감사기록 폴더가 정답이다.
+            calls.extend(answer_records.direct_answer_rows(
+                exclude_keys=called, allowed=allowed, bot=bot_key, limit=limit,
+            ))
+        except OSError as exc:
+            logger.warning("직접 답변 기록을 읽지 못했습니다: %s", exc)
+        calls.sort(key=lambda call: _sort_at(call["at"]), reverse=True)
+        calls = calls[:limit]
+    return {"calls": calls}
+
+
+def _sort_at(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 @app.post("/api/specialists/requests")
@@ -3374,6 +3415,39 @@ image_description_policy_router = image_description_policy_routes.build_router(
 )
 app.include_router(image_description_policy_router)
 
+# B-80 PDF 쪽 Vision 전사 — 정책·요금표·예산과 현황. 정산 근거(요금표)를 콘솔에서 고친다.
+from . import pdf_vision_routes  # noqa: E402
+
+pdf_vision_router = pdf_vision_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(pdf_vision_router)
+
+# 사람이 남긴 사실 정정(2026-11-20) — 원문 권한자 모두에게 보이므로 관리자가 보고 철회한다.
+from . import fact_correction_routes  # noqa: E402
+
+fact_correction_router = fact_correction_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(fact_correction_router)
+
+# B-81 Vision provider API 키는 전용 DB에 암호화하고 mask만 조회한다.
+from . import image_description_secret_routes  # noqa: E402
+
+image_description_secret_router = image_description_secret_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(image_description_secret_router)
+
 # B-12 임베딩 색인 운영(모델 등록·워크스페이스 승인·현황). 쓰기 보호와 감사는
 # 이미지 설명 정책과 같은 방식으로 주입한다 — 순환 import 를 피한다.
 from . import embedding_routes  # noqa: E402
@@ -3385,6 +3459,30 @@ embedding_router = embedding_routes.build_router(
     audit_event=_audit_event,
 )
 app.include_router(embedding_router)
+
+# B-89 후속: 변환 런타임 정책(rhwp 앱 ID·야간 재점검 숫자)의 DB 정본. admin 전용,
+# 저장은 전체 워크스페이스 관리자만. 같은 방식으로 의존성을 주입한다.
+from . import conversion_policy_routes  # noqa: E402
+
+conversion_policy_router = conversion_policy_routes.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(conversion_policy_router)
+
+# B-93 2단계: 채널×일 검색 다이제스트 현황·분량 미리보기·소급. 본문은 내보내지 않는다.
+from . import channel_digest_routes  # noqa: E402
+
+app.include_router(
+    channel_digest_routes.build_router(
+        current_user=current_user,
+        require_admin=_require_admin,
+        check_write_request=_check_write_request,
+        audit_event=_audit_event,
+    )
+)
 
 # 사용자 목록 · 봇 사용 권한(vipbot 등). admin 전용.
 from . import user_access_routes  # noqa: E402

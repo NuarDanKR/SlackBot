@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from collections import Counter
 from collections.abc import Mapping
@@ -29,6 +30,7 @@ from .intent import (
     parse_period,
     plan,
 )
+from .prior_answer import with_prior_answer
 
 logger = logging.getLogger("tybot.answer")
 
@@ -41,10 +43,16 @@ SYSTEM_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것�
 3. 사람 발언과 문서 내용은 구분해서 쓴다. 숫자가 엇갈리면 두 시점을 함께 표기한다.
    누군가의 평가·의견·판단을 옮길 때는 발언자와 날짜를 함께 적고, 봇 자신의
    평가처럼 바꾸어 쓰지 않는다.
-4. <원문>으로 답할 수 없으면 "아카이브에서 근거를 찾지 못했습니다"라고만 답한다.
+4. <원문>에 질문과 관련된 내용이 **일부라도** 있으면 그것으로 답한다. 원문에 있는 것은
+   그대로 보이고, 원문에서 확인되지 않는 부분만 끝에 "원문에서 확인되지 않음: …"으로 짧게
+   밝힌다. 질문과 표현이 달라도(재무목표↔경영목표·가이던스·KPI, 자금수지↔자금계획·시재)
+   같은 내용이면 근거로 쓴다. 이때도 1·2번은 그대로다 — 원문에 없는 숫자를 채우지 않는다.
+   **관련 내용이 하나도 없을 때만** "아카이브에서 근거를 찾지 못했습니다"라고 답한다.
+   일부를 답하면서 첫 문장을 "근거를 찾지 못했습니다"로 시작하지 않는다.
 5. 답변은 한국어, 간결하게. 출처 줄은 시스템이 붙이므로 네가 쓰지 않는다.
 6. 출력은 Slack 메시지다. `#` 제목과 `**굵게**`는 Slack에서 글자 그대로 보이니 쓰지 않는다.
    굵게는 별표 하나(*굵게*), 목록은 `• `, 구분선은 쓰지 않는다.
+7. 누군가 봇에게 같은 것을 **물어본 기록**(질문 문장 자체)은 근거가 아니다. 답이 든 줄만 쓴다.
 """
 
 SUMMARY_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것보다 나쁘다.
@@ -109,6 +117,113 @@ class AnswerPrompts:
     specialist: str | None = None
 
 
+def _with_user_memory(prompt: str, ctx: RequestContext) -> str:
+    memory = str(getattr(ctx, "user_memory_prompt", "") or "").strip()
+    return f"{prompt}\n\n{memory}" if memory else prompt
+
+
+#: 근거 폭 기본값(B-93, 모든 봇 공통). 엔진 기본값은 시험 호환을 위해 그대로 두고, 운영 봇을
+#: 만드는 자리(`slack/pilot.py`·`vip_workspace.py`)가 이 값을 넘긴다.
+BOT_MAX_HITS = 40
+BOT_PER_DOCUMENT_HITS = 4
+#: VIPBot 은 근거 채널이 관리자가 고른 집합이라 늘 전수로 보고, 종합 질문에 대비해 더 넓게 본다.
+VIP_MAX_HITS = 60
+VIP_PER_DOCUMENT_HITS = 4
+#: 봇 등급별 모델(B-96, 2026-11-12 오너 결정). VIPBot 은 모든 단계가 TYBot 보다 한 단계 위다.
+#: | 단계 | TYBot | VIPBot |  판단(분해·전문 봇 선택) Haiku → Sonnet,  Hermes 등 전문 봇 Sonnet → Opus.
+#: 전문 봇 모델은 Hermes 서버 `allowed_models` 안에 있어야 한다(밖이면 400).
+TYBOT_SPECIALIST_MODEL = "claude-sonnet-5-5"
+VIP_PLANNER_MODEL = "claude-sonnet-5-5"
+VIP_SPECIALIST_MODEL = "claude-opus-5-5"
+#: TYBot 전수 탐색 문턱(보이는 채널 원문 줄 수). 넘으면 DB 색인을 쓴다.
+EXHAUSTIVE_MAX_LINES_ENV = "TYBOT_EXHAUSTIVE_MAX_LINES"
+DEFAULT_EXHAUSTIVE_MAX_LINES = 150_000
+
+
+def exhaustive_max_lines(environ=None) -> int:
+    """설정값. 틀린 값은 기본값, 0 은 「전수 탐색 끔」."""
+    raw = (os.environ if environ is None else environ).get(EXHAUSTIVE_MAX_LINES_ENV, "")
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return DEFAULT_EXHAUSTIVE_MAX_LINES
+    return max(0, value)
+
+
+#: 검색어에서 뺄 **요청 표현**. 답의 모양을 말할 뿐 무엇을 찾는지는 말하지 않는다.
+#: 남겨 두면 「정리」·「표」·「설명」 이 많이 든 문서가 근거 자리를 차지한다(2026-11-12
+#: VIPBot 실측: 같은 질문이 새 ESG 문서에 밀려 재무목표 문서를 놓쳤다).
+REQUEST_WORDS = frozenset({
+    "정리", "정리해", "정리해서", "정리해줘", "정리해주세요",
+    "표", "표로", "표로서",
+    "설명", "설명해", "설명해줘", "설명해주세요", "설명하라",
+    "알려줘", "알려주세요", "말해줘", "보여줘", "찾아줘", "작성해", "작성해줘", "작성해주세요",
+    "요약", "요약해", "요약해줘", "요약해주세요", "해주세요", "해줘", "주세요",
+    "반드시", "가능한", "가능하면", "자세히", "간단히",
+})
+
+#: 회사 이름은 거의 모든 문서에 있어 검색어로는 잡음이다(2026-11-12 실측: 「태영건설 근무규정」
+#: 이 사업법인관리 첨부를 끌어왔다). 질문이 회사 이름뿐이면 그대로 쓴다.
+COMPANY_WORDS = frozenset({"태영건설", "태영", "㈜태영건설", "(주)태영건설"})
+
+_LATIN_JOSA = re.compile(r"^([a-z0-9][a-z0-9.\-]*)(?:을|를|은|는|이|가|의|에|로|으로|와|과|도|만)$")
+
+
+def focus_query(question: str) -> str:
+    """검색에 쓸 낱말만. 요청 표현을 빼고, `top5를` 같은 영문·숫자 뒤 조사를 뗀다.
+
+    다 빼면 아무것도 안 남는 질문(「정리해줘」)은 원래 낱말을 그대로 쓴다 — 검색어가
+    비면 「근거 없음」 이 된다.
+    """
+    from . import search_index
+
+    tokens = search_index.tokens_of(question)
+    kept = []
+    for token in tokens:
+        match = _LATIN_JOSA.match(token)
+        word = match.group(1) if match else token
+        if word not in REQUEST_WORDS and word not in COMPANY_WORDS:
+            kept.append(word)
+    return " ".join(dict.fromkeys(kept or tokens))
+
+
+#: 질문 메아리 판정: 이 길이를 넘는 줄은 질문이 아니라 본문으로 본다.
+_ECHO_MAX_CHARS = 200
+#: 질문 낱말 중 이 비율 이상이 줄에 있으면 「같은 질문」 으로 본다.
+_ECHO_COVERAGE = 0.8
+#: 메아리를 거를 여유분. 같은 질문을 여러 번 한 DM 이면 메아리가 이만큼 섞인다.
+_ECHO_SPARE = 20
+
+
+def is_question_echo(query: str, text: str) -> bool:
+    """이 줄이 **누군가 봇에게 같은 것을 물어본 기록**인가 (2026-11-12 실측).
+
+    DM·채널에 남은 사람의 이전 질문(「…재무목표 Top5를 정리해 표로 설명」)은 질문 낱말을
+    전부 가지고 있어 점수가 가장 높다. 그 줄이 근거 자리를 차지하면 모델은 「원문에는 요청한
+    기록만 있다」 며 근거 없음으로 닫는다.
+
+    셋 다 맞을 때만 메아리다 — 짧고, 요청 표현(정리해·설명·알려주세요·?)이 있고, 질문
+    낱말을 거의 다 가진 줄. 「2026년 재무목표 1 부채비율 200% 이하」 같은 본문은 남는다.
+    """
+    from . import search_index
+
+    body = (text or "").strip()
+    if not body or len(body) > _ECHO_MAX_CHARS:
+        return False
+    words = set()
+    for token in search_index.tokens_of(body):
+        match = _LATIN_JOSA.match(token)
+        words.add(match.group(1) if match else token)
+    if not (words & REQUEST_WORDS) and not body.endswith("?"):
+        return False
+    wanted = list(dict.fromkeys(search_index.tokens_of(focus_query(query))))
+    if len(wanted) < 2:
+        return False
+    compact = body.lower().replace(" ", "")
+    covered = sum(1 for word in wanted if word in compact)
+    return covered / len(wanted) >= _ECHO_COVERAGE
+
+
 def _response_cache_scope(
     ctx: RequestContext,
     hits,
@@ -158,6 +273,10 @@ def _response_cache_scope(
                 else None
             ),
             "preferred_workspaces": sorted(ctx.preferred_workspaces),
+            "user_memory_ids": list(ctx.user_memory_ids),
+            "user_memory_prompt_sha256": hashlib.sha256(
+                ctx.user_memory_prompt.encode("utf-8")
+            ).hexdigest(),
         },
         "evidence": evidence,
     }
@@ -551,7 +670,7 @@ class Answer:
             parts.append(note)
         if self.citations:
             srcs = "\n".join(
-                f"• {_display_citation(c)}" for c in dict.fromkeys(self.citations)
+                f"• {citation}" for citation in _display_citations(self.citations)
             )
             parts.append(f"출처:\n{srcs}")
         return "\n\n".join(parts)
@@ -569,6 +688,38 @@ def _display_citation(citation: str) -> str:
         return citation
     date = match.group("date")
     return f"{match.group('channel')} ({date})" if date else match.group("channel")
+
+
+def _display_citations(citations: list[str]) -> list[str]:
+    """Collapse repeated archive sources into one channel and date range.
+
+    Slack has no native collapsible section.  Keep the minimum verifiable source
+    summary in the message and leave line-level detail to ``근거 보기``.  Links
+    and non-archive citations are never folded because each may open a different
+    original.
+    """
+    channels: dict[str, set[str]] = {}
+    other: list[str] = []
+    for citation in dict.fromkeys(citations):
+        match = ARCHIVE_MD_CITATION_RE.match(citation.strip())
+        if not match:
+            other.append(citation)
+            continue
+        channel = match.group("channel")
+        dates = channels.setdefault(channel, set())
+        if match.group("date"):
+            dates.add(match.group("date"))
+
+    compact: list[str] = []
+    for channel, date_values in channels.items():
+        dates = sorted(date_values)
+        if not dates:
+            compact.append(channel)
+        elif len(dates) == 1:
+            compact.append(f"{channel} ({dates[0]})")
+        else:
+            compact.append(f"{channel} ({dates[0]}~{dates[-1]})")
+    return [*compact, *other]
 
 
 def parse_model_flag(text: str) -> tuple[str | None, str]:
@@ -1143,6 +1294,14 @@ def _blocks_from_hits(hits: list[SearchHit], ctx) -> tuple[list, list, list, int
         doc_citations: list[str] = []
         seen: set[tuple[str, str]] = set()
         for hit in group:
+            if getattr(hit, "revision_id", ""):
+                # PDF 쪽 전사(B-80) — 출처는 원본 PDF 의 **그 쪽**이고 파생 표시가 붙는다.
+                # 파일 단위로 묶으면 다른 쪽이 한 출처로 뭉개진다.
+                cited = hit.citation(with_workspace=workspace != ctx.workspace)
+                if ("vision", cited) not in seen:
+                    seen.add(("vision", cited))
+                    doc_citations.append(cited)
+                continue
             source = hit.line.source_path or hit.doc.path
             date = (hit.line.ts or "").split()[0] if hit.line.ts else ""
             key = (str(source), date)
@@ -1194,6 +1353,11 @@ class AnswerEngine:
         max_output_tokens: int | None = None,
         workspace_labels: Mapping[str, str] | None = None,
         response_cache_namespace: str = "tybot",
+        exhaustive_search: bool = False,
+        per_document_hits: int = 0,
+        exhaustive_max_lines: int = 0,
+        focus_terms: bool = False,
+        planner_model: str = "",
     ) -> None:
         self._store = store
         self._router = router
@@ -1227,6 +1391,17 @@ class AnswerEngine:
         self._sensitivity = sensitivity
         self._max_hits = max_hits
         self._max_lines_per_channel = max_lines_per_channel
+        # 전수 탐색(색인 후보 창을 거치지 않고 보이는 문서 전부를 점수 매김)과 문서당
+        # 근거 줄 상한. VIPBot 이 켠다 — 근거 채널이 관리자가 고른 집합이라 훑을 범위가
+        # 정해져 있고, 「근거 없음」 이 가장 비싼 실패다.
+        self._exhaustive_search = bool(exhaustive_search)
+        self._per_document_hits = max(0, int(per_document_hits))
+        # 0 이면 끔. 0 보다 크면 보이는 채널 줄 수가 그 이하일 때만 전수 탐색(B-93).
+        self._exhaustive_max_lines = max(0, int(exhaustive_max_lines))
+        # 요청 표현(정리해·표로·설명해주세요)을 검색어에서 뺀다. 전수 탐색을 켜면 함께 켠다.
+        self._focus_terms = bool(focus_terms) or self._exhaustive_search
+        # 판단(분해) 모델. 비우면 intent.CLASSIFIER_MODEL(B-96).
+        self._planner_model = str(planner_model or "")
 
     def _output_limit(self, default: int) -> int:
         configured = self._max_output_tokens
@@ -1243,6 +1418,7 @@ class AnswerEngine:
         source_model: str | None,
         source_cost_usd: float,
         cache_scope: str | None = None,
+        user_memory_prompt: str = "",
     ) -> tuple[str, str | None, float, bool]:
         """Apply an optional runtime presentation contract to specialist text.
 
@@ -1254,6 +1430,8 @@ class AnswerEngine:
         original = str(text or "")
         if not prompt:
             return original, source_model, source_cost_usd, False
+        if user_memory_prompt.strip():
+            prompt = f"{prompt}\n\n{user_memory_prompt.strip()}"
         fallback = _specialist_safe_fallback(original)
         try:
             response = self._router.complete(
@@ -1676,6 +1854,22 @@ class AnswerEngine:
             citations.extend(doc_citations)
             specialist_parts.append((block, doc_citations, recent_hits))
 
+        if not scoped:
+            # PDF 쪽 전사(B-80)는 **명시적 문서 질의**일 때만 찾는다 — 주제어(`terms`)나
+            # 문서 이름(`document_query`)이 있을 때. 기간 요약 전체에 전 쪽을 여는 길은
+            # 두지 않는다. 찾는 폭은 `pdf_vision_guide.MAX_PAGES` 로 묶인다.
+            vision_hits = self._summary_vision_hits(
+                [*(terms or []), *wanted_docs], ctx,
+                workspace_filter=workspace_filter, cutoff=cutoff,
+            )
+            if vision_hits:
+                v_blocks, v_citations, v_parts, v_total = _blocks_from_hits(vision_hits, ctx)
+                blocks.extend(v_blocks)
+                citations.extend(v_citations)
+                specialist_parts.extend(v_parts)
+                summary_hits.extend(vision_hits)
+                total += v_total
+
         if not blocks and scoped:
             # 좁혀 물었는데 근거가 안 남았다. **채널 목록으로 넓히지 않는다** —
             # 넓히면 사용자는 자기 질문의 답이 아닌 것을 답으로 받는다(설계 §13).
@@ -1775,6 +1969,7 @@ class AnswerEngine:
                             self._store.root,
                             namespace=self._response_cache_namespace,
                         ),
+                        user_memory_prompt=ctx.user_memory_prompt,
                     )
                 )
                 logger.info(
@@ -1826,7 +2021,7 @@ class AnswerEngine:
             + f"\n</원문>\n\n질문: {question or f'최근 {days}일 진행 상황을 정리해 주세요.'}"
         )
         messages = [
-            Message("system", self._prompts.summary),
+            Message("system", _with_user_memory(self._prompts.summary, ctx)),
             Message("user", summary_prompt),
         ]
         try:
@@ -1882,6 +2077,10 @@ class AnswerEngine:
         model, q = parse_model_flag(question)
         query = " ".join(terms) if terms else q
         found = self._store.search(query, ctx, limit=self._max_hits) if query else []
+        if query:
+            # 판단의 **사내 사실** 근거도 같은 문을 지난다 — 텍스트가 없는 PDF 쪽은 전사가
+            # 유일한 본문이다(B-80). 낱말이 맞는 쪽만, 상한 안에서.
+            found = self._with_pdf_vision_guide(query, found, ctx)
         hits = self._with_seed(extra_hits, found)
 
         if self._specialist is not None:
@@ -1908,6 +2107,7 @@ class AnswerEngine:
                             self._store.root,
                             namespace=self._response_cache_namespace,
                         ),
+                        user_memory_prompt=ctx.user_memory_prompt,
                     )
                 )
                 master_interim = False
@@ -1922,8 +2122,13 @@ class AnswerEngine:
                     try:
                         comment = self._router.complete(
                             [
-                                Message("system", self._prompts.interim_advice),
-                                Message("user", f"{evidence}질문: {q}"),
+                                Message(
+                                    "system",
+                                    _with_user_memory(self._prompts.interim_advice, ctx),
+                                ),
+                                Message(
+                                    "user", with_prior_answer(f"{evidence}질문: {q}", task)
+                                ),
                             ],
                             model=model,
                             sensitivity=self._sensitivity,
@@ -1994,8 +2199,8 @@ class AnswerEngine:
             else "<원문>\n(관련 원문 없음)\n</원문>\n\n"
         )
         messages = [
-            Message("system", self._prompts.advice),
-            Message("user", f"{evidence}질문: {q}"),
+            Message("system", _with_user_memory(self._prompts.advice, ctx)),
+            Message("user", with_prior_answer(f"{evidence}질문: {q}", task)),
         ]
         try:
             resp = self._router.complete(
@@ -2062,6 +2267,7 @@ class AnswerEngine:
             thread_has_refs=thread_has_refs,
             specialists=specialists,
             allow_rule_fallback=allow_rule_fallback,
+            planner_model=self._planner_model,
         )
 
     @property
@@ -2293,8 +2499,18 @@ class AnswerEngine:
                 task=task,
             )
         else:
-            # advice 도 같은 길로 보낸다. 판단 요청이라고 범위를 넓히면 그 순간
-            # 이 질문은 더 이상 후속 질문이 아니다.
+            # 직전 봇 답변을 **지칭 해석용**으로 함께 넘긴다(2026-11-20 오너 결정).
+            # 「위 Top 10 중 …」 은 봇이 고른 목록을 가리킨다. 이 문장은 근거가 아니고,
+            # 직전 답변의 원문 좌표를 지금 전부 다시 연 경우에만 온다(`editing_text`).
+            if followup.editing_text and task is not None and hasattr(task, "prior_answer"):
+                from dataclasses import replace
+
+                task = replace(task, prior_answer=followup.editing_text)
+            # **후속 질문도 범위에 갇히지 않는다**(2026-11-12 오너 결정, 설계 §10 폐기).
+            # 이어 묻는 사람은 맥락과 다른 제3의 질문을 할 수 있다. 「연말 현금시재」 를
+            # 「재무목표」 답의 40줄 안에서만 찾다가 근거 없음이 났다(이강석 14:17·14:19).
+            # 자기 낱말을 가진 질문은 현재 권한으로 새로 찾고, 이전 근거를 함께 둔다.
+            hits = self._widen_followup(q, ctx, intent, hits)
             ans = self.answer(
                 q, ctx, terms=list(intent.terms), evidence_hits=hits, task=task
             )
@@ -2369,6 +2585,178 @@ class AnswerEngine:
             )
         return merged[: self._max_hits + summary_guide.MAX_EXTRA_HITS]
 
+    def _with_digest_guide(self, query: str, hits, ctx) -> list[SearchHit]:
+        """채널×일 다이제스트가 가리킨 날의 **원문 줄**을 검색 후보 뒤에 더한다(B-93 2단계).
+
+        질문 낱말과 문서 낱말이 다를 때(재무목표↔경영목표) 그날 원문을 찾게 한다. 다이제스트
+        문장은 근거로 나가지 않는다 — 더해지는 것은 현재 권한으로 연 원문 줄이다.
+        """
+        from . import digest_guide
+
+        try:
+            extra = digest_guide.expand(self._store, ctx, query)
+        except Exception:
+            logger.warning("다이제스트 길잡이를 쓰지 못했습니다", exc_info=True)
+            return list(hits)
+        if not extra:
+            return list(hits)
+        merged = list(hits)
+        seen = {(str(h.line.source_path or h.doc.path), h.line.lineno) for h in merged}
+        for hit in extra:
+            key = (str(hit.line.source_path or hit.doc.path), hit.line.lineno)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        if len(merged) > len(hits):
+            logger.info(
+                "다이제스트 길잡이로 원문 %d줄을 더했다 ws=%s", len(merged) - len(hits), ctx.workspace,
+            )
+        return merged[: len(hits) + digest_guide.MAX_EXTRA_HITS]
+
+    def _search(self, query: str, ctx) -> list[SearchHit]:
+        """엔진 설정(전수 탐색·문서당 상한)을 적용한 검색. 기본 설정이면 예전과 같다."""
+        if (
+            not self._exhaustive_search
+            and not self._per_document_hits
+            and not self._exhaustive_max_lines
+        ):
+            return self._store.search(query, ctx, limit=self._max_hits)
+        # 질문 메아리(같은 것을 물어본 기록)를 빼고도 근거 수가 줄지 않게 넉넉히 받아 거른다.
+        hits = self._store.search(
+            query, ctx, limit=self._max_hits + _ECHO_SPARE,
+            exhaustive=self._exhaustive_search, per_document=self._per_document_hits,
+            exhaustive_max_lines=self._exhaustive_max_lines,
+        )
+        kept = [hit for hit in hits if not is_question_echo(query, hit.line.text)]
+        echoes = len(hits) - len(kept)
+        hits = kept[: self._max_hits]
+        logger.info(
+            "answer 근거 폭 ws=%s hits=%d docs=%d echoes=%d q=%r",
+            ctx.workspace, len(hits), len({str(h.doc.path) for h in hits}), echoes, query,
+        )
+        return hits
+
+    def _widen_followup(self, question: str, ctx, intent, prior) -> list[SearchHit]:
+        """후속 질문 근거 = 이전 근거 중 이번 낱말에 맞는 줄 → 새 검색 → 나머지 이전 근거.
+
+        주제어가 없는 지칭(「방금 그거 표로」)은 이전 근거 그대로다 — 넓힐 낱말이 없다.
+        새 검색은 `self._search` 라 현재 권한(`visible_docs`)만 본다. 이전 답의 문장은 쓰지
+        않고 원문 줄만 더한다(원칙 1).
+        """
+        from . import search_index
+
+        terms = [t for t in (intent.terms or ()) if t]
+        if not terms:
+            return list(prior)
+        query = " ".join(terms)
+        if self._focus_terms:
+            query = focus_query(query)
+        try:
+            fresh = self._search(query, ctx)
+        except Exception:
+            logger.warning("후속 질문 재검색 실패 — 이전 근거로 답합니다", exc_info=True)
+            return list(prior)
+        tokens = search_index.tokens_of(query)
+
+        def _matches(hit) -> bool:
+            return bool(
+                tokens
+                and search_index.score_line(tokens, query, hit.line.speaker, hit.line.text)
+            )
+
+        def _key(hit):
+            return (str(hit.line.source_path or hit.doc.path), hit.line.lineno)
+
+        ordered = [h for h in prior if _matches(h)] + list(fresh)
+        ordered += [h for h in prior if not _matches(h)]
+        merged: list[SearchHit] = []
+        seen: set = set()
+        for hit in ordered:
+            key = _key(hit)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        limit = max(self._max_hits, len(prior))
+        logger.info(
+            "followup 재검색 ws=%s prior=%d fresh=%d merged=%d q=%r",
+            ctx.workspace, len(prior), len(fresh), min(len(merged), limit), query,
+        )
+        return merged[:limit]
+
+    def _with_image_guide(self, query: str, hits, ctx) -> list[SearchHit]:
+        """AI 이미지 설명·OCR 전사로 찾은 **사진의 원문 줄**을 검색 후보에 더한다 (B-81 후속).
+
+        설명·전사 문장은 근거로 나가지 않는다. 더해지는 것은 요청자의 현재 권한으로 다시
+        연 원문(로컬 OCR 줄·채널 첨부 줄)이고, 원본 파일이 그대로 있는지도 직전에 다시
+        확인한다(`image_guide.expand`). 실패하면 예전 검색 결과 그대로다.
+        """
+        from . import image_guide
+
+        try:
+            extra = image_guide.expand(self._store, ctx, query)
+        except Exception:
+            logger.warning("사진 길잡이를 쓰지 못했습니다", exc_info=True)
+            return list(hits)
+        if not extra:
+            return list(hits)
+        merged = list(hits)
+        seen = {(str(h.doc.path), h.line.lineno) for h in merged}
+        for hit in extra:
+            key = (str(hit.doc.path), hit.line.lineno)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        return merged[: len(hits) + image_guide.MAX_EXTRA_HITS]
+
+    def _with_pdf_vision_guide(self, query: str, hits, ctx) -> list[SearchHit]:
+        """PDF 쪽 Vision 전사(`extracted`)를 근거 후보에 더한다 (B-80).
+
+        로컬 추출·OCR 이 실패한 쪽의 유일한 본문이라 전사 문장 자체가 근거다. 줄마다
+        `[AI 문서 전사·파생 · PDF N쪽]` 이 붙고 출처는 원본 PDF 의 그 쪽이다. 요청자의
+        현재 권한·현재 정본 좌표·원본 해시를 직전에 다시 확인한다(`pdf_vision_guide`).
+        DB 장애·검증 실패면 예전 검색 결과 그대로다.
+        """
+        from . import pdf_vision_guide
+
+        try:
+            extra = pdf_vision_guide.expand(self._store, ctx, query)
+        except Exception:
+            logger.warning("PDF 전사 길잡이를 쓰지 못했습니다", exc_info=True)
+            return list(hits)
+        if not extra:
+            return list(hits)
+        merged = list(hits)
+        seen = {(str(h.doc.path), h.line.lineno) for h in merged}
+        for hit in extra:
+            key = (str(hit.doc.path), hit.line.lineno)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        return merged[: len(hits) + pdf_vision_guide.MAX_PAGES]
+
+    def _summary_vision_hits(
+        self, words, ctx, *, workspace_filter=None, cutoff: str = ""
+    ) -> list[SearchHit]:
+        """요약 경로의 PDF 쪽 전사 근거. 낱말이 없으면 찾지 않는다(전 쪽을 열지 않는다).
+
+        워크스페이스 필터·기간은 다른 요약 근거와 같은 기준으로 자른다. 실패는 닫힌다.
+        """
+        from . import pdf_vision_guide
+
+        query = " ".join(str(w) for w in words or () if str(w).strip())
+        if not query:
+            return []
+        try:
+            found = pdf_vision_guide.expand(self._store, ctx, query)
+        except Exception:
+            logger.warning("PDF 전사 길잡이를 쓰지 못했습니다(요약)", exc_info=True)
+            return []
+        return [
+            hit for hit in found
+            if (not workspace_filter or hit.doc.workspace in workspace_filter)
+            and (not cutoff or (hit.line.ts or "")[:10] >= cutoff)
+        ][: pdf_vision_guide.MAX_PAGES]
+
     def answer(
         self,
         question: str,
@@ -2399,14 +2787,17 @@ class AnswerEngine:
         else:
             # 2겹: 색인이 아니라 원문 라인을 연다.
             query = " ".join(terms) if terms else q
-            hits = self._store.search(query, ctx, limit=self._max_hits)
+            if self._focus_terms:
+                # 요청 표현(「정리해·표로·설명해주세요」)은 찾을 대상이 아니다.
+                query = focus_query(query)
+            hits = self._search(query, ctx)
             if not hits and terms:
                 # 분류기가 고른 핵심어가 문서 표현과 어긋나면 0건이 된다. 사람이 쓴
                 # 질문에는 다른 낱말이 더 있다 — 「근거 없음」 으로 닫기 전에 그 낱말로
                 # **같은 권한 범위에서** 한 번 더 찾는다. 범위는 넓히지 않는다.
                 retry = _question_retry_query(q, terms)
                 if retry:
-                    hits = self._store.search(retry, ctx, limit=self._max_hits)
+                    hits = self._search(retry, ctx)
                     logger.info(
                         "answer 핵심어 0건 -> 질문 낱말로 재검색 terms=%r hits=%d ws=%s",
                         terms, len(hits), ctx.workspace,
@@ -2414,6 +2805,9 @@ class AnswerEngine:
                     if hits:
                         query = retry
             hits = self._with_approved_guide(query, hits, ctx)
+            hits = self._with_digest_guide(query, hits, ctx)
+            hits = self._with_image_guide(query, hits, ctx)
+            hits = self._with_pdf_vision_guide(query, hits, ctx)
             # 방금 올린 첨부는 **검색 앞에** 둔다. 검색어가 파일 내용과 어긋나도
             # 빠지면 안 되는 근거다 — 사람은 그 파일을 보고 물었다(B-57 §4).
             # 검색을 끄지는 않는다. 「이 목록이 슬랙 어디 있나」 같은 질문은
@@ -2453,6 +2847,7 @@ class AnswerEngine:
                         model=model,
                         source_model=special.model,
                         source_cost_usd=special.cost_usd,
+                        user_memory_prompt=ctx.user_memory_prompt,
                     )
                 )
                 logger.info(
@@ -2519,7 +2914,9 @@ class AnswerEngine:
         withheld, attachment_notes = _withheld_attachments(self._store.root, hits)
         partial = _partial_attachments(self._store.root, hits)
         visual = _visual_originals(self._store.root, hits)
-        prompt = f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}"
+        prompt = with_prior_answer(
+            f"<원문>\n{_evidence_block(hits)}\n</원문>\n\n질문: {q}", task
+        )
         note_block = _attachment_note_block(attachment_notes)
         if note_block:
             prompt = f"{prompt}\n\n{note_block}"
@@ -2561,6 +2958,7 @@ class AnswerEngine:
                             self._store.root,
                             namespace=self._response_cache_namespace,
                         ),
+                        user_memory_prompt=ctx.user_memory_prompt,
                     )
                 )
                 logger.info(
@@ -2609,7 +3007,7 @@ class AnswerEngine:
         if visual.any:
             user_content = [{"type": "text", "text": prompt}, *visual.blocks]
         messages = [
-            Message("system", self._prompts.answer),
+            Message("system", _with_user_memory(self._prompts.answer, ctx)),
             Message("user", user_content),
         ]
         try:

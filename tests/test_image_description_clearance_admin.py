@@ -101,7 +101,7 @@ def test_clearance_scope_comes_from_current_source_and_effective_policy() -> Non
     ("clearance_request", "doc", "code"),
     [
         (_request(expected_original_sha256="b" * 64), _doc(), "source_changed"),
-        (_request(), _doc(human_upload_confirmed=False), "human_upload_unverified"),
+        (_request(), _doc(name="현장 정리 · TYBot"), "human_upload_unverified"),
         (_request(), _doc(acl=frozenset()), "source_acl_unknown"),
         (_request(), _doc(visibility=""), "source_acl_unknown"),
         (_request(), _doc(filetype="pdf"), "source_not_image"),

@@ -56,6 +56,15 @@ def qa_log_dir() -> Path:
     return Path(os.getenv("QA_LOG_DIR", "./qa-log"))
 
 
+#: VIPBot 감사기록 폴더. 봇(`slack/pilot.py`)과 같은 기본값을 쓴다.
+VIPBOT_QA_LOG_DEFAULT = "/var/lib/tybot-vipbot/qa"
+
+
+def vip_qa_log_dir() -> Path:
+    """VIPBot 질문·답변 감사기록. TYBot 과 폴더가 다르다."""
+    return Path(os.getenv("VIPBOT_QA_LOG_DIR", VIPBOT_QA_LOG_DEFAULT))
+
+
 def harness_dir() -> Path:
     return Path(os.getenv("HARNESS_DIR", str(archive_dir().parent / "harness")))
 
@@ -654,6 +663,10 @@ def _in_period(stamp: str, since: str) -> bool:
     return len(head) == 16 and head[4] == "-" and head >= since
 
 
+#: 첨부 목록 줄 접두사(`attachment_trace.LISTED_PREFIX` 와 같다).
+_LISTED_ATTACHMENT = "[첨부:"
+
+
 def collected_docs(store: ArchiveStore | None = None, *, since: str | None = None) -> list[dict]:
     """문서 목록. **본문은 담지 않는다** — 열람은 별도 함수로, 기록을 남기며 한다.
 
@@ -673,6 +686,15 @@ def collected_docs(store: ArchiveStore | None = None, *, since: str | None = Non
             size = 0
         raw = d.raw_lines if since is None else [ln for ln in d.raw_lines if _in_period(ln.ts, since)]
         attachment = sum(1 for ln in raw if ln.text.startswith("[첨부"))
+        # 사람이 읽는 개수. 줄 수는 메시지 길이·추출 분량에 따라 커져 감이 안 온다.
+        # - 대화: 첨부가 아닌 줄의 Slack 메시지 수(같은 ts 의 여러 줄은 한 건).
+        #   ts 를 못 남긴 옛 줄은 (시각, 화자) 로 묶는다
+        # - 첨부: 파일 표시 줄(`[첨부:…]`) 수 = 올라온 파일 수. 추출 실패한 파일도 센다
+        messages = len({
+            ln.message_ts or f"{ln.ts}|{ln.speaker}"
+            for ln in raw if not ln.text.startswith("[첨부")
+        })
+        files = sum(1 for ln in raw if ln.text.startswith(_LISTED_ATTACHMENT))
         out.append(
             {
                 "workspace": d.workspace,
@@ -687,6 +709,8 @@ def collected_docs(store: ArchiveStore | None = None, *, since: str | None = Non
                 "documents": 1 if since is None or raw else 0,
                 "bytes": size,
                 "attachmentLines": attachment,
+                "messages": messages,
+                "attachments": files,
                 "lastIngestedAt": d.last_ingested,
                 "visibility": d.visibility,
                 "acl": sorted(d.acl),

@@ -5,6 +5,7 @@ set -euo pipefail
 UNITS=(
   tybot-account-sync.timer
   tybot-collect.timer
+  tybot-channel-digest.timer
   tybot-convert-alert.timer
   tybot-convert-nightly.timer
   tybot-convert-retry.timer

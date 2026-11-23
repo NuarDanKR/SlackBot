@@ -7,6 +7,7 @@ import pytest
 
 from tybot.archive.vision_extract import VisionPageInput
 from tybot.archive.vision_policy import PageApproval, PageReservation, VisionPolicy, preflight
+from tybot.gateway.base import Sensitivity
 
 NOW = datetime(2026, 10, 19, 0, 0, tzinfo=UTC)
 PAGE = VisionPageInput("tyit", "F0TEST0001", "a" * 64, 3, b"synthetic-page", "image/png")
@@ -33,6 +34,7 @@ def check(**over):
     options = dict(
         policy=POLICY, approval=APPROVAL, reservation=RESERVATION, now=NOW,
         source_verified=True, rendering_verified=True, access_verified=True, pii_blocked=False,
+        catalog_max_sensitivity=Sensitivity.PUBLIC,
     )
     options.update(over)
     page = options.pop("page", PAGE)

@@ -21,14 +21,20 @@ TYBot 의 HWP 변환을 끄면 HWP 내용이 아카이브에도 답변에도 들
   그대로 걸린다
 
 목록이 비어 있으면 아무것도 바뀌지 않는다 — 예외는 켜야 생긴다.
+
+## 정본은 DB 다 (B-89 후속)
+
+앱 ID 는 `conversion_runtime_policy` 한 행이 정본이다(`tybot.conversion_policy`).
+옛 설정(`console-managed.env`·`TYBOT_CONVERTER_APP_IDS`)은 전환 기간에 DB 행이
+없을 때만 읽는다. DB 를 못 읽으면 위임 상태는 **「꺼짐」 이 아니라 「모름」** 이고,
+그동안 TYBot 은 HWP/HWPX 를 직접 변환하지 않는다.
 """
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
-#: 콘솔 환경 설정에서 관리하는 키. 쉼표로 여러 앱 ID.
+#: 옛 설정 키(전환 기간 fallback 전용). 정본은 DB 다 — `tybot.conversion_policy`.
 CONVERTER_APPS_ENV = "TYBOT_CONVERTER_APP_IDS"
 
 #: 변환 앱이 올린 파일 중 받는 형식.
@@ -40,6 +46,9 @@ DELEGATED_TYPES = frozenset({"hwp", "hwpx"})
 #: 변환을 넘긴 원본의 사유 코드. 「변환 실패」 와 구별해야 사람이 할 일이 다르다.
 DELEGATED_CODE = "delegated_to_converter_app"
 
+#: 위임 상태를 몰라 변환을 미룬 원본의 사유 코드. 정책이 확인되면 야간 재점검이 다시 연다.
+POLICY_UNKNOWN_CODE = "converter_policy_unknown"
+
 #: 정리한 메시지에 남기는 표식. `bot_id` 를 지운 뒤에도 「사람이 올린 파일」 로
 #: 확인됐다고 적히지 않게 한다(`AttachmentOrigin.human_upload_confirmed`).
 CONVERTER_MARK = "_tybot_converter_app"
@@ -47,14 +56,9 @@ CONVERTER_MARK = "_tybot_converter_app"
 _APP_ID = re.compile(r"^A[A-Z0-9]{6,}$")
 
 
-#: 콘솔 설정 파일의 운영 위치. 수집기(Archiver)는 다른 env 파일로 뜨므로 자기 상태
-#: 폴더만 보면 콘솔이 쓴 파일을 못 찾을 수 있다.
+#: 옛 콘솔 설정 파일의 운영 위치(전환 기간 fallback 전용). 수집기(Archiver)는 다른
+#: env 파일로 뜨므로 자기 상태 폴더만 보면 콘솔이 쓴 파일을 못 찾을 수 있다.
 PRODUCTION_MANAGED_ENV = Path("/var/lib/tybot/config/console-managed.env")
-
-#: 설정 파일을 다시 읽는 간격. 콘솔에서 바꾸면 재시작 없이 이 안에 반영된다.
-CACHE_SECONDS = 60.0
-
-_cache: tuple[float, frozenset[str]] | None = None
 
 
 def _from_managed_files() -> str:
@@ -74,31 +78,31 @@ def _from_managed_files() -> str:
 
 
 def converter_app_ids(*, now: float | None = None) -> frozenset[str]:
-    """지정된 변환 앱 ID. 형식이 틀린 값은 버린다 — 틀린 값이 아무 앱이나 받게 두지 않는다.
+    """지정된 변환 앱 ID. 정책을 모르면 빈 집합 — 모르는 앱의 PDF 를 받지 않는다."""
+    from ..conversion_policy import current
 
-    **콘솔 설정 파일을 직접 읽는다.** 콘솔 저장은 TYBot 본체에만 재시작을 요청하고,
-    수집기(Archiver)는 재시작되지 않는다. 프로세스 환경변수만 보면 수집기는 콘솔에서
-    바꾼 값을 영영 모른다. 파일 값이 있으면 그것이, 없으면 환경변수가 쓰인다.
-    """
-    import time
+    return current(now=now).app_ids
 
-    global _cache
-    clock = time.monotonic() if now is None else now
-    if _cache is not None and clock - _cache[0] < CACHE_SECONDS:
-        return _cache[1]
-    raw = _from_managed_files() or os.getenv(CONVERTER_APPS_ENV, "")
-    ids = frozenset(
-        value for value in (part.strip().upper() for part in raw.split(","))
-        if _APP_ID.fullmatch(value)
-    )
-    _cache = (clock, ids)
-    return ids
+
+def delegation_state(*, now: float | None = None) -> str:
+    """`on` · `off` · `unknown`. `off` 는 DB 정본이 빈 목록일 때만 나온다."""
+    from ..conversion_policy import current
+
+    return current(now=now).delegation
+
+
+def direct_conversion_allowed(filetype: str) -> bool:
+    """TYBot 이 이 형식을 직접 변환해도 되나. HWP/HWPX 는 위임이 확실히 꺼졌을 때만."""
+    from ..conversion_policy import current
+
+    return current().direct_conversion_allowed(filetype)
 
 
 def clear_cache() -> None:
     """시험과 콘솔 저장 직후에 쓴다."""
-    global _cache
-    _cache = None
+    from ..conversion_policy import clear_cache as clear_policy
+
+    clear_policy()
 
 
 def parse_app_ids(raw: str) -> list[str]:
@@ -111,8 +115,12 @@ def parse_app_ids(raw: str) -> list[str]:
 
 
 def conversion_delegated() -> bool:
-    """HWP 변환을 변환 앱에 넘겼는가. 앱이 지정돼 있을 때만 참이다."""
-    return bool(converter_app_ids())
+    """HWP 변환을 변환 앱에 넘겼는가. **확실히 넘겼을 때만** 참이다.
+
+    거짓이라고 직접 변환해도 된다는 뜻은 아니다 — 모를 때도 거짓이다. 직접 변환
+    여부는 `direct_conversion_allowed` 로 본다.
+    """
+    return delegation_state() == "on"
 
 
 def app_id_of(message: dict) -> str:
@@ -167,10 +175,13 @@ __all__ = [
     "CONVERTER_MARK",
     "DELEGATED_CODE",
     "DELEGATED_TYPES",
+    "POLICY_UNKNOWN_CODE",
     "app_id_of",
     "clear_cache",
     "conversion_delegated",
     "converted_document_message",
     "converter_app_ids",
+    "delegation_state",
+    "direct_conversion_allowed",
     "parse_app_ids",
 ]

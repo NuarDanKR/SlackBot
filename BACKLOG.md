@@ -1,6 +1,6 @@
 # BACKLOG — TYBot
 
-_최종 갱신: 2026-11-10_
+_최종 갱신: 2026-11-12_
 
 이 파일은 **다른 세션·다른 에이전트(Codex 등)·다른 사람에게 넘기는 인계 문서**다.
 아이디어는 여기 쌓고, 구현은 준비된 순서대로 한다.
@@ -92,13 +92,20 @@ _최종 갱신: 2026-11-10_
 
 | ID | 제목 | 우선 | 상태 | 의존 |
 |---|---|---|---|---|
+| [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · **1단계 완료, 배포 대기** · 2단계 대기) | B-65, B-68, B-94, B-98 |
 | [B-85](#b-85) | **답변 캐시와 사용자별 TYBot/VIPBot 일일 성공 답변 10회 제한** | **최우선** | 완료 (Codex/2026-11-10) | B-19, B-27b, B-83 |
 | [B-86](#b-86) | **PII·민감정보 결정적 마스킹 후 아카이브·답변 허용** | **최우선** | 완료 (Claude/2026-11-10) | B-07, B-49, B-70 |
 | [B-87](#b-87) | **`/채널 상태` 필수 앱 참여 진단 — Archiver·TYBot·rhwp·Hermes** | **최우선** | 완료 (Claude/2026-11-11) | B-37, B-65, B-72 |
 | [B-88](#b-88) | **전역 화·금 17시 요약 검토와 미검토 후보 자동 봇 요약 전환** | **최우선** | 진행중 (Codex/2026-11-10) | B-37, B-50, B-56, B-79 |
 | [B-89](#b-89) | **매일 새벽 변환 재점검·소급과 요약 검색 색인 배치** | **최우선** | 진행중 (Claude/2026-11-11, 변환 쪽부터) | B-12, B-45, B-46, B-66 |
 | [B-90](#b-90) | **Slack Lists 행 첨부 파일 수집·소급·검색 근거 연결** | **높음 (최우선 다음)** | 진행중 (Claude/2026-11-10) | B-45, B-46, B-65, B-86, B-89 |
-| [B-91](#b-91) | **피드백 기반 개인화 기억과 후속 대화 맥락 연결** | **높음** | 진행중 (Claude 설계/2026-11-10) | B-56, B-83, B-85, B-86 |
+| [B-91](#b-91) | **피드백 기반 개인화 기억과 후속 대화 맥락 연결** | **높음** | 진행중 (Codex 구현·Claude 설계/2026-11-11 · Claude 자유 요청·공유 정정/2026-11-20) | B-56, B-83, B-85, B-86 |
+| [B-92](#b-92) | **rhwp 변환 기능 내재화와 과거 HWP/HWPX 소급 전환** | **높음** | 대기 (현 외부 rhwp 운영 유지·오너/2026-11-12) | B-46, B-80, B-89 |
+| [B-93](#b-93) | **전 봇 공통 근거 폭 확대 — 전수 탐색·채널×일 요약 길잡이·후속 확장** | **최우선** | 진행중 (Claude/2026-11-12, 1단계부터) | B-56, B-57, B-83, B-88, B-89 |
+| [B-94](#b-94) | **이미지 인식 완료 상태의 Archiver 스레드 알림** | **높음** | 진행중 (Codex/2026-11-12) | B-81, B-86 |
+| [B-95](#b-95) | **VIPBot 다중 워크스페이스 DB 연결** | **최우선** | 완료 (Codex/2026-11-12) | B-83 |
+| [B-96](#b-96) | **봇 등급별 모델 — VIPBot 한 단계 위(판단 Sonnet·Hermes Opus)** | **높음** | 대기 (오너/2026-11-12) | B-44 |
+| [B-97](#b-97) | **Google Drive 승인 폴더를 TYBot/VIPBot 공통 근거로 — 0단계 Slack 토큰 외부 전송 차단 포함** | **0단계 긴급 · 나머지 높음** | 설계 초안 (Claude/2026-11-18) · **0단계 완료(2026-11-20)** · 1단계~ 오너 결정 대기 | B-46, B-73, B-81, B-83, B-86 |
 | [B-72](#b-72) | **PF·TY 공용 Hermes의 수집 제거와 단일 아카이브 계약** | **최우선** | 운영 적용·사용 중 (오너 보고/2026-10-27, 범위별 검증 기록 대기) | B-65, B-42, B-68 |
 | [B-74](#b-74) | **단일 서버 Hermes 배포·점검의 전문봇 웹 콘솔 인계** | **최우선 (B-72 다음)** | 준비됨 (오너 결정 2026-10-08) | B-72, B-16, B-38 |
 | [B-75](#b-75) | **Hermes 인스턴스 설정·시크릿의 DB/credential 전환** | **높음 (B-74 연계)** | 준비됨 (오너 결정 2026-10-08) | B-72, B-74, B-16 |
@@ -106,8 +113,8 @@ _최종 갱신: 2026-11-10_
 | [B-77](#b-77) | 토픽별 누적 요약 저장소 | 중 | 대기 (오너 요청/2026-10-15) | B-37, B-50, B-56, B-76 |
 | [B-78](#b-78) | 일정 DM의 명시적 개인 캘린더 ACL 반영 | 높음 | 구현 진행중 · 서버 검증 대기 (Codex/2026-10-15) | B-05, B-33 |
 | [B-79](#b-79) | 검토자별 여러 채널 요약 검토 DM 통합 | 중 | 대기 · 발송 시각 정책 결정 필요 (오너/2026-10-15) | B-50 |
-| [B-80](#b-80) | Archiver PDF/HWP 복구와 Vision 모델·예산 관리 | 높음 | 진행중 (Codex/2026-10-19, 정책·예약 원장 구현 · worker 미연결) | B-46, B-65, B-73 |
-| [B-81](#b-81) | 건설 현장 사진 검색 색인·원본 질의응답 | 높음 | 진행중 (Codex+Claude/2026-10-27) | B-80, B-41, B-53 |
+| [B-80](#b-80) | Archiver PDF/HWP 복구와 Vision 모델·예산 관리 | 높음 | 진행중 (Claude/2026-11-19, 요금표 정산·정책 콘솔·PII 판정 충돌 보류 커밋 · 콘솔에서 정책 입력 → 소량 apply 대기) | B-46, B-65, B-73 |
+| [B-81](#b-81) | 건설 현장 사진 검색 색인·원본 질의응답 | **높음 (다음 작업)** | 진행중 (Codex+Claude/2026-11-12, 운영 연결 재개) | B-80, B-41, B-53 |
 | [B-82](#b-82) | 전문봇 조회 시간 예산·긴 XLSX 분할 열람 | 높음 | 코드 구현·운영 검증 대기 (Codex/2026-10-21) | B-41, B-76 |
 | [B-83](#b-83) | **VIPBot — TYBot 공통 답변과 별도 사용자·근거 채널 권한** | **최우선** | 진행중 (Codex+Claude/2026-11-05) | B-05, B-41, B-44 |
 | [B-84](#b-84) | **모든 봇 — 질문에 함께 첨부한 파일을 즉시 근거로 답변** | **최우선** | 진행중 (Codex+Claude/2026-11-06) | B-41, B-56, B-83 |
@@ -179,6 +186,143 @@ _최종 갱신: 2026-11-10_
 | [B-69](#b-69) | **같은 분·동일 본문인 별개 Slack 메시지 누락 방지** | **긴급** | 준비됨 (Claude 검증 요청 예정) | B-65 |
 | [B-70](#b-70) | **봇 대화·DM 원문·첨부 90일 보존 집행** | **높음** | 준비됨 (오너 결정 2026-10-02, 구현 전) | B-57, B-68 |
 | [B-71](#b-71) | **콘솔 보존 기간 설정·영구 보관 선택** | 중 | 준비됨 (콘솔 분리 작업 후) | B-08, B-70 |
+
+---
+
+## B-99
+### 섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로
+
+**최우선 (긴급·운영 장애) · 진행중 (Claude 총괄/2026-11-20) · 의존 B-65, B-68, B-94, B-98**
+
+**왜 (2026-11-20 장애).** `tybot-archiving-shadow@tyit` 가 16:14부터 10초마다 재시작했다
+(`ArchiverConfigError: live archive root still contains legacy workspace: tyit`). Archiver 는
+운영 루트에 옛 `ARCHIVE_DIR/workspaces/<ws>` 가 있으면 기동을 거부하는데, **Master 가 그
+디렉터리를 계속 만든다.** 11-19 15:16 사용자 DM 1건이 `workspaces/tyit/dm/<user>/raw` 로
+쓰였고 그 뒤 첫 재시작에서 수집·이미지 알림이 모두 멈췄다. 5개 워크스페이스 전부에 같은
+디렉터리가 있었다(civil·mgmt·tyit `dm`, archi·invest `channels`). 지금 떠 있는 Archiver 는
+그 디렉터리가 생기기 전에 기동해서 살아 있을 뿐 **재시작하면 같이 죽는다.**
+
+**임시 조치(오너 서버 실행, 2026-11-20).** 옛 디렉터리 20개 파일을
+`/var/lib/tybot/archive-legacy-quarantine-20261120/workspaces` 로 **이동**(삭제 없음).
+B-98 이행 도구로 병합할 대상이다. 서버 유닛이 옛 판이라 `ReadWritePaths` 에
+`/var/lib/tybot/image-description-notify` 가 없어 B-94 알림이 조용히 실패했다 → 저장소
+유닛을 다시 설치.
+
+**오너 결정(2026-11-20).** 섀도는 없앤다. 「옛 writer 가 정본이고 Archiver 는 비교용」 인
+구조가 남아 있는 한 두 쓰기 경로가 서로를 죽인다.
+
+#### 지금 옛 배치에 쓰는 곳 (조사 2026-11-20)
+
+| 쓰는 곳 | 프로세스 | 막는 장치 |
+|---|---|---|
+| `slack/pilot.py` `_ingest_dm` → `writer.dm_dir` | Master | **없음** — DM 마다 |
+| `slack/pilot.py` `_ingest_live`·`_ingest_channel`, `collect.py` `collect_workspace` | Master·`tybot-collect` 타이머 | `master_may_write` — 소유 기록 없음·DB 실패면 **허용** |
+| `scripts/drain_conversion_queue.py` 원문 줄 추가(비분리 분기)·`write_docs(channel_archive=None)` | `tybot-convert-retry`·`-nightly` | **없음** |
+| `scripts/backfill_channel_history.py`·`sync_channel_files.py`·`convert_staged_attachments.py` | 수동 | 기본 `--archive=ARCHIVE_DIR` |
+
+#### 1단계 — 장애 재발 차단 (긴급)
+
+- [x] **A. Master DM** — `_ingest_dm` 을 운영 루트의 새 DM 배치(`shadow_paths.dm_archive_dir`,
+      `<ws>/dm/<user>/archive`)로 쓴다. 검색(`store._files`)은 두 배치를 이미 읽는다. 옛
+      `writer.dm_dir` 기본 경로는 **운영 루트에서 쓰지 못하게** 막는다 — Claude 2026-11-20
+      (`tests/test_master_dm_layout.py`)
+- [x] **B. Master 채널 쓰기 fail-closed** — `write_owner.decide` 에서 소유 기록 없음·DB 조회
+      실패를 Master 허용이 아니라 **거절**로. 2026-11-18 전 채널이 Archiver 소유다.
+      `collect.py`·`_ingest_live`·`_ingest_channel`·수동 스크립트 기본값 — 하위 에이전트 2026-11-20.
+      `write_owner.decide` 는 행 없음·조회 실패에 `no-owner-row`·`owner-lookup-failed` 로 거절.
+      `writer.ingest` 는 운영 루트(`ARCHIVE_DIR` 또는 `<root>/<ws>/` 존재)에서 옛 배치 기본
+      경로로 떨어지면 `LegacyLayoutRefused`. collect·backfill·sync·convert_staged 는 미리
+      물어 실패로 센다(`tests/test_no_legacy_workspaces_writes.py`). `convert_staged_attachments.py
+      --apply` 는 이제 운영 루트에서 항상 거절된다(오프라인 사본 `--archive` 만)
+- [x] **C. 변환 재처리의 옛 배치 분기 차단** — `drain_conversion_queue.py` 비분리 분기·
+      `channel_archive=None` 일 때 옛 경로로 쓰지 말고 건너뛰며 코드로 남긴다 — 하위 에이전트
+      2026-11-20. `channel_archive_for` 가 채널별 경로를 직접 찾고, 못 찾으면
+      `channel_archive_unresolved`(재시도 없음). 쓰기는 항상 채널별 경로
+      (`tests/test_drain_conversion_channel_layout.py`)
+- [x] **D. Archiver 관측** — 이미지 알림 drain 이 잠금/IO 실패를 삼키지 말고 경고 로그.
+      옛 디렉터리 감지 시 오류 메시지에 경로와 「B-98 격리 후 재시작」 안내 — 담당 Claude
+- [x] **E. 배포 점검** — 설치된 systemd 유닛이 저장소 판과 다르면 진단에서 드러나게
+      (`scripts/check_env.py` 또는 배포 확인 스크립트) — Claude 2026-11-20.
+      **`deploy/install.sh` 가 Archiver 유닛을 설치하지 않았고** 알림 디렉터리도 만들지 않았다 →
+      둘 다 추가. `scripts/check_unit_drift.py` 가 설치된 유닛과 `deploy/` 를 대조
+- [x] 회귀 시험: 어떤 Master 경로도 운영 루트 아래 `workspaces/` 를 만들지 않는다(쓰기 경로 목록
+      `tests/test_write_paths_inventory.py` 갱신 포함)
+
+#### 2단계 — 섀도 제거
+
+- [ ] Archiver `shadow` 모드 수집·섀도 루트(`ARCHIVER_SHADOW_DIR`·`shadow_archive_dir`)·
+      `ingest_ack.SHADOW` 제거. 채널 모드는 `off|active|paused` 만
+- [ ] DM 인계 소비자가 섀도 루트가 아니라 운영 루트에 쓴다. Master DM 쓰기는 인계로 일원화할지 결정
+- [ ] 콘솔·스키마 CHECK(`archive_channel_mode.mode`, `written_to`, supervisor `desired_mode`)에서 `shadow` 제거
+      — 남은 행 0 확인(`deploy/checks/archiver_no_shadow_channels.sql`) 뒤
+- [ ] 유닛 `tybot-archiving-shadow@` → `tybot-archiver@`, `LOCK_DIR`·`ReadWritePaths` 정리, 전환 절차
+- [ ] 섀도 전용 스크립트·진단(`shadow_root`, `migrate_shadow_root`, file_audit/recovery 의 shadow_root 인자) 정리
+- [ ] 격리한 `archive-legacy-quarantine-20261120` 을 B-98 도구로 dry-run → apply
+
+**완료 조건.** Master·타이머·스크립트 어느 것도 운영 루트에 `workspaces/` 를 만들지 않고,
+5개 Archiver 를 동시에 재시작해도 모두 `active`, 섀도 경로·모드가 코드와 DB 에 없다.
+
+---
+
+## B-97
+### Google Drive 승인 폴더를 TYBot/VIPBot 공통 근거로
+
+**0단계 긴급 · 나머지 높음 · 설계 초안 (Claude/2026-11-18) · 의존 B-46, B-73, B-81, B-83, B-86**
+
+설계: [`docs/design/google-drive-evidence.md`](docs/design/google-drive-evidence.md) ·
+위협 모델: [`docs/design/google-drive-threat-model.md`](docs/design/google-drive-threat-model.md)
+
+**왜.** 현장·본부는 문서를 Slack 에 올리지 않고 Drive 링크로 공유한다. 지금은 링크 한 줄만
+남아 「그 문서에 뭐라고 돼 있었지」 에 근거가 없다. Slack Google Drive 앱을 설치해도 본문은
+봇이 받을 수 없다 — Slack 원격 파일은 포인터이고, 본문을 내려주는 Slack 메서드가 없다.
+
+**지키는 선.**
+- Slack 외부 파일·`external_url`·Drive URL 에 Slack `Authorization` 헤더를 절대 보내지 않는다
+- Drive 본문은 **Drive API 전용 자격**으로만. 평문은 저장소·DB·로그 어디에도 없다
+- **콘솔에서 승인한 Shared Drive·폴더만.** 루트마다 `(workspace, channel_id)` 를 DB 에 둔다(`.env` 정책 아님)
+- Drive 문서는 **결속 채널 ACL 을 상속**. 다른 채널에 링크가 올라와도 넓어지지 않는다
+- 변환·PII 마스킹·정본(`AttachmentDoc`)·revision·색인은 기존 경로 재사용
+- 삭제·권한 철회·다운로드 제한 → 근거에서 제외. revision 변경 → 새 판, 옛 판은 근거에서 내림
+- 출처는 원본 Drive 링크 + 파일명(마스킹) + 수정 시각
+- TYBot(`visible_docs`)·VIPBot(`bot_source_channel`)은 같은 수집본을 각자 기존 권한으로 읽는다
+- 초기 범위 밖: 개인 My Drive 전체, domain-wide delegation, Drive 쓰기, 답변 시점 실시간 조회
+
+**발견(2026-11-18).** `archive/files.py` 의 `download_bytes`·`download_text` 가 호스트 검사 없이
+`url_private_download or url_private` 에 Slack Bearer 토큰을 붙인다. Slack 문서상 원격 파일의
+`url_private` 은 임의 호스트일 수 있다. 수집(`stage_attachments`)·DM 인계(`slack/pilot.py`)·Canvas
+세 경로가 같은 함수를 쓴다. 질문 첨부 경로(`question_files.py`)만 `files.slack.com` 으로 막혀 있다.
+→ **0단계는 Drive 기능과 무관하게 먼저 고친다.**
+
+#### 단계 (설계 §11)
+
+- [x] **0 (긴급)** Slack 다운로드 호스트 가드: `mode=external`/`is_external`/`filetype=remote`
+      거부, https + `files.slack.com` 정확 일치, 리다이렉트로 호스트가 바뀌면 헤더 제거·실패,
+      `external_skipped` 로 흔적 남김. 세 호출 경로 회귀 시험 — Claude 2026-11-20.
+      `files.authorized_download_url` 가 요청 전에 판정하고, 모듈 `urlopen` 은
+      `_SlackOnlyRedirect` opener 다(Slack 밖으로 가는 리다이렉트는 따라가지 않고 실패).
+      원격 파일은 `[첨부:외부파일] 이름 (gdrive)`·`status=external_skipped`·재처리 큐 없음,
+      추적에는 `code=external-file`(SKIPPED). 시험 `tests/test_slack_download_guard.py`(20)
+- [ ] 1 스키마·역할(`tybot_drive` 신규), `DriveClient` 프로토콜 + 가짜 클라이언트, 자격 저장소(전용 키) — Claude
+- [ ] 2 Archiver 링크·원격파일 감지 → `gdrive_link_sighting`(좌표만) — Claude
+- [ ] 3 범위·다운로드 제한 판정, export(Docs→docx, Sheets→xlsx, Slides→pptx)·download, staging 출력 — Codex(B-81 종료 후)
+- [ ] 4 정본 발행(`gd_<id>`, `source_kind: gdrive`)·출처 형식·`EvidenceRef` 확장 — Claude
+- [ ] 5 변경 로그 동기화·일일 전수 대조·철회 표식·색인 삭제 — Codex
+- [ ] 6 콘솔 「근거 소스 > Google Drive」(연결 상태·승인 루트·마지막 동기화·실패·철회·소급 dry-run) — Claude
+- [ ] 7 systemd 유닛(설치 시 비활성)·배포 — Codex
+- [ ] 8 운영 착수: 자격 생성·egress·시범 루트 1개·철회 3종 실측 — 오너+인프라+Claude
+
+1~7 은 **가짜 Drive 클라이언트로만** 시험한다. 실제 Google 호출과 운영 자격 생성은 8단계에서 사람이 한다.
+
+#### 오너 결정 대기 (설계 §12)
+
+D1 자격 종류(서비스 계정 키 / OAuth / WIF) · D2 Drive 권한 < 채널 멤버일 때 · D3 루트↔채널 1:1 ·
+D5 철회 반영 주기 · D6 철회 본문 삭제 시점 · D7 다운로드 제한 파일 · D8 콘솔 자격 입력 방식 ·
+D9 시범 범위 · D11 서비스 계정 Shared Drive 멤버 가능 여부(인프라) · D12 egress 방화벽 · D13 키 회전 책임자
+
+#### 하지 않는 것
+
+이 작업은 B-81 파일(`src/tybot/archive/image_description_store.py`, `tests/test_image_description_store.py`)과
+B-81 세부 항목을 고치지 않는다. Drive 이미지는 B-81 이 받는 staging 형식으로 넘기기만 한다.
 
 ---
 
@@ -332,8 +476,8 @@ Asia/Seoul** 한 회차로 묶는다. 검토자가 기한 안에 처리하지 �
 
 - [x] 새벽 실행 시각·동시성·회차 상한을 timer 설정으로 제공 — `tybot-convert-nightly.timer`
       03:20(±10분), oneshot 이라 회차는 하나씩이고 작업은 큐 lease 로 한 프로세스만 잡는다.
-      처리 상한은 unit `--limit`, 한 밤 소급 상한은 `TYBOT_CONVERT_RECHECK_LIMIT`(기본 50),
-      rhwp 대기는 `TYBOT_CONVERT_RHWP_GRACE_HOURS`(기본 6)
+      처리 상한은 unit `--limit`. 한 밤 소급 상한(기본 50)·rhwp 대기(기본 6시간)는 아래
+      「변환 정책 DB 이전」 으로 DB 정본에 옮겼다. 실행 시각 03:20 은 timer 에 남긴다
 - [x] 변환 inventory 비교, 선택 재처리, rhwp 결과 대조, 실패 좌표 원장 구현 —
       `--nightly` 한 회차 = 일시 실패 재시도 → **판정 변경**(미지원인데 지금 변환 가능,
       또는 암호·손상·빈 출력인데 기록된 변환기 판이 지금과 다름) → 구버전 성공 재변환 →
@@ -355,6 +499,64 @@ Asia/Seoul** 한 회차로 묶는다. 검토자가 기한 안에 처리하지 �
       과 journal `convert_nightly_metrics` 줄에 남기고 콘솔 「아카이브 진단」 에 표시(전체
       워크스페이스 권한만). 요약 길잡이 후보 축소는 `승인 요약 길잡이 후보 읽음=N 선택=M` 로그로
       남김. **절약 토큰은 미측정** — 길잡이는 원문 줄을 더할 뿐이라 토큰 절감을 따로 셀 기준이 없다
+
+#### 변환 정책 DB 이전 (rhwp 정체성·야간 숫자, Claude/2026-11-11)
+
+rhwp Slack 앱 ID 와 야간 숫자 정책이 `console-managed.env`·환경변수에 흩어져 있었고, 값이
+비면 「위임 꺼짐」 으로 읽혔다. DB 가 잠깐 안 보이면 TYBot 이 HWP 를 직접 변환해 같은 문서가
+rhwp PDF 와 두 벌의 근거가 될 수 있었다. 정본을 DB 한 행(`conversion_runtime_policy`)으로
+옮기고, **모르면 꺼짐이 아니라 「모름」** 으로 다룬다(`src/tybot/conversion_policy.py`).
+
+| 상태 | 뜻 | HWP/HWPX 직접 변환 | 야간 `--apply` |
+|---|---|---|---|
+| `db` | DB 행을 읽었고 값이 바르다. 빈 목록 = 위임 꺼짐 | 꺼짐일 때만 | 가능 |
+| `legacy` | DB 행 없음·DB 안 보임 + 옛 설정에 앱 ID 가 있음(전환 기간) | 막힘 | 거절(종료 3) |
+| `unknown` | DB 미접속·표 없음·행 없음·잘못된 값, 옛 설정도 증명 못 함 | 막힘 | 거절(종료 3) |
+
+- [x] 스키마 `deploy/sql/conversion_policy_schema.sql` — 정본 한 행(`id=1`)과 append-only 감사 표.
+      기본 행을 넣지 않는다. 값 범위는 CHECK(상한 0~1000, 대기 1~168시간, 앱 ID 10개). GRANT:
+      `tyslackai` SELECT·INSERT·UPDATE(감사는 INSERT 만), `tybot_archiver` SELECT. `apply-schema.sh`
+      에서 `conversion_queue_schema.sql` 뒤
+- [x] 단일 정본 — 수집기·변환·질문 첨부·채널 앱 상태·야간 배치가 `conversion_policy.current()`
+      (60초 캐시) 하나를 본다. DB 값이 있으면 언제나 DB 가 이긴다. DB 값이 틀리면 옛 설정으로
+      내려가지 않고 `unknown(invalid_value)`
+- [x] fail-closed — `unknown`·`legacy` 에서 `can_convert`·`convert()` 입구가 HWP/HWPX 를 막는다
+      (큐 재처리는 `converter_policy_unknown` 로 `held`). 수집은 원본을 보관하고 `[첨부:변환보류]`
+      로 남긴다. 질문 첨부 HWP 는 PDF 로 다시 물어 달라고 안내한다. 격리 변환 워커는 DB 가 없어
+      정책 대신 처리기 유무(`has_handler`)만 본다
+- [x] 전환 기간 fallback — DB 가 답하지 못할 때만 옛 `console-managed.env` → `TYBOT_CONVERTER_APP_IDS`
+      → `TYBOT_CONVERT_RECHECK_LIMIT`·`TYBOT_CONVERT_RHWP_GRACE_HOURS` 를 읽는다. 앱 ID 가 하나 이상일
+      때만 쓰이고(빈 값 = 모름), `TYBOT_CONVERT_POLICY_LEGACY=0` 이면 읽지 않는다. 상태가 바뀔 때
+      `변환 정책 state=… sources=…` 로그를 한 번 남긴다(`db` 는 INFO, 나머지는 WARNING)
+- [x] 콘솔 — 「환경변수 설정 > 변환 정책」: 상태·사유·필드별 출처·직접 변환/야간 실행 가능 여부,
+      옛 값 미리 채움, 앱 ID·두 숫자·사유 저장(판 번호로 충돌 409), 감사 이력. `GET/PUT
+      /api/conversion-policy`(admin, 저장은 전체 워크스페이스 관리자, CSRF, 모르는 칸 422). 환경변수
+      화면은 앱 ID 를 더 받지 않고, 저장할 때 옛 값은 fallback 용으로 그대로 옮겨 쓴다
+- [x] 야간 배치 — 회차 시작에 정책을 새로 읽어 상태·출처를 출력하고 지표(`policy`·`blocked_reason`)
+      에 남긴다. `db` 가 아니면 `--apply` 를 거절(종료 3)하고 거절 지표를 쓴다. dry-run 은 돌되
+      모르는 상한은 0 으로 센다. rhwp 미확인 집계는 위임 상태를 모르면 하지 않는다
+- [x] readiness `scripts/check_conversion_policy.py` — 종료 0 = DB 정본(야간 가능) · 3 = 옛 설정 ·
+      1 = 모름. 고치지 않고, 타이머를 켜지 않고, 시크릿을 찍지 않는다
+- [x] 타이머 자동 재시작 금지 — `deploy/update.sh` 가 더는 `tybot-convert-nightly.timer` 를
+      `enable --now` 하지 않는다(재처리 큐 timer 만 켠다). 실행 시각 03:20 은 timer 에 둔다
+- [x] 회귀 시험 `tests/test_conversion_policy.py` — DB 장애·표 없음·행 없음·잘못된 값 14종,
+      fallback 우선순위·전환 종료, 캐시·로그, 저장 충돌·감사, 야간 거절·dry-run, readiness 종료
+      코드, 콘솔 API 권한·CSRF·오류 매핑, 배포 스크립트. 핵심 가드 변이 16개 모두 잡힘. 실DB
+      시험은 `TEST_DATABASE_URL`(또는 `TYBOT_SCHEMA_TEST_DSN`)이 있을 때만 돈다 — 아직 못 돌림
+- [ ] 운영 전환(사람) — 아래 순서. **현재 멈춘 `tybot-convert-nightly.timer` 는 5단계 전까지
+      켜지 않는다**
+  1. 배포 후 `sudo /opt/tybot/deploy/apply-schema.sh` (표·GRANT. 행은 생기지 않는다)
+  2. readiness 로 지금 상태 확인 — 보통 `legacy`(옛 앱 ID 로 동작, 종료 3) 또는 `unknown`(종료 1)
+     `sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_conversion_policy.py`
+  3. 콘솔 「환경변수 설정 > 변환 정책」 에서 미리 채워진 옛 값을 **실제 rhwp 앱 ID**(Slack 앱
+     관리 화면의 App ID)와 대조하고 사유를 적어 저장. 위임을 끌 때만 앱 ID 를 비운다
+  4. readiness 가 종료 0·`state: db`·의도한 위임 상태인지, 야간 dry-run 이 정책 출처 `db` 를
+     찍는지 확인: `… /opt/tybot/scripts/drain_conversion_queue.py --nightly`
+  5. 그 뒤에만 사람이 `sudo systemctl enable --now tybot-convert-nightly.timer`
+  6. 며칠 `db` 로 안정되면 `/etc/tybot/tybot.env` 의 옛 키 셋을 지우고
+     `TYBOT_CONVERT_POLICY_LEGACY=0` 을 넣어 fallback 을 닫는다. 수집기(Hermes archiver)의 DB
+     역할에 `conversion_runtime_policy` SELECT 가 있는지 먼저 확인한다 — 없으면 `table_missing`
+     으로 읽혀 rhwp PDF 를 받지 못한다
 
 ---
 
@@ -431,12 +633,161 @@ Asia/Seoul** 한 회차로 묶는다. 검토자가 기한 안에 처리하지 �
 
 - [x] Claude: 오염·프롬프트 주입·교차 사용자 누출 위협 모델, 스키마 초안, 운영 문구와
       독립 평가 세트 작성(B-90 완료 뒤 착수)
-- [ ] Codex: 피드백 발언 판정, 직전 턴 lineage 연결, 사용자별 기억 저장/조회 경로 구현
-      (B-88 완료 뒤 착수)
+- [x] Codex: 피드백 발언 판정, 직전 본인 QA record lineage 검증, 사용자별 기억 저장소와
+      Slack 자연어·`/피드백` 저장 경로 연결(2026-11-11)
+- [x] Codex: 기억 조회를 현재 ACL·원문 revision 검증 뒤 답변 프롬프트에 주입하고 개인화별
+      응답 캐시를 분리(2026-11-11). 근거 없는 사실의 검색 힌트는 관련성 계약 전까지 비활성
+- [x] Codex: `내 기억 보여줘`·`기억 삭제 <번호>`로 본인 활성 기억만 조회·철회하고,
+      DB 장애를 빈 목록이나 없는 기억으로 오인하지 않게 구분(2026-11-11)
 - [ ] 선호·용어·사실 주장 분류와 근거 없는 사실의 검색 힌트 제한 시험
 - [ ] DM/스레드 연속 질문, 사용자 정정, 주제 전환, 다른 사용자/채널 격리 회귀 시험
 - [ ] 현재 ACL·원문 revision·PII 마스킹·철회/만료·프롬프트 예산 검증
 - [ ] 운영 QA 로그에서 비식별 표본으로 맥락 성공률·오연결률·추가 토큰을 측정
+- [x] 오너 결정(2026-11-20) · Claude: **자유 형식 요청을 본인 답변에 반영**(`instruction`).
+      「결론부터」·「친근하게」·「답변 끝에 요약 한 줄」 같은 열거형 밖 요청을 120자·3건·180일로
+      저장한다. 근거·출처·권한·마스킹을 끄는 말은 저장 전·주입 때 두 번 막는다.
+      설계 [personal-memory-threat-model.md](docs/design/personal-memory-threat-model.md) §8.1
+- [x] 오너 결정(2026-11-20) · Claude: **사실 정정을 원문 권한자 모두에게 표시**(`fact_correction`).
+      「15억이 아니라 12억」 처럼 전 → 후가 읽히는 정정만. 답변 끝에 「✏️ 정정자 · 날짜 · 「질문」
+      답변: 전 → 후」 를 붙이고 원문은 바꾸지 않는다(원칙 7). 저장은 정정자가, 표시는 보는 사람이
+      정정한 답변의 원문 좌표를 **지금 전부** 열 수 있을 때만. DM 질문은 「무엇을」 에 싣지 않는다.
+      철회: 본인 `정정 삭제 번호`, 관리자 콘솔 「질문·답변 원본 › 사람이 남긴 정정」. 설계 §8.2
+- [ ] 서버: `sudo /opt/tybot/deploy/apply-schema.sh` 로 `fact_correction_schema.sql` 적용 → 배포
+- [ ] 운영 확인: 정정 → 다른 사람 같은 질문에 표시 · 권한 없는 사람 미표시 · 철회 후 미표시
+
+---
+
+## B-92
+### rhwp 변환 기능 내재화와 과거 HWP/HWPX 소급 전환
+
+**높음 · 대기 (현 외부 rhwp 운영 유지·오너 결정 2026-11-12) · 의존 B-46, B-80, B-89**
+
+현재 운영은 바꾸지 않는다. Slack의 외부 rhwp 앱이 HWP/HWPX를 PDF로 변환하고,
+Archiver가 그 PDF를 원문 첨부 수집 경로로 보관한다. TYBot과 VIPBot은 같은 중앙
+아카이브를 읽는다. 이 경로가 정상 동작하므로 즉시 자체 변환으로 절체하지 않는다.
+
+오너 결정(2026-11-12): 악성 앱 운영자는 조직 정책으로 별도 차단하므로, rhwp 후보를
+사람이 건별 승인하는 큐는 만들지 않는다. 앱·봇 표시 이름에 `rhwp`가 들어간 경우를
+정책상 신뢰할 수 있다. 다만 예외는 계속 좁게 유지한다.
+
+- 받는 것은 그 앱이 올린 **PDF 파일만**이다. 메시지 본문은 봇 출력이므로 버린다.
+- PDF는 사람 첨부와 같은 PII 마스킹·ACL·중복 방지·원문 보존 경로를 거친다.
+- 이름 규칙과 활성화 여부는 환경변수가 아니라 DB 변환 정책의 감사 가능한 필드로 둔다.
+- 정책을 읽지 못한 `unknown` 상태에서는 이름으로 추측하지 않고 계속 fail-closed 한다.
+
+장기적으로는 오픈소스 `postmelee/rhwp-slack`의 변환 기능을 TYBot 배포에 포함할 수 있다.
+이는 Slack 수집기 프로세스에 변환 코드를 직접 넣는다는 뜻이 아니다. Chromium/WASM 등
+무거운 의존성과 비신뢰 문서를 격리한 별도 `tybot-rhwp-worker`가 기존 변환 큐를 소비하고,
+Archiver는 원본·결과·lineage만 관리한다. 외부 인바운드 포트와 Slack/API 시크릿을 worker에
+주지 않으며, 버전·이미지 digest와 라이선스 고지를 고정한다.
+
+#### 할 일
+
+- [ ] 대표 HWP/HWPX 30~50건으로 외부 rhwp 결과와 고정한 upstream worker 결과를 비교한다.
+      표·도형·글꼴·페이지 수·빈 출력·암호/손상 문서까지 확인하고 절체 기준을 문서화한다.
+- [ ] DB 변환 정책에 감사 가능한 이름 규칙과 활성화 상태를 추가하고 콘솔에서 조회·변경한다.
+      이름 정규화, PDF 전용, 봇 본문 폐기, `unknown` fail-closed 회귀 시험을 포함한다.
+- [ ] 별도 비권한 worker를 만든다. non-root·읽기 전용 root filesystem·작업별 임시 디렉터리·
+      CPU/메모리/시간 제한·네트워크 차단·동시성 제한을 적용하고 수집기 장애와 분리한다.
+- [ ] 원본 HWP/HWPX와 결과 PDF를 잇는 lineage와 멱등 키를 저장한다. 같은 원본의 재시도는
+      중복 근거를 만들지 않고 converter revision이 바뀔 때만 새 결과를 만든다.
+- [ ] 과거 자료 inventory를 만든다. 이미 rhwp PDF가 있는 원본은 그 PDF를 current로 연결하고,
+      rhwp 초대 전이라 PDF가 없는 원본만 내부 worker 소급 대상으로 분리한다.
+- [ ] 과거 TYBot 직접 변환 결과와 rhwp 결과가 함께 있으면 원본은 보존하되 직접 변환 결과를
+      `superseded`로 내리고 rhwp PDF만 current 검색 근거로 재색인한다. 자동 대조가 모호한
+      경우만 사람 확인 대상으로 남긴다.
+- [ ] 콘솔에 전체·대기·성공·실패·중복·모호 건수, converter revision, dry-run과 제한 배치
+      실행을 제공한다. 소량 소급 검증 뒤 전체 소급하며 그동안 외부 rhwp 경로는 유지한다.
+- [ ] 자체 worker의 품질과 운영 안정성이 확인된 뒤에만 외부 rhwp 의존 제거 여부를 다시
+      결정한다. 절체 전에는 두 변환기가 같은 원본의 current 근거를 동시에 만들지 못하게 한다.
+
+---
+
+## B-93
+### 전 봇 공통 근거 폭 확대 — 전수 탐색·채널×일 요약 길잡이·후속 확장
+
+**최우선 · 진행중 (Claude/2026-11-12, 1단계부터) · 의존 B-56, B-57, B-83, B-88, B-89**
+
+**오너 지시(2026-11-12).** 「근거 없음」 이 나오지 않도록 가능한 한 전수 근거로 답한다.
+모든 봇에 공통으로 적용한다. MD 를 저장하는 의미가 거기 있다.
+
+**계기.** VIPBot 이 같은 질문 「2026년 연말까지 달성해야 할 재무목표 Top5」 에 07:29 에는
+답했고, 09:34 부터는 「근거를 찾을 수 없다」 를 냈다. `scripts/diagnose_vip_answers.py` 로
+본 결과, 검색이 빈 회차는 없었다(8회 모두 20~40줄). 원인은 **근거 묶음**이었다.
+- 새로 수집된 ESG 첨부 두 개가 질문 낱말(2026년·연말·달성)과 요청 표현(정리·표·설명)을
+  더 많이 맞혀 근거 20줄을 독차지했다
+- 그래서 경영계획수립·조직성과관리 문서가 밀려났다
+- 시험(`tests/test_vip_exhaustive_search.py`)에서 같은 모양을 재현했다. 전수 탐색만 켜서는
+  못 막고, **문서당 상한**이 핵심이다
+
+**원칙(변경 없음).** 요약은 **길잡이**이고 답변 근거는 끝까지 원문 줄이다(CLAUDE.md 원칙 1,
+B-56). 요약 문장을 근거로 인용하지 않는다. 권한은 `visible_docs(ctx)` 하나가 정한다.
+
+#### 1단계 — 공통 검색 폭 (진행중)
+
+- [x] VIPBot: 전수 탐색·문서당 4줄·근거 60줄·요청 표현 제거 (`9ff9dd3`)
+  - `ArchiveStore.search(exhaustive=, per_document=)`
+  - `answer.focus_query`, `AnswerEngine(exhaustive_search=, per_document_hits=)`
+  - `vipbot_engine.VIP_*`
+- [x] TYBot: 문서당 4줄·`focus_query`·근거 40줄을 켜고, **보이는 채널 원문 줄 수가
+      `TYBOT_EXHAUSTIVE_MAX_LINES`(기본 150,000) 이하면 전수 탐색**, 넘으면 DB 색인을 쓴다
+      (`slack/pilot.py`). `vip_workspace.py` 의 두 번째 VIP 엔진 경로에도 VIP 설정을 넣었다.
+      공통 값은 `answer.BOT_*`·`VIP_*` 한 곳에 있다
+  - TYBot 전체 권한 질문은 아카이브 전체(약 110만 줄)가 범위다. 매 질문 파이썬 전체 스캔은
+    수 초~수십 초이고, 2026-11-02 에 같은 종류의 전체 처리로 OOM 이 났다. 그래서 문턱을 둔다
+  - Hermes(외부 전문봇)는 자기 검색을 한다. 이 변경은 Master 가 넘기는 근거에만 적용된다
+- [ ] **서버 측정 후 문턱 조정**: 로그 `검색 경로 전수|색인 visible_lines=` 와
+      `answer 전수 탐색 hits= docs=`, 응답 시간을 일주일 본다. 문턱은 env 로 바꾼다
+- [ ] 색인 경로의 후보 창(`search_index.CANDIDATE_LIMIT` 500) 확대 — 측정 뒤 결정
+- [ ] QA 기록에 검색 경로(전수/색인)와 근거 문서 수를 남긴다(콘솔 「질문·답변 원본」에서 보이게)
+- [x] 회귀 시험: 작은 범위는 전수·큰 범위는 색인, 문서 폭 확대, 기본 순서 보존, 세 엔진 설정
+      (`tests/test_vip_exhaustive_search.py`)
+
+#### 2단계 — 채널×일 자동 요약 길잡이 (설계 완료, 구현 대기)
+
+**오너 결정(2026-11-12):** 요약 단위는 **일**, 첫 대상은 **VIPBot 근거 채널**.
+설계: [`docs/design/channel-day-digest.md`](docs/design/channel-day-digest.md).
+그 문서 §7 의 구현 순서 1~6 을 체크박스로 진행한다.
+
+- [ ] §7-1 스키마·입력 수집·입력 지문
+- [ ] §7-2 생성(프롬프트·출력 검사·마스킹·저장)
+- [ ] §7-3 배치 스크립트(dry-run 분량)·timer(설치 시 비활성)
+- [ ] §7-4 `digest_guide` 와 `AnswerEngine` 연결
+- [ ] §7-5 콘솔 API·화면(분량 미리보기·소급)
+- [ ] §7-6 서버 dry-run → 오너 확인 → VIPBot 근거 채널 소급
+
+(아래는 결정 전 메모)
+
+- 채널마다 일자 MD(와 그날 첨부)를 묶은 자동 요약을 DB 에 둔다(새벽 배치, B-89 계열)
+- 요약마다 자기가 묶은 원문 좌표(일자 파일·첨부 revision·해시)를 저장한다. 원문이 바뀌면
+  `stale` 로 표시하고 재생성 대상으로 둔다(B-56 `mark_stale` 와 같은 축)
+- 질문 → 요약 대조로 「어느 채널·어느 날짜·어느 첨부」 를 고른다 → 그 범위의 원문을 전수 탐색
+- 요약 단위(일·주)와 대상 채널 범위는 **오너 결정 대기**. 소급은 콘솔에서 채널을 고르고
+  분량을 먼저 센 뒤 실행한다(CLAUDE.md 운영 원칙). LLM 비용이 든다
+- 파생 요약 다섯 조건(CLAUDE.md 원칙 1 2026-09-17)과 충돌하지 않게, 자동 요약은 근거가 아닌
+  길잡이 전용으로 두고 `auto_bot_summary`(B-88)와 출처 표시를 구분한다
+
+#### 3단계 — 후속 질문 넓히기
+
+- [x] 후속 질문도 이전 범위에 갇히지 않는다(2026-11-12 오너 결정, 후속 설계 §10 폐기).
+  자기 낱말이 있으면 현재 권한으로 새로 찾아 이전 근거와 합친다 — `AnswerEngine._widen_followup`
+- [x] 회사 이름(태영건설)은 검색어에서 뺀다 — `answer.COMPANY_WORDS`
+- [x] 부분 근거로 답하기(프롬프트 규칙 4)·질문 메아리 거르기 — `61fde67`
+- [ ] (남음) 같은 문서·날짜·첨부의 주변 줄로 넓히는 좌표 확장
+
+- 후속 질문이 이전 답이 연 원문 좌표(`EvidenceRef`, B-57·B-83)에서 출발해, 같은 문서·
+  같은 날짜·같은 첨부의 주변 줄로 넓혀 다시 탐색한다
+- 확장도 매번 현재 권한으로 다시 연다. 지난 답의 문장은 쓰지 않는다
+
+#### 이어받는 사람에게
+
+- 진행 위치는 위 체크박스다. 진행 중인 작업은 커밋 메시지에 `(B-93)` 을 붙인다
+- 1단계 코드 위치:
+  - `src/tybot/archive/store.py`: `search`·`_rank(per_document)`·`_scan_attachment_fallback`
+  - `src/tybot/answer.py`: `focus_query`·`REQUEST_WORDS`·`AnswerEngine._search`
+- 진단은 서버에서 `scripts/diagnose_vip_answers.py` 로 한다(같은 질문의 회차별 근거 묶음 비교)
+- 측정 없이 전수 범위를 넓히지 않는다. 서버에서 `answer 전수 탐색 … hits= docs=` 로그와
+  응답 시간을 먼저 본다
 
 ---
 
@@ -545,7 +896,24 @@ TYIT 정기보고 채널의 XLSX 네 건은 변환·아카이브에 성공했지
 
 ## B-81
 ### 건설 현장 사진 검색 색인과 원본 질의응답
-**우선 높음 · 진행중 (Codex+Claude/2026-10-27) · 연계 B-80, B-41, B-53 · 콘솔 WC-30**
+**우선 높음 (다음 작업) · 진행중 (Codex+Claude/2026-11-12, 운영 연결 재개) · 연계 B-80, B-41, B-53 · 콘솔 WC-30**
+
+> **2026-11-19 오너 결정 — 일반 업무 문서의 Google Vision 전송 허용.** 당사는 일반 업무 문서를
+> 별도 기밀로 분류하지 않는다. 일반 업무 이미지·PDF 는 정책/카탈로그 민감도 표기 불일치로
+> 막지 않는다(`public`·`internal` = 같은 일반 업무 단계, `confidential` 은 그대로 차단).
+> PII·민감 문서 차단, OCR 불완전 ≠ 안전, 원본 불변, 파생 전사, 페이지별 중복 호출·재청구 금지,
+> provider 오류 시 자동 재시도 금지는 **완화하지 않는다.** B-80·B-81 공통 계약:
+> [vision-sensitivity-contract.md](docs/design/vision-sensitivity-contract.md)
+
+> **2026-11-20 오너 결정 — B-81 이미지의 전송 전 PII 판별·건별 승인을 폐지한다.**
+> Archiver가 정본으로 수집한 PNG/JPEG/WebP는 운영자가 켠 Vision 정책 아래에서
+> 별도 clearance/approval 없이 승인된 Google 모델로 보낼 수 있다. 현재 ACL·정본 좌표와
+> 원본 해시·봇 출력 제외·무료 모델 및 quota 확인은 그대로다. 반환된 설명·OCR 텍스트는
+> 저장·Slack 전달 전에 기존 마스킹과 출력 가드를 거치며 얼굴 신원 식별·차량번호 전사는
+> 계속 금지한다. PDF/HWP·스캔 문서와 대화·추출문에는 이 예외를 적용하지 않는다.
+> 기존 clearance/approval 원장은 감사 호환용으로 남길 수 있으나, 이미지 worker의 필수
+> 전제나 사람이 처리해야 하는 큐로 두지 않는다. `pii_cleared=true`인 가짜 자동 승인 행을
+> 만드는 방식도 금지한다.
 
 2026-10-27 오너 결정: HWP는 rhwp 앱의 PDF 변환 경로를 사용하므로 이 항목의
 선행 조건에서 제외한다. 이번 구현의 중심은 Archiver가 보관한 PNG/JPEG/WebP 원본을
@@ -561,6 +929,42 @@ TYIT 정기보고 채널의 XLSX 네 건은 변환·아카이브에 성공했지
 한해 비동기로 짧은 설명·태그를 만들어 사진을 찾는 데 사용한다. 설명은 파생 색인이며
 원문이나 답변의 사실 근거로 재사용하지 않는다. 모든 사진 자동 해석은 기본 OFF다.
 
+2026-11-12 오너 결정: 기존 로컬 OCR을 없애지 않고, 수집 시 원본 보존과 로컬 OCR을
+먼저 끝낸 뒤 무료 Vision LLM이 이미지 설명과 텍스트 인식을 보완한다. LLM 장애·무료
+한도 소진·정책 차단은 원본 수집 성공을 되돌리지 않는다. 이미지 설명용 API 자격은
+`.env`의 평문이나 일반 TYBot 전역 키로 관리하지 않고 **Vision 전용 DB 비밀 항목**으로
+관리한다.
+
+- API 키는 DB에 Fernet 암호문·mask·활성 상태·교체자·교체 시각만 저장한다. Fernet
+  복호화 키는 DB 밖 `/etc/tybot/workspace-secret.key`에 두고 복호화 조회 API는 만들지 않는다.
+- provider/model·무료 조건·Vision 지원·리전·민감도·quota는 비시크릿 모델 카탈로그가
+  소유한다. API 키가 있다는 사실만으로 모델을 활성화하거나 무료라고 판정하지 않는다.
+- Vision worker는 전용 DB 역할로 자기 scope의 자격만 읽는다. DB·복호화 키·카탈로그 중
+  하나라도 확인하지 못하면 환경변수나 유료 모델로 내려가지 않고 해당 작업만 보류한다.
+- 무료 API의 입력 보관·학습 이용 조건이 사내 자료 정책과 맞는지 모델별로 검증한다.
+  무료라는 이유만으로 `internal`·`confidential` 이미지를 외부 전송하지 않는다.
+
+#### 2026-11-12 현재 진척
+
+- **구현됨:** 무료 모델 fail-closed 카탈로그, 전역/workspace 정책, clearance와 외부 전송
+  승인, 현재 ACL·PII·사람 업로드 provenance 재검사, 원본 로더, 예약·quota·동시성 원장,
+  one-shot 호출, 출력 안전 게이트, 불변 파생 revision 발행, 읽기/정책 변경 콘솔 API,
+  비활성 기본의 15분 worker timer와 Vision 전용 DB 역할/DSN.
+- **운영 미연결:** Google 무료 Vision API 실호출 검증, 콘솔 화면의 모델·
+  자격·작업 목록, workspace별 timer 활성화.
+- **검증:** 2026-11-12 이미지 설명 코어·worker·원장·systemd·콘솔 라우트 집중 시험
+  `211 passed`. 이는 실제 provider 호출이나 실제 이미지 설명 품질을 검증한 결과는 아니다.
+
+#### 이번 분담
+
+- **Codex:** Vision 전용 암호화 API 자격 스키마·저장소·관리 API, worker의 exact provider
+  자격 주입과 env/전역 키 fallback 차단, 배포/readiness 및 회귀 시험.
+- **Claude:** 수집된 이미지 후보 → 정책/ACL/정본 검증 → worker → 파생 revision → 검색 후보 →
+  현재 ACL 원본 재개봉 end-to-end 감사와 연결. 합성 이미지 OCR·설명 품질 평가 세트 및
+  불확실/봇 생성 이미지에서 외부 호출 0회 계약을 담당한다.
+- 서로 겹치지 않게 Codex는 자격·DB·provider 경계만, Claude는 후보·파생 색인·검색·평가
+  경로만 수정한다. 정책 OFF와 timer 비활성 기본은 양쪽 모두 유지한다.
+
 - [ ] 검색 설명과 사진 질의응답의 용도별 모델·예산·전송 정책을 분리한다.
 - [ ] 전역 기본과 workspace override로 이미지 설명 모델을 라우팅한다. 모델 ID 자유
       입력은 금지하고 서버 카탈로그 후보만 선택한다. 저장 revision과 worker 적용
@@ -573,7 +977,16 @@ TYIT 정기보고 채널의 XLSX 네 건은 변환·아카이브에 성공했지
       OFF여도 원본 수집은 성공할 수 있고, 설명은 `대기/완료/불확실/실패/차단`으로 남긴다.
 - [ ] 질문 시 현재 권한으로 원본 사진을 다시 열어 설명·비교하고 사진 좌표를 출처로 붙인다.
 - [ ] PF Hermes 이미지 열람 RPC 계약을 설계한다. 현재 텍스트 RPC만으로 지원된다고 보지 않는다.
-- [ ] 얼굴·차량 번호 등 개인정보의 외부 전송 전 처리/승인과 원본 열람 감사를 적용한다.
+- [x] 이미지 전송 전 PII 판별·건별 승인 없이 동작하게 하되 원본 열람 감사는 유지하고,
+      반환 텍스트의 얼굴 신원 식별·차량번호 전사 금지를 검증한다. — Claude 2026-11-20.
+      `run_cleared_batch` 는 clearance·approval 을 조회하지 않고 `verify_current_access`
+      (정본 좌표·원본 해시·현재 visibility/ACL 을 **아는지**)만 본다. 예약은 승인이 없으면
+      `policy_scope` 로 **정책 판에 결속**되고(`archiver_image_description_job.approval_id`
+      NULL 허용, 스키마 ALTER), preflight·dispatch 가 지금 정책 판·모델·프롬프트 판과
+      어긋나면 호출하지 않는다. 옛 승인 행이 주어지면 예전 규칙 그대로(호환). 가짜
+      `pii_cleared` 행은 만들지 않는다. OCR 전사에 번호판 모양이 남으면 전사를 저장하지
+      않는다. 시험 `tests/test_image_description_policy_bound_e2e.py`(정상 1회 호출 →
+      revision·투영·B-94 알림, 정책 OFF·ACL 모름·해시 변경·봇 산출물·quota 소진 0회)
 - [ ] 게시 시각·실제 촬영 시각·작성자 설명·모델 관찰을 구분하고 EXIF를 확정 사실로 쓰지 않는다.
 - [ ] 공정률·치수·수량·하자·안전 여부를 사진만으로 확정하지 않는다. 불확실 영역을 표시한다.
 - [ ] 기간 비교는 같은 현장/구역/대상이 확인된 사진끼리 수행하고 사진 밖의 진척을 추측하지 않는다.
@@ -652,6 +1065,51 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] Codex: 승인된 후보만 처리하는 one-shot worker와 15분 timer 유닛, 집계 전용
       상태 파일을 추가하고 설치 시에는 **비활성 상태**로 둔다 (2026-11-03,
       정책 OFF·전용 DSN 없음·승인 없음에서는 외부 호출 0회).
+- [x] Codex: Google Gemini Developer API 이미지 입력 어댑터, Vision 전용 암호화 provider
+      자격 표·mask 전용 관리 API, worker exact-key 주입과 일반 키/env fallback 차단을 구현.
+      Rocky 8 systemd 239에서 지원하지 않는 `LoadCredential=`도 0600 파일 경로 방식으로
+      교체 (2026-11-12, 집중 54건·관련 250건 및 Ruff 통과, 실제 Google 호출은 아직 안 함).
+- [x] Claude: Google 출력으로 **검색 설명**과 **OCR 전사**를 분리한 계약을 만들고,
+      후보 → worker → 파생 revision → 검색 → 현재 ACL 원본 재개봉을 end-to-end로 연결 (2026-11-12).
+      프롬프트 판 `2026-11-12.1`이 한 번의 호출로 `description`과 `transcript`를 따로 받는다.
+      전사는 마스킹(`sensitive_mask`)과 최종 관문(`pii_screen`)을 지나 별도 원장
+      `archiver_image_transcript_revision`(`[AI 텍스트 인식·검색용]`, Vision 전용)에 저장한다.
+      설명에 전사가 옮겨지면 설명을 보류한다. Master는 안전 판정을 지난 텍스트만 담은 투영
+      `image_search_entry`만 읽는다(drift 예외 `MASTER_READ_ONLY`). `image_guide`는 답변 직전에
+      다음을 다시 확인하고 원문 줄(로컬 OCR·채널 첨부 줄)만 근거로 돌려준다.
+      - 투영 PII
+      - 원본 존재·해시·사람 업로드(`load_original`)와 가장 새 정본
+      - 현재 ACL(`visible_docs`)
+
+      모델 실패·timeout·무료 한도 소진이면 revision이 없고 로컬 OCR 검색으로 복귀한다.
+      콘솔 「운영 > 이미지 설명」은 Codex 자격 API(마스크·교체·사용 중지·사유)와 현황을 쓴다.
+      E2E 47건, 변이 16건 검출. 실제 Google 호출과 실DB는 미검증.
+      운영 절차와 남은 판단: `docs/verification/2026-11-12-b81-image-transcript-e2e.md`
+- [x] Codex: 호출 예외(timeout·429)는 provider 영수증을 꾸며 내지 않고
+      `failed/model_timeout` 또는 `failed/model_error`로 닫는다. 사용량·비용을 확인할 수 없으므로
+      파생 revision은 만들지 않고 해당 무료 카탈로그를 자동 차단한다(2026-11-18).
+- [x] 자동 보안 리뷰 3건 반영(2026-11-12, 오너 승인으로 Claude가 Codex 소유 자격 경로 수정)
+  1. **전용 키:** Vision provider 키는 `VISION_PROVIDER_SECRET_KEY_FILE`
+     (`/etc/tybot/vision-provider-secret.key`, 0400) 전용 Fernet 키로만 암호화한다.
+     - 워크스페이스 키로 내려가지 않는다.
+     - worker unit 에서 `WORKSPACE_SECRET_KEY_FILE` 을 뺐다.
+     - install.sh 가 키가 없을 때만 만든다.
+  2. **마스크:** 끝 4자와 SHA-256 지문 8자만 보인다. 최소 길이는 20자다.
+  3. **역할 분리:** worker(`tybot_vision`)는 `provider·ciphertext·enabled` 열 SELECT 만 갖는다.
+     - 콘솔은 Vision DSN 대신 콘솔 `DATABASE_URL`(`tyslackai`)로 쓴다.
+     - 콘솔은 마스크·상태 열 SELECT 와 INSERT·UPDATE 만 갖고, **암호문 열은 못 읽는다**.
+     - drift 검사기가 두 역할의 정확한 열 권한을 대조한다.
+  - **운영 전환:**
+    1. 배포한다. 이때 install/update 가 키 파일을 만든다.
+    2. `sudo /opt/tybot/deploy/apply-schema.sh` 로 권한을 회수하고 다시 준다.
+    3. `check_schema_drift.py` 로 대조한다.
+    4. **콘솔 「운영 > 이미지 설명」 에서 Vision 키를 다시 넣는다.** 예전 키는 워크스페이스 키로
+       암호화돼 있어 새 키로 풀리지 않는다(`provider_secret_unreadable` → 작업 보류, 외부 호출 0).
+    5. `/etc/tybot/archiver.env` 에 `WORKSPACE_SECRET_KEY` 가 있는지 확인한다. 있으면 worker 가
+       여전히 그 값을 환경으로 받으므로, 수집기에 필요한지 먼저 확인한 뒤 뺀다.
+- [ ] 오너 결정: AI OCR 전사를 로컬 OCR처럼 **인용 가능한 기계 추출**로 올릴지
+      (지금은 검색 길잡이 전용)
+- [ ] VIPBot 답변 엔진에 사진 길잡이 연결, 실제 현장 사진 품질 평가 세트(정책 ON 이후)
 
 > **「LOGIN 계정 준비」 와 「worker 활성화」 는 같은 완료가 아니다.**
 >
@@ -665,9 +1123,115 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 
 ---
 
+## B-94
+### 이미지 인식 완료 상태의 Archiver 스레드 알림
+
+**높음 · 진행중 (Codex/2026-11-12) · 의존 B-81, B-86**
+
+사진 설명/OCR worker가 안전한 파생 검색 자료를 발행한 뒤, 원본이 올라온 Slack
+스레드에 처리 상태를 알린다.
+
+> **2026-11-20 (오너 결정) — 「상태만」 에서 「어떻게 인식했는지」 로.**
+>
+> 올린 사람이 인식 결과를 **확인할 수 있어야** 한다. 상태 문구만으로는 틀린 인식을
+> 아무도 모른 채 검색 보조 자료가 된다. 그래서 원 스레드 답글에 **발행된** 인식 결과를 싣는다.
+> - 싣는 것은 저장된 revision 뿐이다 — 출력 가드(`image_description_output_guard`)를 지난
+>   설명·태그와 `guard_transcript` 를 지난 OCR 줄. 모델 원문 응답은 outbox 에도 안 쓴다
+> - outbox 에 넣기 전, Slack 문구가 되기 직전 **두 번** `sensitive_mask` 를 거친다.
+>   가린 뒤에도 민감해 보이는 줄은 빼고, Slack 제어 문자(`<`·`>`·`&`)는 이스케이프한다
+> - 크기 상한: 설명 600자, 태그 12개, OCR 12줄(넘으면 「외 N줄」)
+> - **원 스레드**라 그 사진을 이미 볼 수 있는 사람에게만 간다. 봇 발언이라 재수집되지
+>   않는다(원칙 1). 사람이 스레드에 바로잡으면 그 말이 원문이 된다
+> - 파일명·원문은 여전히 싣지 않는다. 인식 결과를 못 읽으면 예전 고정 문구로 보낸다
+
+- worker는 Slack 토큰을 갖지 않는다. 좌표와 고정 상태 코드만 든 로컬 outbox에
+  알림 요청을 내고, Archiver만 자신의 검증된 Slack token으로 보낸다.
+- 성공: `✅ 이미지를 이렇게 인식했습니다 — …` + 설명·태그·읽은 글자 (2026-11-20 결정, 구현
+  `image_description_notification.recognition_fields`·`load_recognition`). 인식 결과가 없으면
+  `✅ 이미지 설명·텍스트 인식 완료 — 검색 보조 정보로 반영되었습니다.`
+- 불확실: `🟡 이미지를 이렇게 인식했습니다 (일부 불확실) — …`
+- 승인 대기·정책 OFF·차단·quota 소진은 채널에 알리지 않는다. 콘솔/운영 로그만
+  남겨 채널을 스팸하지 않는다.
+- 원 메시지 좌표가 없거나 현재 Archiver가 해당 채널의 멤버가 아니면 보내지 않고
+  outbox를 실패 코드로 닫는다. Slack API 실패를 성공으로 기록하지 않는다.
+- 알림은 수집 경로에서 봇 발언으로 제외되는지 회귀시험으로 확인한다.
+
+완료 조건: worker 단독 실행에는 Slack 토큰이 없고, 완료 상태 하나당 안전한 알림
+요청 하나만 생기며, Archiver 재시작·API 실패·중복 drain에도 같은 상태가 반복 게시되지
+않는다.
+
+---
+
+## B-96
+### 봇 등급별 모델 — VIPBot 한 단계 위(판단 Sonnet·Hermes Opus)
+
+**높음 · 대기 (오너/2026-11-12) · 의존 B-44**
+
+**오너 결정(2026-11-12).** VIPBot 은 TYBot 보다 모든 단계가 한 단계 위다.
+
+| 단계 | TYBot | VIPBot |
+|---|---|---|
+| 판단(분해·어느 봇을 부를지) | Haiku (`intent.CLASSIFIER_MODEL`) | **Sonnet** |
+| Hermes 답변(요약·내부 기록) | **Sonnet** | Opus |
+| VIPBot 직접 답변 | — | Opus (`vip_profile.APPROVED_MODEL`, 현행 그대로) |
+
+**현재 코드 사실(2026-11-12 확인).**
+- TYBot 판단 모델은 `intent.plan` 이 `CLASSIFIER_MODEL` 로 하드코딩한다. 엔진별로 바꿀 손잡이가 없다
+- Hermes 는 두 길이다. RPC worker(`subbots/hermes/src/rpc/profiles.js`)는 **서버 profiles 의
+  workspace 항목 `model`** 이 정하고(요청 본문이 고르지 못하게 설계됨), 프로세스 내 어댑터는
+  DB `specialist_bot.model` 을 쓴다
+- VIPBot 은 공유 경로(`vip_workspace.build_engine`, B-95) 하나다. TYBot 과 같은 파이프라인에
+  권한(`vip_access`)·근거 채널·모델·예산만 VIP 것으로 바꾸며 Hermes 훅도 붙어 있다.
+  2026-11-12에 독립 런타임과 전용 systemd 유닛을 삭제해 두 구현이 다시 갈라질 여지를 없앴다
+- **오너 목표(2026-11-12): VIPBot 은 TYBot 과 같고 권한·출처 채널만 다르다.** B-96은
+  공유 경로에 손잡이 둘(판단 모델·Hermes 등급)만 넣으면 된다
+
+**할 일.**
+1. TYBot→Hermes Sonnet: 서버 Hermes RPC profiles 의 각 workspace `model` 을
+   `claude-sonnet-5-5` 로(설정 변경. 프로세스 내 어댑터를 쓰는 곳은 DB `specialist_bot.model`)
+2. `intent.plan(model=)`·`AnswerEngine(planner_model=)` 손잡이. 기본값은 지금과 같다
+3. VIPBot 에 판단(Sonnet)과 Hermes 훅을 붙인다. Hermes RPC 는 요청이 모델을 못 고르므로
+   **호출자 등급(tier)** 을 서버 허용 목록으로 둔다 — 예: profile 에 `models: {default, vip}`.
+   요청은 `tier: "vip"` 만 말하고, 서버가 허용한 값만 쓴다(profiles.js 설계 원칙 유지)
+4. 직접 답변은 현행 Opus를 유지하고, 분해·전문봇 선택과 Hermes 호출 등급만 분리한다
+
+## B-95
+### VIPBot 다중 워크스페이스 DB 연결
+
+**최우선 · 완료 (Codex/2026-11-12) · 의존 B-83**
+
+공유 TYBot 런타임 안에서 VIPBot을 한 워크스페이스로 제한하던
+`VIPBOT_WORKSPACE` 선택을 제거한다. 콘솔 DB의 `bot_connection` 가운데
+`bot_key='vipbot'`, `state='enabled'`, `identity_ok=true`이고 bot/app 토큰 쌍이
+완전한 워크스페이스를 모두 기동한다.
+
+- 모델·답변 엔진·예산·QA 저장소는 같은 VIPBot 제품 분기로 공유한다.
+- Slack Socket Mode 연결과 요청 컨텍스트/권한 판정은 워크스페이스별로 분리한다.
+- 비활성·신원 미검증·토큰 불완전 연결은 기동하지 않는다.
+- 한 연결의 복호화·설정 오류는 해당 워크스페이스만 제외하고 TYBot과 다른 VIPBot
+  연결은 계속 기동한다.
+- TYBot 토큰과 같거나 다른 VIPBot 연결이 이미 쓰는 bot/app 토큰 중 하나라도
+  같으면 중복 Socket Mode 세션을 만들지 않는다.
+- 공유 런타임의 워크스페이스 정본은 DB다. `.env`의 `VIPBOT_WORKSPACE`는 읽지 않는다.
+- 기존 단독 `tybot-vipbot.service`와 전용 실행 코드는 삭제했다. 배포 시 서버에 남은
+  유닛도 중지·제거해 같은 Slack 토큰의 두 번째 소비자가 다시 뜨지 못하게 한다.
+
+완료 조건: `tyit`, `mgmt` 등 둘 이상의 검증된 VIPBot 연결이 한 TYBot 프로세스에서
+각각 Socket Mode 세션을 만들고, 한 연결 실패가 다른 연결을 막지 않으며, 각 요청이
+자기 워크스페이스의 사용자 권한과 DM 전달 정책을 적용한다.
+
+---
+
 ## B-80
 ### Archiver PDF와 HWP 복구 및 Vision 모델 관리
 **우선 높음 · 진행중 (Codex/2026-10-19) · 연계 B-46, B-65, B-73 · 콘솔 WC-21**
+
+> **2026-11-19 오너 결정 — 일반 업무 문서의 Google Vision 전송 허용.** 당사는 일반 업무 문서를
+> 별도 기밀로 분류하지 않는다. 일반 업무 이미지·PDF 는 정책/카탈로그 민감도 표기 불일치로
+> 막지 않는다(`public`·`internal` = 같은 일반 업무 단계, `confidential` 은 그대로 차단).
+> PII·민감 문서 차단, OCR 불완전 ≠ 안전, 원본 불변, 파생 전사, 페이지별 중복 호출·재청구 금지,
+> provider 오류 시 자동 재시도 금지는 **완화하지 않는다.** B-80·B-81 공통 계약:
+> [vision-sensitivity-contract.md](docs/design/vision-sensitivity-contract.md)
 
 2026-10-19 오너 승인: 로컬 OCR 뒤 Vision LLM 변환을 보완 경로로 추가하고,
 아카이버용 모델을 웹콘솔에서 관리한다. 수집 프로세스 안에서 LLM을 동기 호출하지
@@ -687,6 +1251,81 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] Claude: 페이지 이미지 전사·표 추출 코어, 구조 검증·실패 코드·독립 시험.
 - [x] Codex/Claude: 혼합 PDF 이미지 누락 탐지와 coverage 기록, PDF 변환기 판 4로 revision 분리 (운영 실측 대기).
 - [ ] Codex: 미해독 쪽의 페이지 렌더링·Vision 승인 worker 연결. 현재 `partial` 정본은 일반 검색 근거가 아니다.
+- [x] Claude(2026-11-19, `a96280f`): 운영 연결 코어.
+  - 후보 `archive/vision_candidates.py`: staged metadata 의 `missing_units`·`unverified_units` 쪽만.
+    원본 없음·XLS 등 비 PDF·PII/정책 격리·PII 알림(부분 검사 fail-closed)·검사 결과 모름·쪽 판정 없음·
+    목록 상한(50) 도달은 대기열에 넣지 않는다
+  - 렌더 `archive/vision_pdf_render.py`: 요청 쪽만 PNG. `pypdfium2==4.30.0` 을 배포 의존성에 고정,
+    실제 렌더 smoke 시험
+  - 실행 `archive/vision_pdf_batch.py`(`dry_run`·`apply` 분리) + `scripts/vision_pdf_backfill.py`
+    (기본 dry-run, apply 는 실행자·사유·쪽 상한·쪽당 예약 금액 필수). 전송 전 등록 채널·수집 범위
+    (`archive_channel_mode`, Master 읽기 전용)·원본 좌표를 실제 조회한다
+  - 파생 revision `archiver_vision_page_revision`(job 당 1건, 마스킹→최종 관문, 원문 불변) →
+    Master 읽기 전용 투영 `pdf_page_search_entry`(성공 전사만, `--project` 로 멱등 소급)
+  - 민감도: 공통 계약 [vision-sensitivity-contract.md](docs/design/vision-sensitivity-contract.md)
+- [x] Claude(2026-11-19, `8e802ac`): 폐기 PostgreSQL 16 에서 DB 시험 실행(B-81 5건 + Vision 16건 통과).
+  시험 준비 결함 2건(B-81 정책 씨앗 행 TRUNCATE, 전용 스키마의 pg_trgm 검색 경로)만 고쳤다
+- [x] Claude(2026-11-19, `c2f903e`): **답변 근거 연결.** `pdf_vision_guide` 가 최초 질문에서 투영을
+  찾고, TYBot·VIPBot 공통 답변 경로(`_with_pdf_vision_guide`)로 들어간다.
+  - `extracted` 만 근거(같은 쪽 최신 revision 이 아니면 옛 extracted 로 되돌아가지 않음)
+  - 직전 재검증: 현재 visible 채널·정본 ACL(VIP `evidence_sources` 포함) · 현재 AttachmentDoc 의
+    file_id·original_sha256·상태 · 원본 PDF 자리·해시·`%PDF` · PII 재검사
+  - 근거 줄 `[AI 문서 전사·파생 · PDF N쪽]`, 출처 `📄원본.pdf N쪽(날짜) · [AI 문서 전사·파생]`
+  - 후속 질문: `EvidenceRef(kind=vision_page)` 에 revision_id·file_id·page·original_sha256 만
+    (전사 문장·지문 없음). 다음 질문에서 DB·권한·원본을 처음부터 다시 확인
+  - DB 오류·투영 누락/대체·좌표 불일치·권한 변경은 fail-closed, 기존 검색은 그대로
+- [x] 오너 결정(2026-11-19): **PDF 쪽 전사는 「사람 업로드 확인」 을 요구하지 않는다.**
+  - 그 값(`human_upload_confirmed`)은 실시간 수집이 Slack 이벤트에서 `user` 가 있고 `bot_id`·`app_id`·
+    변환 앱 표식이 없을 때만 참으로 적는다. 2026-10-27 이전 문서·파일 목록 소급·변환 앱 PDF 는 거짓이다
+  - 수집 입구가 이미 봇·앱 메시지를 버리고 **지정 변환 앱의 PDF 만** 받는다(`collect`·`converter_bots`).
+    그 PDF 는 사람이 올린 HWP 의 변환본이다. 이 값을 요구하면 HWP 계열과 옛 PDF 전부가 빠져
+    「가능한 모든 문서를 정확한 텍스트로」 라는 목표와 반대가 된다. 봇 출력 되먹임은 수집 입구가 막는다
+- [x] 오너 결정(2026-11-19) · Claude(`7200ca1`): **B-81 이미지도 같은 기준.** 판정은
+  `archive/vision_provenance.admitted_by_collection` 한 곳 — 좌표가 온전하고 TYBot·VIPBot 답변
+  Canvas 표식이 없는 정본. 선별기·원본 로더·승인/clearance 콘솔이 이것을 부른다. 옛 사진·히스토리
+  재수집·파일 목록 소급 사진이 범위에 들어온다. `human_upload_confirmed` 는 기록만 하고 판정에
+  쓰지 않는다. 오류·건너뜀 코드 이름은 콘솔·원장 호환을 위해 그대로 둔다.
+  우리 봇이 이미지·PDF 를 올리는 기능이 생기면 **그 입구에서** 표식을 남기고 이 함수가 거절해야 한다
+- [x] Claude(2026-11-19, `3061fe8`): **배포 차단 결함 수정**(c2f903e 검증 지적).
+  - 실패·보류 revision 도 `pdf_page_search_entry` 에 **본문 없는 묘비**로 투영(body·unreadable 항상 빈 값,
+    DB 제약 `pdf_page_search_entry_body_by_status`). 최신 판이 failed·withheld·uncertain 이면 옛
+    extracted 는 최초 검색·후속 복원 양쪽에서 빠진다
+  - 투영 `created_at` = 원장 revision 시각. 스키마 재적용이 기존 행 시각 정정·제약 교체·묘비 소급을
+    멱등으로 한다
+  - `active_entries` 를 (workspace, channel) **정확한 좌표 쌍**(unnest)으로 LIMIT 전에 제한
+  - `summarize()`(명시적 `terms`·`document_query` 일 때만, 상한 4쪽)·`advise()` 의 사내 사실 근거에도
+    연결. TYBot·VIPBot 공통. `EvidenceRef.kind` Literal 에 `vision_page`
+  - 폐기 PostgreSQL 16: extracted→failed/withheld 검색·옛 참조 복원 0건, 투영 삭제 후 소급해도 원장
+    순서 유지, 옛 투영 표 제자리 업그레이드 — 통과. 변이 시험(묘비 제거·투영 시각·최신판 무시) 모두 검출
+- [x] 서버 스키마 재적용·드리프트 확인 완료(오너, 2026-11-19)
+- [x] 서버 dry-run(2026-11-19): 문서 436 · 보낼 문서 200 · 보낼 쪽 812(같은 채널 중복 제외 약 796).
+  eligible 200 · not_pdf 107 · screen_unknown 111(대부분 mgmt `C0BRAE7B3KN`·`C0BRMFMT8T0` 옛 metadata) ·
+  screen_notice 14 · list_truncated 4. 쪽 사유는 missing 약 650 · unverified 약 160
+- [x] Claude(2026-11-19, `3681068`·`07226a5`): **실제 비용이 0 원으로 정산되던 결함.** Vision Router 는
+  단가 0 ModelSpec 으로 만들고 Google provider 는 늘 `cost_usd=0.0` 이라, 정산 `actual_usd` 가 0 → 일일
+  예산(정산분은 실제액 합산)이 사실상 무력했다.
+  - 정책 설정에 요금표 `input_usd_per_mtok`·`output_usd_per_mtok`. 없으면 예약 거절(`tariff_unconfigured`),
+    예약액이 출력 상한 비용보다 작으면 거절(`reservation_below_tariff`)
+  - 정산 = 예약 때 묶인 요금표 × 응답 토큰. gateway `cost_usd` 는 쓰지 않는다. 토큰이 없거나 0 이면
+    0 원이 아니라 `unknown`(예약액 유지). Google 사고 토큰(`thoughtsTokenCount`)을 출력에 포함
+  - B-81 이미지 설명은 무료 한도(건수) 카탈로그 설계라 이 결함과 무관하다
+- [x] Claude(2026-11-19): **B-80 정책 콘솔.** 정책 행을 쓰는 길이 콘솔·스크립트 어디에도 없어 apply 가
+  `policy_unavailable` 로 막혔다. 운영 › 이미지 설명 화면에 「PDF 쪽 전사 (B-80)」 섹션 —
+  모델·요금표·쪽당 상한·하루 예산·동시 상한, 켜기 전 차단 사유, 오늘 사용액, 작업 좌표·예약/실제 금액.
+  API `GET /api/archiver/pdf-vision`·`PUT /api/archiver/pdf-vision/policy`(관리자·CSRF·사유 필수·감사).
+  전역 행은 전체 권한 관리자만. 저장은 허가가 아니다(모델 호출·소급 시작 없음)
+- [x] Claude(2026-11-19): **PII 판정이 엇갈린 파일은 보류**(`screen_conflict`). 같은 파일의 한 정본은
+  `passed`, 다른 정본은 알림·모름·격리면 통과한 쪽도 보내지 않는다(dry-run 의 `F0C8HETC917`·
+  `F0C0MFB44MR`·`F0C0TM2TU8J`·`F0C0FMK9MLJ`·`F0C0KCK984C`). 같은 채널의 같은 계획은 한 번만 센다
+- [ ] 콘솔에서 전역·`tyit` 정책 입력(요금표는 provider 공식 가격표로 확인) → 소량 apply(문서 2건·6쪽,
+  missing·unverified 각 1건) → 원장 실제액·로그 토큰으로 쪽당 비용 실측
+- [ ] **여러 채널에 공유된 같은 파일**은 원장 identity 에 채널이 없어 첫 채널에만 revision·투영이 생긴다
+  (`F0CDT782V7V`·`F0C0FMK9MLJ`·`F0C0KCK984C`). 투영 키를 (revision, channel) 로 넓히고 답변 직전
+  검증을 채널별로 — 재청구 없이 다른 채널에도 근거가 되게
+- [ ] **`screen_unknown` 111건 로컬 재검사**를 콘솔에서: 채널을 고르고 분량을 먼저 센 뒤
+  `file_reconversion` 으로 재변환·PII 재검사(외부 전송 없음). 통과분만 다음 dry-run 대상
+- [ ] `list_truncated` 4건: metadata 쪽 목록 상한(50) — 재변환으로 전체 목록을 얻은 뒤 다룬다
+- [ ] 남은 것: 원본과 수치·표 대조(아래 운영 승인 항목) → 범위 확대
 - [ ] Claude: HWP 단일 kordoc 실패 경로의 오류 진단, 로컬 추출/검증된 PDF 렌더링 우회.
 - [ ] 콘솔 담당자: WC-21 화면. API는 아직 없으므로 운영 활성화 버튼은 막는다.
 - [ ] 대표 실패 PDF로 로컬 OCR과 Vision 결과·페이지 범위·수치·표를 비교하고 운영 승인.
@@ -3814,3 +4453,26 @@ Hermes 정지 후 TYBot 설치 순서를 지킨다.
 
 각 항목의 상세 근거는 [agent-architecture.md](docs/design/agent-architecture.md),
 [identity-and-legacy-login.md](docs/design/identity-and-legacy-login.md) 에 있다.
+
+---
+
+## B-98
+### 그림자 수집 폐기 뒤 격리한 레거시 아카이브를 현재 단일 루트로 무손실 병합
+
+**최우선 · 진행중 (Codex/2026-11-18) · 의존 B-65**
+
+2026-11-18 운영 전환에서 모든 `shadow` 채널을 `active/archiver`로 바꾸고 그림자
+수집본을 운영 루트에 복사했다. 기동 안전장치가 옛
+`archive/workspaces/<workspace>`와 새 채널별 레이아웃의 공존을 막아, 옛 자료
+182MB는 삭제하지 않고
+`/var/lib/tybot/archive-legacy-quarantine-20261118/workspaces`로 격리했다.
+
+- [x] 기본 dry-run, 명시적 `--apply`만 쓰는 전용 병합 CLI
+- [x] 원문은 `(workspace, channel_id, message_ts)` 좌표로 중복 제거하고 좌표 없는
+      줄은 동일 문장일 때만 중복 제거
+- [x] 현재 문서의 frontmatter·ACL을 덮어쓰지 않고, 새 문서는 옛 ACL보다 넓히지 않음
+- [x] 첨부 추출문은 민감물 차단·비가역 마스킹을 다시 거치며, 같은 revision 내용이
+      같을 때만 멱등 처리하고 충돌은 차단
+- [x] DM은 `<workspace>/dm/<user>/archive`로만 병합
+- [x] 원본 격리 폴더는 수정·삭제하지 않으며 운영자가 만든 폐기 가능 `workspaces_`는 범위 밖
+- [ ] 적용 뒤 전체 원문·첨부 수, 충돌 0, 검색 재색인과 문제 채널 질의 검증

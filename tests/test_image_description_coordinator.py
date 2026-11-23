@@ -116,11 +116,12 @@ class ManagedStore(Store):
 
 
 def _run(monkeypatch, docs=None, store=None, **over):
+    dispatch_result = over.pop(
+        "dispatch_result", ImageDescriptionRun("job-1", "published", revision_id="revision-1")
+    )
     monkeypatch.setattr(
         "tybot.archive.image_description_coordinator.dispatch_reserved_image",
-        lambda *_args, **_kwargs: ImageDescriptionRun(
-            "job-1", "published", revision_id="revision-1"
-        ),
+        lambda *_args, **_kwargs: dispatch_result,
     )
     args = {
         "workspace": "tyit",
@@ -138,6 +139,32 @@ def _run(monkeypatch, docs=None, store=None, **over):
     }
     args.update(over)
     return run_approved_batch([_doc()] if docs is None else docs, **args)
+
+
+def test_published_revision_enqueues_only_a_coordinate_completion_notice(monkeypatch):
+    noticed = []
+    batch = _run(
+        monkeypatch,
+        docs=[_doc(message_ts="1700000000.123456")],
+        completion_notifier=noticed.append,
+    )
+
+    assert batch.items[0].revision_id == "revision-1"
+    assert noticed == [batch.items[0]]
+    assert noticed[0].message_ts == "1700000000.123456"
+
+
+def test_no_revision_never_enqueues_a_completion_notice(monkeypatch):
+    noticed = []
+
+    _run(
+        monkeypatch,
+        docs=[_doc(message_ts="1700000000.123456")],
+        completion_notifier=noticed.append,
+        dispatch_result=ImageDescriptionRun("job-1", "closed_without_revision"),
+    )
+
+    assert noticed == []
 
 
 def test_an_approved_candidate_is_reserved_then_dispatched(monkeypatch):
@@ -165,11 +192,12 @@ def test_an_existing_revision_is_not_loaded_or_reserved(monkeypatch):
     assert not store.reserved
 
 
-def test_missing_human_provenance_never_reaches_the_loader(monkeypatch):
+def test_a_bot_generated_file_never_reaches_the_loader(monkeypatch):
+    """봇 출력 표식이 있는 정본은 후보가 아니다(수집 입구 판정, 2026-11-19)."""
     loaded = []
     batch = _run(
         monkeypatch,
-        docs=[_doc(human_upload_confirmed=False)],
+        docs=[_doc(name="현장 정리 · TYBot")],
         load_image=lambda *_args: loaded.append(True),
     )
 
@@ -404,31 +432,20 @@ def _run_cleared(monkeypatch, *, store=None, doc=None, loaded=None):
     return batch, store, opened
 
 
-def test_managed_batch_binds_current_policy_clearance_and_original(monkeypatch):
-    batch, store, opened = _run_cleared(monkeypatch)
+def test_managed_batch_needs_no_clearance_or_approval(monkeypatch):
+    """2026-11-20 오너 결정: 건별 PII clearance·approval 을 조회하지 않고 예약한다."""
+    batch, store, opened = _run_cleared(
+        monkeypatch, store=ManagedStore(assessment=False, approval=False)
+    )
 
     assert batch.items[0].state == "published"
-    assert store.approval_queries == [{
-        "workspace": "tyit",
-        "channel": "C12345678",
-        "file_id": "F12345678",
-        "original_sha256": SHA,
-        "provider": "provider",
-        "model": "free-vision",
-        "policy_revision": "policy-1",
-        "prompt_revision": PROMPT_REVISION,
-    }]
-    assert store.clearance_queries == [{
-        "workspace": "tyit",
-        "channel_id": "C12345678",
-        "file_id": "F12345678",
-        "original_sha256": SHA,
-        "provider": "provider",
-        "model": "free-vision",
-        "policy_revision": "policy-1",
-    }]
+    assert store.approval_queries == []
+    assert store.clearance_queries == []
     assert opened[0][1]["max_image_bytes"] == 1024
-    assert store.reserved[0][1]["checks"] == {
+    _image_input, kwargs = store.reserved[0]
+    assert kwargs["approval_id"] == ""
+    assert kwargs["prompt_revision"] == PROMPT_REVISION
+    assert kwargs["checks"] == {
         "access_verified": True,
         "pii_blocked": False,
         "bot_generated": False,
@@ -453,23 +470,24 @@ def test_unknown_fresh_check_is_rejected_instead_of_silently_dropped(monkeypatch
     assert store.reserved == []
 
 
-def test_missing_clearance_never_opens_the_original(monkeypatch):
-    batch, _store, opened = _run_cleared(
-        monkeypatch, store=ManagedStore(assessment=False)
+def test_omitted_pii_fact_is_blocked_before_the_original_opens(monkeypatch):
+    store = Store()
+    batch = _run(
+        monkeypatch,
+        store=store,
+        checks_for=lambda *_args: {"access_verified": True, "bot_generated": False},
     )
+    assert batch.items[0].code == "pii_blocked"
+    assert store.reserved == []
 
-    assert batch.items[0].code == "assessment_missing"
-    assert not opened
 
-
-def test_missing_exact_approval_never_opens_the_original(monkeypatch):
-    batch, _store, opened = _run_cleared(
-        monkeypatch, store=ManagedStore(approval=False)
-    )
+def test_legacy_approval_path_still_requires_its_approval(monkeypatch):
+    """옛 건별 승인 경로(호환)는 승인 조회를 주면 예전처럼 동작한다."""
+    store = Store()
+    batch = _run(monkeypatch, store=store, approval_id_for=lambda _candidate: "")
 
     assert batch.items[0].state == "approval_required"
-    assert batch.items[0].code == "approval_missing"
-    assert not opened
+    assert store.reserved == []
 
 
 def test_disabled_policy_does_not_query_clearance_or_open_original(monkeypatch):
@@ -482,13 +500,21 @@ def test_disabled_policy_does_not_query_clearance_or_open_original(monkeypatch):
     assert not opened
 
 
-def test_changed_acl_never_opens_the_original(monkeypatch):
-    batch, _store, opened = _run_cleared(
-        monkeypatch, doc=_doc(acl=frozenset({"#다른채널"}))
-    )
+def test_unknown_acl_never_opens_the_original(monkeypatch):
+    batch, store, opened = _run_cleared(monkeypatch, doc=_doc(acl=frozenset()))
 
-    assert batch.items[0].code == "acl_changed"
+    assert batch.items[0].code == "acl_unknown"
     assert not opened
+    assert store.reserved == []
+
+
+def test_unknown_visibility_never_opens_the_original(monkeypatch):
+    batch, store, opened = _run_cleared(monkeypatch, doc=_doc(visibility=""))
+
+    # 선별기가 먼저 떨어뜨리거나 접근 판정이 막는다 — 어느 쪽이든 열지 않는다.
+    assert all(item.state != "published" for item in batch.items)
+    assert not opened
+    assert store.reserved == []
 
 
 def test_managed_original_failure_keeps_only_the_safe_code(monkeypatch):

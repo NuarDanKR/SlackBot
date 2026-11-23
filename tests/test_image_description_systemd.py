@@ -6,7 +6,20 @@ ROOT = Path(__file__).parents[1]
 def test_worker_unit_uses_dedicated_credential_and_hardening():
     unit = (ROOT / "deploy/tybot-image-description@.service").read_text(encoding="utf-8")
 
-    assert "LoadCredential=tybot-vision-database-url:" in unit
+    assert not any(line.startswith("LoadCredential=") for line in unit.splitlines())
+    assert "TYBOT_VISION_DATABASE_URL_FILE=/etc/tybot/tybot-vision-database-url" in unit
+    # 2026-11-12 보안 리뷰: worker 는 Vision 전용 키만 받는다. 워크스페이스 토큰 키는 없다.
+    assert "VISION_PROVIDER_SECRET_KEY_FILE=/etc/tybot/vision-provider-secret.key" in unit
+    assert "WORKSPACE_SECRET_KEY" not in "\n".join(
+        line
+        for line in unit.splitlines()
+        if not line.lstrip().startswith("#") and not line.startswith("UnsetEnvironment=")
+    )
+    # archiver.env 에서 들어오는 워크스페이스 키·Master DB 접속은 지우고, 키 파일은 가린다.
+    unset = next(line for line in unit.splitlines() if line.startswith("UnsetEnvironment="))
+    for name in ("WORKSPACE_SECRET_KEY_FILE", "WORKSPACE_SECRET_KEY", "DATABASE_URL", "PGPASSFILE"):
+        assert name in unset.split("=", 1)[1].split()
+    assert "InaccessiblePaths=-/etc/tybot/workspace-secret.key" in unit
     assert "EnvironmentFile=/etc/tybot/archiver.env" in unit
     assert "--workspace %i" in unit
     assert "ProtectSystem=strict" in unit
@@ -30,3 +43,17 @@ def test_timer_runs_the_matching_workspace_instance():
 
     assert "Unit=tybot-image-description@%i.service" in timer
     assert "Persistent=true" in timer
+
+
+def test_console_unit_gets_the_vision_dsn_file_path():
+    """콘솔 이미지 설명 화면도 Vision 전용 DSN 만 쓴다. 경로가 빠지면 화면이 실패한다."""
+    unit = (ROOT / "deploy/tybot-console.service").read_text(encoding="utf-8")
+    assert "Environment=TYBOT_VISION_DATABASE_URL_FILE=/etc/tybot/tybot-vision-database-url" in unit
+    assert not any(line.startswith("LoadCredential=") for line in unit.splitlines())
+
+
+def test_setup_script_guides_a_tcp_dsn_not_the_peer_socket():
+    """소켓 DSN 은 peer 인증으로 거절된다(2026-11-12). 안내는 TCP 루프백이어야 한다."""
+    text = (ROOT / "deploy/setup-tybot-vision-runtime.sh").read_text(encoding="utf-8")
+    assert "@127.0.0.1:$PORT/$DB" in text
+    assert "<비밀번호>@/$DB?host=/run/postgresql" not in text

@@ -10,7 +10,8 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
+from pathlib import Path
 
 from ..answer_status import answer_failed, failure_code
 from ..feedback import event_id
@@ -82,21 +83,70 @@ def record_key(row: dict) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
+#: 어느 봇의 감사기록에서 읽었는지 붙여 두는 키. 파일에는 없다 — 폴더가 곧 봇이다.
+BOT_KEY = "_answer_bot"
+
+
+def _record_dirs() -> list[tuple[str, Path]]:
+    """(봇, 폴더). VIPBot 폴더가 TYBot 폴더와 같게 잘못 설정돼도 두 번 읽지 않는다."""
+    ty = reader.qa_log_dir()
+    vip = reader.vip_qa_log_dir()
+    dirs = [("tybot", ty)]
+    try:
+        same = vip.resolve() == ty.resolve()
+    except OSError:
+        same = False
+    if not same:
+        dirs.append(("vipbot", vip))
+    return dirs
+
+
 def _all_records() -> list[dict]:
+    """TYBot·VIPBot 감사기록 전부. 각 줄에 답변한 봇(`BOT_KEY`)을 붙인다."""
     rows: list[dict] = []
-    for path in sorted(reader.qa_log_dir().glob("qa-*.jsonl")):
-        try:
-            with path.open(encoding="utf-8") as stream:
-                for line in stream:
-                    try:
-                        item = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(item, dict):
-                        rows.append(item)
-        except OSError as exc:
-            logger.warning("질문·답변 기록을 읽지 못했습니다 (%s): %s", path, exc)
+    for bot, directory in _record_dirs():
+        for path in sorted(directory.glob("qa-*.jsonl")):
+            try:
+                with path.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        try:
+                            item = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(item, dict):
+                            item[BOT_KEY] = bot
+                            rows.append(item)
+            except OSError as exc:
+                logger.warning("질문·답변 기록을 읽지 못했습니다 (%s): %s", path, exc)
+    rows.sort(key=lambda row: str(row.get("ts") or ""))
     return rows
+
+
+def answer_bot(row: dict) -> str:
+    return str(row.get(BOT_KEY) or "tybot")
+
+
+#: 본문을 가린 VIP 기록에서도 보여 주는 작업 기록 키 — 처리 경로만, 내용은 없다.
+_TRACE_KEYS = (
+    "task_index", "task_kind", "required_capability", "routing_confidence",
+    "final_responder", "attempted_specialists", "result", "error_code",
+)
+
+
+def body_visible(row: dict, user: ConsoleUser) -> bool:
+    """질문·답변 본문을 보여 줘도 되는가.
+
+    VIPBot(경영진) 질문 본문은 **콘솔 관리자와 질문한 본인**만 본다. 검토자 등 그 밖의
+    계정은 시각·모델·결과·근거 건수 같은 처리 기록만 본다. 관리자도 담당 워크스페이스
+    밖의 기록은 애초에 열 수 없다(`find_visible`). 열람은 감사기록에 남는다.
+    (2026-11-18 「본인만」 → 2026-11-19 「관리자 + 본인」, 오너 결정)
+
+    본인 확인은 회사 이메일 → 사번 → Slack ID 매핑으로만 한다 — 확인이 안 되면 가린다.
+    """
+    if answer_bot(row) != "vipbot" or user.is_admin:
+        return True
+    own = review_scope(user.email).own_users
+    return (str(row.get("workspace") or ""), str(row.get("user") or "")) in own
 
 
 def _visible(row: dict, user: ConsoleUser, scope: ReviewScope) -> bool:
@@ -118,6 +168,7 @@ def visible_records(
     workspace: str = "",
     result: str = "",
     asker: str = "",
+    bot: str = "",
 ) -> tuple[list[dict], ReviewScope]:
     scope = ReviewScope() if user.is_admin else review_scope(user.email)
     rows = [
@@ -128,6 +179,8 @@ def visible_records(
     ]
     if workspace:
         rows = [row for row in rows if str(row.get("workspace") or "") == workspace]
+    if bot:
+        rows = [row for row in rows if answer_bot(row) == bot]
     if result == "slow":
         rows = [row for row in rows if int(row.get("elapsed_ms") or 0) > health.SLOW_MS]
     elif result == "error":
@@ -198,6 +251,7 @@ def summaries(rows: list[dict], feedback: list[dict]) -> list[dict]:
     return [
         {
             "recordKey": record_key(row),
+            "bot": answer_bot(row),
             "at": str(row.get("ts") or ""),
             "workspace": str(row.get("workspace") or ""),
             "channel": str(row.get("channel") or row.get("channel_id") or ""),
@@ -246,7 +300,7 @@ def find_visible(user: ConsoleUser, key: str) -> tuple[dict | None, ReviewScope]
     return None, scope
 
 
-def detail(row: dict, feedback: list[dict]) -> dict:
+def detail(row: dict, feedback: list[dict], *, show_body: bool = True) -> dict:
     raw_id = str(row.get("record_id") or "")
     events = [item for item in feedback if str(item.get("qa_record_id") or "") == raw_id]
     resolved = {
@@ -272,8 +326,9 @@ def detail(row: dict, feedback: list[dict]) -> dict:
                 "handledNote": str((done or {}).get("text") or ""),
             }
         )
-    return {
+    out = {
         "recordKey": record_key(row),
+        "bot": answer_bot(row),
         "at": str(row.get("ts") or ""),
         "workspace": str(row.get("workspace") or ""),
         "channel": str(row.get("channel") or ""),
@@ -304,3 +359,90 @@ def detail(row: dict, feedback: list[dict]) -> dict:
         "specialistErrorCode": str(row.get("specialist_error_code") or ""),
         "feedback": visible_feedback,
     }
+    out["bodyHidden"] = not show_body
+    if not show_body:
+        out.update(
+            question="", answer="", citations=[],
+            taskTraces=[{key: trace.get(key) for key in _TRACE_KEYS if key in trace}
+                        for trace in out["taskTraces"] if isinstance(trace, dict)],
+            feedback=[{**item, "text": "", "handledNote": ""} for item in out["feedback"]],
+        )
+    return out
+
+
+#: 봇 분류 상태에서 전문 봇 없이 답한 질문의 결과 값.
+DIRECT_RESULT = "direct"
+
+
+def _parse_at(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def direct_answer_rows(
+    *,
+    exclude_keys: set[str],
+    allowed: frozenset[str] | set[str] | None,
+    bot: str = "",
+    limit: int = 200,
+) -> list[dict]:
+    """전문 봇(Hermes)을 부르지 않고 봇이 **직접** 답한 질문 — 봇 분류 상태용.
+
+    봇 분류 상태는 원래 전문 봇 호출(`specialist_call`)만 보였다. 그러면 VIPBot·TYBot 이
+    스스로 답한 질문(짧은 질문, 이어 묻기 재검색, 조언 답변, 자료 없음 등)은 어느 봇이
+    받았는지 그 화면에 남지 않는다. 감사기록(TYBot·VIPBot 폴더)에서 읽어, 이미 호출로
+    잡힌 질문(`exclude_keys`)을 빼고 같은 모양으로 돌려준다. 본문은 담지 않는다.
+    """
+    out: list[dict] = []
+    for row in reversed(_all_records()):
+        key = record_key(row)
+        if key in exclude_keys:
+            continue
+        workspace = str(row.get("workspace") or "")
+        if allowed is not None and workspace not in allowed:
+            continue
+        answered_by = answer_bot(row)
+        if bot and answered_by != bot:
+            continue
+        at = _parse_at(row.get("ts"))
+        if at is None:
+            continue
+        intent = str(row.get("intent_kind") or "")
+        source = str(row.get("intent_source") or "")
+        model = str(row.get("model") or "-")
+        reason = str(row.get("reason") or "")
+        out.append({
+            "id": f"qa:{key}",
+            "at": at,
+            "workspace": workspace,
+            "specialist": "",
+            "routingReason": " ".join(
+                part for part in (
+                    "direct",
+                    f"intent={intent}" if intent else "",
+                    f"source={source}" if source else "",
+                    f"model={model}",
+                    f"reason={reason}" if reason else "",
+                ) if part
+            ),
+            "confidence": None,
+            "result": DIRECT_RESULT,
+            "answerResult": answer_result(row),
+            "elapsedMs": int(row.get("elapsed_ms") or 0),
+            "costUsd": float(row.get("cost_usd") or 0),
+            "errorCode": failure_code(row),
+            "qaRecordKey": key,
+            "decisionId": "",
+            "taskIndex": 0,
+            "taskKind": intent,
+            "requiredCapability": "",
+            "bot": answered_by,
+        })
+        if len(out) >= limit:
+            break
+    return out

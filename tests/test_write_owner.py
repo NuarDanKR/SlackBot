@@ -8,8 +8,8 @@
 여기서 보는 것은 셋이다.
 
 1. 어떤 상태에서도 **둘 다 참이 되지 않는다**
-2. 모르는 상태의 기본값이 **서로 반대**다 — Master 는 쓰고 Archiver 는 안 쓴다
-3. 표를 못 읽어도 **수집이 죽지 않는다**
+2. 모르는 상태(행 없음·DB 실패)에서는 **둘 다 쓰지 않는다**(B-99, 2026-11-20 fail-closed)
+3. 표를 못 읽어도 **예외가 올라오지 않는다** — 쓰지 않는 쪽으로 판정할 뿐이다
 """
 
 from __future__ import annotations
@@ -94,10 +94,38 @@ def test_the_switch_being_off_is_said_out_loud():
 
 # --- 모르는 상태의 기본값 ---------------------------------------------------------
 
-def test_an_unknown_channel_stays_with_the_master():
-    """전환 전 상태가 그것이다. 반대로 두면 표에 없는 채널이 통째로 안 모인다."""
-    assert decide(None, WriterOwner.MASTER).allowed
+def test_an_unknown_channel_is_written_by_nobody():
+    """B-99: 행 없는 채널에 Master 가 쓰면 운영 루트에 옛 배치가 생기고 Archiver 가 죽는다."""
+    master = decide(None, WriterOwner.MASTER)
+
+    assert not master.allowed
+    assert master.code == "no-owner-row"
+    assert master.degraded is False
     assert not decide(None, WriterOwner.ARCHIVER, archiver_flag=True).allowed
+
+
+def test_a_degraded_lookup_is_written_by_nobody():
+    for actor in WriterOwner:
+        verdict = decide(None, actor, archiver_flag=True, degraded=True)
+        assert not verdict.allowed
+        assert verdict.degraded is True
+        assert verdict.code == "owner-lookup-failed"
+
+
+def test_reason_codes_carry_no_channel_text():
+    """로그는 코드로 가른다. 코드에 채널 이름·좌표가 섞이면 원문이 로그로 샌다."""
+    codes = {
+        decide(None, WriterOwner.MASTER).code,
+        decide(None, WriterOwner.MASTER, degraded=True).code,
+        decide(SHADOW, WriterOwner.MASTER).code,
+        decide(ACTIVE, WriterOwner.MASTER).code,
+        decide(PAUSED, WriterOwner.MASTER).code,
+        decide(ACTIVE, WriterOwner.ARCHIVER).code,
+    }
+    assert codes == {
+        "no-owner-row", "owner-lookup-failed", "owner", "not-owner", "paused",
+        "archiver-switch-off",
+    }
 
 
 def test_an_unreadable_row_is_not_guessed():
@@ -172,14 +200,26 @@ def _lookup(row=None, *, conn=True, error=None, clock=None):
     return lookup, cursor
 
 
-def test_without_a_database_the_master_keeps_collecting():
-    """DB 장애로 수집이 죽으면 그날 대화가 통째로 빠진다."""
+def test_without_a_database_the_master_does_not_write():
+    """B-99 fail-closed. 예전에는 DB 장애 때 Master 가 썼고, 그 쓰기가 Archiver 를 멈췄다."""
     lookup, _ = _lookup(conn=False)
 
     verdict = lookup.master_may_write(CH)
 
-    assert verdict.allowed
+    assert not verdict.allowed
     assert verdict.degraded is True
+    assert verdict.code == "owner-lookup-failed"
+
+
+def test_a_missing_row_denies_the_master():
+    lookup, cursor = _lookup(None)
+
+    verdict = lookup.master_may_write(CH)
+
+    assert not verdict.allowed
+    assert verdict.degraded is False
+    assert verdict.code == "no-owner-row"
+    assert cursor.queries == 1
 
 
 def test_operator_stop_survives_database_failure(monkeypatch):
@@ -228,8 +268,20 @@ def test_a_query_error_does_not_raise():
 
     verdict = lookup.master_may_write(CH)
 
-    assert verdict.allowed
+    assert not verdict.allowed
     assert verdict.degraded is True
+
+
+def test_a_query_error_log_carries_no_exception_text(caplog):
+    """예외 본문은 SQL 값·접속 정보를 담을 수 있다. 종류와 코드만 남긴다."""
+    lookup, _ = _lookup(error=RuntimeError("password=secret host=db.internal"))
+
+    with caplog.at_level("WARNING", logger="tybot.archive.write_owner"):
+        lookup.master_may_write(CH)
+
+    assert "owner-lookup-failed" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "secret" not in caplog.text
 
 
 def test_a_handed_over_channel_is_read_from_the_table():
@@ -298,3 +350,51 @@ def test_the_master_gate_matches_the_table(mode, owner, expected):
                          "cutover_ts": "1.000100"})
 
     assert lookup.master_may_write(CH).allowed is expected
+
+
+# --- 초대·재초대 인수의 정착 대기 (2026-11-18, shadow 폐기) -----------------------
+#
+# 신규 채널은 DB 가 cutover_ts 를 「등록 시각 + 60초」 로 박는다. Master 는 판정을
+# CACHE_SECONDS(30초) 동안 들고 있으므로, 그 사이 Archiver 가 쓰면 두 writer 다.
+
+SETTLING = _state(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1790000060.000000")
+
+
+def test_the_archiver_waits_until_a_future_cutover_passes():
+    early = decide(SETTLING, WriterOwner.ARCHIVER, archiver_flag=True, now=1790000059.9)
+    late = decide(SETTLING, WriterOwner.ARCHIVER, archiver_flag=True, now=1790000060.0)
+
+    assert not early and "정착" in early.reason
+    assert late
+
+
+@pytest.mark.parametrize("now", [1790000000.0, 1790000030.0, 1790000059.0, 1790000061.0])
+def test_a_settling_hand_over_never_has_two_writers(now):
+    """Master 가 아직 캐시로 「행 없음 = 내 것」 을 믿는 동안 Archiver 는 쓰지 않는다.
+
+    등록 시각 1790000000, Master 캐시 상한 30초 → Master 는 늦어도 1790000030 에 멈춘다.
+    Archiver 는 1790000060 부터 쓴다. 어느 시각에도 둘이 동시에 참이 아니다.
+    """
+    from tybot.archive.write_owner import CACHE_SECONDS
+
+    registered = 1790000000.0
+    master_may_still_write = now < registered + CACHE_SECONDS  # 낡은 캐시: 행 없음
+    archiver = decide(SETTLING, WriterOwner.ARCHIVER, archiver_flag=True, now=now)
+
+    assert not (master_may_still_write and archiver.allowed)
+
+
+def test_a_past_cutover_is_not_delayed():
+    """기존 active 채널의 좌표(과거)는 지금처럼 바로 쓴다 — 좌표 보존 재초대 포함."""
+    assert decide(ACTIVE, WriterOwner.ARCHIVER, archiver_flag=True, now=1790000000.0)
+
+
+def test_an_unreadable_cutover_does_not_invent_a_delay():
+    odd = _state(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "legacy-coordinate")
+
+    assert decide(odd, WriterOwner.ARCHIVER, archiver_flag=True, now=1.0)
+
+
+def test_the_master_never_writes_a_settling_channel():
+    """정착 대기 중에도 Master 몫으로 돌아가지 않는다 — 비는 구간이지 겹치는 구간이 아니다."""
+    assert not decide(SETTLING, WriterOwner.MASTER, now=1790000000.0)

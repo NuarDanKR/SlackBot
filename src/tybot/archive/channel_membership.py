@@ -26,12 +26,25 @@ DM 은 받지 않는다 — DM 은 개인 작업공간이고 별도 규칙이 �
 초대했으면 그 방은 수집을 기대한다. 이름으로 거르면 **초대했는데 안 되는** 첫
 번째 경우로 돌아간다.
 
-## 나가면 멈춘다. 다시 들어와도 사람이 끈 것은 안 켠다
+## 초대 = 운영 수집 (2026-11-18 오너 결정: shadow 폐기)
+
+초대된 채널은 곧바로 `active` · `writer_owner='archiver'` 로 등록된다. 그림자
+단계는 없다. 주인·인수 좌표는 **DB 함수 `archiver_save_membership` 이 한 문장에**
+정한다 — 이 모듈은 「참여 중이니 운영 수집」 이라는 요청만 보낸다. 좌표를 파이썬이
+고르면 두 프로세스(주기 동기화·이벤트 발견)가 다른 좌표를 박을 수 있다.
+
+신규 채널의 `cutover_ts` 는 **등록 시각 + `SETTLE_SECONDS`** 다. Master 의 판정
+캐시가 만료되기 전에 Archiver 가 쓰면 두 writer 가 되므로, Archiver 는 그 시각이
+지난 뒤에만 운영 원문에 쓴다(`write_owner.decide`). 전역 스위치
+`archiver_writes_live` 가 꺼져 있으면 DB 는 신규 채널을 등록하지 않는다(`deferred`) —
+넘기면 아무도 안 쓰는 채널이 된다.
+
+## 나가면 멈춘다. 다시 들어오면 재개한다. 사람이 끈 것은 안 켠다
 
 봇이 채널에서 빠지면 `membership='left'` 이고 수집을 멈춘다(`paused`). 다시
-초대되면 그림자 수집으로 돌아온다 — 단 **사람이 명시적으로 끈 채널은 예외다**
-(`operator_hold`). 그걸 구분하지 않으면 재초대 한 번에 끈 채널까지 되살아나고,
-끈 사람은 그 사실을 모른다.
+초대되면 운영 수집으로 돌아온다 — 이미 Archiver 몫이던 채널은 **기존 인수 좌표를
+그대로** 쓴다. 단 **사람이 명시적으로 끈 채널은 예외다**(`operator_hold`). 그걸
+구분하지 않으면 재초대 한 번에 끈 채널까지 되살아나고, 끈 사람은 그 사실을 모른다.
 """
 
 from __future__ import annotations
@@ -47,8 +60,16 @@ PAGE_SIZE = 200
 #: 받아 올 대화 종류. **DM 은 없다**(`im`·`mpim`).
 CONVERSATION_TYPES = "public_channel,private_channel"
 
-#: 자동 등록될 때의 모드. 그림자다 — 운영 원문은 계속 Master 가 쓴다.
-DEFAULT_MODE = "shadow"
+#: 자동 등록·재초대 때 요청하는 모드. **운영 수집이다**(2026-11-18, shadow 폐기).
+#: 주인·좌표는 DB 함수가 정한다. 스위치가 꺼져 있으면 DB 가 `deferred`/`off` 로 낮춘다.
+DEFAULT_MODE = "active"
+
+#: 폐기된 모드. 동기화가 이 값을 요청하면 계획 자체가 틀린 것이다.
+RETIRED_MODES = frozenset({"shadow"})
+
+#: 신규·재인수 채널의 정착 시간(초). DB `archive_settled_cutover_ts()` 의
+#: `interval '60 seconds'` 와 같아야 한다 — `handover.DRAIN_SETTLE_SECONDS` 와 같은 값.
+SETTLE_SECONDS = 60
 
 JOINED, LEFT, UNKNOWN = "joined", "left", "unknown"
 
@@ -66,7 +87,7 @@ class Channel:
 class Action:
     """동기화가 하려는 일 하나. **무엇을 왜** 바꾸는지 들고 있다."""
 
-    kind: str  # register · rejoin · leave · touch
+    kind: str  # register · rejoin · leave · touch · hold
     channel_id: str
     mode: str
     membership: str
@@ -152,42 +173,25 @@ def plan_sync(joined: list[Channel], known: list[dict]) -> SyncPlan:
             ))
             continue
         if bool(row.get("operator_hold")):
-            # 사람이 끈 채널이다. 재초대는 그 결정을 뒤집지 않는다.
+            # 사람이 끈 채널이다. 재초대는 그 결정을 뒤집지 않는다 — **paused 를 요청한다.**
+            # 행의 현재 모드를 되돌려 보내면, 그 값이 무엇이든 그대로 굳는다.
             plan.actions.append(Action(
-                kind="touch", channel_id=channel.channel_id,
-                mode=str(row.get("mode") or "paused"), membership=JOINED,
+                kind="hold", channel_id=channel.channel_id,
+                mode="paused", membership=JOINED,
                 name=channel.name, is_private=channel.is_private,
                 reason="참여 확인(사람이 중지해 둔 채널)",
             ))
             continue
         if (
-            str(row.get("writer_owner") or "master") == "archiver"
-            and (
-                str(row.get("membership") or UNKNOWN) != JOINED
-                or str(row.get("mode")) == "paused"
-            )
-        ):
-            # An active channel that lost the app still belongs to the Archiver.
-            # Moving it back to shadow would also move live-writer ownership to
-            # Master, which requires an explicit cutover coordinate.
-            plan.actions.append(Action(
-                kind="rejoin-blocked",
-                channel_id=channel.channel_id,
-                mode="paused",
-                membership=JOINED,
-                name=channel.name,
-                is_private=channel.is_private,
-                reason="운영 writer 인수 좌표 확인 전 자동 재개 차단",
-            ))
-            continue
-        if (
             str(row.get("membership") or UNKNOWN) != JOINED
-            or str(row.get("mode")) in {"off", "paused"}
+            or str(row.get("mode")) != "active"
         ):
+            # paused·left·off·옛 shadow 전부 운영 수집으로 돌아온다. 이미 Archiver 몫이면
+            # DB 가 기존 인수 좌표를 보존하고, Master 몫이면 새 좌표(정착 시간 뒤)를 박는다.
             plan.actions.append(Action(
                 kind="rejoin", channel_id=channel.channel_id, mode=DEFAULT_MODE,
                 membership=JOINED, name=channel.name, is_private=channel.is_private,
-                reason="봇이 다시 참여해 수집 재개",
+                reason="봇이 다시 참여해 운영 수집 재개",
             ))
             continue
         plan.actions.append(Action(
@@ -213,17 +217,23 @@ def plan_sync(joined: list[Channel], known: list[dict]) -> SyncPlan:
 
 
 def apply_plan(repo, workspace: str, plan: SyncPlan, *, actor: str = "membership-sync") -> dict:
-    """계획을 DB 에 쓴다. **모드를 직접 켜지 않는다** — `shadow` 까지다.
+    """계획을 DB 에 쓴다. **주인·좌표는 DB 함수가 정한다.**
 
-    `active` 로는 절대 자동 전환하지 않는다(오너 지시 12). 운영 원문의 주인을
-    바꾸는 일은 사람이 사유와 함께 하는 것이고, 동기화 잡이 할 일이 아니다.
+    초대는 곧 운영 수집이다(2026-11-18 오너 결정, 예전 오너 지시 12 「자동 active
+    금지」 를 대체). 다만 이 함수는 `writer_owner`·`cutover_ts` 를 보내지 않는다 —
+    그 둘은 `archiver_save_membership` 이 잠금 안에서 한 문장으로 정한다.
+
+    `shadow` 를 요청하는 계획은 **틀린 계획**이다. 조용히 통과시키면 폐기한 경로가
+    다시 열린다.
+
+    DB 가 `deferred`(스위치 꺼짐으로 등록 보류)를 돌려주면 따로 센다 — 「등록됨」 으로
+    세면 화면은 수집 중이라고 말하는데 실제로는 Master 가 쓰고 있다.
     """
-    counts = {"registered": 0, "resumed": 0, "stopped": 0, "checked": 0}
+    counts = {"registered": 0, "resumed": 0, "stopped": 0, "checked": 0, "deferred": 0}
     for action in plan.actions:
-        if action.mode == "active" and action.kind in ("register", "rejoin"):
-            # 있을 수 없는 조합이지만, 있으면 조용히 통과시키지 않는다.
-            raise ValueError("동기화는 운영 수집으로 전환하지 않습니다.")
-        repo.save_membership({
+        if action.mode in RETIRED_MODES:
+            raise ValueError("shadow 수집은 폐기됐습니다. 동기화는 shadow 를 요청하지 않습니다.")
+        outcome = repo.save_membership({
             "workspace": workspace,
             "channel_id": action.channel_id,
             "mode": action.mode,
@@ -234,7 +244,9 @@ def apply_plan(repo, workspace: str, plan: SyncPlan, *, actor: str = "membership
             "audit": action.kind != "touch",
             "reason": action.reason,
         })
-        if action.kind == "register":
+        if outcome == "deferred":
+            counts["deferred"] += 1
+        elif action.kind == "register":
             counts["registered"] += 1
         elif action.kind == "rejoin":
             counts["resumed"] += 1
@@ -251,9 +263,9 @@ def sync(client, repo, workspace: str, *, actor: str = "membership-sync") -> dic
     plan = plan_sync(joined, repo.channels(workspace))
     result = apply_plan(repo, workspace, plan, actor=actor)
     log.info(
-        "채널 멤버십 동기화 ws=%s 참여=%d 등록=%d 재개=%d 중단=%d",
+        "채널 멤버십 동기화 ws=%s 참여=%d 등록=%d 재개=%d 중단=%d 보류=%d",
         workspace, len(joined), result["registered"], result["resumed"],
-        result["stopped"],
+        result["stopped"], result["deferred"],
     )
     return {**result, "joined": len(joined)}
 

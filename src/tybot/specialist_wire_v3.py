@@ -134,6 +134,10 @@ class FollowUpRef:
     locator: str
 
 
+#: 요청 model 모양. Hermes `wire.MODEL_ID_RE` 와 같다.
+MODEL_ID_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
+
+
 @dataclass(frozen=True)
 class Request:
     """v3 요청. `body()` 가 그대로 전송된다."""
@@ -150,8 +154,14 @@ class Request:
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     deadline_ms: int = DEADLINE_MS
     max_output_chars: int = MAX_OUTPUT_CHARS
+    # 호출자가 고른 모델(선택, 2026-11-12). 봇 등급마다 다르다 — TYBot 은 Sonnet, VIPBot 은
+    # Opus. Hermes 는 서버 프로필 `allowed_models` 안에서만 받고, 밖이면 400 으로 거절한다.
+    # 비우면 보내지 않고 Hermes 기본 모델이 답한다(예전과 같다).
+    model: str = ""
 
     def __post_init__(self) -> None:
+        if self.model and not MODEL_ID_RE.fullmatch(self.model):
+            raise WireViolation("모델 id 모양이 올바르지 않습니다.")
         if not self.workspace.strip() or not self.authorization_id.strip():
             raise WireViolation("워크스페이스와 권한 판정 식별자가 필요합니다.")
         if not self.question.strip():
@@ -191,6 +201,8 @@ class Request:
                 "max_output_chars": self.max_output_chars,
             },
         }
+        if self.model:
+            payload["model"] = self.model
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         if len(raw) > MAX_REQUEST_BYTES:
             raise WireViolation(

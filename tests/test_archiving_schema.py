@@ -403,14 +403,69 @@ def test_the_screen_can_tell_whether_events_arrived(sql):
     assert "ADD COLUMN IF NOT EXISTS membership_checked_at timestamptz" in sql
 
 
+def _membership_function(sql: str) -> str:
+    found = re.search(
+        r"CREATE FUNCTION archiver_save_membership\((.*?)\n\$\$;", sql, re.S,
+    )
+    assert found, "archiver_save_membership 본문을 찾지 못했다"
+    return found.group(1)
+
+
 def test_archiver_membership_write_is_narrowed_by_a_security_definer_function(sql):
-    assert "CREATE OR REPLACE FUNCTION archiver_save_membership" in sql
-    assert "SECURITY DEFINER" in sql
-    assert "membership sync cannot promote a channel to active" in sql
+    body = _membership_function(sql)
+    assert "SECURITY DEFINER" in body
+    assert "RETURNS text" in body
     assert "REVOKE ALL ON FUNCTION archiver_save_membership" in sql
     assert "GRANT EXECUTE ON FUNCTION archiver_save_membership" in sql
     assert "CREATE OR REPLACE FUNCTION archiver_mark_channel_event" in sql
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE archive_channel_mode" not in sql
+
+
+def test_the_membership_function_is_dropped_before_it_is_recreated(sql):
+    """반환형이 void → text 로 바뀌었다. 재적용 때마다 지우고 만들어야 idempotent 하다."""
+    drop = sql.index("DROP FUNCTION IF EXISTS archiver_save_membership(")
+    create = sql.index("CREATE FUNCTION archiver_save_membership(")
+    grant = sql.index("GRANT EXECUTE ON FUNCTION archiver_save_membership")
+    assert drop < create < grant
+    assert "CREATE OR REPLACE FUNCTION archiver_save_membership" not in sql
+
+
+def test_the_membership_function_never_stores_shadow(sql):
+    """shadow 는 요청값으로만(배포 순서 호환) 받고 저장하지 않는다."""
+    body = _membership_function(sql)
+    assert "'shadow'" in body  # 요청값 별칭
+    for assignment in re.findall(r"next_mode := '([a-z]+)'", body):
+        assert assignment != "shadow"
+    insert = re.search(r"INSERT INTO archive_channel_mode.*?VALUES(.*?);", body, re.S)
+    assert insert and "'active', 'archiver'" in insert.group(1)
+    assert "'shadow'" not in insert.group(1)
+
+
+def test_the_membership_function_shares_the_console_mode_lock(sql):
+    """콘솔 인수(`archiving_repo.channel_state`)와 같은 advisory 키여야 엇갈리지 않는다."""
+    body = _membership_function(sql)
+    assert "hashtext('archive-mode:' || p_workspace || '/' || p_channel_id)" in body
+    repo_src = (ROOT / "src/tybot/console/archiving_repo.py").read_text(encoding="utf-8")
+    assert 'f"archive-mode:{workspace}/{channel_id}"' in repo_src
+
+
+def test_new_and_handed_over_channels_settle_before_the_archiver_writes(sql):
+    from tybot.archive import channel_membership, handover
+
+    found = re.search(
+        r"FUNCTION archive_settled_cutover_ts\(\).*?interval '(\d+) seconds'", sql, re.S,
+    )
+    assert found
+    assert int(found.group(1)) == channel_membership.SETTLE_SECONDS
+    assert channel_membership.SETTLE_SECONDS == handover.DRAIN_SETTLE_SECONDS
+
+
+def test_the_live_switch_gates_every_hand_over(sql):
+    """스위치가 꺼진 채 넘기면 아무도 안 쓰는 채널이 된다."""
+    body = _membership_function(sql)
+    assert "name = 'archiver_writes_live'" in body
+    assert "RETURN 'deferred'" in body
+    assert "next_mode := 'off'" in body
 
 
 def test_existing_collecting_channels_are_treated_as_joined(sql):

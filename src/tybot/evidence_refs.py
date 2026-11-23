@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -31,7 +32,13 @@ logger = logging.getLogger("tybot.evidence_refs")
 
 ARCHIVE_LINE = "archive_line"
 LIVE_MESSAGE = "live_message"
-KINDS = (ARCHIVE_LINE, LIVE_MESSAGE)
+#: PDF 쪽 Vision 전사(B-80). 전사 문장이 아니라 revision·파일·쪽·원본 해시 좌표만 담는다.
+VISION_PAGE = "vision_page"
+KINDS = (ARCHIVE_LINE, LIVE_MESSAGE, VISION_PAGE)
+#: VISION_PAGE 에만 쓰는 필드. 다른 종류의 JSON 에는 싣지 않는다(옛 레코드 모양 유지).
+_VISION_FIELDS = ("revision_id", "file_id", "page_number", "original_sha256")
+_HEX64 = re.compile(r"^[a-f0-9]{64}$")
+_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 # 한 답변이 남길 참조 상한. 감사 기록 한 줄이 커지는 것을 막는다 —
 # 참조가 수백 개면 후속 질문의 범위가 「채널 전체」와 다를 바 없다.
@@ -75,7 +82,7 @@ def safe_relative_path(value: str) -> str:
 class EvidenceRef:
     """원문 한 줄을 **다시 열 수 있는** 좌표. 원문 자체는 들지 않는다."""
 
-    kind: Literal["archive_line", "live_message"]
+    kind: Literal["archive_line", "live_message", "vision_page"]
     workspace: str
     channel_id: str
     document_path: str = ""  # ARCHIVE_DIR 기준 상대 경로
@@ -83,13 +90,26 @@ class EvidenceRef:
     source_ts: str = ""
     content_hash: str = ""
     message_ts: str = ""  # live_message 일 때 사용
+    # vision_page 일 때만. 전사 본문은 담지 않는다 — 다음 질문에서 DB 를 다시 읽는다.
+    revision_id: str = ""
+    file_id: str = ""
+    page_number: int = 0
+    original_sha256: str = ""
 
     @property
     def is_live(self) -> bool:
         return self.kind == LIVE_MESSAGE
 
+    @property
+    def is_vision_page(self) -> bool:
+        return self.kind == VISION_PAGE
+
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        row = asdict(self)
+        if self.kind != VISION_PAGE:
+            for key in _VISION_FIELDS:
+                row.pop(key, None)
+        return row
 
     @classmethod
     def from_json(cls, row: Any) -> EvidenceRef | None:
@@ -117,6 +137,8 @@ class EvidenceRef:
         message_ts = str(row.get("message_ts") or "")
         if kind == LIVE_MESSAGE and not message_ts:
             return None
+        if kind == VISION_PAGE:
+            return _vision_from_json(row, workspace, channel_id)
         return cls(
             kind=kind,  # type: ignore[arg-type]
             workspace=workspace,
@@ -127,6 +149,46 @@ class EvidenceRef:
             content_hash=str(row.get("content_hash") or ""),
             message_ts=message_ts,
         )
+
+
+def _vision_from_json(row: dict, workspace: str, channel_id: str) -> EvidenceRef | None:
+    """vision_page 좌표. 모양이 하나라도 틀리면 버린다."""
+    revision_id = str(row.get("revision_id") or "")
+    file_id = str(row.get("file_id") or "")
+    sha = str(row.get("original_sha256") or "")
+    try:
+        page = int(row.get("page_number") or 0)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not _SAFE_ID.match(revision_id)
+        or not _SAFE_ID.match(file_id)
+        or page <= 0
+        or not _HEX64.match(sha)
+    ):
+        return None
+    return vision_ref(workspace, channel_id, revision_id=revision_id, file_id=file_id,
+                      page_number=page, original_sha256=sha)
+
+
+def vision_ref(
+    workspace: str, channel_id: str, *, revision_id: str, file_id: str,
+    page_number: int, original_sha256: str,
+) -> EvidenceRef | None:
+    """PDF 쪽 전사 한 건의 참조. 본문·지문·경로는 담지 않는다."""
+    if not workspace or not channel_id or not revision_id or not file_id or page_number <= 0:
+        return None
+    if not _HEX64.match(original_sha256 or ""):
+        return None
+    return EvidenceRef(
+        kind=VISION_PAGE,
+        workspace=workspace,
+        channel_id=channel_id,
+        revision_id=revision_id,
+        file_id=file_id,
+        page_number=int(page_number),
+        original_sha256=original_sha256,
+    )
 
 
 @dataclass(frozen=True)
@@ -174,6 +236,16 @@ def ref_from_hit(hit, root: Path | str) -> EvidenceRef | None:
     line = getattr(hit, "line", None)
     if doc is None or line is None:
         return None
+    if getattr(hit, "revision_id", ""):
+        # PDF 쪽 전사(B-80). 줄 지문도 남기지 않는다 — 좌표만.
+        return vision_ref(
+            str(getattr(doc, "workspace", "") or ""),
+            str(getattr(doc, "channel_id", "") or ""),
+            revision_id=str(hit.revision_id),
+            file_id=str(getattr(hit, "file_id", "") or ""),
+            page_number=int(getattr(hit, "page_number", 0) or 0),
+            original_sha256=str(getattr(hit, "original_sha256", "") or ""),
+        )
     channel_id = str(getattr(doc, "channel_id", "") or "")
     if not channel_id:
         # 채널 ID 가 없으면 다음 요청에서 채널 범위를 확인할 수 없다.
@@ -205,12 +277,12 @@ def ref_from_hit(hit, root: Path | str) -> EvidenceRef | None:
 def refs_from_hits(hits, root: Path | str, *, limit: int = MAX_REFS) -> list[EvidenceRef]:
     """검색 결과 -> 참조 목록. 중복은 합치고 상한을 건다."""
     out: list[EvidenceRef] = []
-    seen: set[tuple[str, str, int]] = set()
+    seen: set[tuple[str, str, int, str]] = set()
     for hit in hits or ():
         ref = ref_from_hit(hit, root)
         if ref is None:
             continue
-        key = (ref.workspace, ref.document_path, ref.line_no)
+        key = (ref.workspace, ref.document_path, ref.line_no, ref.revision_id)
         if key in seen:
             continue
         seen.add(key)

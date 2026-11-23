@@ -1105,3 +1105,113 @@ def test_an_existing_row_survives_as_daily_with_no_weekday(conn):
     verify.apply_files(conn, ("reviewer_schema.sql",))
 
     assert verify.check_review_schedule(conn) == []
+
+
+# --- 초대 = 운영 수집 (2026-11-18 shadow 폐기) -------------------------------------
+
+def _save(cur, channel_id, membership="joined", mode="active", ws="tyit"):
+    cur.execute(
+        "SELECT archiver_save_membership(%s,%s,%s,%s,'',false,'test',true,'r')",
+        (ws, channel_id, mode, membership),
+    )
+    return cur.fetchone()[0]
+
+
+def _channel(cur, channel_id, ws="tyit"):
+    cur.execute(
+        "SELECT mode, writer_owner, cutover_ts, cutover_at IS NOT NULL, membership"
+        "  FROM archive_channel_mode WHERE workspace=%s AND channel_id=%s",
+        (ws, channel_id),
+    )
+    return cur.fetchone()
+
+
+def _live(cur, on: bool):
+    cur.execute(
+        "UPDATE archive_feature_flag SET enabled=%s"
+        " WHERE name='archiver_writes_live' AND scope='global' AND scope_key=''",
+        (on,),
+    )
+
+
+@needs_db
+def test_membership_function_registers_new_and_re_invited_channels_live(conn):
+    """신규 → active/archiver/정착 좌표, 재초대 → 좌표 보존, hold → paused, 스위치 꺼짐 → 보류."""
+    import time
+
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _live(cur, False)
+        assert _save(cur, "C0DEFER") == "deferred"
+        assert _channel(cur, "C0DEFER") is None
+
+        _live(cur, True)
+        before = time.time()
+        assert _save(cur, "C0NEW") == "active"
+        mode, owner, cutover, has_at, membership = _channel(cur, "C0NEW")
+        assert (mode, owner, has_at, membership) == ("active", "archiver", True, "joined")
+        assert before + 55 < float(cutover) < time.time() + 65
+
+        # 나갔다 재초대 — 기존 좌표 보존
+        assert _save(cur, "C0NEW", membership="left") == "paused"
+        assert _save(cur, "C0NEW") == "active"
+        assert _channel(cur, "C0NEW")[2] == cutover
+
+        # Master 몫(옛 shadow) 재초대 — 새 좌표로 인수
+        cur.execute(
+            "INSERT INTO archive_channel_mode (workspace, channel_id, mode, writer_owner,"
+            " membership) VALUES ('tyit','C0OLD','shadow','master','left')"
+        )
+        assert _save(cur, "C0OLD") == "active"
+        assert _channel(cur, "C0OLD")[:2] == ("active", "archiver")
+
+        # operator_hold 는 재초대로 풀리지 않는다
+        cur.execute(
+            "INSERT INTO archive_channel_mode (workspace, channel_id, mode, writer_owner,"
+            " membership, operator_hold) VALUES ('tyit','C0HOLD','paused','master','left',true)"
+        )
+        assert _save(cur, "C0HOLD") == "paused"
+        assert _channel(cur, "C0HOLD")[:2] == ("paused", "master")
+
+        cur.execute("SELECT count(*) FROM archive_channel_mode WHERE mode='shadow'")
+        assert cur.fetchone()[0] == 0
+        cur.execute(
+            "SELECT count(*) FROM archive_config_audit"
+            " WHERE field='writer_owner' AND channel_id IN ('C0NEW','C0OLD')"
+        )
+        assert cur.fetchone()[0] == 2
+    conn.rollback()
+
+
+@needs_db
+def test_reapplying_over_the_old_void_membership_function_is_safe(conn):
+    """운영 DB 에는 반환형 void 인 옛 함수가 있다. 재적용이 그 위에서 두 번 돌아야 한다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        cur.execute(
+            "DROP FUNCTION archiver_save_membership(text,text,text,text,text,boolean,text,boolean,text)"
+        )
+        cur.execute(
+            "CREATE FUNCTION archiver_save_membership(text,text,text,text,text,boolean,"
+            "text,boolean,text) RETURNS void LANGUAGE sql AS $$ SELECT $$"
+        )
+    conn.commit()
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    assert verify.check_privileges(conn) == []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_get_function_result('archiver_save_membership(text,text,text,text,"
+            "text,boolean,text,boolean,text)'::regprocedure)"
+        )
+        assert cur.fetchone()[0] == "text"
+        cur.execute(
+            "SELECT has_function_privilege('tybot_archiver', 'archiver_save_membership("
+            "text,text,text,text,text,boolean,text,boolean,text)', 'EXECUTE')"
+        )
+        assert cur.fetchone()[0] is True
+    conn.rollback()

@@ -82,7 +82,10 @@ def _create(store, request: ApprovalRequest, *, now: datetime, docs=None) -> dic
     digest = str(doc.sha256 or "").strip().lower()
     if digest != request.expected_original_sha256:
         raise ImageDescriptionApprovalAdminError("source_changed")
-    if not doc.human_upload_confirmed:
+    from ..archive.vision_provenance import admitted_by_collection
+
+    if not admitted_by_collection(doc):
+        # 봇 출력은 수집 입구가 막는다(2026-11-19). 옛 사진·소급 사진도 승인할 수 있다.
         raise ImageDescriptionApprovalAdminError("human_upload_unverified")
     if str(doc.filetype or "").strip().lower() not in FILETYPE_MIME:
         raise ImageDescriptionApprovalAdminError("source_not_image")

@@ -128,7 +128,13 @@ def bindings(workspace: str, *, converter_ids=None, delegated=None) -> tuple:
         out.append(binding_from_connection(role, rows.get(key)))
 
     ids = converter_bots.converter_app_ids() if converter_ids is None else converter_ids
-    on = converter_bots.conversion_delegated() if delegated is None else delegated
+    if delegated is None:
+        # 「모름」 을 「꺼짐」 으로 접지 않는다(B-89 후속). 꺼짐으로 적으면 화면이
+        # 「해당 없음」 을 보여 주는데, 그동안 TYBot 은 HWP 를 변환하지 않는다.
+        state = converter_bots.delegation_state()
+        on = True if state == "on" else False if state == "off" else None
+    else:
+        on = delegated
     out.append(converter_binding(ids, delegated=on))
 
     out.append(

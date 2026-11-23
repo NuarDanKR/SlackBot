@@ -30,7 +30,7 @@ from fastapi.testclient import TestClient
 from test_console_api import env, guest, member, owner  # noqa: F401
 
 from tybot.console import app as console_app
-from tybot.console import bot_admin, bot_identity, bot_manifest
+from tybot.console import bot_admin, bot_identity, bot_manifest, bot_routes
 
 CSRF = {"X-TYBot-CSRF": "1", "Origin": "http://testserver"}
 BOT = "xoxb-" + "1" * 30
@@ -172,6 +172,31 @@ def test_saving_a_token_checks_identity_and_enables_the_connection(client, repo)
     assert row["identity_ok"] is True
 
 
+def test_saving_a_verified_vipbot_connection_requests_runtime_restart(
+    client, repo, monkeypatch
+):
+    repo.given_bot(
+        "vipbot",
+        category="orchestrator",
+        slack_connectable=True,
+        internally_invokable=False,
+        display_name="VIPBot",
+    )
+    restart = Mock()
+    monkeypatch.setattr(bot_routes, "request_restart", restart)
+
+    response = client.put(
+        "/api/workspaces/tyit/bot-connections/vipbot/slack",
+        json={"botToken": BOT, "appToken": APP, "reason": "VIP 연결"},
+        headers={**owner(client), **CSRF},
+    )
+
+    assert response.status_code == 200
+    restart.assert_called_once_with(
+        "dan@taeyoung.com", ["BOT_CONNECTION:tyit:vipbot"]
+    )
+
+
 def test_a_bad_token_shape_is_422(client, repo):
     response = client.put(
         "/api/workspaces/tyit/bot-connections/archiver/slack",
@@ -254,6 +279,46 @@ def test_runtime_tokens_drop_the_internal_fingerprint(monkeypatch):
 
     assert bot_identity.runtime_tokens("tyit", "vipbot") == ("bot", "app")
     loaded.assert_called_once_with("tyit", "vipbot", require_runtime=True)
+
+
+def test_runtime_workspaces_returns_only_complete_verified_enabled_connections():
+    repo = Mock()
+    repo.connections.return_value = [
+        {
+            "workspace": "mgmt",
+            "bot_key": "vipbot",
+            "connector_type": "slack_socket",
+            "state": "enabled",
+            "identity_ok": True,
+            "token_count": 2,
+        },
+        {
+            "workspace": "tyit",
+            "bot_key": "vipbot",
+            "connector_type": "slack_socket",
+            "state": "enabled",
+            "identity_ok": True,
+            "token_count": 2,
+        },
+        {
+            "workspace": "civil",
+            "bot_key": "vipbot",
+            "connector_type": "slack_socket",
+            "state": "disabled",
+            "identity_ok": True,
+            "token_count": 2,
+        },
+        {
+            "workspace": "invest",
+            "bot_key": "master",
+            "connector_type": "slack_socket",
+            "state": "enabled",
+            "identity_ok": True,
+            "token_count": 2,
+        },
+    ]
+
+    assert bot_identity.runtime_workspaces("vipbot", repo=repo) == ["mgmt", "tyit"]
 
 
 def test_runtime_token_state_and_secrets_are_bound_in_the_same_sql_snapshot(
@@ -368,6 +433,27 @@ def test_a_connection_can_be_disabled(client, repo):
 
     assert response.status_code == 200
     assert repo.connections("pf")[0]["state"] == "disabled"
+
+
+def test_disabling_a_vipbot_connection_requests_runtime_restart(
+    client, repo, monkeypatch
+):
+    repo.given_connection(
+        "mgmt", "vipbot", state="enabled", team_id="T1", bot_user_id="U9"
+    )
+    restart = Mock()
+    monkeypatch.setattr(bot_routes, "request_restart", restart)
+
+    response = client.post(
+        "/api/workspaces/mgmt/bot-connections/vipbot/slack/state",
+        json={"state": "disabled", "reason": "연결 중지"},
+        headers={**owner(client), **CSRF},
+    )
+
+    assert response.status_code == 200
+    restart.assert_called_once_with(
+        "dan@taeyoung.com", ["BOT_CONNECTION:mgmt:vipbot"]
+    )
 
 
 def test_enabling_by_hand_is_rejected_by_the_schema(client, repo):

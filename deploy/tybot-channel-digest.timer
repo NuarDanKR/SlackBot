@@ -1,0 +1,13 @@
+[Unit]
+Description=TYBot 채널×일 검색 다이제스트 (B-93 2단계)
+
+# **설치만 하고 켜지 않는다.** LLM 비용이 드는 일이라 오너가 dry-run 분량을 본 뒤 켠다:
+#   sudo systemctl enable --now tybot-channel-digest.timer
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

@@ -13,8 +13,25 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from copy import deepcopy
+
+#: `archive_settled_cutover_ts()` 의 `interval '60 seconds'` 와 같다.
+SETTLE_SECONDS = 60
+
+
+def _check_row(row: dict) -> None:
+    """DB CHECK 두 개(`owner_matches`·`cutover_present`)를 흉내 낸다."""
+    mode, owner = row.get("mode"), row.get("writer_owner")
+    if not (
+        mode == "paused"
+        or (mode in {"off", "shadow"} and owner == "master")
+        or (mode == "active" and owner == "archiver")
+    ):
+        raise ValueError(f"archive_channel_mode_owner_matches: {mode}/{owner}")
+    if owner == "archiver" and not row.get("cutover_ts"):
+        raise ValueError("archive_channel_mode_cutover_present")
 
 
 class FakeArchivingRepo:
@@ -30,6 +47,8 @@ class FakeArchivingRepo:
         self.locked: list[tuple[str, str]] = []
         self.transaction_count = 0
         self.fail_audit = False
+        #: 정착 좌표를 정하는 시계(초). 시험이 바꿔 끼운다.
+        self.clock = time.time
 
     @contextmanager
     def transaction(self):
@@ -71,40 +90,116 @@ class FakeArchivingRepo:
             if ws == workspace
         ]
 
-    def save_membership(self, row: dict) -> None:
+    # `archiver_save_membership` 과 **같은 규칙**(deploy/sql/archiving_schema.sql).
+    # 실제 SQL 은 격리 DB 시험이 따로 본다. 여기는 「바꾼 뒤 상태」 만 흉내 낸다.
+    def _live_on(self) -> bool:
+        row = self.flag_rows.get(("archiver_writes_live", "global", ""))
+        return bool(row and row.get("enabled") is True)
+
+    def _settled_cutover(self) -> str:
+        return f"{self.clock() + SETTLE_SECONDS:.6f}"
+
+    def save_membership(self, row: dict) -> str:
+        if row["mode"] not in {"active", "paused", "shadow"}:
+            raise ValueError(f"membership sync cannot request mode {row['mode']}")
+        if row["membership"] not in {"joined", "left"}:
+            raise ValueError(f"membership sync cannot write membership {row['membership']}")
         key = (row["workspace"], row["channel_id"])
-        current = self.channel_rows.setdefault(key, {
-            "channel_id": row["channel_id"], "writer_owner": "master",
-            "cutover_ts": "", "operator_hold": False,
-        })
+        self.locked.append(key)
+        current = self.channel_rows.get(key)
+        live = self._live_on()
+        if current is None:
+            if row["membership"] != "joined" or row["mode"] == "paused":
+                raise ValueError("a new invited channel must be registered as joined/active")
+            if not live:
+                return "deferred"
+            cutover = self._settled_cutover()
+            self.channel_rows[key] = {
+                "workspace": row["workspace"], "channel_id": row["channel_id"],
+                "mode": "active", "writer_owner": "archiver",
+                "cutover_ts": cutover, "cutover_at": "now",
+                "membership": "joined", "operator_hold": False,
+                "channel_name": row.get("channel_name", ""),
+                "is_private": row.get("is_private", False),
+                "updated_by": row.get("updated_by", ""), "last_event_at": None,
+            }
+            if row.get("audit"):
+                self._membership_audit(row, "", "joined/active")
+                self._owner_audit(row, "", f"archiver@{cutover}")
+            return "active"
+
+        before_membership = current.get("membership")
+        before_mode = current.get("mode")
+        before_owner = current.get("writer_owner")
+        before_cutover = current.get("cutover_ts") or ""
+        if row["membership"] == "left" or current.get("operator_hold") or row["mode"] == "paused":
+            mode = "paused"
+        elif before_owner == "archiver":
+            mode = "active"
+        elif live:
+            mode = "active"
+            fresh = self._settled_cutover()
+            keep = bool(before_cutover) and float(before_cutover) > float(fresh)
+            current["writer_owner"] = "archiver"
+            if not keep:
+                current["cutover_ts"] = fresh
+                current["cutover_at"] = "now"
+        else:
+            mode = "off"
         current.update({
-            "mode": row["mode"], "membership": row["membership"],
+            "mode": mode, "membership": row["membership"],
             "channel_name": row.get("channel_name", ""),
             "is_private": row.get("is_private", False),
             "updated_by": row.get("updated_by", ""),
         })
-        if row.get("audit"):
-            self.audit_rows.append({
-                "actor": row["updated_by"],
-                "subject": "channel_membership",
-                "workspace": row["workspace"],
-                "channel_id": row["channel_id"],
-                "field": "membership",
-                "old_value": "",
-                "new_value": f"{row['membership']}/{row['mode']}",
-                "reason": row["reason"],
-            })
+        _check_row(current)
+        if row.get("audit") and (before_membership != row["membership"] or before_mode != mode):
+            self._membership_audit(
+                row, f"{before_membership}/{before_mode}", f"{row['membership']}/{mode}",
+            )
+        if before_owner != current["writer_owner"]:
+            self._owner_audit(
+                row, f"{before_owner}@{before_cutover or '-'}",
+                f"{current['writer_owner']}@{current['cutover_ts']}",
+            )
+        return mode
+
+    def _membership_audit(self, row: dict, old: str, new: str) -> None:
+        self.audit_rows.append({
+            "actor": row["updated_by"], "subject": "channel_membership",
+            "workspace": row["workspace"], "channel_id": row["channel_id"],
+            "field": "membership", "old_value": old, "new_value": new,
+            "reason": row["reason"],
+        })
+
+    def _owner_audit(self, row: dict, old: str, new: str) -> None:
+        self.audit_rows.append({
+            "actor": row["updated_by"], "subject": "channel_membership",
+            "workspace": row["workspace"], "channel_id": row["channel_id"],
+            "field": "writer_owner", "old_value": old, "new_value": new,
+            "reason": "settle 60s after registration",
+        })
 
     def set_operator_hold(self, row: dict) -> int:
         key = (row["workspace"], row["channel_id"])
         current = self.channel_rows.get(key)
         if current is None:
             return 0
+        self.locked.append(key)
         current["operator_hold"] = row["hold"]
         if row["hold"]:
             current["mode"] = "paused"
         elif current.get("membership") == "joined":
-            current["mode"] = "shadow"
+            if current.get("writer_owner") == "archiver":
+                current["mode"] = "active"
+            elif self._live_on():
+                current.update({
+                    "mode": "active", "writer_owner": "archiver",
+                    "cutover_ts": self._settled_cutover(), "cutover_at": "now",
+                })
+            else:
+                current["mode"] = "off"
+        _check_row(current)
         current["updated_by"] = row["actor"]
         return 1
 

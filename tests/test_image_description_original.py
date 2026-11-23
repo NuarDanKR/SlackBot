@@ -7,7 +7,7 @@
 2. **정말 이미지인가.** 매직 바이트를 본다 — 확장자는 이름일 뿐이다.
 3. **우리 자리에 있나.** 경로는 우리가 만들고, 링크를 푼 뒤에도 뿌리 안이어야 한다.
 4. **하나가 아니면 고르지 않는다.** 해시로 맞혀 고르면 끼워 넣기가 가능해진다.
-5. **사람이 올린 것인가.** `human_upload_confirmed` 가 없으면 아니다.
+5. **봇 출력이 아닌가.** 수집 입구를 지난 정본인가(`vision_provenance`, 2026-11-19).
 6. **오류에 아무것도 담지 않는다.** 경로·파일명·바이트·예외 본문 전부.
 
 모델·DB·네트워크를 부르지 않는다. 실제 임시 디렉터리에 합성 바이트를 깔고
@@ -528,17 +528,24 @@ def test_a_missing_doc_is_refused(archive):
     assert out.error_code == orig.ERROR_PROVENANCE
 
 
-def test_an_unconfirmed_human_upload_is_refused(archive):
-    """옛 자료는 이 값이 없다. **없으면 아니다**(fail-closed)."""
+def test_an_upload_without_the_live_human_flag_is_loaded(archive):
+    """옛 사진·파일 목록 소급 사진은 이 값이 없다. 수집 입구를 지났으면 대상이다."""
     _put(archive, PNG)
     out = _load(archive, doc=_doc(human_upload_confirmed=False))
+
+    assert out.ok, out.error_code
+
+
+def test_a_bot_generated_file_is_refused(archive):
+    _put(archive, PNG)
+    out = _load(archive, doc=_doc(name="현장 정리 · TYBot"))
 
     assert out.error_code == orig.ERROR_NOT_HUMAN
 
 
 def test_provenance_is_checked_before_the_file_is_opened(archive):
     """어긋난 좌표로 **디스크를 뒤지지 않는다.**"""
-    out = _load(archive, doc=_doc(human_upload_confirmed=False))
+    out = _load(archive, doc=_doc(name="현장 정리 · TYBot"))
 
     assert out.error_code == orig.ERROR_NOT_HUMAN
 

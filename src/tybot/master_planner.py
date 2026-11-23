@@ -281,6 +281,9 @@ class MasterTask:
     decision_id: str = ""
     task_index: int = 0
     editing_text: str = ""
+    # 직전 봇 답변 — **지칭 해석용, 근거 아님**(`prior_answer`). 형식 변경이 아닌
+    # 후속 질문에서 「위 목록」 이 무엇인지 알게 한다. 권한 재확인을 통과한 것만 온다.
+    prior_answer: str = ""
     parent_record_ids: tuple[str, ...] = ()
     topic_terms: tuple[str, ...] = ()
     document_query: tuple[str, ...] = ()

@@ -40,7 +40,15 @@ from .. import (
     summary_review,
 )
 from ..access import RequestContext
-from ..answer import Answer, AnswerEngine
+from ..answer import (
+    BOT_MAX_HITS,
+    BOT_PER_DOCUMENT_HITS,
+    TYBOT_SPECIALIST_MODEL,
+    VIP_SPECIALIST_MODEL,
+    Answer,
+    AnswerEngine,
+    exhaustive_max_lines,
+)
 from ..archive import writer
 from ..archive.attachment_writer import raw_lines_for
 from ..archive.attachment_writer import write_docs as write_attachment_docs
@@ -58,7 +66,7 @@ from ..archive.store import ArchiveDoc, ArchiveStore, RawLine, SearchHit
 from ..archive.write_owner import OwnerLookup
 from ..archive.writer import KST
 from ..attachment_trace import confirm_archived
-from ..audit import QALog, QARecord
+from ..audit import DM_CONTEXT_MINUTES, THREAD_TURNS, QALog, QARecord
 from ..autojoin import on_channel_event, sweep
 from ..bot_access import DENY_MESSAGE
 from ..canvas_answer import create as create_answer_canvas
@@ -123,6 +131,7 @@ from ..intent import (
     Intent,
     apply_dm_feedback_context,
     carry_dm_subject_context,
+    is_bare_command,
 )
 from ..lock import AlreadyRunning, LockUnavailable, instance_lock
 from ..managed_env import consume_restart_request
@@ -393,6 +402,99 @@ CHANNEL_SCOPE_NOTICE = (
 MAX_THREAD_CONTEXT_CHARS = 6000
 
 
+def display_request(tasks) -> master_planner.ArtifactRequest:
+    """여러 작업 중 **표시 요청 하나**를 고른다. 어느 작업이든 Canvas 를 원하면 그것.
+
+    첫 작업만 보면 「위 답변을 참고해서, … Top 5를 canvas와 표로 정리해줘」 처럼
+    앞 절이 맥락이고 뒤 절이 지시인 질문에서 Canvas 요청이 사라진다(2026-11-19).
+    """
+    items = list(tasks or [])
+    if not items:
+        return master_planner.ArtifactRequest()
+    return next(
+        (item.artifact for item in items if item.artifact.wants_canvas),
+        items[0].artifact,
+    )
+
+
+#: 피드백 처리 중간값. Socket Mode 이벤트는 스레드 풀에서 동시에 돈다 — 인스턴스 속성에
+#: 두면 한 사람의 정정 문장이 다른 사람의 답 문장에 섞인다. 스레드마다 따로 둔다.
+_FEEDBACK_STATE = threading.local()
+
+
+def _memory_saved_fact(entry: dict) -> str:
+    """피드백 답 문장에 넘기는 사실 — 무엇이 저장됐고 어디에 쓰이는지."""
+    if not entry.get("memory_saved"):
+        return "개인 기억으로는 저장하지 않았다."
+    if entry.get("memory_kind") == "claim":
+        return (
+            "본인 전용 메모로 저장했다. DM 이나 원문 좌표가 없는 답에서 한 정정은 "
+            "다른 사람에게 보이지 않는다."
+        )
+    if entry.get("memory_kind") == "instruction":
+        return (
+            "본인 전용 요청으로 저장했다. 다음 답변부터 말투·구성·형식에 반영한다. "
+            "근거·출처·권한 규칙과 부딪히는 부분은 따르지 않는다. "
+            "`내 기억 보여줘`로 확인하고 `기억 삭제 번호`로 지울 수 있다."
+        )
+    return "본인 전용 선호로 저장했다. 다음 답변 형식에 반영한다."
+
+
+#: 정정을 공유하지 못한 이유 → 사람이 할 수 있는 일.
+_CORRECTION_REASON_TEXT = {
+    "no_evidence": (
+        "정정한 답변에 연결된 원문 좌표가 없어 다른 사람에게는 표시하지 않습니다 "
+        "(누가 봐도 되는지 정할 수 없습니다)."
+    ),
+    "corrector_cannot_open": (
+        "정정한 답변의 원문을 지금 권한으로 열 수 없어 공유 정정으로 남기지 않았습니다."
+    ),
+    "dm_private": "DM 에서 한 정정은 본인 기록이라 다른 사람에게 표시하지 않습니다.",
+    "private_source": (
+        "정정한 답변이 질문 첨부나 실시간 대화를 근거로 써서, 그 근거를 볼 수 없는 분께도 "
+        "보일 수 있어 공유 정정으로 남기지 않았습니다."
+    ),
+    "unavailable": "정정 저장소를 지금 쓸 수 없어 공유 정정으로 남기지 못했습니다. 잠시 후 다시 남겨 주세요.",
+}
+
+
+def _correction_fact(entry: dict) -> str:
+    change = entry.get("correction_change") or ""
+    if entry.get("correction_saved"):
+        return (
+            f"사실 정정({change})으로 기록했다. 이 원문을 볼 수 있는 사람이 관련 질문을 하면 "
+            "답변 끝에 정정한 사람·날짜·정정 전후 값이 원문 값과 함께 표시된다. "
+            "원문 자체는 바뀌지 않는다."
+        )
+    reason = entry.get("correction_reason") or ""
+    if reason in _CORRECTION_REASON_TEXT:
+        return f"사실 정정({change})으로 읽었지만 " + _CORRECTION_REASON_TEXT[reason]
+    return "사실 정정은 없었다."
+
+
+def _correction_reply(result) -> str:
+    """스레드 `정정:` 의 확인 문장 한 줄. 정정으로 읽히지 않았으면 빈 문자열."""
+    if result is None or result.reason == "not_correction":
+        return ""
+    change = f"{result.before} → {result.after}" if result.before else ""
+    if result.saved:
+        return (
+            f"✏️ 정정({change})을 남겼습니다. 이 원문을 볼 수 있는 분이 관련 질문을 하면 "
+            "답변 끝에 정정하신 분·날짜와 함께 표시됩니다. 원문은 바뀌지 않습니다."
+        )
+    return _CORRECTION_REASON_TEXT.get(result.reason, "")
+
+
+def _slack_error_code(exc: Exception) -> str:
+    """Slack API 오류 코드(`invalid_arguments` 등). 모르면 예외 이름."""
+    response = getattr(exc, "response", None)
+    try:
+        code = response.get("error") if response is not None else ""
+    except Exception:
+        code = ""
+    return str(code or type(exc).__name__)[:60]
+
+
 def _carry_context(answers: list, last):
     """복합 답변이 다음 턴에 물려줄 **좌표를 합친 Answer**.
 
@@ -510,6 +612,7 @@ class WorkspaceBot:
         operational_owner: bool = True,
         private_answers: bool = False,
         answer_quota=None,
+        prefer_canvas: bool = False,
     ) -> None:
         from slack_bolt import App
 
@@ -535,6 +638,9 @@ class WorkspaceBot:
         self._question_transform = question_transform or (lambda question: question)
         self.operational_owner = operational_owner
         self.private_answers = private_answers
+        # Canvas 를 기본으로 쓰는 봇(VIPBot). 상세·순위·표 요청이나 조금 긴 답을
+        # Canvas 로 보낸다(2026-11-19 오너 결정). 표시 형식만 바꾸고 근거는 같다.
+        self.prefer_canvas = prefer_canvas
         self.answer_quota = answer_quota
         # 전 채널·전 워크스페이스 통합조회 허용 사용자. 채널 멤버십과 워크스페이스 경계를 모두 우회한다.
         self.exec_users = {
@@ -1808,6 +1914,164 @@ class WorkspaceBot:
             )
         )
 
+    def _remember_user_feedback(
+        self,
+        *,
+        user_id: str,
+        text: str,
+        prior: dict | None,
+    ) -> bool:
+        """Persist bounded personal memory without making feedback evidence.
+
+        ``prior`` is the exact QA row already selected for the feedback log.
+        The memory service re-checks workspace/user ownership and fails soft, so
+        this hook cannot widen lineage or make feedback availability affect the
+        answer path.
+        """
+        service = self._user_memory_service()
+        result = service.remember(
+            text,
+            workspace=self.workspace,
+            user_id=user_id,
+            prior=prior,
+        )
+        _FEEDBACK_STATE.memory_kind = str(result.decision.kind) if result.saved else ""
+        if result.saved:
+            log.info(
+                "[%s] 사용자 피드백 개인 기억 저장 user=%s kind=%s memory_id=%s",
+                self.workspace,
+                user_id,
+                result.decision.kind,
+                result.memory_id,
+            )
+        return bool(result.saved)
+
+    def _fact_correction_service(self):
+        service = getattr(self, "_fact_correction_service_obj", None)
+        if service is None:
+            from ..user_memory_service import FactCorrectionService
+
+            service = FactCorrectionService()
+            self._fact_correction_service_obj = service
+        return service
+
+    def _record_fact_correction(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        text: str,
+        prior: dict | None,
+    ):
+        """사실 정정을 원장에 남긴다(2026-11-20 오너 결정).
+
+        정정은 원문 권한자 **모두**에게 보이므로, 정정자도 지금 그 원문 좌표를
+        전부 열 수 있어야 한다. 권한 없는 사람이 정정 문장으로 내용을 퍼뜨리는
+        길을 막는다(원칙 3). 판정은 답변과 같은 `resolve_refs` 다.
+        """
+        client = getattr(getattr(self, "app", None), "client", None)
+
+        def can_open(raw_refs: list[dict]) -> bool:
+            refs = refs_from_json(list(raw_refs))
+            if not refs or len(refs) != len(raw_refs):
+                return False
+            ctx = self._request_context(
+                client,
+                user_id,
+                channel_id=channel_id,
+                in_channel=bool(channel_id) and not channel_id.startswith("D"),
+            )
+            hits, dropped = self.store.resolve_refs(refs, ctx)
+            return not dropped and len(hits) == len(refs)
+
+        try:
+            name = self._user_name(client, user_id) if client is not None else user_id
+        except Exception:
+            name = user_id
+        result = self._fact_correction_service().record(
+            text,
+            workspace=self.workspace,
+            corrector_id=user_id,
+            corrector_name=name,
+            prior=prior,
+            can_open=can_open,
+        )
+        log.info(
+            "[%s] 사실 정정 user=%s saved=%s reason=%s id=%s",
+            self.workspace,
+            user_id,
+            result.saved,
+            result.reason,
+            result.correction_id,
+        )
+        return result
+
+    def _user_memory_service(self):
+        service = getattr(self, "_user_memory_service_obj", None)
+        if service is None:
+            from ..user_memory_service import UserMemoryService
+
+            service = UserMemoryService()
+            self._user_memory_service_obj = service
+        return service
+
+    def _with_user_memory_context(
+        self,
+        ctx: RequestContext,
+        *,
+        user_id: str,
+        question: str,
+    ) -> RequestContext:
+        """Attach exact-user memory after reopening claim coordinates now."""
+        from ..user_memory import claim_matches_evidence
+
+        def claim_is_current(memory) -> bool:
+            # Store rows expose an immutable tuple, while the audit JSON parser
+            # intentionally accepts only lists. Convert at this boundary rather
+            # than weakening the parser used for untrusted log payloads.
+            refs = refs_from_json(list(memory.evidence_refs))
+            if not refs or len(refs) != len(memory.evidence_refs):
+                return False
+            hits, dropped = self.store.resolve_refs(refs, ctx)
+            if dropped or len(hits) != len(refs):
+                return False
+            return claim_matches_evidence(
+                memory, (hit.line.text for hit in hits)
+            )
+
+        memory = self._user_memory_service().context(
+            workspace=self.workspace,
+            user_id=user_id,
+            question=question,
+            claim_is_current=claim_is_current,
+            include_search_hints=False,
+        )
+
+        def correction_visible(item) -> bool:
+            # 보는 사람이 정정한 답변의 원문 좌표를 **지금 전부** 열 수 있어야 한다.
+            # 채널 질문이면 그 채널로 고정된 ctx 이므로 다른 채널 정정은 안 보인다.
+            refs = refs_from_json(list(item.evidence_refs))
+            if not refs or len(refs) != len(item.evidence_refs):
+                return False
+            hits, dropped = self.store.resolve_refs(refs, ctx)
+            return not dropped and len(hits) == len(refs)
+
+        corrections = self._fact_correction_service().context(
+            workspace=self.workspace,
+            question=question,
+            visible=correction_visible,
+        )
+        prompt = "\n\n".join(part for part in (memory.prompt, corrections.prompt) if part)
+        if not prompt:
+            return ctx
+        return replace(
+            ctx,
+            user_memory_prompt=prompt,
+            user_memory_ids=memory.memory_ids,
+            user_preferences=tuple(getattr(memory, "preferences", ()) or ()),
+            fact_corrections=tuple(corrections.items),
+        )
+
     def _record_slash_feedback(self, *, user_id: str, channel_id: str, text: str) -> str:
         """`/피드백 <내용>` 을 기록하고 사용자에게 확인을 돌려준다."""
         if not text:
@@ -1825,19 +2089,101 @@ class WorkspaceBot:
             action="submitted",
             text=text,
         )
+        _FEEDBACK_STATE.memory_kind = ""
+        memory_saved = self._remember_user_feedback(user_id=user_id, text=text, prior=row)
+        correction = None
+        if not memory_saved:
+            from ..fact_correction import parse_change
+
+            if parse_change(text) is not None:
+                correction = self._record_fact_correction(
+                    user_id=user_id, channel_id=channel_id, text=text, prior=row
+                )
         # 연결할 답변이 없으면 그 사실을 말한다 - 검토자가 재현하지 못하기 때문이다.
         asked = str(row.get("question") or "").strip() if row else ""
         linked = f"직전 질문(`{asked[:60]}`)에 연결했습니다." if record_id and asked else ""
+        _FEEDBACK_STATE.entry = {
+            "linked_question": asked[:60] if record_id and asked else "",
+            "memory_saved": bool(memory_saved),
+            "memory_kind": getattr(_FEEDBACK_STATE, "memory_kind", "") if memory_saved else "",
+            "correction_saved": bool(correction and correction.saved),
+            "correction_reason": correction.reason if correction else "",
+            "correction_change": (
+                f"{correction.before} → {correction.after}"
+                if correction and correction.before
+                else ""
+            ),
+        }
         return feedback_thanks("correction", linked=linked)
 
     def _record_natural_feedback(
         self, *, user_id: str, channel_id: str, text: str
     ) -> str:
-        """일반 문장으로 준 TYBot 개선 의견도 `/피드백`과 같은 원장에 남긴다."""
+        """일반 문장으로 준 개선 의견·불만도 `/피드백`과 같은 원장에 남긴다.
+
+        **접수 문구로 닫지 않는다**(2026-11-19 오너). 「피드백으로 판단했습니다」 만
+        돌려주면 사람은 왜 그렇게 됐는지도, 다음에 어떻게 하면 되는지도 모른다.
+        기록은 코드가 하고, 답 문장은 LLM 이 **코드가 만든 사실만으로** 쓴다 —
+        공감하고, 왜 그렇게 동작했는지와 원하는 결과를 얻는 방법을 안내한다.
+        """
+        _FEEDBACK_STATE.entry = {}
         recorded = self._record_slash_feedback(
             user_id=user_id, channel_id=channel_id, text=text
         )
-        return "요청 내용을 TYBot 답변 품질 피드백으로 판단했습니다.\n" + recorded
+        entry = dict(getattr(_FEEDBACK_STATE, "entry", {}) or {})
+        fallback = f"말씀하신 내용을 {self._display_name()} 답변 품질 피드백으로 기록했습니다.\n" + recorded
+        return write_from_facts(
+            getattr(getattr(self, "engine", None), "router", None),
+            question=text,
+            facts=self._feedback_facts(entry),
+            fallback=fallback,
+        )
+
+    def _display_name(self) -> str:
+        from ..canvas_answer import display_name
+
+        return display_name(self.bot_name)
+
+    def _format_facts(self) -> dict:
+        """답변 형식(Canvas·표·메시지)이 **실제로** 어떻게 정해지는지. 코드와 같은 값이다."""
+        from ..canvas_answer import AUTO_CANVAS_LINES, PREFERRED_CANVAS_LINES
+
+        prefer = bool(getattr(self, "prefer_canvas", False))
+        return {
+            "Canvas_명시_요청": (
+                "'캔버스로 정리해줘', 'canvas와 표로 작성해줘'처럼 말하면 Canvas 문서로 답한다."
+            ),
+            "표_요청": (
+                "표로 정리해 달라고 했고 답에 표가 있으면 Canvas로 보낸다. "
+                "Slack 메시지는 표를 그릴 수 없어 목록으로 풀리기 때문이다."
+            ),
+            "기본_형식": (
+                f"상세·순위·보고·비교 요청이나 {PREFERRED_CANVAS_LINES}줄을 넘는 답은 Canvas로 보낸다."
+                if prefer
+                else f"{AUTO_CANVAS_LINES}줄을 넘는 긴 답은 Canvas로 보낸다."
+            ),
+            "메시지로_받기": "'메시지로 답해줘'라고 하면 Canvas를 만들지 않는다.",
+            "이전_답변_다시_정리": (
+                "같은 스레드나 DM에서 '위 답변을 캔버스로 다시 정리해줘'라고 하면 직전 질문의 "
+                "원문 근거를 다시 찾아 정리한다. 이전 답변 문장을 그대로 옮기지는 않는다."
+            ),
+        }
+
+    def _feedback_facts(self, entry: dict) -> dict:
+        return {
+            "봇": self._display_name(),
+            "할_일": (
+                "사용자의 불만·개선 의견에 짧게 공감하고, 왜 그렇게 동작했을 수 있는지를 "
+                "아래 답변_형식_규칙 안에서만 설명한 뒤, 원하는 결과를 얻는 방법을 한두 개 안내한다. "
+                "규칙에 없는 원인을 지어내지 않는다."
+            ),
+            "피드백_기록": "답변 품질 피드백으로 기록했다. 검토자가 본다.",
+            "연결한_직전_질문": entry.get("linked_question") or "없음",
+            "개인_선호_저장": _memory_saved_fact(entry),
+            "사실_정정": _correction_fact(entry),
+            "답변_형식_규칙": self._format_facts(),
+            "추가_도움": "`도움말`이라고 보내면 전체 명령을 볼 수 있다.",
+        }
 
     def _handle_correction(self, event: dict, say) -> bool:
         text = correction_text(_clean(event.get("text", "")))
@@ -1867,6 +2213,19 @@ class WorkspaceBot:
             action="submitted",
             text=text,
         )
+        # 「15억이 아니라 12억」 처럼 무엇에서 무엇으로 읽히면 원문 권한자 모두에게
+        # 정정자·날짜와 함께 보이는 정정으로 남긴다(2026-11-20 오너 결정).
+        shared = None
+        from ..fact_correction import parse_change
+
+        if parse_change(text) is not None:
+            shared = self._record_fact_correction(
+                user_id=str(event.get("user") or ""),
+                channel_id=channel_id,
+                text=text,
+                prior=row,
+            )
+        shared_note = _correction_reply(shared)
         # **접수하고 끝내지 않는다**(2026-09-18 문제 패킷 QA e8463a7b).
         #
         # 예전에는 기록하고 "반영하겠습니다" 로 닫았다. 틀렸다고 알려준 사람은
@@ -1879,6 +2238,7 @@ class WorkspaceBot:
         if ACTION_RE.search(text):
             say(
                 text="정정 의견을 기록했습니다. 말씀하신 방향으로 다시 찾아보겠습니다."
+                + (f"\n{shared_note}" if shared_note else "")
                 + (f"\n{note}" if note else ""),
                 thread_ts=thread_ts,
             )
@@ -1889,6 +2249,7 @@ class WorkspaceBot:
             return True
         say(
             text="정정 의견을 기록했습니다. 답변 품질 검토에 반영하겠습니다."
+            + (f"\n{shared_note}" if shared_note else "")
             + (f"\n{note}" if note else ""),
             thread_ts=thread_ts,
         )
@@ -3316,8 +3677,19 @@ class WorkspaceBot:
             from ..canvas_answer import automatic, message
 
             answer_supports_canvas = ans is not None and ans.reason in ("answered", "advice")
+            # 본인이 남긴 형식 선호(B-91). 명시 요청이 없을 때의 기본값만 바꾼다.
+            prefs = frozenset(getattr(ctx, "user_preferences", ()) or ()) if ctx else frozenset()
             use_canvas = answer_supports_canvas and (
-                artifact.wants_canvas or automatic(reply, raw_text)
+                artifact.wants_canvas
+                or automatic(
+                    reply, raw_text,
+                    prefer_canvas=(
+                        bool(getattr(self, "prefer_canvas", False))
+                        or "format.canvas=prefer" in prefs
+                    ),
+                    avoid_canvas="format.canvas=avoid" in prefs,
+                    table_preferred="format.table=prefer" in prefs,
+                )
             )
             private_delivery = bool(
                 getattr(self, "private_answers", False) and in_channel
@@ -3393,7 +3765,11 @@ class WorkspaceBot:
                     if delivery_channel and not delivery_channel.startswith("D"):
                         grant_canvas_channel(client, canvas.canvas_id, delivery_channel)
                 except Exception as exc:
-                    log.exception("[%s] Canvas 답변 생성 실패: %s", self.workspace, exc)
+                    code = _slack_error_code(exc)
+                    log.exception(
+                        "[%s] Canvas 답변 생성 실패 code=%s chars=%d: %s",
+                        self.workspace, code, len(reply), exc,
+                    )
                     canvas = None
                     kw = fallback_kw
             elif ans is not None:
@@ -3610,7 +3986,11 @@ class WorkspaceBot:
         # 표시 요청은 **첫 작업의 것**을 쓴다. 복합 질문이라도 산출물은 하나이고,
         # 작업마다 다른 형식으로 만들면 한 문서 안에서 형식이 뒤섞인다.
         if decision.tasks:
-            artifact = decision.tasks[0].artifact
+            # 산출물은 하나다. 다만 **첫 작업만** 보면 「위 답변을 참고해서, … Top 5를
+            # canvas와 표로 정리해줘」 처럼 앞 절이 맥락이고 뒤 절이 지시인 질문에서
+            # Canvas 요청이 사라진다(2026-11-19 VIPBot). 어느 작업이든 Canvas 를
+            # 원하면 그 표시 요청을 쓴다.
+            artifact = display_request(decision.tasks)
         sections: list[str] = []
         answers: list = []
         ctx: RequestContext | None = None
@@ -3634,6 +4014,11 @@ class WorkspaceBot:
             if ctx is None:
                 ctx = event.get("_tybot_request_context") or self._request_context(
                     client, user_id, channel_id=channel_id, in_channel=in_channel
+                )
+                ctx = self._with_user_memory_context(
+                    ctx,
+                    user_id=str(user_id or ""),
+                    question=text,
                 )
                 # 파일은 권한 경계를 만든 뒤에만 열고 이번 요청의 임시 근거로만 쓴다.
                 # 영속 수집과 후속 질문의 좌표 재개방은 별도 경로다.
@@ -3669,7 +4054,8 @@ class WorkspaceBot:
                 except Exception as exc:
                     log.exception("[%s] 후속 질문 해석 실패: %s", self.workspace, exc)
                     followup = None
-            with specialist_router.bind_qa_record(qa_record_id):
+            with specialist_router.bind_qa_record(qa_record_id), \
+                    specialist_router.bind_answer_bot(self.bot_name):
                 ans = self.engine.respond(
                     q, ctx, task, followup=followup, task=master_task,
                     seed_hits=question_file_hits,
@@ -3696,6 +4082,29 @@ class WorkspaceBot:
 
         if dropped:
             sections.append(truncated_notice(dropped))
+
+        # 사람이 남긴 정정 — 근거를 찾아 답한 경우에만 붙인다. 거절·안내 답변에
+        # 붙이면 근거 없이 정정 값만 전하는 꼴이 된다.
+        candidates = tuple(getattr(ctx, "fact_corrections", ()) or ()) if ctx else ()
+        if candidates:
+            from ..fact_correction import overlaps, render_notice
+
+            # 이번 답변이 정정한 답변과 **같은 문서**를 읽었을 때만 붙인다. 낱말만
+            # 겹친 답에 붙이면 그 답의 근거와 무관한 정정이 사실처럼 보인다.
+            answer_refs = refs_to_json(
+                [ref for a in answers for ref in (getattr(a, "evidence_refs", None) or ())],
+                limit=10_000,
+            )
+            shown = [item for item in candidates if overlaps(item, answer_refs)]
+            if shown:
+                sections.append(render_notice(
+                    shown,
+                    viewer_channel_id=str(getattr(ctx, "channel_id", "") or "")
+                    if in_channel else "",
+                ))
+                self._fact_correction_service().mark_shown(
+                    [item.id for item in shown], workspace=self.workspace
+                )
 
         # 감사기록에는 처리한 의도를 전부 남긴다(예: "memory+summary").
         merged = Intent(
@@ -4018,15 +4427,24 @@ class WorkspaceBot:
             if not msgs:
                 return staged
             channel = writer.dm_channel(user_id)
+            dm_channel_id = str(event.get("channel") or "")
+            # 운영 루트의 **개인별 DM 배치**(`<ws>/dm/<user>/archive`)에 쓴다(B-99).
+            # 옛 `workspaces/<ws>/dm/<user>` 에 쓰면 Archiver 가 그 디렉터리를 보고 기동을
+            # 거부한다 — 2026-11-20 DM 한 건으로 tyit 수집이 멈췄다. 검색은 이 배치를 읽는다.
+            from ..archive.shadow_paths import dm_archive_dir
+
             r = writer.ingest(
                 self.archive_dir,
                 workspace=self.workspace,
                 channel=channel,
-                channel_id=str(event.get("channel") or ""),
+                channel_id=dm_channel_id,
                 messages=msgs,
                 # 채널 멤버십으로는 열리지 않는다. 여는 열쇠는 `dm_user` 하나다.
                 acl=[],
                 dm_user=user_id,
+                dm_directory=dm_archive_dir(
+                    self.archive_dir, self.workspace, user_id, dm_channel_id
+                ),
             )
         except Exception as e:
             log.exception("[%s] DM 수집 실패 user=%s: %s", self.workspace, user_id, e)
@@ -4293,10 +4711,23 @@ class WorkspaceBot:
         """
         recent = self.qa_log.recent_for_user(self.workspace, user_id)
         return {
-            "스레드_밖_지속_기억": False,
+            "이전_봇_답변_지속_기억": False,
+            "구조화된_개인_기억": (
+                "사용자가 직전 답변에 준 일부 선호·용어·정정은 본인 전용으로 저장될 수 있다. "
+                "답변 선호는 형식에만 쓰고, 사실 정정은 현재 권한으로 원문 좌표를 다시 "
+                "확인한 경우에만 사용한다."
+            ),
             "같은_스레드_맥락": (
-                "이전 질문과 답변으로 '그 문서' 같은 지칭어만 해석하고, "
-                "실제 답은 권한 내 원문에서 다시 찾는다."
+                f"같은 스레드에서는 최근 {THREAD_TURNS}개 문답의 질문과 원문 근거 좌표를 이어 받는다. "
+                "'그 문서', '위 답변' 같은 지칭을 이해하고, 실제 답은 권한 내 원문에서 다시 찾는다."
+            ),
+            "DM_맥락": (
+                f"봇과의 DM에서는 스레드가 아니어도 최근 {DM_CONTEXT_MINUTES // 60}시간의 "
+                f"본인 문답(최대 {THREAD_TURNS}개)을 이어 받는다. 이어진 질문인지는 매번 판단한다."
+            ),
+            "맥락_요약": (
+                "대화 맥락(무엇을 물었는지·어떤 근거였는지)은 이어진다. "
+                "다만 이전 답변 문장 자체를 사실 근거로 다시 쓰지는 않는다."
             ),
             "이유": [
                 "봇 답변을 다시 근거로 쓰면 틀린 내용이 사실처럼 굳는다(요약 재귀).",
@@ -4308,6 +4739,92 @@ class WorkspaceBot:
             ],
             "최근_질문_주의": "감사 기록이며 답변 생성에는 쓰이지 않는다. 본인 질문만 보인다.",
         }
+
+    def _personal_memory_command(self, question: str, user_id: str) -> str | None:
+        """Handle exact-user memory inspection and revocation without an LLM."""
+        revoke_correction = re.search(r"정정\s*(?:삭제|철회)\s*#?(\d+)\b", question)
+        if revoke_correction:
+            correction_id = int(revoke_correction.group(1))
+            outcome = self._fact_correction_service().revoke_own(
+                correction_id, workspace=self.workspace, corrector_id=user_id
+            )
+            if outcome.unavailable:
+                return "정정 저장소를 지금 확인할 수 없어 철회하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            if outcome.revoked:
+                return f"정정 #{correction_id}을 철회했습니다. 다음 답변부터 표시하지 않습니다."
+            return f"철회할 수 있는 본인의 활성 정정 #{correction_id}이 없습니다."
+        revoke = re.search(r"기억\s*(?:삭제|철회)\s*#?(\d+)\b", question)
+        service = self._user_memory_service()
+        if revoke:
+            memory_id = int(revoke.group(1))
+            result = service.revoke_result(
+                memory_id,
+                workspace=self.workspace,
+                user_id=user_id,
+                actor=user_id,
+            )
+            if result.unavailable:
+                return "개인 기억 저장소를 지금 확인할 수 없어 철회하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            if result.revoked:
+                return f"개인 기억 #{memory_id}을 철회했습니다. 다음 답변부터 사용하지 않습니다."
+            return f"철회할 수 있는 본인 소유의 활성 기억 #{memory_id}이 없습니다."
+
+        wants_list = bool(
+            re.search(
+                r"(?:내|개인|저장된)\s*(?:선호\s*)?기억|기억\s*(?:목록|보여)|"
+                r"(?:내가\s*(?:남긴|한)|내)\s*정정|정정\s*목록",
+                question,
+            )
+        )
+        if not wants_list:
+            return None
+        result = service.list_active(workspace=self.workspace, user_id=user_id)
+        if result.unavailable:
+            return "개인 기억 저장소를 지금 확인할 수 없습니다. 기억이 없다는 뜻은 아닙니다."
+        own = self._fact_correction_service().list_own(
+            workspace=self.workspace, corrector_id=user_id
+        )
+        from ..fact_correction import slack_escape
+
+        correction_lines: list[str] = []
+        if own.corrections:
+            correction_lines.append(
+                "*내가 남긴 정정* — 원문을 볼 수 있는 모든 분의 관련 답변에 이름과 함께 표시됩니다."
+            )
+            for item in own.corrections:
+                expires = item.expires_at.date().isoformat() if item.expires_at else "만료일 없음"
+                subject = f"「{slack_escape(item.subject)}」 " if item.subject else ""
+                correction_lines.append(
+                    f"• `#{item.id}` {subject}{slack_escape(item.before)} → "
+                    f"{slack_escape(item.after)} "
+                    f"(표시 {item.show_count}회, 만료 {expires})"
+                )
+            correction_lines.append("지우려면 `정정 삭제 번호`라고 입력하세요.")
+        if not result.memories:
+            if correction_lines:
+                return "\n".join(["현재 저장된 개인 기억이 없습니다.", *correction_lines])
+            return "현재 저장된 개인 기억이 없습니다."
+
+        from ..user_memory import INSTRUCTION, PREFERENCE, PREFERENCE_TEXT, TERM
+
+        lines = ["*저장된 개인 기억* — 본인에게만 적용됩니다."]
+        for memory in result.memories:
+            if memory.kind == PREFERENCE:
+                label = "답변 선호"
+                body = PREFERENCE_TEXT.get(memory.body, memory.body)
+            elif memory.kind == TERM:
+                label = "용어"
+                body = memory.body.replace("=", " → ", 1)
+            elif memory.kind == INSTRUCTION:
+                label = "답변 요청"
+                body = slack_escape(memory.body)
+            else:
+                label = "정정 힌트"
+                body = slack_escape(memory.body)
+            expires = memory.expires_at.date().isoformat() if memory.expires_at else "만료일 없음"
+            lines.append(f"• `#{memory.id}` [{label}] {body} (만료 {expires})")
+        lines.append("지우려면 `기억 삭제 번호`라고 입력하세요. 예: `기억 삭제 17`")
+        return "\n".join([*lines, *correction_lines])
 
     def _visible_workspaces(self) -> frozenset[str]:
         """상태에 보여줄 워크스페이스. 자기 것 + 크로스 열람 허용분.
@@ -4364,6 +4881,9 @@ class WorkspaceBot:
         """
         router = getattr(self.engine, "router", None)
         if kind == "memory":
+            command_reply = self._personal_memory_command(question, user_id)
+            if command_reply is not None:
+                return command_reply
             return write_from_facts(
                 router,
                 question=question,
@@ -4383,7 +4903,17 @@ class WorkspaceBot:
         if kind == "help":
             if asks_about_our_sources:
                 return SOURCE_SCOPE_ANSWER
-            return self._help()
+            # 「도움말」·「명령어」 처럼 짧게 부르면 전체 목록이다. 문장으로 물으면
+            # **그 질문에 맞춰** LLM 이 답한다(2026-11-19 오너). 전체 목록을 덤프하면
+            # 「캔버스로 받으려면?」 같은 질문에 답이 없다.
+            if is_bare_command(question):
+                return self._help()
+            return write_from_facts(
+                router,
+                question=question,
+                facts=self._help_facts(),
+                fallback=self._help(),
+            )
         if kind == "smalltalk":
             return write_from_facts(
                 router,
@@ -4402,14 +4932,10 @@ class WorkspaceBot:
         )
 
     def _memory(self, user_id: str) -> str:
-        """"이전 답변 기억나?" — 설계상 기억하지 않는다는 것을 그대로 말한다.
-
-        매번 아카이브 원문에서 처음부터 찾는 것이 요약 재귀를 막는 장치다(원칙 1).
-        대신 감사 기록에 남은 **본인 질문**은 보여준다.
-        """
+        """Explain the boundary between answer history and structured memory."""
         lines = [
-            "*이전 답변을 스레드 밖까지 기억하지 않습니다.* "
-            "질문마다 아카이브 원문에서 다시 찾습니다.",
+            "*이전 봇 답변 문장은 스레드 밖의 사실 근거로 기억하지 않습니다.* "
+            "질문마다 아카이브 원문을 다시 확인합니다.",
             "",
             "그렇게 만든 이유:",
             "• 제 답변을 다시 근거로 쓰면 틀린 내용이 사실처럼 굳습니다(요약 재귀).",
@@ -4417,6 +4943,11 @@ class WorkspaceBot:
             "",
             "같은 스레드에서 이어 물으면 이전 문답으로 `그 문서` 같은 지칭어를 "
             "해석합니다. 이전 봇 답변 자체를 근거로 쓰지는 않고 원문에서 다시 검증합니다.",
+            "",
+            "다만 직전 답변에 주신 일부 답변 선호·조직 용어·정정은 구조화된 개인 기억으로 "
+            "저장될 수 있습니다. 이는 본인에게만 적용되며, 정정 내용은 현재 권한으로 원문을 "
+            "다시 확인한 경우에만 답변에 사용합니다. `내 기억 보여줘`로 확인하고 "
+            "`기억 삭제 번호`로 철회할 수 있습니다.",
         ]
         recent = self.qa_log.recent_for_user(self.workspace, user_id)
         if recent:
@@ -4424,6 +4955,19 @@ class WorkspaceBot:
             lines += [f"• {ts[5:16].replace('T', ' ')}  {q}" for ts, q in recent]
             lines.append("(기록용이며 답변 생성에는 쓰이지 않습니다. 본인 질문만 표시됩니다.)")
         return "\n".join(lines)
+
+    def _help_facts(self) -> dict:
+        """도움말 질문에 줄 사실. 명령 목록은 `_help()` 와 **같은 문자열**을 쓴다."""
+        return {
+            "봇": self._display_name(),
+            "역할": "사내 Slack 아카이브 원문만 근거로 답하고, 근거가 없으면 추측하지 않는다.",
+            "명령_목록": [
+                line.removeprefix("• ") for line in self._help().splitlines()[1:]
+                if line.startswith("• ")
+            ],
+            "답변_형식_규칙": self._format_facts(),
+            "추가_도움": "`도움말`이라고 보내면 전체 명령을 볼 수 있다.",
+        }
 
     def _help(self) -> str:
         return "\n".join(
@@ -4439,7 +4983,8 @@ class WorkspaceBot:
                 "• `/권한` — 내 질문이 근거로 삼는 범위",
                 "• `/피드백` — 답변 품질 신고. 선택 화면이 열립니다 "
                 "(`/피드백 <내용>` 으로 바로 보내거나, 답변에 :+1:/:-1: 도 가능)",
-                "• `이전 답변 기억나?` — 기억 여부와 그 이유(매번 원문에서 다시 찾습니다)",
+                "• `이전 답변 기억나?` — 답변 이력과 개인 기억의 경계를 안내",
+                "• `내 기억 보여줘` / `기억 삭제 17` — 본인 개인 기억 확인·철회",
                 "• `--model=claude-opus-4-8 질문` — 모델 지정",
                 "*사실*은 아카이브 원문만 근거로 답합니다. 근거가 없으면 추측하지 않습니다.",
             ]
@@ -4813,7 +5358,9 @@ def _bind_request_live_fetch(ctx, live_fetch):
     return fetch
 
 
-def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=None):
+def specialist_hook(
+    router, store=None, live_fetch=None, external_v3_factory=None, specialist_model: str = ""
+):
     """엔진이 근거를 모은 뒤 부를 훅. **전문 봇 호출의 결말**을 돌려준다.
 
     예전에는 여기서 `route()` 가 LLM 을 **한 번 더** 불러 전문 봇을 골랐다. 그
@@ -4888,6 +5435,7 @@ def specialist_hook(router, store=None, live_fetch=None, external_v3_factory=Non
                 external_v3_factory=(
                     external_v3_factory if master_v2_enabled(workspace) else None
                 ),
+                specialist_model=specialist_model,
             )
         except Exception as exc:
             log.exception("[%s] 전문가 호출 실패: %s", workspace, exc)
@@ -4909,6 +5457,50 @@ def _require_distinct_runtime_tokens(
         for config in configs
     ):
         raise ConfigError("VIPBot Slack credentials duplicate a TYBot connection")
+
+
+def _vip_runtime_credentials(
+    configs: list[WorkspaceConfig],
+    *,
+    allowed_workspaces: set[str] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Load each verified VIPBot connection without coupling their failures."""
+    from ..console.bot_identity import runtime_tokens, runtime_workspaces
+
+    try:
+        workspaces = runtime_workspaces("vipbot")
+    except Exception as exc:
+        log.error("VIPBot connection discovery failed err=%s", type(exc).__name__)
+        return []
+
+    loaded: list[tuple[str, str, str]] = []
+    seen_bot_tokens: set[str] = set()
+    seen_app_tokens: set[str] = set()
+    for workspace in workspaces:
+        if allowed_workspaces is not None and workspace not in allowed_workspaces:
+            log.error(
+                "VIPBot connection ignored for unmanaged workspace ws=%s", workspace
+            )
+            continue
+        try:
+            bot_token, app_token = runtime_tokens(workspace, "vipbot")
+            _require_distinct_runtime_tokens(
+                configs, bot_token=bot_token, app_token=app_token
+            )
+        except Exception as exc:
+            log.error(
+                "VIPBot connection unavailable ws=%s err=%s",
+                workspace,
+                type(exc).__name__,
+            )
+            continue
+        if bot_token in seen_bot_tokens or app_token in seen_app_tokens:
+            log.error("VIPBot duplicate credentials ignored ws=%s", workspace)
+            continue
+        seen_bot_tokens.add(bot_token)
+        seen_app_tokens.add(app_token)
+        loaded.append((workspace, bot_token, app_token))
+    return loaded
 
 
 _external_v3_tool_server = None
@@ -4942,7 +5534,7 @@ def _start_external_v3(configs):
     global _external_v3_tool_server
     _external_v3_tool_server = server
 
-    def factory(chosen, *, workspace, authorization_id, toolbox):
+    def factory(chosen, *, workspace, authorization_id, toolbox, model=""):
         endpoint = endpoints.for_request(chosen.key, workspace)
         identity, secret = credentials.get(chosen.key, endpoint.credential_workspace)
         server.register_credential(identity, secret)
@@ -4955,6 +5547,7 @@ def _start_external_v3(configs):
             credential_id=identity,
             registry=registry,
             transport=UnixSocketTransport(endpoint.socket),
+            model=model,
         )
 
     log.info(
@@ -5005,8 +5598,15 @@ def build_bots() -> list[WorkspaceBot]:
             store=store,
             live_fetch=live_fetch,
             external_v3_factory=external_v3_factory,
+            # B-96: TYBot 이 부르는 전문 봇(Hermes)은 Sonnet.
+            specialist_model=TYBOT_SPECIALIST_MODEL,
         ),
         allow_master_business_answers=lambda ctx: master_v2_enabled(ctx.workspace),
+        # B-93: 근거 폭. 문서당 상한·검색어 정리·근거 40줄. 보이는 범위가 작으면 전수 탐색.
+        max_hits=BOT_MAX_HITS,
+        per_document_hits=BOT_PER_DOCUMENT_HITS,
+        exhaustive_max_lines=exhaustive_max_lines(),
+        focus_terms=True,
     )
     answer_quota = AnswerQuota.from_env()
 
@@ -5029,46 +5629,33 @@ def build_bots() -> list[WorkspaceBot]:
         live_bots[cfg.key] = bot
         bots.append(bot)
 
-    if _truthy(os.getenv("VIPBOT_SHARED_RUNTIME_ENABLED", "0")):
-        from ..console.bot_identity import runtime_tokens
-        from ..console.workspace_store import list_workspaces
-        from ..vip_profile import load_profile, question_for_engine
-        from ..vip_workspace import build_engine as build_vip_engine
-        from ..vip_workspace import context_resolver
+    from ..console.workspace_store import list_workspaces
+    from ..vip_profile import load_profile, question_for_engine
+    from ..vip_workspace import build_engine as build_vip_engine
+    from ..vip_workspace import context_resolver
 
-        vip_workspace = str(os.getenv("VIPBOT_WORKSPACE") or "").strip().lower()
-        if vip_workspace not in labels:
-            raise ConfigError(
-                "VIPBOT_WORKSPACE must name an existing managed workspace"
-            )
-        vip_bot_token, vip_app_token = runtime_tokens(vip_workspace, "vipbot")
-        _require_distinct_runtime_tokens(
-            configs, bot_token=vip_bot_token, app_token=vip_app_token
+    managed_labels = dict(labels)
+    try:
+        managed_labels.update(
+            {
+                str(row["key"]): str(row.get("label") or row["key"])
+                for row in list_workspaces()
+                if row.get("state") != "disabled"
+            }
         )
+    except Exception as exc:
+        log.warning(
+            "VIPBot workspace labels unavailable; active runtime labels only err=%s",
+            type(exc).__name__,
+        )
+    vip_connections = _vip_runtime_credentials(
+        configs, allowed_workspaces=set(managed_labels)
+    )
+    if vip_connections:
         vip_profile = load_profile()
-        managed_labels = dict(labels)
-        try:
-            managed_labels.update(
-                {
-                    str(row["key"]): str(row.get("label") or row["key"])
-                    for row in list_workspaces()
-                    if row.get("state") != "disabled"
-                }
-            )
-        except Exception as exc:
-            log.warning(
-                "VIPBot workspace labels unavailable; active runtime labels only err=%s",
-                type(exc).__name__,
-            )
         vip_qa_log = QALog(
             os.getenv("VIPBOT_QA_LOG_DIR", "/var/lib/tybot-vipbot/qa"),
             write_md=_truthy(os.getenv("QA_LOG_MD", "1")),
-        )
-        vip_cfg = WorkspaceConfig(
-            key=vip_workspace,
-            label=f"{labels[vip_workspace]} VIPBot",
-            bot_token=vip_bot_token,
-            app_token=vip_app_token,
         )
         vip_engine = build_vip_engine(
             store=store,
@@ -5079,26 +5666,36 @@ def build_bots() -> list[WorkspaceBot]:
                 store=store,
                 live_fetch=live_fetch,
                 external_v3_factory=external_v3_factory,
+                # B-96: VIPBot 이 부르는 전문 봇(Hermes)은 Opus — TYBot 보다 한 단계 위.
+                specialist_model=VIP_SPECIALIST_MODEL,
             ),
         )
-        vip_bot = WorkspaceBot(
-            vip_cfg,
-            store=store,
-            engine=vip_engine,
-            qa_log=vip_qa_log,
-            archive_dir=archive_dir,
-            request_context_resolver=context_resolver(vip_workspace),
-            question_transform=question_for_engine,
-            bot_name="vipbot",
-            realtime=False,
-            autojoin=False,
-            operational_owner=False,
-            private_answers=True,
-            answer_quota=answer_quota,
-        )
-        vip_bot.path_problems = problems
-        vip_bot.workspace_labels = managed_labels
-        bots.append(vip_bot)
+        for vip_workspace, vip_bot_token, vip_app_token in vip_connections:
+            vip_cfg = WorkspaceConfig(
+                key=vip_workspace,
+                label=f"{managed_labels[vip_workspace]} VIPBot",
+                bot_token=vip_bot_token,
+                app_token=vip_app_token,
+            )
+            vip_bot = WorkspaceBot(
+                vip_cfg,
+                store=store,
+                engine=vip_engine,
+                qa_log=vip_qa_log,
+                archive_dir=archive_dir,
+                request_context_resolver=context_resolver(vip_workspace),
+                question_transform=question_for_engine,
+                bot_name="vipbot",
+                realtime=False,
+                autojoin=False,
+                operational_owner=False,
+                private_answers=True,
+                answer_quota=answer_quota,
+                prefer_canvas=True,
+            )
+            vip_bot.path_problems = problems
+            vip_bot.workspace_labels = managed_labels
+            bots.append(vip_bot)
     return bots
 
 

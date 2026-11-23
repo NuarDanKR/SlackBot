@@ -27,13 +27,11 @@
 
 ## 봇이 만든 이미지
 
-`AttachmentDoc` 에는 업로더가 없다. 수집 단계에서 `bot_id`·`app_id` 로 가리고
-그 사실은 메타데이터에 남지 않는다. 그래서 **여기서는 알 수 없다.**
-
-알 수 없는 것을 사람 원본으로 취급하면 봇이 만든 그림을 봇이 다시 설명하고,
-그 설명이 색인에 들어가 다음 답변의 검색 결과가 된다 — 원칙 1이 막으려는 고리가
-그대로 생긴다. 그래서 **호출자가 「사람이 올린 것」 이라고 짚어 준 파일만** 후보다.
-안 짚으면 후보가 아니다.
+`AttachmentDoc` 에는 업로더가 없다. 봇 출력은 **수집 입구**에서 버려진다
+(`vision_provenance` — 오너 결정 2026-11-19). 이 모듈은 그 판정을 스스로 하지 않고
+**호출자가 짚어 준 파일**(`admitted_file_ids`)만 후보로 본다. 안 짚으면 후보가 아니다.
+예전에는 「실시간 수집이 사람 업로드를 직접 확인한 것」 만 짚었고, 그래서 옛 사진·
+파일 목록 소급 사진이 사람이 올렸어도 전부 빠졌다.
 
 ## 같은 사진이 두 채널에 있으면 둘 다 후보다
 
@@ -225,8 +223,8 @@ def select_image_candidates(
 ) -> Selection:
     """원본 메타데이터 → 설명 후보.
 
-    `human_file_ids` 는 **사람이 올린 것이 확인된** 파일 ID 다. 여기에 없는 파일은
-    봇이 만들었을 수도, 그냥 모르는 것일 수도 있다 — 둘 다 후보가 아니다.
+    `human_file_ids` 는 **수집 입구를 지난 것으로 판정된** 파일 ID 다
+    (`vision_provenance.admitted_file_ids`). 여기에 없는 파일은 후보가 아니다.
     `AttachmentDoc` 에는 업로더가 없어 이 모듈이 스스로 알 길이 없다.
 
     `already_indexed` 는 `(workspace, channel_id, original_sha256)` 집합이다.
@@ -292,12 +290,14 @@ def select_image_candidates(
 
 
 def confirmed_human_file_ids(docs) -> frozenset[str]:
-    """정본 provenance가 확인된 파일 ID만 돌려준다. 없는 옛 값은 허용하지 않는다."""
-    return frozenset(
-        doc.file_id
-        for doc in docs
-        if doc.human_upload_confirmed is True and doc.file_id
-    )
+    """수집 입구를 지난(우리 봇 출력이 아닌) 정본의 파일 ID.
+
+    이름은 호환을 위해 남긴다. 판정은 `vision_provenance` 한 곳이 한다 — 실시간 수집이
+    직접 본 `human_upload_confirmed` 만 요구하던 것을 2026-11-19 에 바꿨다.
+    """
+    from .vision_provenance import admitted_file_ids
+
+    return admitted_file_ids(docs)
 
 
 __all__ = [

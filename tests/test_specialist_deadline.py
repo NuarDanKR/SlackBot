@@ -910,3 +910,66 @@ def test_a_discovery_timeout_still_produces_an_answer_from_what_was_read():
     assert text == "읽은 것으로 정리했습니다."
     assert adapter.phase == "finalize"
     assert "tools" not in router.calls[-1]
+
+
+# --- 직전 봇 답변 — 지칭 해석용 (2026-11-20) -----------------------------------
+
+
+class _CapturingRouter:
+    def __init__(self, reply: str):
+        self.reply = reply
+        self.messages: list = []
+
+    def complete(self, messages, **kw):
+        self.messages.append(list(messages))
+        return _answer(self.reply)
+
+
+def _user_text(messages) -> str:
+    out = []
+    for message in messages:
+        if message.role != "user":
+            continue
+        content = message.content
+        if isinstance(content, list):
+            out.extend(part.get("text", "") for part in content if isinstance(part, dict))
+        else:
+            out.append(str(content))
+    return "\n".join(out)
+
+
+@pytest.mark.parametrize("kind", ["prompt", "tool"])
+def test_specialists_see_the_prior_answer_as_reference_only(kind):
+    from tybot.specialist_adapters import PromptSpecialist
+
+    router = _CapturingRouter("답")
+    adapter = (
+        PromptSpecialist("hermes", router, rules="규칙")
+        if kind == "prompt"
+        else ToolSpecialist("hermes", router, toolbox=FakeToolbox(), rules="규칙")
+    )
+    base = _request()
+    request = SpecialistRequest(
+        question="위 Top 10 중 CFO 사안",
+        evidence=base.evidence,
+        prior_answer="1. 보증채무 현실화\n2. 천안성환 기성금",
+    )
+
+    adapter.complete(request)
+
+    text = _user_text(router.messages[0])
+    assert '<직전_봇_답변 용도="지칭 해석" 근거="아님">' in text
+    assert "천안성환 기성금" in text
+
+
+def test_prior_answer_does_not_switch_specialists_into_edit_mode():
+    """편집 모드(`editing_text`)는 새 사실 검색을 막는다. 지칭용 직전 답변은 막지 않는다."""
+    router = _CapturingRouter("답")
+    adapter = ToolSpecialist("hermes", router, toolbox=FakeToolbox(), rules="규칙")
+    base = _request()
+
+    adapter.complete(
+        SpecialistRequest(question="위 목록 중 2번", evidence=base.evidence, prior_answer="1. A\n2. B")
+    )
+
+    assert "이전 답변을 편집하는 작업" not in str(router.messages[0][0].content)

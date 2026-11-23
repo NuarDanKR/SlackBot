@@ -94,10 +94,34 @@ def _raw_block(path: Path) -> list[str]:
 
 
 def _run(mod, archive, monkeypatch, capsys, *args):
+    """오프라인 사본 루트에서 돌린다.
+
+    B-99 부터 운영 루트(`ARCHIVE_DIR`)에는 옛 배치로 쓰지 않는다. 이 파일의 시험은
+    변환·덧붙이기 규칙을 보므로 `--archive` 로 별도 루트를 준다. 운영 루트 거절은
+    `test_apply_is_refused_on_the_live_root` 가 본다.
+    """
+    monkeypatch.setattr(mod, "load_env_file", lambda: None)
+    monkeypatch.setenv("ARCHIVE_DIR", str(Path(archive).parent / "live-elsewhere"))
+    code = mod.main(["--archive", str(archive), *args])
+    return code, capsys.readouterr().out
+
+
+def test_apply_is_refused_on_the_live_root(mod, tmp_path, monkeypatch, capsys):
+    """운영 루트에 `workspaces/` 를 쓰면 Archiver 가 기동을 거부한다(B-99)."""
+    pytest.importorskip("openpyxl")
+    archive = _archive(tmp_path, ["[첨부:검수대기] 표.xlsx (xlsx, 1KB)"])
+    _stage(tmp_path, name="표.xlsx", file_id="F1", data=_book([["품목", "수량"]]))
+    target = next(archive.rglob("2026-09-07.md"))
+    before = target.read_text(encoding="utf-8")
     monkeypatch.setattr(mod, "load_env_file", lambda: None)
     monkeypatch.setenv("ARCHIVE_DIR", str(archive))
-    code = mod.main(list(args))
-    return code, capsys.readouterr().out
+
+    code = mod.main(["--apply"])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "legacy-layout-live-root" in out
+    assert target.read_text(encoding="utf-8") == before
 
 
 # --- 덧붙이기 -----------------------------------------------------------------

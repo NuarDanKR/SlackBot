@@ -65,13 +65,26 @@ def test_feedback_classification_is_closed_and_requires_lineage(
     assert got.body == body
 
 
-def test_a_claim_is_promoted_only_when_fact_tokens_are_in_reopened_evidence():
-    unverified = memory.classify_feedback(
+def test_a_before_after_correction_is_a_shared_correction_not_personal_memory():
+    # 2026-11-20 오너 결정: 「무엇에서 무엇으로」 읽히는 정정은 개인 기억 표가 아니라
+    # 원문 권한자 모두에게 보이는 정정 원장으로 간다.
+    got = memory.classify_feedback(
         "그 문서 기준으로는 15억이 아니라 12억이야",
         prior_record_id="r1",
     )
+
+    assert got.kind == memory.CORRECTION
+    assert got.normalized == "15억→12억"
+    assert not got.stores
+
+
+def test_a_claim_is_promoted_only_when_fact_tokens_are_in_reopened_evidence():
+    unverified = memory.classify_feedback(
+        "그 문서 기준 확정 금액은 12억이야",
+        prior_record_id="r1",
+    )
     verified = memory.classify_feedback(
-        "그 문서 기준으로는 15억이 아니라 12억이야",
+        "그 문서 기준 확정 금액은 12억이야",
         prior_record_id="r1",
         resolved_evidence=("기존 15억원에서 확정 12억원으로 정정했다.",),
     )
@@ -161,7 +174,7 @@ def test_unverified_claim_body_never_enters_prompt_and_limits_are_deterministic(
         ],
     ]
 
-    got = memory.build_context(rows)
+    got = memory.build_context(rows, question="김해외고 기성금")
 
     assert "15억" not in got.prompt
     assert got.search_terms == ("김해외동", "기성금")
@@ -177,14 +190,40 @@ def test_claim_with_coordinates_still_needs_current_acl_and_revision_validation(
         kind=memory.CLAIM,
         body="확정 금액은 12억",
         normalized="claim",
+        search_terms=("확정 금액",),
         evidence_refs=({"kind": "archive_line"},),
     )
 
-    denied = memory.build_context([claim], claim_is_current=lambda _row: False)
-    allowed = memory.build_context([claim], claim_is_current=lambda _row: True)
+    denied = memory.build_context(
+        [claim], question="확정 금액", claim_is_current=lambda _row: False
+    )
+    allowed = memory.build_context(
+        [claim], question="확정 금액", claim_is_current=lambda _row: True
+    )
 
     assert "12억" not in denied.prompt
     assert "12억" in allowed.prompt
+
+
+def test_unrelated_claim_is_not_injected_or_counted_as_used():
+    claim = memory.UserMemory(
+        id=9,
+        workspace="tyit",
+        user_id="U1",
+        kind=memory.CLAIM,
+        body="확정 금액은 12억",
+        normalized="claim",
+        search_terms=("확정 금액",),
+        evidence_refs=({"kind": "archive_line"},),
+    )
+
+    got = memory.build_context(
+        [claim], question="건축본부 일정", claim_is_current=lambda _row: True
+    )
+
+    assert got.prompt == ""
+    assert got.search_terms == ()
+    assert got.memory_ids == ()
 
 
 def test_claim_fact_tokens_must_survive_current_source_reopening():

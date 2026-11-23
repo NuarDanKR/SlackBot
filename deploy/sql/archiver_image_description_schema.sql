@@ -2,6 +2,18 @@
 -- Applying this file does NOT activate a model or grant the collector/Master access.
 BEGIN;
 
+CREATE TABLE IF NOT EXISTS archiver_image_provider_secret (
+    provider text PRIMARY KEY
+        CHECK (provider ~ '^[a-z][a-z0-9_-]{1,31}$'),
+    ciphertext bytea NOT NULL,
+    mask text NOT NULL CHECK (mask <> ''),
+    enabled boolean NOT NULL DEFAULT true,
+    updated_by text NOT NULL CHECK (updated_by <> ''),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE archiver_image_provider_secret IS
+    'Vision worker provider API keys. Fernet ciphertext only; decryption key stays outside DB.';
+
 CREATE TABLE IF NOT EXISTS archiver_image_model_catalog (
     provider text NOT NULL CHECK (provider <> ''),
     model text NOT NULL CHECK (model <> ''),
@@ -158,7 +170,8 @@ CREATE INDEX IF NOT EXISTS archiver_image_description_clearance_lookup
 CREATE TABLE IF NOT EXISTS archiver_image_description_job (
     id text PRIMARY KEY,
     identity_sha256 text NOT NULL UNIQUE CHECK (identity_sha256 ~ '^[a-f0-9]{64}$'),
-    approval_id text NOT NULL REFERENCES archiver_image_description_approval(id),
+    -- 2026-11-20 오너 결정: 건별 승인은 선택이다. NULL 이면 정책 판에 결속된 dispatch 다.
+    approval_id text REFERENCES archiver_image_description_approval(id),
     workspace text NOT NULL CHECK (workspace <> ''),
     policy_revision text NOT NULL CHECK (policy_revision <> ''),
     prompt_revision text NOT NULL CHECK (prompt_revision <> ''),
@@ -185,6 +198,8 @@ CREATE TABLE IF NOT EXISTS archiver_image_description_job (
            OR finished_at IS NOT NULL),
     CHECK ((actual_model IS NULL) = (actual_provider IS NULL))
 );
+-- 이미 설치된 서버: 건별 승인 없는 작업을 받게 한다(2026-11-20). 옛 행과 FK 는 그대로다.
+ALTER TABLE archiver_image_description_job ALTER COLUMN approval_id DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS archiver_image_description_job_status
     ON archiver_image_description_job(workspace, state, created_at);
 
@@ -216,7 +231,7 @@ CREATE TABLE IF NOT EXISTS archiver_image_description_revision (
 CREATE INDEX IF NOT EXISTS archiver_image_description_revision_source
     ON archiver_image_description_revision(workspace, channel_id, file_id, created_at);
 
-REVOKE ALL ON archiver_image_model_catalog,
+REVOKE ALL ON archiver_image_provider_secret, archiver_image_model_catalog,
     archiver_image_description_policy, archiver_image_description_policy_audit,
     archiver_image_description_approval, archiver_image_description_clearance,
     archiver_image_description_job,
@@ -229,6 +244,12 @@ DO $$ BEGIN
         GRANT SELECT, INSERT, UPDATE ON TABLE archiver_image_model_catalog,
             archiver_image_description_policy, archiver_image_description_job
             TO tybot_vision;
+        -- 2026-11-12 보안 리뷰: worker 는 provider 자격을 **읽기만** 한다. 예전 판이 준
+        -- 표 전체 SELECT·INSERT·UPDATE 는 좁은 GRANT 로 사라지지 않으므로 먼저 회수한다.
+        -- 키를 쓰는 것은 콘솔(아래 tyslackai)의 일이다.
+        REVOKE ALL ON TABLE archiver_image_provider_secret FROM tybot_vision;
+        GRANT SELECT (provider, ciphertext, enabled)
+            ON TABLE archiver_image_provider_secret TO tybot_vision;
         -- Earlier revisions granted table-wide UPDATE here. A narrower GRANT
         -- does not remove that privilege, so revoke it before adding columns.
         REVOKE UPDATE ON TABLE archiver_image_description_approval
@@ -243,6 +264,15 @@ DO $$ BEGIN
             ON TABLE archiver_image_description_clearance TO tybot_vision;
         GRANT SELECT, INSERT ON TABLE archiver_image_description_policy_audit,
             archiver_image_description_revision TO tybot_vision;
+    END IF;
+    -- 콘솔(Master DSN)은 provider 자격을 **쓰고 마스크만 읽는다.** 암호문 열은 읽지 못한다.
+    -- 이 표 하나에만 주는 열 단위 권한이다. 다른 Vision 표에는 여전히 아무 권한도 없다.
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tyslackai') THEN
+        REVOKE ALL ON TABLE archiver_image_provider_secret FROM tyslackai;
+        GRANT SELECT (provider, mask, enabled, updated_by, updated_at),
+              INSERT (provider, ciphertext, mask, enabled, updated_by),
+              UPDATE (ciphertext, mask, enabled, updated_by, updated_at)
+            ON TABLE archiver_image_provider_secret TO tyslackai;
     END IF;
 END $$;
 COMMIT;

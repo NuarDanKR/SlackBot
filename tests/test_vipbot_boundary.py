@@ -2,10 +2,8 @@
 
 ## 2026-11-09 로 규칙이 한 축 바뀌었다
 
-전에는 VIPBot 이 별도 답변 제품이었다. 자기 전달 코드(`vipbot_delivery`)로 DM
-한 통만 보냈고, 그래서 이 파일은 「Canvas 금지 · Slack 호출 두 개」 를 고정했다.
-
-지금은 **같은 `WorkspaceBot` 의 VIP 구성 분기**다. 다른 것은 **넷**뿐이다 —
+전에는 VIPBot 이 별도 답변 제품이었다. 2026-11-12에 독립 런타임을 삭제했고,
+지금은 **같은 `WorkspaceBot` 의 VIP 구성 분기** 하나다. 다른 것은 **넷**뿐이다 —
 모델·프롬프트·비용 상한, 사용자 허용 판정, 근거 채널, 그리고 **상세 답변은
 요청자 DM 으로만** 간다(`private_answers`).
 
@@ -51,13 +49,6 @@ VIP_CONFIG_SOURCES = (
     "src/tybot/vip_access.py",
 )
 
-#: 전환 전까지 아직 떠 있는 **독립 런타임**. 새 분기로 절체할 때까지 운영에서
-#: 돌고 있으므로 보호를 걷지 않는다. 다만 **동결**이다 — 여기에 기능을 더하면
-#: 두 전달 경로가 동시에 자라고, 같은 질문에 두 형식이 나간다.
-LEGACY_RUNTIME_SOURCES = ("src/tybot/vipbot_delivery.py",)
-LEGACY_EVENT_SOURCES = ("src/tybot/vipbot_event.py",)
-LEGACY_BOOT_SOURCES = ("src/tybot/vipbot_runtime.py",)
-
 #: 공통 답변 경로. 매니페스트가 덮어야 할 Slack 호출이 여기서 나온다.
 COMMON_ANSWER_SOURCES = (
     "src/tybot/slack/pilot.py",
@@ -84,26 +75,6 @@ CONFIG_ALLOWED_IMPORTS = {
     "tybot.slack.pilot",
     "tybot.vip_access",
     "tybot.vip_profile",
-}
-
-LEGACY_ALLOWED_IMPORTS = {
-    "__future__",
-    "collections.abc",
-    "dataclasses",
-    "logging",
-    "tybot.bot_access",
-}
-
-LEGACY_EVENT_ALLOWED_IMPORTS = {
-    "__future__",
-    "collections.abc",
-    "dataclasses",
-    "re",
-    "typing",
-    "tybot.access",
-    "tybot.bot_access",
-    "tybot.vip_access",
-    "tybot.vipbot_delivery",
 }
 
 #: 쓰는 길. 하나라도 import 되면 계약 위반이다.
@@ -260,9 +231,7 @@ def test_vip_configuration_imports_nothing_outside_its_whitelist(relative):
     assert not extra, f"VIP 구성이 새 모듈을 들여왔다: {sorted(extra)}"
 
 
-@pytest.mark.parametrize(
-    "relative", VIP_CONFIG_SOURCES + LEGACY_RUNTIME_SOURCES + LEGACY_EVENT_SOURCES
-)
+@pytest.mark.parametrize("relative", VIP_CONFIG_SOURCES)
 def test_no_vip_module_imports_a_writer_collector_or_backfill_path(relative):
     assert not imported(relative) & FORBIDDEN_IMPORTS
 
@@ -302,65 +271,20 @@ def test_vip_configuration_owns_only_model_access_and_evidence_choices():
         assert own_delivery not in config, f"VIP 구성이 전달 코드를 가졌다: {own_delivery}"
 
 
-# --- 2. 전환 전까지 독립 런타임은 동결 -----------------------------------------
-
-
-@pytest.mark.parametrize("relative", LEGACY_RUNTIME_SOURCES)
-def test_the_legacy_runtime_imports_nothing_outside_its_whitelist(relative):
-    extra = imported(relative) - LEGACY_ALLOWED_IMPORTS
-    assert not extra, f"동결된 legacy 런타임이 새 모듈을 들여왔다: {sorted(extra)}"
-
-
-@pytest.mark.parametrize("relative", LEGACY_RUNTIME_SOURCES)
-def test_the_legacy_delivery_grows_no_new_slack_calls(relative):
-    """예전 규칙은 「VIP 는 DM 한 통만 보낸다」 였다. 지금 규칙은 **동결**이다.
-
-    이 모듈은 절체될 때까지만 산다. 여기에 Canvas·첨부·근거 보기를 더하면 공통
-    경로와 나란히 자라고, 그러면 절체할 것이 두 배가 된다. 더할 곳은 공통
-    경로다 — 그래야 TYBot 과 VIP 가 **같이** 바뀐다.
-    """
-    assert client_calls(relative) == {"conversations_open", "chat_postMessage"}
-
-
-@pytest.mark.parametrize(
-    "relative", LEGACY_RUNTIME_SOURCES + LEGACY_EVENT_SOURCES + VIP_CONFIG_SOURCES
-)
+@pytest.mark.parametrize("relative", VIP_CONFIG_SOURCES)
 def test_no_collection_or_channel_management_api_is_even_named(relative):
     text = source(relative)
     for name in FORBIDDEN_SLACK_CALLS:
         assert name not in text
 
 
-@pytest.mark.parametrize("relative", LEGACY_EVENT_SOURCES)
-def test_the_legacy_event_coordinator_imports_no_writer_or_collector(relative):
-    assert imported(relative) == LEGACY_EVENT_ALLOWED_IMPORTS
-
-
-@pytest.mark.parametrize("relative", LEGACY_EVENT_SOURCES)
-def test_the_legacy_event_coordinator_never_calls_slack_directly(relative):
-    assert client_calls(relative) == set()
-
-
-def test_the_shared_branch_does_not_call_the_legacy_delivery():
-    """공통 분기는 `vipbot_delivery` 를 부르지 않는다.
-
-    예전 이 자리의 시험은 「기존 코드가 VIP 경로를 물면 안 된다」 였다. 그 전제는
-    VIPBot 이 **별도 프로세스**라는 것이었고, 지금은 아니다 — 공통 런타임이 VIP
-    토큰으로 `WorkspaceBot` 을 하나 더 만든다. 토큰이 섞이는 것은
-    `pilot._require_distinct_runtime_tokens` 가 따로 막는다.
-
-    남은 금지는 **전달 경로가 둘이 되는 것**이다. 공통 분기가 legacy delivery 를
-    부르기 시작하면, 같은 질문이 어느 날은 공통 형식으로 어느 날은 DM 한 통으로
-    나간다. 그 차이는 로그만 봐서는 보이지 않는다.
-    """
-    owned = set(LEGACY_RUNTIME_SOURCES + LEGACY_EVENT_SOURCES + LEGACY_BOOT_SOURCES)
-    callers = [
-        path.relative_to(ROOT).as_posix()
-        for path in (ROOT / "src").rglob("*.py")
-        if path.relative_to(ROOT).as_posix() not in owned
-        and "vipbot_delivery" in path.read_text(encoding="utf-8")
-    ]
-    assert callers == [], f"공통 코드가 legacy 전달 경로를 물었다: {callers}"
+def test_the_retired_standalone_runtime_cannot_reappear():
+    retired = (
+        "vipbot_runtime.py", "vipbot_engine.py", "vipbot_delivery.py",
+        "vipbot_event.py", "vipbot_runtime_store.py",
+    )
+    assert all(not (ROOT / "src" / "tybot" / name).exists() for name in retired)
+    assert not (ROOT / "deploy" / "tybot-vipbot.service").exists()
 
 
 # --- 3. 매니페스트: 따로 설치되는 별도 앱 --------------------------------------

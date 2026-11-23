@@ -60,11 +60,20 @@ const TIMED_OUT = Symbol('rpc-deadline');
  * @param {object}   deps.model         `{id, maxTokens, effort}`
  * @param {object}   deps.terms         표시 용어
  * @param {number}   deps.maxIterations
+ * @param {string[]} [deps.allowedModels] 요청이 고를 수 있는 모델 id. 비면 요청 모델을 받지 않는다
  */
 export function createRpcAnswerer({
-  toolSession, buildTools, createClient, renderPrompt, model, terms,
+  toolSession, buildTools, createClient, renderPrompt, model: defaultModel, terms,
   maxIterations = 12, now = () => Date.now(), console: log = globalThis.console,
+  allowedModels = [],
 }) {
+  const allowed = new Set([defaultModel.id, ...allowedModels.map(String)]);
+
+  /** 요청 모델을 받을 수 있나. 비어 있으면 기본 모델이라 늘 된다. */
+  function allowsModel(id) {
+    return !id || allowed.has(id);
+  }
+
   /**
    * @param {object} request `wire.parseAnswerRequest` 가 돌려준 것
    * @param {{signal?:AbortSignal}} [opts]
@@ -72,6 +81,11 @@ export function createRpcAnswerer({
    */
   async function answer(request, { signal } = {}) {
     const started = now();
+    // 서버가 먼저 `allowsModel` 로 거른다. 여기서 한 번 더 보는 것은 다른 배선(단일 worker·
+    // 점검 스크립트)이 그 대조를 빼먹어도 **허용 밖 모델로 나가지 않게** 하려는 것이다.
+    const model = request.model && allowed.has(request.model)
+      ? Object.freeze({ ...defaultModel, id: request.model })
+      : defaultModel;
     const trace = [];
     // 예산 시계는 `own` 이 쥔다(아래). **세 군데에 같은 신호를 준다** — 도구 래퍼는
     // 호출 직전에 보고 멈추고, 도구 HTTP 는 진행 중인 왕복을 끊고, 모델 세션은 SDK
@@ -269,7 +283,7 @@ export function createRpcAnswerer({
     }
   }
 
-  return { answer };
+  return { answer, allowsModel };
 }
 
 export { NOTHING_FOUND };

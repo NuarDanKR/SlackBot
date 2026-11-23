@@ -126,6 +126,12 @@ export function loadRpcConfig(env = process.env) {
   }
 
   const model = String(env.HERMES_RPC_MODEL || 'claude-opus-5-5').trim();
+  // 호출자가 고를 수 있는 모델(쉼표 구분, 2026-11-12). 비면 `HERMES_RPC_MODEL` 하나만 받는다.
+  const allowedModels = String(env.HERMES_RPC_ALLOWED_MODELS || '')
+    .split(',').map((id) => id.trim()).filter(Boolean);
+  if (allowedModels.some((id) => !/^[a-z0-9][a-z0-9.-]{0,63}$/.test(id))) {
+    throw new RpcConfigError('HERMES_RPC_ALLOWED_MODELS 에 모델 id 가 아닌 값이 있습니다.');
+  }
   const maxTokens = Number.parseInt(env.HERMES_RPC_MAX_TOKENS || '8000', 10);
   const effort = String(env.HERMES_RPC_EFFORT || 'high').trim();
   const maxIterations = Number.parseInt(env.HERMES_RPC_MAX_ITERATIONS || '12', 10);
@@ -146,6 +152,7 @@ export function loadRpcConfig(env = process.env) {
       file: env.HERMES_RPC_HMAC_FILE,
     }),
     model: Object.freeze({ id: model, maxTokens, effort }),
+    allowedModels: Object.freeze([...new Set(allowedModels)]),
     reviewModel: reviewModelFor({ id: model }, {
       model: env.HERMES_RPC_REVIEW_MODEL,
       maxTokens: env.HERMES_RPC_REVIEW_MAX_TOKENS,

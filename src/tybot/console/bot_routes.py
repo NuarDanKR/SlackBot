@@ -34,6 +34,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..managed_env import request_restart
 from . import bot_admin
 from .app import _audit_event, _check_write_request, _require_admin, current_user
 from .auth import ConsoleUser
@@ -218,6 +219,18 @@ def put_slack_connection(
         target_type="bot_connection", target_id=f"{bot}/slack_socket",
         workspace=key, outcome="succeeded", metadata={"reason": body.reason},
     )
+    if bot == "vipbot":
+        try:
+            request_restart(user.email, [f"BOT_CONNECTION:{key}:vipbot"])
+        except OSError as exc:
+            logger.exception("VIPBot 연결 저장 후 재시작 요청 실패")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "VIPBot 연결은 활성화됐지만 봇 재시작을 요청하지 못했습니다. "
+                    "TYBot 서비스를 한 번 재시작하세요."
+                ),
+            ) from exc
     return bot_admin.workspace_connections(key)
 
 
@@ -246,6 +259,18 @@ def set_slack_connection_state(
         workspace=key, outcome="succeeded",
         metadata={"reason": body.reason, "state": body.state},
     )
+    if bot == "vipbot":
+        try:
+            request_restart(user.email, [f"BOT_CONNECTION:{key}:vipbot"])
+        except OSError as exc:
+            logger.exception("VIPBot 연결 상태 저장 후 재시작 요청 실패")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "VIPBot 연결 상태는 저장됐지만 봇 재시작을 요청하지 못했습니다. "
+                    "TYBot 서비스를 한 번 재시작하세요."
+                ),
+            ) from exc
     return bot_admin.workspace_connections(key)
 
 

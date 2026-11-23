@@ -884,10 +884,18 @@ journalctl -u tybot-collect -n 40
 5분 주기의 `tybot-convert-retry.timer`가 이어서 처리한다. 지원하지 않는 형식,
 암호화·손상 파일, PII 차단, 원본이 없는 파일은 자동 재시도하지 않는다.
 
+**새벽 재점검 타이머는 배포가 켜지 않는다**(B-89 후속). 회차는 DB 변환 정책
+(`conversion_runtime_policy`: rhwp 앱 ID·소급 상한·rhwp 대기)으로 소급 재변환을
+하고, 정책이 DB 정본이 아니면 `--apply` 를 거절한다(종료 코드 3). 켜기 전에
+readiness 를 보고, 종료 코드 `0` 일 때만 사람이 켠다. 실행 시각 03:20 은 타이머가
+정하며 DB 로 옮기지 않는다.
+
 ```bash
-sudo systemctl enable --now tybot-convert-retry.timer tybot-convert-nightly.timer
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env   /opt/tybot/.venv/bin/python /opt/tybot/scripts/check_conversion_policy.py
+sudo -u tybot env TYBOT_ENV_FILE=/etc/tybot/tybot.env   /opt/tybot/.venv/bin/python /opt/tybot/scripts/drain_conversion_queue.py --nightly   # dry-run
+sudo systemctl enable --now tybot-convert-retry.timer
+sudo systemctl enable --now tybot-convert-nightly.timer     # readiness 0 확인 뒤에만
 systemctl list-timers tybot-convert-retry.timer tybot-convert-nightly.timer
-sudo systemctl start tybot-convert-nightly.service
 sudo journalctl -u tybot-convert-nightly -n 60 --no-pager
 ```
 

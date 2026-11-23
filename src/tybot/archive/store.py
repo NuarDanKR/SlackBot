@@ -1020,11 +1020,15 @@ class ArchiveStore:
         **복원에 실패했다고 채널 전체 검색으로 넓히지 않는다.** 호출자가 판단한다 —
         조용히 넓히면 사용자는 좁은 질문을 했는데 넓은 답을 받고, 그 사실을 알 수 없다.
         """
-        from ..evidence_refs import ARCHIVE_LINE, content_hash, safe_relative_path
+        from ..evidence_refs import ARCHIVE_LINE, VISION_PAGE, content_hash, safe_relative_path
 
         items = list(refs or ())
         if not items:
             return [], []
+        # PDF 쪽 전사 좌표(B-80)는 아카이브 줄이 아니다. DB 투영·현재 정본·원본 해시를
+        # 처음부터 다시 확인하는 쪽(`pdf_vision_guide.resolve_refs`)에 맡긴다.
+        vision_items = [r for r in items if getattr(r, "kind", "") == VISION_PAGE]
+        items = [r for r in items if getattr(r, "kind", "") != VISION_PAGE]
 
         # 1. 권한이 경로 조회보다 먼저다.
         #
@@ -1133,6 +1137,21 @@ class ArchiveStore:
                 continue
             hits.append(SearchHit(doc=doc, line=line, score=1))
 
+        if vision_items:
+            from .. import pdf_vision_guide
+
+            try:
+                vision_hits, vision_dropped = pdf_vision_guide.resolve_refs(
+                    self, ctx, vision_items
+                )
+            except Exception:
+                logger.warning("PDF 전사 좌표 복원 실패", exc_info=True)
+                vision_hits, vision_dropped = [], ["vision_db_unavailable"]
+            hits.extend(vision_hits)
+            for code in vision_dropped:
+                drop(code)
+            items = [*items, *vision_items]
+
         logger.info(
             "refs 복원 ws=%s ch=%s 요청=%d 복원=%d 줄밀림=%d 제외=%s",
             ctx.workspace,
@@ -1156,8 +1175,22 @@ class ArchiveStore:
         *,
         limit: int = 20,
         channels: frozenset[str] | None = None,
+        exhaustive: bool = False,
+        per_document: int = 0,
+        exhaustive_max_lines: int = 0,
     ) -> list[SearchHit]:
         """근거 줄 찾기. 색인(DB)을 먼저 보고, 못 보면 파일을 훑는다.
+
+        `exhaustive=True` 면 색인 후보(최대 500줄)를 거치지 않고 **보이는 문서 전부**
+        (채널 원문과 첨부 정본)의 모든 줄을 점수 매긴다. 근거 채널이 관리자가 고른 집합으로
+        좁혀진 VIPBot 이 쓴다 — 후보 창에서 잘린 문서는 「근거 없음」 으로만 보인다.
+
+        `per_document` 가 0 보다 크면 한 문서가 차지하는 줄 수를 그만큼으로 묶는다.
+        한 문서가 상위 자리를 독차지하면, 같은 질문에 답이 될 다른 문서가 밀려난다.
+
+        `exhaustive_max_lines` 가 0 보다 크면 **보이는 채널 원문 줄 수가 그 이하일 때만**
+        전수 탐색으로 간다(B-93). 범위가 아카이브 전체인 질문(임원·전체 권한)을 매번 파이썬으로
+        다 훑으면 수 초~수십 초가 걸리고 메모리가 터진 적이 있다(2026-11-02).
 
         **권한은 여기서, 코드가 판정한다**(`visible_docs`). 색인에는 이미 통과한
         채널 목록만 넘긴다 — 판정을 SQL 로 옮기면 ACL 이 두 곳으로 갈라진다(원칙 3).
@@ -1179,10 +1212,21 @@ class ArchiveStore:
             # 먼저 권한을 적용한 문서에서 범위를 더 좁힌다. 반대로 이 인자로
             # visible_docs 밖 문서를 열 수는 없다.
             docs = [doc for doc in docs if doc.channel in channels]
+        if not exhaustive and exhaustive_max_lines > 0:
+            visible_lines = sum(len(doc.raw_lines) for doc in docs)
+            exhaustive = visible_lines <= exhaustive_max_lines
+            logger.info(
+                "검색 경로 %s visible_lines=%d max=%d",
+                "전수" if exhaustive else "색인", visible_lines, exhaustive_max_lines,
+            )
+        if exhaustive:
+            return self._scan_attachment_fallback(
+                query, tokens, docs, ctx, limit, channels, per_document=per_document
+            )
         found = search_index.candidates(query, sorted({d.channel for d in docs if d.channel}))
         if found is None:
             return self._scan_attachment_fallback(
-                query, tokens, docs, ctx, limit, channels
+                query, tokens, docs, ctx, limit, channels, per_document=per_document
             )
 
         # Candidate coordinates narrow attachment bodies before they become Python
@@ -1239,7 +1283,7 @@ class ArchiveStore:
             # 색인이 아직 안 돌았을 수 있다. 0건으로 답하기 전에 파일을 한 번 본다 —
             # 「색인 없음」이 「자료 없음」으로 보이는 것이 이 기능의 가장 나쁜 실패다.
             return self._scan_attachment_fallback(
-                query, tokens, docs, ctx, limit, channels
+                query, tokens, docs, ctx, limit, channels, per_document=per_document
             )
 
         # 색인에 **일부** 결과가 있으면 예전에는 여기서 끝났다. 그래서 방금 들어온
@@ -1249,11 +1293,12 @@ class ArchiveStore:
         # 낡은 문서만 파일에서 보완한다. 전체 아카이브를 매번 훑지 않는다.
         hits += self._stale_hits(query, tokens, docs, expected_counts)
         return self._rank(
-            hits, limit, preferred_workspaces=ctx.preferred_workspaces
+            hits, limit, preferred_workspaces=ctx.preferred_workspaces,
+            per_document=per_document,
         )
 
     def _scan_attachment_fallback(
-        self, query, tokens, channel_docs, ctx, limit, channels
+        self, query, tokens, channel_docs, ctx, limit, channels, *, per_document: int = 0
     ) -> list[SearchHit]:
         """Scan attachments one file family at a time when the index cannot help."""
         from . import attachment_reader
@@ -1274,13 +1319,17 @@ class ArchiveStore:
                 continue
             hits.extend(self._scan(query, tokens, [doc], keep))
             if len(hits) >= keep * 2:
+                # 중간 정리도 문서당 상한을 지킨다. 점수만으로 자르면 한 문서의 줄이
+                # 창을 다 채워, 마지막 정렬 전에 다른 문서가 먼저 사라진다.
                 hits = self._rank(
                     hits,
                     keep,
                     preferred_workspaces=ctx.preferred_workspaces,
+                    per_document=per_document * SCAN_KEEP_FACTOR if per_document else 0,
                 )
         return self._rank(
-            hits, limit, preferred_workspaces=ctx.preferred_workspaces
+            hits, limit, preferred_workspaces=ctx.preferred_workspaces,
+            per_document=per_document,
         )
 
     def _stale_hits(self, query, tokens, docs, expected_counts) -> list[SearchHit]:
@@ -1368,8 +1417,12 @@ class ArchiveStore:
         limit: int,
         *,
         preferred_workspaces: frozenset[str] = frozenset(),
+        per_document: int = 0,
     ) -> list[SearchHit]:
         """선호 workspace → 점수 → **최근순** → 경로.
+
+        `per_document` 가 있으면 순서를 지킨 채 문서마다 그 수까지 먼저 고르고, 남는
+        자리는 나머지 줄로 채운다. 근거 수는 줄지 않고 문서 폭만 넓어진다.
 
         선호 workspace가 없으면 기존 점수 순서와 완전히 같다. 선호는 권한을
         넓히지 않으며 호출자가 이미 허용한 문서 사이의 순서만 바꾼다.
@@ -1404,4 +1457,19 @@ class ArchiveStore:
             # ``visible_docs(ctx)``. Stable sorting only moves an explicitly
             # named workspace ahead of the other registered source channels.
             hits.sort(key=lambda h: h.doc.workspace not in preferred_workspaces)
+        if per_document > 0 and len(hits) > limit:
+            # 순서를 지킨 채 문서마다 `per_document` 줄까지 먼저 고르고, 남은 자리를
+            # 나머지로 채운다. 줄 수는 그대로이고 **문서 폭만** 넓어진다.
+            counts: dict[str, int] = {}
+            first: list[SearchHit] = []
+            rest: list[SearchHit] = []
+            for hit in hits:
+                key = str(hit.doc.path)
+                if counts.get(key, 0) < per_document:
+                    counts[key] = counts.get(key, 0) + 1
+                    first.append(hit)
+                else:
+                    rest.append(hit)
+            hits = (first + rest)[:limit]
+            return hits
         return hits[:limit]

@@ -83,7 +83,10 @@ def _create(store, request: ClearanceRequest, *, now: datetime, docs=None) -> di
     digest = str(doc.sha256 or "").strip().lower()
     if digest != request.expected_original_sha256:
         raise ImageDescriptionClearanceAdminError("source_changed")
-    if not doc.human_upload_confirmed:
+    from ..archive.vision_provenance import admitted_by_collection
+
+    if not admitted_by_collection(doc):
+        # 봇 출력은 수집 입구가 막는다(2026-11-19). 옛 사진·소급 사진도 승인할 수 있다.
         raise ImageDescriptionClearanceAdminError("human_upload_unverified")
     if str(doc.filetype or "").strip().lower() not in FILETYPE_MIME:
         raise ImageDescriptionClearanceAdminError("source_not_image")

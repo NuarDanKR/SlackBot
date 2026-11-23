@@ -2799,6 +2799,8 @@ HWP는 rhwp가 PDF로 변환하는 운영 경로를 사용하므로 WC-30의 선
 | 사진 안전 판정 생성·철회 | `POST /api/archiver/image-description/clearances`, `POST .../clearances/{id}/revoke` — **구현됨** |
 | 외부 전송 승인 생성·철회 | `POST /api/archiver/image-description/approvals`, `POST .../approvals/{id}/revoke` — **구현됨** |
 | 선택 가능한 무료 Vision 모델 | `GET /api/archiver/image-description/models?workspace=...` |
+| Vision provider API 키 mask·상태 | `GET /api/archiver/image-description/provider-secrets` — **구현됨** |
+| Vision provider API 키 등록·교체·중지 | `PUT /api/archiver/image-description/provider-secrets` — **구현됨** |
 | 작업 목록·상세 | `GET /api/archiver/image-description/jobs` 및 `GET .../jobs/{id}` |
 | 승인된 재처리·취소 | `POST .../jobs`, `POST .../jobs/{id}/cancel` |
 
@@ -2807,6 +2809,12 @@ HWP는 rhwp가 PDF로 변환하는 운영 경로를 사용하므로 WC-30의 선
 전용 Vision DSN이 없거나 읽지 못하면 빈 목록이나 정상으로 바꾸지 않고
 `503`과 고정 코드를 반환한다. `workerAppliedRevision=null`은 **미적용 확인 전**이며
 `applicationState=not_configured`를 함께 표시한다.
+
+Provider API 키는 Vision 전용 DB 표에 Fernet 암호문으로 저장하고 화면에는 mask만
+돌려준다. 복호화 키는 DB 밖 `/etc/tybot/workspace-secret.key`에 둔다. 현재 Google
+Gemini Developer API 어댑터가 이미지 입력을 지원하며, worker는 정책이 선택한 정확한
+provider의 DB 키만 주입받는다. 일반 TYBot 키나 환경변수로 폴백하지 않는다. 키 등록은
+무료·Vision 지원·quota·민감도 검증을 대신하지 않으며 카탈로그와 정책은 별도로 켜야 한다.
 
 ## 접속 자격 — 일반 `DATABASE_URL`로 내려가지 않는다 (2026-10-28)
 

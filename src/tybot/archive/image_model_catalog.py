@@ -99,7 +99,11 @@ def evaluate_free_vision_model(
         blockers.append("verification_stale")
     elif entry.verified_at > now:
         blockers.append("verification_from_future")
-    if entry.max_sensitivity.rank() < sensitivity.rank():
+    # 오너 결정(2026-11-19): 정책·카탈로그는 같은 계약 단계로 비교한다(`vision_sensitivity`).
+    # public·internal 은 같은 「일반 업무」 라 표기 차이로 막지 않는다. 기밀은 그대로 막는다.
+    from .vision_sensitivity import catalog_allows
+
+    if not catalog_allows(entry.max_sensitivity, sensitivity):
         blockers.append("sensitivity_not_allowed")
     if not region.strip() or region not in entry.allowed_regions:
         blockers.append("region_not_allowed")

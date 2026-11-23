@@ -1,0 +1,28 @@
+[Unit]
+Description=TYBot 채널×일 검색 다이제스트 (B-93 2단계)
+Documentation=file:///opt/tybot/docs/design/channel-day-digest.md
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=TYBOT_ENV_FILE=/etc/tybot/tybot.env
+# 전용 DB 계정(tybot_digest_runtime)만 쓴다. Master DATABASE_URL 로 내려가지 않는다.
+Environment=TYBOT_DIGEST_DATABASE_URL_FILE=/etc/tybot/tybot-digest-database-url
+# 최근 3일(오늘 제외) 중 원문이 바뀐 날만 만든다. 소급은 콘솔/수동 dry-run 뒤에 따로 한다.
+ExecStart=/opt/tybot/.venv/bin/python scripts/build_channel_digests.py --apply --max-calls 300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-channel-digest
+TimeoutStartSec=3600
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 아카이브는 읽기만 한다. 비용 상태 파일만 쓴다.
+ReadOnlyPaths=/var/lib/tybot/archive
+ReadWritePaths=/var/lib/tybot

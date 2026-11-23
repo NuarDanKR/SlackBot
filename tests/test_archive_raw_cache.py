@@ -642,7 +642,13 @@ def _assert_flat(peaks: list[int]) -> None:
     late = sorted(peaks[half:])[-2]
     assert late < early * 1.5 + 256 * 1024, (early, late)
     # 끝나 갈 때 기준선으로 돌아와 있어야 한다. 쌓이는 누수는 여기서 가장 크다.
-    tail = max(peaks[-3:])
+    #
+    # 여기서도 **한 번 튄 값 하나는 뺀다.** 2026-11-11 전체 실행에서 마지막 라운드만
+    # 4.9MB 가 튀었다. tracemalloc 으로 잡아 보니 15블록 3.8MB 가 `pathlib` 의
+    # `sys.intern` 이었다 — 프로세스 전체의 인터닝 문자열 표가 커지며 한 번 재할당된
+    # 것이고, 그 시점은 수집된 시험 모듈 수에 따라 옮겨 다닌다. 누수는 마지막 네
+    # 라운드 중 둘 이상에서 그대로 보이므로 두 번째로 큰 값으로 충분하다.
+    tail = sorted(peaks[-4:])[-2]
     assert tail < early * 1.5 + 256 * 1024, (early, tail)
 
 

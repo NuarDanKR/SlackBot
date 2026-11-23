@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from .archive.converter_bots import DELEGATED_TYPES, conversion_delegated
+from .archive.converter_bots import DELEGATED_TYPES, direct_conversion_allowed
 from .archive.files import BoundedFileLines, SlackFile, bounded_file_lines
 
 #: 질문에 붙인 HWP. 변환하지 않고 변환 앱의 PDF 로 다시 묻게 한다.
@@ -118,9 +118,12 @@ def read_question_files(
         normalized["url_private_download"] = download
         normalized.pop("url_private", None)
         parsed_file = SlackFile.from_event(normalized)
-        if parsed_file.filetype in DELEGATED_TYPES and conversion_delegated():
+        if parsed_file.filetype in DELEGATED_TYPES and not direct_conversion_allowed(
+            parsed_file.filetype
+        ):
             # HWP 는 답변할 때 변환하지 않는다. 변환 앱(rhwp)이 채널에 올린 PDF 로
-            # 다시 물어 달라고 안내한다(2026-11-09 오너 결정).
+            # 다시 물어 달라고 안내한다(2026-11-09 오너 결정). 위임 상태를 모를 때도
+            # 같다 — PDF 로 물으면 어느 쪽이든 답할 수 있다(B-89 후속).
             return QuestionFileEvidence(codes=(HWP_USE_PDF_CODE,))
         if not (parsed_file.is_text or parsed_file.is_convertible):
             return QuestionFileEvidence(codes=("file_type_unsupported",))

@@ -275,6 +275,9 @@ def _converted(meta: dict, meta_path: Path) -> StageResult:
     if status == "pii_refused":
         # 변환 자체는 됐고 PII 로 막은 것이다. 다음 단계에서 그렇게 말한다.
         return StageResult(CONVERTED, OK, "extracted=(PII 검사에서 폐기)")
+    if status == "external_skipped":
+        # 원격 파일(Google Drive 등)이라 봇 토큰을 보내지 않으려고 내려받지 않았다(B-97 0단계).
+        return StageResult(CONVERTED, SKIPPED, "code=external-file")
     if status == "unsupported":
         if meta.get("error_code") == "delegated_to_converter_app":
             # HWP 를 변환 앱(rhwp)에 넘겼다. 같은 문서는 그 앱의 PDF 로 들어온다.

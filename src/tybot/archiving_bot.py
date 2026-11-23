@@ -11,7 +11,14 @@ from pathlib import Path
 
 from slack_sdk.errors import SlackApiError
 
-from .archive import attachment_ack, channel_membership, ingest_ack, shadow_paths, writer
+from .archive import (
+    attachment_ack,
+    channel_membership,
+    image_description_notification,
+    ingest_ack,
+    shadow_paths,
+    writer,
+)
 from .archive.archiving_state import IngestState
 from .archive.attachment_writer import raw_lines_for
 from .archive.attachment_writer import write_docs as write_attachment_docs
@@ -41,6 +48,28 @@ class ArchiverWorkspace:
     allowed_channels: frozenset[str]
     separate_attachments: bool = False
     bot_user_id: str = ""
+
+
+def deliver_image_description_notice(client, cfg: ArchiverWorkspace, notice) -> bool:
+    """Post the completion reply (fixed status, or the published recognition) after a current membership check."""
+    if notice.channel_id not in cfg.allowed_channels:
+        log.warning("[%s] image notice discarded: unregistered channel=%s", cfg.key, notice.channel_id)
+        return True
+    try:
+        info = client.conversations_info(channel=notice.channel_id).get("channel") or {}
+        if not info.get("is_member"):
+            log.warning("[%s] image notice discarded: not a member channel=%s", cfg.key, notice.channel_id)
+            return True
+        client.chat_postMessage(
+            channel=notice.channel_id,
+            thread_ts=notice.message_ts,
+            text=notice.text,
+            client_msg_id=notice.client_msg_id,
+        )
+        return True
+    except SlackApiError:
+        log.warning("[%s] image notice delivery deferred channel=%s", cfg.key, notice.channel_id)
+        return False
 
 
 def validate_slack_identity(cfg: ArchiverWorkspace, identity: dict) -> None:
@@ -710,8 +739,13 @@ def _live_archive_root(workspace: str, env: dict[str, str] | None = None) -> Pat
     # Keep the same-workspace guard to avoid two canonical layouts for its data.
     legacy = live_root / "workspaces" / workspace
     if legacy.exists() or legacy.is_symlink():
+        # 원인과 조치를 같이 적는다(B-99). 2026-11-20 Master 의 옛 DM 쓰기가 이 디렉터리를
+        # 다시 만들었고, 메시지만으로는 무엇을 해야 하는지 알 수 없었다.
         raise ArchiverConfigError(
-            f"live archive root still contains legacy workspace: {workspace}"
+            f"live archive root still contains legacy workspace: {workspace} "
+            f"({legacy}). Move it out (do not delete) to an "
+            "archive-legacy-quarantine-<date>/workspaces directory, merge it with "
+            "scripts/promote_legacy_archive.py (B-98), then restart. See BACKLOG B-99."
         )
     return live_root
 
@@ -741,6 +775,16 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
             cfg.key, recovered["applied"], recovered["left"],
         )
 
+    def image_notice_loop() -> None:
+        while not stop.is_set():
+            outcome = image_description_notification.drain(
+                cfg.key, lambda notice: deliver_image_description_notice(app.client, cfg, notice)
+            )
+            if outcome["sent"] or outcome["invalid"] or outcome.get("error"):
+                log.info("[%s] image notice outbox sent=%s left=%s invalid=%s", cfg.key,
+                         outcome["sent"], outcome["left"], outcome["invalid"])
+            stop.wait(15)
+
     @app.event("message")
     def on_message(event, client):
         try:
@@ -757,6 +801,11 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         target=_membership_sync_loop,
         args=(app.client, repo, cfg.key, stop, interval),
         name=f"archiver-membership-{cfg.key}",
+        daemon=True,
+    )
+    notice_thread = threading.Thread(
+        target=image_notice_loop,
+        name=f"archiver-image-notice-{cfg.key}",
         daemon=True,
     )
     dm_thread = None
@@ -791,6 +840,7 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
             daemon=True,
         )
     sync_thread.start()
+    notice_thread.start()
     if dm_thread is not None:
         dm_thread.start()
     if backfill_thread is not None:
@@ -800,6 +850,7 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     finally:
         stop.set()
         sync_thread.join(timeout=1)
+        notice_thread.join(timeout=1)
         if dm_thread is not None:
             dm_thread.join(timeout=1)
         if backfill_thread is not None:

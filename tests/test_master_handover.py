@@ -102,15 +102,23 @@ def test_a_channel_we_still_own_is_written_in_realtime(tmp_path):
     ingest.assert_called_once()
 
 
-def test_an_unknown_channel_is_still_written_in_realtime(tmp_path):
-    """표에 없는 채널까지 막으면 아직 아무것도 안 옮겼는데 수집이 멈춘다."""
+def test_an_unknown_channel_is_not_written_in_realtime(tmp_path):
+    """B-99 fail-closed. 표에 없는 채널을 Master 가 쓰면 운영 루트에 옛 배치
+    `workspaces/<ws>/channels` 가 생기고, Archiver 가 다음 기동을 거부한다(2026-11-20)."""
     bot = _bot(tmp_path, None)
 
     with patch("tybot.slack.pilot.writer.ingest") as ingest:
-        ingest.return_value = _result(tmp_path)
         bot._ingest_live(Mock(), {"channel": "C1", "ts": "1759200000.000100"})
 
-    ingest.assert_called_once()
+    ingest.assert_not_called()
+    bot._messages_from.assert_not_called()
+
+
+def test_the_hourly_job_skips_an_unknown_channel(tmp_path, monkeypatch, batch):
+    stats, slack = _run_batch(tmp_path, None, monkeypatch, batch)
+
+    assert slack.history_calls == []
+    assert stats["skipped_owner"] == 1
 
 
 def test_the_gate_runs_before_slack_is_read(tmp_path):

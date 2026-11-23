@@ -37,6 +37,8 @@ TYBot 이 **마스터**다. 저가 모델이 어느 전문 봇에게 물을지�
    후속 질문("방금 그 문서 다시")도 같다 — 이어 가는 것은 이전 답변 문장이 아니라
    그 답변이 읽은 **원문 좌표**(`EvidenceRef`)이고, 그 좌표는 매번 현재 권한으로
    다시 연다. 설계: [`docs/design/thread-follow-up-evidence.md`](docs/design/thread-follow-up-evidence.md)
+   **2026-11-20(오너 결정):** 「위 Top 10 중 …」 처럼 봇이 보여 준 목록을 가리킬 수 있게,
+   좌표를 전부 다시 연 직전 답변 문장을 **지칭 해석용(근거 아님)** 으로 함께 넘긴다.
 
    > **2026-09-17 (오너 결정) — 「요약 재귀 금지」 에서 「검증된 것만 다음 단계로」 로.**
    >
@@ -85,6 +87,9 @@ TYBot 이 **마스터**다. 저가 모델이 어느 전문 봇에게 물을지�
    > 설계: [`docs/design/pii-guardrail-and-canvas-artifacts.md`](docs/design/pii-guardrail-and-canvas-artifacts.md)
 6. **시크릿은 저장소 밖** — 토큰/API키는 서버 설정·시크릿 매니저에만. 저장소엔 `.env.example`만.
 7. **사람 발언 ↔ 문서 분리** — 숫자가 엇갈리면 문서 우선하되 두 시점 함께 표기.
+   사람이 남긴 사실 정정(「15억이 아니라 12억」)은 원문을 바꾸지 않고, 그 원문을 지금
+   볼 수 있는 사람의 답변 끝에 **정정자·날짜·전 → 후**로 붙는다(2026-11-20 오너 결정).
+   설계: [`docs/design/personal-memory-threat-model.md`](docs/design/personal-memory-threat-model.md) §8
 
 > **2026-09-11 (오너 결정) — 「아카이브된 것만」 에서 「아카이브 + 실시간」 으로.**
 >

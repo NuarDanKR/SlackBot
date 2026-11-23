@@ -13,7 +13,7 @@
 | 승인된 그 파일인가 | 읽은 바이트의 SHA-256 을 후보 값과 대조 |
 | 정말 이미지인가 | **매직 바이트**를 본다. 확장자는 이름일 뿐이다 |
 | 우리 자리에 있나 | 경로를 **우리가 만든다.** 메타데이터의 문자열을 안 쓴다 |
-| 사람이 올린 것인가 | 정본의 `human_upload_confirmed` 가 **참일 때만** |
+| 봇 출력이 아닌가 | 정본이 수집 입구를 지났나(`vision_provenance`, 2026-11-19) |
 
 ## 경로를 메타데이터에서 받지 않는다
 
@@ -202,9 +202,11 @@ def _provenance_code(candidate, doc) -> str:
         return ERROR_PROVENANCE
     if (getattr(doc, "sha256", "") or "").strip().lower() != candidate.original_sha256:
         return ERROR_PROVENANCE
-    if getattr(doc, "human_upload_confirmed", False) is not True:
-        # 옛 자료는 이 값이 없다. **없으면 아니다** — 봇이 만든 그림을 봇이
-        # 설명하고 그 설명이 검색 결과가 되는 고리를 여기서 끊는다(원칙 1).
+    from .vision_provenance import admitted_by_collection
+
+    if not admitted_by_collection(doc):
+        # 봇 출력 되먹임은 수집 입구가 막는다. 여기서는 그 판정을 지난 정본인지만
+        # 본다 — 옛 사진·파일 목록 소급 사진도 사람이 올린 것이면 대상이다(원칙 1).
         return ERROR_NOT_HUMAN
     return ""
 

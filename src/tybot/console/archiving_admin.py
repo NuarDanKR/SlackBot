@@ -171,8 +171,9 @@ def set_collection_hold(
     끈 것은 **재초대로 풀리지 않는다.** 멤버십 상실과 사람의 결정을 한 칸에 담으면
     다시 초대하는 순간 끈 채널까지 되살아나고, 끈 사람은 그 사실을 모른다.
 
-    모드는 저장소가 함께 옮긴다 — 끄면 `paused`, 켜면 참여 중일 때만 `shadow`.
-    봇이 없는 채널을 켜 봐야 권한 오류만 쌓인다.
+    모드는 저장소가 함께 옮긴다 — 끄면 `paused`, 켜면 참여 중일 때만 운영 수집
+    (`active`·`archiver`, 2026-11-18 shadow 폐기). 전역 스위치가 꺼져 있으면 `off`
+    (Master 가 씀). 봇이 없는 채널을 켜 봐야 권한 오류만 쌓인다.
     """
     store = repo or default_repo()
     with store.transaction() as tx:

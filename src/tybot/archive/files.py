@@ -8,6 +8,9 @@
 - 스캔 PDF·구형 hwp는 서버 변환기가 있을 때 처리하고, OCR 사용 여부를 본문에 표시한다.
 - 다운로드에는 `files:read` 스코프와 봇 토큰 Bearer 헤더가 **둘 다** 필요하다.
   헤더가 없으면 파일 대신 로그인 HTML 이 200 으로 내려온다(조용한 고장) - 그래서 검증한다.
+- **봇 토큰은 `files.slack.com` 으로만 간다**(B-97 0단계). 원격 파일(Google Drive 등)의
+  `url_private` 은 임의 호스트라, 그대로 Bearer 를 붙이면 토큰이 Slack 밖으로 나간다.
+  판정은 다운로드 함수 **안에서** 한다 — 호출부(수집·DM 인계·Canvas)가 따로 막지 않게.
 """
 from __future__ import annotations
 
@@ -17,11 +20,12 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..pii_screen import ScreenMetadata
 from .convert import ConvertError, can_convert, convert
-from .converter_bots import DELEGATED_CODE, DELEGATED_TYPES, conversion_delegated
+from .converter_bots import DELEGATED_CODE, DELEGATED_TYPES, POLICY_UNKNOWN_CODE, delegation_state
 from .text_normalize import remove_nul
 
 logger = logging.getLogger("tybot.files")
@@ -70,6 +74,55 @@ class DownloadLimitExceeded(DownloadError):
     """The response body exceeded a caller-supplied byte limit."""
 
 
+# --- B-97 0단계: 봇 토큰을 실어 보내도 되는 호스트. **정확히 일치**만 허용한다.
+# 접미사 비교는 `files.slack.com.evil.test` 를 통과시킨다.
+SLACK_FILE_HOSTS = frozenset({"files.slack.com"})
+#: 원격 파일이라 내려받지 않은 첨부의 상태 코드. 조용히 버리지 않고 흔적을 남긴다.
+EXTERNAL_SKIPPED_CODE = "external_skipped"
+
+
+class ExternalFileRefused(DownloadError):
+    """봇 토큰을 실어 보낼 수 없는 파일(원격 파일·Slack 밖 URL). 요청을 만들지 않는다."""
+
+
+def slack_file_url(value: object) -> str:
+    """토큰을 붙여도 되는 Slack 파일 URL 이면 그대로, 아니면 빈 문자열."""
+    raw = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or parsed.username or parsed.password or port:
+        return ""
+    if (parsed.hostname or "").lower() not in SLACK_FILE_HOSTS:
+        return ""
+    return raw
+
+
+class _SlackOnlyRedirect(HTTPRedirectHandler):
+    """리다이렉트가 Slack 파일 호스트를 떠나면 따라가지 않는다.
+
+    urllib 은 3xx 를 따라갈 때 `Request(headers=...)` 로 넣은 Authorization 을 **새 요청에
+    그대로 복사한다.** 호스트가 바뀌는 리다이렉트를 따라가면 토큰이 그 호스트로 간다.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not slack_file_url(newurl):
+            raise DownloadError(
+                "Slack 파일 호스트 밖으로 리다이렉트되어 중단했습니다 - files:read 스코프·토큰 확인"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = build_opener(_SlackOnlyRedirect)
+
+
+def urlopen(req: Request, timeout: float = DOWNLOAD_TIMEOUT):
+    """토큰을 싣는 요청 전용. 리다이렉트도 Slack 파일 호스트 안에서만 따라간다."""
+    return _OPENER.open(req, timeout=timeout)
+
+
 @dataclass(frozen=True)
 class SlackFile:
     id: str
@@ -82,6 +135,11 @@ class SlackFile:
     # Slack 이 말하는 **파일이 올라온 시각**(epoch 초). 0 이면 모른다.
     # 수집 시각으로 대신하지 않는다 — 몇 년 전 문서가 「오늘 올라온 것」 이 된다.
     created: int = 0
+    # 원격 파일 표시(B-97 0단계). Slack 파일 객체의 `mode`·`is_external`·`external_type`.
+    # 원격 파일은 Slack 이 보관하지 않는 **포인터**이고 URL 이 임의 호스트다.
+    mode: str = ""
+    is_external: bool = False
+    external_type: str = ""
 
     @classmethod
     def from_event(cls, f: dict) -> SlackFile:
@@ -97,15 +155,31 @@ class SlackFile:
             if suffix in TEXT_EXTS or suffix in DELEGATED_TYPES or can_convert(suffix)
             else reported
         )
+        mode = str(f.get("mode") or "").lower()
+        external_type = str(f.get("external_type") or "").strip()
+        is_external = (
+            f.get("is_external") is True
+            or mode == "external"
+            or reported == "remote"
+            or bool(external_type)
+        )
         return cls(
             id=str(f.get("id", "")),
             name=name,
             filetype=filetype,
             size=int(f.get("size") or 0),
-            url_private_download=f.get("url_private_download") or f.get("url_private"),
+            # `url_private` 으로 내려가는 것은 hosted 파일일 때뿐이다. 원격 파일의
+            # `url_private` 은 외부 URL 이다(Slack 문서 「working with files」).
+            url_private_download=(
+                f.get("url_private_download")
+                or (None if is_external else f.get("url_private"))
+            ),
             mimetype=str(f.get("mimetype") or ""),
             permalink=str(f.get("permalink") or f.get("permalink_public") or ""),
             created=_epoch(f.get("created") or f.get("timestamp")),
+            mode=mode,
+            is_external=is_external,
+            external_type=external_type,
         )
 
     @property
@@ -129,7 +203,11 @@ class SlackFile:
         kb = max(1, self.size // 1024)
         if state is None:
             state = "본문 수집" if self.is_text else ("변환" if self.is_convertible else "미변환")
-        text = f"[첨부:{state}] {self.name} ({self.filetype or self.mimetype or '?'}, {kb}KB)"
+        if self.is_external:
+            # 원격 파일은 크기가 없고 종류가 의미 있다(gdrive 등).
+            text = f"[첨부:{state}] {self.name} ({self.external_type or 'external'})"
+        else:
+            text = f"[첨부:{state}] {self.name} ({self.filetype or self.mimetype or '?'}, {kb}KB)"
         if self.permalink:
             text += f" · <{self.permalink}|원본 파일>"
         if file_id:
@@ -368,11 +446,24 @@ def _decode_text(raw: bytes, declared_size: int) -> str:
     return out
 
 
-def download_bytes(f: SlackFile, bot_token: str, limit: int | None = None) -> bytes:
-    """원본 바이트를 가져온다. 로그인 HTML 이 오면 실패로 처리한다."""
+def authorized_download_url(f: SlackFile) -> str:
+    """봇 토큰을 실어 보내도 되는 URL. 아니면 **요청을 만들기 전에** 예외."""
+    if f.is_external:
+        raise ExternalFileRefused(f"{f.name}: 원격 파일이라 내려받지 않았습니다")
     if not f.url_private_download:
         raise DownloadError(f"{f.name}: 다운로드 URL 없음")
-    req = Request(f.url_private_download, headers={"Authorization": f"Bearer {bot_token}"})
+    url = slack_file_url(f.url_private_download)
+    if not url:
+        raise ExternalFileRefused(
+            f"{f.name}: Slack 파일 호스트가 아닌 URL 이라 토큰을 보내지 않았습니다"
+        )
+    return url
+
+
+def download_bytes(f: SlackFile, bot_token: str, limit: int | None = None) -> bytes:
+    """원본 바이트를 가져온다. 로그인 HTML 이 오면 실패로 처리한다."""
+    url = authorized_download_url(f)
+    req = Request(url, headers={"Authorization": f"Bearer {bot_token}"})
     with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:
         raw = resp.read() if limit is None else resp.read(limit + 1)
     if limit is not None and len(raw) > limit:
@@ -386,9 +477,8 @@ def download_bytes(f: SlackFile, bot_token: str, limit: int | None = None) -> by
 
 def download_text(f: SlackFile, bot_token: str) -> str:
     """텍스트 파일 본문을 가져온다. 실패는 예외로 올린다(조용히 넘기지 않는다)."""
-    if not f.url_private_download:
-        raise DownloadError(f"{f.name}: 다운로드 URL 없음")
-    req = Request(f.url_private_download, headers={"Authorization": f"Bearer {bot_token}"})
+    url = authorized_download_url(f)
+    req = Request(url, headers={"Authorization": f"Bearer {bot_token}"})
     with urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         # 상한이 없으면 끝까지 읽는다. **0 을 그대로 넘기지 않는다** —
@@ -478,11 +568,14 @@ def stage_attachments(
 
             if f.is_text:
                 extracted = _decode_text(raw, f.size)
-            elif f.filetype in DELEGATED_TYPES and conversion_delegated():
+            elif f.filetype in DELEGATED_TYPES and (delegation := delegation_state()) != "off":
                 # HWP 는 지정된 변환 앱(rhwp)이 PDF 로 바꿔 채널에 올리고, 그 PDF 가
                 # 원문 첨부로 들어온다(2026-11-09 오너 결정). 여기서 또 변환하면 같은
                 # 문서가 두 벌의 근거가 된다. 원본은 위에서 이미 보관했다.
-                error_code = DELEGATED_CODE
+                #
+                # 위임 상태를 **모르면** 변환하지 않고 미룬다(B-89 후속). 정책이 확인되면
+                # 야간 재점검이 「미지원」 판정을 다시 연다.
+                error_code = DELEGATED_CODE if delegation == "on" else POLICY_UNKNOWN_CODE
             elif f.is_convertible:
                 # `convert` 를 **모듈 수준 이름 그대로** 부른다. 다른 함수로
                 # 바꾸면 이 이름을 갈아 끼우던 테스트가 조용히 무력해진다 —
@@ -502,6 +595,14 @@ def stage_attachments(
                 if not extracted.strip():
                     raise ConvertError("변환 결과에 검색 가능한 텍스트가 없습니다")
                 state = "converted"
+        except ExternalFileRefused as exc:
+            # 실패가 아니다. 토큰을 보내지 않으려고 **내려받지 않았다**(B-97 0단계).
+            # 재처리 큐에 올리지 않는다 — 다시 해도 같은 판정이다.
+            state = EXTERNAL_SKIPPED_CODE
+            error = str(exc)
+            error_code = EXTERNAL_SKIPPED_CODE
+            retryable = False
+            own_warnings.append(error)
         except (DownloadError, ConvertError, OSError) as exc:
             state = "download_or_extract_failed"
             error = str(exc)
@@ -560,7 +661,8 @@ def stage_attachments(
                     "blocked" if state == "pii_refused" else
                     _converted_state(coverage) if state == "converted" else
                     "failed" if original_retained and error else
-                    "unsupported" if state == "unsupported" else "pending"
+                    "unsupported" if state in ("unsupported", EXTERNAL_SKIPPED_CODE)
+                    else "pending"
                 ),
                 "slack_file_id": f.id,
                 "name": f.name,
@@ -640,10 +742,15 @@ def stage_attachments(
             # 실패가 아니다. 변환 앱(rhwp)의 PDF 가 따로 들어온다 — 「미지원」 으로
             # 적으면 진단이 조치 대상으로 세고, 사람은 고칠 것이 없는 파일을 찾아 헤맨다.
             label = "변환앱위임"
+        elif state == "unsupported" and error_code == POLICY_UNKNOWN_CODE:
+            # 실패가 아니다. 위임 여부를 몰라 변환을 미뤘다 — 원본은 보관돼 있다.
+            label = "변환보류"
         elif state == "unsupported":
             label = "미지원"
         elif state == "pii_refused":
             label = "수집제외"
+        elif state == EXTERNAL_SKIPPED_CODE:
+            label = "외부파일"
         else:
             label = "처리실패"
         # 참조와 본문을 **만드는 자리에서** 가른다. 뒤에서 문자열을 보고 나누면
@@ -725,6 +832,10 @@ def file_lines(files: list[dict], bot_token: str | None) -> tuple[list[str], lis
                 data = download_bytes(f, bot_token)
                 body = convert(f.filetype, data)
                 tag = "첨부추출"
+        except ExternalFileRefused as e:
+            lines.append(f.describe("외부파일"))
+            warnings.append(str(e))
+            continue
         except (DownloadError, ConvertError) as e:
             # 변환 못 한 것은 목록에 남긴다 - 색인의 「변환하지 못한 것」이 된다.
             lines.append(f.describe("미변환"))

@@ -209,6 +209,9 @@ def _governed_prompt(prompt: str) -> str:
     return prompt.rstrip() + MASTER_OUTPUT_POLICY
 
 
+from .prior_answer import with_prior_answer  # noqa: E402
+
+
 def _with_display_hint(body: str, request) -> str:
     """표시 힌트를 질문 **뒤에** 붙인다(설계 §3.3).
 
@@ -465,7 +468,10 @@ class PromptSpecialist:
 
         # 시각 근거는 **텍스트 뒤에** 붙인다. 앞에 두면 프롬프트 캐시가 매번
         # 깨지고(캐시는 접두사 일치), 이미지가 근거 텍스트보다 앞서 읽힌다.
-        body = _with_display_hint(f"근거:\n{evidence}\n\n질문: {request.question}", request)
+        body = _with_display_hint(
+            with_prior_answer(f"근거:\n{evidence}\n\n질문: {request.question}", request),
+            request,
+        )
         content = (
             [{"type": "text", "text": body}, *request.visual]
             if getattr(request, "visual", ())
@@ -859,7 +865,9 @@ class ToolSpecialist:
             log.warning("seed 근거가 %d자라 %d자 안으로 시트별로 줄인다 key=%s",
                         len(joined), MAX_EVIDENCE_CHARS, self.key)
         seed = fit_evidence(joined, MAX_EVIDENCE_CHARS)
-        opening = _with_display_hint(f"질문: {request.question}", request)
+        opening = _with_display_hint(
+            with_prior_answer(f"질문: {request.question}", request), request
+        )
         briefing = self.scope_plan.briefing()
         if briefing:
             # 범위와 예산을 **먼저** 말한다. 뒤에 붙이면 모델은 이미 첫 범위를

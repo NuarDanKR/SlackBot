@@ -155,9 +155,11 @@ function scriptedSession(script) {
 
 /* ── 배선 ──────────────────────────────────────────────────────────────── */
 const openServers = [];
-async function bootWorker({ script, toolSocket }) {
+async function bootWorker({ script, toolSocket, allowedModels, onModel }) {
+  const session = scriptedSession(script);
   const answerer = createRpcAnswerer({
-    toolSession: scriptedSession(script),
+    toolSession: (model) => { onModel?.(model.id); return session(model); },
+    allowedModels,
     buildTools: buildRemoteTools,
     createClient: ({ requestId, token, allow }) => createToolClient({
       socketPath: toolSocket, secret: SECRET, requestId, token, allow, timeoutMs: 5_000,
@@ -457,6 +459,28 @@ await test('스키마가 다르면 400', async () => {
 await test('다른 workspace 요청은 400', async () => {
   const r = await callWorker(guard.socketPath, wire.ANSWER_ENDPOINT, requestBody({ workspace: 'mgmt', request_id: 'r-ws' }));
   assert.equal(r.status, 400);
+});
+await test('요청 model 모양이 틀리면 400', async () => {
+  const r = await callWorker(guard.socketPath, wire.ANSWER_ENDPOINT, requestBody({ model: 'Opus 5!', request_id: 'r-mshape' }));
+  assert.equal(r.status, 400);
+});
+await test('허용 목록 밖 모델은 기본 모델로 바꾸지 않고 400', async () => {
+  const r = await callWorker(guard.socketPath, wire.ANSWER_ENDPOINT, requestBody({ model: 'claude-opus-5-5', request_id: 'r-mdeny' }));
+  assert.equal(r.status, 400);
+});
+await test('호출자가 고른 모델(허용 목록 안)로 답하고, 안 고르면 기본 모델이다', async () => {
+  const seen = [];
+  const tiered = await bootWorker({
+    script: [{ text: '근거가 없습니다' }],
+    toolSocket: place('unused'),
+    allowedModels: ['claude-opus-5-5', 'claude-sonnet-5-5'],
+    onModel: (id) => seen.push(id),
+  });
+  for (const [id, model] of [['r-m1', 'claude-opus-5-5'], ['r-m2', 'claude-sonnet-5-5'], ['r-m3', undefined]]) {
+    const r = await callWorker(tiered.socketPath, wire.ANSWER_ENDPOINT, requestBody({ request_id: id, model }));
+    assert.equal(r.status, 200);
+  }
+  assert.deepEqual(seen, ['claude-opus-5-5', 'claude-sonnet-5-5', 'stub']);
 });
 await test('모르는 경로는 404', async () => {
   const body = Buffer.from('{}', 'utf8');

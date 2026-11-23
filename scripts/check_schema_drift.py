@@ -49,16 +49,30 @@ VISION_TABLES = {
     name: "archiver_vision_schema.sql" for name in (
         "archiver_vision_approval", "archiver_vision_job",
         "archiver_vision_policy", "archiver_vision_policy_audit",
+        # B-80 운영 연결(2026-11-19): 페이지 전사 파생 revision. Vision 전용, append-only.
+        "archiver_vision_page_revision",
     )
 }
 VISION_TABLES.update({
     name: "archiver_image_description_schema.sql" for name in (
-        "archiver_image_model_catalog", "archiver_image_description_approval",
+        "archiver_image_provider_secret", "archiver_image_model_catalog",
+        "archiver_image_description_approval",
         "archiver_image_description_clearance", "archiver_image_description_job",
         "archiver_image_description_policy",
         "archiver_image_description_policy_audit", "archiver_image_description_revision",
     )
 })
+# B-81 후속: AI OCR 전사 원장도 Vision 전용이다. Master 에 열지 않는다.
+VISION_TABLES["archiver_image_transcript_revision"] = "archiver_image_transcript_schema.sql"
+# Master 가 **읽기만** 하는 표. Vision worker 가 쓰고 Master 는 검색에서 읽는다.
+# 쓰기 권한이 없는 것이 정상이므로 「봇 권한 없음」 으로 세지 않는다.
+MASTER_READ_ONLY = {
+    "image_search_entry": "archiver_image_transcript_schema.sql",
+    # B-93: 채널×일 다이제스트는 배치(tybot_digest)가 쓰고 Master 는 검색에서 읽기만 한다.
+    "channel_day_digest": "channel_day_digest_schema.sql",
+    # B-80: PDF 페이지 전사 검색 투영. Vision 이 쓰고 Master 는 읽기만 한다.
+    "pdf_page_search_entry": "archiver_vision_schema.sql",
+}
 VISION_ROLE = "tybot_vision"
 VISION_REQUIRED = {
     table: {"SELECT", "INSERT"} | (
@@ -76,6 +90,21 @@ VISION_COLUMN_REQUIRED = {
     },
     "archiver_image_description_clearance": {
         "UPDATE": {"revoked_at", "revoked_by", "revoke_reason"},
+    },
+    # 2026-11-12 보안 리뷰: worker 는 provider 자격을 **세 열만 읽는다.** 쓰기는 콘솔 몫이다.
+    "archiver_image_provider_secret": {
+        "SELECT": {"provider", "ciphertext", "enabled"},
+    },
+}
+VISION_REQUIRED["archiver_image_provider_secret"] = set()
+# 콘솔(Master DSN)이 provider 자격에 갖는 **정확한** 열 권한. 암호문 열 SELECT 는 없다.
+# 이 표 밖의 Vision 표에 Master 권한이 있으면 여전히 drift 다.
+MASTER_ROLE = "tyslackai"
+MASTER_COLUMN_REQUIRED = {
+    "archiver_image_provider_secret": {
+        "SELECT": {"provider", "mask", "enabled", "updated_by", "updated_at"},
+        "INSERT": {"provider", "ciphertext", "mask", "enabled", "updated_by"},
+        "UPDATE": {"ciphertext", "mask", "enabled", "updated_by", "updated_at"},
     },
 }
 
@@ -198,7 +227,10 @@ def vision_access(conn) -> tuple[list[tuple[str, str, str]], bool]:
         required = role == VISION_ROLE and privilege in VISION_REQUIRED[table]
         expected_columns = (
             VISION_COLUMN_REQUIRED.get(table, {}).get(privilege, set())
-            if role == VISION_ROLE else set()
+            if role == VISION_ROLE
+            else MASTER_COLUMN_REQUIRED.get(table, {}).get(privilege, set())
+            if role == MASTER_ROLE
+            else set()
         )
         # Required table privileges cannot be replaced with partial column grants.
         if required and not table_allowed:
@@ -221,7 +253,8 @@ def vision_access(conn) -> tuple[list[tuple[str, str, str]], bool]:
 
 def required_bot_access(tables: dict[str, str], denied: set[str]) -> list[str]:
     return sorted(name for name, source in tables.items() if name in denied
-                  and VISION_TABLES.get(name) != source)
+                  and VISION_TABLES.get(name) != source
+                  and MASTER_READ_ONLY.get(name) != source)
 
 
 def main(argv: list[str] | None = None) -> int:

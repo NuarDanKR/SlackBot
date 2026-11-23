@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -155,6 +156,9 @@ def correction_text(text: str) -> str | None:
     """`정정: 실제 내용`에서 사람이 쓴 정정 내용만 꺼낸다."""
     value = (text or "").strip()
     if not value.startswith("정정"):
+        return None
+    # 「정정 삭제 3」·「정정 목록」 은 정정이 아니라 내 정정을 다루는 명령이다.
+    if re.match(r"정정\s*(?:삭제|철회|목록|보여)", value):
         return None
     value = value[2:].lstrip(" \t:：-—")
     return value or ""

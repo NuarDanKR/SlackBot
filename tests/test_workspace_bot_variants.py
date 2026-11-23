@@ -289,7 +289,67 @@ def test_private_answer_denial_never_falls_back_to_a_public_channel() -> None:
     say.assert_not_called()
 
 
-def test_shared_runtime_builds_vip_as_the_same_workspace_bot(monkeypatch) -> None:
+def test_vip_runtime_connections_isolate_failures_and_duplicate_tokens(
+    monkeypatch,
+) -> None:
+    from tybot.console import bot_identity
+
+    configs = [WorkspaceConfig("tyit", "TY IT", "master-bot", "master-app")]
+    monkeypatch.setattr(
+        bot_identity,
+        "runtime_workspaces",
+        lambda _key: ["archi", "civil", "invest", "mgmt"],
+    )
+
+    def tokens(workspace, _key):
+        if workspace == "civil":
+            raise RuntimeError("secret unavailable")
+        if workspace == "archi":
+            return "vip-bot-archi", "vip-app-shared"
+        if workspace == "invest":
+            return "vip-bot-invest", "vip-app-shared"
+        return "vip-bot-mgmt", "vip-app-mgmt"
+
+    monkeypatch.setattr(bot_identity, "runtime_tokens", tokens)
+
+    assert pilot._vip_runtime_credentials(
+        configs, allowed_workspaces={"archi", "civil", "invest", "mgmt"}
+    ) == [
+        ("archi", "vip-bot-archi", "vip-app-shared"),
+        ("mgmt", "vip-bot-mgmt", "vip-app-mgmt"),
+    ]
+
+
+def test_vip_runtime_connection_discovery_failure_keeps_master_available(
+    monkeypatch,
+) -> None:
+    from tybot.console import bot_identity
+
+    monkeypatch.setattr(
+        bot_identity,
+        "runtime_workspaces",
+        Mock(side_effect=RuntimeError("database unavailable")),
+    )
+
+    assert pilot._vip_runtime_credentials([]) == []
+
+
+def test_vip_runtime_does_not_open_credentials_for_an_unmanaged_workspace(
+    monkeypatch,
+) -> None:
+    from tybot.console import bot_identity
+
+    loaded = Mock(return_value=("bot", "app"))
+    monkeypatch.setattr(bot_identity, "runtime_workspaces", lambda _key: ["old"])
+    monkeypatch.setattr(bot_identity, "runtime_tokens", loaded)
+
+    assert pilot._vip_runtime_credentials(
+        [], allowed_workspaces={"tyit", "mgmt"}
+    ) == []
+    loaded.assert_not_called()
+
+
+def test_shared_runtime_builds_every_verified_vip_workspace_bot(monkeypatch) -> None:
     config = WorkspaceConfig("tyit", "TY IT", "master-bot", "master-app")
     made: list[tuple[WorkspaceConfig, dict]] = []
 
@@ -300,8 +360,8 @@ def test_shared_runtime_builds_vip_as_the_same_workspace_bot(monkeypatch) -> Non
             self.kwargs = kwargs
             made.append((cfg, kwargs))
 
-    monkeypatch.setenv("VIPBOT_SHARED_RUNTIME_ENABLED", "1")
-    monkeypatch.setenv("VIPBOT_WORKSPACE", "tyit")
+    monkeypatch.setenv("VIPBOT_SHARED_RUNTIME_ENABLED", "0")
+    monkeypatch.setenv("VIPBOT_WORKSPACE", "legacy-value-must-be-ignored")
     monkeypatch.delenv("VIPBOT_QA_LOG_DIR", raising=False)
     monkeypatch.setattr(pilot, "load_workspaces", lambda: [config])
     monkeypatch.setattr(pilot, "_start_external_v3", lambda _configs: None)
@@ -329,9 +389,14 @@ def test_shared_runtime_builds_vip_as_the_same_workspace_bot(monkeypatch) -> Non
     from tybot.console import bot_identity, workspace_store
 
     profile = object()
-    resolver = object()
+    resolvers = {"tyit": object(), "mgmt": object()}
     monkeypatch.setattr(
-        bot_identity, "runtime_tokens", lambda *_args: ("vip-bot", "vip-app")
+        bot_identity, "runtime_workspaces", lambda _key: ["mgmt", "tyit"]
+    )
+    monkeypatch.setattr(
+        bot_identity,
+        "runtime_tokens",
+        lambda workspace, _key: (f"vip-bot-{workspace}", f"vip-app-{workspace}"),
     )
     monkeypatch.setattr(
         workspace_store,
@@ -352,20 +417,30 @@ def test_shared_runtime_builds_vip_as_the_same_workspace_bot(monkeypatch) -> Non
 
     monkeypatch.setattr(vip_workspace, "build_engine", fake_vip_engine)
     monkeypatch.setattr(
-        vip_workspace, "context_resolver", lambda _workspace: resolver
+        vip_workspace, "context_resolver", lambda workspace: resolvers[workspace]
     )
 
     bots = pilot.build_bots()
 
-    assert len(bots) == 2
+    assert len(bots) == 3
     assert all(isinstance(bot, FakeBot) for bot in bots)
-    assert len(made) == 2
-    vip_config, vip_options = made[1]
-    assert (vip_config.bot_token, vip_config.app_token) == ("vip-bot", "vip-app")
-    assert vip_options["engine"] == "vip-engine"
-    assert vip_options["qa_log"] is qa_logs[1]
+    assert len(made) == 3
+    vip_configs = {cfg.key: (cfg, options) for cfg, options in made[1:]}
+    assert set(vip_configs) == {"mgmt", "tyit"}
+    assert (
+        vip_configs["mgmt"][0].bot_token,
+        vip_configs["mgmt"][0].app_token,
+    ) == ("vip-bot-mgmt", "vip-app-mgmt")
+    assert (
+        vip_configs["tyit"][0].bot_token,
+        vip_configs["tyit"][0].app_token,
+    ) == ("vip-bot-tyit", "vip-app-tyit")
+    vip_options = vip_configs["mgmt"][1]
+    assert all(options["engine"] == "vip-engine" for _, options in made[1:])
+    assert all(options["qa_log"] is qa_logs[1] for _, options in made[1:])
     assert qa_logs[1].root == "/var/lib/tybot-vipbot/qa"
-    assert vip_options["request_context_resolver"] is resolver
+    assert vip_configs["mgmt"][1]["request_context_resolver"] is resolvers["mgmt"]
+    assert vip_configs["tyit"][1]["request_context_resolver"] is resolvers["tyit"]
     assert vip_options["question_transform"] is vip_profile.question_for_engine
     assert vip_options["operational_owner"] is False
     assert vip_options["realtime"] is False
@@ -377,4 +452,16 @@ def test_shared_runtime_builds_vip_as_the_same_workspace_bot(monkeypatch) -> Non
         "mgmt": "경영본부",
         "civil": "토목본부",
     }
-    assert bots[1].workspace_labels == engine_options[0]["workspace_labels"]
+    assert all(
+        bot.workspace_labels == engine_options[0]["workspace_labels"]
+        for bot in bots[1:]
+    )
+
+
+def test_vip_connections_are_database_driven_without_a_rollout_environment_gate():
+    import inspect
+
+    source = inspect.getsource(pilot.build_bots)
+    assert "VIPBOT_SHARED_RUNTIME_ENABLED" not in source
+    assert "VIPBOT_WORKSPACE" not in source
+    assert "_vip_runtime_credentials" in source

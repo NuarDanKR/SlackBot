@@ -149,6 +149,9 @@ class BackfillStats:
     #: 인수돼서 Master 가 손을 뗀 채널 수. 실패와 나눠 센다 — 합치면 「소급이 안
     #: 됐다」 와 「소급할 자리가 아니다」 를 로그로 구분할 수 없다.
     refused_owner: int = 0
+    #: 운영 루트에 옛 배치(`workspaces/`)로 쓰게 돼 거절한 채널 수(B-99). 실패로도 센다 —
+    #: 사람이 시킨 소급이 아무것도 안 했는데 성공으로 끝나면 안 된다.
+    refused_layout: int = 0
     changed_paths: set[pathlib.Path] = field(default_factory=set)
 
 
@@ -352,6 +355,19 @@ def backfill_channel(
                  cfg.key, channel.get("name") or channel_id, verdict.reason)
         stats = BackfillStats()
         stats.refused_owner = 1
+        return stats
+    # 이 스크립트는 옛 배치(`workspaces/<ws>/channels`)로 쓴다. 운영 루트에 그 배치가
+    # 생기면 Archiver 가 기동을 거부한다(B-99) — Slack 을 읽기 전에 멈춘다.
+    refusal = writer.legacy_layout_refusal(archive, cfg.key)
+    if refusal:
+        log.error(
+            "[%s] %s 운영 아카이브 루트에는 옛 배치로 소급하지 않는다 code=%s"
+            " — 별도 --archive 경로를 주거나 Archiver 소급을 쓰세요",
+            cfg.key, channel_id, refusal,
+        )
+        stats = BackfillStats()
+        stats.refused_layout = 1
+        stats.failures = 1
         return stats
     state = checkpoints.get(cfg.key, channel_id)
     stats = BackfillStats()

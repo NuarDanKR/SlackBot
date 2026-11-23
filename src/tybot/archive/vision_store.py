@@ -15,12 +15,35 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
+from tybot.gateway.base import Sensitivity
+
 from .vision_policy import PageApproval, PageReservation, VisionPolicy, preflight
+from .vision_sensitivity import GENERAL_BUSINESS, request_sensitivity
 
 CONFIG_KEYS = frozenset({
     'model', 'provider', 'max_image_bytes', 'max_output_tokens', 'timeout_seconds',
-    'daily_usd', 'job_usd', 'max_concurrency',
+    'daily_usd', 'job_usd', 'max_concurrency', 'sensitivity',
+    'input_usd_per_mtok', 'output_usd_per_mtok',
 })
+
+#: 운영자가 확인해 적은 모델 요금표(USD / 1M tokens). **정산은 이 값으로만 한다.**
+#:
+#: gateway 응답의 `cost_usd` 는 쓰지 않는다. 그 값은 Router 에 넣은 ModelSpec 단가로
+#: 계산되는데, Vision 경로는 단가 0 으로 Router 를 만들고(Google provider 는 늘 0.0)
+#: 그러면 실제 청구와 무관하게 0 원으로 정산되어 일일 예산이 소진되지 않는다.
+TARIFF_KEYS = ('input_usd_per_mtok', 'output_usd_per_mtok')
+#: 요금표는 모델에 묶이고 전역 하루 예산의 근거다 — **전역 행만** 정한다. 워크스페이스 행이
+#: 덮어쓰면 그 워크스페이스 관리자가 요금 0 으로 전역 예산을 우회할 수 있다.
+GLOBAL_ONLY_KEYS = frozenset({'provider', 'model', *TARIFF_KEYS})
+#: 워크스페이스 행이 **값을 갖지 못하는** 칸. 모델·요금표에 더해 민감도도 전역만 정한다 —
+#: 워크스페이스 관리자가 민감도를 낮추면 전역이 막은 모델 카탈로그(`catalog_allows`)를
+#: 통과한다(2026-11-19 보안 검토). 민감도는 기본값(일반 업무)이 있어 전역 행에 없어도 된다.
+WORKSPACE_LOCKED_KEYS = GLOBAL_ONLY_KEYS | {'sensitivity'}
+
+
+def global_sensitivity(global_config: dict | None) -> str:
+    """전역 행이 정한 민감도. 없으면 일반 업무(오너 결정 2026-11-19)."""
+    return str((global_config or {}).get('sensitivity', GENERAL_BUSINESS.value))
 
 
 class VisionDenied(RuntimeError):
@@ -36,6 +59,36 @@ class VisionDispatch:
     provider: str
     max_output_tokens: int
     timeout_seconds: float
+    #: Router·provider 경계에 넘길 계약 값(`vision_sensitivity.request_sensitivity`).
+    sensitivity: Sensitivity = GENERAL_BUSINESS
+    #: 예약 시점에 묶인 요금표. 없으면(옛 예약) 정산은 「모름」 이다 — 0 이 아니다.
+    input_usd_per_mtok: Decimal | None = None
+    output_usd_per_mtok: Decimal | None = None
+
+    def charge_usd(self, input_tokens, output_tokens) -> Decimal | None:
+        """토큰 × 요금표. 토큰이나 요금표 하나라도 모르면 None(모름)."""
+        if self.input_usd_per_mtok is None or self.output_usd_per_mtok is None:
+            return None
+        if not all(type(t) is int and t >= 0 for t in (input_tokens, output_tokens)):
+            return None
+        if input_tokens == 0 or output_tokens == 0:
+            # 쪽 이미지를 보낸 호출은 입력이 0 일 수 없고, 응답이 있으면 출력도 0 이 아니다.
+            # provider 는 usage 가 빠지면 0 으로 채운다 — 그 0 을 「공짜」 로 읽지 않는다.
+            return None
+        return (Decimal(input_tokens) * self.input_usd_per_mtok
+                + Decimal(output_tokens) * self.output_usd_per_mtok) / Decimal(1_000_000)
+
+
+def tariff(config: dict) -> tuple[Decimal, Decimal] | None:
+    """설정의 요금표. 둘 다 있고 유효할 때만. 모르면 None — 0 으로 메우지 않는다."""
+    if not all(key in config for key in TARIFF_KEYS):
+        return None
+    try:
+        rates = tuple(money(config[key]) for key in TARIFF_KEYS)
+    except VisionDenied:
+        return None
+    # 0 원 요금표는 정산을 0 으로 만든다 — 무료 모델은 B-81 의 건수 한도 경로다.
+    return rates if all(rate > 0 for rate in rates) else None  # type: ignore[return-value]
 
 
 def money(value) -> Decimal:
@@ -115,7 +168,18 @@ class VisionStore:
         if not local or not workspace:
             raise VisionDenied('policy_unavailable')
         config = global_row['config'] | local['config']
+        # 민감도는 전역 행만 정한다. 워크스페이스 값이 전역과 다르면(낮추든 높이든) 정책이
+        # 갈라진 것이다 — 예약·전송 어느 경로에서도 보내지 않는다.
+        expected = global_sensitivity(global_row['config'])
+        if str(local['config'].get('sensitivity', expected)) != expected:
+            raise VisionDenied('workspace_override_forbidden')
+        try:
+            # 일반 업무가 기본(오너 결정 2026-11-19). 틀린 값은 짐작하지 않고 정책 무효다.
+            sensitivity = Sensitivity(config.get('sensitivity', GENERAL_BUSINESS.value))
+        except ValueError:
+            raise VisionDenied('policy_invalid') from None
         policy = VisionPolicy(
+            sensitivity=sensitivity,
             workspace=workspace, revision=global_row['revision'] + ':' + local['revision'],
             enabled=global_row['enabled'], workspace_enabled=local['enabled'],
             capability_verified=capability_verified, credential_ready=credential_ready,
@@ -206,6 +270,17 @@ class VisionStore:
                 raise VisionDenied('reservation_expiry_invalid')
             if amount > money(config.get('job_usd', 0)):
                 raise VisionDenied('job_budget_exceeded')
+            global_config = global_row['config'] or {}
+            if any(config.get(k) != global_config.get(k) for k in GLOBAL_ONLY_KEYS):
+                # 워크스페이스 행이 모델·요금표를 덮어썼다. 전역 예산의 근거가 갈라진다.
+                raise VisionDenied('workspace_override_forbidden')
+            rates = tariff(global_config)
+            if rates is None:
+                # 요금표 없이 보내면 정산할 수 없다. 모르는 비용을 0 으로 적지 않는다.
+                raise VisionDenied('tariff_unconfigured')
+            if amount < Decimal(policy.max_output_tokens or 0) * rates[1] / Decimal(1_000_000):
+                # 출력 상한만으로도 넘는 예약은 보수적인 상한이 아니다.
+                raise VisionDenied('reservation_below_tariff')
             scope = approval_scope(approval)
             cur.execute('SELECT id FROM archiver_vision_job WHERE identity_sha256=%s',
                         (identity(scope),))
@@ -250,9 +325,12 @@ class VisionStore:
 
     @staticmethod
     def _source(checks):
-        return {k: checks.get(k, k == 'pii_blocked') for k in (
+        source = {k: checks.get(k, k == 'pii_blocked') for k in (
             'source_verified', 'rendering_verified', 'access_verified', 'pii_blocked'
         )}
+        # 서버 카탈로그가 확인한 모델 민감도 상한. 없으면 preflight 가 막는다.
+        source['catalog_max_sensitivity'] = checks.get('catalog_max_sensitivity')
+        return source
 
     def begin_dispatch(self, job_id: str, page, *, checks: dict) -> VisionDispatch:
         """Commit before I/O; crash after this point is NOT automatically retried.
@@ -275,12 +353,18 @@ class VisionStore:
                 raise VisionDenied(verdict.code)
             cur.execute("UPDATE archiver_vision_job SET state='dispatching', dispatched_at=now() WHERE id=%s",
                         (job_id,))
+            # 정산 요금표는 **예약 때 묶인 값**이다. 그 사이 정책이 바뀌어도 이 job 은 그대로.
+            snapshot = (job.get('policy_snapshot') or {}).get('global_config') or {}
+            rates = tariff(snapshot)
             return VisionDispatch(
                 reservation=receipt,
                 model=policy.model,
                 provider=policy.provider,
                 max_output_tokens=policy.max_output_tokens,
                 timeout_seconds=float(policy.timeout_seconds),
+                sensitivity=request_sensitivity(policy.sensitivity),
+                input_usd_per_mtok=rates[0] if rates else None,
+                output_usd_per_mtok=rates[1] if rates else None,
             )
 
     def finish(self, job_id: str, *, actual_usd: Decimal | None):
@@ -293,6 +377,107 @@ class VisionStore:
                         ('unknown' if actual is None else 'settled', actual, job_id))
             if not cur.fetchone():
                 raise VisionDenied('job_not_dispatched')
+
+    def record_page(self, job_id: str, result, *, channel_id: str) -> str:
+        """한 job 의 전사 결과를 **파생 revision** 으로 남긴다(원본·원문 MD 는 그대로).
+
+        - 정산된(`settled`)·결과 미확정(`unknown`) job 만 받는다 — 보내지 않은 job 의 결과는 없다
+        - 결과 좌표가 job 좌표와 다르면 거절한다(다른 쪽 결과가 이 쪽에 붙지 않게)
+        - 본문은 `sensitive_mask` 로 가린 뒤 `pii_screen` 최종 관문을 지난 것만. 관문에 걸리면
+          본문 없이 `withheld` 로 남긴다(원칙 5)
+        - job 하나에 결과 하나(`job_id` UNIQUE). 같은 페이지를 다시 적지 않는다
+        - `channel_id` 는 호출부가 **방금 수집 범위를 조회해 맞춘** 채널이다(`vision_pdf_batch.access_code`)
+        - 같은 트랜잭션에서 검색 투영(`pdf_page_search_entry`)에도 들어간다. 실패·보류는
+          본문 없는 묘비다 — 옛 성공 전사가 최신 판인 척하지 않게
+        """
+        from ..pii_screen import screen_line
+        from ..sensitive_mask import mask_sensitive
+
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            raise VisionDenied('channel_required')
+        with self._transaction(), self.connection.cursor() as cur:
+            self._lock(cur)
+            cur.execute('SELECT * FROM archiver_vision_job WHERE id=%s FOR UPDATE', (job_id,))
+            job = cur.fetchone()
+            if not job or job['state'] not in ('settled', 'unknown'):
+                raise VisionDenied('job_not_finished')
+            scope = job['scope']
+            coordinates = (
+                result.workspace, result.file_id, result.original_sha256, result.page_number,
+                result.page_basis, result.rendered_sha256 or result.original_sha256,
+                result.renderer_version,
+            )
+            if coordinates != (
+                scope['workspace'], scope['file_id'], scope['original_sha256'],
+                scope['page_number'], scope['page_basis'], scope['rendered_sha256'],
+                scope['renderer_version'],
+            ):
+                raise VisionDenied('result_scope_mismatch')
+            status, body, codes, masked = result.status, '', [], 0
+            if result.ok and result.markdown.strip():
+                masked_result = mask_sensitive(result.markdown)
+                masked = sum(masked_result.counts.values())
+                lines = masked_result.text.splitlines()
+                if any(screen_line(line) for line in lines):
+                    status, codes = 'withheld', ['pii_screen_blocked']
+                else:
+                    body = masked_result.text.strip()
+            elif result.ok:
+                status, codes = 'failed', ['empty_output']
+            else:
+                status = 'failed'
+            if result.error_code:
+                codes.append(result.error_code)
+            revision_id = uuid4().hex
+            cur.execute(
+                """INSERT INTO archiver_vision_page_revision
+                (id,job_id,workspace,channel_id,file_id,original_sha256,page_number,page_basis,
+                 rendered_sha256,renderer_version,image_sha256,model,provider,status,body,
+                 unreadable,codes,masked_count)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (revision_id, job_id, scope['workspace'], channel_id.strip(), scope['file_id'],
+                 scope['original_sha256'], scope['page_number'], scope['page_basis'],
+                 scope['rendered_sha256'], scope['renderer_version'], scope['image_sha256'],
+                 scope['model'], scope['provider'], status, body,
+                 list(result.unreadable), codes, masked),
+            )
+            self._project(cur, revision_id=revision_id)
+            return revision_id
+
+    #: 전사 revision → 검색 투영. 이미 있으면 건너뛴다(revision_id UNIQUE) — 소급을 몇 번
+    #: 돌려도 같다.
+    #:
+    #: - 실패·보류(failed·withheld)도 **본문 없는 묘비**로 들어간다. 그래야 Master 가 그 쪽의
+    #:   최신 판이 실패·보류임을 알고 옛 extracted 를 쓰지 않는다. 묘비의 body·unreadable 은
+    #:   여기서 비운다 — 원장 제약과 별개로 민감 본문이 Master 로 넘어갈 길을 두지 않는다
+    #: - created_at 은 **원장 revision 시각**을 복사한다. 소급 투영 시각이 들어가면 나중에
+    #:   투영된 옛 판이 새 판보다 새것으로 보인다
+    _PROJECT = '''INSERT INTO pdf_page_search_entry
+        (id, revision_id, workspace, channel_id, file_id, page_number, original_sha256,
+         renderer_version, provider, model, status, body, unreadable, created_at)
+        SELECT md5(r.id || ':search'), r.id, r.workspace, r.channel_id, r.file_id,
+               r.page_number, r.original_sha256, r.renderer_version, r.provider, r.model,
+               r.status,
+               CASE WHEN r.status IN ('extracted', 'uncertain') THEN r.body ELSE '' END,
+               CASE WHEN r.status IN ('extracted', 'uncertain') THEN r.unreadable
+                    ELSE '{}'::text[] END,
+               r.created_at
+          FROM archiver_vision_page_revision r
+         WHERE (r.status IN ('failed', 'withheld')
+                OR (r.status IN ('extracted', 'uncertain') AND r.body <> ''))
+           AND (%(revision_id)s::text IS NULL OR r.id = %(revision_id)s::text)
+        ON CONFLICT (revision_id) DO NOTHING'''
+
+    @classmethod
+    def _project(cls, cur, *, revision_id: str | None) -> int:
+        cur.execute(cls._PROJECT, {'revision_id': revision_id})
+        return cur.rowcount or 0
+
+    def project_pages(self) -> int:
+        """이미 저장된 전사 revision(묘비 포함)을 검색 투영에 소급한다. 멱등 — 새 줄 수."""
+        with self._transaction(), self.connection.cursor() as cur:
+            self._lock(cur)
+            return self._project(cur, revision_id=None)
 
     def cancel(self, job_id: str):
         with self._transaction(), self.connection.cursor() as cur:

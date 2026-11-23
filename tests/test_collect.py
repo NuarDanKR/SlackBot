@@ -4,7 +4,11 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
+
+from tybot.archive.archiving_state import ChannelMode, ChannelState, WriterOwner
 from tybot.archive.files import attachment_storage
+from tybot.archive.write_owner import decide
 from tybot.collect import collect_workspace
 from tybot.workspaces import WorkspaceConfig
 
@@ -37,6 +41,29 @@ class FakeClient:
 
     def files_info(self, file):
         return {"file": self._file}
+
+
+class _MasterOwns:
+    """주인 표가 「Master 몫」 이라고 답한다.
+
+    B-99 부터 표에 행이 없거나 DB 를 못 읽으면 Master 는 쓰지 않는다(fail-closed).
+    이 파일은 페이싱·멱등·실패 격리를 보므로, 쓰기가 허용된 채널을 전제로 둔다.
+    판정 자체는 `test_write_owner.py`, 운영 루트 거절은 `test_no_legacy_workspaces_writes.py`.
+    """
+
+    def __init__(self, workspace) -> None:
+        self.workspace = workspace
+
+    def master_may_write(self, channel_id):
+        state = ChannelState(self.workspace, channel_id, ChannelMode.OFF, WriterOwner.MASTER)
+        return decide(state, WriterOwner.MASTER)
+
+
+@pytest.fixture(autouse=True)
+def _master_owned_offline_root(monkeypatch, tmp_path):
+    monkeypatch.setattr("tybot.collect.OwnerLookup", _MasterOwns)
+    # 시험 루트가 운영 루트로 판정되지 않게 `ARCHIVE_DIR` 을 다른 곳에 둔다.
+    monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path / "live-elsewhere"))
 
 
 def _cfg():

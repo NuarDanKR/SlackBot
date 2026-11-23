@@ -122,6 +122,8 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
         # 인수돼서 Master 가 손을 뗀 채널. 규칙 밖(`skipped_rule`)과 나눠 센다 —
         # 합치면 「왜 이 채널이 안 들어오나」 를 로그로 구분할 수 없다.
         "skipped_owner": 0, "failed": 0,
+        # 운영 루트에 옛 배치(`workspaces/`)로 쓰게 돼 거절한 채널(B-99). 실패로도 센다.
+        "refused_layout": 0,
     }
     name_cache: dict[str, str] = {}
     owner = OwnerLookup(cfg.key)
@@ -161,6 +163,18 @@ def collect_workspace(cfg, archive_dir: str, *, pace: float = PACE_SECONDS) -> d
             # 이후 구간을 두 봇이 쓰게 된다.
             log.info("[%s] %s 인수된 채널이라 건너뛴다: %s", cfg.key, name, verdict.reason)
             stats["skipped_owner"] += 1
+            continue
+        # 이 잡은 옛 배치(`workspaces/<ws>/channels`)로 쓴다. 운영 루트에 그 배치가 생기면
+        # Archiver 가 다음 기동을 거부한다(B-99, 2026-11-20 장애). Slack 을 읽기 전에 멈추고
+        # **실패로 센다** — 조용히 넘기면 「수집이 돈다」 고 읽힌다.
+        refusal = writer.legacy_layout_refusal(archive_dir, cfg.key)
+        if refusal:
+            log.error(
+                "[%s] %s 운영 아카이브 루트라 옛 배치로 쓰지 않는다 code=%s",
+                cfg.key, ch["id"], refusal,
+            )
+            stats["refused_layout"] += 1
+            stats["failed"] += 1
             continue
         storage = attachment_storage(archive_dir, cfg.key, ch["id"])
         if i:
@@ -287,15 +301,19 @@ def _collect_all() -> int:
     archive_dir = os.getenv("ARCHIVE_DIR", "./archive")
     pace = float(os.getenv("COLLECT_PACE_SECONDS", PACE_SECONDS))
 
-    total = {"channels": 0, "written": 0, "skipped": 0, "failed": 0}
+    total = {"channels": 0, "written": 0, "skipped": 0, "failed": 0, "refused_layout": 0}
     for cfg in load_workspaces():
         s = collect_workspace(cfg, archive_dir, pace=pace)
         for k in total:
-            total[k] += s[k]
+            total[k] += s.get(k, 0)
     log.info(
-        "백필 완료 - 채널 %d, 신규 %d건, 중복 %d건, 실패 %d",
+        "백필 완료 - 채널 %d, 신규 %d건, 중복 %d건, 실패 %d, 옛 배치 거절 %d",
         total["channels"], total["written"], total["skipped"], total["failed"],
+        total["refused_layout"],
     )
+    # 옛 배치 거절은 다른 채널이 써졌어도 실패로 끝낸다 — 타이머 실패로 드러나야 한다.
+    if total["refused_layout"]:
+        return 1
     return 1 if total["failed"] and not total["written"] else 0
 
 

@@ -67,6 +67,23 @@ _qa_record_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+# 어느 Slack 봇(TYBot·VIPBot)이 받은 질문인지. 두 봇이 같은 워크스페이스·같은 전문 봇을
+# 쓰므로 워크스페이스만으로는 콘솔 「봇 분류 상태」 에서 가를 수 없다.
+_answer_bot: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "specialist_answer_bot", default=""
+)
+
+
+@contextlib.contextmanager
+def bind_answer_bot(bot_name: str):
+    """이 실행 문맥의 분류 기록에 답한 봇 이름(`tybot`·`vipbot`)을 남긴다."""
+    token = _answer_bot.set((bot_name or "").strip().lower()[:40])
+    try:
+        yield
+    finally:
+        _answer_bot.reset(token)
+
+
 @contextlib.contextmanager
 def bind_qa_record(record_id: str):
     """이 실행 문맥의 분류 기록을 QA 원본 한 건에 연결한다."""
@@ -549,6 +566,7 @@ def record(decision: Decision, *, workspace: str, elapsed_ms: int, cost_usd: flo
             cost_usd=cost_usd,
             error_code="no-adapter" if decision.specialist else "",
             qa_record_id=_qa_record_id.get(),
+            bot=_answer_bot.get(),
         )
     except Exception as exc:  # noqa: BLE001 - 기록 실패가 답변을 막으면 안 된다
         log.warning("라우팅 판정을 남기지 못했습니다: %s", exc)
@@ -647,6 +665,7 @@ def serve(
     visual: tuple = (),
     active_routes_only: bool = False,
     external_v3_factory=None,
+    specialist_model: str = "",
 ) -> SpecialistOutcome:
     """이 작업을 전문 봇에게 맡긴다. 실패하면 **다음 승인 후보**를 시도한다.
 
@@ -733,10 +752,12 @@ def serve(
             decision_id=decision_id,
             task_index=int(getattr(task, "task_index", 0) or 0),
             editing_text=str(getattr(task, "editing_text", "") or ""),
+            prior_answer=str(getattr(task, "prior_answer", "") or ""),
             task_kind=str(getattr(task, "kind", "") or ""),
             required_capability=str(getattr(task, "required_capability", "") or ""),
             display_hint=display_hint_for(task),
             external_v3_factory=external_v3_factory,
+            specialist_model=specialist_model,
         )
         if answer is not None:
             return SpecialistOutcome(
@@ -999,10 +1020,12 @@ def _run_one(
     decision_id: str = "",
     task_index: int = 0,
     editing_text: str = "",
+    prior_answer: str = "",
     task_kind: str = "",
     required_capability: str = "",
     display_hint: str = "",
     external_v3_factory=None,
+    specialist_model: str = "",
 ) -> tuple[SpecialistAnswer | None, str, str]:
     """후보 하나를 실제로 부른다. `(답, 사유코드, 미확인 범위)`."""
     import time
@@ -1031,15 +1054,17 @@ def _run_one(
         if external_v3_factory is not None:
             if toolbox is None:
                 raise specialist_adapters.AdapterError("toolbox-unavailable")
+            # 호출자 등급의 모델(B-96). Hermes 서버가 `allowed_models` 로 받을지 정한다.
             adapter = external_v3_factory(
                 chosen,
                 workspace=workspace,
                 authorization_id=authorization_id,
                 toolbox=toolbox,
+                model=specialist_model,
             )
         else:
             adapter = specialist_adapters.build(
-                chosen.adapter, router, model=chosen.model, rules=chosen.rules,
+                chosen.adapter, router, model=specialist_model or chosen.model, rules=chosen.rules,
                 execution_mode=chosen.execution_mode, toolbox=toolbox, live=live,
             )
         authorized = tuple(
@@ -1059,6 +1084,7 @@ def _run_one(
             allow_empty_evidence=chosen.execution_mode == "tools" or external_v3_factory is not None,
             visual=tuple(visual or ()),
             editing_text=editing_text,
+            prior_answer=prior_answer,
             display_hint=display_hint,
             # **하나의 시계.** 어댑터·Gateway·Provider·도구 루프가 같은 값을 본다
             # (2026-09-16 장애). 재시도마다 새로 주지 않는다.
@@ -1107,6 +1133,7 @@ def _run_one(
                     allow_empty_evidence=chosen.execution_mode == "tools",
                     visual=tuple(visual or ()),
                     editing_text=editing_text,
+                    prior_answer=prior_answer,
                     display_hint=REFUSAL_CORRECTION,
                     # 실행 거부 보정도 최초 요청과 **같은 시계**를 쓴다. 새 시계를
                     # 만들면 첫 호출 뒤 다시 최대 90초를 쓰는 이전 장애가 재발한다.
@@ -1195,6 +1222,7 @@ def _run_one(
             cost_usd=getattr(adapter, "last_cost_usd", 0.0),
             error_code="" if ok else (error_code or "adapter-build"),
             qa_record_id=_qa_record_id.get(),
+            bot=_answer_bot.get(),
             decision_id=decision_id,
             task_index=task_index,
             task_kind=task_kind,

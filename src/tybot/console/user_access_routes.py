@@ -50,6 +50,8 @@ class RevokeBody(BaseModel):
 
 class AccountSyncBody(BaseModel):
     apply: bool = False
+    #: false 면 Slack 명단·사번 연결만 맞춘다(게스트 계정은 그대로)
+    accounts: bool = True
 
 
 class SourceChannel(BaseModel):
@@ -196,16 +198,22 @@ def build_router(
         require_admin(user)
         check_write_request(request)
         try:
-            result = account_sync.run(actor=user.email, dry_run=not body.apply)
+            result = account_sync.run(actor=user.email, dry_run=not body.apply, accounts=body.accounts)
         except account_sync.AccountSyncError as exc:
             code = str(exc)
             raise HTTPException(status_code=SYNC_CODES.get(code, 503), detail=code) from exc
-        if body.apply:
+        if body.apply and body.accounts:
             # 멈춘 계정의 로그인을 지금 프로세스에서도 끊는다. 재조회 실패는 결과를 무르지 않는다.
             with contextlib.suppress(Exception):
                 reload_accounts()
             audit_event(
                 actor=user.email, category="console-user", action="account-sync",
+                target_type="account_sync_run", target_id=str(result.get("runId", "")),
+                outcome="succeeded", metadata=result["counts"],
+            )
+        elif body.apply:
+            audit_event(
+                actor=user.email, category="console-user", action="slack-names-sync",
                 target_type="account_sync_run", target_id=str(result.get("runId", "")),
                 outcome="succeeded", metadata=result["counts"],
             )

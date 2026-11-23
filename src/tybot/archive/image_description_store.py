@@ -16,7 +16,13 @@ from uuid import uuid4
 
 from tybot.gateway.base import Sensitivity
 
-from .image_description import ImageDescription, ImageInput
+from .image_description import (
+    ERROR_MODEL_ERROR,
+    ERROR_MODEL_TIMEOUT,
+    STATUS_FAILED,
+    ImageDescription,
+    ImageInput,
+)
 from .image_description_clearance import SafetyAssessment
 from .image_description_output_guard import guard_index_write
 from .image_description_policy import (
@@ -26,6 +32,8 @@ from .image_description_policy import (
     preflight_image_description,
 )
 from .image_model_catalog import FreeQuotaState, ImageModelCatalogEntry
+from .image_transcript import guard_transcript
+from .vision_sensitivity import request_sensitivity
 
 CONFIG_KEYS = frozenset({
     "model",
@@ -50,6 +58,7 @@ class ImageDescriptionGrant:
     dispatch: ImageDescriptionDispatch
     model: str
     provider: str
+    sensitivity: Sensitivity
     max_output_tokens: int
     timeout_seconds: float
 
@@ -95,6 +104,24 @@ def approval_scope(approval: ImageDescriptionApproval) -> dict:
     for key in ("approval_id", "expires_at", "revoked"):
         data.pop(key)
     return data
+
+
+def policy_scope(image: ImageInput, policy, prompt_revision: str) -> dict:
+    """승인 없는 dispatch 의 scope. **`approval_scope` 와 같은 키**다.
+
+    키가 같아야 `dispatch_identity` 가 옛 승인 작업과 같은 원본을 같은 작업으로 본다 —
+    승인 경로와 정책 경로가 같은 bytes 를 두 번 보내지 않는다.
+    """
+    return {
+        "workspace": image.workspace,
+        "channel": image.channel,
+        "file_id": image.file_id,
+        "original_sha256": image.original_sha256,
+        "policy_revision": policy.revision,
+        "prompt_revision": prompt_revision,
+        "model": policy.model,
+        "provider": policy.provider,
+    }
 
 
 def dispatch_identity(scope: dict) -> str:
@@ -300,10 +327,14 @@ class ImageDescriptionStore:
             if channel_id:
                 where += " AND channel_id=%s"
                 params = (workspace, channel_id)
+            # 전사 revision 만 생긴 원본도 「이미 처리함」 이다 (B-81 후속). 한쪽 표만 보면
+            # 전사만 남은 사진을 자동 배치가 다시 모델에 보낸다.
             cur.execute(
-                "SELECT DISTINCT workspace,channel_id,original_sha256 "
-                "FROM archiver_image_description_revision WHERE " + where,
-                params,
+                "SELECT workspace,channel_id,original_sha256 "
+                "FROM archiver_image_description_revision WHERE " + where
+                + " UNION SELECT workspace,channel_id,original_sha256 "
+                "FROM archiver_image_transcript_revision WHERE " + where,
+                params + params,
             )
             return frozenset(
                 (
@@ -605,7 +636,7 @@ class ImageDescriptionStore:
     def _receipt(job) -> ImageDescriptionDispatch:
         return ImageDescriptionDispatch(
             dispatch_id=job["id"],
-            approval_id=job["approval_id"],
+            approval_id=job["approval_id"] or "",
             max_output_tokens=job["max_output_tokens"],
             expires_at=job["expires_at"],
             active=job["state"] == "reserved",
@@ -614,6 +645,8 @@ class ImageDescriptionStore:
 
     @staticmethod
     def _checks(checks: dict) -> dict:
+        # 빠진 사실은 닫힌 쪽으로 읽는다. 이미지 정책 경로는 `pii_blocked=False` 를
+        # **명시해서** 넘긴다(2026-11-20 오너 결정) — 키가 빠진 것과 같지 않다.
         return {
             key: checks.get(key, key in ("pii_blocked", "bot_generated"))
             for key in ("source_verified", "access_verified", "pii_blocked", "bot_generated")
@@ -623,7 +656,7 @@ class ImageDescriptionStore:
         self,
         image: ImageInput,
         *,
-        approval_id: str,
+        approval_id: str = "",
         prompt_revision: str,
         expires_at: datetime,
         checks: dict,
@@ -634,7 +667,8 @@ class ImageDescriptionStore:
             now = cur.fetchone()["now"]
             policy, config, _ = self._effective(cur, global_row, image.workspace)
             catalog = self._catalog(cur, policy)
-            approval = self._approval(cur, approval_id)
+            # 건별 승인은 선택이다(2026-11-20). 없으면 정책 판에 결속된 dispatch 다.
+            approval = self._approval(cur, approval_id) if approval_id else None
             verdict = preflight_image_description(
                 image,
                 policy=policy,
@@ -647,12 +681,18 @@ class ImageDescriptionStore:
             )
             if verdict.code != "dispatch_unavailable":
                 raise ImageDescriptionDenied(verdict.code)
-            if expires_at.utcoffset() is None or not now < expires_at <= approval.expires_at:
+            if (
+                expires_at.utcoffset() is None
+                or not now < expires_at
+                or (approval is not None and expires_at > approval.expires_at)
+            ):
                 raise ImageDescriptionDenied("dispatch_expiry_invalid")
 
-            scope = approval_scope(approval) | {
-                "image_sha256": hashlib.sha256(image.image).hexdigest()
-            }
+            scope = (
+                approval_scope(approval)
+                if approval is not None
+                else policy_scope(image, policy, prompt_revision)
+            ) | {"image_sha256": hashlib.sha256(image.image).hexdigest()}
             identity = dispatch_identity(scope)
             cur.execute(
                 "SELECT id FROM archiver_image_description_job WHERE identity_sha256=%s",
@@ -703,7 +743,7 @@ class ImageDescriptionStore:
                 (
                     job_id,
                     identity,
-                    approval_id,
+                    approval_id or None,
                     image.workspace,
                     policy.revision,
                     prompt_revision,
@@ -740,7 +780,9 @@ class ImageDescriptionStore:
                 image,
                 policy=policy,
                 catalog=catalog,
-                approval=self._approval(cur, job["approval_id"]),
+                approval=(
+                    self._approval(cur, job["approval_id"]) if job["approval_id"] else None
+                ),
                 dispatch=receipt,
                 prompt_revision=job["prompt_revision"],
                 now=job["now"],
@@ -757,6 +799,8 @@ class ImageDescriptionStore:
                 dispatch=receipt,
                 model=policy.model,
                 provider=policy.provider,
+                # 계약 값으로 넘긴다 — 운영 Router 의 모델 상한과 같은 값이다(2026-11-19).
+                sensitivity=request_sensitivity(policy.sensitivity),
                 max_output_tokens=policy.max_output_tokens,
                 timeout_seconds=float(policy.timeout_seconds),
             )
@@ -790,12 +834,29 @@ class ImageDescriptionStore:
                 raise ImageDescriptionDenied("result_scope_mismatch")
 
             usage = result.usage
-            if bool(usage.model) != bool(usage.provider):
-                raise ImageDescriptionDenied("result_identity_invalid")
             expected_identity = (
                 job["catalog_snapshot"]["model"],
                 job["catalog_snapshot"]["provider"],
             )
+            # A transport exception has no provider receipt, so it must not claim
+            # an actual provider.  It is still a terminal failed call: the dispatch
+            # was committed before the request, and retrying could charge twice.
+            # Keep the useful failure code, but disable the catalog's free claim
+            # because the cost is unknowable without a receipt.
+            unreceipted_transport_failure = (
+                result.status == STATUS_FAILED
+                and result.error_code in {ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR}
+                and usage.model == expected_identity[0]
+                and not usage.provider
+                and usage.input_tokens is None
+                and usage.output_tokens is None
+                and usage.cost_usd is None
+                and not result.description
+                and not result.tags
+                and not result.uncertainty
+            )
+            if bool(usage.model) != bool(usage.provider) and not unreceipted_transport_failure:
+                raise ImageDescriptionDenied("result_identity_invalid")
             if decision.storable and (usage.model, usage.provider) != expected_identity:
                 raise ImageDescriptionDenied("result_identity_invalid")
             for value in (usage.input_tokens, usage.output_tokens):
@@ -817,7 +878,9 @@ class ImageDescriptionStore:
                 else "blocked"
             )
             codes = (
-                (cost_code,)
+                tuple(filter(None, (result.error_code, cost_code)))
+                if unreceipted_transport_failure
+                else (cost_code,)
                 if cost_code
                 else decision.codes
                 if decision.storable
@@ -852,6 +915,17 @@ class ImageDescriptionStore:
                         list(decision.uncertainty),
                     ),
                 )
+                self._project(
+                    cur, job, result,
+                    kind="description",
+                    revision_id=revision_id,
+                    status=decision.index_status,
+                    body=" ".join(
+                        part for part in (decision.description, " ".join(decision.tags)) if part
+                    ),
+                    uncertainty=decision.uncertainty,
+                )
+                self._publish_transcript(cur, job, scope, result, revision_id)
             if cost_code:
                 # 한 건만 막고 다음 사진을 또 보내면 「무료라서 켠 기능」이 계속 과금된다.
                 # 사람이 카탈로그를 다시 검증하기 전까지 같은 모델을 fail-closed 한다.
@@ -869,7 +943,7 @@ class ImageDescriptionStore:
                 (
                     state,
                     ",".join(codes),
-                    usage.model or None,
+                    usage.model if usage.provider else None,
                     usage.provider or None,
                     usage.input_tokens,
                     usage.output_tokens,
@@ -878,6 +952,95 @@ class ImageDescriptionStore:
                 ),
             )
             return revision_id
+
+    @staticmethod
+    def _publish_transcript(cur, job, scope, result: ImageDescription, description_id: str) -> str:
+        """같은 호출의 **OCR 전사**를 설명과 다른 표·라벨로 저장한다 (B-81 후속).
+
+        설명이 저장될 때만 부른다 — 설명이 규칙 위반으로 막힌 응답의 전사는 믿을 근거가
+        없다. 전사는 마스킹 뒤 최종 관문을 지난 줄만 들어간다(`guard_transcript`).
+        provenance 는 설명과 같은 job·원본 좌표·provider/model/prompt 판을 그대로 문다.
+        """
+        decision = guard_transcript(result.transcript)
+        if not decision.storable:
+            return ""
+        transcript_id = uuid4().hex
+        identity = hashlib.sha256(
+            (str(job["identity_sha256"]) + ":transcript").encode("utf-8")
+        ).hexdigest()
+        cur.execute(
+            """INSERT INTO archiver_image_transcript_revision
+            (id,identity_sha256,job_id,description_revision_id,workspace,channel_id,file_id,
+             original_sha256,image_sha256,prompt_revision,model,provider,status,body,
+             line_count,masked_count,uncertainty,guard_codes)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                transcript_id,
+                identity,
+                job["id"],
+                description_id,
+                result.workspace,
+                result.channel,
+                result.file_id,
+                result.original_sha256,
+                scope["image_sha256"],
+                result.prompt_revision,
+                job["catalog_snapshot"]["model"],
+                job["catalog_snapshot"]["provider"],
+                decision.status,
+                decision.body,
+                decision.line_count,
+                decision.masked_count,
+                list(decision.uncertainty),
+                list(decision.codes),
+            ),
+        )
+        ImageDescriptionStore._project(
+            cur, job, result,
+            kind="transcript",
+            revision_id=transcript_id,
+            status=decision.status,
+            body=decision.body,
+            uncertainty=decision.uncertainty,
+        )
+        return transcript_id
+
+    @staticmethod
+    def _project(cur, job, result: ImageDescription, *, kind: str, revision_id: str,
+                 status: str, body: str, uncertainty) -> None:
+        """Master 가 읽는 **검색 투영**에 한 줄을 더한다 (B-81 후속).
+
+        Vision 원장(job·scope·카탈로그)은 Master 에 열지 않는다. 여기 들어가는 것은
+        안전 판정을 이미 지난 검색 텍스트와 원본 좌표·provenance 뿐이다. 설명이 보류돼
+        태그도 없으면 넣지 않는다 — 찾을 말이 없는 줄은 검색에 쓸모가 없다.
+        """
+        from .image_transcript import LABEL as TRANSCRIPT_LABEL
+
+        text = (body or "").strip()
+        if not text:
+            return
+        cur.execute(
+            """INSERT INTO image_search_entry
+            (id,kind,revision_id,workspace,channel_id,file_id,original_sha256,provider,
+             model,prompt_revision,status,label,body,uncertainty)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                uuid4().hex,
+                kind,
+                revision_id,
+                result.workspace,
+                result.channel,
+                result.file_id,
+                result.original_sha256,
+                job["catalog_snapshot"]["provider"],
+                job["catalog_snapshot"]["model"],
+                result.prompt_revision,
+                status,
+                "[AI 이미지 설명·검색용]" if kind == "description" else TRANSCRIPT_LABEL,
+                text,
+                list(uncertainty),
+            ),
+        )
 
     def mark_unknown(self, job_id: str, *, code: str = "result_unknown") -> None:
         if not re.fullmatch(r"[a-z0-9_]+", code or ""):

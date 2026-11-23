@@ -53,7 +53,6 @@ def test_every_verified_condition_is_required() -> None:
         (_entry(verified_at=None), "verification_missing"),
         (_entry(verification_revision=""), "verification_missing"),
         (_entry(verified_at=NOW - timedelta(days=2)), "verification_stale"),
-        (_entry(max_sensitivity=Sensitivity.PUBLIC), "sensitivity_not_allowed"),
         (_entry(allowed_regions=frozenset({"us"})), "region_not_allowed"),
         (_entry(credential_ready=False), "credential_not_ready"),
         (_entry(quota_state=FreeQuotaState.UNKNOWN), "quota_unknown"),
@@ -63,6 +62,23 @@ def test_every_verified_condition_is_required() -> None:
     ]
     for entry, blocker in cases:
         assert blocker in _decision(entry).blockers
+
+
+def test_general_business_documents_are_not_blocked_by_label_mismatch() -> None:
+    """오너 결정(2026-11-19): public·internal 은 같은 일반 업무 단계다(`vision_sensitivity`)."""
+    assert _decision(_entry(max_sensitivity=Sensitivity.PUBLIC)).eligible
+
+
+def test_confidential_documents_stay_blocked_on_a_general_business_catalog() -> None:
+    for catalog_max in (Sensitivity.PUBLIC, Sensitivity.INTERNAL):
+        decision = evaluate_free_vision_model(
+            _entry(max_sensitivity=catalog_max),
+            sensitivity=Sensitivity.CONFIDENTIAL,
+            region="kr",
+            now=NOW,
+            verification_ttl=TTL,
+        )
+        assert "sensitivity_not_allowed" in decision.blockers
 
 
 def test_a_fully_verified_entry_is_eligible() -> None:

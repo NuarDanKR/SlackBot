@@ -34,6 +34,11 @@ def _blocked(command: str) -> bool:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        # Windows Git may write localized diagnostics in the active OEM code
+        # page even though the Python hook itself writes UTF-8.  The test only
+        # needs the exit code, so an undecodable diagnostic must not escape a
+        # subprocess reader thread and poison the following pytest item.
+        errors="replace",
     )
     return done.returncode != 0
 

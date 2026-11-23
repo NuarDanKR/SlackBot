@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { DateRangeFilter, periodLabel } from '../components/DateRangeFilter'
 import { Chip, Empty, Failed, Loading, PageHead, Section, fmt } from '../components/primitives'
 import { withQuery } from '../navigation'
@@ -83,7 +85,82 @@ export function AnswerRecords({
         </div>
       </div>
     </Section>
+
+    {user.role === 'admin' && (workspace
+      ? <FactCorrectionsSection key={workspace} workspace={workspace} />
+      : <Section title="사람이 남긴 정정" note="워크스페이스를 지정하면 보입니다"><p className="hint">위 「원본 찾기」 에서 워크스페이스를 정하고 조회하면 그 워크스페이스의 정정 목록과 철회 버튼이 나옵니다.</p></Section>)}
   </>
+}
+
+interface FactCorrectionRow {
+  id: number
+  correctorId: string
+  correctorName: string
+  subject: string
+  before: string
+  after: string
+  body: string
+  channelId: string
+  createdAt: string | null
+  expiresAt: string | null
+  showCount: number
+  revokedAt: string | null
+  revokedBy: string
+  revokeReason: string
+}
+
+/** 사람이 남긴 사실 정정. 원문 권한자 모두의 답변에 이름과 함께 붙으므로 관리자가 철회할 수 있어야 한다. */
+function FactCorrectionsSection({ workspace }: { workspace: string }) {
+  const list = useResource<{ workspace: string; corrections: FactCorrectionRow[] }>(`/api/fact-corrections?workspace=${encodeURIComponent(workspace)}`, [workspace])
+  const [target, setTarget] = useState<FactCorrectionRow | null>(null)
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function revoke() {
+    if (!target) return
+    setBusy(true)
+    setError('')
+    try {
+      await api.post(`/api/fact-corrections/${target.id}/revoke`, { workspace, reason: reason.trim() })
+      setTarget(null)
+      setReason('')
+      list.reload()
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const note = '원문을 지금 볼 수 있는 사람의 관련 답변 끝에 「정정자 · 날짜 · 전 → 후」 로 붙습니다. 원문은 바뀌지 않습니다.'
+  if (list.loading && !list.data) return <Section title="사람이 남긴 정정" note={note}><Loading what="정정 목록을" /></Section>
+  if (list.error || !list.data) return <Section title="사람이 남긴 정정" note={note}><Failed what="정정 목록을" detail={list.error?.message ?? '응답이 없습니다.'} onRetry={list.reload} /></Section>
+  const rows = list.data.corrections
+  return <Section title="사람이 남긴 정정" note={note}>
+    {error && <div className="notice bad"><div><div className="notice-title">철회하지 못했습니다</div><div className="notice-detail">{error}</div></div></div>}
+    {rows.length === 0 ? <Empty title="남겨진 정정이 없습니다" note="Slack 에서 「15억이 아니라 12억」 처럼 무엇에서 무엇으로 바뀌었는지 말하면 생깁니다." /> :
+      <div className="table-wrap"><table className="table">
+        <thead><tr><th>상태</th><th>정정자 · 날짜</th><th>무엇을</th><th>전 → 후</th><th>표시</th><th></th></tr></thead>
+        <tbody>{rows.map((row) => <tr key={row.id}>
+          <td>{row.revokedAt ? <Chip tone="plain">철회</Chip> : <Chip tone="ok">표시 중</Chip>}</td>
+          <td>{row.correctorName || row.correctorId}<div className="hint">{row.createdAt ? fmt.dayClock(row.createdAt) : '-'}</div></td>
+          <td>{row.subject || '-'}<div className="hint">{row.body}</div></td>
+          <td className="mono">{row.before} → {row.after}</td>
+          <td>{row.showCount}회{row.revokedAt && <div className="hint">{row.revokedBy} · {row.revokeReason}</div>}</td>
+          <td>{!row.revokedAt && <button className="btn btn-sm btn-quiet" type="button" onClick={() => { setTarget(row); setReason(''); setError('') }}>철회</button>}</td>
+        </tr>)}</tbody>
+      </table></div>}
+    <ConfirmDialog open={target !== null}
+      title="이 정정을 철회할까요?"
+      detail={target ? `${target.correctorName || target.correctorId} 님의 정정 「${target.before} → ${target.after}」 이 다음 답변부터 표시되지 않습니다. 기록은 지우지 않고 실행자·사유를 남깁니다.` : ''}
+      confirmLabel="철회" busy={busy || !reason.trim()}
+      onCancel={() => setTarget(null)}
+      onConfirm={() => { void revoke() }}>
+      <div className="field"><label className="field-label" htmlFor="fact-correction-reason">철회 사유 (감사 기록, 필수)</label>
+        <input id="fact-correction-reason" className="input" maxLength={300} value={reason} onChange={(event) => setReason(event.target.value)} /></div>
+    </ConfirmDialog>
+  </Section>
 }
 
 function RecordDetail({ item }: { item: AnswerRecordDetail }) {

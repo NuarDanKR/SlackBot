@@ -1036,13 +1036,50 @@ def can_convert(filetype: str) -> bool:
     HWP 는 지정된 변환 앱(rhwp)이 있으면 **TYBot 이 변환하지 않는다** — 앱이 올린
     PDF 가 원문 첨부로 들어온다(2026-11-09 오너 결정). 수집·소급 변환·재처리 큐·
     질문 첨부가 모두 이 함수로 판정하므로 여기 한 곳에서 막는다.
+
+    위임 상태를 **모를 때도** 변환하지 않는다(B-89 후속). DB 가 안 보이는 순간을
+    「꺼짐」 으로 읽으면 같은 문서가 rhwp PDF 와 두 벌의 근거가 된다.
     """
     kind = filetype.lower()
-    if kind not in _HANDLERS:
+    if not has_handler(kind):
         return False
-    from .converter_bots import DELEGATED_TYPES, conversion_delegated
+    from .converter_bots import direct_conversion_allowed
 
-    return not (kind in DELEGATED_TYPES and conversion_delegated())
+    return direct_conversion_allowed(kind)
+
+
+def has_handler(filetype: str) -> bool:
+    """이 형식의 변환기가 있는가. **정책은 보지 않는다** — 격리 변환 워커용.
+
+    워커는 DB 에 닿지 않는 별도 계정이다. 정책 판정은 작업을 넘기는 쪽
+    (`convert`)이 이미 했다. 워커가 다시 판정하면 DB 가 없어 늘 「모름」 이 된다.
+    """
+    return str(filetype or "").lower() in _HANDLERS
+
+
+def _require_direct_conversion(filetype: str) -> None:
+    """위임 대상(HWP/HWPX)을 직접 변환해도 되는지 **변환 입구에서** 한 번 더 본다.
+
+    `can_convert` 만으로는 재처리 큐·소급 스크립트처럼 그 판정을 거치지 않고 바로
+    `convert` 를 부르는 경로를 막지 못한다. 막힌 작업은 큐에서 `held` 로 남는다 —
+    파일 문제가 아니라 정책 확인이 필요한 일이다.
+    """
+    from .converter_bots import (
+        DELEGATED_CODE,
+        POLICY_UNKNOWN_CODE,
+        delegation_state,
+        direct_conversion_allowed,
+    )
+
+    if direct_conversion_allowed(filetype):
+        return
+    on = delegation_state() == "on"
+    code = DELEGATED_CODE if on else POLICY_UNKNOWN_CODE
+    detail = (
+        "변환 앱(rhwp)에 위임된 형식이라 직접 변환하지 않습니다"
+        if on else "변환 정책(rhwp 위임 여부)을 확인할 수 없어 직접 변환하지 않습니다"
+    )
+    raise ConvertError(detail) from ExternalConversionError(detail, code=code, retryable=False)
 
 
 def convert(filetype: str, data: bytes) -> list[str]:
@@ -1050,6 +1087,7 @@ def convert(filetype: str, data: bytes) -> list[str]:
     fn = _HANDLERS.get(filetype.lower())
     if fn is None:
         raise ConvertError(f"'{filetype}' 은 변환 대상이 아니다")
+    _require_direct_conversion(filetype)
     if not data:
         raise ConvertError("빈 파일")
     if os.getenv("TYBOT_CONVERT_SPOOL"):

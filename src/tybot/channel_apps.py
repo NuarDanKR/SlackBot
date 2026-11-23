@@ -79,12 +79,14 @@ MEMBERS_UNREADABLE = "members_unreadable"
 APP_ID_UNRESOLVED = "app_id_unresolved"
 EXTERNAL_RPC = "external_rpc"
 DELEGATION_OFF = "delegation_off"
+#: rhwp 위임 여부를 모른다(변환 정책 DB 를 못 읽었거나 값이 틀렸다). B-89 후속.
+POLICY_UNKNOWN = "policy_unknown"
 MEMBER = "member"
 ABSENT = "absent"
 
 CODES = frozenset({
     BINDING_MISSING, DB_UNREADABLE, BINDING_DISABLED, IDENTITY_UNVERIFIED, MEMBERS_UNREADABLE,
-    APP_ID_UNRESOLVED, EXTERNAL_RPC, DELEGATION_OFF, MEMBER, ABSENT,
+    APP_ID_UNRESOLVED, EXTERNAL_RPC, DELEGATION_OFF, POLICY_UNKNOWN, MEMBER, ABSENT,
 })
 
 MARKS = {JOINED: "✅", NOT_INVITED: "❌", UNKNOWN: "❓", NOT_APPLICABLE: "➖"}
@@ -189,7 +191,8 @@ def evaluate_one(binding: AppBinding, facts: ChannelAppFacts) -> AppStatus:
         )
         return _unknown(
             binding, code, detail,
-            "콘솔 > 봇 연결에서 토큰을 넣고 신원 확인을 하세요.",
+            binding.invite_hint if code == POLICY_UNKNOWN
+            else "콘솔 > 봇 연결에서 토큰을 넣고 신원 확인을 하세요.",
         )
     needs_app_ids = bool(binding.app_ids) and not binding.bot_user_ids
     if facts.member_ids is None:
@@ -319,13 +322,23 @@ def binding_from_connection(role: str, row: Mapping | None) -> AppBinding:
     )
 
 
-def converter_binding(app_ids: Iterable[str], *, delegated: bool) -> AppBinding:
+def converter_binding(app_ids: Iterable[str], *, delegated: bool | None) -> AppBinding:
     """변환 앱. **HWP 위임이 켜져 있을 때만 필수다.**
 
     끄고 쓰는 워크스페이스에서 이 줄이 빨강이면, 고칠 것이 없는 경고가 매번
     보인다. 그런 경고는 몇 번 지나면 옆의 진짜 경고까지 같이 무시된다.
+
+    `delegated=None` 은 **위임 여부를 모른다**는 뜻이다(변환 정책 DB 를 못 읽음).
+    그동안 TYBot 은 HWP 를 직접 변환하지 않으므로 「해당 없음」 이 아니라
+    「확인 불가」 다.
     """
     ids = frozenset(str(value).strip().upper() for value in app_ids if str(value).strip())
+    if delegated is None:
+        return AppBinding(
+            role=RHWP, missing_code=POLICY_UNKNOWN,
+            invite_hint="콘솔 > 환경변수 설정 > 변환 정책에서 rhwp 위임 상태를 확인하세요.",
+            note="변환 정책을 읽지 못해 rhwp 위임 여부를 알 수 없습니다. HWP 직접 변환을 멈춘 상태입니다.",
+        )
     if not delegated:
         return AppBinding(
             role=RHWP, required=False, missing_code=DELEGATION_OFF,
@@ -389,6 +402,7 @@ __all__ = [
     "MEMBERS_UNREADABLE",
     "NOT_APPLICABLE",
     "NOT_INVITED",
+    "POLICY_UNKNOWN",
     "RHWP",
     "ROLES",
     "STATES",

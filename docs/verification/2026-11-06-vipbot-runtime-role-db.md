@@ -1,5 +1,8 @@
 # VIPBot runtime role DB verification
 
+> **Retired standalone-runtime record (2026-11-12).** VIPBot now runs only as
+> a branch of `tybot.service`; the steps below are historical, not deployment instructions.
+
 Date: 2026-11-06
 
 ## Result

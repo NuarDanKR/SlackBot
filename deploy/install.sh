@@ -501,6 +501,15 @@ if [[ "${WITH_CONSOLE:-0}" == "1" && ! -f "$WS_KEY_FILE" ]]; then
     | install -o tybot -g tybot -m 0400 /dev/stdin "$WS_KEY_FILE"
   echo "  → 워크스페이스 암호화 키 생성: $WS_KEY_FILE (백업 대상입니다)"
 fi
+# B-81 Vision provider 자격 **전용** 키. 워크스페이스 키와 나눈다 — Vision worker 가 Slack
+# 토큰 암호문을 풀 수 있는 키를 들고 돌지 않게(2026-11-12 보안 리뷰). 역시 덮지 않는다.
+VISION_KEY_FILE="$CONF_DIR/vision-provider-secret.key"
+if [[ ! -f "$VISION_KEY_FILE" ]]; then
+  "$APP_DIR/.venv/bin/python" \
+    -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" \
+    | install -o tybot -g tybot -m 0400 /dev/stdin "$VISION_KEY_FILE"
+  echo "  → Vision provider 자격 키 생성: $VISION_KEY_FILE (백업 대상입니다)"
+fi
 if [[ "${WITH_CONSOLE:-0}" == "1" ]] \
    && ! grep -qE "^WORKSPACE_SECRET_KEY(_FILE)?=.+" "$CONF_DIR/tybot.env"; then
   sed -i -E "/^WORKSPACE_SECRET_KEY_FILE=[[:space:]]*$/d" "$CONF_DIR/tybot.env"
@@ -509,29 +518,13 @@ if [[ "${WITH_CONSOLE:-0}" == "1" ]] \
 fi
 
 install -m 0644 "$APP_DIR/deploy/tybot.service" /etc/systemd/system/tybot.service
-# VIPBOT_STAGE:BEGIN
-# VIPBot is staged only on an explicit operator request. Staging installs the
-# static unit and non-secret settings template, but never starts or enables the
-# process and never creates credentials. Existing settings are preserved.
-if [[ "${WITH_VIPBOT:-0}" == "1" ]]; then
-  install -m 0644 "$APP_DIR/deploy/tybot-vipbot.service" /etc/systemd/system/tybot-vipbot.service
-  if [[ ! -f "$CONF_DIR/tybot-vipbot.conf" ]]; then
-    install -o root -g tybot -m 0640 \
-      "$APP_DIR/deploy/tybot-vipbot.conf.example" "$CONF_DIR/tybot-vipbot.conf"
-    echo "  → VIPBot 비시크릿 설정 본보기 생성: $CONF_DIR/tybot-vipbot.conf"
-  else
-    echo "  → $CONF_DIR/tybot-vipbot.conf 이미 존재 — 값을 건드리지 않음."
-  fi
-  echo "  → VIPBot 준비 설치 완료 — readiness 통과 전에는 start/enable 하지 않습니다."
-fi
-# VIPBOT_STAGE:END
 # 타이머는 파일만 배치한다. enable은 운영자가 직접 하거나 관리자 콘솔의 배치 관리에서 결정한다.
 #
 # 다만 **꺼져 있다는 사실을 아무도 모르는 것**이 실제 문제였다. 타이머가 안 켜져 있으면
 # 일정 동기화·DM 알림·백필이 통째로 돌지 않는데, 오류가 나지 않으니 몇 주가 지나도
 # 모른다. 그래서 설치 끝에 어떤 것이 꺼져 있는지 이름을 대고 알린다.
 install -d -o tybot -g tybot -m 0700 "$DATA_DIR/file-audit"
-TIMERS=(tybot-update tybot-collect tybot-tidy tybot-index tybot-schedule-sync tybot-schedule-reconcile tybot-schedule-dm tybot-review-dm tybot-convert-retry tybot-convert-nightly tybot-convert-alert tybot-account-sync tybot-file-audit tybot-embedding-index)
+TIMERS=(tybot-update tybot-collect tybot-tidy tybot-index tybot-schedule-sync tybot-schedule-reconcile tybot-schedule-dm tybot-review-dm tybot-convert-retry tybot-convert-nightly tybot-convert-alert tybot-account-sync tybot-file-audit tybot-embedding-index tybot-channel-digest)
 for u in "${TIMERS[@]}"; do
   install -m 0644 "$APP_DIR/deploy/$u.service" "/etc/systemd/system/$u.service"
   install -m 0644 "$APP_DIR/deploy/$u.timer"   "/etc/systemd/system/$u.timer"
@@ -544,8 +537,16 @@ install -m 0644 "$APP_DIR/deploy/hermes-privacy-manifest@.timer" /etc/systemd/sy
 # B-81 is installed disabled. Enabling an instance requires a dedicated DB
 # credential, an approved workspace policy, catalog verification and approvals.
 install -d -o tybot -g tybot -m 0700 "$DATA_DIR/image-description"
+# B-94: the worker writes completion notices here and the Archiver drains them.
+# Both units list it in ReadWritePaths; systemd refuses to start (226/NAMESPACE)
+# when a listed directory is missing.
+install -d -o tybot -g tybot -m 0700 "$DATA_DIR/image-description-notify"
 install -m 0644 "$APP_DIR/deploy/tybot-image-description@.service" /etc/systemd/system/tybot-image-description@.service
 install -m 0644 "$APP_DIR/deploy/tybot-image-description@.timer" /etc/systemd/system/tybot-image-description@.timer
+# B-99: the Archiver unit was never refreshed by this installer, so a code update
+# ran under an old unit whose ReadWritePaths lacked the notice outbox (2026-11-20).
+# Installed, not enabled: running instances pick it up on their next restart.
+install -m 0644 "$APP_DIR/deploy/tybot-archiving-shadow@.service" /etc/systemd/system/tybot-archiving-shadow@.service
 install -d -m 0755 /usr/local/libexec
 install -o root -g root -m 0755 "$APP_DIR/deploy/hermes-archiver-run" /usr/local/libexec/hermes-archiver-run
 install -o root -g root -m 0644 "$APP_DIR/deploy/hermes-bot-locks.conf" /etc/tmpfiles.d/hermes-bot-locks.conf

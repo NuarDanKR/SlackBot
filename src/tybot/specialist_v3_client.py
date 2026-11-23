@@ -55,6 +55,7 @@ def call(
     registry: ToolSessionRegistry,
     allow: tuple[str, ...] = wire.DEFAULT_TOOLS,
     deadline_ms: int = wire.DEADLINE_MS,
+    model: str = "",
 ) -> CallOutcome:
     """Call once and revoke the request authority on every exit path."""
     started = time.monotonic()
@@ -74,6 +75,7 @@ def call(
         allow=allow,
         request_id=request_id,
         deadline_ms=deadline_ms,
+        model=model,
     )
     try:
         body = request.body()
@@ -153,6 +155,7 @@ class ExternalV3Adapter:
         credential_id: str,
         registry: ToolSessionRegistry,
         transport: Transport | None = None,
+        model: str = "",
     ) -> None:
         from .specialist_tools import Touched
 
@@ -164,6 +167,8 @@ class ExternalV3Adapter:
         self.credential_id = credential_id
         self.registry = registry
         self.transport = transport or transport_for(key, workspace)
+        # 호출자 등급의 모델(TYBot=Sonnet, VIPBot=Opus). 비면 Hermes 기본 모델.
+        self.model = model
         self.touched = Touched()
         self.budget = toolbox.budget
         self.last_model = f"external:{key}"
@@ -203,6 +208,7 @@ class ExternalV3Adapter:
             credential_id=self.credential_id,
             registry=self.registry,
             allow=allow,
+            model=self.model,
             # Return before execute() reaches the same outer deadline. This
             # leaves time for result propagation and best-effort cancellation.
             deadline_ms=max(1, int((remaining - RETURN_RESERVE_SECONDS) * 1000)),
