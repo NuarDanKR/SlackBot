@@ -213,3 +213,46 @@ def test_enabled_policy_uses_the_exact_scoped_provider_key(monkeypatch, tmp_path
     )
 
     assert seen == {"provider": "openai", "api_key": "db-secret-for-openai"}
+
+
+def test_target_reader_selects_only_the_exact_channel_and_file(monkeypatch, tmp_path):
+    wanted = SimpleNamespace(channel_id="C0C9A86JUSJ", file_id="F0CKWK89XC3")
+    same_file_other_channel = SimpleNamespace(
+        channel_id="C0OTHER1234", file_id="F0CKWK89XC3"
+    )
+    same_channel_other_file = SimpleNamespace(
+        channel_id="C0C9A86JUSJ", file_id="F0OTHER1234"
+    )
+    monkeypatch.setattr(
+        job,
+        "all_revisions",
+        lambda _root: [same_file_other_channel, wanted, same_channel_other_file],
+    )
+
+    selected = job._target_revisions("C0C9A86JUSJ", "F0CKWK89XC3")(tmp_path)
+
+    assert selected == [wanted]
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "file_id"),
+    [
+        ("C0C9A86JUSJ", ""),
+        ("", "F0CKWK89XC3"),
+        ("not-a-channel", "F0CKWK89XC3"),
+        ("C0C9A86JUSJ", "not-a-file"),
+    ],
+)
+def test_main_rejects_incomplete_or_invalid_exact_target(channel_id, file_id):
+    argv = ["--workspace", "tyit"]
+    if channel_id:
+        argv.extend(("--channel-id", channel_id))
+    if file_id:
+        argv.extend(("--file-id", file_id))
+
+    assert job.main(argv) == 2
+
+
+def test_target_reader_rejects_invalid_slack_coordinates():
+    with pytest.raises(RuntimeError, match="runtime_config_invalid"):
+        job._target_revisions("../C0C9A86JUSJ", "F0CKWK89XC3")

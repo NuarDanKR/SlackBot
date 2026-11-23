@@ -28,6 +28,8 @@ from .image_description_store import ImageDescriptionStore
 from .vision_sensitivity import request_sensitivity
 
 _WORKSPACE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_CHANNEL_ID = re.compile(r"^[CDG][A-Z0-9]{8,31}$")
+_FILE_ID = re.compile(r"^F[A-Z0-9]{8,31}$")
 log = logging.getLogger("tybot.archive.image_description_job")
 _SAFE_CODES = {
     "runtime_busy",
@@ -183,10 +185,27 @@ def run_once(
     return _summary(workspace, policy.revision, batch)
 
 
+def _target_revisions(channel_id: str, file_id: str):
+    """Return an archive reader restricted to one exact Slack attachment."""
+    if not _CHANNEL_ID.fullmatch(channel_id) or not _FILE_ID.fullmatch(file_id):
+        raise RuntimeError("runtime_config_invalid")
+
+    def selected(root: Path | str):
+        return [
+            revision
+            for revision in all_revisions(root)
+            if revision.channel_id == channel_id and revision.file_id == file_id
+        ]
+
+    return selected
+
+
 def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one B-81 image-description batch")
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--channel-id", default="")
+    parser.add_argument("--file-id", default="")
     return parser.parse_args(argv)
 
 
@@ -194,6 +213,14 @@ def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
     workspace = args.workspace.strip().lower()
     if not _WORKSPACE.fullmatch(workspace):
+        return 2
+    channel_id = args.channel_id.strip().upper()
+    file_id = args.file_id.strip().upper()
+    if bool(channel_id) != bool(file_id):
+        return 2
+    if channel_id and (
+        not _CHANNEL_ID.fullmatch(channel_id) or not _FILE_ID.fullmatch(file_id)
+    ):
         return 2
     root = state_dir()
     code = ""
@@ -207,12 +234,16 @@ def main(argv: list[str] | None = None) -> int:
         lock = instance_lock(f"image-description-{workspace}", dsn=dsn)
         lock.acquire()
         try:
+            run_options = {}
+            if channel_id:
+                run_options["revisions"] = _target_revisions(channel_id, file_id)
             status = run_once(
                 workspace,
                 dsn=dsn,
                 archive_root=archive,
                 runtime_root=root,
                 limit=args.limit,
+                **run_options,
             )
         finally:
             lock.release()
