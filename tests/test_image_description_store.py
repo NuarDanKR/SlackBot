@@ -160,6 +160,9 @@ def test_dispatch_identity_ignores_only_a_policy_resave() -> None:
         ("model", "other"),
     ):
         assert dispatch_identity(SCOPE) != dispatch_identity(SCOPE | {key: value})
+    assert dispatch_identity(SCOPE, max_output_tokens=256) != dispatch_identity(
+        SCOPE, max_output_tokens=4096
+    )
 
 
 def test_missing_fresh_checks_are_fail_closed() -> None:
