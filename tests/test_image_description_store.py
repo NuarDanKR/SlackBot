@@ -11,6 +11,7 @@ import pytest
 from tybot.archive.image_description import (
     ERROR_MODEL_ERROR,
     ERROR_MODEL_TIMEOUT,
+    ERROR_TRUNCATED,
     PROMPT_REVISION,
     STATUS_DESCRIBED,
     STATUS_FAILED,
@@ -504,6 +505,21 @@ def test_a_transport_failure_without_a_provider_receipt_is_terminal_and_disables
     assert job_update[1][2:4] == (None, None)
     catalog_update = next(event for event in _updates(connection) if "model_catalog" in event[0])
     assert catalog_update[1] == ("approved-provider", "free-vision-v1")
+
+
+def test_a_receipted_parse_failure_keeps_its_specific_error_code() -> None:
+    connection = ScriptedConnection([GLOBAL, JOB])
+    result = _result(
+        status=STATUS_FAILED,
+        description="",
+        tags=(),
+        error_code=ERROR_TRUNCATED,
+    )
+
+    assert ImageDescriptionStore(connection).finish_and_publish("job-1", result) == ""
+    assert not _inserts(connection)
+    job_update = next(event for event in _updates(connection) if "description_job" in event[0])
+    assert job_update[1][0:2] == ("failed", "truncated_output,status_failed")
 
 
 def test_a_result_from_an_unapproved_identity_is_never_published() -> None:

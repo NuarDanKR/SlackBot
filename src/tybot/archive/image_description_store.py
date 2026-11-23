@@ -882,6 +882,10 @@ class ImageDescriptionStore:
                 if unreceipted_transport_failure
                 else (cost_code,)
                 if cost_code
+                else tuple(
+                    dict.fromkeys(filter(None, (result.error_code, *decision.codes)))
+                )
+                if result.status == STATUS_FAILED
                 else decision.codes
                 if decision.storable
                 else decision.codes or ((result.error_code or "unsafe_output"),)
