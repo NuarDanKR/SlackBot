@@ -162,11 +162,23 @@ class Selection:
 
 
 def _sort_key(doc: AttachmentDoc) -> tuple:
-    """**입력 순서에 기대지 않는다.** 같은 입력이면 같은 배치가 나와야 한다."""
+    """Newest unprocessed images first, with a stable tie-breaker.
+
+    Local OCR is available as soon as an attachment is archived, whereas the
+    Vision worker is asynchronous.  Processing an old backlog first leaves a
+    newly uploaded table answerable only from lossy OCR for many timer runs.
+    Give the newest source priority so the Vision transcript becomes the
+    authoritative image evidence promptly; file id/revision keep equal-time
+    inputs deterministic.
+    """
+    stamp = doc.converted_at or doc.staged_at or ""
     return (
+        # ISO-8601 timestamps sort lexically.  Invert code points rather than
+        # parsing mixed legacy timestamp formats; this gives descending order
+        # without making an unparsable legacy value fatal to the batch.
+        "".join(chr(0x10FFFF - ord(char)) for char in stamp),
         doc.workspace or "",
         doc.channel_id or "",
-        doc.converted_at or doc.staged_at or "",
         doc.file_id or "",
         doc.revision or "",
     )
