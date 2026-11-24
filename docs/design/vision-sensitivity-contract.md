@@ -17,6 +17,18 @@
 > - 페이지별 중복 호출·재청구 방지
 > - provider 오류 시 자동 재시도 금지
 
+### B-81 이미지 예외 (2026-11-20 오너 결정)
+
+Archiver가 정본으로 수집한 PNG/JPEG/WebP 이미지는 사진 속 PII의 외부 전송 전
+판별·가림이나 파일별 clearance/approval 없이, 운영자가 켠 Vision 정책에 따라 승인된
+Google 모델로 전송할 수 있다. 아래 표의 `pii_blocked` 사전 판정은 **B-80 PDF 페이지와
+그 밖의 문서에는 유지**되지만 B-81 이미지 worker의 호출 조건에서는 제거한다.
+
+폐지한 것은 전송 전 PII 관문뿐이다. 현재 ACL·정본 좌표와 원본 해시·봇 출력 제외·무료
+모델 및 quota 확인·원본 불변·중복 호출 방지는 유지한다. 반환된 설명·OCR 텍스트는 저장과
+전달 전에 기존 마스커와 출력 가드를 통과해야 하며 얼굴 신원 식별과 차량번호 전사는
+계속 금지한다. 자동 처리를 `pii_cleared=true`인 사람 검토처럼 기록해서는 안 된다.
+
 ## 왜 바꾸나
 
 전에는 정책이 `internal` 이고 모델 카탈로그가 `public` 이면 `sensitivity_not_allowed` 로
@@ -45,7 +57,7 @@
 
 | 방어 | 자리 |
 |---|---|
-| PII·민감 문서 | `pii_blocked` 사전 판정, `pii_screen`, 문서 자체가 민감물인 격리 |
+| PII·민감 문서 | B-80 문서에는 `pii_blocked` 사전 판정·격리를 유지한다. B-81 이미지는 2026-11-20 예외로 전송 전 판정을 하지 않고 반환 텍스트의 `pii_screen`·마스킹만 유지한다 |
 | OCR 불완전 ≠ 안전 | 로컬 OCR 실패·부분 성공은 전송 승인도 PII 안전 증명도 아니다(B-80) |
 | 원본 불변 · 파생 전사 | 결과는 별도 revision. 원문 MD 를 고치지 않는다 |
 | 중복 호출·재청구 | 원장 `identity_sha256` UNIQUE(B-80 `archiver_vision_job`, B-81 `archiver_image_description_job`) |
