@@ -21,10 +21,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="write to the destination; without this flag the command is read-only",
     )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="RELATIVE_PATH",
+        help=(
+            "leave a reviewed item in quarantine (path relative to the source "
+            "workspaces dir, e.g. civil/dm/USLACK); repeatable"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         report = promote(
-            args.source_workspaces, args.destination, apply=args.apply
+            args.source_workspaces,
+            args.destination,
+            apply=args.apply,
+            exclude=args.exclude,
         )
     except LegacyPromotionError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
