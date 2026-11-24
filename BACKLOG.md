@@ -209,6 +209,17 @@ B-98 이행 도구로 병합할 대상이다. 서버 유닛이 옛 판이라 `Re
 `/var/lib/tybot/image-description-notify` 가 없어 B-94 알림이 조용히 실패했다 → 저장소
 유닛을 다시 설치.
 
+**재발(2026-11-24 확인).** 1단계 코드가 서버에 들어가기 전인 11-23 07:27(archi `channels/…/raw`)과
+13:09(tyit `channels/…/raw`·`attachments/<fid>/…md`)에 옛 코드가 `workspaces/` 를 다시 만들었다.
+모양으로 보아 Master 채널 쓰기(소유 기록 없음 허용, B)와 변환 재처리의 옛 배치 분기(C)다.
+archi Archiver 가 기동 거부로 재시작을 반복했다. 3개 파일을
+`/var/lib/tybot/archive-legacy-quarantine-20261124/workspaces` 로 **이동**(삭제 없음, B-98 병합 대상)하고
+archi 를 재시작해 복구했다. 같은 날 배포(`31e3a07`)로 1·2단계 코드가 깔렸다 — 다음에 다시
+생기면 아직 막지 못한 쓰기 경로가 있다는 뜻이다.
+
+**배포 순서 주의.** 콘솔 배포는 **이미 깔린** `/opt/tybot/deploy/update.sh` 를 실행한다. 그래서
+`update.sh` 에 넣은 Archiver 유닛 전환은 그것을 깐 배포가 아니라 **그다음 배포**에서 돈다.
+
 **오너 결정(2026-11-20).** 섀도는 없앤다. 「옛 writer 가 정본이고 Archiver 는 비교용」 인
 구조가 남아 있는 한 두 쓰기 경로가 서로를 죽인다.
 
