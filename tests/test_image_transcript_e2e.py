@@ -535,13 +535,42 @@ def test_end_to_end_a_photo_found_by_its_ai_description_reopens_original_lines(t
     assert DESCRIPTION not in joined and "[AI " not in joined  # 설명 문장은 근거가 아니다
 
 
-def test_end_to_end_the_ai_transcript_finds_text_and_the_answer_cites_the_original(tmp_path):
+def test_end_to_end_the_ai_transcript_is_answer_evidence_and_cites_the_original(tmp_path):
     store, conn = _end_to_end(tmp_path)
     hits = image_guide.expand(store, _ctx(), "현장소장 연락처", conn=conn)
     assert hits
     assert all("010-1234-5678" not in hit.line.text for hit in hits)
-    assert all("[AI " not in hit.line.text for hit in hits)
+    assert any(image_guide.VISION_TRANSCRIPT_LABEL in hit.line.text for hit in hits)
+    assert all(hit.line.lineno < 0 for hit in hits)  # not the physical local-OCR line
     assert all(hit.citation() for hit in hits)
+
+
+def test_an_uncertain_handwritten_image_keeps_its_masked_transcript_as_evidence(tmp_path):
+    """A handwriting flag is a quality note, not permission to discard a usable table OCR."""
+    root = tmp_path / "archive"
+    _archive(root)
+    result = _describe(
+        _Resp(
+            _model_json(
+                uncertainty=["text_heavy"],
+                transcript={
+                    "present": True,
+                    "lines": TRANSCRIPT_LINES,
+                    "uncertainty": ["handwriting"],
+                },
+            )
+        )
+    )
+    assert result.status == idesc.STATUS_UNCERTAIN
+    _, ledger = _publish(result)
+    store = ArchiveStore(root)
+    hits = image_guide.expand(
+        store, _ctx(), "현장소장 연락처", conn=_EntryConn(_entries_from(ledger))
+    )
+    assert len(hits) == 1
+    assert image_guide.VISION_TRANSCRIPT_LABEL in hits[0].line.text
+    assert hits[0].line.lineno < 0
+    assert "010-1234-5678" not in hits[0].line.text
 
 
 def test_a_requester_without_channel_access_gets_nothing(tmp_path):
@@ -608,6 +637,28 @@ def test_the_answer_pipeline_adds_guide_hits_after_search(tmp_path, monkeypatch)
     engine = SimpleNamespace(_store=store)
     merged = answer_module.AnswerEngine._with_image_guide(engine, "타워크레인", [], _ctx())
     assert any(LOCAL_OCR in hit.line.text for hit in merged)
+
+
+def test_the_answer_pipeline_replaces_local_table_ocr_with_a_vision_transcript(tmp_path, monkeypatch):
+    """A Vision transcript must not compete with the malformed OCR of its own image."""
+    from tybot import answer as answer_module
+
+    store, conn = _end_to_end(tmp_path)
+    monkeypatch.setattr(image_guide, "_connect", lambda: conn)
+    engine = SimpleNamespace(_store=store)
+    local_hits = store.search(LOCAL_OCR, _ctx(), limit=20)
+    assert any(LOCAL_OCR in hit.line.text for hit in local_hits)
+    local_attachment_paths = {str(hit.doc.path) for hit in local_hits}
+
+    merged = answer_module.AnswerEngine._with_image_guide(
+        engine, "현장소장 연락처", local_hits, _ctx()
+    )
+
+    assert any(image_guide.VISION_TRANSCRIPT_LABEL in hit.line.text for hit in merged)
+    assert all(
+        str(hit.doc.path) not in local_attachment_paths or hit.line.lineno < 0
+        for hit in merged
+    )
 
 
 # --- 5. 모델 실패·무료 한도 소진 → 로컬 OCR 로 복귀 -------------------------

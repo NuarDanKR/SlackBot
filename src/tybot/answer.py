@@ -2684,11 +2684,12 @@ class AnswerEngine:
         return merged[:limit]
 
     def _with_image_guide(self, query: str, hits, ctx) -> list[SearchHit]:
-        """AI 이미지 설명·OCR 전사로 찾은 **사진의 원문 줄**을 검색 후보에 더한다 (B-81 후속).
+        """AI 이미지 설명·OCR 전사로 사진 근거를 보강한다 (B-81 후속).
 
-        설명·전사 문장은 근거로 나가지 않는다. 더해지는 것은 요청자의 현재 권한으로 다시
-        연 원문(로컬 OCR 줄·채널 첨부 줄)이고, 원본 파일이 그대로 있는지도 직전에 다시
-        확인한다(`image_guide.expand`). 실패하면 예전 검색 결과 그대로다.
+        설명은 검색 힌트로만 쓴다. 반면 마스킹·출력 가드를 통과한 AI 전사는 원본 이미지의
+        해시를 다시 확인한 뒤 원본 첨부의 근거로 전달한다. 같은 첨부에 전사가 있으면 표의
+        행·열 관계를 잃을 수 있는 로컬 OCR 줄은 제거한다. Vision 조회가 실패하면 기존 검색
+        결과를 그대로 유지한다.
         """
         from . import image_guide
 
@@ -2699,7 +2700,15 @@ class AnswerEngine:
             return list(hits)
         if not extra:
             return list(hits)
-        merged = list(hits)
+        # A transcript and a local OCR body describe the same immutable attachment.
+        # Keep the former only: handing both to the model makes a broken table OCR
+        # compete with the structurally faithful Vision transcript.
+        transcript_paths = {
+            str(hit.doc.path)
+            for hit in extra
+            if hit.line.text.startswith(image_guide.VISION_TRANSCRIPT_LABEL)
+        }
+        merged = [hit for hit in hits if str(hit.doc.path) not in transcript_paths]
         seen = {(str(h.doc.path), h.line.lineno) for h in merged}
         for hit in extra:
             key = (str(hit.doc.path), hit.line.lineno)

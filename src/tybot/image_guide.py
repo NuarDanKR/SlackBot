@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 logger = logging.getLogger("tybot.image_guide")
@@ -48,6 +48,11 @@ CANDIDATE_LIMIT = 500
 MAX_FILTER_TOKENS = 12
 #: 원본 재확인에서 읽는 최대 크기. 정책의 전송 상한과 별개다 — 여기서는 보내지 않는다.
 MAX_ORIGINAL_BYTES = 50 * 1024 * 1024
+
+# A Vision transcript is a masked, immutable derivative of the original image.
+# Unlike an AI *description*, it is allowed to carry the text that appeared in
+# the image, so it must be explicit in the evidence sent to the answer model.
+VISION_TRANSCRIPT_LABEL = "[AI 이미지 전사·원본 이미지 대조]"
 
 #: `archiver_image_transcript_schema.sql` 의 색인 식과 글자까지 같아야 한다.
 ENTRY_COMPACT_BODY = "lower(replace(e.body, ' ', ''))"
@@ -257,11 +262,39 @@ def _is_attachment_of(doc, entry: ImageEntry) -> bool:
 def reopen(docs, entry: ImageEntry, query: str) -> list:
     """요청자에게 **보이는** 문서에서 그 사진의 원문 줄을 다시 연다.
 
-    - 첨부 정본(로컬 OCR 본문): 질문 점수가 높은 줄부터
+    - AI 전사: 마스킹된 전사 자체를 원본 첨부의 근거로 전달한다
+    - AI 설명: 첨부 정본(로컬 OCR 본문)을 질문 점수가 높은 줄부터 다시 연다
     - 채널 원문의 첨부 줄(`· id:F…`): 사진이 올라온 자리. 출처가 Slack 메시지로 이어진다
     """
     from . import search_index
-    from .archive.store import SearchHit
+    from .archive.store import RawLine, SearchHit
+
+    # A local OCR result is useful as a fallback, but it must not replace a
+    # successfully stored Vision transcript.  In particular, table OCR often
+    # loses the row/column relationship while the Vision transcript preserves
+    # it.  The transcript has already passed the transcript masking gate and
+    # `original_code()` has re-opened and hash-checked the source image above.
+    # Its citation still points to that original image attachment.
+    if entry.kind == "transcript":
+        attachment_docs = [doc for doc in docs if _is_attachment_of(doc, entry)]
+        if not attachment_docs:
+            return []
+        doc = max(
+            attachment_docs,
+            key=lambda item: (getattr(item, "last_ingested", "") or "", str(item.path)),
+        )
+        source = next(iter(doc.raw_lines), None)
+        caution = " · 판독 유의" if entry.status == "uncertain" else ""
+        line = RawLine(
+            ts=(source.ts if source else ""),
+            speaker=entry.file_id,
+            text=f"{VISION_TRANSCRIPT_LABEL}{caution}\n{entry.body}",
+            # Negative line numbers cannot collide with a physical archive line.
+            lineno=-1,
+            source_path=doc.path,
+            message_ts=(source.message_ts if source else ""),
+        )
+        return [SearchHit(doc=replace(doc, raw_lines=[line]), line=line, score=1)]
 
     tokens = search_index.tokens_of(query)
     marker = f"· id:{entry.file_id}"
@@ -293,7 +326,11 @@ def reopen(docs, entry: ImageEntry, query: str) -> list:
 
 
 def expand(store, ctx, query: str, *, conn=None, limit: int = MAX_EXTRA_HITS) -> list:
-    """질문과 맞는 사진의 **원문 줄**. 투영 문장은 한 글자도 따라 나가지 않는다."""
+    """질문과 맞는 사진 근거를 연다.
+
+    AI 설명은 원본 OCR을 여는 검색 힌트다. AI 전사는 원본 해시·ACL을 재확인한 뒤,
+    원본 첨부를 가리키는 마스킹된 근거로 전달한다.
+    """
     from . import search_index
 
     tokens = search_index.tokens_of(query)
