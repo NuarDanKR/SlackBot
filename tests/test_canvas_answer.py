@@ -26,6 +26,14 @@ def test_long_answers_use_canvas_unless_message_requested():
     assert not automatic("\n".join(["line"] * 26), "메시지로 답변해줘")
 
 
+def test_a_table_request_uses_canvas_even_when_the_model_returned_bullets():
+    """표 요청은 모델이 Markdown 표를 만들었는지와 무관하게 Canvas로 보낸다."""
+    bullets = "- 대우건설: 협의중\n- 케이씨씨건설: 수금완료"
+
+    assert automatic(bullets, "수금 현황을 자세히 표로 그려줘")
+    assert not automatic(bullets, "수금 현황을 메시지로 표로 알려줘")
+
+
 def test_canvas_threshold_excludes_each_answers_source_block():
     first = "\n".join(["본문"] * 13) + "\n\n출처:\n" + "\n".join(["• 문서"] * 20)
     second = "\n".join(["본문"] * 12) + "\n\n출처:\n• 문서"

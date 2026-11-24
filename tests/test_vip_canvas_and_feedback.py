@@ -88,6 +88,7 @@ def test_a_requested_table_goes_to_canvas_for_every_bot():
     assert has_markdown_table(TABLE)
     assert automatic(TABLE, "Top 10을 표로 상세히 정리해줘") is True
     assert automatic(TABLE, "Top 10 알려줘") is False
+    assert automatic("- 항목 A\n- 항목 B", "Top 10을 표로 정리해줘") is True
 
 
 def test_a_preferring_bot_uses_canvas_for_detailed_or_ranked_requests():
