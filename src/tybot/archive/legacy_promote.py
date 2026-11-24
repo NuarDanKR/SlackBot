@@ -25,6 +25,7 @@ same revision is absent or byte-identical.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,6 +87,10 @@ class PromotionReport:
     live_policy_adopted: list[str] = field(default_factory=list)
     #: 운영자가 `exclude` 로 격리에 남긴 항목.
     excluded: list[str] = field(default_factory=list)
+    #: 같은 file ID·revision(= 같은 원본)의 운영 정본이 이미 있어 운영 쪽을 둔 첨부.
+    live_attachment_kept: int = 0
+    #: 그중 옛 쪽에만 본문이 있는 것 — 운영에서 다시 변환할 대상.
+    attachment_text_only_in_legacy: list[str] = field(default_factory=list)
     masked_values: dict[str, int] = field(default_factory=dict)
     blocked: list[str] = field(default_factory=list)
 
@@ -213,15 +218,30 @@ def _is_excluded(relative: str, exclude: tuple[str, ...]) -> bool:
     )
 
 
+#: 대괄호가 든 파일명(`[190801]정산서.xlsx`)까지 잡는다. `LEGACY_LINE` 은 첫 `]` 에서
+#: 끊겨 `[190801` 만 남고, 그러면 정본 문서와 이름이 맞지 않는다.
+_INLINE_NAME = re.compile(
+    r"^\[(?:첨부추출|첨부본문):(?P<name>.+?\.[A-Za-z0-9]{1,6})\](?:\s|$)"
+)
+
+
+def _inline_attachment_name(text: str) -> str | None:
+    match = attachment_doc.LEGACY_LINE.match(text)
+    if not match:
+        return None
+    full = _INLINE_NAME.match(text)
+    return (full or match).group("name").strip()
+
+
 def _split_attachment_lines(
     messages: tuple[writer.IncomingMessage, ...],
 ) -> tuple[tuple[writer.IncomingMessage, ...], list[str]]:
     kept: list[writer.IncomingMessage] = []
     names: list[str] = []
     for message in messages:
-        match = attachment_doc.LEGACY_LINE.match(message.text)
-        if match:
-            names.append(match.group("name").strip())
+        name = _inline_attachment_name(message.text)
+        if name is not None:
+            names.append(name)
         else:
             kept.append(message)
     return tuple(kept), names
@@ -517,9 +537,18 @@ def _copy_plans(
             continue
         identical = target.is_file() and _digest_bytes(content) == _digest(target)
         if target.exists() and not identical:
-            report.blocked.append(
-                f"{_relative(path, source)}: live attachment revision differs"
-            )
+            # revision 은 원본 해시다 — 경로가 같으면 원본이 같다. 다른 것은 다시 처리하며
+            # 붙은 값(permalink·처리 시각·변환 상태·공개 여부)이고, 운영 정본이 현재
+            # 파이프라인의 결과다. 덮어쓰지 않고 운영 쪽을 둔다(2026-11-24).
+            current = attachment_reader.load(target) if target.is_file() else None
+            if current is None:
+                report.blocked.append(
+                    f"{_relative(path, source)}: live attachment revision differs"
+                )
+                continue
+            report.live_attachment_kept += 1
+            if loaded.text.strip() and not current.text.strip():
+                report.attachment_text_only_in_legacy.append(_relative(path, source))
             continue
         if identical:
             report.identical_attachment_documents += 1

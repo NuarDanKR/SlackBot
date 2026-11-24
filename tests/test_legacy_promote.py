@@ -565,3 +565,58 @@ def test_imported_from_names_the_quarantine_it_came_from(tmp_path):
     target, = (live / WS).glob(f"{CID}__*/archive/raw/*.md")
     assert 'imported_from: "quarantine"' in target.read_text(encoding="utf-8")
 
+
+@pytest.mark.parametrize(
+    ("line", "name"),
+    [
+        ("[첨부추출:[190801]정산서.xlsx] | 81191001", "[190801]정산서.xlsx"),
+        ("[첨부추출:정산서(군포지산)_최종.xlsx] | 1", "정산서(군포지산)_최종.xlsx"),
+        ("[첨부본문:메모.txt]", "메모.txt"),
+        ("[첨부추출:확장자없음] 본문", "확장자없음"),
+        ("보통 메시지", None),
+    ],
+)
+def test_inline_attachment_names_keep_their_brackets(line, name):
+    assert legacy_promote._inline_attachment_name(line) == name
+
+
+def _live_attachment(live: Path, text: str, *, state: str) -> Path:
+    path = (
+        live / WS / f"{CID}__{CHANNEL}" / "archive" / "attachments"
+        / "F12345678" / "rev.md"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        attachment_doc.render(
+            attachment_doc.AttachmentDoc(
+                workspace=WS, channel_id=CID, channel=CHANNEL, file_id="F12345678",
+                name="현황보고.txt", revision="rev", visibility="private",
+                acl=frozenset({ACL}), text=text, conversion_state=state,
+            )
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_reprocessed_live_attachment_of_the_same_revision_is_kept(tmp_path):
+    """같은 원본을 운영이 다시 처리했다 — 운영 정본을 두고 나머지를 진행한다."""
+    source, live = _roots(tmp_path)
+    _legacy_doc(source)
+    _legacy_attachment(
+        source / WS / "channels" / CID / "attachments" / "F12345678" / "rev.md",
+        "옛 변환 본문",
+    )
+    kept = _live_attachment(live, "", state=attachment_doc.FAILED)
+    before = kept.read_bytes()
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert report.ok, report.blocked
+    assert report.live_attachment_kept == 1
+    assert report.attachment_text_only_in_legacy == [
+        f"{WS}/channels/{CID}/attachments/F12345678/rev.md"
+    ]
+    assert kept.read_bytes() == before
+    assert report.written_messages == 1
+
