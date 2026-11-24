@@ -62,7 +62,7 @@ def case(tmp_path, monkeypatch):
 def run(case, *, apply=True, indexer=None):
     return file_recovery.recover(
         case.client, case.repo, case.owner, case.cfg, ["F123"],
-        live_root=case.live, shadow_root=case.shadow, channel_id=CHANNEL,
+        live_root=case.live, channel_id=CHANNEL,
         apply=apply, actor="test-operator", indexer=indexer,
     )["results"][0]
 
@@ -130,12 +130,15 @@ def test_existing_artifacts_require_review_not_download(case, kind):
     assert path.read_bytes() == before
 
 
-def test_shadow_records_are_not_automatically_promoted(case):
+def test_retired_shadow_records_are_neither_read_nor_promoted(case):
+    """B-99 2단계(D7): 옛 섀도 루트는 보관만 한다. 대조에도 쓰지 않고 옮기지도 않는다."""
     path = case.shadow / "mgmt" / f"{CHANNEL}__board" / "staging/F123/metadata.json"
     path.parent.mkdir(parents=True)
     path.write_text("{}", encoding="utf-8")
-    assert run(case)["status"] == "existing-needs-review"
+    assert run(case, apply=False)["status"] == "missing"
     assert not case.downloads
+    assert path.read_text(encoding="utf-8") == "{}"
+    assert not case.base.exists()
 
 
 def test_revoked_file_share_is_not_downloaded(case):

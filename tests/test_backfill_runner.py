@@ -63,7 +63,7 @@ class Collector:
 
 
 CHANNEL = {"channel_id": "C1", "channel_name": "test", "membership": "joined",
-           "operator_hold": False, "mode": "shadow"}
+           "operator_hold": False, "mode": "active"}
 MESSAGE = {"ts": "100.000100", "user": "U1", "text": "source"}
 
 

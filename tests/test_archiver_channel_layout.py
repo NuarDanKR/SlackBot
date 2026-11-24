@@ -1,3 +1,8 @@
+"""Archiver 채널별 배치 — `<root>/<ws>/<cid>__<name>/archive` (B-99 2단계: 루트 하나).
+
+`shadow_paths` 는 이름만 옛것이다. 운영 배치도 같은 모듈을 쓴다.
+"""
+
 from __future__ import annotations
 
 import json
@@ -42,8 +47,8 @@ def test_channel_root_rejects_invalid_coordinates(tmp_path):
         shadow_paths.channel_root(tmp_path, "../bad", CHANNEL_ID, CHANNEL_NAME)
 
 
-def test_shadow_raw_writer_is_read_without_changing_live_layout(tmp_path):
-    root = tmp_path / "archiver-shadow"
+def test_channel_raw_writer_is_read_without_the_legacy_layout(tmp_path):
+    root = tmp_path / "archive"
     archive = shadow_paths.archive_dir(root, "tyit", CHANNEL_ID, CHANNEL_NAME)
     result = writer.ingest(
         root, workspace="tyit", channel=CHANNEL_NAME, channel_id=CHANNEL_ID,
@@ -60,10 +65,10 @@ def test_shadow_raw_writer_is_read_without_changing_live_layout(tmp_path):
     assert not (root / "workspaces").exists()
 
 
-def test_shadow_collector_writes_events_to_channel_scoped_archive(tmp_path, monkeypatch):
+def test_collector_writes_events_to_channel_scoped_archive(tmp_path, monkeypatch):
     monkeypatch.setattr(archiving_bot.ingest_ack, "advance", lambda **_: None)
     monkeypatch.setattr(archiving_bot, "record_revision", lambda **_: 1)
-    root = tmp_path / "archiver-shadow"
+    root = tmp_path / "archive"
     config = archiving_bot.ArchiverWorkspace(
         "tyit", "archiver-bot", "archiver-app", "T12345678", "U_MASTER",
         frozenset({CHANNEL_ID}), separate_attachments=True,
@@ -77,20 +82,19 @@ def test_shadow_collector_writes_events_to_channel_scoped_archive(tmp_path, monk
         def users_info(self, *, user):
             return {"user": {"name": user}}
 
-    collector = archiving_bot.ShadowCollector(config, root, layout="per-channel-v1")
+    collector = archiving_bot.ArchiveCollector(config, root)
     event = {"channel_type": "channel", "channel": CHANNEL_ID, "user": "U1",
-             "ts": "1790726400.000001", "text": "A new shadow message"}
+             "ts": "1790726400.000001", "text": "A new channel message"}
     assert collector.ingest_event(Client(), event) == "written"
     assert collector.ingest_event(Client(), event) == "duplicate"
     assert len(list((root / "tyit").glob(f"{CHANNEL_ID}__*/archive/raw/*.md"))) == 1
+    assert not (root / "workspaces").exists()
 
 
-def test_empty_shadow_root_backfill_uses_new_layout_and_is_idempotent(tmp_path, monkeypatch):
+def test_empty_root_backfill_uses_channel_layout_and_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(archiving_bot.ingest_ack, "advance", lambda **_: None)
     monkeypatch.setattr(archiving_bot, "record_revision", lambda **_: 1)
-    root = tmp_path / "archiver-shadow"
-    live = tmp_path / "archive"
-    live.mkdir()
+    root = tmp_path / "archive"
     config = archiving_bot.ArchiverWorkspace(
         "tyit", "archiver-bot", "archiver-app", "T12345678", "U_MASTER",
         frozenset({CHANNEL_ID}), separate_attachments=True,
@@ -112,7 +116,7 @@ def test_empty_shadow_root_backfill_uses_new_layout_and_is_idempotent(tmp_path, 
 
     client = Client()
     target = backfill.Target("tyit", CHANNEL_ID, CHANNEL_NAME)
-    collector = archiving_bot.ShadowCollector(config, root, layout="per-channel-v1")
+    collector = archiving_bot.ArchiveCollector(config, root)
     preview = backfill.plan(client, [target], workspace="tyit")
     assert preview.found == 1
     assert not root.exists()
@@ -131,7 +135,7 @@ def test_empty_shadow_root_backfill_uses_new_layout_and_is_idempotent(tmp_path, 
     assert source[0].path.parent.parent.name == "archive"
     assert "Backfilled text" in source[0].path.read_text(encoding="utf-8")
     assert "Bot reply" not in source[0].path.read_text(encoding="utf-8")
-    assert not list(live.rglob("*.md"))
+    assert not (root / "workspaces").exists()
 
     counts, state = backfill.run(
         client, [target], workspace="tyit", ingest=ingest,
@@ -142,14 +146,14 @@ def test_empty_shadow_root_backfill_uses_new_layout_and_is_idempotent(tmp_path, 
     assert len(ArchiveStore(root).source_docs()) == 1
 
 
-def test_shadow_backfill_keeps_attachment_body_out_of_raw(tmp_path, monkeypatch):
+def test_backfill_keeps_attachment_body_out_of_raw_even_when_db_flag_is_off(tmp_path, monkeypatch):
     monkeypatch.setattr(archiving_bot.ingest_ack, "advance", lambda **_: None)
     monkeypatch.setattr(archiving_bot, "record_revision", lambda **_: 1)
     monkeypatch.setattr(files, "download_bytes", lambda *_: b"Attachment evidence from Slack")
-    root = tmp_path / "archiver-shadow"
+    root = tmp_path / "archive"
     config = archiving_bot.ArchiverWorkspace(
         "tyit", "archiver-bot", "archiver-app", "T12345678", "U_MASTER",
-        frozenset({CHANNEL_ID}), separate_attachments=True,
+        frozenset({CHANNEL_ID}), separate_attachments=False,
     )
 
     class Client:
@@ -168,7 +172,7 @@ def test_shadow_backfill_keeps_attachment_body_out_of_raw(tmp_path, monkeypatch)
             return {"user": {"name": user}}
 
     client = Client()
-    collector = archiving_bot.ShadowCollector(config, root, layout="per-channel-v1")
+    collector = archiving_bot.ArchiveCollector(config, root)
     target = backfill.Target("tyit", CHANNEL_ID, CHANNEL_NAME)
     counts, state = backfill.run(
         client, [target], workspace="tyit",
@@ -187,17 +191,18 @@ def test_shadow_backfill_keeps_attachment_body_out_of_raw(tmp_path, monkeypatch)
     assert (channel / "staging" / "F123" / "metadata.json").is_file()
 
 
-def test_new_layout_refuses_embedded_attachment_body(tmp_path):
+def test_channel_layout_never_embeds_attachment_body(tmp_path):
+    """전에는 섀도 배치가 분리 설정을 요구하며 기동을 거부했다. 배치가 하나뿐이라 항상 켠다."""
     config = archiving_bot.ArchiverWorkspace(
         "tyit", "archiver-bot", "archiver-app", "T12345678", "U_MASTER",
         frozenset({CHANNEL_ID}), separate_attachments=False,
     )
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="requires separate attachments"):
-        archiving_bot.ShadowCollector(config, tmp_path, layout="per-channel-v1")
+    collector = archiving_bot.ArchiveCollector(config, tmp_path)
+    assert collector.cfg.separate_attachments is True
 
 
-def test_shadow_attachment_has_one_channel_folder_and_reader_uses_real_path(tmp_path):
-    root = tmp_path / "archiver-shadow"
+def test_attachment_has_one_channel_folder_and_reader_uses_real_path(tmp_path):
+    root = tmp_path / "archive"
     archive = shadow_paths.archive_dir(root, "tyit", CHANNEL_ID, CHANNEL_NAME)
     storage = attachment_storage(
         root, "tyit", CHANNEL_ID, channel_root=archive.parent,
@@ -229,8 +234,8 @@ def test_shadow_attachment_has_one_channel_folder_and_reader_uses_real_path(tmp_
     assert not (root / "tyit" / CHANNEL_ID).exists()
 
 
-def test_shadow_attachment_path_rejects_other_channel_frontmatter(tmp_path):
-    root = tmp_path / "archiver-shadow"
+def test_attachment_path_rejects_other_channel_frontmatter(tmp_path):
+    root = tmp_path / "archive"
     archive = shadow_paths.archive_dir(root, "tyit", CHANNEL_ID, CHANNEL_NAME)
     path = archive / "attachments" / "F123" / "abcdef123456.md"
     path.parent.mkdir(parents=True)
@@ -241,14 +246,3 @@ def test_shadow_attachment_path_rejects_other_channel_frontmatter(tmp_path):
         "---\n\nUntrusted text\n", encoding="utf-8",
     )
     assert attachment_reader.load_checked(path, root) is None
-
-
-def test_new_layout_must_be_explicit_to_allow_shadow_next_to_live(tmp_path):
-    env = {
-        "ARCHIVE_DIR": str(tmp_path / "archive"),
-        "ARCHIVER_SHADOW_DIR": str(tmp_path / "archiver-shadow"),
-    }
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="share a parent"):
-        archiving_bot.shadow_archive_dir(env)
-    env["ARCHIVER_SHADOW_LAYOUT"] = "per-channel-v1"
-    assert archiving_bot.shadow_archive_dir(env) == tmp_path / "archiver-shadow"

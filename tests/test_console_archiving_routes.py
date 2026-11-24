@@ -56,6 +56,7 @@ CSRF_ONLY = {"X-TYBot-CSRF": "1"}
 def repo(monkeypatch) -> FakeArchivingRepo:
     """진짜 저장소 대신 가짜를 물린다. **DB 없이 라우트를 전부 본다.**"""
     fake = FakeArchivingRepo()
+    # 옛 shadow 행(읽기 전용 과거값, B-99 2단계). 나가는 길만 남아 있다.
     fake.given_channel("tyit", "C0FUND", "shadow")
     fake.given_flag("archiver_writes_live", False)
     fake.given_flag("require_attachment_ack", False)
@@ -78,7 +79,7 @@ def test_a_guest_cannot_change_a_channel_mode(client):
 
     response = client.put(
         f"{BASE}/channels/C0FUND",
-        json={"mode": "shadow", "reason": "해 보기"},
+        json={"mode": "paused", "reason": "해 보기"},
         headers=headers,
     )
 
@@ -185,7 +186,7 @@ def test_service_identity_is_checked_server_side(client, repo, monkeypatch):
 @pytest.mark.parametrize(
     ("path", "payload"),
     [
-        ("/channels/C0FUND", {"mode": "shadow"}),
+        ("/channels/C0FUND", {"mode": "paused"}),
         ("/flags", {"name": "require_attachment_ack", "enabled": True}),
         ("/retention", {"name": "bot_conversation_audit", "days": 90}),
     ],
@@ -203,7 +204,7 @@ def test_a_request_without_a_reason_is_rejected(client, repo, path, payload):
 @pytest.mark.parametrize(
     ("path", "payload"),
     [
-        ("/channels/C0FUND", {"mode": "shadow", "reason": "   "}),
+        ("/channels/C0FUND", {"mode": "paused", "reason": "   "}),
         ("/flags", {"name": "x", "enabled": False, "reason": ""}),
     ],
     ids=["channel-blank", "flag-empty"],
@@ -299,8 +300,23 @@ def test_channel_flag_cannot_target_another_workspaces_channel(client, repo):
 
 # --- 되는 것 ------------------------------------------------------------------
 
-def test_shadow_is_not_gated(client, repo):
-    """그림자는 운영 원문을 안 건드린다. 막으면 개발이 멈춘다."""
+def test_requesting_shadow_is_rejected(client, repo):
+    """그림자 수집은 폐기됐다(B-99 2단계 D2·D6). 요청 본문 단계에서 거절한다."""
+    headers = owner(client) | CSRF
+
+    response = client.put(
+        f"{BASE}/channels/C0FUND",
+        json={"mode": "shadow", "reason": "다시 그림자로"},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert repo.channel_rows[("tyit", "C0FUND")]["mode"] == "shadow"
+    assert repo.audit_rows == []
+
+
+def test_a_legacy_shadow_row_can_be_turned_off(client, repo):
+    """옛 shadow 행은 off 로 나갈 수 있다. 끄는 것은 게이트가 막지 않는다."""
     headers = owner(client) | CSRF
 
     response = client.put(

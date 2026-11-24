@@ -33,7 +33,11 @@ REPO_DEPLOY = pathlib.Path(__file__).resolve().parent.parent / "deploy"
 SYSTEMD_DIR = pathlib.Path("/etc/systemd/system")
 
 #: 반드시 설치돼 있어야 하는 유닛. 없으면 그 기능은 배포되지 않은 것이다.
-REQUIRED = ("tybot-archiving-shadow@.service", "tybot-image-description@.service")
+REQUIRED = ("tybot-archiver@.service", "tybot-image-description@.service")
+
+#: 저장소에서 빠진 옛 유닛. 설치돼 있으면 알린다 — 그 유닛으로 띄우면 옛 코드 경로를 기대한다.
+#: (B-99 2단계: `tybot-archiving-shadow@` → `tybot-archiver@`)
+RETIRED = ("tybot-archiving-shadow@.service",)
 
 
 def _meaningful(text: str) -> list[str]:
@@ -46,7 +50,10 @@ def _meaningful(text: str) -> list[str]:
 
 
 def compare(deploy_dir: pathlib.Path, systemd_dir: pathlib.Path) -> list[tuple[str, str]]:
-    """`(유닛 이름, 상태)` 목록. 상태: `same` · `differs` · `missing` · `not-installed`."""
+    """`(유닛 이름, 상태)` 목록.
+
+    상태: `same` · `differs` · `missing` · `not-installed` · `retired-present`.
+    """
     results: list[tuple[str, str]] = []
     names = sorted(
         path.name
@@ -61,6 +68,9 @@ def compare(deploy_dir: pathlib.Path, systemd_dir: pathlib.Path) -> list[tuple[s
         ours = _meaningful((deploy_dir / name).read_text(encoding="utf-8"))
         theirs = _meaningful(installed.read_text(encoding="utf-8"))
         results.append((name, "same" if ours == theirs else "differs"))
+    for name in RETIRED:
+        if (systemd_dir / name).is_file():
+            results.append((name, "retired-present"))
     return results
 
 
@@ -75,15 +85,17 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
     results = compare(args.deploy_dir, args.systemd_dir)
-    bad = [(name, state) for name, state in results if state in ("differs", "missing")]
+    flagged = ("differs", "missing", "retired-present")
+    bad = [(name, state) for name, state in results if state in flagged]
     for name, state in results:
-        if args.verbose or state in ("differs", "missing"):
+        if args.verbose or state in flagged:
             print(f"{state:13} {name}")
     if bad:
         print(
             f"\n{len(bad)}개 유닛이 저장소와 다릅니다. "
             "`sudo install -m 0644 /opt/tybot/deploy/<유닛> /etc/systemd/system/<유닛>` → "
-            "`sudo systemctl daemon-reload` → 해당 인스턴스 재시작."
+            "`sudo systemctl daemon-reload` → 해당 인스턴스 재시작. "
+            "`retired-present` 는 옛 유닛이다 — 인스턴스를 멈추고 새 유닛으로 띄운 뒤 파일을 지운다."
         )
         return EXIT_DRIFT
     print("설치된 유닛이 저장소와 같습니다.")

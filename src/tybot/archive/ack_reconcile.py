@@ -242,22 +242,15 @@ def _recount(current: list, total: int, *, root: Path | str) -> attachment_ack.O
 def roots_from_env() -> dict[str, Path]:
     """`written_to` 값마다 그 자료가 있는 루트.
 
-    두 루트는 **다른 곳**이다. 그림자 수집은 `ARCHIVER_SHADOW_DIR` 에, 운영은
-    `ARCHIVE_DIR` 에 쌓인다. 한 루트로만 다시 세면 다른 쪽 행은 정본을 못 찾고,
-    못 찾은 것이 「아직 변환 중」 으로 읽혀 **끝난 일이 영원히 아직**이 된다.
-    반대 방향은 더 나쁘다 — 엉뚱한 루트에서 같은 file ID 를 찾으면 남의 자료로
-    남의 메시지를 `ready` 로 올린다.
+    B-99 2단계(D5·D7)부터 루트는 운영(`ARCHIVE_DIR`) 하나다. `written_to` 가
+    `shadow` 인 과거 행은 **루트를 주지 않는다** — 옛 섀도 루트는 보관만 하고,
+    그 행을 운영 루트에서 찾으면 엉뚱한 자료로 남의 메시지를 `ready` 로 올린다.
+    `ARCHIVER_SHADOW_DIR` 은 더 읽지 않는다.
     """
     import os
 
-    found: dict[str, Path] = {}
     live = os.getenv("ARCHIVE_DIR", "").strip()
-    shadow = os.getenv("ARCHIVER_SHADOW_DIR", "").strip()
-    if live:
-        found[ingest_ack.LIVE] = Path(live)
-    if shadow:
-        found[ingest_ack.SHADOW] = Path(shadow)
-    return found
+    return {ingest_ack.LIVE: Path(live)} if live else {}
 
 
 def label_for(roots: dict[str, Path], path: Path | str) -> str:
@@ -398,11 +391,10 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     load_env_file()
-    # 루트를 손으로 받지 않는다. `written_to` 가 고르는 값이라 하나만 받으면
-    # 그림자 행을 운영 루트에서 찾거나 그 반대를 하게 된다.
+    # 루트를 손으로 받지 않는다. 운영 루트는 설정 파일의 `ARCHIVE_DIR` 하나다.
     roots = roots_from_env()
     if not roots:
-        print("ARCHIVE_DIR 도 ARCHIVER_SHADOW_DIR 도 없습니다.")
+        print("ARCHIVE_DIR 이 없습니다.")
         return 2
     try:
         changes = run(args.workspace, roots=roots, apply=args.apply, limit=args.limit)

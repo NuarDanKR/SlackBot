@@ -1,6 +1,7 @@
 """Read-only Archiver discovery must not inherit Master collection authority."""
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -36,8 +37,7 @@ def setup(tmp_path, monkeypatch):
     row = {"channel_id": CHANNEL, "membership": "joined", "mode": "active",
            "operator_hold": False}
     repo = SimpleNamespace(channels=lambda workspace: [row])
-    return Client(), repo, row, {"live_root": tmp_path / "live",
-                               "shadow_root": tmp_path / "shadow"}
+    return Client(), repo, row, {"live_root": tmp_path / "live"}
 
 
 def run(setup):
@@ -55,15 +55,18 @@ def test_complete_deduplicated_inventory_does_not_write(setup):
     assert all(not root.exists() for root in setup[3].values())
 
 
-def test_metadata_is_not_reported_as_completed_collection(setup):
-    for root_key, file_id in [("live_root", "F1"), ("shadow_root", "F2")]:
-        path = setup[3][root_key] / "mgmt" / f"{CHANNEL}__board" / "staging" / file_id
-        path.mkdir(parents=True)
-        (path / "metadata.json").write_text('{"status":"failed"}', encoding="utf-8")
+def test_metadata_is_not_reported_as_completed_collection(setup, tmp_path):
+    path = setup[3]["live_root"] / "mgmt" / f"{CHANNEL}__board" / "staging" / "F1"
+    path.mkdir(parents=True)
+    (path / "metadata.json").write_text('{"status":"failed"}', encoding="utf-8")
+    # B-99 2단계(D7): 옛 섀도 루트의 기록은 대조하지 않는다 — 운영에 없으면 없는 것이다.
+    shadow = tmp_path / "shadow" / "mgmt" / f"{CHANNEL}__board" / "staging" / "F2"
+    shadow.mkdir(parents=True)
+    (shadow / "metadata.json").write_text('{"status":"failed"}', encoding="utf-8")
     result = run(setup)
     assert result["live_metadata_records"] == 1
-    assert result["shadow_only_ids"] == ["F2"]
-    assert result["missing_metadata_ids"] == ["F3"]
+    assert "shadow_only_ids" not in result
+    assert result["missing_metadata_ids"] == ["F2", "F3"]
     assert "collected" not in result
 
 
@@ -104,9 +107,16 @@ def test_page_limit_marks_partial(setup, monkeypatch):
     assert run(setup)["list_complete"] is False
 
 
-def test_overlapping_roots_are_rejected(setup):
-    setup[3]["shadow_root"] = setup[3]["live_root"] / "shadow"
+def test_relative_root_is_rejected(setup):
+    setup[3]["live_root"] = Path("live")
     with pytest.raises(ValueError):
+        run(setup)
+    assert not setup[0].calls
+
+
+def test_shadow_root_is_no_longer_accepted(setup, tmp_path):
+    setup[3]["shadow_root"] = tmp_path / "shadow"
+    with pytest.raises(TypeError):
         run(setup)
     assert not setup[0].calls
 

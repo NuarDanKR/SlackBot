@@ -27,7 +27,7 @@ def partial(case, monkeypatch):
 def reconvert(case, *, apply=True):
     return file_recovery.recover(
         case.client, case.repo, case.owner, case.cfg, ["F123"],
-        live_root=case.live, shadow_root=case.shadow, channel_id=CHANNEL,
+        live_root=case.live, channel_id=CHANNEL,
         apply=apply, actor="operator", reconvert=True,
     )["results"][0]
 

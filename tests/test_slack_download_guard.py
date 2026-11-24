@@ -203,14 +203,17 @@ def test_file_lines_leaves_a_trace_for_remote_file(monkeypatch):
     assert warnings
 
 
-def test_canvas_and_dm_handoff_share_the_guarded_downloader():
-    """세 호출부(수집·Canvas·DM 인계)가 같은 함수를 지나야 같이 막힌다."""
+def test_canvas_shares_the_guarded_downloader():
+    """수집과 Canvas 가 같은 함수를 지나야 같이 막힌다.
+
+    DM 인계 거울은 B-99 2단계에서 은퇴해 세 번째 호출부가 없어졌다.
+    """
     assert canvas_mod.download_bytes is files.download_bytes
     source = files.__file__.replace("archive\\files.py", "slack\\pilot.py").replace(
         "archive/files.py", "slack/pilot.py"
     )
     text = Path(source).read_text(encoding="utf-8")
-    assert "from ..archive.files import SlackFile, download_bytes" in text
+    assert "_mirror_dm_handoff" not in text
 
 
 def test_trace_reports_remote_file_as_skipped_not_failed(tmp_path):

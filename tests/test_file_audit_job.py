@@ -25,14 +25,14 @@ def report(*, complete=True, missing=None):
                                       "list_complete": complete, "live_metadata_records": 2,
                                       "files_seen": 5,
                                       "missing_after_record_check": missing or [],
-                                      "shadow_only_ids": [], "existing_needs_review": []}]}],
+                                      "existing_needs_review": []}]}],
     }
 
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     directory = tmp_path / "state"
-    args = {"live_root": tmp_path / "live", "shadow_root": tmp_path / "shadow"}
+    args = {"live_root": tmp_path / "live"}
     responses = [report()]
 
     def invoke(command, **kwargs):
@@ -61,7 +61,7 @@ def test_completed_missing_files_are_findings_not_a_failed_scan(setup):
     assert state["last_run"]["counts"]["missing"] == 1
     assert state["last_success"] == state["last_run"]
     assert not args["live_root"].exists()
-    assert not args["shadow_root"].exists()
+    assert "shadow_only" not in state["last_run"]["counts"]
 
 
 @pytest.mark.parametrize("failure,code,error", [
@@ -131,7 +131,7 @@ def test_projection_discards_body_names_and_file_metadata(setup):
     assert "DO_NOT_PERSIST" not in (directory / "status.json").read_text()
 
 
-@pytest.mark.parametrize("target", ["live", "shadow", "parent"])
+@pytest.mark.parametrize("target", ["live", "parent"])
 def test_state_cannot_overlap_archives(setup, target):
     directory, args, _ = setup
     target = args.get(f"{target}_root", directory.parent)
@@ -295,11 +295,15 @@ def test_failed_workspace_does_not_invent_total_scope(setup):
 
 def test_main_uses_dedicated_env_without_master_workspaces(monkeypatch, tmp_path):
     monkeypatch.setattr(job, "load_env_file", lambda: None)
-    for key in ("STATE_DIR", "ARCHIVE_DIR", "ARCHIVER_SHADOW_DIR"):
+    for key in ("STATE_DIR", "ARCHIVE_DIR"):
         monkeypatch.setenv(key, str(tmp_path / key))
+    # B-99 2단계(D7): 옛 섀도 루트 설정은 없어도 되고, 있어도 넘기지 않는다.
+    monkeypatch.delenv("ARCHIVER_SHADOW_DIR", raising=False)
 
     def run(directory, **kwargs):
         assert directory == tmp_path / "STATE_DIR/file-audit"
+        assert kwargs["live_root"] == tmp_path / "ARCHIVE_DIR"
+        assert "shadow_root" not in kwargs
         assert kwargs["pause"] == 4
         return 2
 

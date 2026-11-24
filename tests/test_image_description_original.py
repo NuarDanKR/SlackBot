@@ -336,12 +336,12 @@ def test_a_directory_in_place_of_the_original_is_refused(archive):
 
 # --- 두 배치 ---------------------------------------------------------------
 #
-# 아카이브는 옛 배치와 shadow 배치가 공존하고 **objects 자리가 다르다.**
-# 운영 수집기는 shadow 쪽을 쓴다(`archiving_bot` 이 `channel_root` 를 넘긴다).
+# 아카이브는 옛 배치와 채널별 배치가 공존하고 **objects 자리가 다르다.**
+# 운영 수집기는 채널별 배치를 쓴다(`archiving_bot` 이 `channel_root` 를 넘긴다).
 
 
-def _shadow(archive: Path) -> tuple[Path, Path]:
-    """shadow 배치의 (정본 문서 경로, objects 디렉터리)."""
+def _per_channel(archive: Path) -> tuple[Path, Path]:
+    """채널별 배치의 (정본 문서 경로, objects 디렉터리)."""
     channel_root = archive / WS / f"{CH}__공지"
     doc_path = (
         channel_root / "archive" / "attachments" / FID / "r1.md"
@@ -355,9 +355,9 @@ def _shadow(archive: Path) -> tuple[Path, Path]:
     return doc_path, objects
 
 
-def test_the_shadow_layout_is_resolved_from_the_doc(archive):
+def test_the_per_channel_layout_is_resolved_from_the_doc(archive):
     """옛 배치만 가정하면 새 배치의 사진이 전부 **「없음」** 이 된다."""
-    doc_path, objects = _shadow(archive)
+    doc_path, objects = _per_channel(archive)
     (objects / "photo.png").write_bytes(PNG)
 
     out = _load(archive, doc=_doc(source_path=doc_path))
@@ -372,10 +372,10 @@ def test_the_legacy_layout_still_works_without_a_source_path(archive):
     assert _load(archive).ok is True
 
 
-def test_a_shadow_doc_does_not_read_the_legacy_objects_dir(archive):
+def test_a_per_channel_doc_does_not_read_the_legacy_objects_dir(archive):
     """배치를 섞어 읽으면 **다른 채널의 바이트**를 집을 수 있다."""
     _put(archive, PNG)
-    doc_path, _ = _shadow(archive)
+    doc_path, _ = _per_channel(archive)
 
     out = _load(archive, doc=_doc(source_path=doc_path))
 

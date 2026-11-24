@@ -543,10 +543,10 @@ def test_successful_retries_reconcile_the_message_ack_from_canonical_files(tmp_p
     from tybot.archive import ack_reconcile, ingest_ack
     from tybot.archive.archiving_state import IngestProgress, IngestState
 
-    # 이 잡이 돌린 아카이브가 **어느 쪽인지** 환경이 말해 준다. 모르면 다시
+    # 이 잡이 돌린 아카이브가 운영 루트인지 환경이 말해 준다. 모르면 다시
     # 세지 않는다(`--archive` 로 임의 경로를 받을 수 있기 때문이다).
-    monkeypatch.setenv("ARCHIVER_SHADOW_DIR", str(tmp_path))
-    monkeypatch.delenv("ARCHIVE_DIR", raising=False)
+    monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path))
+    monkeypatch.delenv("ARCHIVER_SHADOW_DIR", raising=False)
 
     channel = tmp_path / "pilot" / "C1__팀-전산-공지"
     docs = {}
@@ -588,7 +588,7 @@ def test_successful_retries_reconcile_the_message_ack_from_canonical_files(tmp_p
                 attachment_ready=1,
                 error_code="attachment-pending",
             ),
-            written_to="shadow",
+            written_to="live",
         ),
     )
     calls = []
@@ -609,7 +609,7 @@ def test_successful_retries_reconcile_the_message_ack_from_canonical_files(tmp_p
     assert len(calls) == 1
     assert calls[0]["target"] == IngestState.READY
     assert calls[0]["attachment_ready"] == 2
-    assert calls[0]["written_to"] == "shadow"
+    assert calls[0]["written_to"] == "live"
     assert calls[0]["error_code"] == ""
 
 
@@ -643,13 +643,56 @@ def test_a_retry_does_not_reconcile_an_archive_it_cannot_place(tmp_path, monkeyp
     assert calls == []
 
 
+def test_a_retired_shadow_ack_row_is_not_reconciled_against_the_live_root(tmp_path, monkeypatch):
+    """B-99 2단계(D5·D7): `written_to=shadow` 인 과거 행은 운영 루트에서 다시 세지 않는다.
+
+    옛 섀도 자료를 운영 루트의 정본으로 세면 남의 자료로 남의 메시지를 `ready` 로 올린다.
+    """
+    import drain_conversion_queue as drain
+
+    from tybot.archive import ack_reconcile, ingest_ack
+    from tybot.archive.archiving_state import IngestProgress, IngestState
+
+    monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path))
+    monkeypatch.setenv("ARCHIVER_SHADOW_DIR", str(tmp_path / "shadow"))
+    assert ack_reconcile.roots_from_env() == {ingest_ack.LIVE: tmp_path}
+    monkeypatch.setattr(
+        ack_reconcile, "docs_by_message",
+        lambda root: pytest.fail("a shadow row must not be counted"),
+    )
+    monkeypatch.setattr(
+        ingest_ack,
+        "read",
+        lambda *_: ingest_ack.AckStatus(
+            IngestProgress(
+                IngestState.PARTIAL, attachment_total=2, attachment_ready=1,
+                error_code="attachment-pending",
+            ),
+            written_to="shadow",
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(ingest_ack, "advance", lambda **kwargs: calls.append(kwargs))
+    job = queue.Job(
+        id=1, workspace="pilot", channel_id="C1", file_id="F2", original_sha256="",
+        pipeline_version="1", state="leased", attempt_count=1,
+    )
+
+    drain._reconcile_ingest_ack(tmp_path, job, "1.0001")
+
+    assert calls == []
+
+
 # =============================================================================
 # 경로
 # =============================================================================
 
 
 def test_a_job_coordinate_cannot_escape_the_staging_root(tmp_path):
-    """큐는 DB 다. DB 에서 읽은 값을 그대로 경로에 붙이면 그 자리가 경로 탈출이다."""
+    """큐는 DB 다. DB 에서 읽은 값을 그대로 경로에 붙이면 그 자리가 경로 탈출이다.
+
+    B-99 2단계(D7): 배치는 항상 채널별이라 잘못된 좌표는 경로가 되기 전에 거부된다.
+    """
     import drain_conversion_queue as drain
 
     job = queue.Job(
@@ -663,18 +706,16 @@ def test_a_job_coordinate_cannot_escape_the_staging_root(tmp_path):
         attempt_count=0,
     )
 
-    path = drain.staging_meta(str(tmp_path / "archive"), job)
-
-    root = (tmp_path / "staging" / "workspaces").resolve()
-    assert root in path.resolve().parents
-    assert ".." not in path.parts
+    with pytest.raises(ValueError):
+        drain.staging_meta(str(tmp_path / "archive"), job)
 
 
-def test_shadow_queue_finds_staging_beneath_the_channel(tmp_path, monkeypatch):
+def test_queue_finds_staging_beneath_the_channel(tmp_path, monkeypatch):
+    """채널별 배치는 설정 없이 항상 쓴다. 옛 `ARCHIVER_SHADOW_LAYOUT` 은 읽지 않는다."""
     import drain_conversion_queue as drain
 
-    monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
-    root = tmp_path / "archiver-shadow"
+    monkeypatch.delenv("ARCHIVER_SHADOW_LAYOUT", raising=False)
+    root = tmp_path / "archive"
     channel = root / "tyit" / "C12345678__first-name"
     channel.mkdir(parents=True)
     job = queue.Job(
@@ -691,10 +732,9 @@ def test_shadow_queue_finds_staging_beneath_the_channel(tmp_path, monkeypatch):
     assert drain.staging_meta(str(root), job) == channel / "staging" / "F123" / "metadata.json"
 
 
-def test_shadow_queue_records_bad_channel_path_and_continues(tmp_path, monkeypatch):
+def test_queue_records_bad_channel_path_and_continues(tmp_path, monkeypatch):
     import drain_conversion_queue as drain
 
-    monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
     job = queue.Job(
         id=7,
         workspace="tyit",

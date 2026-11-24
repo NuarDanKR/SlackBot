@@ -15,7 +15,9 @@
 // 한 곳에 모으는 이유는 화면이 여럿이기 때문이다. 목록·상세·확인 모달이 각자
 // 문구를 쓰면 같은 상태가 화면마다 다르게 불리고, 그때 사람은 둘이 다른 것인 줄 안다.
 
-export type ChannelMode = 'off' | 'shadow' | 'active' | 'paused'
+// `shadow` 는 **읽기 전용 과거값**이다(B-99 2단계). 그림자 수집은 폐기돼 고를 수 없지만,
+// 옛 행이 남아 있으면 서버가 그대로 돌려주므로 화면은 뜻을 붙여 보여 준다.
+export type ChannelMode = 'off' | 'active' | 'paused' | 'shadow'
 export type ConnectionState = 'draft' | 'disabled' | 'enabled' | 'error' | 'retired'
 export type RouteMode = 'disabled' | 'shadow' | 'active'
 
@@ -36,14 +38,6 @@ export const CHANNEL_MODES: Record<ChannelMode, Meaning> = {
     key: 'off',
     tone: 'neutral',
   },
-  shadow: {
-    label: '그림자 대조 · 운영본은 Master',
-    detail:
-      'Archiver 가 같은 대화를 따로 모아 Master 결과와 대조합니다. '
-      + '답변이 쓰는 원문은 여전히 Master 것입니다.',
-    key: 'shadow',
-    tone: 'warn',
-  },
   active: {
     label: 'Archiver 운영 수집',
     detail: '이 채널의 운영 원문을 Archiver 가 씁니다. 전환 시점(watermark)이 기록됩니다.',
@@ -57,6 +51,15 @@ export const CHANNEL_MODES: Record<ChannelMode, Meaning> = {
       + '멈춘 동안의 대화는 나중에 백필해야 합니다.',
     key: 'paused',
     tone: 'bad',
+  },
+  // 과거값. 고를 수 있는 모드가 아니다 — 옛 행을 읽을 때만 쓰인다.
+  shadow: {
+    label: '과거 그림자(수집 안 함)',
+    detail:
+      '그림자 수집은 폐기됐습니다(B-99). Archiver 는 이 채널을 수집하지 않고, '
+      + '다음 멤버십 동기화가 운영 수집으로 올립니다.',
+    key: 'shadow',
+    tone: 'warn',
   },
 }
 

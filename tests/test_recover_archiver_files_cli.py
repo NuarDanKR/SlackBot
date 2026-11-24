@@ -16,10 +16,10 @@ def cli(monkeypatch, tmp_path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "load_env_file", lambda: None)
-    monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
+    # B-99 2단계(D7): 채널별 배치는 설정 없이 항상 쓴다.
+    monkeypatch.delenv("ARCHIVER_SHADOW_LAYOUT", raising=False)
     monkeypatch.setenv("ARCHIVER_LIVE_WRITES_ENABLED", "1")
     monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path))
-    monkeypatch.setattr(module, "shadow_archive_dir", lambda env: tmp_path / "shadow")
     monkeypatch.setattr(module, "default_repo", lambda: object())
     monkeypatch.setattr(module, "OwnerLookup", lambda *args, **kwargs: object())
     cfg = SimpleNamespace(key="mgmt", bot_token="fixture")
@@ -63,7 +63,7 @@ def test_running_collector_prevents_recovery(cli, monkeypatch, capsys):
     lock = SimpleNamespace(acquire=acquire, release=lambda: None)
 
     def instance_lock(name):
-        assert name == "archiving-bot-shadow-mgmt"
+        assert name == "archiving-bot-mgmt"
         return lock
 
     monkeypatch.setattr(cli, "instance_lock", instance_lock)
@@ -124,6 +124,16 @@ def test_apply_still_requires_env_live_gate(cli, monkeypatch, capsys):
     monkeypatch.setattr(cli, "recover", lambda *args, **kwargs: pytest.fail("no writes"))
     assert cli.main([*ARGS, "--apply", "--by", "operator"]) == 1
     assert json.loads(capsys.readouterr().out)["stage"] == "live-write-env"
+
+
+def test_apply_no_longer_requires_the_live_writes_env(cli, monkeypatch):
+    """B-99 2단계(D1): 값이 없어도 된다. 명시적으로 끈 값만 거부한다(위 시험)."""
+    monkeypatch.delenv("ARCHIVER_LIVE_WRITES_ENABLED")
+    monkeypatch.setattr(cli, "instance_lock", lambda name:
+                        SimpleNamespace(acquire=lambda: None, release=lambda: None))
+    monkeypatch.setattr(cli, "recover", lambda *args, **kwargs:
+                        {"results": [{"status": "recovered"}]})
+    assert cli.main([*ARGS, "--apply", "--by", "operator"]) == 0
 
 
 def test_errors_report_safe_stage_not_exception_body(cli, monkeypatch, capsys):

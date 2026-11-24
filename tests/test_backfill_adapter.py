@@ -132,7 +132,7 @@ def test_the_realtime_path_is_a_shared_method():
     tree = ast.parse(BOT_SOURCE)
     collector = next(
         node for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef) and node.name == "ShadowCollector"
+        if isinstance(node, ast.ClassDef) and node.name == "ArchiveCollector"
     )
     methods = {node.name for node in collector.body if isinstance(node, ast.FunctionDef)}
 

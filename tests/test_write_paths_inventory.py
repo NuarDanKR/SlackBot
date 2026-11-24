@@ -45,10 +45,11 @@ WRITE_PATHS: dict[str, str] = {
     "scripts/drain_conversion_queue.py": "no-new-conversation",
     # -- 소유권과 무관 -------------------------------------------------------
     #
-    # Archiver 는 자기 root(shadow)에 쓴다. 운영 경로를 열 때는
-    # `write_owner.archiver_may_write_live()` 를 지나야 한다(아직 안 열렸다).
+    # Archiver 는 운영 루트 하나에 채널별 배치로 쓴다(B-99 2단계). 쓰기마다
+    # 채널 모드(`active`)와 `write_owner.archiver_may_write_live()` 를 지난다.
     "src/tybot/archiving_bot.py": "out-of-scope",
-    # Encrypted Master DM handoff writes only to Archiver's private per-user root.
+    # Library only since B-99 stage 2: the Archiver no longer starts a DM consumer
+    # (Master `_ingest_dm` is the single DM writer). Retention still uses it.
     # Channel writer ownership does not govern personal DM storage.
     "src/tybot/archive/dm_consumer.py": "out-of-scope",
     # v1 -> v2 이행. 채널 단위가 아니라 아카이브 전체를 옮긴다.

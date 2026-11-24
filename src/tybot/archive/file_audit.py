@@ -15,7 +15,7 @@ log = logging.getLogger("tybot.archive.file_audit")
 
 
 def audit(workspaces: list[str], *, config_loader, client_factory, repo,
-          live_root: Path, shadow_root: Path, pause: float = 3.0,
+          live_root: Path, pause: float = 3.0,
           identity_validator) -> dict:
     """Only intersect actual joined channels with currently collectible DB rows.
 
@@ -57,11 +57,11 @@ def audit(workspaces: list[str], *, config_loader, client_factory, repo,
                     time.sleep(pause)
                 try:
                     item = preview(client, repo, workspace, channel.channel_id,
-                                   live_root=live_root, shadow_root=shadow_root)
+                                   live_root=live_root)
                     uncertain = []
                     missing = []
                     for file_id in item["missing_metadata_ids"]:
-                        records = existing_records([live_root, shadow_root], workspace,
+                        records = existing_records([live_root], workspace,
                                                    channel.channel_id, channel.name, file_id)
                         if records:
                             uncertain.append({"file_id": file_id, "records": records})

@@ -473,7 +473,6 @@ def _written_archive(tmp_path):
         "ARCHIVER_MASTER_BOT_USER_TYIT": "U_MASTER",
         "ARCHIVER_CHANNEL_IDS_TYIT": "C12345678",
         "ARCHIVE_DIR": str(tmp_path / "live"),
-        "ARCHIVER_SHADOW_DIR": str(tmp_path / "shadow"),
     }
 
     class Client:
@@ -485,7 +484,7 @@ def _written_archive(tmp_path):
             return {"user": {"name": user}}
 
     cfg = archiving_bot.load_archiver_workspaces(env)[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
     collector.ingest_event(Client(), {
         "channel_type": "channel", "channel": "C12345678", "user": "U1",
         "ts": "1790070000.000001", "text": "회의는 10시입니다",
@@ -498,7 +497,7 @@ def _written_archive(tmp_path):
         "previous_message": {"ts": "1790070000.000001", "user": "U1",
                              "text": "회의는 10시입니다"},
     })
-    return tmp_path / "shadow"
+    return tmp_path / "archive"
 
 
 def _store(root, monkeypatch, latest):
@@ -615,7 +614,7 @@ def test_the_audit_view_still_holds_every_revision(tmp_path, monkeypatch):
 def test_the_raw_file_is_never_modified(tmp_path, monkeypatch):
     """읽을 때만 거른다. 파일에서 줄을 지우면 감사에서 무엇이 바뀌었는지 못 본다."""
     root = _written_archive(tmp_path)
-    path = next(root.glob("workspaces/*/channels/*/raw/*.md"))
+    path = next(root.glob("tyit/*__*/archive/raw/*.md"))
     before = path.read_bytes()
 
     store = _store(root, monkeypatch, _revision("delete"))
@@ -626,7 +625,7 @@ def test_the_raw_file_is_never_modified(tmp_path, monkeypatch):
 
 def test_a_database_outage_hides_the_revision_but_not_the_rest(tmp_path, monkeypatch):
     """장애가 옛 자료 검색까지 끊으면, 고치려던 것보다 큰 사고가 된다."""
-    from tybot.archive import writer
+    from tybot.archive import shadow_paths, writer
 
     root = _written_archive(tmp_path)
     writer.ingest(
@@ -637,6 +636,10 @@ def test_a_database_outage_hides_the_revision_but_not_the_rest(tmp_path, monkeyp
             "U2", "옛 자료 한 줄",
         )],
         acl=["#팀-전산_abb155-공지"],
+        # 수집기가 쓰는 배치 그대로다. 운영 루트에는 옛 `workspaces/` 배치가 없다.
+        channel_directory=shadow_paths.archive_dir(
+            root, "tyit", "C12345678", "#팀-전산_abb155-공지"
+        ),
     )
     store = _store(root, monkeypatch, reader.UNKNOWN)
 

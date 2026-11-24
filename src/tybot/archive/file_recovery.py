@@ -129,7 +129,7 @@ def _metadata_path(root: Path, base: Path, file_id: str, receipt: dict) -> Path:
 
 
 def recover(client, repo, owner, cfg, file_ids: list[str], *, live_root: Path,
-            shadow_root: Path, channel_id: str, apply: bool, actor: str,
+            channel_id: str, apply: bool, actor: str,
             indexer=None, reconvert: bool = False) -> dict:
     """Caller must hold the collector instance lock for the entire apply run.
 
@@ -143,7 +143,7 @@ def recover(client, repo, owner, cfg, file_ids: list[str], *, live_root: Path,
     if apply and not actor.strip():
         raise ValueError("an accountable actor is required")
     inventory = preview(client, repo, cfg.key, channel_id,
-                        live_root=live_root, shadow_root=shadow_root)
+                        live_root=live_root)
     if not inventory["list_complete"]:
         raise ValueError("incomplete file inventory")
     info = _authorize(client, repo, owner, cfg.key, channel_id)
@@ -165,7 +165,7 @@ def recover(client, repo, owner, cfg, file_ids: list[str], *, live_root: Path,
                 "channel_id": channel_id, "file_id": file_id,
             }.items()):
                 raise ValueError("invalid recovery receipt")
-            records = existing_records([live_root, shadow_root], cfg.key, channel_id, name, file_id)
+            records = existing_records([live_root], cfg.key, channel_id, name, file_id)
             if records and receipt is None:
                 item.update(status="existing-needs-review", records=records)
                 continue

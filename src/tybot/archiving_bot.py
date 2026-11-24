@@ -1,4 +1,8 @@
-"""Independent Slack archive collector with per-channel shadow/live routing."""
+"""Independent Slack archive collector. Writes the live archive (per-channel layout) only.
+
+B-99 2단계(2026-11-24): 섀도 루트·섀도 모드·DM 인계 소비자를 없앴다. Archiver 가 쓰는
+곳은 `ARCHIVE_DIR` 하나다.
+"""
 from __future__ import annotations
 
 import logging
@@ -146,91 +150,92 @@ def load_archiver_workspaces(env: dict[str, str] | None = None) -> list[Archiver
     return configs
 
 
-def shadow_archive_dir(env: dict[str, str] | None = None) -> Path:
+#: B-99 2단계로 은퇴한 설정. 남아 있어도 읽지 않고, 기동 로그에 한 줄 남긴다.
+#: 조용히 무시하면 운영자는 그 값이 아직 무언가를 하고 있다고 믿는다.
+RETIRED_SETTINGS = (
+    "ARCHIVER_SHADOW_DIR",
+    "ARCHIVER_SHADOW_LAYOUT",
+    "ARCHIVER_DM_CONSUME_ENABLED",
+    "ARCHIVER_DM_POLL_SECONDS",
+)
+
+_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def retired_settings(env: dict[str, str] | None = None) -> list[str]:
     values = os.environ if env is None else env
-    supplied = values.get("ARCHIVER_SHADOW_DIR", "")
+    return [name for name in RETIRED_SETTINGS if str(values.get(name, "")).strip()]
+
+
+def archive_root(workspace: str, env: dict[str, str] | None = None) -> Path:
+    """Archiver 가 쓰는 **유일한** 루트(`ARCHIVE_DIR`).
+
+    전에는 섀도 루트와 운영 루트 둘을 받았다. 두 쓰기 경로가 남아 있는 한 한쪽이 만든
+    디렉터리가 다른 쪽의 기동을 막았다(2026-11-20 장애, B-99).
+    """
+    values = os.environ if env is None else env
+    if values.get("ARCHIVER_LIVE_WRITES_ENABLED", "").strip().lower() in _OFF_VALUES:
+        # 운영 쓰기가 아닌 모드는 이제 없다. 끈 값을 「섀도로 돌아간다」 로 읽으면 안 된다.
+        raise ArchiverConfigError(
+            "ARCHIVER_LIVE_WRITES_ENABLED is off, but the Archiver has no non-live mode "
+            "since B-99 stage 2. Remove the setting, or stop the unit to stop collection."
+        )
+    supplied = values.get("ARCHIVE_DIR", "")
     if not supplied or not Path(supplied).is_absolute():
-        raise ArchiverConfigError("ARCHIVER_SHADOW_DIR must be an explicit absolute path")
-    live_supplied = values.get("ARCHIVE_DIR", "")
-    if not live_supplied or not Path(live_supplied).is_absolute():
         raise ArchiverConfigError("ARCHIVE_DIR must be an explicit absolute path")
-    shadow = Path(supplied).resolve()
-    live = Path(live_supplied).resolve()
-    layout = values.get("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower()
-    if layout not in {"legacy", "per-channel-v1"}:
-        raise ArchiverConfigError("ARCHIVER_SHADOW_LAYOUT must be legacy or per-channel-v1")
-    if shadow == live or shadow in live.parents or live in shadow.parents:
-        raise ArchiverConfigError("shadow and live archive paths must not overlap")
-    # 첨부 정본은 archive 의 **형제**에 쌓인다(`files.attachment_storage` — objects/,
-    # staging/). 그래서 두 archive 가 겹치지 않아도 부모가 같으면 shadow 첨부가 운영
-    # objects/ 안으로 들어간다. 경로가 다르니 오류가 나지 않고, 나중에 어느 것이
-    # shadow 였는지 구분할 수 없다.
-    if layout == "legacy" and shadow.parent == live.parent:
+    root = Path(supplied).resolve()
+    if not root.is_dir():
+        raise ArchiverConfigError("live archive root must already exist")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", workspace):
+        raise ArchiverConfigError("invalid workspace key for live archive")
+    # Unrelated legacy namespaces must not prevent a new workspace starting.
+    # Keep the same-workspace guard to avoid two canonical layouts for its data.
+    legacy = root / "workspaces" / workspace
+    if legacy.exists() or legacy.is_symlink():
+        # 원인과 조치를 같이 적는다(B-99). 2026-11-20 Master 의 옛 DM 쓰기가 이 디렉터리를
+        # 다시 만들었고, 메시지만으로는 무엇을 해야 하는지 알 수 없었다.
         raise ArchiverConfigError(
-            "shadow and live archives must not share a parent directory;"
-            " attachment objects/ and staging/ are siblings of the archive dir"
+            f"live archive root still contains legacy workspace: {workspace} "
+            f"({legacy}). Move it out (do not delete) to an "
+            "archive-legacy-quarantine-<date>/workspaces directory, merge it with "
+            "scripts/promote_legacy_archive.py (B-98), then restart. See BACKLOG B-99."
         )
-    return shadow
+    return root
 
 
-def shadow_workspace_config(
-    cfg: ArchiverWorkspace, env: dict[str, str] | None = None,
-) -> ArchiverWorkspace:
-    values = os.environ if env is None else env
-    if values.get("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower() != "per-channel-v1":
-        return cfg
-    root = shadow_archive_dir(values)
-    if (root / "workspaces").exists():
-        raise ArchiverConfigError(
-            "per-channel-v1 requires a new shadow root without legacy workspaces"
-        )
-    return replace(cfg, separate_attachments=True)
+class ArchiveCollector:
+    """한 워크스페이스의 채널 원문을 운영 아카이브에 쓴다.
 
+    채널마다 `<root>/<ws>/<cid>__<name>/archive` 에 쓴다(`shadow_paths` — 이름만 옛것이다).
+    쓸지 말지는 채널 모드(`active`)와 DB 의 소유 기록이 정한다 — Master 와 동시에 쓰지 않는다.
+    """
 
-class ShadowCollector:
     def __init__(self, cfg: ArchiverWorkspace, root: Path, *, membership_repo=None,
-                 layout: str = "legacy", live_root: Path | None = None,
-                 live_enabled: bool = False, owner_lookup=None) -> None:
-        if layout not in {"legacy", "per-channel-v1"}:
-            raise ArchiverConfigError("unknown shadow archive layout")
-        if layout == "per-channel-v1" and not cfg.separate_attachments:
-            raise ArchiverConfigError(
-                "per-channel-v1 requires separate attachments; raw must not contain extracted body"
-            )
+                 owner_lookup=None) -> None:
+        # 채널별 배치의 원문에는 추출 본문을 넣지 않는다 — 첨부 본문은 정본 문서로 따로 간다.
+        # 섀도 시절에는 기동 설정이 켰다. 이제 배치가 하나뿐이라 항상 켠다.
+        if not cfg.separate_attachments:
+            cfg = replace(cfg, separate_attachments=True)
         self.cfg = cfg
         self.root = root
-        self.layout = layout
         self._membership_repo = membership_repo
         self._names: dict[str, str] = {}
         self._store = ArchiveStore(root)
-        if live_enabled and (layout != "per-channel-v1" or live_root is None or
-                             root.resolve() == live_root.resolve() or
-                             root.resolve() in live_root.resolve().parents or
-                             live_root.resolve() in root.resolve().parents):
-            raise ArchiverConfigError("live writes require disjoint per-channel-v1 roots")
-        self._live_root = live_root
-        self._live_enabled = live_enabled
         self._owner_lookup = owner_lookup
-        self._live_store = ArchiveStore(live_root) if live_enabled else None
 
     def _channel_archive(self, channel_id: str, channel: str,
-                         root: Path | None = None) -> Path | None:
-        if self.layout == "legacy":
-            return None
+                         root: Path | None = None) -> Path:
         return shadow_paths.archive_dir(root or self.root, self.cfg.key, channel_id, channel)
 
     def _destination(self, channel_id: str) -> tuple[Path, str, ArchiveStore] | None:
         if self._membership_repo is None:
-            return self.root, ingest_ack.SHADOW, self._store
+            # 오프라인 시험 전용이다. `_serve` 는 항상 멤버십 저장소와 소유 조회를 넘긴다.
+            return self.root, ingest_ack.LIVE, self._store
         try:
             row = channel_membership.channel_row(
                 self._membership_repo, self.cfg.key, channel_id
             )
             if not channel_membership.is_collectible(row):
-                return None
-            if row["mode"] == "shadow":
-                return self.root, ingest_ack.SHADOW, self._store
-            if not self._live_enabled or self._live_root is None:
                 return None
             if self._owner_lookup is None:
                 return None
@@ -239,7 +244,7 @@ class ShadowCollector:
                 channel_id, archiver_flag=flag
             ):
                 return None
-            return self._live_root, ingest_ack.LIVE, self._live_store
+            return self.root, ingest_ack.LIVE, self._store
         except Exception:
             log.exception("[%s] live destination authorization failed ch=%s", self.cfg.key, channel_id)
             return None
@@ -620,8 +625,7 @@ class ShadowCollector:
         이벤트가 번갈아 들어오면 뒤에 온 것이 앞의 좌표를 덮어 **엉뚱한 채널에
         기록**한다. 한 프로세스가 여러 채널을 보는 것이 정상 동작이다.
 
-        그림자 모드라 `written_to=SHADOW` 다. 인수 전까지 이 기록이 운영
-        아카이브를 가리킨다고 읽히면 안 된다.
+        쓰는 곳은 운영 아카이브 하나라 `written_to=LIVE` 다(B-99 2단계).
         """
         try:
             ingest_ack.advance(
@@ -629,7 +633,7 @@ class ShadowCollector:
                 channel_id=channel_id,
                 message_ts=message_ts,
                 target=target,
-                written_to=values.pop("written_to", ingest_ack.SHADOW),
+                written_to=values.pop("written_to", ingest_ack.LIVE),
                 **values,
             )
         except Exception:
@@ -678,78 +682,6 @@ def _backfill_loop(runner, stop: threading.Event, interval_seconds: int) -> None
         stop.wait(interval_seconds)
 
 
-def _dm_handoff_consumer(
-    cfg: ArchiverWorkspace, root: Path, env: dict[str, str] | None = None,
-):
-    values = os.environ if env is None else env
-    if not cfg.master_bot_user_id:
-        log.info("[%s] Master 없이 채널을 수집합니다. Master DM 인계는 사용하지 않습니다.", cfg.key)
-        return None
-    if values.get("ARCHIVER_DM_CONSUME_ENABLED", "").strip().lower() not in {
-        "1", "true", "yes", "on",
-    }:
-        return None
-    if values.get("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower() != "per-channel-v1":
-        raise ArchiverConfigError("DM handoff requires per-channel-v1 shadow layout")
-    handoff_dir = Path(values.get("ARCHIVER_DM_HANDOFF_DIR", ""))
-    if not handoff_dir.is_absolute() or not handoff_dir.is_dir() or handoff_dir.is_symlink():
-        raise ArchiverConfigError("ARCHIVER_DM_HANDOFF_DIR must be an existing absolute directory")
-
-    from .archive.dm_consumer import DmConsumer
-    from .archive.dm_file_handoff import DmFileVault
-    from .archive.dm_inbox import DmInbox
-    from .console.workspace_store import _fernet
-
-    cipher = _fernet()
-    return DmConsumer(
-        workspace=cfg.key, master_bot_user_id=cfg.master_bot_user_id,
-        archive_root=root, inbox=DmInbox(handoff_dir, cipher),
-        file_vault=DmFileVault(handoff_dir, cipher),
-    )
-
-
-def _dm_handoff_loop(consumer, stop: threading.Event, interval_seconds: int) -> None:
-    while not stop.is_set():
-        try:
-            completed, failed = consumer.run_once()
-            if completed or failed:
-                log.info("[%s] DM handoff completed=%s pending=%s",
-                         consumer.workspace, completed, failed)
-        except Exception as exc:  # noqa: BLE001 - a DM poll must not stop channel collection
-            log.warning("[%s] DM handoff poll failed: %s",
-                        consumer.workspace, type(exc).__name__)
-        stop.wait(interval_seconds)
-
-
-def _live_archive_root(workspace: str, env: dict[str, str] | None = None) -> Path | None:
-    values = os.environ if env is None else env
-    if values.get("ARCHIVER_LIVE_WRITES_ENABLED", "").strip().lower() not in {
-        "1", "true", "yes", "on",
-    }:
-        return None
-    supplied = values.get("ARCHIVE_DIR", "")
-    if not supplied or not Path(supplied).is_absolute():
-        raise ArchiverConfigError("ARCHIVE_DIR must be absolute for live writes")
-    live_root = Path(supplied).resolve()
-    if not live_root.is_dir():
-        raise ArchiverConfigError("live archive root must already exist")
-    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", workspace):
-        raise ArchiverConfigError("invalid workspace key for live archive")
-    # Unrelated legacy namespaces must not prevent a new workspace starting.
-    # Keep the same-workspace guard to avoid two canonical layouts for its data.
-    legacy = live_root / "workspaces" / workspace
-    if legacy.exists() or legacy.is_symlink():
-        # 원인과 조치를 같이 적는다(B-99). 2026-11-20 Master 의 옛 DM 쓰기가 이 디렉터리를
-        # 다시 만들었고, 메시지만으로는 무엇을 해야 하는지 알 수 없었다.
-        raise ArchiverConfigError(
-            f"live archive root still contains legacy workspace: {workspace} "
-            f"({legacy}). Move it out (do not delete) to an "
-            "archive-legacy-quarantine-<date>/workspaces directory, merge it with "
-            "scripts/promote_legacy_archive.py (B-98), then restart. See BACKLOG B-99."
-        )
-    return live_root
-
-
 def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -760,13 +692,9 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
     validate_slack_identity(cfg, app.client.auth_test())
     repo = default_repo()
     channel_membership.sync(app.client, repo, cfg.key, actor="startup-membership-sync")
-    live_root = _live_archive_root(cfg.key)
-    live_enabled = live_root is not None
-    collector = ShadowCollector(
+    collector = ArchiveCollector(
         cfg, root, membership_repo=repo,
-        layout=os.getenv("ARCHIVER_SHADOW_LAYOUT", "legacy").strip().lower(),
-        live_root=live_root, live_enabled=live_enabled,
-        owner_lookup=OwnerLookup(cfg.key, cache_seconds=0) if live_enabled else None,
+        owner_lookup=OwnerLookup(cfg.key, cache_seconds=0),
     )
     recovered = ingest_ack.drain_outbox(cfg.key)
     if recovered["applied"] or recovered["left"]:
@@ -808,17 +736,6 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         name=f"archiver-image-notice-{cfg.key}",
         daemon=True,
     )
-    dm_thread = None
-    dm_consumer = _dm_handoff_consumer(cfg, root)
-    if dm_consumer is not None:
-        dm_interval = int(os.getenv("ARCHIVER_DM_POLL_SECONDS", "15"))
-        if dm_interval < 5:
-            raise ArchiverConfigError("ARCHIVER_DM_POLL_SECONDS must be at least 5")
-        dm_thread = threading.Thread(
-            target=_dm_handoff_loop,
-            args=(dm_consumer, stop, dm_interval),
-            name=f"archiver-dm-{cfg.key}", daemon=True,
-        )
     backfill_thread = None
     if os.getenv("ARCHIVER_BACKFILL_ENABLED", "").strip().lower() in {
         "1", "true", "yes", "on",
@@ -841,8 +758,6 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         )
     sync_thread.start()
     notice_thread.start()
-    if dm_thread is not None:
-        dm_thread.start()
     if backfill_thread is not None:
         backfill_thread.start()
     try:
@@ -851,14 +766,14 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         stop.set()
         sync_thread.join(timeout=1)
         notice_thread.join(timeout=1)
-        if dm_thread is not None:
-            dm_thread.join(timeout=1)
         if backfill_thread is not None:
             backfill_thread.join(timeout=1)
 
 
 def _instance_lock_name(workspace: str) -> str:
-    return f"archiving-bot-shadow-{workspace}"
+    # 옛 유닛(`tybot-archiving-shadow@`)과 동시에 도는 것은 잠금이 아니라 유닛의
+    # `Conflicts=` 가 막는다 — 두 유닛의 LOCK_DIR 이 다르다.
+    return f"archiving-bot-{workspace}"
 
 
 def main() -> int:
@@ -874,16 +789,17 @@ def main() -> int:
     load_dotenv(env_file, override=False)
     log.info("archiver environment loaded from dedicated file")
     configs = load_archiver_workspaces()
-    root = shadow_archive_dir()
-    config = shadow_workspace_config(configs[0])
-    root.mkdir(parents=True, exist_ok=True)
+    config = configs[0]
     workspace = config.key
+    root = archive_root(workspace)
+    for name in retired_settings():
+        log.warning("[%s] retired setting ignored (B-99 stage 2): %s", workspace, name)
     lock = instance_lock(_instance_lock_name(workspace))
     try:
         lock.acquire()
     except AlreadyRunning as exc:
         raise ArchiverConfigError(
-            f"another archiving shadow collector is running for {workspace}"
+            f"another archiver is running for {workspace}"
         ) from exc
     try:
         _serve(config, root)

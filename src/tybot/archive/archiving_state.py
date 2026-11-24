@@ -14,8 +14,8 @@
 
 1. **첨부가 안 끝났는데 「검색된다」 고 말하는 것** — 오너 결정 §6.
    `ready` 로 가려면 첨부 수가 맞아야 한다
-2. **두 writer 가 같은 채널에 동시에 쓰는 것** — 인수는 `shadow → active` 한 길뿐이고
-   그때 `writer_owner` 와 `cutover_ts` 가 같이 움직인다
+2. **두 writer 가 같은 채널에 동시에 쓰는 것** — 인수는 `→ active` 한 길뿐이고
+   그때 `writer_owner` 와 `cutover_ts` 가 같이 움직인다(인수 좌표 필수)
 3. **끝난 것을 되돌리는 것** — `ready` 다음은 없다. 새 사실이 생기면 그건 새
    메시지이거나 새 revision 이다
 4. **운영값 없이 production 으로 가는 것** — 보존 정책이 비어 있으면 막는다
@@ -38,9 +38,19 @@ from enum import StrEnum
 
 class ChannelMode(StrEnum):
     OFF = "off"
+    #: **읽기 전용 과거값**(B-99 2단계 D2). 그림자 수집은 폐기됐다 — Archiver 는 이
+    #: 모드의 채널을 수집하지 않고(`refused`), 멤버십 동기화가 `active` 로 올린다.
+    #: 옛 행을 읽을 수 있게 값만 남긴다. 어떤 전이도 이 값으로 들어오지 못한다.
     SHADOW = "shadow"
     ACTIVE = "active"
     PAUSED = "paused"
+
+
+#: 더는 들어갈 수 없는 모드. 옛 행에서 **나가는 길**만 남는다.
+RETIRED_MODES: frozenset[ChannelMode] = frozenset({ChannelMode.SHADOW})
+
+#: 폐기된 모드로 가려 할 때의 사유. 콘솔·스키마가 같은 말로 거절한다.
+SHADOW_RETIRED_REASON = "shadow 수집은 폐기됐습니다 (B-99)"
 
 
 class WriterOwner(StrEnum):
@@ -48,17 +58,20 @@ class WriterOwner(StrEnum):
     ARCHIVER = "archiver"
 
 
-# 갈 수 있는 길. **`off → active` 가 없는 것이 요점이다.**
+# 갈 수 있는 길(B-99 2단계 D2).
 #
-# 그림자를 건너뛰면 「누락 0·권한 유출 0·첨부 손실 0」 을 확인할 기회가 없다
-# (분리 설계 §4-C). 급할 때 건너뛰고 싶어지는 단계라 코드로 막는다.
+# 예전에는 `off → shadow → active` 로 그림자 대조를 거치게 했다. 그림자 수집이
+# 폐기되면서 인수는 `off → active` 한 걸음이 됐다 — 대신 **인수 좌표가 필수**다
+# (`plan_mode_change`). 좌표 없는 인수는 전후 중복·누락을 대조할 수 없다.
+#
+# `shadow` 로 들어가는 길은 없다. 옛 `shadow` 행은 `active·paused·off` 로만 나간다.
 _MODE_EDGES: dict[ChannelMode, frozenset[ChannelMode]] = {
-    ChannelMode.OFF: frozenset({ChannelMode.SHADOW}),
+    ChannelMode.OFF: frozenset({ChannelMode.ACTIVE}),
     ChannelMode.SHADOW: frozenset({ChannelMode.OFF, ChannelMode.ACTIVE, ChannelMode.PAUSED}),
     ChannelMode.ACTIVE: frozenset({ChannelMode.PAUSED}),
-    # 멈춘 채널은 원래 모드로만 돌아간다. paused 에서 off 로 가면 그 채널이
-    # 인수됐다는 사실이 사라지고, 다음 사람이 다시 shadow 부터 시작한다.
-    ChannelMode.PAUSED: frozenset({ChannelMode.SHADOW, ChannelMode.ACTIVE}),
+    # 멈춘 채널은 운영 수집으로만 돌아간다. paused 에서 off 로 가면 그 채널이
+    # 인수됐다는 사실(주인·좌표)이 사라진다.
+    ChannelMode.PAUSED: frozenset({ChannelMode.ACTIVE}),
 }
 
 
@@ -84,6 +97,12 @@ def plan_mode_change(
     「active 인데 주인은 master」 가 만들어지고, 그 상태에서는 두 writer 가
     같은 파일에 쓴다. 줄이 섞이고 `doc_count` 갱신이 유실된다.
     """
+    if target in RETIRED_MODES:
+        # 같은 값으로의 「전이」 도 받지 않는다. 받아 주면 폐기한 모드를 요청하는
+        # 호출부가 조용히 살아남고, 그 호출부는 언젠가 다른 행에서 shadow 를 만든다.
+        raise TransitionRefused(
+            f"{current.mode} → {target} 로는 갈 수 없습니다. {SHADOW_RETIRED_REASON}"
+        )
     if target == current.mode:
         return current
     allowed = _MODE_EDGES[current.mode]
@@ -110,36 +129,6 @@ def plan_mode_change(
             )
         return ChannelState(
             current.workspace, current.channel_id, target, WriterOwner.ARCHIVER, ts
-        )
-
-    if target == ChannelMode.SHADOW:
-        # 첫 파일럿은 master 가 운영 원문을 계속 쓰고 archiver 는 그림자에만 쓴다.
-        # active 이후 shadow 로 되돌리는 것은 운영 writer 를 master 로 넘기는
-        # 역인수다. 새 좌표 없이 소유권만 바꾸면 그 경계에서 중복·누락이 생긴다.
-        if current.writer_owner == WriterOwner.ARCHIVER:
-            if not cutover_ts:
-                raise TransitionRefused(
-                    "active 이후 shadow 로 돌아가려면 역인수 좌표(cutover_ts)가 "
-                    "필요합니다. 이 ts 이후가 master 몫입니다"
-                )
-            if current.cutover_ts and cutover_ts < current.cutover_ts:
-                raise TransitionRefused(
-                    f"역인수 좌표는 기존 인수 좌표보다 앞설 수 없습니다: "
-                    f"{current.cutover_ts} → {cutover_ts}"
-                )
-            return ChannelState(
-                current.workspace,
-                current.channel_id,
-                target,
-                WriterOwner.MASTER,
-                cutover_ts,
-            )
-        return ChannelState(
-            current.workspace,
-            current.channel_id,
-            target,
-            WriterOwner.MASTER,
-            current.cutover_ts,
         )
 
     if target == ChannelMode.OFF:
@@ -175,6 +164,8 @@ def owns_write(state: ChannelState, actor: WriterOwner) -> bool:
     """이 actor 가 지금 이 채널을 쓸 주인인가. **둘이 동시에 참이 되지 않는다.**"""
     if state.mode == ChannelMode.PAUSED:
         return False
+    # 옛 `shadow` 행은 `off` 와 같이 읽는다(과거값). Archiver 는 그 채널을 수집하지
+    # 않으므로 운영 원문의 주인은 여전히 master 다 — Master 판정은 바꾸지 않는다.
     if state.mode in (ChannelMode.OFF, ChannelMode.SHADOW):
         return actor == WriterOwner.MASTER
     return actor == WriterOwner.ARCHIVER

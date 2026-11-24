@@ -1,5 +1,8 @@
 # Archiving Bot 그림자 수집 준비
 
+> **폐기 (2026-11-24, B-99 2단계).** 섀도 루트·섀도 모드·`tybot-archiving-shadow@` 유닛은 없어졌다.
+> 운영 절차는 [Archiver 유닛 전환](archiver-unit-switch.md)을 따른다. 이 문서는 기록으로만 남긴다.
+
 기준: [Archiving Bot 분리 결정](../design/archiving-bot-separation-2026-09-23.md)
 상태: 개발/비교 전용. 운영 writer 전환 절차가 아니다.
 

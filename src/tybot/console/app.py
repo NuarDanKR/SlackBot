@@ -2225,7 +2225,8 @@ def put_workspace(key: str, body: WorkspaceBody, request: Request, user: User) -
 
 
 class ChannelModeBody(BaseModel):
-    mode: Literal["off", "shadow", "active", "paused"]
+    # `shadow` 는 받지 않는다(B-99 2단계 D2·D6). 옛 행에 남은 값은 읽기 전용 과거값이다.
+    mode: Literal["off", "active", "paused"]
     # **사유는 선택이 아니다.** 기본값을 두면 전부 그 기본값으로 남고,
     # 그건 기록이 아니다.
     reason: str = Field(min_length=1)
@@ -2483,7 +2484,8 @@ def put_retention(key: str, body: RetentionBody, request: Request, user: User) -
 # ---------------------------------------------------------------------------
 
 class ArchiverDesiredBody(BaseModel):
-    mode: Literal["off", "shadow", "live"]
+    # `shadow` 는 받지 않는다(B-99 2단계). 수집은 운영 쓰기(`live`) 하나뿐이다.
+    mode: Literal["off", "live"]
     reason: str = Field(min_length=1)
 
 

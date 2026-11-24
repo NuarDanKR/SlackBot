@@ -12,7 +12,8 @@ _spec = importlib.util.spec_from_file_location(
 drift = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drift)
 
-UNIT = "tybot-archiving-shadow@.service"
+UNIT = "tybot-archiver@.service"
+OLD = "tybot-archiving-shadow@.service"
 
 
 def _dirs(tmp_path):
@@ -58,3 +59,25 @@ def test_the_installer_installs_the_archiver_unit_and_the_notice_outbox():
     text = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
     assert f'"$APP_DIR/deploy/{UNIT}" /etc/systemd/system/{UNIT}' in text
     assert '"$DATA_DIR/image-description-notify"' in text
+    assert '"$DATA_DIR/archiver"' in text
+
+
+def test_the_retired_shadow_unit_left_installed_is_reported(tmp_path, capsys):
+    deploy, systemd = _dirs(tmp_path)
+    (systemd / UNIT).write_text((deploy / UNIT).read_text(encoding="utf-8"), encoding="utf-8")
+    (systemd / OLD).write_text("[Service]\n", encoding="utf-8")
+
+    code = drift.main(["--deploy-dir", str(deploy), "--systemd-dir", str(systemd)])
+
+    assert code == drift.EXIT_DRIFT
+    assert f"retired-present {OLD}" in capsys.readouterr().out
+
+
+def test_the_archiver_unit_conflicts_with_the_old_one_and_drops_the_shadow_root():
+    text = (ROOT / "deploy" / UNIT).read_text(encoding="utf-8")
+    assert "Conflicts=tybot-archiving-shadow@%i.service" in text
+    assert "LOCK_DIR=/var/lib/tybot/archiver/%i/.locks" in text
+    rw = next(line for line in text.splitlines() if line.startswith("ReadWritePaths="))
+    assert "archiver-shadow" not in rw and "dm-handoff" not in rw
+    assert "/var/lib/tybot/image-description-notify" in rw
+    assert not (ROOT / "deploy" / OLD).exists()

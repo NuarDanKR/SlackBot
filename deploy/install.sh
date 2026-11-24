@@ -546,7 +546,11 @@ install -m 0644 "$APP_DIR/deploy/tybot-image-description@.timer" /etc/systemd/sy
 # B-99: the Archiver unit was never refreshed by this installer, so a code update
 # ran under an old unit whose ReadWritePaths lacked the notice outbox (2026-11-20).
 # Installed, not enabled: running instances pick it up on their next restart.
-install -m 0644 "$APP_DIR/deploy/tybot-archiving-shadow@.service" /etc/systemd/system/tybot-archiving-shadow@.service
+# B-99 stage 2: the unit is now tybot-archiver@ (Conflicts= with the old name).
+# The old tybot-archiving-shadow@ file is left in place for the operator to stop and
+# remove after switching each workspace; check_unit_drift.py reports it as retired.
+install -d -o tybot -g tybot -m 0700 "$DATA_DIR/archiver"
+install -m 0644 "$APP_DIR/deploy/tybot-archiver@.service" /etc/systemd/system/tybot-archiver@.service
 install -d -m 0755 /usr/local/libexec
 install -o root -g root -m 0755 "$APP_DIR/deploy/hermes-archiver-run" /usr/local/libexec/hermes-archiver-run
 install -o root -g root -m 0644 "$APP_DIR/deploy/hermes-bot-locks.conf" /etc/tmpfiles.d/hermes-bot-locks.conf

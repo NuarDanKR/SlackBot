@@ -46,7 +46,7 @@ def setup(tmp_path):
         "config_loader": lambda workspace: cfgs[workspace],
         "client_factory": lambda cfg: clients[cfg.key],
         "repo": SimpleNamespace(channels=lambda workspace: rows[workspace]),
-        "live_root": tmp_path / "live", "shadow_root": tmp_path / "shadow",
+        "live_root": tmp_path / "live",
         "identity_validator": lambda cfg, identity: None, "pause": 0,
     }
     return args, rows, clients
@@ -62,7 +62,6 @@ def test_masterless_workspace_included_and_scopes_do_not_mix(setup):
     assert all(client.calls == [{"channel": CHANNEL, "count": 100, "page": 1}]
                for client in clients.values())
     assert not args["live_root"].exists()
-    assert not args["shadow_root"].exists()
 
 
 @pytest.mark.parametrize("change", [

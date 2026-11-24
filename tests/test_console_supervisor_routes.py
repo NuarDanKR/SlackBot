@@ -82,8 +82,10 @@ def test_the_owner_sees_the_runtime(client, repo):
     body = client.get(f"{BASE}/runtime", headers=owner(client)).json()
 
     assert body["workspace"] == "tyit"
+    # 옛 shadow 행은 과거값으로 그대로 보이되, 고를 수 있는 것은 off·live 뿐이다.
     assert body["desiredMode"] == "shadow"
-    assert body["gatedModes"] == ["live"]
+    assert body["selectableModes"] == ["off", "live"]
+    assert body["gatedModes"] == []
 
 
 def test_every_read_says_saving_is_not_applying(client, repo):
@@ -104,15 +106,26 @@ def test_a_mode_change_without_a_reason_never_reaches_the_rules(client, repo):
     assert repo.runtime("tyit")["desired_mode"] == "shadow"
 
 
-def test_live_is_refused_with_422_not_500(client, repo):
-    """고칠 수 없는 고장이 아니라 **지금은 안 되는 것**이다."""
+def test_shadow_is_refused_with_422_not_500(client, repo):
+    """그림자 수집은 폐기됐다(B-99 2단계). 요청 본문 단계에서 거절한다."""
     headers = {**owner(client), **CSRF}
 
-    response = client.put(f"{BASE}/desired", json={"mode": "live", "reason": "전환"},
+    response = client.put(f"{BASE}/desired", json={"mode": "shadow", "reason": "전환"},
                           headers=headers)
 
     assert response.status_code == 422
-    assert "파일럿" in response.json()["detail"]
+    assert repo.runtime("tyit")["desired_mode"] == "shadow"
+
+
+def test_live_is_recorded(client, repo):
+    """수집을 켜는 값은 `live` 하나다. 옛 shadow 행도 이 값으로 옮긴다."""
+    headers = {**owner(client), **CSRF}
+
+    body = client.put(f"{BASE}/desired", json={"mode": "live", "reason": "전환"},
+                      headers=headers).json()
+
+    assert body["desiredMode"] == "live"
+    assert body["generation"] == 4
 
 
 def test_pausing_is_recorded(client, repo):

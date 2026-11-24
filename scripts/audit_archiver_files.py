@@ -15,11 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 from slack_sdk import WebClient
 
 from tybot.archive.file_audit import audit
-from tybot.archiving_bot import (
-    load_archiver_workspaces,
-    shadow_archive_dir,
-    validate_slack_identity,
-)
+from tybot.archiving_bot import load_archiver_workspaces, validate_slack_identity
 from tybot.console.archiving_repo import default_repo
 from tybot.console.workspace_store import _connect
 from tybot.envfile import load_env_file
@@ -49,14 +45,11 @@ def main(argv=None) -> int:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
         load_env_file()
         live_root = pathlib.Path(os.environ["ARCHIVE_DIR"])
-        shadow_root = shadow_archive_dir()
-        if os.getenv("ARCHIVER_SHADOW_LAYOUT") != "per-channel-v1":
-            raise ValueError("per-channel-v1 is required")
         if not live_root.is_absolute() or not live_root.is_dir():
             raise ValueError("existing absolute archive root is required")
         output = pathlib.Path(args.result_json).resolve() if args.result_json else None
-        if output and any(output.is_relative_to(root.resolve()) for root in (live_root, shadow_root)):
-            raise ValueError("audit output must be outside both archives")
+        if output and output.is_relative_to(live_root.resolve()):
+            raise ValueError("audit output must be outside the archive")
         workspaces = registered_workspaces() if args.all_workspaces else args.workspace
 
         def config_loader(workspace):
@@ -67,7 +60,7 @@ def main(argv=None) -> int:
         report = audit(
             workspaces, config_loader=config_loader,
             client_factory=lambda cfg: WebClient(token=cfg.bot_token, timeout=30),
-            repo=default_repo(), live_root=live_root, shadow_root=shadow_root,
+            repo=default_repo(), live_root=live_root,
             identity_validator=validate_slack_identity, pause=args.pause,
         )
         rendered = json.dumps(report, ensure_ascii=True, sort_keys=True)

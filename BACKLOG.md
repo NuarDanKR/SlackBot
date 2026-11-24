@@ -92,7 +92,7 @@ _최종 갱신: 2026-11-12_
 
 | ID | 제목 | 우선 | 상태 | 의존 |
 |---|---|---|---|---|
-| [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · **1단계 완료, 배포 대기** · 2단계 진행중 Claude/2026-11-24) | B-65, B-68, B-94, B-98 |
+| [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · **1단계 완료, 배포 대기** · **2단계 코드 완료, 배포 대기** — 전환 절차 `docs/deploy/archiver-unit-switch.md`) | B-65, B-68, B-94, B-98 |
 | [B-100](#b-100) | **B-94 확장 — 이미지 Vision 처리 상태를 Slack 스레드 댓글 하나(고쳐 가며)와 콘솔에서 확실히 보이기** | **높음** | 대기 (B-99 2단계 `archiving_bot.py` 병합 후 착수) | B-94, B-99, B-81 |
 | [B-85](#b-85) | **답변 캐시와 사용자별 TYBot/VIPBot 일일 성공 답변 10회 제한** | **최우선** | 완료 (Codex/2026-11-10) | B-19, B-27b, B-83 |
 | [B-86](#b-86) | **PII·민감정보 결정적 마스킹 후 아카이브·답변 허용** | **최우선** | 완료 (Claude/2026-11-10) | B-07, B-49, B-70 |
@@ -251,13 +251,47 @@ B-98 이행 도구로 병합할 대상이다. 서버 유닛이 옛 판이라 `Re
 
 #### 2단계 — 섀도 제거
 
-- [ ] Archiver `shadow` 모드 수집·섀도 루트(`ARCHIVER_SHADOW_DIR`·`shadow_archive_dir`)·
-      `ingest_ack.SHADOW` 제거. 채널 모드는 `off|active|paused` 만
-- [ ] DM 인계 소비자가 섀도 루트가 아니라 운영 루트에 쓴다. Master DM 쓰기는 인계로 일원화할지 결정
-- [ ] 콘솔·스키마 CHECK(`archive_channel_mode.mode`, `written_to`, supervisor `desired_mode`)에서 `shadow` 제거
-      — 남은 행 0 확인(`deploy/checks/archiver_no_shadow_channels.sql`) 뒤
-- [ ] 유닛 `tybot-archiving-shadow@` → `tybot-archiver@`, `LOCK_DIR`·`ReadWritePaths` 정리, 전환 절차
-- [ ] 섀도 전용 스크립트·진단(`shadow_root`, `migrate_shadow_root`, file_audit/recovery 의 shadow_root 인자) 정리
+**2단계 설계 결정 (Claude/2026-11-24 — 분담 작업의 계약).**
+
+- **D1 루트 하나.** Archiver 는 `ARCHIVE_DIR` 에만 쓴다(채널 `<ws>/<cid>__<name>/archive`).
+  `ARCHIVER_SHADOW_DIR`·`ARCHIVER_SHADOW_LAYOUT` 은 런타임이 읽지 않는다. 남아 있으면
+  기동 로그에 「무시함」 한 줄을 남긴다. `ARCHIVER_LIVE_WRITES_ENABLED` 는 이제 필수가 아니다.
+  다만 명시적으로 끈 값(`0`·`false`·`off`)이면 기동을 거부한다 — 운영 쓰기가 아닌 모드가 없다.
+  운영 스위치는 DB 의 Archiver live 플래그와 채널 소유 기록이다.
+- **D2 `shadow` 모드는 읽기 전용 과거값.** 수집하지 않는다(`refused`). 멤버십 동기화가
+  `active` 로 올린다(2026-11-18 결정 그대로). 상태 전이: `off → active`(인수 좌표 필수),
+  `active ↔ paused`. 옛 `shadow` 행은 `active·paused·off` 로만 나간다.
+- **D3 DM 쓰기는 Master 하나.** 1단계에서 Master 가 운영 루트의 개인별 배치에 쓴다.
+  Archiver 의 DM 인계 소비자가 같은 경로에 쓰면 한 파일에 쓰는 프로세스가 둘이 된다.
+  그래서 인계 거울(`ARCHIVER_DM_MIRROR_ENABLED`)과 소비자(`ARCHIVER_DM_CONSUME_ENABLED`)를
+  은퇴시킨다 — 켜져 있어도 「무시함」 경고만 남긴다. 섀도 루트의 DM 사본은 Master 가 옛 배치에
+  쓴 원문(격리분)과 같은 것이다. 그 원문은 B-98 병합으로 되살린다.
+- **D4 유닛 `tybot-archiver@`.** `Conflicts=tybot-archiving-shadow@%i.service` 로 옛 유닛과
+  동시에 돌지 못하게 한다. `LOCK_DIR=/var/lib/tybot/archiver/%i/.locks`, 잠금 이름은
+  `archiving-bot-<ws>` 이다. `ReadWritePaths` 에서 섀도 루트를 뺀다. `check_unit_drift` 는 새
+  유닛을 필수로 보고, 옛 유닛이 남아 있으면 `retired-present` 로 알린다.
+- **D5 ACK.** `written_to` 는 항상 `live` 다. `SHADOW` 상수는 과거 행을 읽는 데만 남긴다.
+  스키마의 `written_to` CHECK 는 과거 행 때문에 그대로 둔다. `archive_channel_mode.mode` 와
+  supervisor `desired_mode` 의 `shadow` 는 **남은 행이 0일 때만** 빼는 가드 블록으로 지운다.
+- **D6 콘솔.** 섀도 루트 집계와 shadow 모드 선택지를 없앤다.
+- **D7 운영 도구.** 단일 루트로 바꾼다: `ack_reconcile`·`retention`·`file_inventory`·
+  `file_audit*`·`file_recovery`·`drain_conversion_queue`(항상 채널별 배치). `shadow_root.py` 와
+  `migrate_shadow_root.py` 는 삭제한다. 서버의 섀도 루트 **데이터는 지우지 않는다**(보관).
+- `shadow_paths` 모듈 이름은 운영 배치도 쓰므로 그대로 둔다(이름 변경만 하는 churn 금지).
+
+- [x] Archiver `shadow` 모드 수집·섀도 루트 제거(`ArchiveCollector`, `archive_root`). ACK 는 항상
+      `live`. `SHADOW` 상수는 과거 행 읽기용으로만 남김(D5)
+- [x] DM 인계: 일원화 대신 **은퇴**(D3). Master 거울·Archiver 소비자 제거, Master 가 단독 writer
+- [x] 콘솔·스키마: shadow 선택지·섀도 집계 제거. `mode`·supervisor `desired_mode` CHECK 는 남은 행
+      0일 때만 좁히는 가드 블록. `written_to` CHECK 는 과거 행 때문에 유지. supervisor 희망 상태는
+      `off|live`
+- [x] 유닛 `tybot-archiver@`(`Conflicts=` 옛 유닛), `LOCK_DIR=/var/lib/tybot/archiver/%i/.locks`,
+      `check_unit_drift` 의 `retired-present`, 전환 절차 `docs/deploy/archiver-unit-switch.md`
+- [x] `shadow_root.py`·`migrate_shadow_root.py` 삭제, 운영 도구 단일 루트(D7)
+- [ ] 서버 전환(절차 문서 순서) — 오너
+- [ ] 남은 정리: `supervisor_state.PILOT_MODES` 문서·`handover.py` 의 「역인수 → shadow」 문서,
+      콘솔 `PILOT_BLOCKED_FLAGS` 의 `archiver_writes_live`, 섀도 루트 데이터 보관 방식.
+      `active·paused → off` 길이 없다(운영 정지는 `paused`) — 필요하면 따로 정한다
 - [ ] 격리한 `archive-legacy-quarantine-20261120` 을 B-98 도구로 dry-run → apply
 
 **완료 조건.** Master·타이머·스크립트 어느 것도 운영 루트에 `workspaces/` 를 만들지 않고,

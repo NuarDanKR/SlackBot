@@ -251,7 +251,8 @@ def test_changed_backfill_counts_a_file_present_in_both_layouts_once(
     shadow_path.parent.mkdir(parents=True)
     shadow_path.write_text(item.meta_path.read_text(encoding="utf-8"), encoding="utf-8")
     shadow = replace(item, meta_path=shadow_path)
-    monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
+    # 채널별 사본을 고르는 데 설정이 필요 없다(B-99 2단계 D7).
+    monkeypatch.delenv("ARCHIVER_SHADOW_LAYOUT", raising=False)
     monkeypatch.setattr(attachment_review, "scan", lambda _archive: [item, shadow])
     report = recheck.NightlyReport()
 

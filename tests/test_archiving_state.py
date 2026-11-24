@@ -4,7 +4,8 @@
 
 - 두 writer 가 같은 채널에 쓰면 줄이 섞이는데 아무도 예외를 안 받는다
 - 첨부가 안 끝났는데 「검색됩니다」 라고 하면 사람이 찾으러 갔다가 없다고 본다
-- 그림자를 건너뛰면 누락을 확인할 기회 자체가 사라진다
+- 인수 좌표 없이 운영 수집으로 가면 인수 전후 중복·누락을 대조할 수 없다
+- 폐기한 그림자 모드(B-99)로 다시 들어가는 길이 열리면 수집 안 하는 채널이 생긴다
 - 보존 기간을 안 정하면 기본값이 「영구 보관」 이 된다
 
 결정: 2026-09-25 오너 확정. 스키마: `deploy/sql/archiving_schema.sql`.
@@ -15,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from tybot.archive.archiving_state import (
+    SHADOW_RETIRED_REASON,
     ChannelMode,
     ChannelState,
     IngestProgress,
@@ -41,21 +43,58 @@ def _channel(mode=ChannelMode.OFF, owner=WriterOwner.MASTER, cutover="") -> Chan
 
 # --- 채널 모드 ---------------------------------------------------------------
 
-def test_shadow_cannot_be_skipped():
-    """`off → active` 는 없다.
-
-    그림자를 건너뛰면 「누락 0 · 권한 유출 0 · 첨부 손실 0」 을 확인할 기회가
-    없다(분리 설계 §4-C). 급할 때 건너뛰고 싶어지는 단계라 코드로 막는다.
-    """
+def test_off_goes_active_only_with_a_cutover_coordinate():
+    """`off → active` 는 한 걸음이다(B-99 2단계 D2). 대신 **인수 좌표가 필수**다."""
     with pytest.raises(TransitionRefused) as caught:
-        plan_mode_change(_channel(), ChannelMode.ACTIVE, cutover_ts="1700000000.0001")
+        plan_mode_change(_channel(), ChannelMode.ACTIVE)
 
-    assert "off → active" in str(caught.value)
-    assert "shadow" in str(caught.value)
+    assert "cutover_ts" in str(caught.value)
+
+    after = plan_mode_change(_channel(), ChannelMode.ACTIVE, cutover_ts="1700000000.0001")
+
+    assert after.mode == ChannelMode.ACTIVE
+    assert after.writer_owner == WriterOwner.ARCHIVER
+    assert after.cutover_ts == "1700000000.0001"
+
+
+@pytest.mark.parametrize(
+    ("mode", "owner", "cutover"),
+    [
+        (ChannelMode.OFF, WriterOwner.MASTER, ""),
+        (ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1700000000.0001"),
+        (ChannelMode.PAUSED, WriterOwner.ARCHIVER, "1700000000.0001"),
+        (ChannelMode.PAUSED, WriterOwner.MASTER, ""),
+        # 같은 값으로의 「전이」 도 받지 않는다 — 폐기한 모드를 요청하는 호출부가
+        # 조용히 살아남지 않게.
+        (ChannelMode.SHADOW, WriterOwner.MASTER, ""),
+    ],
+)
+def test_nothing_enters_the_retired_shadow_mode(mode, owner, cutover):
+    """그림자 수집은 폐기됐다(B-99). 어느 출발점에서도, 좌표가 있어도 못 간다."""
+    with pytest.raises(TransitionRefused) as caught:
+        plan_mode_change(
+            _channel(mode, owner, cutover), ChannelMode.SHADOW,
+            cutover_ts="1700009000.0001",
+        )
+
+    assert SHADOW_RETIRED_REASON in str(caught.value)
+    assert SHADOW_RETIRED_REASON == "shadow 수집은 폐기됐습니다 (B-99)"
+
+
+@pytest.mark.parametrize(
+    "target", [ChannelMode.ACTIVE, ChannelMode.PAUSED, ChannelMode.OFF],
+)
+def test_a_legacy_shadow_row_can_leave(target):
+    """옛 `shadow` 행은 읽기 전용 과거값이다. `active·paused·off` 로 나갈 수 있다."""
+    after = plan_mode_change(
+        _channel(ChannelMode.SHADOW), target, cutover_ts="1700000000.0001",
+    )
+
+    assert after.mode == target
 
 
 def test_going_active_requires_a_cutover_coordinate():
-    """인수 좌표가 없으면 인수 전후를 대조할 수 없다."""
+    """인수 좌표가 없으면 인수 전후를 대조할 수 없다. 옛 shadow 행도 같다."""
     shadow = _channel(ChannelMode.SHADOW)
 
     with pytest.raises(TransitionRefused) as caught:
@@ -90,21 +129,13 @@ def test_cutover_cannot_move_backwards():
     assert "뒤로 갈 수 없습니다" in str(caught.value)
 
 
-def test_turning_off_returns_the_channel_to_master():
-    """archiver 가 주인인 채로 꺼지면 **아무도 안 쓰는 구간**이 생긴다.
+def test_turning_off_a_legacy_shadow_row_clears_the_coordinate():
+    """꺼진 채널의 주인은 master 이고 좌표는 비운다.
 
-    그건 누락인데 오류가 안 난다.
-
-    출발점이 중요하다. 이미 master 인 채널에서 끄면 주인을 유지해도 결과가 같아
-    시험이 아무것도 안 본다. 그래서 **실제로 갈 수 있는 경로**로 active 에서
-    역인수한 뒤 끈다(active → paused → shadow → off).
+    archiver 가 주인인 채로 꺼지면 **아무도 안 쓰는 구간**이 생긴다. 그건 누락인데
+    오류가 안 난다.
     """
-    active = _channel(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1700000000.0001")
-    paused = plan_mode_change(active, ChannelMode.PAUSED)
-    shadow = plan_mode_change(
-        paused, ChannelMode.SHADOW, cutover_ts="1700001000.0001"
-    )
-    assert shadow.writer_owner == WriterOwner.MASTER
+    shadow = _channel(ChannelMode.SHADOW, WriterOwner.MASTER, "1700001000.0001")
 
     after = plan_mode_change(shadow, ChannelMode.OFF)
 
@@ -120,35 +151,29 @@ def test_pause_keeps_the_owner_so_resume_continues():
     assert paused.writer_owner == WriterOwner.ARCHIVER
     assert paused.cutover_ts == "1700000000.0001"
 
+    resumed = plan_mode_change(paused, ChannelMode.ACTIVE)
+
+    assert resumed.mode == ChannelMode.ACTIVE
+    assert resumed.cutover_ts == "1700000000.0001"
+
 
 def test_active_cannot_go_straight_back_to_shadow():
-    """운영에 쓰던 채널을 그림자로 되돌리면 그 사이 원문을 아무도 안 쓴다."""
+    """운영에 쓰던 채널을 그림자로 되돌리는 길은 없다(B-99)."""
     active = _channel(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1700000000.0001")
 
-    with pytest.raises(TransitionRefused):
+    with pytest.raises(TransitionRefused, match="폐기"):
         plan_mode_change(active, ChannelMode.SHADOW)
 
 
-def test_reverse_cutover_returns_live_writes_to_master():
+@pytest.mark.parametrize("target", [ChannelMode.OFF])
+def test_active_and_paused_only_move_between_each_other(target):
+    """`active ↔ paused` 만 있다. paused 에서 off 로 가면 인수 사실(주인·좌표)이 사라진다."""
     active = _channel(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1700000000.0001")
     paused = plan_mode_change(active, ChannelMode.PAUSED)
 
-    shadow = plan_mode_change(
-        paused, ChannelMode.SHADOW, cutover_ts="1700001000.0001"
-    )
-
-    assert shadow.writer_owner == WriterOwner.MASTER
-    assert shadow.cutover_ts == "1700001000.0001"
-    assert owns_write(shadow, WriterOwner.MASTER)
-    assert not owns_write(shadow, WriterOwner.ARCHIVER)
-
-
-def test_reverse_cutover_needs_a_new_coordinate():
-    active = _channel(ChannelMode.ACTIVE, WriterOwner.ARCHIVER, "1700000000.0001")
-    paused = plan_mode_change(active, ChannelMode.PAUSED)
-
-    with pytest.raises(TransitionRefused, match="역인수 좌표"):
-        plan_mode_change(paused, ChannelMode.SHADOW)
+    for state in (active, paused):
+        with pytest.raises(TransitionRefused, match="갈 수 없습니다"):
+            plan_mode_change(state, target)
 
 
 # --- 동시 쓰기 ---------------------------------------------------------------

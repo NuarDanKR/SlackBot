@@ -172,12 +172,16 @@ def test_the_detail_says_saving_is_not_applying():
     assert detail["health"]["state"] == "ok"
 
 
-def test_live_is_not_selectable_in_the_pilot():
-    """화면이 버튼을 회색으로 만들 근거. 눌러 보고 거절당하는 것보다 낫다."""
+def test_shadow_is_not_selectable():
+    """그림자 수집은 폐기됐다(B-99 2단계). 켜는 값은 `live` 하나다.
+
+    옛 행의 `shadow` 는 `desiredMode` 로 그대로 보이지만(과거값) 고를 수는 없다.
+    """
     detail = supervisor_admin.runtime_detail("tyit", FakeRepo(_runtime()), now=NOW)
 
-    assert detail["selectableModes"] == ["off", "shadow"]
-    assert detail["gatedModes"] == ["live"]
+    assert detail["selectableModes"] == ["off", "live"]
+    assert detail["gatedModes"] == []
+    assert detail["desiredMode"] == "shadow"
 
 
 def test_the_detail_names_the_workspace_place_under_the_common_root():
@@ -214,37 +218,59 @@ def test_changing_the_mode_bumps_the_generation():
     """세대가 안 오르면 supervisor 는 「바뀐 것이 없다」 고 보고 옛 설정으로 돈다."""
     repo = FakeRepo(_runtime(desired_mode="off", generation=3))
 
-    detail = supervisor_admin.set_desired_mode("tyit", "shadow", WHO, repo,
+    detail = supervisor_admin.set_desired_mode("tyit", "live", WHO, repo,
                                                audit_repo=repo)
 
-    assert detail["desiredMode"] == "shadow"
+    assert detail["desiredMode"] == "live"
     assert detail["generation"] == 4
 
 
 def test_pressing_the_same_mode_does_not_restart_the_worker():
-    repo = FakeRepo(_runtime(desired_mode="shadow", generation=7))
+    repo = FakeRepo(_runtime(desired_mode="live", generation=7))
 
-    detail = supervisor_admin.set_desired_mode("tyit", "shadow", WHO, repo,
+    detail = supervisor_admin.set_desired_mode("tyit", "live", WHO, repo,
                                                audit_repo=repo)
 
     assert detail["generation"] == 7
 
 
-def test_live_is_refused():
-    """파일럿 범위 밖이다. 여는 것은 별도 결정이고 기본값이 되면 안 된다."""
+def test_a_legacy_shadow_row_moves_to_live():
+    """옛 `shadow` 행은 `live` 로 옮긴다. 값이 바뀌므로 세대가 오른다."""
+    repo = FakeRepo(_runtime(desired_mode="shadow", generation=7))
+
+    detail = supervisor_admin.set_desired_mode("tyit", "live", WHO, repo,
+                                               audit_repo=repo)
+
+    assert detail["desiredMode"] == "live"
+    assert detail["generation"] == 8
+
+
+@pytest.mark.parametrize("mode", ["shadow", "SHADOW", " shadow "])
+def test_shadow_is_refused(mode):
+    """그림자 수집은 폐기됐다(B-99 2단계). 저장소에 닿기 전에 막는다."""
+    repo = FakeRepo(_runtime(desired_mode="off", generation=3))
+
+    with pytest.raises(AdminRefused, match="폐기"):
+        supervisor_admin.set_desired_mode("tyit", mode, WHO, repo, audit_repo=repo)
+
+    assert repo.runtime("tyit")["desired_mode"] == "off"
+    assert repo.audit == []
+
+
+def test_an_unknown_mode_is_refused():
     repo = FakeRepo(_runtime())
 
-    with pytest.raises(AdminRefused, match="파일럿 범위 밖"):
-        supervisor_admin.set_desired_mode("tyit", "live", WHO, repo, audit_repo=repo)
+    with pytest.raises(AdminRefused, match="알 수 없는"):
+        supervisor_admin.set_desired_mode("tyit", "on", WHO, repo, audit_repo=repo)
 
 
 def test_a_mode_change_is_audited():
     repo = FakeRepo(_runtime(desired_mode="off"))
 
-    supervisor_admin.set_desired_mode("tyit", "shadow", WHO, repo, audit_repo=repo)
+    supervisor_admin.set_desired_mode("tyit", "live", WHO, repo, audit_repo=repo)
 
     assert repo.audit[0]["old_value"] == "off"
-    assert repo.audit[0]["new_value"] == "shadow"
+    assert repo.audit[0]["new_value"] == "live"
     assert repo.audit[0]["reason"] == "파일럿 소급 검증"
 
 

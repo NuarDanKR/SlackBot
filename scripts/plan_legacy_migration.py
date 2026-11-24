@@ -10,10 +10,10 @@
 
 ```bash
 sudo -u tybot /opt/tybot/.venv/bin/python /opt/tybot/scripts/plan_legacy_migration.py \\
-    --source /var/lib/tybot/archive \\
-    --destination /var/lib/tybot/archiver-shadow/archive \\
+    --source /var/lib/tybot/archive-legacy-quarantine-20261120 \\
+    --destination /var/lib/tybot/legacy-migration-plan/archive \\
     --live-archive /var/lib/tybot/archive \\
-    --collected /var/lib/tybot/archiver-shadow/archive \\
+    --collected /var/lib/tybot/archive \\
     --json > /tmp/legacy-migration-plan.json
 ```
 
@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--collected", default="",
-        help="소급·그림자가 이미 가져온 아카이브 루트. 주지 않으면 중복을 대조하지 않는다",
+        help="Archiver 가 이미 가져온 아카이브 루트(운영 ARCHIVE_DIR). 주지 않으면 중복을 대조하지 않는다",
     )
     parser.add_argument("--json", action="store_true", help="보고서를 JSON 으로 출력")
     args = parser.parse_args(argv)
