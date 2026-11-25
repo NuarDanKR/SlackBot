@@ -321,21 +321,29 @@ class ImageDescriptionStore:
             return policy, config, sources
 
     def indexed_sources(
-        self, workspace: str, *, channel_id: str = ""
+        self,
+        workspace: str,
+        *,
+        prompt_revision: str,
+        channel_id: str = "",
     ) -> frozenset[tuple[str, str, str]]:
-        """이미 파생 revision이 생긴 원본 좌표.
+        """현재 프롬프트로 파생 revision이 생긴 원본 좌표.
 
         설명 본문을 보류한 revision도 포함한다. 사람 검토 대상으로 이미 기록된
         사진을 자동 배치가 다시 모델에 보내면 보류가 재전송 통로가 된다.
+
+        프롬프트 판이 바뀌면 과거 좌표는 완료로 보지 않는다. 그렇지 않으면 표 전사
+        규칙을 고쳐도 이미 처리된 사진은 영원히 옛 전사에 머문다. 새 판은 별도
+        revision으로 쌓이며 원문과 옛 감사 기록을 덮어쓰지 않는다.
         """
-        if not workspace:
+        if not workspace or not prompt_revision:
             raise ImageDescriptionDenied("workspace_required")
         with self._transaction(), self.connection.cursor() as cur:
-            params: tuple[str, ...] = (workspace,)
-            where = "workspace=%s"
+            params: tuple[str, ...] = (workspace, prompt_revision)
+            where = "workspace=%s AND prompt_revision=%s"
             if channel_id:
                 where += " AND channel_id=%s"
-                params = (workspace, channel_id)
+                params = (workspace, prompt_revision, channel_id)
             # 전사 revision 만 생긴 원본도 「이미 처리함」 이다 (B-81 후속). 한쪽 표만 보면
             # 전사만 남은 사진을 자동 배치가 다시 모델에 보낸다.
             cur.execute(

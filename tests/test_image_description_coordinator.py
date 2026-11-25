@@ -54,8 +54,9 @@ class Store:
         self.indexed = frozenset(indexed)
         self.reserved = []
 
-    def indexed_sources(self, workspace):
+    def indexed_sources(self, workspace, *, prompt_revision):
         assert workspace == "tyit"
+        assert prompt_revision == PROMPT_REVISION
         return self.indexed
 
     def reserve(self, image, **kwargs):

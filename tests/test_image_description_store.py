@@ -185,7 +185,9 @@ def test_indexed_sources_include_withheld_revisions_and_can_be_channel_scoped() 
     ]
     connection = ScriptedConnection([rows])
 
-    got = ImageDescriptionStore(connection).indexed_sources("tyit", channel_id="C1")
+    got = ImageDescriptionStore(connection).indexed_sources(
+        "tyit", prompt_revision="prompt-v2", channel_id="C1"
+    )
 
     assert got == frozenset(
         {("tyit", "C1", "a" * 64), ("tyit", "C1", "b" * 64)}
@@ -196,15 +198,33 @@ def test_indexed_sources_include_withheld_revisions_and_can_be_channel_scoped() 
     assert "archiver_image_transcript_revision" in query[0]
     assert (
         " UNION SELECT workspace,channel_id,original_sha256 "
-        "FROM archiver_image_transcript_revision WHERE workspace=%s AND channel_id=%s"
+        "FROM archiver_image_transcript_revision WHERE "
+        "workspace=%s AND prompt_revision=%s AND channel_id=%s"
     ) in query[0]
     assert "status" not in query[0]
-    assert query[1] == ("tyit", "C1", "tyit", "C1")
+    assert "prompt_revision=%s" in query[0]
+    assert query[1] == (
+        "tyit",
+        "prompt-v2",
+        "C1",
+        "tyit",
+        "prompt-v2",
+        "C1",
+    )
 
 
 def test_indexed_sources_require_a_workspace() -> None:
     with pytest.raises(ImageDescriptionDenied, match="workspace_required"):
-        ImageDescriptionStore(ScriptedConnection([])).indexed_sources("")
+        ImageDescriptionStore(ScriptedConnection([])).indexed_sources(
+            "", prompt_revision="prompt-v2"
+        )
+
+
+def test_indexed_sources_require_a_prompt_revision() -> None:
+    with pytest.raises(ImageDescriptionDenied, match="workspace_required"):
+        ImageDescriptionStore(ScriptedConnection([])).indexed_sources(
+            "tyit", prompt_revision=""
+        )
 
 
 def test_catalog_snapshot_keeps_regions_and_times_structured() -> None:

@@ -133,7 +133,7 @@ def run_approved_batch(
     봇 생성 여부를 제공한다. 어느 콜백도 실패 본문을 결과에 싣지 않는다.
     """
     current = tuple(doc for doc in docs if doc.workspace == workspace)
-    indexed = store.indexed_sources(workspace)
+    indexed = store.indexed_sources(workspace, prompt_revision=PROMPT_REVISION)
     selection = select_image_candidates(
         current,
         human_file_ids=confirmed_human_file_ids(current),

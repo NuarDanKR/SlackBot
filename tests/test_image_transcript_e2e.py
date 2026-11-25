@@ -124,6 +124,45 @@ def test_prompt_revision_is_bumped_and_the_prompt_separates_the_two_fields():
     assert "#T" not in idesc.SYSTEM_PROMPT
 
 
+def test_prompt_preserves_table_headers_rows_and_exact_printed_numbers():
+    prompt = idesc.SYSTEM_PROMPT
+    assert "표는 행과 열의 관계를 보존합니다" in prompt
+    assert "모든 최종 열 이름을 ` | `로 연결" in prompt
+    assert "한 행을 한 줄" in prompt
+    assert "표에 인쇄된 정확한 값" in prompt
+    assert "빈 셀·`-`·`0`·괄호·부호·소수점·쉼표·퍼센트·단위" in prompt
+    assert "[읽을 수 없음]" in prompt
+
+
+def test_a_profit_rank_question_selects_a_structured_vision_table_transcript():
+    body = "\n".join(
+        (
+            "건축본부",
+            "26년 진행 현장 LIST (단위: 억원, VAT 제외)",
+            "현장명 | 현 공정률 | 공사금액-당사분 | 정산추정 | 손익",
+            "화성동탄2 A78BL | 43% | 1,699 | 81.2% | 319",
+            "창원 자산 재개발 | 17% | 2,913 | 89.1% | 318",
+        )
+    )
+    entry = image_guide.ImageEntry(
+        kind="transcript",
+        workspace=WS,
+        channel_id=CH,
+        file_id=FID,
+        original_sha256=SHA,
+        body=body,
+        status="transcribed",
+    )
+
+    selected = image_guide.matched(
+        "2026년 진행중인 건축본부 현장을 추정 손익이 큰 순서로 정렬해 표로 정리해주세요",
+        [entry],
+    )
+
+    assert selected == [entry]
+    assert "화성동탄2 A78BL | 43% | 1,699 | 81.2% | 319" in selected[0].body
+
+
 def test_one_call_returns_a_description_and_a_separate_transcript():
     router = _Router(_Resp(_model_json()))
     got = idesc.describe_image(
