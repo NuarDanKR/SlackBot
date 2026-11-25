@@ -167,6 +167,46 @@ if [[ -e /etc/systemd/system/tybot-vipbot.service ]]; then
 fi
 systemctl restart tybot
 
+# B-99 2단계: Archiver 유닛을 `tybot-archiving-shadow@` 에서 `tybot-archiver@` 로 옮긴다.
+# 서버에 들어가 명령을 치지 않아도 콘솔 배포 한 번으로 끝나게 한다(운영 기능은 콘솔에).
+#
+# - 돌고 있는 옛 인스턴스만 옮긴다. 새 유닛에는 `Conflicts=` 가 있어 시작하면 옛 것이 멈춘다.
+# - 새 유닛이 안 뜨면 그 워크스페이스는 **옛 유닛으로 되돌려** 수집을 이어 가고, 배포는
+#   실패로 끝낸다(아래). 새 코드는 섀도 루트가 없어도 돌므로 옛 유닛으로도 수집한다.
+# - 전부 옮겨진 뒤에만 옛 유닛 파일을 지운다. 다음 배포부터 이 단계는 할 일이 없다.
+# - 답변 봇(tybot)과 무관하다. Archiver 는 수집만 한다.
+ARCHIVER_SWITCH_FAILED=()
+OLD_ARCHIVERS=$(systemctl list-units --type=service --state=active --no-legend --plain \
+  'tybot-archiving-shadow@*.service' | awk '{print $1}')
+for unit in $OLD_ARCHIVERS; do
+  ws=${unit#tybot-archiving-shadow@}
+  ws=${ws%.service}
+  log "Archiver 전환: $ws (tybot-archiving-shadow@ → tybot-archiver@)"
+  if systemctl start "tybot-archiver@$ws.service"; then
+    # Type=simple 이라 start 는 바로 돌아온다. 기동 검사(토큰·루트)가 끝날 시간을 준다.
+    sleep 15
+    if systemctl is-active --quiet "tybot-archiver@$ws.service"; then
+      log "  $ws 정상 — 새 유닛으로 수집합니다"
+      continue
+    fi
+  fi
+  ARCHIVER_SWITCH_FAILED+=("$ws")
+  log "  $ws 새 유닛 기동 실패 — 옛 유닛으로 되돌립니다. journalctl -u tybot-archiver@$ws -n 50 확인"
+  systemctl stop "tybot-archiver@$ws.service" || true
+  systemctl start "tybot-archiving-shadow@$ws.service" \
+    || log "  $ws 옛 유닛도 기동 실패 — 이 워크스페이스는 지금 수집하지 않습니다"
+done
+# `| grep -q` 는 쓰지 않는다 — pipefail 아래에서 grep 이 먼저 끝나면 SIGPIPE 로 파이프가
+# 실패해 「남은 옛 인스턴스 없음」 으로 뒤집혀 읽힌다. 값으로 받아서 본다.
+OLD_LEFT=$(systemctl list-units --type=service --state=active,activating --no-legend --plain \
+  'tybot-archiving-shadow@*.service' | awk '{print $1}')
+if ((${#ARCHIVER_SWITCH_FAILED[@]} == 0)) && [[ -z "$OLD_LEFT" ]] \
+    && [[ -e /etc/systemd/system/tybot-archiving-shadow@.service ]]; then
+  rm -f /etc/systemd/system/tybot-archiving-shadow@.service
+  systemctl daemon-reload
+  log "폐기된 tybot-archiving-shadow@ 유닛 파일을 제거했습니다"
+fi
+
 # 검토자를 지정해도 발송 타이머가 꺼져 있으면 아무 DM도 가지 않는다. 이 기능은
 # 채널 설정에서 매일 발송한다고 명시하므로 배포가 실행기를 함께 활성화한다.
 systemctl enable --now tybot-review-dm.timer
@@ -212,6 +252,11 @@ fi
 
 # 서비스가 다 뜬 뒤에 미뤄 둔 실패를 알린다. **여기서 실패로 끝내는 이유**는
 # 0 으로 끝내면 콘솔 배포 화면이 성공으로 표시하고, 그러면 아무도 안 고치기 때문이다.
+if ((${#ARCHIVER_SWITCH_FAILED[@]})); then
+  log "Archiver 전환 실패: ${ARCHIVER_SWITCH_FAILED[*]} — 옛 유닛으로 수집은 계속합니다."
+  log "journalctl -u tybot-archiver@<워크스페이스> 로 원인을 고친 뒤 다시 배포하세요."
+  exit 5
+fi
 if ((INSTALL_RC == 4)); then
   log "다만 일부 구성 요소가 빠졌습니다 — 위 ⚠ 를 보고 고친 뒤 다시 배포하세요."
   exit 4

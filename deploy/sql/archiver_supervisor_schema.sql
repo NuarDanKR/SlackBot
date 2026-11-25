@@ -14,9 +14,8 @@
 --
 -- ## 파일럿 범위
 --
--- `desired_mode` 는 `off`·`shadow`·`live` 를 표현할 수 있지만, 파일럿에서는
--- `live` 를 **코드가 거절한다**(`supervisor_state.plan_desired_change`). 스키마에서
--- 아예 빼지 않는 이유는, 나중에 열 때 표를 고치면 그 시점에 지문이 또 바뀌기 때문이다.
+-- `desired_mode` 는 `off`·`live` 다. `shadow` 는 **과거값**이다(B-99 2단계 — 그림자
+-- 수집 폐기). 콘솔은 더 적지 않고, 남은 행이 0 이 되면 아래 가드 블록이 CHECK 에서 뺀다.
 --
 -- 적용:
 --   sudo /opt/tybot/deploy/apply-schema.sh
@@ -58,10 +57,33 @@ CREATE TABLE IF NOT EXISTS archiver_workspace_runtime (
     updated_by      text NOT NULL DEFAULT ''
 );
 
+-- `shadow` 를 desired_mode CHECK 에서 뺀다 — **남은 행이 0 일 때만**(B-99 2단계 D5).
+-- 남아 있으면 NOTICE 만 남기고 그대로 둔다. 콘솔에서 그 워크스페이스를 `live`(또는
+-- `off`)로 바꾼 뒤 다시 적용하면 빠진다. 재적용해도 안전하다.
+DO $$
+DECLARE
+    shadow_rows bigint;
+BEGIN
+    LOCK TABLE archiver_workspace_runtime IN SHARE ROW EXCLUSIVE MODE;
+    SELECT count(*) INTO shadow_rows
+      FROM archiver_workspace_runtime WHERE desired_mode = 'shadow';
+    IF shadow_rows > 0 THEN
+        RAISE NOTICE 'archiver_workspace_runtime: desired_mode=shadow 행 %건이 남아'
+                     ' CHECK 를 그대로 둡니다', shadow_rows;
+        RETURN;
+    END IF;
+    ALTER TABLE archiver_workspace_runtime
+        DROP CONSTRAINT IF EXISTS archiver_workspace_runtime_desired_mode_check;
+    ALTER TABLE archiver_workspace_runtime
+        ADD CONSTRAINT archiver_workspace_runtime_desired_mode_check
+        CHECK (desired_mode IN ('off', 'live'));
+END
+$$;
+
 COMMENT ON TABLE archiver_workspace_runtime IS
     '워크스페이스별 수집 희망·관측 상태. 자격증명은 bot_connection 이 정본이다.';
 
--- 예전 초안은 `off + running`을 금지했다. 하지만 shadow worker가 도는 중에 사람이
+-- 예전 초안은 `off + running`을 금지했다. 하지만 worker가 도는 중에 사람이
 -- off를 누르면 supervisor가 generation을 읽고 멈출 때까지 그 조합이 반드시 생긴다.
 -- desired/observed의 차이는 저장하고, 오래 지속될 때 운영 화면에서 장애로 알린다.
 ALTER TABLE archiver_workspace_runtime

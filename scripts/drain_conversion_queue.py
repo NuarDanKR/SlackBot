@@ -67,26 +67,17 @@ def staging_meta(archive_dir: str, job: queue.Job) -> pathlib.Path:
     """작업 좌표 → metadata 경로. **큐에서 온 값을 경로로 쓰기 전에 검사한다.**
 
     큐는 DB 다. DB 에서 읽은 값을 그대로 경로에 붙이면 그 자리가 곧 경로 탈출이다.
+
+    B-99 2단계(D7)부터 배치는 **항상 채널별**(`<ws>/<cid>__<name>/staging`)이다.
+    `ARCHIVER_SHADOW_LAYOUT` 은 더 읽지 않는다. 채널 디렉터리가 없거나 좌표가
+    어긋나면 `ValueError` 로 거부한다 — 호출자가 `staging_path_invalid` 로 남긴다.
     """
     from tybot.archive.files import _safe_component
+    from tybot.archive.shadow_paths import existing_channel_root
 
-    if os.getenv("ARCHIVER_SHADOW_LAYOUT", "").strip().lower() == "per-channel-v1":
-        from tybot.archive.shadow_paths import existing_channel_root
-
-        return (
-            existing_channel_root(archive_dir, job.workspace, job.channel_id)
-            / "staging" / _safe_component(job.file_id) / "metadata.json"
-        )
-
-    root = pathlib.Path(archive_dir).parent / "staging" / "workspaces"
     return (
-        root
-        / _safe_component(job.workspace)
-        / "channels"
-        / _safe_component(job.channel_id)
-        / "attachments"
-        / _safe_component(job.file_id)
-        / "metadata.json"
+        existing_channel_root(archive_dir, job.workspace, job.channel_id)
+        / "staging" / _safe_component(job.file_id) / "metadata.json"
     )
 
 
@@ -765,21 +756,16 @@ def _active_layout_items(items, archive_dir: str):
     """Choose one metadata row per Slack file from the active archive layout.
 
     During the layout migration the same file can exist under both legacy
-    ``staging/workspaces`` and per-channel shadow staging. Counting both burns
-    the nightly budget twice and can enqueue a digest from a layout that the
-    worker will not open. Prefer the configured layout and keep a deterministic
-    fallback for installations that have only the other copy.
+    ``staging/workspaces`` and per-channel staging. Counting both burns the
+    nightly budget twice and can enqueue a digest from a layout that the worker
+    will not open. 워커는 항상 채널별 배치를 연다(B-99 2단계 D7) — 채널별
+    사본을 고르고, 옛 배치 사본만 있는 설치에는 결정적인 대체로 남긴다.
     """
     legacy_root = pathlib.Path(archive_dir).parent / "staging" / "workspaces"
-    prefer_shadow = (
-        os.getenv("ARCHIVER_SHADOW_LAYOUT", "").strip().lower()
-        == "per-channel-v1"
-    )
     selected = {}
     for item in items:
         key = (item.workspace, item.channel_id, item.file_id)
-        is_legacy = item.meta_path.is_relative_to(legacy_root)
-        preferred = (not is_legacy) if prefer_shadow else is_legacy
+        preferred = not item.meta_path.is_relative_to(legacy_root)
         current = selected.get(key)
         if current is None or preferred:
             selected[key] = item

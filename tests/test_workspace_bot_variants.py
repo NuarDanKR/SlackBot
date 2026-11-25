@@ -204,15 +204,12 @@ def test_denied_dm_file_stops_before_file_preflight_or_answering() -> None:
     assert "_tybot_question_file_preflight_codes" not in event
 
 
-def test_a_non_owner_answers_a_dm_without_ingesting_or_mirroring_it() -> None:
+def test_a_non_owner_answers_a_dm_without_ingesting_it() -> None:
     bot = _bot(
         operational_owner=False,
         _bot_users={"U1": False},
         _handle_correction=lambda _event, _say: False,
         _ingest_dm=Mock(side_effect=AssertionError("non-owner must not ingest")),
-        _mirror_dm_handoff=Mock(
-            side_effect=AssertionError("non-owner must not mirror")
-        ),
         _handle=Mock(),
     )
     event = {
@@ -242,9 +239,6 @@ def test_a_non_owner_dm_attachment_remains_transient_question_input(
             evidence_sources=frozenset({("tyit", "C1")}),
         ),
         _ingest_dm=Mock(side_effect=AssertionError("non-owner must not ingest")),
-        _mirror_dm_handoff=Mock(
-            side_effect=AssertionError("non-owner must not mirror")
-        ),
         _handle=Mock(),
         cfg=SimpleNamespace(bot_token="vip-token", readable=frozenset(), is_root=False),
     )

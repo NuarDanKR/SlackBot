@@ -435,3 +435,188 @@ def test_a_dm_attachment_matching_its_dm_document_is_copied(tmp_path):
 
     assert report.ok, report.blocked
     assert list((live / WS / "dm" / user_id).rglob("attachments/F12345678/rev.md"))
+
+
+def _live_public_message(live: Path) -> None:
+    target = live / WS / f"{CID}__{CHANNEL}" / "archive"
+    writer.ingest(
+        live,
+        workspace=WS,
+        channel=CHANNEL,
+        channel_id=CID,
+        visibility="public",
+        acl=[],
+        messages=[
+            writer.IncomingMessage(
+                ts=datetime.fromisoformat("2026-11-20T10:00:00+09:00"),
+                speaker="홍길동",
+                text="공개 채널 기록",
+                source_ts="1795146000.000100",
+            )
+        ],
+        channel_directory=target,
+    )
+
+
+def test_inline_attachment_lines_are_not_promoted_into_raw(tmp_path):
+    """2026-11-24 — 옛 코드가 엑셀 행을 원문 줄로 펼쳤다. 정본(attachments/)으로만 간다."""
+    source, live = _roots(tmp_path)
+    _legacy_doc(
+        source,
+        lines=(
+            "> [2026-11-18 10:00|1794973200.000100] 홍길동: 정산서 올립니다.",
+            "> [2026-11-18 10:00|1794973200.000100] 홍길동: [첨부추출:정산서.xlsx] | 81191001 | 1,000",
+            "> [2026-11-18 10:00|1794973200.000100] 홍길동: [첨부추출:정산서.xlsx] | 81131007 | 2,000",
+        ),
+    )
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert report.ok, report.blocked
+    assert report.written_messages == 1
+    assert report.skipped_attachment_lines == 2
+    assert report.attachment_names_without_document == [f"{WS}/{CID}: 정산서.xlsx"]
+    target, = (live / WS).glob(f"{CID}__*/archive/raw/*.md")
+    assert "[첨부추출:" not in target.read_text(encoding="utf-8")
+
+
+def test_an_inline_attachment_with_a_canonical_document_is_not_reported(tmp_path):
+    source, live = _roots(tmp_path)
+    _legacy_doc(
+        source,
+        lines=(
+            "> [2026-11-18 10:00|1794973200.000100] 홍길동: [첨부추출:현황보고.txt] 본문",
+        ),
+    )
+    _legacy_attachment(
+        source / WS / "channels" / CID / "attachments" / "F12345678" / "rev.md", "본문"
+    )
+
+    report = legacy_promote.promote(source, live)
+
+    assert report.ok, report.blocked
+    assert report.skipped_attachment_lines == 1
+    assert report.attachment_names_without_document == []
+
+
+def test_a_public_live_channel_policy_is_adopted_for_promoted_lines(tmp_path):
+    """옛 코드는 전부 비공개로 적었다. 운영(Slack)이 공개라면 현재 사실을 따른다."""
+    source, live = _roots(tmp_path)
+    _legacy_doc(
+        source,
+        day="2026-11-17",
+        lines=("> [2026-11-17 10:00|1794886800.000100] 홍길동: 옛 공개 채널 기록",),
+    )
+    _legacy_attachment(
+        source / WS / "channels" / CID / "attachments" / "F12345678" / "rev.md", "본문"
+    )
+    _live_public_message(live)
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert report.ok, report.blocked
+    assert report.live_policy_adopted == [f"{WS}/{CID}"]
+    promoted = next((live / WS).glob(f"{CID}__*/archive/raw/2026-11-17.md"))
+    doc = load_doc(promoted)
+    assert doc.visibility == "public"
+    assert doc.acl == frozenset()
+    copied, = (live / WS).glob(f"{CID}__*/archive/attachments/F12345678/rev.md")
+    loaded = attachment_reader.load(copied)
+    assert loaded is not None and loaded.visibility == "public"
+
+
+def test_a_different_private_live_policy_still_blocks(tmp_path):
+    source, live = _roots(tmp_path)
+    _legacy_doc(source)
+    _live_message(live, acl="다른채널")
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert not report.ok
+    assert report.live_policy_adopted == []
+
+
+def test_excluded_items_stay_in_quarantine_without_blocking(tmp_path):
+    source, live = _roots(tmp_path)
+    _legacy_doc(source)
+    _legacy_doc(source, workspace=WS, dm_user="USLACK", channel_id="D12345678",
+                channel="DM:USLACK", acl="")
+    before_source = _hashes(source)
+
+    blocked = legacy_promote.promote(source, live)
+    report = legacy_promote.promote(
+        source, live, apply=True, exclude=[f"{WS}/dm/USLACK/"]
+    )
+
+    assert not blocked.ok
+    assert report.ok, report.blocked
+    assert report.excluded == [f"{WS}/dm/USLACK/raw/2026-11-18.md"]
+    assert report.written_messages == 1
+    assert not (live / WS / "dm").exists()
+    assert _hashes(source) == before_source
+
+
+def test_imported_from_names_the_quarantine_it_came_from(tmp_path):
+    source, live = _roots(tmp_path)
+    _legacy_doc(source)
+
+    assert legacy_promote.promote(source, live, apply=True).ok
+
+    target, = (live / WS).glob(f"{CID}__*/archive/raw/*.md")
+    assert 'imported_from: "quarantine"' in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("line", "name"),
+    [
+        ("[첨부추출:[190801]정산서.xlsx] | 81191001", "[190801]정산서.xlsx"),
+        ("[첨부추출:정산서(군포지산)_최종.xlsx] | 1", "정산서(군포지산)_최종.xlsx"),
+        ("[첨부본문:메모.txt]", "메모.txt"),
+        ("[첨부추출:확장자없음] 본문", "확장자없음"),
+        ("보통 메시지", None),
+    ],
+)
+def test_inline_attachment_names_keep_their_brackets(line, name):
+    assert legacy_promote._inline_attachment_name(line) == name
+
+
+def _live_attachment(live: Path, text: str, *, state: str) -> Path:
+    path = (
+        live / WS / f"{CID}__{CHANNEL}" / "archive" / "attachments"
+        / "F12345678" / "rev.md"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        attachment_doc.render(
+            attachment_doc.AttachmentDoc(
+                workspace=WS, channel_id=CID, channel=CHANNEL, file_id="F12345678",
+                name="현황보고.txt", revision="rev", visibility="private",
+                acl=frozenset({ACL}), text=text, conversion_state=state,
+            )
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_reprocessed_live_attachment_of_the_same_revision_is_kept(tmp_path):
+    """같은 원본을 운영이 다시 처리했다 — 운영 정본을 두고 나머지를 진행한다."""
+    source, live = _roots(tmp_path)
+    _legacy_doc(source)
+    _legacy_attachment(
+        source / WS / "channels" / CID / "attachments" / "F12345678" / "rev.md",
+        "옛 변환 본문",
+    )
+    kept = _live_attachment(live, "", state=attachment_doc.FAILED)
+    before = kept.read_bytes()
+
+    report = legacy_promote.promote(source, live, apply=True)
+
+    assert report.ok, report.blocked
+    assert report.live_attachment_kept == 1
+    assert report.attachment_text_only_in_legacy == [
+        f"{WS}/channels/{CID}/attachments/F12345678/rev.md"
+    ]
+    assert kept.read_bytes() == before
+    assert report.written_messages == 1
+

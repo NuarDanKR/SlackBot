@@ -1501,100 +1501,15 @@ class WorkspaceBot:
             event["_tybot_dm_attachments"] = (
                 self._ingest_dm(client, event) if owns_operations else []
             )
-            try:
-                self._handle(event, client, say, in_channel=False)
-            finally:
-                # The mirror may fetch attachment bytes. Keep that optional
-                # network work off the critical path for the user's reply.
-                if (
-                    owns_operations
-                    and not event.get("_tybot_question_file_preflight_codes")
-                ):
-                    self._mirror_dm_handoff(client, event)
+            # DM 원문은 Master 가 위 `_ingest_dm` 에서 운영 루트에 쓰는 것 하나뿐이다.
+            # Archiver 로 보내던 인계 거울은 B-99 2단계에서 은퇴했다 — 한 경로에 쓰는
+            # 프로세스가 둘이 되지 않게 한다.
+            self._handle(event, client, say, in_channel=False)
             return "answered"
         if ctype in ("channel", "group") and self.realtime:
             self._ingest_live(client, event)
             return "ingested"
         return "skipped"
-
-    def _mirror_dm_handoff(self, client, event: dict) -> None:
-        """Queue a Master DM copy while the existing writer remains authoritative."""
-        if os.getenv("ARCHIVER_DM_MIRROR_ENABLED", "").strip().lower() not in {
-            "1", "true", "yes", "on",
-        }:
-            return
-        try:
-            if writer.screen(str(event.get("text") or "")):
-                return
-            from pathlib import Path
-
-            from ..archive.dm_file_handoff import (
-                MAX_FILE_BYTES,
-                DmFile,
-                DmFileVault,
-                digest_of,
-            )
-            from ..archive.dm_inbox import DmHandoff, DmInbox
-            from ..archive.files import SlackFile, download_bytes
-            from ..console.workspace_store import _fernet
-
-            channel_id = str(event.get("channel") or "")
-            user_id = str(event.get("user") or "")
-            info = client.conversations_info(
-                channel=channel_id, include_num_members=True,
-            )
-            conversation = info.get("channel") if info and info.get("ok", True) else None
-            if (not isinstance(conversation, dict)
-                    or conversation.get("id") != channel_id
-                    or conversation.get("is_im") is not True
-                    or conversation.get("is_mpim") is True
-                    or conversation.get("user") != user_id
-                    or conversation.get("is_member") is False
-                    or conversation.get("num_members", 2) != 2):
-                raise ValueError("Master DM conversation could not be verified")
-
-            root = Path(os.environ["ARCHIVER_DM_HANDOFF_DIR"])
-            if not root.is_absolute():
-                raise ValueError("DM handoff directory must be absolute")
-            snapshot = {
-                key: event[key]
-                for key in ("channel_type", "channel", "user", "ts", "text",
-                            "subtype", "thread_ts", "files")
-                if key in event
-            }
-            files = event.get("files") or []
-            if files:
-                vault = DmFileVault(root, _fernet())
-                file_keys = []
-                for file_event in files:
-                    slack_file = SlackFile.from_event(file_event)
-                    data = download_bytes(slack_file, self.cfg.bot_token, limit=MAX_FILE_BYTES)
-                    meta = DmFile(
-                        workspace=self.workspace,
-                        channel_id=channel_id,
-                        user_id=user_id,
-                        message_ts=str(event.get("ts") or ""),
-                        file_id=slack_file.id,
-                        name=slack_file.name,
-                        mimetype=slack_file.mimetype,
-                        size=len(data),
-                        sha256=digest_of(data),
-                    )
-                    file_keys.append(vault.put(meta, data))
-                snapshot["_dm_file_keys"] = file_keys
-            handoff = DmHandoff(
-                workspace=self.workspace,
-                channel_id=channel_id,
-                user_id=user_id,
-                message_ts=str(event.get("ts") or ""),
-                revision_id="create",
-                master_bot_user_id=self._bot_user_id(),
-                speaker=self._user_name(client, str(event.get("user") or "")),
-                event=snapshot,
-            )
-            DmInbox(root, _fernet()).enqueue(handoff)
-        except Exception as exc:
-            log.error("[%s] DM handoff mirror failed: %s", self.workspace, type(exc).__name__)
 
     # Slack 이 만든 이벤트의 표식. **`subtype` 만으로는 안 걸린다** — Canvas 접근
     # 요청처럼 사람 메시지와 같은 모양으로 오는 것이 있다.
@@ -5718,6 +5633,10 @@ def main() -> int:
     from ..envfile import load_env_file
 
     log.info("환경설정 출처: %s", load_env_file())
+    # B-99 2단계: Master 의 DM 인계 거울은 은퇴했다. 값이 남아 있으면 아직 동작한다고
+    # 믿게 되므로 한 줄 남긴다.
+    if os.getenv("ARCHIVER_DM_MIRROR_ENABLED", "").strip():
+        log.warning("retired setting ignored (B-99 stage 2): ARCHIVER_DM_MIRROR_ENABLED")
 
     # 봇이 두 곳에서 뜨면 같은 질문에 두 번 답하고 LLM 비용이 두 배가 된다.
     # Slack 에 연결하기 **전에** 막는다 — 연결한 뒤에 알면 이미 중복 응답이 나간다.

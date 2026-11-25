@@ -65,6 +65,20 @@ SELECT a.at, a.workspace, a.channel_id, a.old_value, a.new_value, m.cutover_at
    AND (:'ws' = '' OR a.workspace = :'ws')
  ORDER BY a.at DESC;
 
+\echo '== 9. 위반: supervisor 희망 상태 shadow (B-99 2단계, 기대 0행 — 콘솔에서 live/off 로 바꾼다)'
+SELECT workspace, desired_mode, observed_state, generation, updated_at, updated_by
+  FROM archiver_workspace_runtime
+ WHERE desired_mode = 'shadow' AND (:'ws' = '' OR workspace = :'ws')
+ ORDER BY workspace;
+
+\echo '== 10. CHECK 에 shadow 가 아직 남아 있나 (남은 행 0 뒤 apply-schema 재적용으로 빠진다)'
+SELECT conrelid::regclass AS table_name, conname,
+       pg_get_constraintdef(oid) LIKE '%shadow%' AS still_allows_shadow
+  FROM pg_constraint
+ WHERE conname IN ('archive_channel_mode_mode_check',
+                   'archiver_workspace_runtime_desired_mode_check')
+ ORDER BY conname;
+
 \echo '== 판정'
 SELECT set_config('tybot.check_ws', :'ws', false);
 DO $$
@@ -73,6 +87,7 @@ DECLARE
     shadow_rows integer;
     held_running integer;
     contradictions integer;
+    desired_shadow integer;
 BEGIN
     SELECT count(*) INTO shadow_rows FROM archive_channel_mode
      WHERE mode = 'shadow' AND (ws = '' OR workspace = ws);
@@ -81,10 +96,12 @@ BEGIN
     SELECT count(*) INTO contradictions FROM archive_channel_mode
      WHERE (mode = 'active' AND (writer_owner <> 'archiver' OR cutover_ts = ''))
         OR (mode IN ('off', 'shadow') AND writer_owner <> 'master');
-    IF shadow_rows > 0 OR held_running > 0 OR contradictions > 0 THEN
-        RAISE EXCEPTION 'FAIL: shadow=% held_not_paused=% owner_contradictions=%',
-            shadow_rows, held_running, contradictions;
+    SELECT count(*) INTO desired_shadow FROM archiver_workspace_runtime
+     WHERE desired_mode = 'shadow' AND (ws = '' OR workspace = ws);
+    IF shadow_rows > 0 OR held_running > 0 OR contradictions > 0 OR desired_shadow > 0 THEN
+        RAISE EXCEPTION 'FAIL: shadow=% held_not_paused=% owner_contradictions=% desired_shadow=%',
+            shadow_rows, held_running, contradictions, desired_shadow;
     END IF;
-    RAISE NOTICE 'PASS: shadow 행 0, hold 채널 전부 paused, 주인·좌표 모순 0';
+    RAISE NOTICE 'PASS: shadow 행 0, hold 채널 전부 paused, 주인·좌표 모순 0, 희망 상태 shadow 0';
 END
 $$;

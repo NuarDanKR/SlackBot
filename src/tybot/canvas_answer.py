@@ -108,7 +108,13 @@ def automatic(
     if OPT_OUT_RE.search(request) or avoid_canvas:
         return False
     table = has_markdown_table(body)
-    if table and (TABLE_REQUEST_RE.search(request) or table_preferred):
+    # A request for a table is an explicit presentation request.  Do not make
+    # Canvas depend on the answer model happening to emit Markdown table
+    # syntax first: Slack turns such tables into an unreadable code/list form,
+    # and a short bullet answer would otherwise silently ignore the request.
+    if TABLE_REQUEST_RE.search(request):
+        return True
+    if table and table_preferred:
         return True
     lines = answer_line_count(body)
     if prefer_canvas:

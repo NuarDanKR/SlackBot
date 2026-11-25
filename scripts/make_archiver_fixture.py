@@ -8,7 +8,7 @@
 파일 모양을 **손으로 적으면 안 된다.** 손으로 적은 fixture 는 쓴 사람이 생각한 모양을
 고정할 뿐이고, 정본이 바뀌면 시험은 계속 통과한다 — 그때 reader 는 운영에서만 깨진다.
 
-그래서 `archiving_bot.ShadowCollector` + `backfill.run` 을 그대로 돌린다. Slack
+그래서 `archiving_bot.ArchiveCollector` + `backfill.run` 을 그대로 돌린다. Slack
 클라이언트만 가짜다. 경로는 `shadow_paths` 가, 줄 모양은 `archive.writer` 가, 첨부
 정본은 `attachment_writer` 가 만든다 — 전부 운영이 쓰는 그 코드다.
 
@@ -121,7 +121,7 @@ def _collect(root: Path, workspace: str, channels: list, history: dict, names: d
         workspace, "archiver-bot", "archiver-app", "T12345678", "U_MASTER",
         frozenset(cid for cid, _ in channels), separate_attachments=True,
     )
-    collector = archiving_bot.ShadowCollector(config, root, layout="per-channel-v1")
+    collector = archiving_bot.ArchiveCollector(config, root)
     client = FakeSlack(history, names, private)
     targets = [backfill.Target(workspace, cid, name) for cid, name in channels]
     counts, state = backfill.run(

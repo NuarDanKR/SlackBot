@@ -18,7 +18,8 @@ import { ApiError, api } from '../api/client'
 import { useResource } from '../api/hooks'
 import { Chip, Failed, Loading, Section, fmt } from './primitives'
 
-export type ChannelMode = 'off' | 'shadow' | 'active' | 'paused'
+// `shadow` 는 읽기 전용 과거값이다(B-99 2단계). 고르는 곳은 없고, 옛 행을 보여 줄 때만 쓴다.
+export type ChannelMode = 'off' | 'active' | 'paused' | 'shadow'
 
 export interface ServiceRow {
   service: 'master' | 'archiver' | 'hermes_direct'
@@ -109,16 +110,16 @@ export interface ArchivingDetail {
 // 사람은 원문이 안 쌓이는 줄 아는데, 실제로는 Master 가 그대로 쓴다.
 const MODE_LABEL: Record<ChannelMode, string> = {
   off: '미적용',
-  shadow: '그림자 수집',
   active: '운영 수집',
   paused: '일시 중지',
+  shadow: '과거 그림자(수집 안 함)',
 }
 
 const MODE_DETAIL: Record<ChannelMode, string> = {
   off: 'Archiver 가 수집하지 않고 Master 가 운영본을 기록합니다.',
-  shadow: 'Archiver 는 별도 shadow 경로에 기록하고 Master 가 운영본을 계속 기록합니다.',
-  active: '현재 파일럿에서는 선택할 수 없습니다.',
+  active: 'Archiver 가 이 채널의 운영 원문을 기록합니다.',
   paused: '양쪽 writer 인수 상태를 확인한 뒤에만 사용합니다.',
+  shadow: '그림자 수집은 폐기됐습니다(B-99). 다음 멤버십 동기화가 운영 수집으로 올립니다.',
 }
 
 
@@ -130,10 +131,13 @@ const MODE_DETAIL: Record<ChannelMode, string> = {
 const PILOT_BLOCKED_FLAGS = ['archiver_writes_live', 'separate_attachments']
 
 function modeChip(mode: ChannelMode) {
-  if (mode === 'active') return <Chip tone="ok">{MODE_LABEL[mode]}</Chip>
-  if (mode === 'shadow') return <Chip tone="watch">{MODE_LABEL[mode]}</Chip>
-  if (mode === 'paused') return <Chip tone="stalled">{MODE_LABEL[mode]}</Chip>
-  return <Chip tone="plain">{MODE_LABEL[mode]}</Chip>
+  // 모르는 값도 빈칸이 되지 않게 그대로 보여 준다.
+  const label = MODE_LABEL[mode] ?? mode
+  if (mode === 'active') return <Chip tone="ok">{label}</Chip>
+  if (mode === 'paused') return <Chip tone="stalled">{label}</Chip>
+  // 과거값 shadow: 수집하지 않는 상태라 정상처럼 보이면 안 된다.
+  if (mode === 'shadow') return <Chip tone="watch">{label}</Chip>
+  return <Chip tone="plain">{label}</Chip>
 }
 
 export function ArchivingPanel({ workspace }: { workspace: string }) {
@@ -236,7 +240,7 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
 
       <Section
         title="수집 채널"
-        lead="Archiving Bot 을 채널에 초대하면 자동으로 목록에 들어오고 그림자 수집이 시작됩니다. 채널 ID 를 손으로 넣지 않습니다 — 초대가 정본입니다."
+        lead="Archiving Bot 을 채널에 초대하면 자동으로 목록에 들어오고 운영 수집이 시작됩니다. 채널 ID 를 손으로 넣지 않습니다 — 초대가 정본입니다."
       >
         <div className="card card-pad">
           <p className="field-help">
@@ -253,7 +257,7 @@ export function ArchivingPanel({ workspace }: { workspace: string }) {
 
       <Section
         title="채널 수집 모드"
-        lead="그림자 수집은 운영 원문을 건드리지 않습니다 — Master 가 계속 운영본을 씁니다. 운영 수집(writer 인수)으로는 자동 전환하지 않습니다."
+        lead="초대된 채널은 운영 수집(Archiver 가 운영 원문을 씀)입니다. 그림자 수집은 폐기됐습니다 — 옛 그림자 행은 수집하지 않으며 다음 동기화가 운영 수집으로 올립니다."
       >
         <div className="card card-pad"><div className="table-scroll"><table className="table">
           <thead><tr><th>채널</th><th>참여</th><th>수집 상태</th><th>마지막 이벤트</th>
@@ -397,7 +401,7 @@ function ChannelRowView({ row, busy, onHold }: {
           </button>
           {!joined && !held && (
             <span className="field-help">
-              봇이 이 채널에 없습니다. 다시 초대하면 그림자 수집으로 돌아옵니다.
+              봇이 이 채널에 없습니다. 다시 초대하면 운영 수집으로 돌아옵니다.
             </span>
           )}
         </div>
@@ -451,7 +455,7 @@ function FlagRowView({
           )}
           {next && pilotBlocked && (
             <span className="field-help warn">
-              파일럿 범위 밖입니다. 이 스위치는 shadow 검증을 마친 뒤 별도 승인으로 켭니다.
+              파일럿 범위 밖입니다. 이 스위치는 별도 승인으로 켭니다.
             </span>
           )}
         </div>

@@ -92,7 +92,8 @@ _최종 갱신: 2026-11-12_
 
 | ID | 제목 | 우선 | 상태 | 의존 |
 |---|---|---|---|---|
-| [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · **1단계 완료, 배포 대기** · 2단계 대기) | B-65, B-68, B-94, B-98 |
+| [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · **1단계 완료, 배포 대기** · **2단계 코드 완료, 배포 대기** — 전환 절차 `docs/deploy/archiver-unit-switch.md`) | B-65, B-68, B-94, B-98 |
+| [B-100](#b-100) | **B-94 확장 — 이미지 Vision 처리 상태를 Slack 스레드 댓글 하나(고쳐 가며)와 콘솔에서 확실히 보이기** | **높음** | 대기 (B-99 2단계 `archiving_bot.py` 병합 후 착수) | B-94, B-99, B-81 |
 | [B-85](#b-85) | **답변 캐시와 사용자별 TYBot/VIPBot 일일 성공 답변 10회 제한** | **최우선** | 완료 (Codex/2026-11-10) | B-19, B-27b, B-83 |
 | [B-86](#b-86) | **PII·민감정보 결정적 마스킹 후 아카이브·답변 허용** | **최우선** | 완료 (Claude/2026-11-10) | B-07, B-49, B-70 |
 | [B-87](#b-87) | **`/채널 상태` 필수 앱 참여 진단 — Archiver·TYBot·rhwp·Hermes** | **최우선** | 완료 (Claude/2026-11-11) | B-37, B-65, B-72 |
@@ -208,6 +209,17 @@ B-98 이행 도구로 병합할 대상이다. 서버 유닛이 옛 판이라 `Re
 `/var/lib/tybot/image-description-notify` 가 없어 B-94 알림이 조용히 실패했다 → 저장소
 유닛을 다시 설치.
 
+**재발(2026-11-24 확인).** 1단계 코드가 서버에 들어가기 전인 11-23 07:27(archi `channels/…/raw`)과
+13:09(tyit `channels/…/raw`·`attachments/<fid>/…md`)에 옛 코드가 `workspaces/` 를 다시 만들었다.
+모양으로 보아 Master 채널 쓰기(소유 기록 없음 허용, B)와 변환 재처리의 옛 배치 분기(C)다.
+archi Archiver 가 기동 거부로 재시작을 반복했다. 3개 파일을
+`/var/lib/tybot/archive-legacy-quarantine-20261124/workspaces` 로 **이동**(삭제 없음, B-98 병합 대상)하고
+archi 를 재시작해 복구했다. 같은 날 배포(`31e3a07`)로 1·2단계 코드가 깔렸다 — 다음에 다시
+생기면 아직 막지 못한 쓰기 경로가 있다는 뜻이다.
+
+**배포 순서 주의.** 콘솔 배포는 **이미 깔린** `/opt/tybot/deploy/update.sh` 를 실행한다. 그래서
+`update.sh` 에 넣은 Archiver 유닛 전환은 그것을 깐 배포가 아니라 **그다음 배포**에서 돈다.
+
 **오너 결정(2026-11-20).** 섀도는 없앤다. 「옛 writer 가 정본이고 Archiver 는 비교용」 인
 구조가 남아 있는 한 두 쓰기 경로가 서로를 죽인다.
 
@@ -250,13 +262,47 @@ B-98 이행 도구로 병합할 대상이다. 서버 유닛이 옛 판이라 `Re
 
 #### 2단계 — 섀도 제거
 
-- [ ] Archiver `shadow` 모드 수집·섀도 루트(`ARCHIVER_SHADOW_DIR`·`shadow_archive_dir`)·
-      `ingest_ack.SHADOW` 제거. 채널 모드는 `off|active|paused` 만
-- [ ] DM 인계 소비자가 섀도 루트가 아니라 운영 루트에 쓴다. Master DM 쓰기는 인계로 일원화할지 결정
-- [ ] 콘솔·스키마 CHECK(`archive_channel_mode.mode`, `written_to`, supervisor `desired_mode`)에서 `shadow` 제거
-      — 남은 행 0 확인(`deploy/checks/archiver_no_shadow_channels.sql`) 뒤
-- [ ] 유닛 `tybot-archiving-shadow@` → `tybot-archiver@`, `LOCK_DIR`·`ReadWritePaths` 정리, 전환 절차
-- [ ] 섀도 전용 스크립트·진단(`shadow_root`, `migrate_shadow_root`, file_audit/recovery 의 shadow_root 인자) 정리
+**2단계 설계 결정 (Claude/2026-11-24 — 분담 작업의 계약).**
+
+- **D1 루트 하나.** Archiver 는 `ARCHIVE_DIR` 에만 쓴다(채널 `<ws>/<cid>__<name>/archive`).
+  `ARCHIVER_SHADOW_DIR`·`ARCHIVER_SHADOW_LAYOUT` 은 런타임이 읽지 않는다. 남아 있으면
+  기동 로그에 「무시함」 한 줄을 남긴다. `ARCHIVER_LIVE_WRITES_ENABLED` 는 이제 필수가 아니다.
+  다만 명시적으로 끈 값(`0`·`false`·`off`)이면 기동을 거부한다 — 운영 쓰기가 아닌 모드가 없다.
+  운영 스위치는 DB 의 Archiver live 플래그와 채널 소유 기록이다.
+- **D2 `shadow` 모드는 읽기 전용 과거값.** 수집하지 않는다(`refused`). 멤버십 동기화가
+  `active` 로 올린다(2026-11-18 결정 그대로). 상태 전이: `off → active`(인수 좌표 필수),
+  `active ↔ paused`. 옛 `shadow` 행은 `active·paused·off` 로만 나간다.
+- **D3 DM 쓰기는 Master 하나.** 1단계에서 Master 가 운영 루트의 개인별 배치에 쓴다.
+  Archiver 의 DM 인계 소비자가 같은 경로에 쓰면 한 파일에 쓰는 프로세스가 둘이 된다.
+  그래서 인계 거울(`ARCHIVER_DM_MIRROR_ENABLED`)과 소비자(`ARCHIVER_DM_CONSUME_ENABLED`)를
+  은퇴시킨다 — 켜져 있어도 「무시함」 경고만 남긴다. 섀도 루트의 DM 사본은 Master 가 옛 배치에
+  쓴 원문(격리분)과 같은 것이다. 그 원문은 B-98 병합으로 되살린다.
+- **D4 유닛 `tybot-archiver@`.** `Conflicts=tybot-archiving-shadow@%i.service` 로 옛 유닛과
+  동시에 돌지 못하게 한다. `LOCK_DIR=/var/lib/tybot/archiver/%i/.locks`, 잠금 이름은
+  `archiving-bot-<ws>` 이다. `ReadWritePaths` 에서 섀도 루트를 뺀다. `check_unit_drift` 는 새
+  유닛을 필수로 보고, 옛 유닛이 남아 있으면 `retired-present` 로 알린다.
+- **D5 ACK.** `written_to` 는 항상 `live` 다. `SHADOW` 상수는 과거 행을 읽는 데만 남긴다.
+  스키마의 `written_to` CHECK 는 과거 행 때문에 그대로 둔다. `archive_channel_mode.mode` 와
+  supervisor `desired_mode` 의 `shadow` 는 **남은 행이 0일 때만** 빼는 가드 블록으로 지운다.
+- **D6 콘솔.** 섀도 루트 집계와 shadow 모드 선택지를 없앤다.
+- **D7 운영 도구.** 단일 루트로 바꾼다: `ack_reconcile`·`retention`·`file_inventory`·
+  `file_audit*`·`file_recovery`·`drain_conversion_queue`(항상 채널별 배치). `shadow_root.py` 와
+  `migrate_shadow_root.py` 는 삭제한다. 서버의 섀도 루트 **데이터는 지우지 않는다**(보관).
+- `shadow_paths` 모듈 이름은 운영 배치도 쓰므로 그대로 둔다(이름 변경만 하는 churn 금지).
+
+- [x] Archiver `shadow` 모드 수집·섀도 루트 제거(`ArchiveCollector`, `archive_root`). ACK 는 항상
+      `live`. `SHADOW` 상수는 과거 행 읽기용으로만 남김(D5)
+- [x] DM 인계: 일원화 대신 **은퇴**(D3). Master 거울·Archiver 소비자 제거, Master 가 단독 writer
+- [x] 콘솔·스키마: shadow 선택지·섀도 집계 제거. `mode`·supervisor `desired_mode` CHECK 는 남은 행
+      0일 때만 좁히는 가드 블록. `written_to` CHECK 는 과거 행 때문에 유지. supervisor 희망 상태는
+      `off|live`
+- [x] 유닛 `tybot-archiver@`(`Conflicts=` 옛 유닛), `LOCK_DIR=/var/lib/tybot/archiver/%i/.locks`,
+      `check_unit_drift` 의 `retired-present`, 전환 절차 `docs/deploy/archiver-unit-switch.md`
+- [x] `shadow_root.py`·`migrate_shadow_root.py` 삭제, 운영 도구 단일 루트(D7)
+- [ ] 서버 전환(절차 문서 순서) — 오너
+- [ ] 남은 정리: `supervisor_state.PILOT_MODES` 문서·`handover.py` 의 「역인수 → shadow」 문서,
+      콘솔 `PILOT_BLOCKED_FLAGS` 의 `archiver_writes_live`, 섀도 루트 데이터 보관 방식.
+      `active·paused → off` 길이 없다(운영 정지는 `paused`) — 필요하면 따로 정한다
 - [ ] 격리한 `archive-legacy-quarantine-20261120` 을 B-98 도구로 dry-run → apply
 
 **완료 조건.** Master·타이머·스크립트 어느 것도 운영 루트에 `workspaces/` 를 만들지 않고,
@@ -1150,8 +1196,9 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
   `image_description_notification.recognition_fields`·`load_recognition`). 인식 결과가 없으면
   `✅ 이미지 설명·텍스트 인식 완료 — 검색 보조 정보로 반영되었습니다.`
 - 불확실: `🟡 이미지를 이렇게 인식했습니다 (일부 불확실) — …`
-- 승인 대기·정책 OFF·차단·quota 소진은 채널에 알리지 않는다. 콘솔/운영 로그만
-  남겨 채널을 스팸하지 않는다.
+- ~~승인 대기·정책 OFF·차단·quota 소진은 채널에 알리지 않는다.~~ **2026-11-24 오너 결정으로
+  [B-100](#b-100) 이 대체** — 이미지당 댓글 하나를 두고 상태(접수·처리 중·완료·보류·미처리)를
+  `chat.update` 로 고쳐 간다.
 - 원 메시지 좌표가 없거나 현재 Archiver가 해당 채널의 멤버가 아니면 보내지 않고
   outbox를 실패 코드로 닫는다. Slack API 실패를 성공으로 기록하지 않는다.
 - 알림은 수집 경로에서 봇 발언으로 제외되는지 회귀시험으로 확인한다.
@@ -1159,6 +1206,89 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 완료 조건: worker 단독 실행에는 Slack 토큰이 없고, 완료 상태 하나당 안전한 알림
 요청 하나만 생기며, Archiver 재시작·API 실패·중복 drain에도 같은 상태가 반복 게시되지
 않는다.
+
+---
+
+## B-100
+### B-94 확장 — 이미지 Vision 처리 상태를 Slack 스레드에서 확실히 알리기
+
+**높음 · 대기 · 의존 B-94, B-99(2단계), B-81**
+
+**왜.** B-81 Vision 변환·검색 저장은 운영 검증됐지만, 사용자에게는 이미지가 접수됐는지,
+처리 중인지, 성공·실패했는지가 보이지 않는다. 지금 `image-description-notify` JSONL outbox 는
+완료 알림만 비동기로 보내고, 실제로 전달됐는지 운영자도 알기 어렵다(2026-11-20 유닛
+`ReadWritePaths` 누락 때 로그 없이 실패 — B-99 D 참조). 원본 이미지 스레드에서 처리 상태와
+결과를 확인할 수 있게 만든다. Canvas 는 만들지 않는다.
+
+**선행 조건.** B-99 2단계(섀도 제거)가 `src/tybot/archiving_bot.py` 를 크게 바꾼다. 그 작업을
+병합한 뒤 착수한다.
+
+> **2026-11-24 (오너 결정) — B-94 의 알림 정책을 B-100 으로 대체한다.**
+>
+> B-94 의 「승인 대기·정책 OFF·차단·quota 소진은 채널에 알리지 않는다」 는 폐기한다.
+> 상태 알림은 이 항목을 따른다.
+>
+> **댓글은 이미지당 하나다.** 상태마다 새 댓글을 다는 것이 아니라, 처음 단 댓글을
+> `chat.update` 로 **고쳐 가며** 진행 상황만 보여 준다. 스레드를 상태 로그로 채우지 않는다.
+> - 첫 상태에서 `chat.postMessage` 로 댓글을 하나 만들고, 그 댓글의 `ts` 를 DB 에 이미지
+>   좌표별로 저장한다. 이후 상태는 모두 그 `ts` 에 `chat.update` 한다.
+> - 상태는 앞으로만 간다(`accepted → processing → completed|deferred|…`). 늦게 도착한 옛 상태가
+>   새 상태를 덮지 않는다.
+> - 같은 이미지에 작업이 다시 돌아도(재시도·재실행) 새 댓글을 만들지 않고 같은 댓글을 고친다.
+> - 댓글이 지워졌거나 `ts` 를 잃었다면(`message_not_found` 등) 새로 하나 달고 `ts` 를 바꾼다.
+>   이 경우만 예외다.
+
+#### UX 계약 — 원본 이미지의 `thread_ts` 에 댓글 하나를 두고 고쳐 간다
+
+1. 수집·대상 판정 통과 직후: `이미지 접수됨 · AI 인식 대기 중입니다.`
+2. Vision worker 가 dispatch 를 확정한 뒤: `이미지 인식 처리 중입니다.`
+3. 성공: `이미지 인식 완료 · 검색 보조 정보로 반영했습니다.`
+   - 짧은 설명과 허용 태그
+   - 마스킹된 OCR 최대 12줄, 나머지는 「추가 N줄은 검색에 반영됨」
+   - 「AI 인식 결과이며 원본 이미지를 확인해 달라」 는 고정 안내
+4. 재시도할 수 있는 외부 일시 오류(예: Google 503):
+   `이미지 인식이 일시 보류되었습니다. 자동 재시도 예정입니다.`
+   provider 예외 본문·키·URL·파일명은 싣지 않는다.
+5. 정책·권한·원본 검증 같은 재시도 불가 차단:
+   `이미지 인식이 처리되지 않았습니다. 관리 콘솔에서 상태를 확인해 주세요.`
+   민감한 내부 코드나 원문은 싣지 않는다.
+
+#### 유지하는 원칙
+
+- 봇 댓글은 아카이브 근거로 다시 수집하지 않는다(원칙 1).
+- 댓글에 원문 파일명·원본 본문·raw model output 을 넣지 않는다.
+- OCR·설명은 저장된 guard-approved 값만 쓰고, 전달 직전에 다시 마스킹한다.
+- Slack 실패를 성공으로 기록하지 않는다.
+
+#### 내구성·운영 계약
+
+- 이미지별 Slack 알림 상태를 JSONL 이 아니라 **DB** 에서 조회할 수 있다.
+  최소 상태는 `accepted`, `processing`, `completed`, `deferred`, `failed_delivery`.
+- 각 상태는 `(workspace, channel_id, message_ts, file_id 또는 job_id)` 기준으로 멱등이다.
+  Slack 에 한 번만 표시한다.
+- delivered watermark 는 `chat.postMessage` 가 성공한 뒤에만 기록한다.
+- Slack API 오류·네트워크 오류는 outbox 에 남겨 재시도한다.
+- 등록 해제·멤버십 없음은 버리지 않는다. 콘솔에 `failed_delivery` 로 보인다.
+- 콘솔 이미지 설명 운영 화면과 API 에 최근 작업별로 다음을 보인다(콘솔 원칙):
+  Slack 알림 상태, 마지막 시도, 안전한 오류 코드, 재전송 가능 여부.
+- 이전 작업과 새 작업 사이의 중복 댓글을 막는다.
+- 댓글은 Archiver bot 만 게시한다. Vision worker 에는 Slack 토큰을 주지 않는다.
+
+#### 시험
+
+- [ ] 접수 → 처리 중 → 완료 순서 — `chat.postMessage` 1회 뒤 같은 `ts` 에 `chat.update` 만, 스레드 댓글 수 1
+- [ ] 늦게 온 옛 상태가 새 상태를 덮지 않는다. 댓글이 지워졌을 때만 새 댓글을 달고 `ts` 를 바꾼다
+- [ ] 성공 댓글에는 guard-approved·마스킹된 OCR 만 들어 있다
+- [ ] Slack API 일시 오류 뒤 재시도해 성공한다
+- [ ] 등록 해제·멤버십 없음은 콘솔에 실패로 남고 성공 처리되지 않는다
+- [ ] worker 재시작, 중복 outbox 행, 같은 job 재실행에도 같은 상태 댓글이 중복되지 않는다
+- [ ] 봇 댓글이 Archiver 수집 경로에 다시 들어가지 않는다
+- [ ] Slack 실패·DB 실패에서 원문·토큰·API 키가 로그·댓글·DB 상태에 노출되지 않는다
+- [ ] PostgreSQL 격리 DB 시험
+- [ ] `ruff check src tests scripts` 0건, 관련 pytest 와 전체 pytest 결과를 보고한다
+
+**범위 밖.** Canvas 생성. PDF/Word 전체 추출 텍스트를 Slack 댓글로 게시. Vision worker 에
+Slack 토큰 부여. B-99 섀도 제거 로직 변경.
 
 ---
 
@@ -4459,7 +4589,7 @@ Hermes 정지 후 TYBot 설치 순서를 지킨다.
 ## B-98
 ### 그림자 수집 폐기 뒤 격리한 레거시 아카이브를 현재 단일 루트로 무손실 병합
 
-**최우선 · 진행중 (Codex/2026-11-18) · 의존 B-65**
+**최우선 · 진행중 (Codex/2026-11-18 → Claude/2026-11-24 적용) · 의존 B-65**
 
 2026-11-18 운영 전환에서 모든 `shadow` 채널을 `active/archiver`로 바꾸고 그림자
 수집본을 운영 루트에 복사했다. 기동 안전장치가 옛
@@ -4476,3 +4606,30 @@ Hermes 정지 후 TYBot 설치 순서를 지킨다.
 - [x] DM은 `<workspace>/dm/<user>/archive`로만 병합
 - [x] 원본 격리 폴더는 수정·삭제하지 않으며 운영자가 만든 폐기 가능 `workspaces_`는 범위 밖
 - [ ] 적용 뒤 전체 원문·첨부 수, 충돌 0, 검색 재색인과 문제 채널 질의 검증
+
+**적용 전 dry-run(2026-11-24) 과 오너 결정.** 격리분 3개(11-18·11-20·11-24)를 dry-run
+하니 79건이 막혔고, 11-18 분 반영 대상이 24.9만 줄이었다.
+
+- **24.9만 줄은 사람 대화가 아니었다.** 옛 코드가 첨부 엑셀을 `[첨부추출:…]` 원문 줄로
+  펼친 것이다(archi 본부-건축 cs 채널 24만 줄 = 메시지 32개, tyit 봇테스트 11.6만 줄).
+  → **결정: 첨부 줄은 원문 병합에서 뺀다.** 첨부 본문은 정본(`attachments/`)으로만
+  들어간다. 원문에 이름만 있고 정본이 원본·운영 어디에도 없는 첨부는 리포트
+  `attachment_names_without_document` 에 남겨 변환을 다시 돌릴 수 있게 한다.
+- **「정책 불일치」 는 권한이 넓어지는 쪽이 아니었다.** 전부 옛 `private` ↔ 운영 `public`
+  이고, 운영은 Archiver 가 Slack `is_private` 로 정한다. 옛 코드가 막는 쪽 기본값으로
+  비공개라 적은 것이다. → **결정: 운영 채널의 최신 문서가 공개면 그 정책을 따른다**
+  (원문·첨부 정본 모두). 공개 채널 이력은 이미 워크스페이스 누구나 Slack 에서 본다.
+  위 「새 문서는 옛 ACL 보다 넓히지 않음」 의 유일한 예외이며, **비공개끼리 다르면
+  여전히 막는다.** 리포트 `live_policy_adopted` 에 채널이 남는다.
+- 운영자가 검토한 항목(Slackbot DM `civil/dm/USLACK`, 리비전이 다른 첨부 1건)은
+  `--exclude <상대경로>` 로 격리에 남기고 나머지를 진행한다. 리포트 `excluded`.
+- `imported_from` 은 출처 격리 폴더 이름(예: `archive-legacy-quarantine-20261124`)을 적는다.
+- 11-20 분의 invest 6개 채널은 반영 대상 0(이미 운영에 있음)이었다.
+- **같은 file ID·revision 의 운영 첨부 정본이 이미 있으면 운영 쪽을 둔다**(차단하지 않음).
+  revision 은 원본 해시라 원본은 같고, 11-18 분 33건의 차이는 다시 처리하며 붙은 값
+  (permalink·처리 시각·`source_path`·변환 상태·공개 여부·채널명)이었다. 덮어쓰지 않으며,
+  옛 쪽에만 본문이 있는 것은 `attachment_text_only_in_legacy` 로 남겨 재변환 대상으로 삼는다.
+  운영 정본을 읽지 못하면 전처럼 막는다.
+- 대괄호가 든 첨부 이름(`[190801]정산서.xlsx`)이 첫 `]` 에서 끊기던 것을 고쳤다.
+- **적용 1차(2026-11-24):** 11-24 분 원문 4·첨부 1, 11-20 분 원문 19 반영(차단 0,
+  `civil/dm/USLACK`·리비전 충돌 첨부 1건 제외).

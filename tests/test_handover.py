@@ -207,18 +207,18 @@ def test_the_window_never_goes_negative():
     assert backfill_window("10.000000") == ("0.000000", "")
 
 
-def test_pausing_also_stops_the_shadow_collection():
+def test_only_active_channels_are_collected():
     """§5.3 이 이 사실 위에 서 있다. 바뀌면 문서가 조용히 틀린 것이 된다.
 
-    `paused` 동안 그림자까지 멈추기 때문에 비운 구간은 **어디에도 안 남는다.**
-    그래서 소급이 선택이 아니라 필수다.
+    `paused` 동안 수집이 멈추기 때문에 비운 구간은 **어디에도 안 남는다.** 그래서
+    소급이 선택이 아니라 필수다. 옛 `shadow` 행도 수집하지 않는다(B-99 2단계 D2).
     """
     from tybot.archive.channel_membership import is_collectible
 
     row = {"membership": "joined", "operator_hold": False}
 
-    assert is_collectible({**row, "mode": "shadow"})
     assert is_collectible({**row, "mode": "active"})
+    assert not is_collectible({**row, "mode": "shadow"})
     assert not is_collectible({**row, "mode": "paused"})
 
 
@@ -230,13 +230,12 @@ def test_the_step_reads_as_a_boolean():
 
 # --- 되돌릴 수 있나 ---------------------------------------------------------------
 #
-# 「인수했는데 문제가 있다」 는 반드시 생긴다. 그때 되돌릴 수 없으면 인수를 못 한다.
-#
-# 되돌리는 길은 **한 단계가 아니다.** `_MODE_EDGES` 에 `active → shadow` 가 없고
-# `active → paused → shadow` 만 있다. 먼저 멈추고, 그다음에 넘긴다.
+# 그림자 수집이 폐기되면서(B-99 2단계 D2) Master 로 되돌려 주는 역인수 길
+# (`active → paused → shadow`)도 없어졌다. 남은 길은 `active ↔ paused` 뿐이다.
+# 「인수했는데 문제가 있다」 면 먼저 멈추고(`paused`), 고친 뒤 같은 좌표로 재개한다.
 
 def test_there_is_no_one_step_way_back():
-    """바로 넘기면 멈추지 않은 채 주인이 바뀐다 — 인수할 때와 똑같은 겹침이다."""
+    """운영 수집에서 그림자로 가는 길은 없다."""
     from tybot.archive.archiving_state import TransitionRefused, plan_mode_change
 
     with pytest.raises(TransitionRefused, match="갈 수 없습니다"):
@@ -253,47 +252,52 @@ def test_the_first_step_back_is_to_stop_both():
             if decide(halted, who, archiver_flag=True).allowed] == []
 
 
-def test_the_second_step_reopens_the_master_gate():
-    """모드만 바뀌고 문지기가 안 열리면 되돌린 것이 아니다."""
-    from tybot.archive.archiving_state import plan_mode_change
+def test_a_stopped_channel_cannot_be_handed_back_to_shadow():
+    """역인수 좌표가 있어도 그림자로는 못 간다 — 폐기된 모드다."""
+    from tybot.archive.archiving_state import (
+        SHADOW_RETIRED_REASON,
+        TransitionRefused,
+        plan_mode_change,
+    )
 
     halted = plan_mode_change(ACTIVE, ChannelMode.PAUSED)
-    back = plan_mode_change(halted, ChannelMode.SHADOW, cutover_ts="1759200000.000100")
 
-    assert back.writer_owner == WriterOwner.MASTER
-    assert decide(back, WriterOwner.MASTER).allowed
-    assert not decide(back, WriterOwner.ARCHIVER, archiver_flag=True).allowed
+    with pytest.raises(TransitionRefused) as caught:
+        plan_mode_change(halted, ChannelMode.SHADOW, cutover_ts="1759200000.000100")
+
+    assert SHADOW_RETIRED_REASON in str(caught.value)
 
 
-def test_handing_back_needs_a_new_coordinate():
-    """좌표 없이 소유권만 바꾸면 그 경계에서 중복·누락이 생긴다."""
+def test_a_stopped_channel_only_resumes():
+    """paused 에서 off 로 가면 인수 사실(주인·좌표)이 사라진다."""
     from tybot.archive.archiving_state import TransitionRefused, plan_mode_change
 
     halted = plan_mode_change(ACTIVE, ChannelMode.PAUSED)
 
-    with pytest.raises(TransitionRefused, match="역인수 좌표"):
-        plan_mode_change(halted, ChannelMode.SHADOW)
+    with pytest.raises(TransitionRefused, match="갈 수 없습니다"):
+        plan_mode_change(halted, ChannelMode.OFF)
 
 
-def test_the_rollback_coordinate_cannot_precede_the_handover():
+def test_resuming_keeps_the_coordinate_and_reopens_the_archiver_gate():
+    """모드만 바뀌고 문지기가 안 열리면 재개한 것이 아니다."""
+    from tybot.archive.archiving_state import plan_mode_change
+
+    halted = plan_mode_change(ACTIVE, ChannelMode.PAUSED)
+    back = plan_mode_change(halted, ChannelMode.ACTIVE)
+
+    assert back.writer_owner == WriterOwner.ARCHIVER
+    assert back.cutover_ts == ACTIVE.cutover_ts
+    assert not decide(back, WriterOwner.MASTER).allowed
+
+
+def test_the_resume_coordinate_cannot_move_backwards():
     """뒤로 가면 이미 넘긴 구간을 다시 넘기게 되고, 그 구간은 양쪽이 다 썼다고 본다."""
     from tybot.archive.archiving_state import TransitionRefused, plan_mode_change
 
     halted = plan_mode_change(ACTIVE, ChannelMode.PAUSED)
 
-    with pytest.raises(TransitionRefused, match="앞설 수 없습니다"):
-        plan_mode_change(halted, ChannelMode.SHADOW, cutover_ts="1.000100")
-
-
-def test_a_rolled_back_channel_starts_over():
-    """되돌린 채널은 처음부터 다시 간다. `active` 로 바로 못 돌아간다."""
-    from tybot.archive.archiving_state import plan_mode_change
-
-    halted = plan_mode_change(ACTIVE, ChannelMode.PAUSED)
-    back = plan_mode_change(halted, ChannelMode.SHADOW, cutover_ts="1759200000.000100")
-
-    assert stage_of(back) == Stage.BEFORE
-    assert plan(back, ready=READY).action == "pause"
+    with pytest.raises(TransitionRefused, match="뒤로 갈 수 없습니다"):
+        plan_mode_change(halted, ChannelMode.ACTIVE, cutover_ts="1.000100")
 
 
 def test_stopping_does_not_erase_who_owned_it():

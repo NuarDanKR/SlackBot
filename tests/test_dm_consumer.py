@@ -1,9 +1,7 @@
 from dataclasses import replace
 
-import pytest
 from cryptography.fernet import Fernet
 
-from tybot import archiving_bot
 from tybot.archive import shadow_paths, writer
 from tybot.archive.dm_consumer import DmConsumer
 from tybot.archive.dm_file_handoff import DmFile, DmFileVault, digest_of
@@ -156,38 +154,3 @@ def test_writer_refusal_does_not_ack(monkeypatch, tmp_path):
     assert consumer.run_once() == (0, 1)
     assert inbox.pending_keys("tyit") == [key]
     assert not list(root.rglob("*.md"))
-
-
-def test_worker_consumer_is_off_by_default(tmp_path):
-    cfg = archiving_bot.ArchiverWorkspace(
-        "tyit", "bot", "app", "T12345678", "U87654321", frozenset(), True,
-    )
-    assert archiving_bot._dm_handoff_consumer(cfg, tmp_path, {}) is None
-    assert not list(tmp_path.iterdir())
-
-
-def test_standalone_archiver_does_not_open_master_dm_handoff(tmp_path):
-    cfg = archiving_bot.ArchiverWorkspace(
-        "tec", "bot", "app", "T12345678", "", frozenset(), True,
-    )
-    assert archiving_bot._dm_handoff_consumer(
-        cfg, tmp_path, {"ARCHIVER_DM_CONSUME_ENABLED": "1"},
-    ) is None
-    assert not list(tmp_path.iterdir())
-
-
-def test_worker_consumer_requires_private_layout_and_existing_inbox(monkeypatch, tmp_path):
-    cfg = archiving_bot.ArchiverWorkspace(
-        "tyit", "bot", "app", "T12345678", "U87654321", frozenset(), True,
-    )
-    handoff = tmp_path / "inbox"
-    env = {"ARCHIVER_DM_CONSUME_ENABLED": "1", "ARCHIVER_DM_HANDOFF_DIR": str(handoff)}
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="per-channel-v1"):
-        archiving_bot._dm_handoff_consumer(cfg, tmp_path, env)
-    env["ARCHIVER_SHADOW_LAYOUT"] = "per-channel-v1"
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="existing"):
-        archiving_bot._dm_handoff_consumer(cfg, tmp_path, env)
-    handoff.mkdir()
-    monkeypatch.setattr("tybot.console.workspace_store._fernet", lambda: Fernet(Fernet.generate_key()))
-    consumer = archiving_bot._dm_handoff_consumer(cfg, tmp_path / "archive", env)
-    assert isinstance(consumer, DmConsumer)

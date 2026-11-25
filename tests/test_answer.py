@@ -7,7 +7,7 @@ import pytest
 
 from tybot import documents
 from tybot.access import RequestContext
-from tybot.answer import Answer, AnswerEngine, parse_model_flag
+from tybot.answer import Answer, AnswerEngine, expand_source_terms, parse_model_flag
 from tybot.archive.store import ArchiveDoc, ArchiveStore, RawLine, SearchHit
 from tybot.gateway.base import LLMResponse, Message, ModelSpec, Sensitivity
 from tybot.gateway.router import Router
@@ -71,6 +71,26 @@ def test_answer_attaches_citation(engine):
     assert "출처:" in ans.to_slack()
     # 근거는 원문 라인이어야 한다
     assert "3억 2천만원" in fake.calls[0][1].content
+
+
+def test_new_site_wording_adds_the_construction_start_term_without_rewriting_question(
+    engine, monkeypatch
+):
+    eng, _ = engine
+    question = "건축본부와 토목본부의 27년말 현장 개수와 각각 새로 개설되는 현장을 알려줘"
+    seen: list[str] = []
+    original_search = eng._search
+
+    def record_search(query, ctx):
+        seen.append(query)
+        return original_search("기성금", ctx)
+
+    monkeypatch.setattr(eng, "_search", record_search)
+    answer = eng.answer(question, _ctx())
+
+    assert expand_source_terms(question, question=question).endswith("착공예정")
+    assert answer.reason == "answered"
+    assert seen and "착공예정" in seen[0]
 
 
 def test_repeated_channel_citations_are_one_date_range_and_links_stay_visible():

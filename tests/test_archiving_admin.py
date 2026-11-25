@@ -92,7 +92,8 @@ def _given_enforcement(state_dir, *, applied: bool = True) -> None:
             # **전부 돌았고 실패가 없어야** 집행으로 인정된다. 한 정책만 돈
             # 실행이나 실패가 있는 실행은 게이트를 열지 않는다(B-70).
             "covered": list(retention.POLICIES), "failed": [],
-            "scanned_roots": ["/archive", "/shadow"], "unresolved": 0,
+            # 운영 루트 하나만(B-99 2단계 D7 — 섀도 루트는 세지 않는다).
+            "scanned_roots": ["/archive"], "unresolved": 0,
         }),
         encoding="utf-8",
     )
@@ -109,9 +110,15 @@ def test_an_actor_without_a_reason_is_refused():
         admin.Actor("dan", "   ")
 
 
+def _active(repo, channel="C1"):
+    """값싼 합법 전이의 출발점. active 에서 멈추는 것은 게이트 대상이 아니다."""
+    repo.given_channel("tyit", channel, "active", "archiver", "1700000000.0001")
+
+
 def test_every_write_records_the_actor_and_the_reason(repo, gate_closed):
+    _active(repo)
     admin.set_channel_mode(
-        "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
+        "tyit", "C1", ChannelMode.PAUSED, admin.Actor("dan", "파일럿"), repo=repo
     )
 
     assert len(repo.audit_rows) == 1
@@ -137,13 +144,39 @@ def test_active_is_blocked_until_the_schema_is_verified(repo, gate_closed):
     assert repo.audit_rows == []
 
 
-def test_shadow_is_not_blocked_by_the_gate(repo, gate_closed):
-    """그림자는 운영 원문을 안 건드린다. 막으면 개발이 멈춘다."""
-    after = admin.set_channel_mode(
-        "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
-    )
+@pytest.mark.parametrize("existing", [None, "off", "active", "shadow"])
+@pytest.mark.parametrize("target", [ChannelMode.SHADOW, "shadow"])
+def test_shadow_is_refused_as_a_retired_mode(repo, gate_open, existing, target):
+    """그림자 수집은 폐기됐다(B-99 2단계 D2·D6). 게이트가 열려 있어도 못 간다."""
+    if existing == "active":
+        _active(repo)
+    elif existing:
+        repo.given_channel("tyit", "C1", existing)
+    before = dict(repo.channel_rows.get(("tyit", "C1")) or {})
 
-    assert after.mode == ChannelMode.SHADOW
+    with pytest.raises(admin.AdminRefused) as caught:
+        admin.set_channel_mode(
+            "tyit", "C1", target, admin.Actor("dan", "파일럿"), repo=repo
+        )
+
+    assert "shadow 수집은 폐기됐습니다 (B-99)" in str(caught.value)
+    assert dict(repo.channel_rows.get(("tyit", "C1")) or {}) == before
+    assert repo.audit_rows == []
+
+
+def test_shadow_is_refused_before_the_gate(repo, gate_closed):
+    """폐기한 모드는 「조건이 안 맞아서」 가 아니라 없는 길이다. 사유가 달라야 한다."""
+    with pytest.raises(admin.AdminRefused, match="폐기"):
+        admin.set_channel_mode(
+            "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
+        )
+
+
+def test_an_unknown_mode_is_refused(repo, gate_open):
+    with pytest.raises(admin.AdminRefused, match="알 수 없는 채널 모드"):
+        admin.set_channel_mode(
+            "tyit", "C1", "live", admin.Actor("dan", "파일럿"), repo=repo
+        )
 
 
 def test_active_works_once_the_schema_is_verified(repo, gate_open):
@@ -172,7 +205,7 @@ def test_the_gate_is_checked_before_the_transition(repo, gate_closed):
             cutover_ts="1700000000.0001", repo=repo,
         )
 
-    # 전이 규칙(off→active 금지)이 아니라 **게이트** 사유가 먼저 나온다
+    # 전이 규칙이 아니라 **게이트** 사유가 먼저 나온다
     assert "검증" in str(caught.value)
 
 
@@ -211,17 +244,30 @@ def test_the_detail_view_says_what_is_gated_and_why(repo, gate_closed):
 # --- 전이 함수를 지난다 ------------------------------------------------------
 
 def test_an_illegal_transition_never_reaches_the_repository(repo, gate_open):
-    """`off → active` 는 저장 전에 막힌다."""
-    repo.given_channel("tyit", "C1", "off")
+    """`paused → off` 는 없다(active ↔ paused 만). 저장 전에 막힌다."""
+    repo.given_channel("tyit", "C1", "paused", "archiver", "1700000000.0001")
 
-    with pytest.raises(admin.AdminRefused, match="off → active"):
+    with pytest.raises(admin.AdminRefused, match="paused → off"):
         admin.set_channel_mode(
-            "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "급함"),
-            cutover_ts="1700000000.0001", repo=repo,
+            "tyit", "C1", ChannelMode.OFF, admin.Actor("dan", "급함"), repo=repo,
         )
 
-    assert repo.channel_rows[("tyit", "C1")]["mode"] == "off"
+    assert repo.channel_rows[("tyit", "C1")]["mode"] == "paused"
     assert repo.audit_rows == []
+
+
+def test_off_goes_active_with_a_cutover(repo, gate_open):
+    """`off → active` 는 한 걸음이다(B-99 2단계 D2). 인수 좌표가 같이 저장된다."""
+    repo.given_channel("tyit", "C1", "off")
+    _ready_for_active(repo)
+
+    after = admin.set_channel_mode(
+        "tyit", "C1", ChannelMode.ACTIVE, admin.Actor("dan", "인수"),
+        cutover_ts="1700000000.0001", repo=repo,
+    )
+
+    assert (after.mode, after.writer_owner) == (ChannelMode.ACTIVE, WriterOwner.ARCHIVER)
+    assert repo.channel_rows[("tyit", "C1")]["cutover_ts"] == "1700000000.0001"
 
 
 def test_mode_and_owner_move_together(repo, gate_open):
@@ -265,53 +311,55 @@ def test_this_module_contains_no_sql():
         assert keyword not in SOURCE, keyword
 
 
-def test_a_reverse_cutover_goes_through_the_same_path(repo, gate_open):
-    """역인수도 좌표를 요구한다. 콘솔이 그 규칙을 우회하지 않는다."""
+def test_there_is_no_reverse_cutover_to_shadow(repo, gate_open):
+    """역인수(→ shadow) 길은 폐기됐다. 좌표가 있어도 콘솔이 우회하지 않는다."""
     repo.given_channel("tyit", "C1", "paused", "archiver", "1700000000.0001")
 
-    with pytest.raises(admin.AdminRefused, match="역인수 좌표"):
+    with pytest.raises(admin.AdminRefused, match="폐기"):
         admin.set_channel_mode(
-            "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "롤백"), repo=repo
+            "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "롤백"),
+            cutover_ts="1700001000.0001", repo=repo,
         )
 
 
 def test_an_unknown_channel_starts_from_off(repo, gate_open):
-    """행이 없으면 `off` 에서 출발한다. 없는 채널을 바로 active 로 켤 수 없다."""
-    with pytest.raises(admin.AdminRefused, match="off → active"):
+    """행이 없으면 `off` 에서 출발한다. 멈출 것이 없으므로 paused 로는 못 간다."""
+    with pytest.raises(admin.AdminRefused, match="off → paused"):
         admin.set_channel_mode(
-            "tyit", "C-NEW", ChannelMode.ACTIVE, admin.Actor("dan", "신규"),
-            cutover_ts="1700000000.0001", repo=repo,
+            "tyit", "C-NEW", ChannelMode.PAUSED, admin.Actor("dan", "신규"), repo=repo,
         )
 
 
 def test_the_channel_row_is_locked_before_it_is_read(repo, gate_closed):
     """읽고 쓰는 사이에 남이 바꾸면 전이 판정이 옛 상태에서 나온다."""
+    _active(repo)
     admin.set_channel_mode(
-        "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
+        "tyit", "C1", ChannelMode.PAUSED, admin.Actor("dan", "파일럿"), repo=repo
     )
 
     assert repo.locked == [("tyit", "C1")]
 
 
 def test_state_and_audit_use_one_transaction(repo, gate_closed):
+    _active(repo)
     admin.set_channel_mode(
-        "tyit", "C1", ChannelMode.SHADOW, admin.Actor("dan", "파일럿"), repo=repo
+        "tyit", "C1", ChannelMode.PAUSED, admin.Actor("dan", "파일럿"), repo=repo
     )
 
     assert repo.transaction_count == 1
 
 
 def test_audit_failure_rolls_back_the_state_change(repo, gate_closed):
-    repo.given_channel("tyit", "C1", "off")
+    _active(repo)
     repo.fail_audit = True
 
     with pytest.raises(RuntimeError, match="audit failed"):
         admin.set_channel_mode(
-            "tyit", "C1", ChannelMode.SHADOW,
+            "tyit", "C1", ChannelMode.PAUSED,
             admin.Actor("dan", "파일럿"), repo=repo,
         )
 
-    assert repo.channel_rows[("tyit", "C1")]["mode"] == "off"
+    assert repo.channel_rows[("tyit", "C1")]["mode"] == "active"
 
 
 def test_active_is_blocked_while_production_policy_is_incomplete(repo, gate_open):

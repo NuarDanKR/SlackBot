@@ -288,7 +288,8 @@ def is_collectible(row: dict | None) -> bool:
         row
         and str(row.get("membership") or UNKNOWN) == JOINED
         and not bool(row.get("operator_hold"))
-        and str(row.get("mode") or "") in {"shadow", "active"}
+        # 옛 `shadow` 행은 수집하지 않는다(B-99 2단계). 동기화가 `active` 로 올린다.
+        and str(row.get("mode") or "") == "active"
     )
 
 

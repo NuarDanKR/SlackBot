@@ -207,7 +207,7 @@ class FakeArchivingRepo:
         current = self.channel_rows.get((workspace, channel_id))
         if not current or current.get("membership") != "joined":
             return False
-        if current.get("operator_hold") or current.get("mode") not in {"shadow", "active"}:
+        if current.get("operator_hold") or current.get("mode") != "active":
             return False
         current["last_event_at"] = "now"
         return True

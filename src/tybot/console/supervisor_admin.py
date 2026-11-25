@@ -51,6 +51,14 @@ TS = re.compile(r"^\d{1,12}\.\d{1,6}$")
 #: 아직 끝나지 않은 작업의 상태. 같은 채널에 겹쳐 걸지 않는다.
 OPEN_JOB_STATES = frozenset({"queued", "running"})
 
+#: 콘솔에서 고를 수 있는 희망 상태(B-99 2단계). 그림자 수집은 폐기됐고 Archiver 는
+#: 운영 루트에만 쓰므로, 켜는 값은 `live` 하나다. 채널별로 실제로 누가 쓰는지는
+#: 채널 모드·writer 주인·전역 스위치가 정한다 — 이 값은 프로세스를 띄울지만 정한다.
+SELECTABLE_MODES: tuple[DesiredMode, ...] = (DesiredMode.OFF, DesiredMode.LIVE)
+
+#: 옛 행에 남아 있을 수 있는 과거값. 읽기만 하고 새로 적지 않는다.
+RETIRED_DESIRED_MODES = frozenset({"shadow"})
+
 #: 저장이 곧 적용이 아니라는 사실을 **모든 읽기 응답이** 들고 다닌다.
 RUNTIME_EFFECT = (
     "저장은 기록입니다. supervisor 가 다음 설정 읽기에서 세대를 보고 적용하며,"
@@ -164,9 +172,10 @@ def runtime_detail(
         # 공통 root 아래 이 워크스페이스의 자리(§3.3). 절대경로는 서버 env 가 정하고
         # 콘솔은 모른다 — 모르는 값을 화면에 적으면 사람이 그 경로를 찾으러 간다.
         "archiveRelativePath": f"workspaces/{workspace}",
-        # 파일럿에서 고를 수 있는 것만. 화면이 버튼을 회색으로 만들 근거다.
-        "selectableModes": [str(DesiredMode.OFF), str(DesiredMode.SHADOW)],
-        "gatedModes": [str(DesiredMode.LIVE)],
+        # 고를 수 있는 것만. 화면이 버튼을 회색으로 만들 근거다. 옛 `shadow` 행은
+        # `desiredMode` 로 그대로 보이지만(과거값) 여기에는 없다.
+        "selectableModes": [str(mode) for mode in SELECTABLE_MODES],
+        "gatedModes": [],
         # 저장이 곧 적용이 아니다. 성공처럼 보이는 표시를 하지 않게 화면에 넘긴다.
         "runtimeEffect": RUNTIME_EFFECT,
     }
@@ -182,14 +191,19 @@ def set_desired_mode(
 ) -> dict:
     """사람이 원하는 상태를 적는다. **프로세스를 멈추지는 않는다.**
 
-    `live` 는 거절한다(`plan_desired_change`). 파일럿에서 운영 수집으로 넘어가려면
-    release gate·채널별 writer 인수·Master writer 중지가 먼저다.
+    `shadow` 는 거절한다 — 그림자 수집은 폐기됐다(B-99 2단계). 켜는 값은 `live`
+    하나이고, 채널별 운영 쓰기는 여전히 채널 모드·writer 주인·전역 스위치가 막는다.
     """
+    wanted = str(mode or "").strip().lower()
+    if wanted in RETIRED_DESIRED_MODES:
+        raise AdminRefused("shadow 수집은 폐기됐습니다 (B-99). 켜려면 live 를 고르세요.")
+    if wanted not in {str(item) for item in SELECTABLE_MODES}:
+        raise AdminRefused(f"알 수 없는 수집 희망 상태입니다: {mode}")
     store = repo or default_repo()
     with store.transaction() as tx:
         current = _runtime_from_row(workspace, tx.runtime(workspace))
         try:
-            planned = plan_desired_change(current, mode)
+            planned = plan_desired_change(current, wanted, allow_live=True)
         except TransitionRefused as exc:
             raise AdminRefused(str(exc)) from exc
         tx.save_desired(

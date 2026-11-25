@@ -512,18 +512,18 @@ def test_the_refusals_the_note_cites_exist_in_the_code():
     source = (Path(__file__).resolve().parent.parent / "src" / "tybot"
               / "archiving_bot.py").read_text(encoding="utf-8")
 
-    # 루트 모양 검사 — 옛 `workspaces/` 가 있으면 기동하지 않는다.
-    assert "requires a new shadow root without legacy workspaces" in source
-    # 설정 검사 — 첨부 분리가 꺼져 있으면 기동하지 않는다.
-    assert "per-channel-v1 requires separate attachments" in source
+    # 루트 모양 검사 — 운영 루트에 옛 `workspaces/<ws>` 가 있으면 기동하지 않는다.
+    assert "live archive root still contains legacy workspace" in source
+    # 첨부 분리 — 꺼져 있어도 수집기가 켠다(B-99 2단계, 배치가 하나뿐이다).
+    assert "replace(cfg, separate_attachments=True)" in source
 
 
 def test_the_runtime_forces_separation_instead_of_checking_files():
     """강제하는 것이지 검사하는 것이 아니다. 이 구분이 note 의 근거다."""
     source = (Path(__file__).resolve().parent.parent / "src" / "tybot"
               / "archiving_bot.py").read_text(encoding="utf-8")
-    config = source[source.index("def shadow_workspace_config("):]
-    config = config[:config.index("class ShadowCollector")]
+    config = source[source.index("class ArchiveCollector"):]
+    config = config[:config.index("def _channel_archive(")]
 
     assert "replace(cfg, separate_attachments=True)" in config
     # 파일 내용을 읽는 코드가 없다. 있으면 note 를 다시 써야 한다.

@@ -1,0 +1,36 @@
+[Unit]
+Description=TYBot Archiver collector for %i
+# B-99 stage 2: replaces tybot-archiving-shadow@. The two must never run together
+# for one workspace (their LOCK_DIRs differ), so Conflicts= stops the old one.
+Conflicts=tybot-archiving-shadow@%i.service
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/tybot/archiver.env
+
+[Service]
+Type=simple
+User=tybot
+Group=tybot
+WorkingDirectory=/opt/tybot
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=TYBOT_ENV_FILE=/etc/tybot/archiver.env
+Environment=ARCHIVER_CONFIG_SOURCE=db
+Environment=ARCHIVER_WORKSPACE=%i
+Environment=LOCK_DIR=/var/lib/tybot/archiver/%i/.locks
+ExecStart=/opt/tybot/.venv/bin/python -m tybot.archiving_bot
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tybot-archiver
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The live archive is the only archive root. The old shadow root and the DM handoff
+# queue are no longer written by the Archiver (B-99 stage 2).
+ReadWritePaths=/var/lib/tybot/archiver /var/lib/tybot/state/ingest-ack-outbox /var/lib/tybot/image-description-notify -/var/lib/tybot/archive
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Deliberately no [Install]: start explicitly per workspace after token review.

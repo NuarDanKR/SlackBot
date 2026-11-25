@@ -49,7 +49,6 @@ def _env(tmp_path: Path) -> dict[str, str]:
         "ARCHIVER_MASTER_BOT_USER_TYIT": "U_MASTER",
         "ARCHIVER_CHANNEL_IDS_TYIT": CH,
         "ARCHIVE_DIR": str(tmp_path / "live"),
-        "ARCHIVER_SHADOW_DIR": str(tmp_path / "shadow" / "archive"),
     }
 
 
@@ -67,7 +66,7 @@ class _Client:
 
 def _collector(tmp_path: Path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
     collector._record_revision = lambda **_values: True
     return collector
 
@@ -97,7 +96,7 @@ def _deleted_event() -> dict:
 
 def _raw_text(tmp_path: Path) -> str:
     return next(
-        (tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md")
+        (tmp_path / "archive").glob("tyit/*__*/archive/raw/*.md")
     ).read_text(encoding="utf-8")
 
 
@@ -142,7 +141,7 @@ def test_no_feature_switch_guards_the_edit_and_delete_path(tmp_path, monkeypatch
     Slack 은 지난 `message_changed` 를 다시 주지 않는다. 막아야 한다면 버리는
     것이 아니라 **남기고 알리는** 쪽이어야 한다.
     """
-    source = inspect.getsource(archiving_bot.ShadowCollector._ingest_revision)
+    source = inspect.getsource(archiving_bot.ArchiveCollector._ingest_revision)
     for name in UNENFORCED_FLAGS:
         assert name not in source, (
             f"수정·삭제 경로가 `{name}` 을 봅니다. 이 경로는 불변식이라 스위치로 "
@@ -252,11 +251,11 @@ def test_the_reader_never_edits_the_file(tmp_path, monkeypatch):
     collector = _collector(tmp_path)
     assert collector.ingest_event(_Client(), _deleted_event()) == "revision-written"
 
-    path = next((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md"))
+    path = next((tmp_path / "archive").glob("tyit/*__*/archive/raw/*.md"))
     before = path.read_text(encoding="utf-8")
     assert "[삭제 전] 지울 문장" in before
 
-    store = archive_store.ArchiveStore(tmp_path / "shadow")
+    store = archive_store.ArchiveStore(tmp_path / "archive")
     visible = [
         line.text
         for doc in store.docs()

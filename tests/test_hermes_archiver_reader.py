@@ -9,7 +9,7 @@
 **적은 사람이 생각한 모양**만 고정되고, 정본이 바뀌어도 시험은 계속 통과한다.
 
 그래서 `scripts/make_archiver_fixture.py` 가 **운영이 쓰는 수집기**(`archiving_bot.
-ShadowCollector` + `backfill.run`)를 그대로 돌려 fixture 를 만든다. Slack 클라이언트만
+ArchiveCollector` + `backfill.run`)를 그대로 돌려 fixture 를 만든다. Slack 클라이언트만
 가짜다 — 경로는 `shadow_paths`, 줄 모양은 `archive.writer`, 첨부 정본은
 `attachment_writer` 가 만든다.
 
@@ -756,7 +756,7 @@ def test_the_fixture_comes_from_the_real_writer():
     """
     body = MAKE_FIXTURE.read_text(encoding="utf-8")
     for needed in (
-        "archiving_bot.ShadowCollector",
+        "archiving_bot.ArchiveCollector",
         "backfill.run",
         "backfill_adapter.make_ingest",
         "shadow_paths.archive_dir",

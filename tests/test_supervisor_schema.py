@@ -111,6 +111,7 @@ def test_the_states_are_closed_sets(sql):
     desired = _column(sql, "archiver_workspace_runtime", "desired_mode")
     observed = _column(sql, "archiver_workspace_runtime", "observed_state")
 
+    # 처음 만들 때는 옛 값까지 받는다. shadow 는 아래 가드 블록이 남은 행 0 일 때 뺀다.
     assert set(re.findall(r"'(\w+)'", desired)) == {"off", "shadow", "live"}
     assert set(re.findall(r"'(\w+)'", observed)) == {
         "stopped", "starting", "running", "degraded", "error",
@@ -227,3 +228,24 @@ def test_nobody_can_delete_the_records(sql):
     """작업 기록을 지우면 「그때 무엇을 돌렸나」 가 사라진다."""
     assert sql.count("REVOKE DELETE ON TABLE") >= 2
     assert "GRANT SELECT, INSERT, UPDATE, DELETE" not in sql
+
+
+def test_shadow_leaves_the_desired_check_only_when_no_row_holds_it(sql):
+    """그림자 수집 폐기(B-99 2단계 D5). 남은 행이 있으면 NOTICE 만 남기고 그대로 둔다."""
+    found = re.search(
+        r"DO \$\$\s*DECLARE\s+shadow_rows bigint;\s*BEGIN\s*"
+        r"LOCK TABLE archiver_workspace_runtime\b(.*?)END\s*\$\$;",
+        sql, re.S,
+    )
+    assert found, "desired_mode shadow 가드 블록이 없다"
+    body = found.group(1)
+
+    count = body.index("WHERE desired_mode = 'shadow'")
+    bail = body.index("RETURN;")
+    drop = body.index("DROP CONSTRAINT IF EXISTS archiver_workspace_runtime_desired_mode_check")
+    add = body.index("ADD CONSTRAINT archiver_workspace_runtime_desired_mode_check")
+    assert count < bail < drop < add
+    assert "RAISE EXCEPTION" not in body
+    narrowed = re.search(r"CHECK \(desired_mode IN \(([^)]*)\)\)", body)
+    assert narrowed
+    assert set(re.findall(r"'(\w+)'", narrowed.group(1))) == {"off", "live"}

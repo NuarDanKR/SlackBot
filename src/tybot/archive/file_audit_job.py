@@ -75,7 +75,6 @@ def _summary(report: dict) -> dict:
             counts = {
                 "missing": len(channel.get("missing_after_record_check", [])),
                 "existing_needs_review": len(channel.get("existing_needs_review", [])),
-                "shadow_only": len(channel.get("shadow_only_ids", [])),
                 "files_seen": channel.get("files_seen", 0),
                 "warnings": channel.get("warning_count", 0),
             }
@@ -107,7 +106,7 @@ def _summary(report: dict) -> dict:
     if report["complete"] != complete:
         raise ValueError("inconsistent audit completion")
     counts = {}
-    for key in ("missing", "existing_needs_review", "shadow_only", "files_seen", "warnings"):
+    for key in ("missing", "existing_needs_review", "files_seen", "warnings"):
         values = [ch[key] for ws in workspaces for ch in ws["channels"] if ch[key] is not None]
         counts[key] = sum(values) if values or complete else None
     return {"complete": complete, "counts": counts, "workspaces": workspaces,
@@ -125,18 +124,18 @@ def _coverage(workspaces: list[dict]) -> dict:
             "unknown_workspaces": sum(n is None for n in targets)}
 
 
-def run(directory: Path, *, live_root: Path, shadow_root: Path,
+def run(directory: Path, *, live_root: Path,
         timeout: float = 3600, pause: float = 3.0) -> int:
     """Only the child does Slack/DB reads. Kill and reap it on timeout."""
     if (not math.isfinite(timeout) or timeout <= 0
             or not math.isfinite(pause) or pause < 0):
         raise ValueError("invalid audit budget")
-    if not all(path.is_absolute() for path in (directory, live_root, shadow_root)):
+    if not all(path.is_absolute() for path in (directory, live_root)):
         raise ValueError("absolute paths required")
     directory = directory.resolve()
-    for root in (live_root.resolve(), shadow_root.resolve()):
-        if directory.is_relative_to(root) or root.is_relative_to(directory):
-            raise ValueError("audit state and archives must be disjoint")
+    root = live_root.resolve()
+    if directory.is_relative_to(root) or root.is_relative_to(directory):
+        raise ValueError("audit state and archive must be disjoint")
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_path = directory / ".run.lock"
     if lock_path.is_symlink():
@@ -200,7 +199,6 @@ def main(argv=None) -> int:
         load_env_file()
         return run(Path(os.environ.get("STATE_DIR", "/var/lib/tybot")) / "file-audit",
                    live_root=Path(os.environ["ARCHIVE_DIR"]),
-                   shadow_root=Path(os.environ["ARCHIVER_SHADOW_DIR"]),
                    timeout=args.timeout, pause=args.pause)
     except Exception as exc:  # noqa: BLE001 - credentials must not reach journald
         log.error("file audit setup failed type=%s", type(exc).__name__)

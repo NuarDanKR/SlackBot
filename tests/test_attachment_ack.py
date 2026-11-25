@@ -801,12 +801,11 @@ def _collect_one(tmp_path, monkeypatch, *, original_state, conversion):
         "ARCHIVER_MASTER_BOT_USER_TYIT": "U_MASTER",
         "ARCHIVER_CHANNEL_IDS_TYIT": "C12345678",
         "ARCHIVE_DIR": str(tmp_path / "live"),
-        "ARCHIVER_SHADOW_DIR": str(tmp_path / "shadow" / "archive"),
     }
     cfg = dataclasses.replace(
         archiving_bot.load_archiver_workspaces(env)[0], separate_attachments=True
     )
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "live")
 
     class _Client:
         def users_info(self, user):

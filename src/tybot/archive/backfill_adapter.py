@@ -4,7 +4,7 @@
 
 ## 왜 어댑터가 따로 있나
 
-`backfill` 은 Slack 을 읽고 계획을 세운다. 쓰는 일은 `ShadowCollector.ingest_message`
+`backfill` 은 Slack 을 읽고 계획을 세운다. 쓰는 일은 `ArchiveCollector.ingest_message`
 가 한다 — 실시간 이벤트가 지나는 **바로 그 메서드**다. 둘을 잇는 얇은 함수만
 여기 둔다.
 

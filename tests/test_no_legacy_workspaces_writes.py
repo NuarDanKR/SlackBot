@@ -2,7 +2,7 @@
 
 2026-11-20 장애: Master 의 DM 한 건과 채널 수집이 운영 루트에
 `workspaces/<ws>/{dm,channels}` 를 만들었고, Archiver 는 그 디렉터리를 보면 기동을
-거부한다(`archiving_bot._live_archive_root`). 재시작 한 번에 그 워크스페이스 수집이
+거부한다(`archiving_bot.archive_root`). 재시작 한 번에 그 워크스페이스 수집이
 통째로 멈췄다.
 
 막는 자리는 둘이다.

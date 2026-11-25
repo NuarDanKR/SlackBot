@@ -13,11 +13,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 from slack_sdk import WebClient
 
 from tybot.archive.file_inventory import preview
-from tybot.archiving_bot import (
-    load_archiver_workspaces,
-    shadow_archive_dir,
-    validate_slack_identity,
-)
+from tybot.archiving_bot import load_archiver_workspaces, validate_slack_identity
 from tybot.console.archiving_repo import default_repo
 from tybot.envfile import load_env_file
 
@@ -31,14 +27,11 @@ def main(argv=None) -> int:
         load_env_file()
         values = dict(os.environ, ARCHIVER_CONFIG_SOURCE="db", ARCHIVER_WORKSPACE=args.workspace)
         cfg, = load_archiver_workspaces(values)
-        shadow_root = shadow_archive_dir(values)
-        if values.get("ARCHIVER_SHADOW_LAYOUT") != "per-channel-v1":
-            raise ValueError("per-channel-v1 layout is required")
         client = WebClient(token=cfg.bot_token, timeout=30)
         validate_slack_identity(cfg, client.auth_test())
         report = preview(
             client, default_repo(), cfg.key, args.channel,
-            live_root=pathlib.Path(values["ARCHIVE_DIR"]), shadow_root=shadow_root,
+            live_root=pathlib.Path(values["ARCHIVE_DIR"]),
         )
     except Exception as exc:  # noqa: BLE001 - never expose SDK response or credentials
         print(json.dumps({"error": type(exc).__name__, "read_only": True}))

@@ -341,14 +341,14 @@ def test_the_same_input_gives_the_same_batch_in_any_order():
     assert first.skipped == second.skipped
 
 
-def test_the_batch_is_ordered_by_coordinates_then_time():
+def test_the_batch_prioritizes_the_newest_upload_over_an_old_backlog():
     docs = [
         _doc(file_id="F2", sha256="2" * 63 + "a", converted_at="2026-10-27T12:00:00+09:00"),
         _doc(file_id="F1", sha256="1" * 63 + "a", converted_at="2026-10-27T10:00:00+09:00"),
     ]
     out = _pick(docs)
 
-    assert [c.file_id for c in out.candidates] == ["F1", "F2"]
+    assert [c.file_id for c in out.candidates] == ["F2", "F1"]
 
 
 # --- 보고 -------------------------------------------------------------------

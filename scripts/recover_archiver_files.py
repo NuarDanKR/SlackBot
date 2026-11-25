@@ -19,7 +19,6 @@ from tybot.archive.write_owner import OwnerLookup
 from tybot.archiving_bot import (
     _instance_lock_name,
     load_archiver_workspaces,
-    shadow_archive_dir,
     validate_slack_identity,
 )
 from tybot.console.archiving_repo import default_repo
@@ -61,17 +60,16 @@ def main(argv=None) -> int:
         stage = "archive-layout"
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", cfg.key):
             raise ValueError("invalid workspace key")
-        shadow_root = shadow_archive_dir(values)
         live_root = pathlib.Path(values["ARCHIVE_DIR"])
-        if (values.get("ARCHIVER_SHADOW_LAYOUT") != "per-channel-v1"
-                or not live_root.is_absolute() or not live_root.is_dir()):
-            raise ValueError("an existing absolute root and per-channel-v1 are required")
+        if not live_root.is_absolute() or not live_root.is_dir():
+            raise ValueError("an existing absolute archive root is required")
         # Mixed legacy roots are allowed here; recover() checks each file's
         # artifacts before writing. Collector startup keeps its stricter guard.
         if args.apply:
             stage = "live-write-env"
-            if values.get("ARCHIVER_LIVE_WRITES_ENABLED", "").strip().lower() not in {
-                "1", "true", "yes", "on",
+            # B-99 2단계 D1: 이 값은 이제 필수가 아니다. 명시적으로 끈 경우만 거부한다.
+            if values.get("ARCHIVER_LIVE_WRITES_ENABLED", "").strip().lower() in {
+                "0", "false", "no", "off",
             }:
                 raise PermissionError("live writes are disabled")
         stage = "slack-identity"
@@ -84,7 +82,7 @@ def main(argv=None) -> int:
         stage = "file-recovery"
         report = recover(
             client, default_repo(), OwnerLookup(cfg.key, cache_seconds=0), cfg, args.file_id,
-            live_root=live_root, shadow_root=shadow_root, channel_id=args.channel,
+            live_root=live_root, channel_id=args.channel,
             apply=args.apply, actor=args.by, reconvert=args.reconvert,
         )
     except Exception as exc:  # noqa: BLE001 - no credential or private SDK response output

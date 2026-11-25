@@ -1158,10 +1158,11 @@ def test_membership_function_registers_new_and_re_invited_channels_live(conn):
         assert _save(cur, "C0NEW") == "active"
         assert _channel(cur, "C0NEW")[2] == cutover
 
-        # Master 몫(옛 shadow) 재초대 — 새 좌표로 인수
+        # Master 몫 재초대 — 새 좌표로 인수. 새 DB 는 가드 블록이 mode CHECK 에서
+        # shadow 를 뺐으므로(B-99 2단계 D5) 옛 shadow 대신 off 행으로 본다.
         cur.execute(
             "INSERT INTO archive_channel_mode (workspace, channel_id, mode, writer_owner,"
-            " membership) VALUES ('tyit','C0OLD','shadow','master','left')"
+            " membership) VALUES ('tyit','C0OLD','off','master','left')"
         )
         assert _save(cur, "C0OLD") == "active"
         assert _channel(cur, "C0OLD")[:2] == ("active", "archiver")
@@ -1214,4 +1215,90 @@ def test_reapplying_over_the_old_void_membership_function_is_safe(conn):
             "text,text,text,text,text,boolean,text,boolean,text)', 'EXECUTE')"
         )
         assert cur.fetchone()[0] is True
+    conn.rollback()
+
+
+# --- shadow 를 CHECK 에서 빼는 가드 (B-99 2단계 D5) -----------------------------------
+
+_SHADOW_CHECKS = (
+    ("archive_channel_mode", "archive_channel_mode_mode_check"),
+    ("archiver_workspace_runtime", "archiver_workspace_runtime_desired_mode_check"),
+)
+
+
+def _constraint_def(cur, name):
+    cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = %s", (name,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+@needs_db
+def test_a_fresh_db_drops_shadow_from_the_mode_checks(conn):
+    """남은 행이 0 이면 가드가 shadow 를 뺀다. 두 번 적용해도 같다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        for _table, name in _SHADOW_CHECKS:
+            definition = _constraint_def(cur, name)
+            assert definition, f"{name} 가 없다"
+            assert "shadow" not in definition, definition
+        _workspace(cur)
+        with pytest.raises(Exception):
+            cur.execute(
+                "INSERT INTO archive_channel_mode (workspace, channel_id, mode)"
+                " VALUES ('tyit','C0SHADOW','shadow')"
+            )
+    conn.rollback()
+
+
+@needs_db
+def test_remaining_shadow_rows_keep_the_checks(conn):
+    """행이 남아 있으면 NOTICE 만 남기고 CHECK 를 그대로 둔다 — 적용이 실패하지 않는다."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        # 옛 DB 를 흉내 낸다: shadow 를 받는 CHECK 로 되돌리고 shadow 행을 둔다.
+        cur.execute(
+            "ALTER TABLE archive_channel_mode DROP CONSTRAINT archive_channel_mode_mode_check;"
+            " ALTER TABLE archive_channel_mode ADD CONSTRAINT archive_channel_mode_mode_check"
+            " CHECK (mode IN ('off','shadow','active','paused'))"
+        )
+        cur.execute(
+            "ALTER TABLE archiver_workspace_runtime"
+            " DROP CONSTRAINT archiver_workspace_runtime_desired_mode_check;"
+            " ALTER TABLE archiver_workspace_runtime"
+            " ADD CONSTRAINT archiver_workspace_runtime_desired_mode_check"
+            " CHECK (desired_mode IN ('off','shadow','live'))"
+        )
+        _workspace(cur)
+        cur.execute(
+            "INSERT INTO archive_channel_mode (workspace, channel_id, mode, writer_owner)"
+            " VALUES ('tyit','C0LEGACY','shadow','master')"
+        )
+        cur.execute(
+            "INSERT INTO archiver_workspace_runtime (workspace, desired_mode)"
+            " VALUES ('tyit','shadow')"
+        )
+    conn.commit()
+
+    verify.apply_files(conn, verify.TARGET_FILES)
+
+    with conn.cursor() as cur:
+        for _table, name in _SHADOW_CHECKS:
+            assert "shadow" in (_constraint_def(cur, name) or ""), name
+        cur.execute("SELECT mode FROM archive_channel_mode WHERE channel_id='C0LEGACY'")
+        assert cur.fetchone()[0] == "shadow", "가드가 데이터를 바꾸면 안 된다"
+    conn.rollback()
+
+
+@needs_db
+def test_the_membership_function_refuses_a_shadow_request(conn):
+    """동기화가 shadow 를 요청하는 길은 폐기됐다(B-99 2단계)."""
+    _prepared(conn)
+    verify.apply_files(conn, verify.TARGET_FILES)
+    with conn.cursor() as cur:
+        _live(cur, True)
+        with pytest.raises(Exception, match="B-99"):
+            _save(cur, "C0SHADOW", mode="shadow")
     conn.rollback()

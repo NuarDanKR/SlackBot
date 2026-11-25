@@ -51,7 +51,7 @@ class LegacyLayoutRefused(ArchiveRefused):
     """운영 루트에 옛 배치(`<root>/workspaces/...`)를 만들려는 쓰기(B-99).
 
     Archiver 는 운영 루트에 `workspaces/<ws>` 가 있으면 기동을 거부한다
-    (`archiving_bot._live_archive_root`). 2026-11-20 Master 의 DM 한 건이 그 디렉터리를
+    (`archiving_bot.archive_root`). 2026-11-20 Master 의 DM 한 건이 그 디렉터리를
     만들었고, 다음 재시작에서 그 워크스페이스 수집이 통째로 멈췄다.
 
     줄 단위 거절(`IngestResult.refused`)로 돌려주지 않는 이유: 그 칸은 「이 줄은

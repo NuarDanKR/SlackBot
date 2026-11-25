@@ -49,6 +49,12 @@ SYSTEM_PROMPT = """그럴듯하게 지어내는 것은 모른다고 하는 것�
    같은 내용이면 근거로 쓴다. 이때도 1·2번은 그대로다 — 원문에 없는 숫자를 채우지 않는다.
    **관련 내용이 하나도 없을 때만** "아카이브에서 근거를 찾지 못했습니다"라고 답한다.
    일부를 답하면서 첫 문장을 "근거를 찾지 못했습니다"로 시작하지 않는다.
+   질문에 요구가 둘 이상이면(예: "A를 알려줘. 또 B도 알려줘") 요구마다 별도 항목으로
+   답한다. 한 요구의 근거만 있으면 그 부분은 답하고, 나머지만 "원문에서 확인되지 않음"으로
+   밝힌다. 둘째 요구를 생략하거나 첫 요구의 수치만 되풀이하지 않는다.
+   자료의 표현과 질문의 표현이 다르면 가장 가까운 자료 용어를 함께 확인한다. 특히
+   "새로 개설되는 현장"은 공사 자료의 "착공예정 현장"을 뜻할 수 있으므로, 기간이
+   명시되지 않았다면 확인된 착공예정의 기준 연도를 함께 적어 모호함을 감추지 않는다.
 5. 답변은 한국어, 간결하게. 출처 줄은 시스템이 붙이므로 네가 쓰지 않는다.
 6. 출력은 Slack 메시지다. `#` 제목과 `**굵게**`는 Slack에서 글자 그대로 보이니 쓰지 않는다.
    굵게는 별표 하나(*굵게*), 목록은 `• `, 구분선은 쓰지 않는다.
@@ -1336,6 +1342,23 @@ def _question_retry_query(question: str, terms) -> str:
     tried = set(search_index.tokens_of(" ".join(terms or [])))
     fresh = set(search_index.tokens_of(" ".join(words))) - tried
     return " ".join(words) if fresh else ""
+
+
+def expand_source_terms(query: str, *, question: str = "") -> str:
+    """Add only reviewed, source-domain wording needed to find the same fact.
+
+    This is deliberately narrower than a general synonym generator. The
+    construction reports label a new site's start as ``착공예정``; users tend
+    to ask for it as "새로 개설되는 현장". Keeping the original wording and
+    adding the source label improves retrieval without changing the requested
+    scope or inventing a year.
+    """
+    text = f"{query} {question}".replace(" ", "")
+    if "새로개설" not in text:
+        return query
+    if "착공예정" in query.replace(" ", ""):
+        return query
+    return f"{query} 착공예정".strip()
 
 
 class AnswerEngine:
@@ -2684,11 +2707,12 @@ class AnswerEngine:
         return merged[:limit]
 
     def _with_image_guide(self, query: str, hits, ctx) -> list[SearchHit]:
-        """AI 이미지 설명·OCR 전사로 찾은 **사진의 원문 줄**을 검색 후보에 더한다 (B-81 후속).
+        """AI 이미지 설명·OCR 전사로 사진 근거를 보강한다 (B-81 후속).
 
-        설명·전사 문장은 근거로 나가지 않는다. 더해지는 것은 요청자의 현재 권한으로 다시
-        연 원문(로컬 OCR 줄·채널 첨부 줄)이고, 원본 파일이 그대로 있는지도 직전에 다시
-        확인한다(`image_guide.expand`). 실패하면 예전 검색 결과 그대로다.
+        설명은 검색 힌트로만 쓴다. 반면 마스킹·출력 가드를 통과한 AI 전사는 원본 이미지의
+        해시를 다시 확인한 뒤 원본 첨부의 근거로 전달한다. 같은 첨부에 전사가 있으면 표의
+        행·열 관계를 잃을 수 있는 로컬 OCR 줄은 제거한다. Vision 조회가 실패하면 기존 검색
+        결과를 그대로 유지한다.
         """
         from . import image_guide
 
@@ -2699,7 +2723,15 @@ class AnswerEngine:
             return list(hits)
         if not extra:
             return list(hits)
-        merged = list(hits)
+        # A transcript and a local OCR body describe the same immutable attachment.
+        # Keep the former only: handing both to the model makes a broken table OCR
+        # compete with the structurally faithful Vision transcript.
+        transcript_paths = {
+            str(hit.doc.path)
+            for hit in extra
+            if hit.line.text.startswith(image_guide.VISION_TRANSCRIPT_LABEL)
+        }
+        merged = [hit for hit in hits if str(hit.doc.path) not in transcript_paths]
         seen = {(str(h.doc.path), h.line.lineno) for h in merged}
         for hit in extra:
             key = (str(hit.doc.path), hit.line.lineno)
@@ -2787,6 +2819,7 @@ class AnswerEngine:
         else:
             # 2겹: 색인이 아니라 원문 라인을 연다.
             query = " ".join(terms) if terms else q
+            query = expand_source_terms(query, question=q)
             if self._focus_terms:
                 # 요청 표현(「정리해·표로·설명해주세요」)은 찾을 대상이 아니다.
                 query = focus_query(query)
@@ -2795,7 +2828,7 @@ class AnswerEngine:
                 # 분류기가 고른 핵심어가 문서 표현과 어긋나면 0건이 된다. 사람이 쓴
                 # 질문에는 다른 낱말이 더 있다 — 「근거 없음」 으로 닫기 전에 그 낱말로
                 # **같은 권한 범위에서** 한 번 더 찾는다. 범위는 넓히지 않는다.
-                retry = _question_retry_query(q, terms)
+                retry = expand_source_terms(_question_retry_query(q, terms), question=q)
                 if retry:
                     hits = self._search(retry, ctx)
                     logger.info(

@@ -5,11 +5,27 @@ The source is never modified.  Planning is the default; callers must pass
 writer so coordinate deduplication, masking, schema validation, and locks stay
 identical to live collection.  Attachment extracts are copied only when the
 same revision is absent or byte-identical.
+
+2026-11-24 (owner decisions, B-98 apply):
+
+* Legacy raw lines that inline an attachment extract (``[첨부추출:…]`` /
+  ``[첨부본문:…]``) are **not** promoted.  The current layout keeps attachment
+  bodies only in ``attachments/<file-id>/<revision>.md``; re-inlining them would
+  create 50MB day files and count the same attachment twice.  Names that have
+  no canonical attachment document are reported so conversion can be rerun.
+* When the live channel's newest document is **public** (the Archiver takes
+  this from Slack ``is_private``), promoted lines and attachment documents take
+  the live policy.  Old code marked every channel private; a public Slack
+  channel's history is already readable by the whole workspace.  A private
+  live policy that differs from the legacy one still blocks.
+* ``exclude`` lets an operator leave reviewed items (a Slackbot DM, a
+  conflicting attachment revision) in quarantine without blocking the rest.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +54,9 @@ class _RawPlan:
     messages: tuple[writer.IncomingMessage, ...]
     pending: int
     dm_user: str = ""
+    visibility: str = ""
+    acl: frozenset[str] = frozenset()
+    share_with: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -60,6 +79,18 @@ class PromotionReport:
     copied_attachment_documents: int = 0
     identical_attachment_documents: int = 0
     refused_messages: int = 0
+    #: 원문에 펼쳐져 있던 첨부 본문 줄. 정본(attachments/)으로만 들어간다.
+    skipped_attachment_lines: int = 0
+    #: 원문에 이름은 있는데 원본·운영 어디에도 정본 문서가 없는 첨부.
+    attachment_names_without_document: list[str] = field(default_factory=list)
+    #: 운영(Slack) 공개 정책을 따른 채널.
+    live_policy_adopted: list[str] = field(default_factory=list)
+    #: 운영자가 `exclude` 로 격리에 남긴 항목.
+    excluded: list[str] = field(default_factory=list)
+    #: 같은 file ID·revision(= 같은 원본)의 운영 정본이 이미 있어 운영 쪽을 둔 첨부.
+    live_attachment_kept: int = 0
+    #: 그중 옛 쪽에만 본문이 있는 것 — 운영에서 다시 변환할 대상.
+    attachment_text_only_in_legacy: list[str] = field(default_factory=list)
     masked_values: dict[str, int] = field(default_factory=dict)
     blocked: list[str] = field(default_factory=list)
 
@@ -164,17 +195,56 @@ def _pending(messages: tuple[writer.IncomingMessage, ...], target: Path) -> int:
     return count
 
 
-def _same_policy(source: ArchiveDoc, target: Path) -> bool:
+def _newest_live_doc(target: Path) -> ArchiveDoc | None:
+    """운영 채널의 **가장 최근** 원문. 지금 멤버·공개 여부가 그 문서에 있다."""
     existing = sorted((target / "raw").glob("*.md"))
-    if not existing:
+    return load_doc(existing[-1]) if existing else None
+
+
+def _same_policy(source: ArchiveDoc, current: ArchiveDoc | None) -> bool:
+    if current is None:
         return True
-    current = load_doc(existing[0])
     return (
         current.visibility == source.visibility
         and current.acl == source.acl
         and current.share_with == source.share_with
         and current.dm_user == source.dm_user
     )
+
+
+def _is_excluded(relative: str, exclude: tuple[str, ...]) -> bool:
+    return any(
+        relative == prefix or relative.startswith(prefix + "/") for prefix in exclude
+    )
+
+
+#: 대괄호가 든 파일명(`[190801]정산서.xlsx`)까지 잡는다. `LEGACY_LINE` 은 첫 `]` 에서
+#: 끊겨 `[190801` 만 남고, 그러면 정본 문서와 이름이 맞지 않는다.
+_INLINE_NAME = re.compile(
+    r"^\[(?:첨부추출|첨부본문):(?P<name>.+?\.[A-Za-z0-9]{1,6})\](?:\s|$)"
+)
+
+
+def _inline_attachment_name(text: str) -> str | None:
+    match = attachment_doc.LEGACY_LINE.match(text)
+    if not match:
+        return None
+    full = _INLINE_NAME.match(text)
+    return (full or match).group("name").strip()
+
+
+def _split_attachment_lines(
+    messages: tuple[writer.IncomingMessage, ...],
+) -> tuple[tuple[writer.IncomingMessage, ...], list[str]]:
+    kept: list[writer.IncomingMessage] = []
+    names: list[str] = []
+    for message in messages:
+        name = _inline_attachment_name(message.text)
+        if name is not None:
+            names.append(name)
+        else:
+            kept.append(message)
+    return tuple(kept), names
 
 
 def _channel_id_from_directory(name: str) -> str:
@@ -202,6 +272,7 @@ def _safe_attachment_content(
     revision: str,
     visibility: str | None,
     acl: frozenset[str] | None,
+    adopt_policy: bool = False,
 ) -> tuple[attachment_doc.AttachmentDoc, bytes]:
     doc = attachment_reader.load(path)
     if doc is None:
@@ -213,7 +284,10 @@ def _safe_attachment_content(
         or doc.revision != revision
     ):
         raise LegacyPromotionError("attachment coordinates do not match its path")
-    if visibility is not None and (
+    if adopt_policy and visibility is not None:
+        # 채널이 운영(Slack) 공개 정책을 따른다 — 첨부도 같은 정책으로 적는다.
+        doc = replace(doc, visibility=visibility, acl=acl or frozenset())
+    elif visibility is not None and (
         doc.visibility != visibility or doc.acl != (acl or frozenset())
     ):
         raise LegacyPromotionError("attachment and channel access policies differ")
@@ -237,13 +311,20 @@ def _safe_attachment_content(
 
 
 def _raw_plans(
-    source: Path, destination: Path, report: PromotionReport,
+    source: Path,
+    destination: Path,
+    report: PromotionReport,
+    exclude: tuple[str, ...] = (),
+    adopted: set[tuple[str, str]] | None = None,
+    legacy_names: dict[tuple[str, str], set[str]] | None = None,
 ) -> tuple[
     list[_RawPlan],
     dict[tuple[str, str], Path],
     dict[tuple[str, str], tuple[str, frozenset[str]]],
     dict[tuple[str, str, str], tuple[str, frozenset[str]]],
 ]:
+    adopted = adopted if adopted is not None else set()
+    legacy_names = legacy_names if legacy_names is not None else {}
     plans: list[_RawPlan] = []
     channels: dict[tuple[str, str], Path] = {}
     policies: dict[tuple[str, str], tuple[str, frozenset[str]]] = {}
@@ -252,6 +333,9 @@ def _raw_plans(
     paths = sorted(source.glob("*/channels/*/raw/*.md"))
     paths += sorted(source.glob("*/dm/*/raw/*.md"))
     for path in paths:
+        if _is_excluded(_relative(path, source), exclude):
+            report.excluded.append(_relative(path, source))
+            continue
         report.source_documents += 1
         try:
             if _contains_symlink(source, path):
@@ -259,6 +343,8 @@ def _raw_plans(
             doc = load_doc(path)
             relative = path.relative_to(source)
             workspace = relative.parts[0]
+            effective = (doc.visibility, doc.acl, doc.share_with)
+            live_doc: ArchiveDoc | None = None
             if doc.workspace != workspace:
                 raise LegacyPromotionError("workspace frontmatter does not match path")
             dm_user = ""
@@ -275,11 +361,21 @@ def _raw_plans(
                 if prior is not None and prior != target:
                     raise LegacyPromotionError("one channel resolves to multiple targets")
                 channels[key] = target
-                policy = (doc.visibility, doc.acl)
-                if key in policies and policies[key] != policy:
-                    raise LegacyPromotionError(
-                        "legacy documents for one channel have different policies"
-                    )
+                if _contains_symlink(destination, target):
+                    raise LegacyPromotionError("destination path contains a symlink")
+                live_doc = _newest_live_doc(target)
+                if live_doc is not None and live_doc.visibility == "public":
+                    # 운영(Slack) 공개 채널 — 옛 코드의 비공개 표시보다 현재 사실이 맞다.
+                    effective = (live_doc.visibility, live_doc.acl, live_doc.share_with)
+                    if (doc.visibility, doc.acl, doc.share_with) != effective:
+                        adopted.add(key)
+                    policy = (live_doc.visibility, live_doc.acl)
+                else:
+                    policy = (doc.visibility, doc.acl)
+                    if key in policies and policies[key] != policy:
+                        raise LegacyPromotionError(
+                            "legacy documents for one channel have different policies"
+                        )
                 policies[key] = policy
             else:
                 dm_user = relative.parts[2]
@@ -297,11 +393,17 @@ def _raw_plans(
                         "legacy documents for one DM have different policies"
                     )
                 dm_policies[dm_key] = dm_policy
-            if _contains_symlink(destination, target):
-                raise LegacyPromotionError("destination path contains a symlink")
-            if not _same_policy(doc, target):
+                if _contains_symlink(destination, target):
+                    raise LegacyPromotionError("destination path contains a symlink")
+                live_doc = _newest_live_doc(target)
+            follows_live = (
+                relative.parts[1] == "channels"
+                and live_doc is not None
+                and live_doc.visibility == "public"
+            )
+            if not follows_live and not _same_policy(doc, live_doc):
                 raise LegacyPromotionError("source and live access policies differ")
-            messages = _messages(doc)
+            messages, inline_names = _split_attachment_lines(_messages(doc))
             if any(writer.screen(mask_sensitive(message.text).text) for message in messages):
                 raise LegacyPromotionError(
                     "a legacy message remains sensitive after masking"
@@ -312,7 +414,17 @@ def _raw_plans(
             continue
         report.source_messages += len(messages)
         report.pending_messages += pending
-        plans.append(_RawPlan(path, target, doc, messages, pending, dm_user))
+        report.skipped_attachment_lines += len(inline_names)
+        if inline_names:
+            legacy_names.setdefault((workspace, doc.channel_id), set()).update(
+                inline_names
+            )
+        plans.append(
+            _RawPlan(
+                path, target, doc, messages, pending, dm_user,
+                visibility=effective[0], acl=effective[1], share_with=effective[2],
+            )
+        )
     return plans, channels, policies, dm_policies
 
 
@@ -323,6 +435,9 @@ def _copy_plans(
     policies: dict[tuple[str, str], tuple[str, frozenset[str]]],
     report: PromotionReport,
     dm_policies: dict[tuple[str, str, str], tuple[str, frozenset[str]]] | None = None,
+    exclude: tuple[str, ...] = (),
+    adopted: set[tuple[str, str]] | None = None,
+    names: dict[tuple[str, str], set[str]] | None = None,
 ) -> list[_CopyPlan]:
     """첨부 정본 복사 계획. **접근 정책을 확정하지 못하면 복사하지 않는다**(fail-closed).
 
@@ -331,10 +446,15 @@ def _copy_plans(
     들어간다(2026-11-19 보안 검토).
     """
     dm_policies = dm_policies or {}
+    adopted = adopted if adopted is not None else set()
+    names = names if names is not None else {}
     plans: list[_CopyPlan] = []
     paths = sorted(source.glob("*/channels/*/attachments/*/*.md"))
     paths += sorted(source.glob("*/dm/*/attachments/*/*.md"))
     for path in paths:
+        if _is_excluded(_relative(path, source), exclude):
+            report.excluded.append(_relative(path, source))
+            continue
         report.source_attachment_documents += 1
         relative = path.relative_to(source)
         workspace = relative.parts[0]
@@ -357,10 +477,11 @@ def _copy_plans(
                 except ShadowPathError:
                     target_root = None
                 if target_root is not None:
-                    raw = sorted((target_root / "raw").glob("*.md"))
-                    if raw:
-                        live_doc = load_doc(raw[0])
+                    live_doc = _newest_live_doc(target_root)
+                    if live_doc is not None:
                         policy = (live_doc.visibility, live_doc.acl)
+                        if live_doc.visibility == "public":
+                            adopted.add((workspace, channel_id))
             if target_root is None:
                 report.blocked.append(
                     f"{_relative(path, source)}: no unambiguous live channel target"
@@ -388,7 +509,13 @@ def _copy_plans(
                 revision=revision,
                 visibility=policy[0] if policy else None,
                 acl=policy[1] if policy else None,
+                adopt_policy=(
+                    relative.parts[1] == "channels"
+                    and (workspace, channel_id) in adopted
+                ),
             )
+            if relative.parts[1] == "channels":
+                names.setdefault((workspace, channel_id), set()).add(loaded.name)
             if relative.parts[1] == "dm":
                 dm_policy = dm_policies.get((workspace, user_id, loaded.channel_id))
                 if dm_policy is None:
@@ -410,9 +537,18 @@ def _copy_plans(
             continue
         identical = target.is_file() and _digest_bytes(content) == _digest(target)
         if target.exists() and not identical:
-            report.blocked.append(
-                f"{_relative(path, source)}: live attachment revision differs"
-            )
+            # revision 은 원본 해시다 — 경로가 같으면 원본이 같다. 다른 것은 다시 처리하며
+            # 붙은 값(permalink·처리 시각·변환 상태·공개 여부)이고, 운영 정본이 현재
+            # 파이프라인의 결과다. 덮어쓰지 않고 운영 쪽을 둔다(2026-11-24).
+            current = attachment_reader.load(target) if target.is_file() else None
+            if current is None:
+                report.blocked.append(
+                    f"{_relative(path, source)}: live attachment revision differs"
+                )
+                continue
+            report.live_attachment_kept += 1
+            if loaded.text.strip() and not current.text.strip():
+                report.attachment_text_only_in_legacy.append(_relative(path, source))
             continue
         if identical:
             report.identical_attachment_documents += 1
@@ -422,19 +558,60 @@ def _copy_plans(
     return plans
 
 
+def _live_attachment_names(target_root: Path) -> set[str]:
+    found: set[str] = set()
+    for path in sorted((target_root / "attachments").glob("*/*.md")):
+        doc = attachment_reader.load(path)
+        if doc is not None:
+            found.add(doc.name)
+    return found
+
+
+def _report_missing_documents(
+    channels: dict[tuple[str, str], Path],
+    inline: dict[tuple[str, str], set[str]],
+    canonical: dict[tuple[str, str], set[str]],
+    report: PromotionReport,
+) -> None:
+    """원문에서 뺀 첨부 줄 가운데 정본 문서가 어디에도 없는 이름을 남긴다."""
+    for key in sorted(inline):
+        target = channels.get(key)
+        have = set(canonical.get(key, set()))
+        if target is not None:
+            have |= _live_attachment_names(target)
+        for name in sorted(inline[key]):
+            if name in have or mask_sensitive(name).text in have:
+                continue
+            report.attachment_names_without_document.append(
+                f"{key[0]}/{key[1]}: {mask_sensitive(name).text}"
+            )
+
+
 def promote(
     source_workspaces: Path | str,
     destination: Path | str,
     *,
     apply: bool = False,
+    exclude: tuple[str, ...] | list[str] = (),
 ) -> PromotionReport:
     """Plan or apply a lossless promotion from a quarantined ``workspaces`` tree."""
     source = Path(source_workspaces)
     live = Path(destination)
     _validate_roots(source, live)
+    excluded = tuple(item.strip().strip("/") for item in exclude if item.strip("/ "))
     report = PromotionReport(apply=apply)
-    raw_plans, channels, policies, dm_policies = _raw_plans(source, live, report)
-    copy_plans = _copy_plans(source, live, channels, policies, report, dm_policies)
+    adopted: set[tuple[str, str]] = set()
+    inline: dict[tuple[str, str], set[str]] = {}
+    canonical: dict[tuple[str, str], set[str]] = {}
+    raw_plans, channels, policies, dm_policies = _raw_plans(
+        source, live, report, excluded, adopted, inline
+    )
+    copy_plans = _copy_plans(
+        source, live, channels, policies, report, dm_policies,
+        excluded, adopted, canonical,
+    )
+    _report_missing_documents(channels, inline, canonical, report)
+    report.live_policy_adopted = [f"{ws}/{cid}" for ws, cid in sorted(adopted)]
     if not apply or report.blocked:
         return report
 
@@ -444,10 +621,13 @@ def promote(
             "channel": plan.doc.channel,
             "channel_id": plan.doc.channel_id,
             "messages": list(plan.messages),
-            "visibility": plan.doc.visibility,
-            "acl": sorted(plan.doc.acl),
-            "share_with": sorted(plan.doc.share_with),
-            "imported_from": "legacy-quarantine-2026-11-18",
+            "visibility": plan.visibility or plan.doc.visibility,
+            "acl": sorted(plan.acl if plan.visibility else plan.doc.acl),
+            "share_with": sorted(
+                plan.share_with if plan.visibility else plan.doc.share_with
+            ),
+            # 어느 격리분에서 왔는지 남긴다(예: archive-legacy-quarantine-20261124).
+            "imported_from": source.parent.name,
         }
         if plan.dm_user:
             result = writer.ingest(

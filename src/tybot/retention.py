@@ -408,7 +408,8 @@ def scan_dm_spool(
     큐지만 사본은 사본이다. 소비가 막히면 여기 그대로 남고, 보존 기간은
     그것을 모른다.
 
-    경로는 `ARCHIVER_DM_HANDOFF_DIR` 이 정한다(`archiving_bot` 과 같은 값).
+    경로는 `ARCHIVER_DM_HANDOFF_DIR` 이 정한다. B-99 2단계로 생산·소비는 멈췄지만
+    남은 사본은 기한까지 여기서 지운다.
     `STATE_DIR` 아래라고 짐작하지 않는다 — 짐작한 경로는 **언제나 비어 있고**,
     비어 있으면 「지울 것이 없다」 로 보인다.
 
@@ -454,7 +455,6 @@ def plan(
     days: dict[str, int | None],
     qa_dir: Path | str,
     archive_root: Path | str,
-    shadow_root: Path | str | None = None,
     handoff_dir: Path | str | None = None,
     now: datetime | None = None,
     policies: tuple[str, ...] = POLICIES,
@@ -482,6 +482,8 @@ def plan(
     #: 읽고, 그 자료는 아무도 안 지운 채로 운영에 간다.
     partial: set[str] = set()
 
+    # B-99 2단계(D7): DM 원문은 운영 루트 하나에만 있다. 옛 섀도 루트는 보관만
+    # 하고 이 집행의 대상이 아니다(`ARCHIVER_SHADOW_DIR` 을 읽지 않는다).
     live_root = Path(archive_root)
     archive_roots = [live_root]
     if strict_roots and not Path(qa_dir).is_dir():
@@ -489,16 +491,6 @@ def plan(
         partial.add(POLICY_BOT_AUDIT)
     if strict_roots and not live_root.is_dir():
         result.skipped.append(f"live archive root is unavailable: {live_root}")
-        partial.update((POLICY_DM_MESSAGE, POLICY_DM_ATTACHMENT))
-    if shadow_root:
-        candidate = Path(shadow_root)
-        if not candidate.is_dir() or candidate.resolve() == live_root.resolve():
-            result.skipped.append(f"shadow archive root is unavailable or overlaps live: {candidate}")
-            partial.update((POLICY_DM_MESSAGE, POLICY_DM_ATTACHMENT))
-        else:
-            archive_roots.append(candidate)
-    elif strict_roots:
-        result.skipped.append("ARCHIVER_SHADOW_DIR is missing; shadow DMs were not scanned")
         partial.update((POLICY_DM_MESSAGE, POLICY_DM_ATTACHMENT))
     result.scanned_roots = tuple(root for root in archive_roots if root.is_dir())
 
@@ -758,11 +750,13 @@ def enforcement_status(
     missing = sorted(set(POLICIES) - set(record.get("covered") or ()))
     if missing:
         return False, f"마지막 집행이 보지 않은 정책이 있습니다: {', '.join(missing)}"
+    # 운영 루트 **하나**를 실제로 훑었어야 한다(B-99 2단계 D7). 운영 루트가 없어
+    # 못 훑은 실행은 `scanned_roots` 가 비므로 여기서 막힌다. 섀도 루트까지 셋던
+    # 옛 기록(2개)도 통과시키지 않는다 — 다음 집행이 새 기준으로 다시 남긴다.
     roots = record.get("scanned_roots")
-    if (not isinstance(roots, list) or len(roots) != 2
-            or any(not isinstance(root, str) or not root for root in roots)
-            or roots[0] == roots[1]):
-        return False, "마지막 집행이 운영·shadow 아카이브를 모두 확인하지 않았습니다"
+    if (not isinstance(roots, list) or len(roots) != 1
+            or not isinstance(roots[0], str) or not roots[0]):
+        return False, "마지막 집행이 운영 아카이브를 확인하지 않았습니다"
     unresolved = record.get("unresolved")
     if not isinstance(unresolved, int) or unresolved < 0:
         return False, "마지막 집행의 미확인 자료 건수를 읽을 수 없습니다"
@@ -848,7 +842,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="보존 기간을 실제 자료에 적용한다")
     parser.add_argument("--apply", action="store_true", help="실제로 지운다(기본은 미리보기)")
     parser.add_argument("--by", default="", help="실행한 사람. --apply 에 필요하다")
-    parser.add_argument("--shadow-root", default="", help="그림자 DM 아카이브 루트")
     parser.add_argument(
         "--policy", action="append", choices=POLICIES,
         help="이 정책만. 여러 번 줄 수 있다(기본: 전부)",
@@ -880,7 +873,6 @@ def main(argv: list[str] | None = None) -> int:
         days=days,
         qa_dir=os.getenv("QA_LOG_DIR", "./qa-log"),
         archive_root=archive_dir(),
-        shadow_root=args.shadow_root or os.getenv("ARCHIVER_SHADOW_DIR", "").strip(),
         handoff_dir=handoff_dir,
         spool_reader=spool_reader(handoff_dir),
         policies=tuple(args.policy) if args.policy else POLICIES,

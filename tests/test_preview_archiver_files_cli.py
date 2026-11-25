@@ -16,9 +16,9 @@ def cli(monkeypatch, tmp_path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "load_env_file", lambda: None)
-    monkeypatch.setenv("ARCHIVER_SHADOW_LAYOUT", "per-channel-v1")
+    # B-99 2단계(D7): 채널별 배치는 설정 없이 항상 쓴다.
+    monkeypatch.delenv("ARCHIVER_SHADOW_LAYOUT", raising=False)
     monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path / "live"))
-    monkeypatch.setattr(module, "shadow_archive_dir", lambda env: tmp_path / "shadow")
     monkeypatch.setattr(module, "default_repo", lambda: object())
     return module
 

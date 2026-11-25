@@ -62,7 +62,8 @@ def test_every_channel_mode_says_what_changes(modes):
 
     assert set(table) == {"off", "shadow", "active", "paused"}
     assert table["off"]["label"] == "Archiver 미적용 · Master 유지"
-    assert table["shadow"]["label"] == "그림자 대조 · 운영본은 Master"
+    # 과거값(B-99 2단계). 고를 수 없고, 옛 행을 보여 줄 때만 쓴다.
+    assert table["shadow"]["label"] == "과거 그림자(수집 안 함)"
     assert table["active"]["label"] == "Archiver 운영 수집"
     assert table["paused"]["label"] == "일시 중지 · 양쪽 쓰기 중단"
 
@@ -391,7 +392,7 @@ def test_the_mask_is_still_readable(workspaces_page):
     assert "botTokenMask" in workspaces_page and "appTokenMask" in workspaces_page
 
 
-# --- Archiving 화면: 파일럿 shadow 만 (2026-09-28 사양) --------------------------
+# --- Archiving 화면 (2026-09-28 사양 · B-99 2단계로 그림자 폐기) -------------------
 
 PANEL = WEB / "components" / "ArchivingPanel.tsx"
 
@@ -417,12 +418,19 @@ def test_the_panel_points_at_bot_management(panel):
 def test_the_modes_say_what_changes(panel):
     """`미적용` 을 「수집 안 함」 으로만 적으면 원문이 안 쌓이는 줄 안다."""
     assert "off: '미적용'" in panel
-    assert "shadow: '그림자 수집'" in panel
+    assert "active: '운영 수집'" in panel
     assert "paused: '일시 중지'" in panel
     assert "Master 가 운영본을 기록합니다" in panel
-    assert "별도 shadow 경로에 기록하고 Master 가 운영본을 계속 기록합니다" in panel
-    assert "현재 파일럿에서는 선택할 수 없습니다" in panel
     assert "양쪽 writer 인수 상태를 확인한 뒤에만" in panel
+
+
+def test_shadow_is_only_a_legacy_label(panel):
+    """그림자 수집은 폐기됐다(B-99 2단계 D6). 옛 행만 뜻을 붙여 보여 준다."""
+    assert "shadow: '과거 그림자(수집 안 함)'" in panel
+    assert "그림자 수집이 시작됩니다" not in panel
+    assert "그림자 수집으로 돌아옵니다" not in panel
+    assert "별도 shadow 경로" not in panel
+    assert "shadow 검증" not in panel
 
 
 def test_there_is_no_channel_id_input(panel):
@@ -472,9 +480,10 @@ def test_an_operator_hold_survives_a_re_invite(panel):
     assert "재초대해도 저절로 켜지지 않습니다" in panel
 
 
-def test_the_screen_does_not_promise_active(panel):
-    """운영 수집으로 자동 전환하지 않는다(지시 12)."""
-    assert "운영 수집(writer 인수)으로는 자동 전환하지 않습니다" in panel
+def test_the_screen_says_invitation_is_live_collection(panel):
+    """초대 = 운영 수집(2026-11-18 결정). 옛 「자동 전환하지 않는다」 문구는 거짓이 됐다."""
+    assert "운영 수집(writer 인수)으로는 자동 전환하지 않습니다" not in panel
+    assert "초대된 채널은 운영 수집" in panel
 
 
 def test_the_dangerous_switches_cannot_be_turned_on_here(panel):

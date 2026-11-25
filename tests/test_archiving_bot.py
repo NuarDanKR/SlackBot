@@ -17,30 +17,35 @@ def test_archiver_manifest_disables_messages_tab_and_dm_subscription():
     assert "im:history" not in manifest
 
 
-def test_shadow_unit_can_write_live_archive_only_when_runtime_gates_allow_it():
-    unit = (Path(__file__).resolve().parents[1] / "deploy" /
-            "tybot-archiving-shadow@.service").read_text(encoding="utf-8")
+_DEPLOY = Path(__file__).resolve().parents[1] / "deploy"
+
+
+def test_archiver_unit_writes_only_the_live_archive_and_its_state():
+    """B-99 2단계: 섀도 루트와 DM 인계 큐는 더 이상 쓰기 경로가 아니다."""
+    unit = (_DEPLOY / "tybot-archiver@.service").read_text(encoding="utf-8")
     writable = next(
         line.removeprefix("ReadWritePaths=").split()
         for line in unit.splitlines() if line.startswith("ReadWritePaths=")
     )
     assert set(writable) == {
-        "/var/lib/tybot/archiver-shadow",
+        "/var/lib/tybot/archiver",
         "/var/lib/tybot/state/ingest-ack-outbox",
-            "/var/lib/tybot/image-description-notify",
-        "-/var/lib/tybot/state/dm-handoff",
+        "/var/lib/tybot/image-description-notify",
         "-/var/lib/tybot/archive",
     }
+    assert not any("shadow" in path or "dm-handoff" in path for path in writable)
 
 
-def test_shadow_unit_uses_shared_bootstrap_but_isolates_workspace_runtime():
-    unit = (Path(__file__).resolve().parents[1] / "deploy" /
-            "tybot-archiving-shadow@.service").read_text(encoding="utf-8")
+def test_archiver_unit_uses_shared_bootstrap_but_isolates_workspace_runtime():
+    unit = (_DEPLOY / "tybot-archiver@.service").read_text(encoding="utf-8")
     assert "ConditionPathExists=/etc/tybot/archiver.env\n" in unit
     assert "Environment=TYBOT_ENV_FILE=/etc/tybot/archiver.env\n" in unit
     assert "Environment=ARCHIVER_WORKSPACE=%i\n" in unit
-    assert "Environment=LOCK_DIR=/var/lib/tybot/archiver-shadow/%i/.locks\n" in unit
+    assert "Environment=LOCK_DIR=/var/lib/tybot/archiver/%i/.locks\n" in unit
     assert "archiver-%i.env" not in unit
+    # 옛 유닛과 한 워크스페이스에서 동시에 돌지 않는다(LOCK_DIR 이 달라 잠금이 못 막는다).
+    assert "Conflicts=tybot-archiving-shadow@%i.service\n" in unit
+    assert not (_DEPLOY / "tybot-archiving-shadow@.service").exists()
 
 
 def test_image_description_notice_posts_only_a_fixed_thread_status():
@@ -90,7 +95,6 @@ def _env(tmp_path: Path) -> dict[str, str]:
         "ARCHIVER_MASTER_BOT_USER_TYIT": "U_MASTER",
         "ARCHIVER_CHANNEL_IDS_TYIT": "C12345678",
         "ARCHIVE_DIR": str(tmp_path / "live"),
-        "ARCHIVER_SHADOW_DIR": str(tmp_path / "shadow" / "archive"),
     }
 
 
@@ -150,50 +154,77 @@ def test_db_configuration_can_start_before_the_first_channel_invitation(monkeypa
     assert config.allowed_channels == frozenset()
 
 
-def test_new_shadow_layout_separates_attachments_without_changing_db_flag(tmp_path):
-    env = _env(tmp_path)
-    env["ARCHIVER_SHADOW_LAYOUT"] = "per-channel-v1"
-    config = archiving_bot.load_archiver_workspaces(env)[0]
+def test_collector_always_separates_attachments_without_changing_db_flag(tmp_path):
+    """채널별 배치 하나뿐이라 원문에 추출 본문을 넣는 모드가 없다(B-99 2단계)."""
+    config = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
 
-    effective = archiving_bot.shadow_workspace_config(config, env)
+    collector = archiving_bot.ArchiveCollector(config, tmp_path / "archive")
 
     assert config.separate_attachments is False
-    assert effective.separate_attachments is True
-    assert effective.bot_token == config.bot_token
-    archiving_bot.ShadowCollector(effective, tmp_path / "shadow" / "archive",
-                                   layout="per-channel-v1")
+    assert collector.cfg.separate_attachments is True
+    assert collector.cfg.bot_token == config.bot_token
 
 
-def test_shadow_attachment_override_requires_isolated_shadow_root(tmp_path):
-    env = _env(tmp_path)
-    env["ARCHIVER_SHADOW_LAYOUT"] = "per-channel-v1"
-    env["ARCHIVER_SHADOW_DIR"] = env["ARCHIVE_DIR"]
-    config = archiving_bot.load_archiver_workspaces(env)[0]
-
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="must not overlap"):
-        archiving_bot.shadow_workspace_config(config, env)
+def test_the_shadow_root_api_is_gone():
+    for name in (
+        "ShadowCollector", "shadow_archive_dir", "shadow_workspace_config",
+        "_live_archive_root", "_dm_handoff_consumer", "_dm_handoff_loop",
+    ):
+        assert not hasattr(archiving_bot, name), name
 
 
-def test_new_shadow_layout_refuses_a_legacy_archive_tree(tmp_path):
-    env = _env(tmp_path)
-    env["ARCHIVER_SHADOW_LAYOUT"] = "per-channel-v1"
-    (Path(env["ARCHIVER_SHADOW_DIR"]) / "workspaces").mkdir(parents=True)
-    config = archiving_bot.load_archiver_workspaces(env)[0]
+def test_collector_has_no_second_root():
+    """두 번째 루트가 생자 인자로 돌아오면 2026-11-20 장애가 다시 열린다."""
+    import inspect
 
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="new shadow root"):
-        archiving_bot.shadow_workspace_config(config, env)
+    params = inspect.signature(archiving_bot.ArchiveCollector).parameters
+    assert set(params) == {"cfg", "root", "membership_repo", "owner_lookup"}
 
 
-def test_legacy_shadow_keeps_database_attachment_setting(tmp_path):
-    env = _env(tmp_path)
-    config = archiving_bot.load_archiver_workspaces(env)[0]
+@pytest.mark.parametrize("value", ["0", "false", "off", "no", " OFF "])
+def test_archive_root_refuses_an_explicit_off_live_switch(tmp_path, value):
+    """끈 값을 「섀도로 돌아간다」 로 읽으면 안 된다 — 운영 쓰기가 아닌 모드가 없다."""
+    env = {"ARCHIVE_DIR": str(tmp_path), "ARCHIVER_LIVE_WRITES_ENABLED": value}
 
-    assert archiving_bot.shadow_workspace_config(config, env) is config
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="no non-live mode"):
+        archiving_bot.archive_root("tyit", env)
+
+
+@pytest.mark.parametrize("value", [None, "", "1", "true"])
+def test_archive_root_no_longer_requires_the_live_switch(tmp_path, value):
+    env = {"ARCHIVE_DIR": str(tmp_path)}
+    if value is not None:
+        env["ARCHIVER_LIVE_WRITES_ENABLED"] = value
+
+    assert archiving_bot.archive_root("tyit", env) == tmp_path.resolve()
+
+
+def test_retired_settings_are_reported_and_not_read(tmp_path):
+    shadow = tmp_path / "archive"
+    shadow.mkdir()
+    env = {
+        "ARCHIVE_DIR": str(tmp_path / "live"),
+        "ARCHIVER_SHADOW_DIR": str(shadow),
+        "ARCHIVER_SHADOW_LAYOUT": "per-channel-v1",
+        "ARCHIVER_DM_CONSUME_ENABLED": "1",
+        "ARCHIVER_DM_POLL_SECONDS": "  ",
+    }
+    (tmp_path / "live").mkdir()
+
+    assert archiving_bot.retired_settings(env) == [
+        "ARCHIVER_SHADOW_DIR", "ARCHIVER_SHADOW_LAYOUT", "ARCHIVER_DM_CONSUME_ENABLED",
+    ]
+    assert archiving_bot.retired_settings({"ARCHIVE_DIR": str(tmp_path)}) == []
+    # 섀도 경로가 남아 있어도 루트는 ARCHIVE_DIR 하나다.
+    assert archiving_bot.archive_root("tyit", env) == (tmp_path / "live").resolve()
+    del env["ARCHIVE_DIR"]
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="ARCHIVE_DIR"):
+        archiving_bot.archive_root("tyit", env)
 
 
 def test_instance_lock_is_scoped_to_one_workspace():
-    assert archiving_bot._instance_lock_name("tyit") == "archiving-bot-shadow-tyit"
-    assert archiving_bot._instance_lock_name("mgmt") == "archiving-bot-shadow-mgmt"
+    assert archiving_bot._instance_lock_name("tyit") == "archiving-bot-tyit"
+    assert archiving_bot._instance_lock_name("mgmt") == "archiving-bot-mgmt"
     assert (
         archiving_bot._instance_lock_name("tyit")
         != archiving_bot._instance_lock_name("mgmt")
@@ -233,17 +264,6 @@ def test_archiver_can_start_without_master_and_verifies_its_own_bot(tmp_path):
         archiving_bot.validate_slack_identity(cfg, {"team_id": "T12345678"})
 
 
-def test_shadow_must_not_overlap_live_archive(tmp_path):
-    env = _env(tmp_path)
-    assert archiving_bot.shadow_archive_dir(env) == Path(env["ARCHIVER_SHADOW_DIR"]).resolve()
-    env["ARCHIVER_SHADOW_DIR"] = str(tmp_path / "live" / "workspaces")
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="must not overlap"):
-        archiving_bot.shadow_archive_dir(env)
-    del env["ARCHIVE_DIR"]
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="ARCHIVE_DIR"):
-        archiving_bot.shadow_archive_dir(env)
-
-
 class Client:
     def conversations_info(self, *, channel):
         return {"channel": {"id": channel, "name": "팀-전산_abb155-공지", "is_member": True}}
@@ -252,10 +272,23 @@ class Client:
         return {"user": {"name": user}}
 
 
-def test_shadow_collector_writes_only_shadow_root(tmp_path):
+class AllowOwner:
+    """운영 쓰기 플래그가 켜져 있고 채널 소유가 Archiver 인 상태."""
+
+    def archiver_live_flag(self):
+        return True
+
+    def archiver_may_write_live(self, channel_id, *, archiver_flag):
+        return bool(archiver_flag)
+
+
+_RAW = "tyit/C12345678__*/archive/raw/*.md"
+
+
+def test_offline_collector_writes_only_the_per_channel_archive(tmp_path):
     env = _env(tmp_path)
     cfg = archiving_bot.load_archiver_workspaces(env)[0]
-    collector = archiving_bot.ShadowCollector(cfg, archiving_bot.shadow_archive_dir(env))
+    collector = archiving_bot.ArchiveCollector(cfg, Path(env["ARCHIVE_DIR"]))
     event = {
         "channel_type": "channel",
         "channel": "C12345678",
@@ -265,10 +298,10 @@ def test_shadow_collector_writes_only_shadow_root(tmp_path):
     }
     assert collector.ingest_event(Client(), event) == "written"
     assert collector.ingest_event(Client(), event) == "duplicate"
-    files = list(Path(env["ARCHIVER_SHADOW_DIR"]).glob("workspaces/*/channels/*/raw/*.md"))
+    files = list(Path(env["ARCHIVE_DIR"]).glob(_RAW))
     assert len(files) == 1
     assert "회의 일정은 10시입니다." in files[0].read_text(encoding="utf-8")
-    assert not Path(env["ARCHIVE_DIR"]).exists()
+    assert not (Path(env["ARCHIVE_DIR"]) / "workspaces").exists()
 
 
 def test_allowlisted_channel_does_not_need_the_master_naming_rule(tmp_path):
@@ -286,7 +319,7 @@ def test_allowlisted_channel_does_not_need_the_master_naming_rule(tmp_path):
 
     env = _env(tmp_path)
     cfg = archiving_bot.load_archiver_workspaces(env)[0]
-    collector = archiving_bot.ShadowCollector(cfg, archiving_bot.shadow_archive_dir(env))
+    collector = archiving_bot.ArchiveCollector(cfg, Path(env["ARCHIVE_DIR"]))
     event = {
         "channel_type": "channel",
         "channel": "C12345678",
@@ -296,17 +329,13 @@ def test_allowlisted_channel_does_not_need_the_master_naming_rule(tmp_path):
     }
 
     assert collector.ingest_event(NonstandardClient(), event) == "written"
-    raw = next(
-        Path(env["ARCHIVER_SHADOW_DIR"]).glob(
-            "workspaces/*/channels/*/raw/*.md"
-        )
-    )
+    raw = next(Path(env["ARCHIVE_DIR"]).glob("tyit/C12345678__general/archive/raw/*.md"))
     assert "이름 규칙과 무관하게 수집합니다." in raw.read_text(encoding="utf-8")
 
 
-def test_shadow_collector_rejects_bot_and_dm(tmp_path):
+def test_collector_rejects_bot_and_dm(tmp_path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
     event = {
         "channel_type": "channel",
         "channel": "C12345678",
@@ -318,16 +347,16 @@ def test_shadow_collector_rejects_bot_and_dm(tmp_path):
     assert collector.ingest_event(Client(), {**event, "app_id": "A123"}) == "skipped-bot-or-system"
     assert collector.ingest_event(Client(), {**event, "channel_type": "im"}) == "skipped-scope"
     assert collector.ingest_event(Client(), {**event, "channel": "C99999999"}) == "skipped-membership"
-    assert not (tmp_path / "shadow").exists()
+    assert not (tmp_path / "archive").exists()
 
 
 def test_runtime_collector_uses_invitation_state_not_the_legacy_allowlist(tmp_path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
     repo = FakeArchivingRepo()
-    repo.given_channel("tyit", "C99999999", "shadow", membership="joined")
+    repo.given_channel("tyit", "C99999999", "active", owner="archiver", membership="joined")
     repo.channel_rows[("tyit", "C99999999")]["channel_name"] = "general"
-    collector = archiving_bot.ShadowCollector(
-        cfg, tmp_path / "shadow", membership_repo=repo
+    collector = archiving_bot.ArchiveCollector(
+        cfg, tmp_path / "archive", membership_repo=repo, owner_lookup=AllowOwner()
     )
     event = {
         "channel_type": "channel",
@@ -339,6 +368,31 @@ def test_runtime_collector_uses_invitation_state_not_the_legacy_allowlist(tmp_pa
 
     assert collector.ingest_event(Client(), event) == "written"
     assert repo.channel_rows[("tyit", "C99999999")]["last_event_at"] == "now"
+    assert list((tmp_path / "archive").glob("tyit/C99999999__general/archive/raw/*.md"))
+
+
+def test_a_legacy_shadow_mode_row_is_not_collected(tmp_path):
+    """옛 `shadow` 행은 읽기 전용 과거값이다(D2). 멤버십 동기화가 `active` 로 올린다."""
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    repo = FakeArchivingRepo()
+    repo.given_channel("tyit", "C12345678", "shadow", owner="archiver", membership="joined")
+    collector = archiving_bot.ArchiveCollector(
+        cfg, tmp_path / "archive", membership_repo=repo, owner_lookup=AllowOwner()
+    )
+    event = {
+        "channel_type": "channel",
+        "channel": "C12345678",
+        "user": "U12345678",
+        "ts": "1790070000.000001",
+        "text": "섀도 행은 수집하지 않습니다.",
+    }
+
+    assert collector.ingest_event(Client(), event) == "skipped-membership"
+    assert collector.ingest_message(
+        Client(), event, channel="#general", channel_id="C12345678", is_private=False,
+    ) == "refused"
+    assert repo.channel_rows[("tyit", "C12345678")]["last_event_at"] is None
+    assert not (tmp_path / "archive").exists()
 
 
 def test_runtime_collector_respects_operator_hold(tmp_path):
@@ -347,8 +401,8 @@ def test_runtime_collector_respects_operator_hold(tmp_path):
     repo.given_channel(
         "tyit", "C12345678", "paused", membership="joined", operator_hold=True
     )
-    collector = archiving_bot.ShadowCollector(
-        cfg, tmp_path / "shadow", membership_repo=repo
+    collector = archiving_bot.ArchiveCollector(
+        cfg, tmp_path / "archive", membership_repo=repo, owner_lookup=AllowOwner()
     )
 
     assert collector.ingest_event(Client(), {
@@ -358,37 +412,38 @@ def test_runtime_collector_respects_operator_hold(tmp_path):
         "ts": "1790070000.000001",
         "text": "수집하면 안 됩니다.",
     }) == "skipped-membership"
-    assert not (tmp_path / "shadow").exists()
+    assert not (tmp_path / "archive").exists()
 
 
 def test_new_workspace_can_start_beside_unrelated_legacy_archives(tmp_path):
     archive = tmp_path / "archive"
     for workspace in ("mgmt", "archi", "invest"):
         (archive / "workspaces" / workspace).mkdir(parents=True)
-    env = {"ARCHIVE_DIR": str(archive), "ARCHIVER_LIVE_WRITES_ENABLED": "1"}
+    env = {"ARCHIVE_DIR": str(archive)}
 
-    assert archiving_bot._live_archive_root("tec", env) == archive.resolve()
+    assert archiving_bot.archive_root("tec", env) == archive.resolve()
     assert {item.name for item in (archive / "workspaces").iterdir()} == {
         "mgmt", "archi", "invest",
     }
     with pytest.raises(archiving_bot.ArchiverConfigError, match="legacy workspace: mgmt"):
-        archiving_bot._live_archive_root("mgmt", env)
+        archiving_bot.archive_root("mgmt", env)
     (archive / "workspaces" / "tec").mkdir()
     with pytest.raises(archiving_bot.ArchiverConfigError, match="legacy workspace: tec"):
-        archiving_bot._live_archive_root("tec", env)
+        archiving_bot.archive_root("tec", env)
 
 
 def test_live_root_keeps_absolute_existing_path_checks(tmp_path):
-    assert archiving_bot._live_archive_root("tec", {}) is None
-    env = {"ARCHIVER_LIVE_WRITES_ENABLED": "1", "ARCHIVE_DIR": "relative"}
+    with pytest.raises(archiving_bot.ArchiverConfigError, match="ARCHIVE_DIR"):
+        archiving_bot.archive_root("tec", {})
+    env = {"ARCHIVE_DIR": "relative"}
     with pytest.raises(archiving_bot.ArchiverConfigError, match="absolute"):
-        archiving_bot._live_archive_root("tec", env)
+        archiving_bot.archive_root("tec", env)
     env["ARCHIVE_DIR"] = str(tmp_path / "missing")
     with pytest.raises(archiving_bot.ArchiverConfigError, match="already exist"):
-        archiving_bot._live_archive_root("tec", env)
+        archiving_bot.archive_root("tec", env)
     env["ARCHIVE_DIR"] = str(tmp_path)
     with pytest.raises(archiving_bot.ArchiverConfigError, match="invalid workspace"):
-        archiving_bot._live_archive_root("../tec", env)
+        archiving_bot.archive_root("../tec", env)
 
 
 def test_active_channel_writes_only_live_root_when_all_gates_agree(tmp_path, monkeypatch):
@@ -413,22 +468,24 @@ def test_active_channel_writes_only_live_root_when_all_gates_agree(tmp_path, mon
 
     calls = []
     monkeypatch.setattr(archiving_bot.ingest_ack, "advance", lambda **kw: calls.append(kw))
-    collector = archiving_bot.ShadowCollector(
-        cfg, tmp_path / "shadow", membership_repo=repo, layout="per-channel-v1",
-        live_root=tmp_path / "live", live_enabled=True, owner_lookup=Owner(),
+    collector = archiving_bot.ArchiveCollector(
+        cfg, tmp_path / "live", membership_repo=repo, owner_lookup=Owner(),
     )
     event = {"channel_type": "channel", "channel": "C12345678", "user": "U12345678",
              "ts": "1790070000.000001", "text": "운영 원문"}
 
     assert collector.ingest_event(Client(), event) == "written"
-    assert list((tmp_path / "live").glob("tyit/C12345678__*/archive/raw/*.md"))
-    assert not (tmp_path / "shadow").exists()
+    (raw,) = (tmp_path / "live").glob("tyit/C12345678__general/archive/raw/*.md")
+    assert not (tmp_path / "live" / "workspaces").exists()
     assert {call["written_to"] for call in calls} == {"live"}
 
+    # 옛 `shadow` 모드로 되돌린 행은 섀도 루트로 새지 않고 아예 수집되지 않는다.
     repo.channel_rows[("tyit", "C12345678")]["mode"] = "shadow"
     repo.channel_rows[("tyit", "C12345678")]["writer_owner"] = "master"
-    assert collector.ingest_event(Client(), {**event, "ts": "1790070001.000001"}) == "written"
-    assert list((tmp_path / "shadow").glob("tyit/C12345678__*/archive/raw/*.md"))
+    later = {**event, "ts": "1790070001.000001", "text": "섀도 행 원문"}
+    assert collector.ingest_event(Client(), later) == "skipped-membership"
+    assert "섀도 행 원문" not in raw.read_text(encoding="utf-8")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["live"]
 
 
 @pytest.mark.parametrize(
@@ -442,9 +499,7 @@ def test_raw_frontmatter_preserves_slack_channel_visibility(
         archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
         separate_attachments=True,
     )
-    collector = archiving_bot.ShadowCollector(
-        cfg, tmp_path / "shadow", layout="per-channel-v1",
-    )
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     result = collector.ingest_message(
         Client(),
@@ -459,17 +514,20 @@ def test_raw_frontmatter_preserves_slack_channel_visibility(
     )
 
     assert result == "written"
-    raw = next((tmp_path / "shadow").glob("tyit/C12345678__*/archive/raw/*.md"))
+    raw = next((tmp_path / "archive").glob(_RAW))
     assert f"visibility: {expected}\n" in raw.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("reason", ["env", "flag", "owner", "membership"])
+@pytest.mark.parametrize(
+    "reason", ["lookup", "flag", "owner", "membership", "shadow-mode"],
+)
 def test_active_channel_denies_write_when_a_gate_is_missing(tmp_path, reason):
     cfg = replace(archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
                   separate_attachments=True)
     repo = FakeArchivingRepo()
-    repo.given_channel("tyit", "C12345678", "active", owner="archiver",
-                       membership="joined")
+    repo.given_channel("tyit", "C12345678",
+                       "shadow" if reason == "shadow-mode" else "active",
+                       owner="archiver", membership="joined")
     repo.given_flag("archiver_writes_live", reason != "flag")
     if reason == "membership":
         repo.channel_rows[("tyit", "C12345678")]["operator_hold"] = True
@@ -481,15 +539,18 @@ def test_active_channel_denies_write_when_a_gate_is_missing(tmp_path, reason):
         def archiver_may_write_live(self, channel_id, *, archiver_flag):
             return reason != "owner"
 
-    collector = archiving_bot.ShadowCollector(
-        cfg, tmp_path / "shadow", membership_repo=repo, layout="per-channel-v1",
-        live_root=tmp_path / "live", live_enabled=reason != "env", owner_lookup=Owner(),
+    collector = archiving_bot.ArchiveCollector(
+        cfg, tmp_path / "live", membership_repo=repo,
+        owner_lookup=None if reason == "lookup" else Owner(),
     )
     event = {"channel_type": "channel", "channel": "C12345678", "user": "U12345678",
              "ts": "1790070000.000001", "text": "운영 원문"}
 
     assert collector.ingest_event(Client(), event) in {"refused", "skipped-membership"}
-    assert not (tmp_path / "shadow").exists()
+    # 소급은 `_collection_channel` 을 건너뛰므로 쓰기 직전 관문도 따로 막아야 한다.
+    assert collector.ingest_message(
+        Client(), event, channel="#general", channel_id="C12345678", is_private=False,
+    ) == "refused"
     assert not (tmp_path / "live").exists()
 
 
@@ -499,9 +560,9 @@ def test_backfill_direct_ingest_cannot_bypass_active_gate(tmp_path):
     repo = FakeArchivingRepo()
     repo.given_channel("tyit", "C12345678", "active", owner="archiver",
                        membership="joined")
-    collector = archiving_bot.ShadowCollector(
-        cfg, tmp_path / "shadow", membership_repo=repo, layout="per-channel-v1",
-        live_root=tmp_path / "live", live_enabled=True,
+    # 소유 조회가 없으면(= 운영 플래그·소유를 확인할 수 없으면) 쓰지 않는다.
+    collector = archiving_bot.ArchiveCollector(
+        cfg, tmp_path / "live", membership_repo=repo,
     )
 
     result = collector.ingest_message(
@@ -510,18 +571,18 @@ def test_backfill_direct_ingest_cannot_bypass_active_gate(tmp_path):
     )
 
     assert result == "refused"
-    assert not (tmp_path / "shadow").exists()
     assert not (tmp_path / "live").exists()
 
 
-def test_live_writes_reject_overlapping_roots(tmp_path):
-    cfg = replace(archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
-                  separate_attachments=True)
-    with pytest.raises(archiving_bot.ArchiverConfigError, match="disjoint"):
-        archiving_bot.ShadowCollector(
-            cfg, tmp_path / "archive", layout="per-channel-v1",
-            live_root=tmp_path / "archive" / "live", live_enabled=True,
-        )
+def test_collector_refuses_the_retired_second_root_arguments(tmp_path):
+    cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
+    for retired in (
+        {"layout": "per-channel-v1"},
+        {"live_root": tmp_path / "live"},
+        {"live_enabled": True},
+    ):
+        with pytest.raises(TypeError):
+            archiving_bot.ArchiveCollector(cfg, tmp_path / "archive", **retired)
 
 
 def test_periodic_membership_sync_keeps_running_after_one_failure(monkeypatch):
@@ -549,7 +610,7 @@ def test_periodic_membership_sync_keeps_running_after_one_failure(monkeypatch):
 
 def test_changed_message_appends_before_and_after_with_one_revision(tmp_path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
     recorded = []
     collector._record_revision = lambda **values: recorded.append(values) or True
     event = {
@@ -571,7 +632,7 @@ def test_changed_message_appends_before_and_after_with_one_revision(tmp_path):
     }
 
     assert collector.ingest_event(Client(), event) == "revision-written"
-    text = next((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md")).read_text(
+    text = next((tmp_path / "archive").glob(_RAW)).read_text(
         encoding="utf-8"
     )
     assert "[수정 전] 회의는 10시입니다." in text
@@ -582,7 +643,7 @@ def test_changed_message_appends_before_and_after_with_one_revision(tmp_path):
 
 def test_deleted_message_appends_tombstone_and_revision(tmp_path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
     recorded = []
     collector._record_revision = lambda **values: recorded.append(values) or True
     event = {
@@ -599,7 +660,7 @@ def test_deleted_message_appends_tombstone_and_revision(tmp_path):
     }
 
     assert collector.ingest_event(Client(), event) == "revision-written"
-    text = next((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md")).read_text(
+    text = next((tmp_path / "archive").glob(_RAW)).read_text(
         encoding="utf-8"
     )
     assert "[삭제 전] 삭제할 문장" in text
@@ -611,7 +672,7 @@ def test_revision_metadata_failure_is_not_reported_as_success(
     monkeypatch, tmp_path, acked
 ):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test")
     monkeypatch.setattr(archiving_bot, "record_revision", lambda **_values: 1 / 0)
     event = {
@@ -627,7 +688,7 @@ def test_revision_metadata_failure_is_not_reported_as_success(
 
 def test_duplicate_event_retries_missing_revision_metadata(tmp_path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
     attempts = []
     collector._record_revision = lambda **values: attempts.append(values) or True
     event = {
@@ -645,11 +706,12 @@ def test_duplicate_event_retries_missing_revision_metadata(tmp_path):
 
 def test_revision_doc_path_is_relative_to_archive_root(tmp_path):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    root = tmp_path / "shadow"
-    collector = archiving_bot.ShadowCollector(cfg, root)
+    root = tmp_path / "archive"
+    collector = archiving_bot.ArchiveCollector(cfg, root)
 
-    assert collector._relative_doc_path(root / "workspaces" / "tyit" / "raw.md") == (
-        "workspaces/tyit/raw.md"
+    raw = root / "tyit" / "C12345678__general" / "archive" / "raw" / "2026-11.md"
+    assert collector._relative_doc_path(raw) == (
+        "tyit/C12345678__general/archive/raw/2026-11.md"
     )
     with pytest.raises(archiving_bot.ArchiverConfigError, match="escaped"):
         collector._relative_doc_path(tmp_path / "outside.md")
@@ -687,7 +749,7 @@ def _targets(calls: list[dict]) -> list[str]:
 
 def test_a_plain_message_goes_received_then_raw_written_then_ready(tmp_path, acked):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     assert collector.ingest_event(Client(), _event()) == "written"
 
@@ -732,7 +794,7 @@ def test_an_attachment_is_not_ready_when_its_canonical_document_failed(
         return {"F1": archiving_bot.ARCHIVE_DONE}
 
     def fake_write(*_args, **_kwargs):
-        raw = list((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md"))
+        raw = list((tmp_path / "archive").glob(_RAW))
         assert raw, "canonical attachment must be written only after raw provenance"
         return []
 
@@ -743,7 +805,7 @@ def test_an_attachment_is_not_ready_when_its_canonical_document_failed(
         archiving_bot.load_archiver_workspaces(_env(tmp_path))[0],
         separate_attachments=True,
     )
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     assert collector.ingest_event(
         Client(), _event(text="", subtype="file_share", files=[{"id": "F1"}])
@@ -756,7 +818,7 @@ def test_an_attachment_is_not_ready_when_its_canonical_document_failed(
         "partial",
     ]
     assert acked[-1]["attachment_ready"] == 0
-    raw = next((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md"))
+    raw = next((tmp_path / "archive").glob(_RAW))
     text = raw.read_text(encoding="utf-8")
     assert reference in text
     assert "불완전 본문" not in text
@@ -768,7 +830,7 @@ def test_ready_is_recorded_last_after_every_check(tmp_path, acked):
     그리고 `ready` 는 terminal 이라 되돌려지지 않는다.
     """
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _event())
 
@@ -787,7 +849,7 @@ def test_a_screened_message_never_reaches_ready(tmp_path, acked, monkeypatch):
 
     monkeypatch.setattr(archiving_bot.writer, "ingest", refuse)
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     assert collector.ingest_event(Client(), _event()) == "refused"
 
@@ -798,10 +860,10 @@ def test_a_screened_message_never_reaches_ready(tmp_path, acked, monkeypatch):
 def test_a_failed_revision_record_never_reaches_ready(tmp_path, acked, monkeypatch):
     """revision 기록이 빠지면 나중에 수정·삭제를 못 잇는다. 그건 완료가 아니다."""
     monkeypatch.setattr(
-        archiving_bot.ShadowCollector, "_record_revision", lambda *a, **k: False
+        archiving_bot.ArchiveCollector, "_record_revision", lambda *a, **k: False
     )
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     assert collector.ingest_event(Client(), _event()) == "metadata-unconfirmed"
 
@@ -809,14 +871,16 @@ def test_a_failed_revision_record_never_reaches_ready(tmp_path, acked, monkeypat
     assert _targets(acked)[-1] == "partial"
 
 
-def test_the_shadow_collector_never_claims_it_wrote_live(tmp_path, acked):
-    """인수 전까지 이 기록이 운영 아카이브를 가리킨다고 읽히면 안 된다."""
+def test_every_ack_says_it_wrote_live(tmp_path, acked):
+    """쓰는 곳은 운영 아카이브 하나다(D5). `shadow` 는 과거 행을 읽는 데만 남는다."""
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _event())
 
-    assert {call["written_to"] for call in acked} == {"shadow"}
+    assert acked
+    assert {call["written_to"] for call in acked} == {archiving_bot.ingest_ack.LIVE}
+    assert archiving_bot.ingest_ack.LIVE == "live"
 
 
 def test_two_channels_do_not_mix_their_ack_coordinates(tmp_path, acked):
@@ -828,7 +892,7 @@ def test_two_channels_do_not_mix_their_ack_coordinates(tmp_path, acked):
     env = _env(tmp_path)
     env["ARCHIVER_CHANNEL_IDS_TYIT"] = "C12345678,C87654321"
     cfg = archiving_bot.load_archiver_workspaces(env)[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _event(channel="C12345678", ts="1.0001"))
     collector.ingest_event(Client(), _event(channel="C87654321", ts="2.0002"))
@@ -840,7 +904,7 @@ def test_two_channels_do_not_mix_their_ack_coordinates(tmp_path, acked):
 def test_events_outside_our_scope_leave_no_state(tmp_path, acked):
     """범위 밖까지 남기면 「받았는데 안 됐다」 가 쌓여 진짜 미완료를 덮는다."""
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _event(channel_type="im"))
     collector.ingest_event(Client(), _event(channel="C99999999"))
@@ -852,7 +916,7 @@ def test_events_outside_our_scope_leave_no_state(tmp_path, acked):
 def test_a_redelivered_event_records_the_same_states_again(tmp_path, acked):
     """수집기는 멱등을 판단하지 않는다 — **저장소가** 앞으로만 민다."""
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _event())
     acked.clear()
@@ -871,10 +935,10 @@ def test_a_failed_ack_does_not_stop_collection(tmp_path, monkeypatch):
 
     monkeypatch.setattr(archiving_bot.ingest_ack, "advance", boom)
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     assert collector.ingest_event(Client(), _event()) == "written"
-    files = list((tmp_path / "shadow").glob("workspaces/*/channels/*/raw/*.md"))
+    files = list((tmp_path / "archive").glob(_RAW))
     assert files and "회의 일정은 10시입니다." in files[0].read_text(encoding="utf-8")
 
 
@@ -920,7 +984,7 @@ def test_a_changed_message_stops_at_raw_written(tmp_path, acked):
     **고치기 전 문장을 찾아 주겠다고 약속**하는 셈이다.
     """
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _changed())
 
@@ -930,7 +994,7 @@ def test_a_changed_message_stops_at_raw_written(tmp_path, acked):
 def test_a_deleted_message_is_never_marked_ready(tmp_path, acked):
     """지워진 것을 「검색 가능」 이라고 하면 지운 사람의 뜻을 뒤집는다."""
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _deleted())
 
@@ -944,17 +1008,18 @@ def test_revision_acks_use_the_original_message_coordinate(tmp_path, acked):
     검색되나」 에 답할 수 없다.
     """
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _changed())
 
     assert {call["message_ts"] for call in acked} == {"1790070000.000001"}
 
 
-def test_revision_acks_are_shadow_only(tmp_path, acked):
+def test_revision_acks_are_always_live(tmp_path, acked):
     cfg = archiving_bot.load_archiver_workspaces(_env(tmp_path))[0]
-    collector = archiving_bot.ShadowCollector(cfg, tmp_path / "shadow")
+    collector = archiving_bot.ArchiveCollector(cfg, tmp_path / "archive")
 
     collector.ingest_event(Client(), _deleted())
 
-    assert {call["written_to"] for call in acked} == {"shadow"}
+    assert acked
+    assert {call["written_to"] for call in acked} == {"live"}

@@ -19,7 +19,7 @@ writer 가 같은 파일에 쓴다. 줄이 섞이고 `doc_count` 가 유실된�
 범위를 정할 수 없다. 기본값을 두면 전부 그 기본값으로 남고, 그건 기록이 아니다.
 
 **3. 검증 안 된 스키마로 `active` 에 못 간다.** 격리 DB 검증이 release gate 다
-(`release_gate`). 그림자는 열려 있다 — 운영 원문을 안 건드리기 때문이다.
+(`release_gate`). 그림자 모드는 폐기됐다(B-99 2단계 D2) — 어떤 요청도 받지 않는다.
 
 ## SQL 은 여기 없다
 
@@ -32,6 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..archive.archiving_state import (
+    RETIRED_MODES,
+    SHADOW_RETIRED_REASON,
     UNENFORCED_FLAGS,
     ChannelMode,
     ChannelState,
@@ -50,7 +52,7 @@ SUBJECT_CHANNEL = "channel_mode"
 SUBJECT_FLAG = "feature_flag"
 SUBJECT_RETENTION = "retention"
 
-#: 검증 전에는 못 가는 모드. **그림자는 여기 없다** — 운영 원문을 안 건드린다.
+#: 검증 전에는 못 가는 모드.
 GATED_MODES: frozenset[ChannelMode] = frozenset({ChannelMode.ACTIVE})
 
 #: 검증 전에는 못 켜는 스위치. 켜는 순간 운영 원문의 모양이 바뀐다.
@@ -205,7 +207,14 @@ def set_channel_mode(
     `writer_owner` 를 인자로 받지 않는다. 호출부가 주인을 고를 수 있으면 전이
     규칙이 장식이 된다.
     """
-    mode = ChannelMode(target)
+    try:
+        mode = ChannelMode(target)
+    except ValueError as exc:
+        raise AdminRefused(f"알 수 없는 채널 모드입니다: {target}") from exc
+    if mode in RETIRED_MODES:
+        # 게이트·전이 계산보다 먼저 막는다. 폐기한 모드는 「조건이 안 맞아서」 가
+        # 아니라 **없는 길**이다 — 사유가 달라야 사람이 다시 시도하지 않는다.
+        raise AdminRefused(SHADOW_RETIRED_REASON)
     if mode in GATED_MODES:
         # 게이트를 **전이 계산보다 먼저** 본다. 전이가 통과한 뒤에 막으면
         # 「갈 수 있는데 안 보내 준다」 로 보이고, 사람은 규칙을 의심한다.

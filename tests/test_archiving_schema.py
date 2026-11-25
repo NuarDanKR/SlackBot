@@ -90,7 +90,7 @@ def test_active_channel_must_belong_to_the_archiver(sql):
 
 
 def test_off_and_shadow_channels_belong_to_master(sql):
-    """그림자 수집 중에도 운영 원문은 Master가 쓴다."""
+    """옛 shadow 행(과거값)의 운영 원문 주인은 Master 다 — Archiver 는 수집하지 않는다."""
     body = _constraint(sql, "archive_channel_mode_owner_matches")
 
     assert "'off'" in body and "'shadow'" in body
@@ -114,12 +114,46 @@ def test_writer_owner_is_a_closed_set(sql):
 
 
 def test_channel_mode_is_a_closed_set(sql):
+    """처음 만들 때는 옛 값까지 받는다 — 남은 shadow 행이 있는 DB 에서도 적용돼야 한다."""
     found = re.search(r"mode\s+text[^,]*?CHECK\s*\(([^)]*)\)", sql, re.S)
 
     assert found
     assert set(re.findall(r"'(\w+)'", found.group(1))) == {
         "off", "shadow", "active", "paused"
     }
+
+
+def _shadow_guard(sql: str, table: str) -> str:
+    """`shadow` 를 CHECK 에서 빼는 가드 블록(B-99 2단계 D5)."""
+    found = re.search(
+        rf"DO \$\$\s*DECLARE\s+shadow_rows bigint;\s*BEGIN\s*LOCK TABLE {table}\b"
+        r"(.*?)END\s*\$\$;",
+        sql, re.S,
+    )
+    assert found, f"{table} 의 shadow 가드 블록이 없다"
+    return found.group(1)
+
+
+def test_shadow_leaves_the_mode_check_only_when_no_row_holds_it(sql):
+    """남은 행이 있는데 CHECK 를 바꾸면 스키마 적용 전체가 실패한다(B-99 2단계 D5)."""
+    body = _shadow_guard(sql, "archive_channel_mode")
+
+    count = body.index("WHERE mode = 'shadow'")
+    bail = body.index("RETURN;")
+    drop = body.index("DROP CONSTRAINT IF EXISTS archive_channel_mode_mode_check")
+    add = body.index("ADD CONSTRAINT archive_channel_mode_mode_check")
+    assert count < bail < drop < add
+    assert "IF shadow_rows > 0 THEN" in body
+    assert "RAISE NOTICE" in body and "RAISE EXCEPTION" not in body
+    narrowed = re.search(r"ADD CONSTRAINT archive_channel_mode_mode_check\s+CHECK \(([^)]*)\)",
+                         body)
+    assert narrowed
+    assert set(re.findall(r"'(\w+)'", narrowed.group(1))) == {"off", "active", "paused"}
+
+
+def test_the_ingest_ack_written_to_check_keeps_shadow_for_history(sql):
+    """과거 행 때문에 `written_to` 의 shadow 는 그대로 둔다(D5)."""
+    assert "CHECK (written_to IN ('', 'shadow', 'live'))" in sql
 
 
 # --- 첨부가 안 끝났으면 ready 가 아니다 --------------------------------------
@@ -431,9 +465,11 @@ def test_the_membership_function_is_dropped_before_it_is_recreated(sql):
 
 
 def test_the_membership_function_never_stores_shadow(sql):
-    """shadow 는 요청값으로만(배포 순서 호환) 받고 저장하지 않는다."""
+    """shadow 는 저장하지도 요청값으로 받지도 않는다(B-99 2단계)."""
     body = _membership_function(sql)
-    assert "'shadow'" in body  # 요청값 별칭
+    assert "IF p_requested_mode = 'shadow' THEN" in body
+    assert "shadow 수집은 폐기됐습니다 (B-99)" in body
+    assert "p_requested_mode NOT IN ('active', 'paused')" in body
     for assignment in re.findall(r"next_mode := '([a-z]+)'", body):
         assert assignment != "shadow"
     insert = re.search(r"INSERT INTO archive_channel_mode.*?VALUES(.*?);", body, re.S)
@@ -480,6 +516,17 @@ def test_existing_collecting_channels_are_treated_as_joined(sql):
     body = " ".join(found.group(1).split())
     assert "membership = 'unknown'" in body
     assert "mode IN ('shadow', 'active')" in body
+
+
+def test_events_are_marked_only_for_active_channels(sql):
+    """옛 shadow 행은 수집하지 않는다(refused). 이벤트 시각을 적으면 수집 중으로 보인다."""
+    found = re.search(
+        r"FUNCTION archiver_mark_channel_event\(.*?\$\$(.*?)\$\$;", sql, re.S,
+    )
+    assert found
+    body = found.group(1)
+    assert "AND mode = 'active'" in body
+    assert "'shadow'" not in body
 
 
 def test_the_channel_name_is_not_a_key(sql):

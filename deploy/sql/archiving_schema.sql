@@ -31,13 +31,14 @@ BEGIN;
 -- 늘릴 때마다 SSH 가 필요하고, 그건 쓸 수 있는 사람이 한 명이라는 뜻이다.
 --
 -- mode 와 writer_owner 를 **따로** 두는 이유: 「아카이빙 봇이 이 채널을 보고 있다」
--- 와 「이 채널의 원문을 누가 쓴다」 는 다른 사실이다. shadow 에서는 보고 있지만
--- 쓰지 않는다. 한 칸으로 합치면 그림자 기간을 표현할 수 없다.
+-- 와 「이 채널의 원문을 누가 쓴다」 는 다른 사실이다. paused 에서는 주인을 기억하지만
+-- 아무도 쓰지 않는다. 한 칸으로 합치면 멈춘 채널이 어느 쪽 몫인지 표현할 수 없다.
 CREATE TABLE IF NOT EXISTS archive_channel_mode (
     workspace       text NOT NULL,
     channel_id      text NOT NULL,
     -- off      Archiver 는 수집하지 않고 Master 가 운영 원문을 쓴다
-    -- shadow   수집해서 **그림자 경로**에 쓴다. 운영 아카이브는 건드리지 않는다
+    -- shadow   **과거값**(B-99 2단계 D2). 그림자 수집은 폐기됐다 — 새로 적지 않고,
+    --          남은 행이 0 이 되면 아래 가드 블록이 CHECK 에서 뺀다
     -- active   수집해서 운영 아카이브에 쓴다
     -- paused   잠시 멈춘다. 재개하면 watermark 뒤부터 이어 받는다
     mode            text NOT NULL DEFAULT 'off'
@@ -133,6 +134,33 @@ ALTER TABLE archive_channel_mode ADD CONSTRAINT archive_channel_mode_cutover_pre
 CREATE INDEX IF NOT EXISTS archive_channel_mode_active
     ON archive_channel_mode (workspace, mode);
 
+-- `shadow` 를 모드 CHECK 에서 뺀다 — **남은 행이 0 일 때만**(B-99 2단계 D5).
+--
+-- 행이 남아 있는데 CHECK 를 바꾸면 스키마 적용 전체가 실패하고, 그 실패는 다른 표의
+-- 변경까지 되돌린다. 그래서 남아 있으면 NOTICE 만 남기고 그대로 둔다. 확인:
+-- `deploy/checks/archiver_no_shadow_channels.sql`. 멤버십 동기화가 옛 행을 `active`
+-- 로 올린 뒤 다시 적용하면 그때 빠진다.
+--
+-- 재적용해도 안전하다 — 매번 같은 이름으로 지우고 같은 정의로 만든다. 세는 순간과
+-- 바꾸는 순간 사이에 shadow 행이 생기지 않게 표를 잠근다.
+DO $$
+DECLARE
+    shadow_rows bigint;
+BEGIN
+    LOCK TABLE archive_channel_mode IN SHARE ROW EXCLUSIVE MODE;
+    SELECT count(*) INTO shadow_rows FROM archive_channel_mode WHERE mode = 'shadow';
+    IF shadow_rows > 0 THEN
+        RAISE NOTICE 'archive_channel_mode: shadow 행 %건이 남아 mode CHECK 를 그대로 둡니다'
+                     ' (deploy/checks/archiver_no_shadow_channels.sql)', shadow_rows;
+        RETURN;
+    END IF;
+    ALTER TABLE archive_channel_mode
+        DROP CONSTRAINT IF EXISTS archive_channel_mode_mode_check;
+    ALTER TABLE archive_channel_mode ADD CONSTRAINT archive_channel_mode_mode_check
+        CHECK (mode IN ('off', 'active', 'paused'));
+END
+$$;
+
 
 -- ---------------------------------------------------------------------------
 -- 2. 설정 변경 감사 — **지워지지 않는다**
@@ -214,8 +242,9 @@ $$;
 --   5. Master 몫 + 스위치 꺼짐 → `off`(Master 가 씀)
 --   6. 신규 + 스위치 켜짐 → `active`·`archiver`·새 좌표. 꺼짐 → 등록 안 함(`deferred`)
 --
--- `shadow` 는 **저장하지 않는다.** 요청값 `shadow` 는 배포 순서(스키마 → 코드) 동안 옛
--- 코드가 보낼 수 있어 받아 주되 `active` 와 같게 다룬다. 결과 모드를 돌려준다.
+-- `shadow` 는 **저장하지도 받지도 않는다**(B-99 2단계). 옛 코드가 보내던 요청값 별칭은
+-- 거두었다 — 동기화 코드(`channel_membership.apply_plan`)가 먼저 거절하고, 여기서도
+-- 거절한다. 결과 모드를 돌려준다.
 --
 -- 반환형이 void → text 로 바뀌어 CREATE OR REPLACE 로는 못 바꾼다. 재적용이 안전하도록
 -- 매번 지우고 만든다(권한은 이 파일 끝 §8 이 같은 트랜잭션에서 다시 준다).
@@ -249,7 +278,10 @@ BEGIN
     IF coalesce(p_workspace, '') = '' OR coalesce(p_channel_id, '') = '' THEN
         RAISE EXCEPTION 'workspace and channel_id are required';
     END IF;
-    IF p_requested_mode NOT IN ('active', 'paused', 'shadow') THEN
+    IF p_requested_mode = 'shadow' THEN
+        RAISE EXCEPTION 'shadow 수집은 폐기됐습니다 (B-99): membership sync cannot request mode shadow';
+    END IF;
+    IF p_requested_mode IS NULL OR p_requested_mode NOT IN ('active', 'paused') THEN
         RAISE EXCEPTION 'membership sync cannot request mode %', p_requested_mode;
     END IF;
     IF p_membership NOT IN ('joined', 'left') THEN
@@ -382,7 +414,8 @@ BEGIN
        AND channel_id = p_channel_id
        AND membership = 'joined'
        AND operator_hold = false
-       AND mode IN ('shadow', 'active');
+       -- 옛 shadow 행은 수집하지 않으므로(refused) 이벤트도 적지 않는다(B-99).
+       AND mode = 'active';
     GET DIAGNOSTICS affected = ROW_COUNT;
     RETURN affected = 1;
 END
@@ -786,7 +819,7 @@ COMMENT ON TABLE bot_conversation_audit IS
 -- `tybot_archiver` 에게 주지 않는 것:
 -- - DELETE (어디에도). 아카이빙 봇은 지우는 일을 하지 않는다
 -- - 설정 표의 UPDATE. 모드를 바꾸는 것은 콘솔의 일이다 — 봇이 자기 모드를
---   바꿀 수 있으면 shadow 가 안전장치가 아니게 된다
+--   바꿀 수 있으면 채널 모드·writer 주인이 안전장치가 아니게 된다
 -- - 감사 표의 UPDATE·DELETE. append-only 가 아니면 감사가 아니다
 -- - 시크릿 표 일체
 DO $$
