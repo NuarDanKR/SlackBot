@@ -126,6 +126,19 @@ def answer_bot(row: dict) -> str:
     return str(row.get(BOT_KEY) or "tybot")
 
 
+def search_path(row: dict) -> list[str]:
+    """이 질문이 근거를 찾은 경로(B-93). 검색 순서대로의 코드 목록이다.
+
+    값은 `exhaustive|index|scan_no_index|scan_index_empty` 같은 코드뿐이라 본문이 가려진
+    VIP 기록에서도 그대로 보여 준다. 이 칸이 생기기 전의 옛 기록과 손으로 고친 줄은
+    빈 목록이다 — 화면은 그것을 「기록 없음」 으로 말한다.
+    """
+    value = row.get("search_path")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item][:16]
+
+
 #: 본문을 가린 VIP 기록에서도 보여 주는 작업 기록 키 — 처리 경로만, 내용은 없다.
 _TRACE_KEYS = (
     "task_index", "task_kind", "required_capability", "routing_confidence",
@@ -342,6 +355,7 @@ def detail(row: dict, feedback: list[dict], *, show_body: bool = True) -> dict:
         "reason": str(row.get("reason") or ""),
         "scope": str(row.get("scope") or ""),
         "hits": int(row.get("hits") or 0),
+        "searchPath": search_path(row),
         "citations": list(row.get("citations") or []),
         "model": str(row.get("model") or "-"),
         "costUsd": float(row.get("cost_usd") or 0),
