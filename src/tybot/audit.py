@@ -32,7 +32,12 @@ THREAD_TURNS = 10
 # **무제한으로 두지 않는다.** 턴 수와 시간창이 없으면 오래된 주제가 새 질문에
 # 섞이고, 토큰이 대화 길이에 비례해 계속 는다. 끊는 판단 자체는 분해기(LLM)가
 # `reference_mode` 로 하고, 이 값은 그 판단에 보여 줄 범위의 상한일 뿐이다.
-DM_CONTEXT_MINUTES = 720
+#
+# 2026-11-26 오너 결정: 12시간 → **7일 · 20문답.** 며칠 걸친 업무를 DM 에서 이어 묻는다.
+# 넘기는 것은 질문·주제어·근거 개수뿐이라 토큰 증가는 작고, 각 문답에 「N일 전」 을
+# 붙여 분해기가 오래된 주제를 새 질문에 잘못 잇지 않게 한다.
+DM_CONTEXT_MINUTES = 7 * 24 * 60
+DM_TURNS = 20
 # 참조가 없는 **구형 레코드**에서만 싣는 답변 조각. 지칭어 해석 전용이다.
 LEGACY_ANSWER_CHARS = 600
 
@@ -485,7 +490,7 @@ class QALog:
         channel_id: str,
         user: str,
         *,
-        limit: int = THREAD_TURNS,
+        limit: int = DM_TURNS,
         minutes: int = DM_CONTEXT_MINUTES,
     ) -> list[dict]:
         """명시적인 DM 후속 질문에 쓸 최근 **본인 문답 좌표**를 시간순으로 돌려준다.

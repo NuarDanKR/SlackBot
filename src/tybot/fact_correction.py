@@ -30,7 +30,9 @@ from typing import Any
 from .evidence_refs import EvidenceRef
 from .sensitive_mask import mask_sensitive
 
-TTL_DAYS = 90
+#: `None` = 영구(2026-11-26 오너 결정). 원문이 바뀌거나 권한이 사라지면 좌표 재개방에서
+#: 빠지므로 옛 정정이 새 판 문서에 붙지 않는다. 철회는 본인·콘솔.
+TTL_DAYS: int | None = None
 MAX_VALUE_CHARS = 40
 MAX_VALUE_WORDS = 3
 MAX_NAME_VALUE_CHARS = 20
@@ -375,7 +377,7 @@ class Store:
                     sorted({*types, *subject_types, *before_types, *after_types}),
                     revision,
                     current,
-                    current + timedelta(days=TTL_DAYS),
+                    current + timedelta(days=TTL_DAYS) if TTL_DAYS else None,
                 ),
             )
             row = cur.fetchone() or {}
@@ -383,14 +385,35 @@ class Store:
         return int(row.get("id") or 0)
 
     def active(
-        self, workspace: str, *, now: datetime | None = None, limit: int = 500
+        self,
+        workspace: str,
+        *,
+        now: datetime | None = None,
+        limit: int = 500,
+        question: str | None = None,
     ) -> list[FactCorrection]:
+        """활성 정정. `question` 을 주면 그 질문에 걸리는 것만 DB 에서 먼저 고른다.
+
+        정정은 영구라 쌓인다. 최근 500 건만 읽고 거르면 오래된 관련 정정이 오류 없이
+        빠진다. 거르는 조건은 `relevant()` 와 같다(검색 낱말이 질문 안에 있다).
+        """
+        params: list[Any] = [workspace.strip(), now or datetime.now(UTC)]
+        relevance = ""
+        if question is not None:
+            relevance = (
+                " AND EXISTS (SELECT 1 FROM unnest(search_terms) t"
+                " WHERE char_length(t)>1 AND position(lower(t) in lower(%s))>0)"
+            )
+            params.append(question)
+        params.append(max(1, min(limit, 500)))
         with self.conn.cursor() as cur:
             cur.execute(
-                """SELECT * FROM fact_correction
-                WHERE workspace=%s AND revoked_at IS NULL AND expires_at>%s
-                ORDER BY created_at DESC, id DESC LIMIT %s""",
-                (workspace.strip(), now or datetime.now(UTC), max(1, min(limit, 500))),
+                "SELECT * FROM fact_correction"
+                " WHERE workspace=%s AND revoked_at IS NULL"
+                " AND (expires_at IS NULL OR expires_at>%s)"
+                + relevance
+                + " ORDER BY created_at DESC, id DESC LIMIT %s",
+                params,
             )
             return [_row(dict(row)) for row in cur.fetchall()]
 
@@ -399,7 +422,7 @@ class Store:
             cur.execute(
                 """SELECT * FROM fact_correction
                 WHERE workspace=%s AND corrector_id=%s AND revoked_at IS NULL
-                  AND expires_at>now()
+                  AND (expires_at IS NULL OR expires_at>now())
                 ORDER BY created_at DESC, id DESC LIMIT 50""",
                 (workspace.strip(), corrector_id.strip()),
             )

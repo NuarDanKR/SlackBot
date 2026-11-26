@@ -116,7 +116,8 @@ def test_context_uses_exact_user_scope_and_callers_current_evidence_check():
         )
 
     assert got == expected
-    store_type.return_value.active.assert_called_once_with("tyit", "U1")
+    # 영구 기억이 쌓여도 관련된 것이 읽히도록 질문으로 DB 에서 먼저 거른다(2026-11-26).
+    store_type.return_value.active.assert_called_once_with("tyit", "U1", question="확정 금액")
     build.assert_called_once_with(
         [claim],
         question="확정 금액",

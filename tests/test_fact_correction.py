@@ -133,7 +133,7 @@ def test_saved_correction_keeps_who_what_and_values_and_expires():
     assert "INSERT INTO fact_correction" in sql
     assert params[1:6] == ("U9", "홍길동", "김해외동 기성금 얼마야", "15억", "12억")
     assert params[7] == "15억→12억"
-    assert params[-1] == datetime(2026, 11, 20, tzinfo=UTC) + fc.timedelta(days=fc.TTL_DAYS)
+    assert params[-1] is None  # 영구(2026-11-26 오너 결정)
     assert conn.commits == 1
 
 
@@ -594,3 +594,48 @@ def test_question_text_is_shown_only_in_the_channel_where_it_was_asked():
 )
 def test_before_and_after_must_share_a_value_shape(text):
     assert fc.parse_change(text) is None
+
+
+# --- 영구 보관(2026-11-26 오너 결정) ------------------------------------------------
+
+
+def test_corrections_and_terms_and_claims_never_expire_but_styles_do():
+    assert fc.TTL_DAYS is None
+    assert memory.TTL_DAYS[memory.TERM] is None
+    assert memory.TTL_DAYS[memory.CLAIM] is None
+    assert memory.TTL_DAYS[memory.PREFERENCE] == 180
+    assert memory.TTL_DAYS[memory.INSTRUCTION] == 180
+
+
+def test_correction_lookup_filters_by_question_in_sql_before_the_limit():
+    conn = Conn(rows=[])
+
+    fc.Store(conn).active("tyit", question="김해외동 기성금")
+
+    sql, params = conn.cursor_obj.executed[0]
+    assert "expires_at IS NULL OR" in sql
+    assert "unnest(search_terms)" in sql and "position(lower(t) in lower(%s))" in sql
+    assert "김해외동 기성금" in params
+    assert sql.index("unnest") < sql.index("LIMIT")
+
+
+def test_personal_lookup_filters_terms_and_claims_by_question_in_sql():
+    conn = Conn(rows=[])
+
+    memory.Store(conn).active("tyit", "U1", question="기성 얼마야")
+
+    sql, params = conn.cursor_obj.executed[0]
+    assert "kind IN ('preference','instruction')" in sql
+    assert "split_part(body,'=',1)" in sql
+    assert list(params[:2]) == ["tyit", "U1"]
+    assert params.count("기성 얼마야") == 2
+
+
+def test_a_term_is_injected_only_when_the_question_uses_it():
+    term = memory.UserMemory(
+        id=4, workspace="tyit", user_id="U1", kind=memory.TERM,
+        body="기성=기성금", normalized="기성=기성금",
+    )
+
+    assert "용어" in memory.build_context([term], question="이번 달 기성 얼마야").prompt
+    assert memory.build_context([term], question="공정률 알려줘").prompt == ""

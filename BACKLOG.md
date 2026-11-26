@@ -700,6 +700,16 @@ rhwp PDF 와 두 벌의 근거가 될 수 있었다. 정본을 DB 한 행(`conve
       철회: 본인 `정정 삭제 번호`, 관리자 콘솔 「질문·답변 원본 › 사람이 남긴 정정」. 설계 §8.2
 - [ ] 서버: `sudo /opt/tybot/deploy/apply-schema.sh` 로 `fact_correction_schema.sql` 적용 → 배포
 - [ ] 운영 확인: 정정 → 다른 사람 같은 질문에 표시 · 권한 없는 사람 미표시 · 철회 후 미표시
+- [x] 오너 결정(2026-11-26) · Claude: **사실·용어 정정 영구 보관**(`fact_correction`·`term`·`claim`
+      `expires_at IS NULL`). 쌓여도 읽히도록 질문으로 DB 에서 먼저 거른다. 퇴사자 정정은 그대로 표시.
+      설계 [personal-memory-threat-model.md](docs/design/personal-memory-threat-model.md) §9
+- [x] 오너 결정(2026-11-26) · Claude: **DM 맥락 12시간 → 7일 · 20문답**, 분해기 맥락에
+      `[문답 N] (N일 전)`, `reference_turn` 으로 직전이 아닌 문답 지목.
+      설계 [thread-follow-up-evidence.md](docs/design/thread-follow-up-evidence.md)
+- [ ] 서버: `sudo /opt/tybot/deploy/apply-schema.sh` 재적용(만료 NOT NULL 해제·기존 행 영구화)
+- [ ] 정정자 이름 보존 기간을 `archive_retention_policy` 로 콘솔에서 정하게 하기(지금 보존
+      집행은 파일 단위 — DB 행 집행 신설 필요). 기본은 영구
+- [ ] 2단계 검토: 7일 밖 DM 문답 중 같은 주제어인 것 최대 3건 추가(운영 오연결 관찰 후)
 
 ---
 

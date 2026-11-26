@@ -809,3 +809,13 @@ def test_the_site_comparison_question_survives_a_truncated_first_try():
     assert p.calls == 2
     assert p.caps == [intent.PLANNER_MAX_TOKENS, intent.PLANNER_RETRY_MAX_TOKENS]
     assert [t.kind for t in tasks] == ["search"]
+
+
+def test_reference_turn_is_kept_only_for_followups_and_sane_numbers():
+    from tybot.intent import _reference_turn
+
+    assert _reference_turn({"reference_turn": 3}, "prior_turn") == 3
+    assert _reference_turn({"reference_turn": "2"}, "prior_topic") == 2
+    assert _reference_turn({"reference_turn": 3}, "none") == 0
+    for bad in (0, -1, 999, True, "x", None):
+        assert _reference_turn({"reference_turn": bad}, "prior_turn") == 0

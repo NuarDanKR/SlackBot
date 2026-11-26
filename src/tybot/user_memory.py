@@ -41,7 +41,9 @@ MAX_PROMPT_BYTES = 1200
 MAX_INSTRUCTION_CHARS = 120
 MAX_INSTRUCTIONS = 3
 MAX_SEARCH_TERMS = 8
-TTL_DAYS = {PREFERENCE: 180, TERM: 90, CLAIM: 30, INSTRUCTION: 180}
+#: 만료 일수. `None` 은 **영구**다(2026-11-26 오너 결정 — 사실·용어 정정은 기간으로
+#: 사라지지 않는다). 철회는 본인 `기억 삭제`, 원문이 바뀌면 claim 은 재검증에서 빠진다.
+TTL_DAYS: dict[str, int | None] = {PREFERENCE: 180, TERM: None, CLAIM: None, INSTRUCTION: 180}
 
 PREFERENCE_TEXT = {
     "format.canvas=prefer": "Canvas 문서로 받기를 선호함",
@@ -373,7 +375,8 @@ class Store:
             ref = EvidenceRef.from_json(raw_ref)
             if ref is not None:
                 refs.append(ref.to_json())
-        expires = current + timedelta(days=TTL_DAYS[decision.kind])
+        ttl = TTL_DAYS[decision.kind]
+        expires = current + timedelta(days=ttl) if ttl else None
         with self.conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO user_memory
@@ -410,16 +413,34 @@ class Store:
         *,
         now: datetime | None = None,
         limit: int = 50,
+        question: str | None = None,
     ) -> list[UserMemory]:
+        """본인 활성 기억. `question` 을 주면 **그 질문에 걸리는 것만** DB 에서 먼저 고른다.
+
+        용어·사실 정정은 영구라 쌓인다(2026-11-26). 최근 N 건만 읽고 거르면 오래된
+        정정은 읽히지도 않고 사라진다 — 오류 없이. 그래서 거르는 일을 SQL 이 먼저 한다.
+        선호·요청은 질문과 무관하게 늘 후보다.
+        """
         current = now or datetime.now(UTC)
+        params: list[Any] = [workspace.strip(), user_id.strip(), current]
+        relevance = ""
+        if question is not None:
+            relevance = (
+                " AND (kind IN ('preference','instruction')"
+                " OR (kind='term' AND position(lower(split_part(body,'=',1)) in lower(%s))>0)"
+                " OR (kind='claim' AND EXISTS (SELECT 1 FROM unnest(search_terms) t"
+                " WHERE char_length(t)>1 AND position(lower(t) in lower(%s))>0)))"
+            )
+            params += [question, question]
+        params.append(max(1, min(limit, 200)))
         with self.conn.cursor() as cur:
             cur.execute(
-                """SELECT * FROM user_memory
-                WHERE workspace=%s AND user_id=%s AND revoked_at IS NULL
-                  AND expires_at>%s
-                ORDER BY COALESCE(last_used_at, created_at) DESC, id DESC
-                LIMIT %s""",
-                (workspace.strip(), user_id.strip(), current, max(1, min(limit, 100))),
+                "SELECT * FROM user_memory"
+                " WHERE workspace=%s AND user_id=%s AND revoked_at IS NULL"
+                " AND (expires_at IS NULL OR expires_at>%s)"
+                + relevance
+                + " ORDER BY COALESCE(last_used_at, created_at) DESC, id DESC LIMIT %s",
+                params,
             )
             return [_memory(dict(row)) for row in cur.fetchall()]
 
@@ -453,7 +474,7 @@ class Store:
             cur.execute(
                 """UPDATE user_memory SET last_used_at=now(), use_count=use_count+1
                 WHERE id=ANY(%s) AND workspace=%s AND user_id=%s
-                  AND revoked_at IS NULL AND expires_at>now()""",
+                  AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())""",
                 (selected, workspace, user_id),
             )
         self.conn.commit()
@@ -501,6 +522,10 @@ def build_context(
             instructions += 1
         elif memory.kind == TERM and "=" in memory.body:
             source, target = memory.body.split("=", 1)
+            # 용어는 영구라 쌓인다. 질문에 그 낱말이 있을 때만 싣는다 — 아니면 상한 5건을
+            # 무관한 용어가 차지한다.
+            if source.strip().casefold() not in normalized_question:
+                continue
             if _SAFE_TERM_RE.fullmatch(source) and _SAFE_TERM_RE.fullmatch(target):
                 line = f"용어: {source!r}는 {target!r}를 뜻함"
         elif memory.kind == CLAIM:

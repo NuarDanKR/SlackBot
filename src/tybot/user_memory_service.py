@@ -138,7 +138,7 @@ class UserMemoryService:
             with self._connect() as connection:
                 if connection is None:
                     return MemoryContext()
-                memories = Store(connection).active(workspace, user_id)
+                memories = Store(connection).active(workspace, user_id, question=question)
                 result = build_context(
                     memories,
                     question=question,
@@ -329,7 +329,7 @@ class FactCorrectionService:
                 if connection is None:
                     return CorrectionContext()
                 chosen = select(
-                    CorrectionStore(connection).active(workspace),
+                    CorrectionStore(connection).active(workspace, question=question),
                     question=question,
                     visible=visible,
                 )

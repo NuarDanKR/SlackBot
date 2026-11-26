@@ -23,11 +23,17 @@ CREATE TABLE IF NOT EXISTS user_memory (
     created_at        timestamptz NOT NULL DEFAULT now(),
     last_used_at      timestamptz,
     use_count         integer NOT NULL DEFAULT 0 CHECK (use_count >= 0),
-    expires_at        timestamptz NOT NULL,
+    -- NULL = 영구(2026-11-26: 용어·사실 정정). 선호·요청은 만료일이 있다.
+    expires_at        timestamptz,
     revoked_at        timestamptz,
     revoked_by        text NOT NULL DEFAULT '',
     CHECK (revoked_at IS NULL OR btrim(revoked_by) <> '')
 );
+
+-- 이미 만든 표: 만료를 영구로 풀고, 용어·사실 정정의 기존 행을 영구로 바꾼다(멱등).
+ALTER TABLE user_memory ALTER COLUMN expires_at DROP NOT NULL;
+UPDATE user_memory SET expires_at = NULL
+    WHERE kind IN ('term', 'claim') AND revoked_at IS NULL AND expires_at IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS user_memory_unique_live
     ON user_memory (workspace, user_id, kind, normalized)

@@ -24,7 +24,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 from .. import (
     canvas_harness,
@@ -485,6 +485,24 @@ def _correction_reply(result) -> str:
     return _CORRECTION_REASON_TEXT.get(result.reason, "")
 
 
+def _turn_age(stamp, now: datetime) -> str:
+    """「방금」·「3시간 전」·「2일 전」. 시각을 못 읽으면 「시점 미상」."""
+    try:
+        recorded = datetime.fromisoformat(str(stamp or ""))
+    except ValueError:
+        return "시점 미상"
+    if recorded.tzinfo is None:
+        recorded = recorded.replace(tzinfo=timezone(timedelta(hours=9)))
+    minutes = max(0, int((now - recorded).total_seconds() // 60))
+    if minutes < 5:
+        return "방금"
+    if minutes < 60:
+        return f"{minutes}분 전"
+    if minutes < 24 * 60:
+        return f"{minutes // 60}시간 전"
+    return f"{minutes // (24 * 60)}일 전"
+
+
 def _slack_error_code(exc: Exception) -> str:
     """Slack API 오류 코드(`invalid_arguments` 등). 모르면 예외 이름."""
     response = getattr(exc, "response", None)
@@ -888,12 +906,16 @@ class WorkspaceBot:
         """
         blocks: list[str] = []
         used = 0
-        for turn in reversed(turns):
+        now = datetime.now(UTC)
+        for number, turn in reversed(list(enumerate(turns, start=1))):
             if str(turn.get("intent_kind") or "") == "feedback":
                 head = "사용자 정정(검색어 해석용, 사실 근거 아님)"
             else:
                 head = "이전 질문"
-            bits = [f"{head}: {turn.get('question', '')}".strip()]
+            # 번호는 `reference_turn` 으로 지목할 자리, 시점은 오래된 주제를 새 질문에
+            # 잘못 잇지 않게 하는 단서다(2026-11-26 DM 7일 확대).
+            label = f"[문답 {number}] ({_turn_age(turn.get('ts'), now)})"
+            bits = [f"{label} {head}: {turn.get('question', '')}".strip()]
             topics = [str(t) for t in (turn.get("subject_terms") or []) if str(t).strip()]
             if topics:
                 bits.append(f"이전 주제: {', '.join(topics[:6])}")

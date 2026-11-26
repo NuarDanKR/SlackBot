@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS fact_correction (
     mask_types        text[] NOT NULL DEFAULT '{}',
     mask_revision     text NOT NULL DEFAULT '',
     created_at        timestamptz NOT NULL DEFAULT now(),
-    expires_at        timestamptz NOT NULL,
+    -- NULL = 영구(2026-11-26 오너 결정).
+    expires_at        timestamptz,
     last_shown_at     timestamptz,
     show_count        integer NOT NULL DEFAULT 0 CHECK (show_count >= 0),
     revoked_at        timestamptz,
@@ -34,6 +35,11 @@ CREATE TABLE IF NOT EXISTS fact_correction (
     revoke_reason     text NOT NULL DEFAULT '' CHECK (char_length(revoke_reason) <= 300),
     CHECK (revoked_at IS NULL OR btrim(revoked_by) <> '')
 );
+
+-- 이미 만든 표: 만료를 영구로 풀고 기존 행도 영구로 바꾼다(멱등).
+ALTER TABLE fact_correction ALTER COLUMN expires_at DROP NOT NULL;
+UPDATE fact_correction SET expires_at = NULL
+    WHERE revoked_at IS NULL AND expires_at IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS fact_correction_unique_live
     ON fact_correction (workspace, source_record_id, corrector_id, normalized)

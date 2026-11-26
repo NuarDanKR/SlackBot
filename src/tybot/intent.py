@@ -370,6 +370,21 @@ REFERENCE_STOPWORDS = frozenset(
 )
 
 REFERENCE_MODES = ("none", "prior_turn", "prior_topic", "prior_attachments")
+MAX_REFERENCE_TURN = 50
+
+
+def _reference_turn(item: dict, reference_mode: str) -> int:
+    """LLM 이 지목한 문답 번호. 이어 가지 않거나 모양이 틀리면 0(코드가 고른다)."""
+    if reference_mode == "none":
+        return 0
+    raw = item.get("reference_turn")
+    if isinstance(raw, bool):
+        return 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return value if 1 <= value <= MAX_REFERENCE_TURN else 0
 
 SINGULAR_FOLLOW_UP_RE = re.compile(
     r"(하나(?:의|인)?\s*문서|한\s*개(?:의)?\s*문서|그\s*문서|해당\s*문서|"
@@ -392,6 +407,9 @@ class Intent:
     # 질문의 근거는 「현재 권한 ∩ 현재 채널 ∩ 이전 답변의 원문 참조 ∩ 현재 주제」
     # 의 교집합뿐이다. 복원에 실패해도 채널 전체로 되돌아가지 않는다.
     reference_mode: str = "none"  # none | prior_turn | prior_topic | prior_attachments
+    # 이어 가는 문답 번호(맥락의 `[문답 N]`, 1부터). 0 은 코드가 고른다(직전·주제 일치).
+    # **범위를 넓히지 않는다** — 같은 스레드·DM 창 안의 번호만 통과한다(`thread_followup`).
+    reference_turn: int = 0
     format_only: bool = False
     topic_terms: list[str] = field(default_factory=list)
     include_attachment_status: bool = False
@@ -693,6 +711,9 @@ PLANNER_PROMPT = CLASSIFIER_PROMPT.replace(
 - `confidence`: 그 선택의 확신도 0.0~1.0.
 - `reference_mode`: 이전 스레드의 원문 근거를 이어 쓸 범위. 이전 스레드가 없으면
   반드시 `none`. `none|prior_turn|prior_topic|prior_attachments` 중 하나.
+- `reference_turn`: 이전 대화의 `[문답 N]` 중 이 질문이 잇는 번호. **직전 문답이 아니고
+  어느 것인지 분명할 때만** 쓴다. 오래된 문답(며칠 전)은 질문이 분명히 그것을 가리킬
+  때만 잇는다 — 새 주제면 `reference_mode` 를 `none` 으로 둔다.
 - `asks_about_our_sources`: 업무 내용이 아니라 TYBot이 Canvas·파일·폴더·링크 같은
   자료를 근거로 읽는지 묻는 질문이면 true. 이때 kind는 help.
 
@@ -741,6 +762,7 @@ PLANNER_PROMPT = CLASSIFIER_PROMPT.replace(
   같은 문장을 두 번 쓰지 않는다.
 - `research_question`: 뺄 산출물 지시가 **있을 때만.** 없으면 생략한다.
 - `reference_mode`: `none` 이 아닐 때만.
+- `reference_turn`: 직전이 아닌 문답을 이을 때만.
 - `asks_about_our_sources`: `true` 일 때만.
 - `artifact_delivery`·`artifact_operation`·`artifact_layout`·`artifact_title`:
   산출물 요청이 있을 때만.
@@ -1302,6 +1324,7 @@ def plan(
                     routing_confidence=_clamp_confidence(item.get("confidence")),
                     planner_model=str(getattr(resp, "model", "") or ""),
                     reference_mode=reference_mode,
+                    reference_turn=_reference_turn(item, reference_mode),
                     topic_terms=(terms[:8] if reference_mode == "prior_topic" else []),
                     # **가리킴과 물음은 다르다.** `prior_attachments` 는 「이전 턴의
                     # 그 첨부들을 대상으로」 라는 **범위**일 뿐, 「첨부 상태를

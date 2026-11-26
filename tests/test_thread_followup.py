@@ -811,3 +811,46 @@ def test_a_topic_with_no_matching_evidence_does_not_pull_in_other_subjects(
     ans = eng.respond(intent.question, ctx, intent, followup=resolved)
     assert ans.reason == "no_hits"
     assert "미수금액" not in ans.text
+
+
+def test_the_planner_can_point_at_an_older_turn_by_number(world, engine):
+    """「3턴 전 그 자료」 — 분해기가 `[문답 N]` 을 지목하면 직전이 아니라 그 문답을 잇는다."""
+    eng, _ = engine
+    ctx = _ctx()
+    first = eng.answer("미수금", ctx, terms=["미수금"])
+    older = _turn(first, question="미수금", record_id="older")
+    older["editing_text"] = "older answer"
+    latest = _turn(first, question="미수금 다시", record_id="latest")
+    latest["editing_text"] = "latest answer"
+
+    pointed = _resolver(world).resolve(
+        Intent("search", reference_mode="prior_turn", reference_turn=1), ctx, turns=[older, latest]
+    )
+    default = _resolver(world).resolve(
+        Intent("search", reference_mode="prior_turn"), ctx, turns=[older, latest]
+    )
+    outside = _resolver(world).resolve(
+        Intent("search", reference_mode="prior_turn", reference_turn=9), ctx, turns=[older, latest]
+    )
+
+    assert pointed.parent_record_ids == ["older"] and pointed.editing_text == "older answer"
+    assert default.parent_record_ids == ["latest"]
+    assert outside.parent_record_ids == ["latest"]
+
+
+def test_planner_context_numbers_turns_and_shows_their_age():
+    from datetime import datetime, timedelta, timezone
+
+    from tybot.slack.pilot import WorkspaceBot
+
+    now = datetime.now(timezone(timedelta(hours=9)))
+    turns = [
+        {"question": "자금 현황", "ts": (now - timedelta(days=3)).isoformat()},
+        {"question": "차입금 만기", "ts": (now - timedelta(hours=2)).isoformat()},
+    ]
+
+    text = WorkspaceBot._thread_conversation_context(turns)
+
+    assert "[문답 1] (3일 전) 이전 질문: 자금 현황" in text
+    assert "[문답 2] (2시간 전) 이전 질문: 차입금 만기" in text
+    assert text.index("[문답 1]") < text.index("[문답 2]")

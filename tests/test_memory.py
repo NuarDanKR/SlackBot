@@ -182,3 +182,47 @@ def test_thread_context_is_limited_to_the_same_workspace_channel_and_thread(tmp_
 
     # 구형 레코드(좌표 없음)에만 답변 조각이 실린다 — 지칭어 해석 전용이다.
     assert [(row["question"], row["legacy_answer"]) for row in rows] == [("첫 질문", "첫 답변")]
+
+
+# --- DM 맥락 7일 · 20문답 (2026-11-26 오너 결정) -----------------------------------
+
+
+def _dm_row(question: str, at) -> str:
+    import json
+
+    return json.dumps({
+        "workspace": "pilot", "channel_id": "D1", "user": "U1",
+        "question": question, "ts": at.isoformat(), "record_id": question,
+    }, ensure_ascii=False)
+
+
+def test_dm_context_reaches_back_seven_days_but_not_further(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from tybot.audit import DM_CONTEXT_MINUTES
+
+    now = datetime.now(timezone(timedelta(hours=9)))
+    lines = [
+        _dm_row("8일 전 질문", now - timedelta(days=8)),
+        _dm_row("3일 전 질문", now - timedelta(days=3)),
+        _dm_row("방금 질문", now - timedelta(minutes=1)),
+    ]
+    (tmp_path / f"qa-{now:%Y-%m}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rows = QALog(tmp_path, write_md=False).context_for_dm("pilot", "D1", "U1")
+
+    assert DM_CONTEXT_MINUTES == 7 * 24 * 60
+    assert [row["question"] for row in rows] == ["3일 전 질문", "방금 질문"]
+
+
+def test_dm_context_keeps_the_latest_twenty_turns(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone(timedelta(hours=9)))
+    lines = [_dm_row(f"질문 {i:02d}", now - timedelta(minutes=30 - i)) for i in range(25)]
+    (tmp_path / f"qa-{now:%Y-%m}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rows = QALog(tmp_path, write_md=False).context_for_dm("pilot", "D1", "U1")
+
+    assert len(rows) == 20
+    assert rows[0]["question"] == "질문 05" and rows[-1]["question"] == "질문 24"

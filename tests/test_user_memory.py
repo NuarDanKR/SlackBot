@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -126,7 +126,8 @@ def test_store_masks_before_writing_and_fixes_kind_specific_expiry():
     assert "홍길동" not in repr(params)
     assert "010-1234-5678" not in repr(params)
     assert params[5] == []
-    assert params[-1] == now + timedelta(days=30)
+    # 사실 claim 은 영구다(2026-11-26 오너 결정).
+    assert params[-1] is None
     saved_refs = json.loads(params[9])
     assert saved_refs[0]["kind"] == "archive_line"
     assert "unexpected_text" not in saved_refs[0]
@@ -141,7 +142,7 @@ def test_active_lookup_and_revoke_are_always_scoped_to_exact_user():
     assert store.active("tyit", "U1", now=now) == []
     active_sql, active_params = conn.cursor_obj.calls[-1]
     assert "workspace=%s AND user_id=%s" in active_sql
-    assert active_params[:2] == ("tyit", "U1")
+    assert tuple(active_params[:2]) == ("tyit", "U1")
 
     conn.cursor_obj.rows = [{"id": 3}]
     assert store.revoke(3, workspace="tyit", user_id="U1", actor="U1", now=now)
@@ -246,6 +247,8 @@ def test_schema_has_no_cross_user_or_org_scope_index():
 
     assert "workspace, user_id" in sql
     assert "source_record_id  text NOT NULL" in sql
-    assert "expires_at        timestamptz NOT NULL" in sql
+    # NULL = 영구(용어·사실 정정). 이미 만든 표도 풀린다.
+    assert "expires_at        timestamptz," in sql
+    assert "ALTER COLUMN expires_at DROP NOT NULL" in sql
     assert " scope " not in sql.lower()
     assert "REVOKE ALL ON TABLE user_memory FROM PUBLIC" in sql

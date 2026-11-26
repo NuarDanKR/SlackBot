@@ -148,6 +148,11 @@ class ThreadFollowupResolver:
             selected = matched[-1:] if matched else candidates[-1:]
         else:
             selected = candidates[-1:]
+        # 분해기가 `[문답 N]` 을 지목했으면 그 문답을 잇는다. 번호는 이 스레드·DM 창의
+        # 목록 안에서만 뜻이 있고, 좌표를 남긴 문답일 때만 따른다 — 범위를 넓히지 않는다.
+        pointed = int(getattr(intent, "reference_turn", 0) or 0)
+        if 1 <= pointed <= len(turns) and turns[pointed - 1] in candidates:
+            selected = [turns[pointed - 1]]
 
         refs: list[EvidenceRef] = []
         file_refs: list[AttachmentRef] = []
