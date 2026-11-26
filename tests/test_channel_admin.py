@@ -380,3 +380,15 @@ def test_rows_sum_message_and_attachment_counts():
     ])
     row = rows[0].to_json()
     assert row["messages"] == 5 and row["attachments"] == 1
+
+
+def test_rows_sum_attachment_kinds():
+    rows = _rows([
+        _doc(channel="#수집됨", channel_id="C1", attachments=3,
+             attachmentKinds={"document": 2, "image": 1, "canvas": 0, "other": 0}),
+        _doc(channel="#수집됨", channel_id="C1", attachments=1,
+             attachmentKinds={"document": 0, "image": 0, "canvas": 1, "other": 0}),
+    ])
+    row = rows[0].to_json()
+    assert row["attachmentKinds"] == {"document": 2, "image": 1, "canvas": 1, "other": 0}
+    assert row["attachments"] == 4

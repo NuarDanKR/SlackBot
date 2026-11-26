@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -606,6 +607,37 @@ def _in_period(stamp: str, since: str) -> bool:
 
 #: 첨부 목록 줄 접두사(`attachment_trace.LISTED_PREFIX` 와 같다).
 _LISTED_ATTACHMENT = "[첨부:"
+#: 캔버스 한 개를 여는 줄(`archive/canvas.py`). 본문 줄은 `[캔버스본문:…]`.
+_CANVAS_HEAD = "[캔버스:"
+#: 대화가 아닌 줄 — 첨부·캔버스가 원문에 남긴 표시와 추출 본문.
+_NOT_TALK = ("[첨부", "[캔버스")
+
+_IMAGE_TYPES = frozenset({
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "heic", "heif", "tif", "tiff", "svg",
+})
+_DOCUMENT_TYPES = frozenset({
+    "hwp", "hwpx", "doc", "docx", "pdf", "xls", "xlsx", "xlsm", "csv", "ppt", "pptx",
+    "txt", "text", "md", "markdown", "rtf", "odt", "ods", "odp", "html", "email",
+    "gdoc", "gsheet", "gpres", "quip", "post", "space",
+})
+_KIND_RE = re.compile(r"\(([^()]*)\)\s*$")
+
+
+def attachment_kind(text: str) -> str:
+    """첨부 목록 줄 하나가 어떤 파일인가 — document · image · other.
+
+    줄 모양: `[첨부:상태] 이름 (형식, 240KB) · <링크|원본 파일> · id:F…`
+    형식 칸은 Slack 이 준 filetype(없으면 mimetype)이다. 이름에 괄호가 있어도 맨 끝
+    괄호만 본다.
+    """
+    head = text.split(" · <", 1)[0].split(" · id:", 1)[0].strip()
+    m = _KIND_RE.search(head)
+    kind = (m.group(1).split(",", 1)[0].strip().lower() if m else "")
+    if kind.startswith("image/") or kind in _IMAGE_TYPES:
+        return "image"
+    if kind in _DOCUMENT_TYPES or kind.startswith(("application/pdf", "application/vnd", "text/")):
+        return "document"
+    return "other"
 
 
 def collected_docs(store: ArchiveStore | None = None, *, since: str | None = None) -> list[dict]:
@@ -631,11 +663,19 @@ def collected_docs(store: ArchiveStore | None = None, *, since: str | None = Non
         # - 대화: 첨부가 아닌 줄의 Slack 메시지 수(같은 ts 의 여러 줄은 한 건).
         #   ts 를 못 남긴 옛 줄은 (시각, 화자) 로 묶는다
         # - 첨부: 파일 표시 줄(`[첨부:…]`) 수 = 올라온 파일 수. 추출 실패한 파일도 센다
+        # - 대화에서 캔버스 줄도 뺀다(2026-11-26) — 캔버스 하나가 대화 1건으로 세어졌다
+        # - 첨부 종류: 문서·이미지·캔버스·기타. 리스트(Slack Lists)는 수집하지 않는다
         messages = len({
             ln.message_ts or f"{ln.ts}|{ln.speaker}"
-            for ln in raw if not ln.text.startswith("[첨부")
+            for ln in raw if not ln.text.startswith(_NOT_TALK)
         })
-        files = sum(1 for ln in raw if ln.text.startswith(_LISTED_ATTACHMENT))
+        kinds = {"document": 0, "image": 0, "canvas": 0, "other": 0}
+        for ln in raw:
+            if ln.text.startswith(_LISTED_ATTACHMENT):
+                kinds[attachment_kind(ln.text)] += 1
+            elif ln.text.startswith(_CANVAS_HEAD):
+                kinds["canvas"] += 1
+        files = sum(kinds.values())
         out.append(
             {
                 "workspace": d.workspace,
@@ -652,6 +692,7 @@ def collected_docs(store: ArchiveStore | None = None, *, since: str | None = Non
                 "attachmentLines": attachment,
                 "messages": messages,
                 "attachments": files,
+                "attachmentKinds": kinds,
                 "lastIngestedAt": d.last_ingested,
                 "visibility": d.visibility,
                 "acl": sorted(d.acl),
