@@ -314,6 +314,11 @@ class QARecord:
     # 요청 하나에서 증가한 결정적 원문/첨부 캐시와 LLM 캐시 계수.
     # 본문·질문·파일 경로는 넣지 않고 숫자만 기록한다.
     cache_metrics: dict[str, int | float] = field(default_factory=dict)
+    # 이 질문이 근거를 **어느 경로로 찾았나**(B-93). 검색이 여러 번이면 순서대로 쌓인다.
+    #   exhaustive | index | scan_no_index | scan_index_empty
+    # 코드뿐이다. 질문·본문·파일 경로는 넣지 않는다. 옛 기록에는 이 칸이 없어 빈 목록이고,
+    # 빈 목록은 「검색을 안 했다」가 아니라 「모른다」일 수 있다.
+    search_path: list[str] = field(default_factory=list)
 
     @classmethod
     def build(cls, **kw) -> QARecord:

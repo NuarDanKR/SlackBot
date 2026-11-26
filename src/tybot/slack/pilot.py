@@ -62,7 +62,14 @@ from ..archive.files import (
     attachment_storage,
     stage_attachments,
 )
-from ..archive.store import ArchiveDoc, ArchiveStore, RawLine, SearchHit
+from ..archive.store import (
+    ArchiveDoc,
+    ArchiveStore,
+    RawLine,
+    SearchHit,
+    begin_search_trail,
+    search_trail,
+)
 from ..archive.write_owner import OwnerLookup
 from ..archive.writer import KST
 from ..attachment_trace import confirm_archived
@@ -3434,6 +3441,9 @@ class WorkspaceBot:
         started = time.monotonic()
         cache_before = _bot_cache_metric_snapshot(self)
         event["_tybot_cache_before"] = cache_before
+        # 이 질문의 검색 경로 메모장을 새로 연다(B-93). 같은 작업 줄이 이전 질문을 처리하며
+        # 남긴 값이 이번 기록에 섞이지 않게, 검색이 일어나기 전에 비운다.
+        begin_search_trail()
         if not private_channel_request:
             progress.start()
         try:
@@ -3483,6 +3493,7 @@ class WorkspaceBot:
                 cache_metrics=_cache_metric_delta(
                     cache_before, _bot_cache_metric_snapshot(self)
                 ),
+                search_path=search_trail(),
             )
             self.qa_log.write(rec)
         finally:
@@ -3832,6 +3843,7 @@ class WorkspaceBot:
                 cache_metrics=_cache_metric_delta(
                     cache_before, _bot_cache_metric_snapshot(self)
                 ),
+                search_path=search_trail(),
             )
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
