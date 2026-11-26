@@ -786,6 +786,22 @@ B-56). 요약 문장을 근거로 인용하지 않는다. 권한은 `visible_doc
       `answer 전수 탐색 hits= docs=`, 응답 시간을 일주일 본다. 문턱은 env 로 바꾼다
 - [ ] 색인 경로의 후보 창(`search_index.CANDIDATE_LIMIT` 500) 확대 — 측정 뒤 결정
 - [ ] QA 기록에 검색 경로(전수/색인)와 근거 문서 수를 남긴다(콘솔 「질문·답변 원본」에서 보이게)
+      — **기록까지 구현 완료·운영 검증 대기 (heartwriter/2026-11-26)**
+  - 구현: `QARecord.search_path`(목록). 값은 `exhaustive`(전수) · `index`(색인) ·
+    `scan_no_index`(색인을 못 읽어 파일 훑음) · `scan_index_empty`(색인 0건이라 파일 재훑음).
+    한 질문이 검색을 여러 번 하면 순서대로 쌓인다(상한 16)
+  - 방식: `archive.store` 의 **ContextVar 질문별 메모장**(`begin_search_trail`/`search_trail`).
+    전역 계수기(`cache_metrics` 전후 비교)는 동시 질문이 섞여 쓰지 않았다.
+    `pilot` 이 질문 처리 전에 메모장을 열고 정상·오류 두 기록 자리에 값을 넣는다
+  - **근거 문서 수는 넣지 않았다** — `Answer.doc_count`(답변의 「문서 N건」)가 이미 있고
+    기록의 `citations` 로 셀 수 있다
+  - 시험: `tests/test_search_path_trail.py`(12건, 동시 질문 비혼합 포함)
+  - [ ] **운영 검증**: 배포 후 질문 하나를 하고 `qa-log/qa-YYYY-MM.jsonl` 마지막 줄의
+        `search_path` 가 채워지는지 본다. `[]` 이면 Slack 처리 경로가 검색과 다른 작업 줄이라는
+        뜻이다 — 메모장 방식을 다시 본다(값이 틀리게 남지는 않는다)
+  - [ ] 콘솔 「질문·답변 원본」 화면에 `search_path` 표시(콘솔 코드는 이번에 건드리지 않았다)
+  - 참고: 수집 단계 PII 마스킹이 「재무목표」 같은 한글 낱말을 `[이름1]` 로 가려 검색에서
+    빠뜨린다(시험 중 발견, 이 항목과 별개 — 확인 필요)
 - [x] 회귀 시험: 작은 범위는 전수·큰 범위는 색인, 문서 폭 확대, 기본 순서 보존, 세 엔진 설정
       (`tests/test_vip_exhaustive_search.py`)
 

@@ -10,6 +10,7 @@ import os
 import re
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +20,39 @@ from . import revision_reader
 logger = logging.getLogger("tybot.archive.store")
 _legacy_warning_counts: dict[Path, int] = {}
 _legacy_warning_lock = threading.Lock()
+
+# --- 검색 경로 추적 (B-93: QA 기록에 검색 경로를 남긴다) ---------------------
+#
+# 한 질문이 `search()` 를 거치며 **어느 경로로 근거를 찾았는지**를 질문별로 모은다.
+# 값은 프로세스 전체 계수기가 아니라 ContextVar 에 둔다 — 봇은 질문을 동시에 처리하므로
+# 전역 계수기를 전후로 비교하면 다른 질문의 검색이 섞여 들어온다. `begin_search_trail()`
+# 을 부르지 않은 호출(콘솔·배치·시험)은 아무것도 모으지 않는다.
+#
+# 값(코드뿐이다. 질문·본문·경로는 넣지 않는다):
+#   exhaustive       보이는 문서 전부를 훑었다(전수 — 줄 수 문턱 이하이거나 VIPBot)
+#   index            DB 색인 후보에서 근거를 찾았다
+#   scan_no_index    색인을 읽지 못해 파일을 훑었다(장애·미색인)
+#   scan_index_empty 색인 후보에서 쓸 줄이 0건이라 파일을 다시 훑었다
+SEARCH_TRAIL_MAX = 16
+_search_trail: ContextVar[list[str] | None] = ContextVar(
+    "tybot_search_trail", default=None
+)
+
+
+def begin_search_trail() -> None:
+    """지금 실행 중인 질문의 검색 경로 메모장을 새로 연다(이전 값은 버린다)."""
+    _search_trail.set([])
+
+
+def search_trail() -> list[str]:
+    """이 질문이 지금까지 거친 검색 경로(순서대로). 메모장을 열지 않았으면 빈 목록."""
+    return list(_search_trail.get() or [])
+
+
+def _note_search_path(path: str) -> None:
+    trail = _search_trail.get()
+    if trail is not None and len(trail) < SEARCH_TRAIL_MAX:
+        trail.append(path)
 
 
 def _legacy_changed(root: Path, count: int) -> bool:
@@ -1220,11 +1254,13 @@ class ArchiveStore:
                 "전수" if exhaustive else "색인", visible_lines, exhaustive_max_lines,
             )
         if exhaustive:
+            _note_search_path("exhaustive")
             return self._scan_attachment_fallback(
                 query, tokens, docs, ctx, limit, channels, per_document=per_document
             )
         found = search_index.candidates(query, sorted({d.channel for d in docs if d.channel}))
         if found is None:
+            _note_search_path("scan_no_index")
             return self._scan_attachment_fallback(
                 query, tokens, docs, ctx, limit, channels, per_document=per_document
             )
@@ -1282,9 +1318,11 @@ class ArchiveStore:
         if not hits:
             # 색인이 아직 안 돌았을 수 있다. 0건으로 답하기 전에 파일을 한 번 본다 —
             # 「색인 없음」이 「자료 없음」으로 보이는 것이 이 기능의 가장 나쁜 실패다.
+            _note_search_path("scan_index_empty")
             return self._scan_attachment_fallback(
                 query, tokens, docs, ctx, limit, channels, per_document=per_document
             )
+        _note_search_path("index")
 
         # 색인에 **일부** 결과가 있으면 예전에는 여기서 끝났다. 그래서 방금 들어온
         # 줄(예: 재변환한 첨부)이 조용히 검색에서 빠졌다 — 오류도 0건도 아니라
