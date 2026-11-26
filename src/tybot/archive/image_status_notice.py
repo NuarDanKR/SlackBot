@@ -85,19 +85,23 @@ _SUCCESS = frozenset({COMPLETED, UNCERTAIN})
 #: 다음 배치에서 **정말로** 다시 시도되는 사유. 예약 전에 멈춘 후보만 그렇다 —
 #: 한 번 provider 에 나간 job 은 중복 과금을 막으려고 같은 원본을 다시 보내지
 #: 않는다(`ImageDescriptionStore.reserve` 의 `duplicate_job`).
-RETRY_NEXT_BATCH = frozenset({
-    "provider_temporarily_unavailable",
-    "checks_failed",
-    "reserve_failed",
-    "approval_lookup_failed",
-    "catalog_unavailable",
-})
+RETRY_NEXT_BATCH = frozenset(
+    {
+        "provider_temporarily_unavailable",
+        "checks_failed",
+        "reserve_failed",
+        "approval_lookup_failed",
+        "catalog_unavailable",
+    }
+)
 #: 호출·무료 한도. 예약 전에 막혀 다음 배치에서 다시 시도된다.
-RETRY_AFTER_LIMIT = frozenset({
-    "quota_exhausted",
-    "daily_calls_exceeded",
-    "concurrency_exceeded",
-})
+RETRY_AFTER_LIMIT = frozenset(
+    {
+        "quota_exhausted",
+        "daily_calls_exceeded",
+        "concurrency_exceeded",
+    }
+)
 #: provider 일시 오류로 끝난 job. 보류지만 자동 재시도는 없다.
 PROVIDER_TRANSIENT = frozenset({"model_timeout", "model_error"})
 #: 이미 끝난 job 이 다시 막힌 것 — 새로 알릴 사실이 없다.
@@ -252,8 +256,13 @@ def _ocr_line(payload: dict) -> str:
     return f"- 기본 OCR: {_OCR_TEXT.get(str(payload.get('ocr') or ''), '확인 중')}"
 
 
-def render(phase: str, payload: dict) -> str:
-    """한 단계의 댓글 본문. 마지막에 다시 가리고 Slack 제어 문자를 막는다."""
+def render(phase: str, payload: dict, *, shown_transcript=None, table_below: bool = False) -> str:
+    """한 단계의 댓글 본문. 마지막에 다시 가리고 Slack 제어 문자를 막는다.
+
+    ``shown_transcript`` 는 글로 보일 전사 줄이다(기본: 전부). 표로 옮긴 줄을 빼고 부를 때
+    쓰며, 「텍스트 인식: 완료」 판정은 언제나 원래 전사로 한다. ``table_below`` 면 표가
+    아래에 따로 붙는다고 적는다.
+    """
     if phase not in PHASES:
         raise NoticeError("phase_invalid")
     lines: list[str]
@@ -288,9 +297,16 @@ def render(phase: str, payload: dict) -> str:
         tags = tuple(payload.get("tags") or ())
         if tags:
             lines.append("*태그* " + ", ".join(tags))
+        shown = (
+            transcript[:MAX_TRANSCRIPT_LINES]
+            if shown_transcript is None
+            else tuple(shown_transcript)
+        )
         if transcript:
             lines.append("*읽은 글자* (민감정보는 가림)")
-            lines.extend(f"│ {line}" for line in transcript[:MAX_TRANSCRIPT_LINES])
+            if table_below:
+                lines.append("│ (표는 아래에 정리했습니다)")
+            lines.extend(f"│ {line}" for line in shown)
             more = int(payload.get("transcript_more") or 0)
             if more > 0:
                 lines.append(f"│ …추가 {more}줄은 검색에 반영됨")
@@ -324,6 +340,117 @@ def render(phase: str, payload: dict) -> str:
             f"- 상태: {status}. 관리 콘솔에서 상태를 확인해 주세요",
         ]
     return _slack_safe(mask_sensitive("\n".join(lines)).text)
+
+
+# ---------------------------------------------------------------------------
+# 블록 — 전사 속 표를 Slack 표 블록으로
+# ---------------------------------------------------------------------------
+
+#: Slack 이 블록을 거부하면 표 없는 글 블록으로 한 번 더 보낸다.
+INVALID_BLOCK_ERRORS = frozenset({"invalid_blocks", "invalid_blocks_format"})
+MAX_TABLE_COLUMNS = 20
+#: section 블록 text 상한(3000)보다 여유 있게 나눈다.
+_SECTION_CHARS = 2900
+_TABLE_RULE = re.compile(r"^[\s|:\-]+$")
+
+
+def _cells(line: str) -> list[str] | None:
+    """`a | b | c` 한 줄 → 칸 목록. 표 행이 아니면 ``None``."""
+    text = line.strip()
+    if "|" not in text:
+        return None
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+    cells = [cell.strip() for cell in text.split("|")]
+    return cells if len(cells) >= 2 else None
+
+
+def table_span(lines) -> tuple[int, int, list[list[str]]] | None:
+    """전사 줄에서 **첫 번째** 표 구간(시작, 끝, 행들). 두 줄 이상 이어진 `|` 행만 표다.
+
+    Vision 프롬프트(2026-11-26.1)는 표를 「헤더 한 줄 + 한 행을 한 줄」 로, 칸을 ` | ` 로
+    잇는다. 마크다운 구분선(`---|---`)은 행이 아니므로 건너뛴다. 메시지당 표는 하나다.
+    """
+    items = list(lines)
+    index = 0
+    while index < len(items):
+        if _cells(items[index]) is None or _TABLE_RULE.fullmatch(items[index]):
+            index += 1
+            continue
+        start = index
+        rows: list[list[str]] = []
+        while index < len(items):
+            line = items[index]
+            if _TABLE_RULE.fullmatch(line) and "|" in line:
+                index += 1
+                continue
+            cells = _cells(line)
+            if cells is None:
+                break
+            rows.append(cells)
+            index += 1
+        if len(rows) >= 2:
+            width = max(len(row) for row in rows)
+            if width > MAX_TABLE_COLUMNS:
+                return None
+            return start, index, [row + [""] * (width - len(row)) for row in rows]
+    return None
+
+
+def _sections(text: str) -> list[dict]:
+    """mrkdwn 글을 section 블록들로. 줄 경계에서 나눈다."""
+    blocks: list[dict] = []
+    chunk: list[str] = []
+    size = 0
+    for line in text.split("\n"):
+        if chunk and size + len(line) + 1 > _SECTION_CHARS:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(chunk)}})
+            chunk, size = [], 0
+        chunk.append(line[:_SECTION_CHARS])
+        size += len(line) + 1
+    if chunk:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(chunk)}})
+    return blocks
+
+
+def _table_cell(text: str) -> dict:
+    # raw_text 는 mrkdwn 이 아니라 멘션·링크가 되지 않는다 — 이스케이프하면 `&lt;` 가 그대로
+    # 보인다. 가림만 한 번 더 한다. 빈 칸은 공백 한 칸으로 둔다(값을 지어내지 않는다).
+    masked = mask_sensitive(text).text.strip()
+    return {"type": "raw_text", "text": masked or " "}
+
+
+def render_blocks(phase: str, payload: dict, *, with_table: bool = True) -> list[dict]:
+    """댓글 블록. 성공 단계에서 전사에 표가 있으면 글 블록 뒤에 표 블록 하나를 붙인다.
+
+    표로 옮긴 줄은 글에서 빼고, 나머지 전사·설명·안내는 :func:`render` 와 같은 글이다.
+    표가 없거나 ``with_table`` 이 거짓이면 :func:`render` 를 section 블록으로 감쌀 뿐이다.
+    단계마다 블록을 늘 보낸다 — `chat.update` 에서 옛 표가 남지 않게.
+    """
+    transcript = tuple(payload.get("transcript") or ())[:MAX_TRANSCRIPT_LINES]
+    span = table_span(transcript) if with_table and phase in _SUCCESS else None
+    if span is not None:
+        start, end, rows = span
+        if any(contains_sensitive(cell) for row in rows for cell in row):
+            span = None
+    if span is None:
+        return _sections(render(phase, payload))
+    start, end, rows = span
+    text = render(
+        phase,
+        payload,
+        shown_transcript=transcript[:start] + transcript[end:],
+        table_below=True,
+    )
+    width = len(rows[0])
+    table = {
+        "type": "table",
+        "column_settings": [{"is_wrapped": True}] * width,
+        "rows": [[_table_cell(cell) for cell in row] for row in rows],
+    }
+    return [*_sections(text), table]
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +902,8 @@ class MemoryNoticeRepo:
             current, delivery_state="pending", attempts=0, error_code="", next_attempt_at=None
         )
         return True
+
+
 # ---------------------------------------------------------------------------
 # worker 쪽 — Vision 결과를 상태로 적는다(Slack 없음)
 # ---------------------------------------------------------------------------
@@ -946,8 +1075,22 @@ def deliver_one(
         repo.mark_failed(row, "unregistered_channel")
         return "failed_delivery"
     attempts = repo.begin_attempt(row)
+    # text 는 알림·접근성용 대체 글(표 행도 글 줄로 들어 있다). 보이는 것은 blocks 다.
     text = render(row.phase, row.payload)
+    blocks = render_blocks(row.phase, row.payload)
+    plain = render_blocks(row.phase, row.payload, with_table=False)
     metadata = {"event_type": METADATA_EVENT, "event_payload": {"key": row.key.digest}}
+
+    def send(method, **kwargs):
+        try:
+            return method(text=text, blocks=blocks, metadata=metadata, **kwargs)
+        except Exception as exc:
+            if blocks == plain or _slack_error(exc) not in INVALID_BLOCK_ERRORS:
+                raise
+            # 표 블록을 이 워크스페이스가 받지 않는다 — 표 없이 같은 내용을 글로 보낸다.
+            log.warning("[%s] image status table block rejected; sent as text", row.key.workspace)
+            return method(text=text, blocks=plain, metadata=metadata, **kwargs)
+
     try:
         info = client.conversations_info(channel=row.key.channel_id).get("channel") or {}
         if not info.get("is_member"):
@@ -960,19 +1103,16 @@ def deliver_one(
                 repo.mark_reply_ts(row, reply_ts)
         if reply_ts:
             try:
-                client.chat_update(
-                    channel=row.key.channel_id, ts=reply_ts, text=text, metadata=metadata
-                )
+                send(client.chat_update, channel=row.key.channel_id, ts=reply_ts)
             except Exception as exc:
                 if _slack_error(exc) not in REPOST_SLACK_ERRORS:
                     raise
                 reply_ts = ""
         if not reply_ts:
-            posted = client.chat_postMessage(
+            posted = send(
+                client.chat_postMessage,
                 channel=row.key.channel_id,
                 thread_ts=row.key.message_ts,
-                text=text,
-                metadata=metadata,
                 unfurl_links=False,
                 unfurl_media=False,
             )
@@ -1064,7 +1204,9 @@ __all__ = [
     "merged",
     "receipt_payload",
     "render",
+    "render_blocks",
     "resolve",
+    "table_span",
     "worker_phase",
     "worker_status_recorder",
 ]

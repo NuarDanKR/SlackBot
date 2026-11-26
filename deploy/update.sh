@@ -176,6 +176,9 @@ systemctl restart tybot
 # - 전부 옮겨진 뒤에만 옛 유닛 파일을 지운다. 다음 배포부터 이 단계는 할 일이 없다.
 # - 답변 봇(tybot)과 무관하다. Archiver 는 수집만 한다.
 ARCHIVER_SWITCH_FAILED=()
+# 전환 **전에** 이미 새 유닛으로 돌던 인스턴스. 아래에서 다시 띄운다(B-100 후속).
+RUNNING_ARCHIVERS=$(systemctl list-units --type=service --state=active --no-legend --plain \
+  'tybot-archiver@*.service' | awk '{print $1}')
 OLD_ARCHIVERS=$(systemctl list-units --type=service --state=active --no-legend --plain \
   'tybot-archiving-shadow@*.service' | awk '{print $1}')
 for unit in $OLD_ARCHIVERS; do
@@ -206,6 +209,25 @@ if ((${#ARCHIVER_SWITCH_FAILED[@]} == 0)) && [[ -z "$OLD_LEFT" ]] \
   systemctl daemon-reload
   log "폐기된 tybot-archiving-shadow@ 유닛 파일을 제거했습니다"
 fi
+
+# 이미 tybot-archiver@ 로 돌던 Archiver 는 위 전환 대상이 아니고, 유닛이 tybot 에 묶여
+# 있지도 않다. 그대로 두면 봇 배포 뒤에도 **옛 코드로 계속 돈다** — 2026-11-26 B-100 배포
+# 뒤 새 이미지에 접수 댓글이 안 달린 이유다(새 worker 는 상태를 DB 로 적는데 옛 Archiver 는
+# 옛 JSONL 만 읽었다). 봇 배포마다 새 코드로 다시 띄운다. 방금 전환한 인스턴스는 이미 새
+# 코드로 떴으므로 목록(전환 전 수집)에 없다. Socket Mode 재접속 사이 이벤트는 Slack 이 다시
+# 보내고, 수집은 같은 메시지를 중복으로 쓰지 않는다.
+ARCHIVER_RESTART_FAILED=()
+for unit in $RUNNING_ARCHIVERS; do
+  if systemctl restart "$unit"; then
+    sleep 15
+    if systemctl is-active --quiet "$unit"; then
+      log "Archiver 재시작: $unit — 새 코드로 수집합니다"
+      continue
+    fi
+  fi
+  ARCHIVER_RESTART_FAILED+=("$unit")
+  log "  $unit 재시작 후 기동 실패 — journalctl -u $unit -n 50 확인"
+done
 
 # 검토자를 지정해도 발송 타이머가 꺼져 있으면 아무 DM도 가지 않는다. 이 기능은
 # 채널 설정에서 매일 발송한다고 명시하므로 배포가 실행기를 함께 활성화한다.
@@ -255,6 +277,11 @@ fi
 if ((${#ARCHIVER_SWITCH_FAILED[@]})); then
   log "Archiver 전환 실패: ${ARCHIVER_SWITCH_FAILED[*]} — 옛 유닛으로 수집은 계속합니다."
   log "journalctl -u tybot-archiver@<워크스페이스> 로 원인을 고친 뒤 다시 배포하세요."
+  exit 5
+fi
+if ((${#ARCHIVER_RESTART_FAILED[@]})); then
+  log "Archiver 재시작 실패: ${ARCHIVER_RESTART_FAILED[*]} — 이 워크스페이스는 지금 수집하지 않을 수 있습니다."
+  log "journalctl 로 원인을 고친 뒤 다시 배포하세요."
   exit 5
 fi
 if ((INSTALL_RC == 4)); then

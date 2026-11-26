@@ -110,3 +110,17 @@ def test_a_failed_switch_fails_the_deploy_after_services_are_up():
     text = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
     tail = text[text.index('systemctl is-active --quiet tybot; then'):]
     assert "ARCHIVER_SWITCH_FAILED[*]" in tail and "exit 5" in tail
+
+
+def test_a_bot_deploy_restarts_archivers_that_already_run_the_new_unit():
+    """B-100 후속: 이미 tybot-archiver@ 로 돌던 Archiver 가 옛 코드로 남지 않는다."""
+    text = (ROOT / "deploy" / "update.sh").read_text(encoding="utf-8")
+    # 전환 전에 목록을 받아야 방금 전환한 인스턴스를 한 번 더 띄우지 않는다.
+    before = text.index("RUNNING_ARCHIVERS=$(")
+    assert before < text.index("OLD_ARCHIVERS=$(")
+    assert "'tybot-archiver@*.service'" in text[before:before + 200]
+    assert 'systemctl restart "$unit"' in text
+    # 콘솔 배포(console 범위)는 이 앞에서 끝난다 — 봇 배포에서만 Archiver 를 건드린다.
+    assert text.index('if [[ "$SCOPE" == "console" ]]; then') < before
+    tail = text[text.index('systemctl is-active --quiet tybot; then'):]
+    assert "ARCHIVER_RESTART_FAILED[*]" in tail

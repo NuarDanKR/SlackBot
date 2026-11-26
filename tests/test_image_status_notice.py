@@ -49,6 +49,7 @@ class FakeSlack:
         self.updates: list[str] = []
         self.fail_next: list[str] = []
         self.counter = 0
+        self.reject_tables = False
 
     def _maybe_fail(self) -> None:
         if self.fail_next:
@@ -63,14 +64,23 @@ class FakeSlack:
         self.posts += 1
         self.counter += 1
         ts = f"1794000001.{self.counter:06d}"
-        self.thread[ts] = {"ts": ts, "text": text, "metadata": metadata, "user": "UBOT"}
+        self.thread[ts] = {
+            "ts": ts,
+            "text": text,
+            "metadata": metadata,
+            "user": "UBOT",
+            "blocks": _kw.get("blocks"),
+        }
         return {"ts": ts}
 
-    def chat_update(self, *, channel, ts, text, metadata):
+    def chat_update(self, *, channel, ts, text, metadata, blocks=None):
         self._maybe_fail()
         if ts not in self.thread:
             raise SlackError("message_not_found")
+        if self.reject_tables and any(b.get("type") == "table" for b in blocks or ()):
+            raise SlackError("invalid_blocks")
         self.thread[ts]["text"] = text
+        self.thread[ts]["blocks"] = blocks
         self.updates.append(ts)
         return {"ts": ts}
 
@@ -653,3 +663,86 @@ def test_worker_writes_never_touch_delivery_columns():
                  "attempts", "next_attempt_at", "error_code", "slack_eligible"):
         assert getattr(after, name) == getattr(before, name), name
     assert repo.rows[KEY].delivery_state == "pending"  # 읽을 때는 새 판이 보낼 차례다
+
+
+# --- 전사 속 표는 Slack 표 블록으로 ------------------------------------------------
+
+TABLE = [
+    "■ 현장 현황",
+    "구분 | 2026년 준공 | 2026년 착공 | 2027년 준공",
+    "주관 | 16 | - | 1",
+    "비주관 | 7 | 1 | ",
+    "합계 | 23 | 2 | 2",
+    "* 2026년 준공예정: 서부산의료원",
+]
+
+
+def _blocks_of(blocks, kind):
+    return [b for b in blocks if b["type"] == kind]
+
+
+def test_table_rows_become_one_table_block_and_leave_the_text():
+    payload = _success(transcript=TABLE)
+    blocks = notices.render_blocks(notices.COMPLETED, payload)
+    (table,) = _blocks_of(blocks, "table")
+    assert blocks[-1] is table
+    cells = [[cell["text"] for cell in row] for row in table["rows"]]
+    assert cells[0] == ["구분", "2026년 준공", "2026년 착공", "2027년 준공"]
+    # 「-」 는 그대로, 빈 칸은 값을 지어내지 않고 공백으로 채워 열을 맞춘다.
+    assert cells[1] == ["주관", "16", "-", "1"]
+    assert cells[2] == ["비주관", "7", "1", " "]
+    assert all(cell["type"] == "raw_text" for row in table["rows"] for cell in row)
+    text = "\n".join(b["text"]["text"] for b in _blocks_of(blocks, "section"))
+    assert "표는 아래에 정리했습니다" in text and "- 텍스트 인식: 완료" in text
+    assert "│ ■ 현장 현황" in text and "│ * 2026년 준공예정: 서부산의료원" in text
+    assert "합계 | 23" not in text
+
+
+def test_markdown_rules_are_skipped_and_a_single_pipe_line_is_not_a_table():
+    span = notices.table_span(["| a | b |", "|---|---|", "| 1 | 2 |"])
+    assert span == (0, 3, [["a", "b"], ["1", "2"]])
+    assert notices.table_span(["설명 | 한 줄뿐", "다음 글"]) is None
+    assert notices.table_span([" | ".join(str(i) for i in range(21))] * 2) is None
+
+
+def test_phases_without_a_result_have_no_table():
+    for phase in (notices.ACCEPTED, notices.PROCESSING, notices.DEFERRED, notices.FAILED):
+        blocks = notices.render_blocks(phase, {"transcript": TABLE})
+        assert not _blocks_of(blocks, "table")
+        assert blocks == notices.render_blocks(phase, {"transcript": TABLE}, with_table=False)
+
+
+def test_a_sensitive_cell_drops_the_table_and_the_text_is_masked():
+    payload = _success(transcript=["이름 | 연락처", "담당 | 010-1234-5678"])
+    blocks = notices.render_blocks(notices.COMPLETED, payload)
+    assert not _blocks_of(blocks, "table")
+    assert "010-1234-5678" not in str(blocks)
+
+
+def test_a_table_comment_is_still_one_comment_updated_in_place():
+    repo, slack = _repo(), FakeSlack()
+    repo.record(_accepted())
+    _deliver(slack, repo)
+    repo.record(_row(notices.COMPLETED, JOB_A, T0, **_success(transcript=TABLE)))
+    _deliver(slack, repo)
+
+    assert slack.posts == 1
+    (reply,) = slack.thread.values()
+    assert _blocks_of(reply["blocks"], "table")
+    # 알림·대체 글에는 표 행도 글 줄로 남는다.
+    assert "│ 합계 | 23 | 2 | 2" in reply["text"]
+
+
+def test_a_rejected_table_block_falls_back_to_text_without_losing_the_comment():
+    repo, slack = _repo(), FakeSlack()
+    repo.record(_accepted())
+    _deliver(slack, repo)
+    slack.reject_tables = True
+    repo.record(_row(notices.COMPLETED, JOB_A, T0, **_success(transcript=TABLE)))
+    _deliver(slack, repo)
+
+    (reply,) = slack.thread.values()
+    assert not _blocks_of(reply["blocks"], "table")
+    assert "│ 합계 | 23 | 2 | 2" in reply["blocks"][0]["text"]["text"]
+    assert repo.rows[KEY].delivery_state == "delivered"
+

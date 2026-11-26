@@ -1317,6 +1317,21 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 - [x] PostgreSQL 격리 DB 시험 — `tests/test_image_status_notice_schema.py` 12건, 폐기 PostgreSQL 16.4 에서 통과(2026-11-26). Vision 열 권한 거부·접수 지연 병합·동시 첫 INSERT 병합·재전송 함수 포함
 - [x] `ruff check src tests scripts` 0건, 관련 pytest 와 전체 pytest 결과를 보고한다
 
+#### 후속 (2026-11-26, 오너 요청)
+
+- **전사 속 표 → Slack 표 블록.** 오너가 캔버스를 제안했으나 표 블록으로 정했다 — 캔버스는
+  `canvases:write` 추가·재설치가 필요하고, 이미지마다 아카이브 밖 Slack 문서(OCR 사본)가 생긴다.
+  표 블록은 같은 `chat:write` 로 댓글 하나를 고치는 구조를 그대로 쓴다. Vision 프롬프트
+  `2026-11-26.1` 이 표를 ` | ` 로 나눈 한 행 한 줄로 적으므로, 이어진 두 줄 이상을 첫 표로
+  본다(메시지당 1개, 20열 초과·민감 칸이면 표를 만들지 않는다). Slack 이 블록을 거부하면
+  (`invalid_blocks`) 표 없는 글 블록으로 한 번 더 보낸다. 전사 12줄 상한은 그대로다.
+- **배포가 Archiver 를 다시 띄운다.** 「봇 배포」 는 `tybot` 만 재시작해서, 이미
+  `tybot-archiver@` 로 돌던 Archiver 가 옛 코드에 남았다(11-24 기동). 그대로 두면 새 worker 는
+  DB 로만 적고 옛 Archiver 는 JSONL 만 읽어 **댓글이 아예 안 달린다.** `update.sh` 가 봇 배포 때
+  돌던 Archiver 를 재시작하게 했다. 러너는 설치된 옛 `update.sh` 를 돌리므로 **이번 배포 한 번은
+  손으로 재시작**한다.
+- [ ] 실측: 표가 든 이미지에서 표 블록이 보이는지(공개·비공개 채널 각 1)
+
 **범위 밖.** Canvas 생성. PDF/Word 전체 추출 텍스트를 Slack 댓글로 게시. Vision worker 에
 Slack 토큰 부여. B-99 섀도 제거 로직 변경.
 
