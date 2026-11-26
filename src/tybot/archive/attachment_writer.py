@@ -190,6 +190,19 @@ def write_docs(
     나중에 다시 만들 수 있다. 반대로 수집이 멈추면 놓친 원본은 되돌릴 수 없다.
     """
     root = Path(archive_root)
+    if channel_archive is None:
+        # **옛 배치 기본 경로**(`workspaces/<ws>/channels/...`)다. 운영 루트에서는 쓰지 않는다
+        # (B-99) — 원문 writer(`writer.ingest`)와 같은 규칙이다. 2026-11-25 Master 의 DM 첨부
+        # 한 건이 이 경로로 `workspaces/tyit` 를 다시 만들었고, Archiver 재시작에서 tyit
+        # 수집이 통째로 멈췄다. 오프라인 도구·시험이 별도 루트에 쓰는 것은 그대로 둔다.
+        from .writer import LegacyLayoutRefused, legacy_layout_refusal
+
+        code = legacy_layout_refusal(root, workspace)
+        if code:
+            raise LegacyLayoutRefused(
+                f"{code}: refusing legacy workspaces/ attachment layout under the live"
+                " archive root; pass channel_archive for the Archiver layout"
+            )
     written: list[AttachmentDoc] = []
     for result in results:
         staged_meta = getattr(result, "metadata_path", None)

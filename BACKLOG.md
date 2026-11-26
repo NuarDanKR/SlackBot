@@ -217,6 +217,18 @@ archi Archiver 가 기동 거부로 재시작을 반복했다. 3개 파일을
 archi 를 재시작해 복구했다. 같은 날 배포(`31e3a07`)로 1·2단계 코드가 깔렸다 — 다음에 다시
 생기면 아직 막지 못한 쓰기 경로가 있다는 뜻이다.
 
+**재재발(2026-11-26 확인) — 막지 못한 경로였다.** 11-25 15:32 Master 가 **DM 첨부 정본** 한 건을
+`workspaces/tyit/channels/<D…>/attachments/<fid>/<rev>.md` 에 썼다. DM 원문은 11-20 에 개인 배치로
+옮겼지만, 원문보다 먼저 도는 첨부 정본 쓰기(`pilot._write_attachment_docs`)는 위치를 넘기지 않았고,
+첨부 writer(`attachment_writer.write_docs`)에는 원문 writer 의 가드가 없었다. 11-26 Archiver 재시작에서
+tyit 가 기동 거부로 재시작을 반복했다. 고침: 첨부 writer 도 운영 루트에서 위치 없는 쓰기를
+`LegacyLayoutRefused` 로 거절하고, Master 는 DM 첨부를 그 사람의 DM 배치(`<ws>/dm/<user>/archive`)에
+쓴다(`tests/test_master_dm_layout.py`). 그 1개 파일은 `archive-legacy-quarantine-20261126` 으로
+**이동**한다 — DM 첨부라 B-98 로 채널 배치에 병합하지 않는다.
+- [ ] 후속: 개인 DM 배치의 첨부 정본을 읽는 쪽이 없다(`attachment_reader.SHADOW_ATTACHMENT_GLOB`
+  은 채널 배치만 본다). 본인 DM 에서 지난 첨부를 근거로 쓰려면 reader 에 `dm_user` 권한과 함께
+  붙여야 한다 — 권한 설계가 필요해 이번에 하지 않았다
+
 **배포 순서 주의.** 콘솔 배포는 **이미 깔린** `/opt/tybot/deploy/update.sh` 를 실행한다. 그래서
 `update.sh` 에 넣은 Archiver 유닛 전환은 그것을 깐 배포가 아니라 **그다음 배포**에서 돈다.
 

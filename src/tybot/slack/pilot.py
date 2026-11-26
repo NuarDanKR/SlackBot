@@ -4114,7 +4114,16 @@ class WorkspaceBot:
             self._pending_attachments = staged
             # 첨부 정본을 먼저 쓴다. **원문보다 먼저**여야 한다 — 원문에 참조만
             # 남기고 정본 쓰기가 실패하면 그 첨부 본문은 어디에도 없다.
-            self._write_attachment_docs(client, staged, channel_id)
+            self._write_attachment_docs(
+                client,
+                staged,
+                channel_id,
+                dm_user=(
+                    str(event.get("user") or "")
+                    if event.get("channel_type") == "im"
+                    else ""
+                ),
+            )
             for item in staged:
                 # 분리가 켜져 있으면 본문은 정본으로 가고 원문에는 참조만 남는다.
                 # 고르는 자리를 한 곳에 둔다 — 호출부마다 고르면 한 군데가 빠지고,
@@ -4127,7 +4136,9 @@ class WorkspaceBot:
                     log.warning("첨부 처리 경고 ch=%s: %s", channel_id, w)
         return out
 
-    def _write_attachment_docs(self, client, staged, channel_id: str) -> None:
+    def _write_attachment_docs(
+        self, client, staged, channel_id: str, *, dm_user: str = ""
+    ) -> None:
         """첨부 정본을 쓴다. **수집을 막지 않는다.**
 
         못 써도 원본과 staging 은 남아 있으므로 나중에 다시 만들 수 있다. 반대로
@@ -4142,6 +4153,17 @@ class WorkspaceBot:
             return
         channel = self._channel_name(client, channel_id) or channel_id
         try:
+            # DM 첨부는 그 사람의 DM 배치(`<ws>/dm/<user>/<D…>/archive`)에 둔다 — 원문과 같은
+            # 자리다(B-99). 위치를 안 주면 옛 `workspaces/<ws>/channels/<D…>` 로 가고, 운영
+            # 루트에서는 writer 가 거절한다(2026-11-25 tyit Archiver 기동 거부의 원인).
+            # 채널 첨부는 Archiver 몫이다. Master 가 운영 루트에 채널 정본을 쓸 자리는 없다.
+            channel_archive = None
+            if dm_user:
+                from ..archive.shadow_paths import dm_archive_dir
+
+                channel_archive = dm_archive_dir(
+                    self.archive_dir, self.workspace, dm_user, channel_id
+                )
             write_attachment_docs(
                 self.archive_dir,
                 staged,
@@ -4155,6 +4177,7 @@ class WorkspaceBot:
                 # 같은 채널 원문(`writer.ingest` 기본값)과 같은 값을 쓴다.
                 visibility="private",
                 acl=frozenset({channel}),
+                channel_archive=channel_archive,
             )
         except Exception as exc:
             log.warning(
