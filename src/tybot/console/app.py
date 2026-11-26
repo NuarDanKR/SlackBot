@@ -2277,6 +2277,42 @@ def get_image_description_policy(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+class ImageNoticeResendBody(BaseModel):
+    workspace: str = Field(min_length=1, max_length=40)
+    channelId: str = Field(min_length=9, max_length=32)
+    messageTs: str = Field(min_length=3, max_length=32)
+    fileId: str = Field(min_length=9, max_length=32)
+
+
+@app.post("/api/archiver/image-description/notices/resend")
+def post_image_notice_resend(body: ImageNoticeResendBody, request: Request, user: User) -> dict:
+    """B-100 — 전달 실패한 이미지 상태 댓글을 다시 보낸다. 범위는 이미지 하나다."""
+    _require_admin(user)
+    _check_write_request(request)
+    key = body.workspace.strip().lower()
+    if not user.may_see(key):
+        raise HTTPException(status_code=403, detail="이 워크스페이스를 볼 수 없습니다.")
+    try:
+        queued = image_description_admin.resend_notice(
+            key, body.channelId, body.messageTs, body.fileId
+        )
+    except image_description_admin.ImageDescriptionAdminError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not queued:
+        raise HTTPException(status_code=409, detail="다시 보낼 상태가 아닙니다.")
+    _audit_event(
+        actor=user.email,
+        category="image-description",
+        action="image_notice_resend",
+        target_type="image",
+        target_id=body.fileId,
+        workspace=key,
+        outcome="succeeded",
+        metadata={"channel": body.channelId},
+    )
+    return {"queued": True}
+
+
 @app.get("/api/workspaces/{key}/archiving")
 def get_workspace_archiving(key: str, user: User) -> dict:
     """상세 화면이 쓰는 것 전부. **한 번에** 준다.

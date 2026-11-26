@@ -178,7 +178,10 @@ def test_collector_has_no_second_root():
     import inspect
 
     params = inspect.signature(archiving_bot.ArchiveCollector).parameters
-    assert set(params) == {"cfg", "root", "membership_repo", "owner_lookup"}
+    # `image_receipts`(B-100)는 상태 기록 콜백이다 — 쓰기 루트가 아니다.
+    assert set(params) == {
+        "cfg", "root", "membership_repo", "owner_lookup", "image_receipts",
+    }
 
 
 @pytest.mark.parametrize("value", ["0", "false", "off", "no", " OFF "])

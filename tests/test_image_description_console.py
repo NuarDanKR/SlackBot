@@ -213,3 +213,71 @@ def test_the_read_route_maps_an_unavailable_database_to_503(monkeypatch):
     assert error.value.status_code == 503
     assert error.value.detail == "vision_database_unconfigured"
 
+
+
+# --- B-100 Slack 상태 댓글 -----------------------------------------------------------
+
+
+def test_snapshot_lists_status_comments_without_names_or_bodies(monkeypatch):
+    from tybot.archive import image_status_notice as notices
+
+    repo = notices.MemoryNoticeRepo()
+    key = notices.NoticeKey("tyit", "C12345678", "1794000000.000100", "F12345678")
+    repo.record(notices.NoticeRow(
+        key=key, phase=notices.COMPLETED,
+        payload={"file": "현장사진.png", "description": "비밀 본문", "transcript": ["안전제일"]},
+    ))
+    repo.record(notices.NoticeRow(key=key, phase=notices.ACCEPTED))  # 실시간 접수
+    repo.mark_failed(repo.rows[key], "not_member")
+    monkeypatch.setattr(admin, "ImageDescriptionStore", Store)
+    monkeypatch.setattr(notices, "PostgresNoticeRepo", lambda _conn: repo)
+
+    result = admin.snapshot("tyit", connect=Connection)
+
+    (row,) = result["notices"]
+    assert row["phase"] == "completed" and row["deliveryState"] == "failed_delivery"
+    assert row["errorCode"] == "not_member" and row["resendable"] is True
+    rendered = repr(result["notices"])
+    assert "현장사진" not in rendered and "비밀 본문" not in rendered and "안전제일" not in rendered
+    assert result["noticesError"] == ""
+
+
+def test_snapshot_still_works_before_the_status_table_exists(monkeypatch):
+    monkeypatch.setattr(admin, "ImageDescriptionStore", Store)
+
+    result = admin.snapshot("tyit", connect=Connection)
+
+    assert result["notices"] == []
+    assert result["noticesError"] == "notice_status_unavailable"
+    assert result["jobs"]  # 나머지 현황은 그대로 보인다
+
+
+def test_resend_route_is_admin_scoped_and_audited(monkeypatch):
+    paths = {route.path for route in console_app.app.routes if hasattr(route, "path")}
+    assert "/api/archiver/image-description/notices/resend" in paths
+    calls, audits = [], []
+    monkeypatch.setattr(console_app, "_check_write_request", lambda _request: None)
+    monkeypatch.setattr(console_app, "_audit_event", lambda **kw: audits.append(kw))
+    monkeypatch.setattr(admin, "resend_notice", lambda *a: calls.append(a) or True)
+    body = console_app.ImageNoticeResendBody(
+        workspace=" TYIT ", channelId="C12345678", messageTs="1794000000.000100",
+        fileId="F12345678",
+    )
+
+    assert console_app.post_image_notice_resend(body, object(), _user()) == {"queued": True}
+    assert calls == [("tyit", "C12345678", "1794000000.000100", "F12345678")]
+    assert audits[0]["action"] == "image_notice_resend"
+
+    with pytest.raises(HTTPException) as scoped:
+        console_app.post_image_notice_resend(body, object(), _user(workspaces=("mgmt",)))
+    assert scoped.value.status_code == 403
+
+    monkeypatch.setattr(admin, "resend_notice", lambda *a: False)
+    with pytest.raises(HTTPException) as nothing:
+        console_app.post_image_notice_resend(body, object(), _user())
+    assert nothing.value.status_code == 409
+
+
+def test_resend_rejects_malformed_coordinates():
+    with pytest.raises(admin.ImageDescriptionAdminError, match="invalid_request"):
+        admin.resend_notice("tyit", "C12345678", "not-a-ts", "F12345678", connect=Connection)

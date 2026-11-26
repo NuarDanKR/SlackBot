@@ -1,5 +1,4 @@
 # Archiving Bot 그림자 수집 준비
-
 > **폐기 (2026-11-24, B-99 2단계).** 섀도 루트·섀도 모드·`tybot-archiving-shadow@` 유닛은 없어졌다.
 > 운영 절차는 [Archiver 유닛 전환](archiver-unit-switch.md)을 따른다. 이 문서는 기록으로만 남긴다.
 
@@ -33,9 +32,12 @@ Slack 계약: [Socket Mode](https://docs.slack.dev/tools/bolt-python/concepts/so
 - 워크스페이스마다 **TYBot과 다른 Slack 앱**을 설치한다.
   [Archiving 앱 매니페스트](../pilot/archiving-app-manifest.yaml)를 사용한다.
   공개·비공개 채널은 앱을 해당 채널에 초대하고 읽기 권한을 확인한다.
-- Socket Mode 앱 토큰과 봇 토큰을 발급한다. 채널 읽기·첨부 읽기만
-  사용하며 이 앱에는 `chat:write`나 요약 검토 DM 권한을 주지 않는다.
-  앱 토큰에는 Slack의 `connections:write` scope가 필요하다.
+- Socket Mode 앱 토큰과 봇 토큰을 발급한다. 채널 읽기·첨부 읽기에 더해
+  **이미지 처리 상태 댓글 하나**(B-100)를 위해 `chat:write` 만 준다. 이 앱은 원본 이미지
+  스레드에 상태 댓글을 달고 같은 댓글을 고칠 뿐이다 — 새 글·DM·요약 검토 DM 권한
+  (`chat:write.public`, `im:write` 등)은 주지 않는다. 앱 토큰에는 Slack의
+  `connections:write` scope가 필요하다. 적용 절차는 아래
+  [이미지 상태 댓글 권한(B-100)](#이미지-상태-댓글-권한b-100)을 따른다.
 - TYBot bot user ID를 확인한다. Archiving Bot은 시작 때
   `auth.test` 결과의 team ID가 설정과 다르거나 user ID가 TYBot과
   같으면 기동을 거절한다.
@@ -196,3 +198,52 @@ Master writer의 소유권은 이 설정으로 바뀌지 않는다.
 첨부 정본 reader와 재색인을 확인한 뒤 분리 스위치를 켜기 전까지는 미리보기만
 실행하고 첨부 포함 범위의 실제 소급은 보류한다. 소급은 기존 운영 raw의
 `[첨부추출:...]` 줄을 수정하거나 제거하지 않는다.
+
+## 이미지 상태 댓글 권한(B-100)
+
+2026-11-26 부터 Archiver 는 **실시간으로 받은 이미지**의 스레드에 상태 댓글 하나를 달고,
+처리가 진행될 때마다 그 댓글을 `chat.update` 로 고친다(접수 → 처리 중 → 완료·확인 필요·
+보류·처리 안 됨). 소급·과거 아카이브 이미지에는 댓글을 달지 않는다. 이전 계약(「이 앱에는
+`chat:write` 를 주지 않는다」)은 이 한 가지 용도로만 바뀐다.
+
+**받는 권한.** `chat:write` 하나. `chat:write.public` 은 주지 않는다 — 앱이 **멤버인 채널**
+에만 댓글을 달 수 있어야 한다. 그래서 초대가 빠진 채널은 조용히 넘어가지 않고 콘솔에
+`not_member`(전달 실패)로 남는다.
+
+### 적용 순서 (워크스페이스마다)
+
+1. **매니페스트 교체.** api.slack.com/apps → 해당 Archiver 앱 → *App Manifest* 에
+   [archiving-app-manifest.yaml](../pilot/archiving-app-manifest.yaml) 의 `oauth_config.scopes.bot`
+   을 반영한다(`chat:write` 추가). 다른 항목은 바꾸지 않는다.
+2. **앱 재설치.** scope 를 더하면 Slack 이 재설치를 요구한다(*Install App → Reinstall to
+   Workspace*). 워크스페이스 관리자 승인이 필요한 조직이면 승인 요청이 간다.
+3. **토큰 확인.** 재설치 뒤 *OAuth & Permissions* 의 Bot User OAuth Token 이 **바뀌었는지**
+   본다. 토큰 회전을 켜지 않은 앱은 보통 같은 값이 유지되지만 보장되지 않는다.
+   - 바뀌었으면 콘솔 `봇 관리 > 워크스페이스 연결 > Archiver` 에 새 봇 토큰을 저장하고
+     **신원확인**을 다시 통과시킨 뒤, Archiver 를 재시작한다(콘솔 배포 또는
+     `sudo systemctl restart tybot-archiver@<ws>`).
+   - 앱 토큰(`xapp-…`, Socket Mode)은 scope 변경과 무관하다 — 바꾸지 않는다.
+   - 토큰 값을 문서·티켓·채팅에 붙이지 않는다(원칙 6).
+4. **스키마.** 배포가 `apply-schema.sh` 로 `image_status_notice` 표와 함수 두 개를 만든다.
+   콘솔 「이미지 설명」 화면의 상태 댓글 표에 「읽지 못했습니다」 가 없으면 적용된 것이다.
+
+### 실측 — 공개·비공개 채널
+
+배포 뒤 워크스페이스마다 다음을 확인한다. 시험 채널을 쓰고, 실제 업무 사진은 쓰지 않는다.
+
+| # | 채널 | 하는 것 | 기대 |
+|---|---|---|---|
+| 1 | 공개 채널(Archiver 초대됨) | PNG 1장 업로드 | 15초 안에 스레드에 「✅ 이미지 접수 완료」 댓글 **1개** |
+| 2 | 비공개 채널(Archiver 초대됨) | JPEG 1장 업로드 | 1과 같다 |
+| 3 | 1·2 의 스레드 | 다음 Vision 배치 뒤 | **같은 댓글**이 「처리 중」 → 「인식 완료」(또는 보류·처리 안 됨)로 바뀐다. 댓글 수는 1 |
+| 4 | 한 메시지에 이미지 2장 | 업로드 | 파일명이 다른 댓글 2개(이미지마다 1개) |
+| 5 | Archiver 를 내보낸 채널 | 업로드 | 댓글 없음. 수집도 안 됨(정상) |
+| 6 | 콘솔 「이미지 설명」 | 상태 댓글 표 | 1~4 가 `Slack 반영`, 소급 이미지는 `알리지 않음` |
+
+**실패하면.** 콘솔 표의 오류 코드를 본다.
+- `missing_scope` — 2번(재설치)이 안 됐다. 재설치 후 표의 **다시 보내기**를 누른다.
+- `invalid_auth`·`not_authed` — 3번(토큰)이 어긋났다. 토큰 저장·신원확인 후 다시 보내기.
+- `not_member`·`unregistered_channel` — 채널 초대·등록을 확인한다.
+- `ratelimited` 등 — 자동 재시도(최대 20회, 최대 1시간 간격). 손댈 필요 없다.
+
+다시 보내기는 댓글만 다시 보낸다. Vision 은 다시 부르지 않는다.

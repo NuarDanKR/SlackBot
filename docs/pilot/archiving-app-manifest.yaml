@@ -19,6 +19,8 @@ oauth_config:
       - users:read
       - files:read
       - canvases:read
+      # B-100: 이미지 처리 상태 댓글(원본 스레드에 하나, chat.update 로 고침)
+      - chat:write
 settings:
   event_subscriptions:
     bot_events:

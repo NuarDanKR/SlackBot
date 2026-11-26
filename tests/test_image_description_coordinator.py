@@ -566,3 +566,88 @@ def test_managed_original_failure_keeps_only_the_safe_code(monkeypatch):
     )
 
     assert batch.items[0].code == "original_hash_mismatch"
+
+
+# --- B-100 상태 기록 ---------------------------------------------------------------
+
+
+def test_status_is_recorded_as_processing_before_dispatch_then_the_result(monkeypatch):
+    seen = []
+    order = []
+
+    def dispatch(*_args, **_kwargs):
+        order.append("dispatch")
+        return ImageDescriptionRun("job-1", "published", revision_id="revision-1")
+
+    monkeypatch.setattr(
+        "tybot.archive.image_description_coordinator.dispatch_reserved_image", dispatch
+    )
+
+    def notifier(item, *, phase="", doc=None):
+        order.append(phase or item.state)
+        seen.append((item, phase, doc))
+
+    run_approved_batch(
+        [_doc(message_ts="1700000000.123456")],
+        workspace="tyit",
+        store=Store(),
+        router=object(),
+        load_image=_image,
+        approval_id_for=lambda _candidate: "approval-1",
+        checks_for=lambda *_args: {
+            "source_verified": True,
+            "access_verified": True,
+            "pii_blocked": False,
+            "bot_generated": False,
+        },
+        dispatch_expires_at=NOW + timedelta(minutes=5),
+        status_notifier=notifier,
+    )
+
+    assert order == ["processing", "dispatch", "published"]
+    processing, result = seen
+    assert processing[0].job_id == result[0].job_id == "job-1"
+    assert result[0].revision_id == "revision-1"
+    assert processing[2] is not None and result[2] is not None  # 파일 이름·기본 OCR 용 정본
+
+
+def test_blocked_candidates_are_reported_and_a_failing_notifier_changes_nothing(monkeypatch):
+    calls = []
+
+    def fail_once(*_args, **_kwargs):
+        calls.append(True)
+        return ImageDescriptionRun("job-1", "closed_without_revision", code=ERROR_MODEL_ERROR)
+
+    monkeypatch.setattr(
+        "tybot.archive.image_description_coordinator.dispatch_reserved_image", fail_once
+    )
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("status table missing")
+
+    batch = run_approved_batch(
+        [
+            _doc(message_ts="1700000000.123456"),
+            _doc(file_id="F99999999", sha256="b" * 64, message_ts="1700000000.123457"),
+        ],
+        workspace="tyit",
+        store=Store(),
+        router=object(),
+        load_image=_image,
+        approval_id_for=lambda _candidate: "approval-1",
+        checks_for=lambda *_args: {
+            "source_verified": True,
+            "access_verified": True,
+            "pii_blocked": False,
+            "bot_generated": False,
+        },
+        dispatch_expires_at=NOW + timedelta(minutes=5),
+        status_notifier=broken,
+    )
+
+    # cf0ebf5 의 차단기는 그대로다 — 한 번 실패하면 나머지는 예약하지 않는다.
+    assert len(calls) == 1
+    assert [item.code for item in batch.items] == [
+        ERROR_MODEL_ERROR,
+        "provider_temporarily_unavailable",
+    ]

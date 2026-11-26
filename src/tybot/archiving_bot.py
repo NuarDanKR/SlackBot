@@ -76,6 +76,39 @@ def deliver_image_description_notice(client, cfg: ArchiverWorkspace, notice) -> 
         return False
 
 
+def record_image_receipts(workspace: str, channel_id: str, message_ts: str, docs) -> int:
+    """B-100 — 수집한 이미지마다 「접수」 상태를 DB 에 적는다. 댓글은 전달 루프가 단다.
+
+    Vision 정책이 켜졌는지는 Vision 표를 열지 않고 `image_notice_vision_enabled()`
+    (SECURITY DEFINER, 참·거짓만)로 본다. 꺼져 있으면 「기본 OCR 만 씀」 으로 보인다.
+    """
+    from .archive import image_status_notice as notices
+
+    targets = [
+        doc for doc in docs
+        if str(getattr(doc, "filetype", "") or "").lower() in notices.VISION_FILETYPES
+    ]
+    if not targets or not os.getenv("DATABASE_URL"):
+        return 0
+    recorded = 0
+    with notices.connect() as connection:
+        with connection.cursor() as cur:
+            cur.execute("SELECT image_notice_vision_enabled(%s) AS enabled", (workspace,))
+            enabled = bool((cur.fetchone() or {}).get("enabled"))
+        repo = notices.PostgresNoticeRepo(connection)
+        for doc in targets:
+            key = notices.NoticeKey(workspace, channel_id, message_ts, str(doc.file_id))
+            payload = notices.receipt_payload(
+                name=str(getattr(doc, "name", "") or ""),
+                conversion_state=str(getattr(doc, "conversion_state", "") or ""),
+                has_text=bool(str(getattr(doc, "text", "") or "").strip()),
+                vision_enabled=enabled,
+            )
+            if repo.record(notices.NoticeRow(key=key, phase=notices.ACCEPTED, payload=payload)):
+                recorded += 1
+    return recorded
+
+
 def validate_slack_identity(cfg: ArchiverWorkspace, identity: dict) -> None:
     if identity.get("team_id") != cfg.team_id:
         raise ArchiverConfigError(f"archiver token belongs to the wrong workspace: {cfg.key}")
@@ -211,7 +244,7 @@ class ArchiveCollector:
     """
 
     def __init__(self, cfg: ArchiverWorkspace, root: Path, *, membership_repo=None,
-                 owner_lookup=None) -> None:
+                 owner_lookup=None, image_receipts=record_image_receipts) -> None:
         # 채널별 배치의 원문에는 추출 본문을 넣지 않는다 — 첨부 본문은 정본 문서로 따로 간다.
         # 섀도 시절에는 기동 설정이 켰다. 이제 배치가 하나뿐이라 항상 켠다.
         if not cfg.separate_attachments:
@@ -222,6 +255,7 @@ class ArchiveCollector:
         self._names: dict[str, str] = {}
         self._store = ArchiveStore(root)
         self._owner_lookup = owner_lookup
+        self._image_receipts = image_receipts
 
     def _channel_archive(self, channel_id: str, channel: str,
                          root: Path | None = None) -> Path:
@@ -304,13 +338,16 @@ class ArchiveCollector:
             return "skipped-identity"
 
         # 여기서부터는 실시간·소급이 **같은 경로**를 쓴다. 규칙을 복제하면
-        # 같은 대화가 들어온 길에 따라 다르게 남는다.
+        # 같은 대화가 들어온 길에 따라 다르게 남는다. 다른 것은 접수 댓글 하나다 —
+        # 소급이 옛 이미지 스레드마다 댓글을 달면 안 된다(B-100).
         return self.ingest_message(
             client, event, channel=channel, channel_id=channel_id, is_private=is_private,
+            announce_images=True,
         )
 
     def ingest_message(
         self, client, event: dict, *, channel: str, channel_id: str, is_private: bool,
+        announce_images: bool = False,
     ) -> str:
         """사람 메시지 하나를 **원문·첨부·revision·ACK 까지** 처리한다.
 
@@ -397,6 +434,12 @@ class ArchiveCollector:
                 acl=frozenset({channel}),
                 channel_archive=channel_archive,
             )
+        if announce_images and canonical_docs and self._image_receipts is not None:
+            try:
+                self._image_receipts(self.cfg.key, channel_id, message_ts, canonical_docs)
+            except Exception:  # noqa: BLE001 - 상태 기록 실패가 수집을 멈추지 않는다
+                # 상태 댓글은 수집을 막지 않는다. 원문·첨부는 이미 들어갔다.
+                log.warning("[%s] image receipt not recorded ch=%s", self.cfg.key, channel_id)
         if staged:
             # 첨부가 있으면 **본문만으로 ready 라고 하지 않는다.**
             self._ack(
@@ -704,13 +747,32 @@ def _serve(cfg: ArchiverWorkspace, root: Path) -> None:
         )
 
     def image_notice_loop() -> None:
+        from .archive import image_status_notice as notices
+
         while not stop.is_set():
+            # 배포 전에 쌓인 옛 완료 알림(JSONL)만 비운다. 새 상태는 DB 로만 온다.
             outcome = image_description_notification.drain(
                 cfg.key, lambda notice: deliver_image_description_notice(app.client, cfg, notice)
             )
             if outcome["sent"] or outcome["invalid"] or outcome.get("error"):
                 log.info("[%s] image notice outbox sent=%s left=%s invalid=%s", cfg.key,
                          outcome["sent"], outcome["left"], outcome["invalid"])
+            if os.getenv("DATABASE_URL"):
+                try:
+                    with notices.connect() as connection:
+                        counts = notices.deliver_pending(
+                            app.client,
+                            notices.PostgresNoticeRepo(connection),
+                            cfg.key,
+                            allowed_channels=cfg.allowed_channels,
+                            bot_user_id=cfg.bot_user_id,
+                        )
+                    if any(counts.values()):
+                        log.info("[%s] image status notices %s", cfg.key, counts)
+                except Exception as exc:  # noqa: BLE001 - 전달 실패는 다음 회차에 다시 본다
+                    # 본문 없이 종류만. 다음 회차에 다시 본다 — 상태는 DB 에 남아 있다.
+                    log.warning("[%s] image status delivery deferred: %s",
+                                cfg.key, type(exc).__name__)
             stop.wait(15)
 
     @app.event("message")

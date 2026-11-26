@@ -17,7 +17,6 @@ from tybot.lock import AlreadyRunning, LockUnavailable, instance_lock
 
 from .attachment_reader import all_revisions
 from .image_description_coordinator import run_cleared_batch
-from .image_description_notification import ImageDescriptionNotice, enqueue, load_recognition
 from .image_description_runtime import (
     ImageDescriptionRuntimeStatus,
     failed_status,
@@ -25,6 +24,7 @@ from .image_description_runtime import (
 )
 from .image_description_secret import resolve_provider_key
 from .image_description_store import ImageDescriptionStore
+from .image_status_notice import PostgresNoticeRepo, worker_status_recorder
 from .vision_sensitivity import request_sensitivity
 
 _WORKSPACE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -127,6 +127,7 @@ def run_once(
     router_factory=_router,
     secret_resolver=resolve_provider_key,
     revisions=all_revisions,
+    notice_repo_factory=PostgresNoticeRepo,
     now: datetime | None = None,
     limit: int = 50,
 ) -> ImageDescriptionRuntimeStatus:
@@ -150,27 +151,13 @@ def run_once(
             cost_path=runtime_root / "image-description" / "cost-state.json",
             api_key=api_key,
         )
-        def notify(item) -> None:
-            # The worker owns no Slack token.  It queues the source coordinates
-            # and the *published* recognition (guard-approved description, tags
-            # and masked OCR) so the uploader can check it (owner 2026-11-20).
-            # A failed lookup still sends the fixed completion text.
-            try:
-                recognition = load_recognition(connection, item.revision_id)
-            except Exception:  # noqa: BLE001 - DB detail stays out of the notice
-                log.warning(
-                    "image recognition lookup failed ws=%s job=%s", item.workspace, item.job_id
-                )
-                recognition = {}
-            queued = enqueue(ImageDescriptionNotice(
-                job_id=item.job_id,
-                workspace=item.workspace,
-                channel_id=item.channel_id,
-                message_ts=item.message_ts,
-                **recognition,
-            ), root=runtime_root)
-            if not queued:
-                log.warning("image completion notice was not queued ws=%s job=%s", item.workspace, item.job_id)
+        # B-100: 처리 상태는 DB 에만 적는다. worker 는 Slack 토큰이 없고, 댓글은
+        # Archiver 가 같은 댓글을 고쳐 가며 단다. 기록 실패는 Vision 결과를 바꾸지 않는다.
+        record = worker_status_recorder(notice_repo_factory(connection))
+
+        def status_notifier(item, *, phase: str = "", doc=None) -> None:
+            record(item, phase=phase, doc=doc, connection=connection)
+
         batch = run_cleared_batch(
             revisions(archive_root),
             workspace=workspace,
@@ -180,7 +167,7 @@ def run_once(
             dispatch_expires_at=current + timedelta(seconds=DISPATCH_TTL_SECONDS),
             now=current,
             limit=limit,
-            completion_notifier=notify,
+            status_notifier=status_notifier,
         )
         code_counts = Counter(
             code

@@ -126,6 +126,7 @@ def run_approved_batch(
     dispatch_expires_at: datetime,
     approval_id_for=None,
     completion_notifier=None,
+    status_notifier=None,
     limit: int = 50,
 ) -> ImageDescriptionBatch:
     """현재 정본에서 보낼 수 있는 후보만 한 번씩 실행한다.
@@ -152,25 +153,38 @@ def run_approved_batch(
     }
     items: list[ImageDescriptionBatchItem] = []
 
+    def notify(item: ImageDescriptionBatchItem, doc=None, phase: str = "") -> None:
+        # B-100: 상태는 DB 에만 적는다(Slack 은 Archiver 몫). 기록 실패가 결과를 바꾸거나
+        # provider 를 다시 부르게 하지 않는다.
+        if status_notifier is None or not item.message_ts:
+            return
+        with contextlib.suppress(Exception):
+            status_notifier(item, phase=phase, doc=doc)
+
+    def add(item: ImageDescriptionBatchItem, doc=None) -> None:
+        items.append(item)
+        notify(item, doc)
+
     provider_unavailable = False
     for candidate in selection.candidates:
         if provider_unavailable:
-            items.append(
-                _item(candidate, "blocked", code="provider_temporarily_unavailable")
+            add(
+                _item(candidate, "blocked", code="provider_temporarily_unavailable"),
+                by_key.get(candidate.dedupe_key),
             )
             continue
         doc = by_key.get(candidate.dedupe_key)
         if doc is None:
-            items.append(_item(candidate, "blocked", code="source_changed"))
+            add(_item(candidate, "blocked", code="source_changed"))
             continue
         try:
             checks = checks_for(candidate, doc)
         except Exception:  # noqa: BLE001 - ACL/PII 조회의 본문을 내보내지 않는다
-            items.append(_item(candidate, "blocked", code="checks_failed"))
+            add(_item(candidate, "blocked", code="checks_failed"), doc)
             continue
         blocker = _fresh_check_blocker(checks)
         if blocker:
-            items.append(_item(candidate, "blocked", code=blocker))
+            add(_item(candidate, "blocked", code=blocker), doc)
             continue
         # `clearance_code` is a coordinator decision aid, not a dispatch fact.
         # Keep the two caller facts and two loader-derived facts only.
@@ -180,18 +194,18 @@ def run_approved_batch(
             try:
                 approval_id = approval_id_for(candidate)
             except Exception:  # noqa: BLE001 - DB/provider 본문 없이 고정 코드만 보낸다.
-                items.append(_item(candidate, "blocked", code="approval_lookup_failed"))
+                add(_item(candidate, "blocked", code="approval_lookup_failed"), doc)
                 continue
             if not approval_id:
-                items.append(_item(candidate, "approval_required", code="approval_missing"))
+                add(_item(candidate, "approval_required", code="approval_missing"), doc)
                 continue
         try:
             image = load_image(candidate, doc)
         except Exception as exc:  # noqa: BLE001 - 본문 없는 코드로 접는다
-            items.append(_item(candidate, "blocked", code=_code(exc, "source_load_failed")))
+            add(_item(candidate, "blocked", code=_code(exc, "source_load_failed")), doc)
             continue
         if not isinstance(image, ImageInput):
-            items.append(_item(candidate, "blocked", code="source_load_invalid"))
+            add(_item(candidate, "blocked", code="source_load_invalid"), doc)
             continue
         # source_verified는 callback의 주장이 아니라 loader가 bytes·해시를 다시
         # 확인하고 ImageInput을 만든 뒤에만 참이 된다.
@@ -205,8 +219,13 @@ def run_approved_batch(
                 checks=checks,
             )
         except Exception as exc:  # noqa: BLE001 - 저장소도 제어 코드만 내보낸다
-            items.append(_item(candidate, "blocked", code=_code(exc, "reserve_failed")))
+            add(_item(candidate, "blocked", code=_code(exc, "reserve_failed")), doc)
             continue
+        notify(
+            _item(candidate, "dispatching", job_id=receipt.dispatch_id),
+            doc,
+            phase="processing",
+        )
         try:
             run = dispatch_reserved_image(
                 store,
@@ -216,13 +235,14 @@ def run_approved_batch(
                 checks=checks,
             )
         except Exception as exc:  # noqa: BLE001 - worker 본문·provider 응답 금지
-            items.append(
+            add(
                 _item(
                     candidate,
                     "unknown",
                     code=_code(exc, "dispatch_failed"),
                     job_id=receipt.dispatch_id,
-                )
+                ),
+                doc,
             )
             continue
         item = _item(
@@ -232,7 +252,7 @@ def run_approved_batch(
             job_id=run.job_id,
             revision_id=run.revision_id,
         )
-        items.append(item)
+        add(item, doc)
         if run.code in {ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR}:
             # One transient provider/transport failure is enough for this run.
             # Leave later candidates unreserved for the next timer instead of
@@ -264,6 +284,7 @@ def run_cleared_batch(
     now: datetime,
     limit: int = 50,
     completion_notifier=None,
+    status_notifier=None,
 ) -> ImageDescriptionBatch:
     """DB 정책과 현재 정본을 다시 읽어 보낼 수 있는 원본만 실행한다.
 
@@ -312,6 +333,7 @@ def run_cleared_batch(
         checks_for=checks_for,
         dispatch_expires_at=dispatch_expires_at,
         completion_notifier=completion_notifier,
+        status_notifier=status_notifier,
         limit=limit,
     )
 

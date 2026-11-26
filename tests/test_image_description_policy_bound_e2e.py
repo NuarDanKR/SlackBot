@@ -1,7 +1,7 @@
 """B-81 — 2026-11-20 오너 결정: 이미지는 건별 PII clearance·approval 없이 보낸다.
 
 정본 이미지 → 선별 → 원본 재검증 → **정책 결속 예약** → 모델 1회 → 출력 가드 →
-파생 revision·검색 투영 → B-94 스레드 알림까지 `run_once` 를 그대로 돌린다.
+파생 revision·검색 투영 → B-100 상태 기록(처리 중 → 완료)까지 `run_once` 를 그대로 돌린다.
 
 DB 는 `ImageDescriptionStore` 가 내는 SQL 을 **문장 단위로** 받아 메모리 표에 쓰는
 대역이다. 저장소 코드는 실제 것이 돈다 — 대역은 행을 돌려줄 뿐 판정하지 않는다.
@@ -26,7 +26,7 @@ import pytest
 import test_image_transcript_e2e as e2e
 
 from tybot.archive import image_description_job as job
-from tybot.archive import image_description_notification as notification
+from tybot.archive import image_status_notice as notices
 
 NOW = datetime.now(UTC)
 
@@ -263,6 +263,16 @@ class MemoryDB:
             )
             self.entries.append(dict(zip(keys, args, strict=True)))
         elif text.startswith(
+            "SELECT status, description, tags, provider FROM archiver_image_description_revision"
+        ):
+            self._result = self.descriptions.get(args[0])
+        elif text.startswith("SELECT id, status, body FROM archiver_image_transcript_revision"):
+            hit = [t for t in self.transcripts.values() if t["description_revision_id"] == args[0]]
+            self._result = hit[0] if hit else None
+        elif text.startswith("SELECT count(*) AS n FROM image_search_entry"):
+            wanted = set(args[0])
+            self._result = {"n": sum(1 for e in self.entries if e["revision_id"] in wanted)}
+        elif text.startswith(
             "SELECT status, description, tags FROM archiver_image_description_revision"
         ):
             self._result = self.descriptions.get(args[0])
@@ -271,6 +281,14 @@ class MemoryDB:
             self._result = hit[0] if hit else None
         else:  # pragma: no cover - 새 SQL 이 생기면 대역이 조용히 넘기지 않는다
             raise AssertionError(f"unexpected SQL: {text[:120]}")
+
+
+#: 상태 표 대역. 판정은 실제 `advance`·`merged` 가 한다.
+NOTICES: dict[int, notices.MemoryNoticeRepo] = {}
+
+
+def _notice_repo(db) -> notices.MemoryNoticeRepo:
+    return NOTICES.setdefault(id(db), notices.MemoryNoticeRepo())
 
 
 def _run(tmp_path, db, router, *, revisions=None, **archive_kw):
@@ -285,14 +303,14 @@ def _run(tmp_path, db, router, *, revisions=None, **archive_kw):
         connect=lambda _dsn: db,
         router_factory=lambda *_a, **_k: router,
         secret_resolver=lambda *_a: "test-key",
+        notice_repo_factory=lambda _conn: _notice_repo(db),
         **({"revisions": revisions} if revisions else {}),
     )
 
 
-def _drain(tmp_path):
-    seen = []
-    notification.drain(e2e.WS, lambda n: seen.append(n) or True, root=tmp_path / "state")
-    return seen
+def _notice(db) -> notices.NoticeRow:
+    (row,) = _notice_repo(db).rows.values()
+    return row
 
 
 # --- 정책 ON · 정상 이미지 ------------------------------------------------------
@@ -324,12 +342,18 @@ def test_policy_on_image_is_described_once_without_clearance_or_approval(tmp_pat
     assert kinds == ["description", "transcript"]
     assert all("010-1234-5678" not in entry["body"] for entry in db.entries)
 
-    # B-94 스레드 알림: 원 메시지 좌표와 발행된 인식 결과
-    (notice,) = _drain(tmp_path)
-    assert notice.channel_id == e2e.CH and notice.message_ts == "1794000000.000100"
-    assert notice.description == e2e.DESCRIPTION
-    assert "010-1234-5678" not in notice.text
-    assert "안전제일" in notice.text
+    # B-100 상태: 원 메시지 좌표, 처리 중 → 완료(판 2), 검색 투영 확인, 가린 인식 결과
+    notice = _notice(db)
+    assert notice.key.channel_id == e2e.CH and notice.key.message_ts == "1794000000.000100"
+    assert notice.phase == notices.COMPLETED and notice.version == 2
+    assert notice.job_id == row["id"]
+    assert notice.payload["description"] == e2e.DESCRIPTION
+    assert notice.payload["search_published"] is True
+    text = notices.render(notice.phase, notice.payload)
+    assert "- 처리 방식: Google Vision LLM" in text.splitlines()
+    assert "- 검색 반영: 완료" in text.splitlines()
+    assert "010-1234-5678" not in text
+    assert "안전제일" in text
 
 
 def test_the_same_original_is_never_sent_twice(tmp_path):
@@ -427,8 +451,8 @@ def test_a_transcribed_vehicle_plate_is_not_stored_or_shown(tmp_path):
     assert router.calls == 1
     assert not db.transcripts
     assert all("12가3456" not in entry["body"] for entry in db.entries)
-    (notice,) = _drain(tmp_path)
-    assert "12가3456" not in notice.text
+    notice = _notice(db)
+    assert "12가3456" not in notices.render(notice.phase, notice.payload)
 
 
 def test_a_description_that_identifies_a_person_is_not_indexed(tmp_path):
@@ -439,3 +463,41 @@ def test_a_description_that_identifies_a_person_is_not_indexed(tmp_path):
     assert router.calls == 1
     assert all("010-2222-3333" not in entry["body"] for entry in db.entries)
     assert all("010-2222-3333" not in str(row["description"]) for row in db.descriptions.values())
+
+
+def test_a_status_store_failure_changes_neither_the_result_nor_the_call_count(tmp_path):
+    """Slack·상태 표가 실패해도 Vision 을 다시 부르지 않는다(B-100 계약)."""
+
+    class Broken:
+        def record(self, _row):
+            raise RuntimeError("status table missing")
+
+    db = MemoryDB()
+    router = e2e._Router(e2e._Resp(e2e._model_json()))
+    root = (tmp_path / "archive").resolve()
+    e2e._archive(root)
+    status = job.run_once(
+        e2e.WS,
+        dsn="postgresql://unused",
+        archive_root=root,
+        runtime_root=tmp_path / "state",
+        connect=lambda _dsn: db,
+        router_factory=lambda *_a, **_k: router,
+        secret_resolver=lambda *_a: "test-key",
+        notice_repo_factory=lambda _conn: Broken(),
+    )
+    assert router.calls == 1 and status.published == 1
+    (row,) = db.jobs.values()
+    assert row["state"] == "described"
+
+
+def test_a_transient_provider_failure_is_recorded_without_a_second_call(tmp_path):
+    db = MemoryDB()
+    router = e2e._Router(TimeoutError("provider timed out"))
+    _run(tmp_path, db, router)
+    _run(tmp_path, db, router)
+    assert router.calls == 1
+    notice = _notice(db)
+    assert notice.phase == notices.FAILED
+    assert notice.payload["reason"] == "provider_error"
+    assert "다음 배치에서 재시도" not in notices.render(notice.phase, notice.payload)

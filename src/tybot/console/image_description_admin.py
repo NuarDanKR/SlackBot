@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from ..archive import image_status_notice as notices
 from ..archive.image_description_store import ImageDescriptionDenied, ImageDescriptionStore
 from .vision_dsn import VisionDsnError, resolve_vision_database_url
 
@@ -152,6 +153,15 @@ def snapshot(workspace: str, *, limit: int = 50, connect=None) -> dict:
                     (workspace, workspace),
                 )
                 counts = dict(cur.fetchone())
+            # B-100 상태 댓글. 표가 아직 없는 서버(스키마 미적용)에서도 나머지 현황은 보인다.
+            try:
+                notice_rows = [
+                    notices.console_row(row)
+                    for row in notices.PostgresNoticeRepo(conn).recent(workspace, limit=limit)
+                ]
+                notice_error = ""
+            except Exception:  # noqa: BLE001 - 본문 없는 코드로만 알린다
+                notice_rows, notice_error = [], "notice_status_unavailable"
     except ImageDescriptionDenied as exc:
         code = _safe_code(exc.args[0] if exc.args else "")
         raise ImageDescriptionAdminError(code or "policy_unavailable") from exc
@@ -166,6 +176,8 @@ def snapshot(workspace: str, *, limit: int = 50, connect=None) -> dict:
         "policy": _policy_response(policy, config, sources),
         "catalog": catalog,
         "jobs": jobs,
+        "notices": notice_rows,
+        "noticesError": notice_error,
         "counts": {
             "activeApprovals": int(counts["active_approvals"]),
             "activeClearances": int(counts["active_clearances"]),
@@ -173,4 +185,22 @@ def snapshot(workspace: str, *, limit: int = 50, connect=None) -> dict:
     }
 
 
-__all__ = ["ImageDescriptionAdminError", "snapshot"]
+def resend_notice(
+    workspace: str, channel_id: str, message_ts: str, file_id: str, *, connect=None
+) -> bool:
+    """전달 실패한 상태 댓글을 다시 보낼 대기열로 되돌린다. Vision 은 다시 부르지 않는다."""
+    try:
+        key = notices.NoticeKey(workspace.strip().lower(), channel_id, message_ts, file_id)
+    except notices.NoticeError as exc:
+        raise ImageDescriptionAdminError("invalid_request") from exc
+    connector = connect or _connect
+    try:
+        with connector() as conn:
+            return notices.PostgresNoticeRepo(conn).resend(key)
+    except ImageDescriptionAdminError:
+        raise
+    except Exception as exc:
+        raise ImageDescriptionAdminError("notice_status_unavailable") from exc
+
+
+__all__ = ["ImageDescriptionAdminError", "resend_notice", "snapshot"]

@@ -93,7 +93,7 @@ _최종 갱신: 2026-11-12_
 | ID | 제목 | 우선 | 상태 | 의존 |
 |---|---|---|---|---|
 | [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · **1단계 완료, 배포 대기** · **2단계 코드 완료, 배포 대기** — 전환 절차 `docs/deploy/archiver-unit-switch.md`) | B-65, B-68, B-94, B-98 |
-| [B-100](#b-100) | **B-94 확장 — 이미지 Vision 처리 상태를 Slack 스레드 댓글 하나(고쳐 가며)와 콘솔에서 확실히 보이기** | **높음** | 대기 (B-99 2단계 `archiving_bot.py` 병합 후 착수) | B-94, B-99, B-81 |
+| [B-100](#b-100) | **B-94 확장 — 이미지 Vision 처리 상태를 Slack 스레드 댓글 하나(고쳐 가며)와 콘솔에서 확실히 보이기** | **높음** | 진행중 (Claude/2026-11-26 · 코드·시험 완료, 커밋·배포 대기) | B-94, B-99, B-81 |
 | [B-85](#b-85) | **답변 캐시와 사용자별 TYBot/VIPBot 일일 성공 답변 10회 제한** | **최우선** | 완료 (Codex/2026-11-10) | B-19, B-27b, B-83 |
 | [B-86](#b-86) | **PII·민감정보 결정적 마스킹 후 아카이브·답변 허용** | **최우선** | 완료 (Claude/2026-11-10) | B-07, B-49, B-70 |
 | [B-87](#b-87) | **`/채널 상태` 필수 앱 참여 진단 — Archiver·TYBot·rhwp·Hermes** | **최우선** | 완료 (Claude/2026-11-11) | B-37, B-65, B-72 |
@@ -1222,7 +1222,27 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 ## B-100
 ### B-94 확장 — 이미지 Vision 처리 상태를 Slack 스레드에서 확실히 알리기
 
-**높음 · 대기 · 의존 B-94, B-99(2단계), B-81**
+**높음 · 진행중 (Claude/2026-11-26 · 코드·시험 완료, 커밋·배포 대기) · 의존 B-94, B-99(2단계), B-81**
+
+**구현(2026-11-26).** `src/tybot/archive/image_status_notice.py` ·
+`deploy/sql/image_status_notice_schema.sql`.
+- 상태 표 `image_status_notice` — 이미지 하나 = 행 하나 = 댓글 하나. 단계가 실제로 앞으로 갈
+  때만 `version` 이 오르고, Archiver 는 `version > delivered_version` 만 Slack 에 반영한다.
+  단계는 `accepted`·`processing`·`completed`·`uncertain`·`deferred`·`failed`, 전달 상태는
+  `pending`·`retrying`·`delivered`·`failed_delivery`.
+- 게시 뒤 `reply_ts` 를 못 적고 죽는 경우를 위해 댓글 metadata 에 좌표 해시를 싣고, 앞선
+  시도가 있던 행은 게시 전에 스레드에서 먼저 찾는다(`conversations.replies`).
+- Archiver 는 Vision 표를 못 연다. 「Vision 처리 대기」 와 「기본 OCR 만 씀」 을 가르려고
+  참·거짓만 돌려주는 `image_notice_vision_enabled()`(SECURITY DEFINER)를 둔다.
+- **재시도 문구는 사실대로.** 예약 전에 멈춘 후보(`provider_temporarily_unavailable`·한도)만
+  「다음 배치에서 재시도」 다. 한 번 provider 에 나간 job 의 일시 오류는 중복 과금 방지로
+  같은 원본을 다시 보내지 않으므로(`duplicate_job`) 「자동으로 다시 보내지 않음」 으로 보인다.
+- 소급 수집은 접수 댓글을 달지 않는다(옛 이미지 스레드마다 댓글이 생기지 않게).
+- 옛 JSONL outbox 는 새로 쌓지 않고, 배포 전에 남은 줄만 비운다.
+
+**오너 지시 차이(2026-11-26).** 아래 「댓글에 원문 파일명을 넣지 않는다」 와 달리, 이번
+지시는 여러 첨부를 구분하도록 파일명을 보이라고 했다. **가린 뒤(`sensitive_mask`) 80자로
+자르고, 못 가린 모양이면 빼고** 보인다. 콘솔 표에는 파일명을 싣지 않는다.
 
 **왜.** B-81 Vision 변환·검색 저장은 운영 검증됐지만, 사용자에게는 이미지가 접수됐는지,
 처리 중인지, 성공·실패했는지가 보이지 않는다. 지금 `image-description-notify` JSONL outbox 는
@@ -1286,16 +1306,16 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 
 #### 시험
 
-- [ ] 접수 → 처리 중 → 완료 순서 — `chat.postMessage` 1회 뒤 같은 `ts` 에 `chat.update` 만, 스레드 댓글 수 1
-- [ ] 늦게 온 옛 상태가 새 상태를 덮지 않는다. 댓글이 지워졌을 때만 새 댓글을 달고 `ts` 를 바꾼다
-- [ ] 성공 댓글에는 guard-approved·마스킹된 OCR 만 들어 있다
-- [ ] Slack API 일시 오류 뒤 재시도해 성공한다
-- [ ] 등록 해제·멤버십 없음은 콘솔에 실패로 남고 성공 처리되지 않는다
-- [ ] worker 재시작, 중복 outbox 행, 같은 job 재실행에도 같은 상태 댓글이 중복되지 않는다
-- [ ] 봇 댓글이 Archiver 수집 경로에 다시 들어가지 않는다
-- [ ] Slack 실패·DB 실패에서 원문·토큰·API 키가 로그·댓글·DB 상태에 노출되지 않는다
-- [ ] PostgreSQL 격리 DB 시험
-- [ ] `ruff check src tests scripts` 0건, 관련 pytest 와 전체 pytest 결과를 보고한다
+- [x] 접수 → 처리 중 → 완료 순서 — `chat.postMessage` 1회 뒤 같은 `ts` 에 `chat.update` 만, 스레드 댓글 수 1
+- [x] 늦게 온 옛 상태가 새 상태를 덮지 않는다. 댓글이 지워졌을 때만 새 댓글을 달고 `ts` 를 바꾼다
+- [x] 성공 댓글에는 guard-approved·마스킹된 OCR 만 들어 있다
+- [x] Slack API 일시 오류 뒤 재시도해 성공한다
+- [x] 등록 해제·멤버십 없음은 콘솔에 실패로 남고 성공 처리되지 않는다
+- [x] worker 재시작, 중복 outbox 행, 같은 job 재실행에도 같은 상태 댓글이 중복되지 않는다
+- [x] 봇 댓글이 Archiver 수집 경로에 다시 들어가지 않는다
+- [x] Slack 실패·DB 실패에서 원문·토큰·API 키가 로그·댓글·DB 상태에 노출되지 않는다
+- [x] PostgreSQL 격리 DB 시험 — `tests/test_image_status_notice_schema.py` 12건, 폐기 PostgreSQL 16.4 에서 통과(2026-11-26). Vision 열 권한 거부·접수 지연 병합·동시 첫 INSERT 병합·재전송 함수 포함
+- [x] `ruff check src tests scripts` 0건, 관련 pytest 와 전체 pytest 결과를 보고한다
 
 **범위 밖.** Canvas 생성. PDF/Word 전체 추출 텍스트를 Slack 댓글로 게시. Vision worker 에
 Slack 토큰 부여. B-99 섀도 제거 로직 변경.

@@ -39,6 +39,41 @@ interface JobRow {
   finishedAt: string | null
 }
 
+/** B-100 이미지당 Slack 상태 댓글 하나. 본문·파일명은 오지 않는다. */
+interface NoticeRow {
+  channelId: string
+  messageTs: string
+  fileId: string
+  phase: string
+  jobId: string
+  deliveryState: string
+  version: number
+  deliveredVersion: number
+  attempts: number
+  lastAttemptAt: string | null
+  errorCode: string
+  hasReply: boolean
+  resendable: boolean
+  slackEligible: boolean
+}
+
+const NOTICE_PHASE: Record<string, string> = {
+  accepted: '접수',
+  processing: '처리 중',
+  completed: '인식 완료',
+  uncertain: '확인 필요',
+  deferred: '보류(재시도 예정)',
+  failed: '처리 안 됨',
+}
+
+const NOTICE_DELIVERY: Record<string, { tone: 'ok' | 'watch' | 'bad' | 'plain'; text: string }> = {
+  delivered: { tone: 'ok', text: 'Slack 반영' },
+  pending: { tone: 'plain', text: '보낼 차례' },
+  retrying: { tone: 'watch', text: '재시도 중' },
+  failed_delivery: { tone: 'bad', text: '전달 실패' },
+  not_announced: { tone: 'plain', text: '알리지 않음(소급·과거 이미지)' },
+}
+
 interface Snapshot {
   workspace: string
   policy: {
@@ -52,7 +87,70 @@ interface Snapshot {
   }
   catalog: CatalogRow[]
   jobs: JobRow[]
+  notices?: NoticeRow[]
+  noticesError?: string
   counts: { activeApprovals: number; activeClearances: number }
+}
+
+function NoticeTable({ workspace, rows, error, onToast, reload }: {
+  workspace: string
+  rows: NoticeRow[]
+  error: string
+  onToast: (message: string) => void
+  reload: () => void
+}) {
+  const [busy, setBusy] = useState('')
+  const resend = async (row: NoticeRow) => {
+    const id = `${row.channelId}/${row.messageTs}/${row.fileId}`
+    setBusy(id)
+    try {
+      await api.post('/api/archiver/image-description/notices/resend', {
+        workspace,
+        channelId: row.channelId,
+        messageTs: row.messageTs,
+        fileId: row.fileId,
+      })
+      onToast('다시 보낼 대기열에 넣었습니다. 15초 안에 Archiver 가 보냅니다.')
+      reload()
+    } catch (e) {
+      onToast(e instanceof ApiError ? e.message : '다시 보내지 못했습니다.')
+    } finally {
+      setBusy('')
+    }
+  }
+  return (
+    <div className="table-wrap">
+      <p className="hint">
+        Slack 상태 댓글 — 이미지마다 댓글 하나를 고쳐 가며 보여 줍니다. 다시 보내기는 댓글만 보내고 Vision 은 다시 부르지 않습니다.
+      </p>
+      {error && <p className="hint">상태 댓글 표를 읽지 못했습니다({error}). 스키마 적용 여부를 확인하세요.</p>}
+      <table className="table">
+        <thead><tr><th>처리 단계</th><th>Slack</th><th>채널·메시지·파일</th><th>시도</th><th>오류 코드</th><th>마지막 시도</th><th /></tr></thead>
+        <tbody>
+          {rows.length === 0 && !error && <tr><td colSpan={7} className="hint">상태 댓글이 없습니다.</td></tr>}
+          {rows.map((row) => {
+            const id = `${row.channelId}/${row.messageTs}/${row.fileId}`
+            const delivery = NOTICE_DELIVERY[row.deliveryState] ?? { tone: 'plain' as const, text: row.deliveryState }
+            return (
+              <tr key={id}>
+                <td>{NOTICE_PHASE[row.phase] ?? row.phase}</td>
+                <td><Chip tone={delivery.tone}>{delivery.text}</Chip></td>
+                <td className="mono">{id}</td>
+                <td>{row.attempts}</td>
+                <td className="mono">{row.errorCode || '-'}</td>
+                <td>{row.lastAttemptAt ? fmt.dayClock(row.lastAttemptAt) : '-'}</td>
+                <td>
+                  {row.resendable && (
+                    <button className="btn btn-sm" disabled={busy === id} onClick={() => void resend(row)}>다시 보내기</button>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 const JOB_STATE: Record<string, { tone: 'ok' | 'watch' | 'bad' | 'plain'; text: string }> = {
@@ -161,7 +259,7 @@ function SecretsSection({ onToast }: { onToast: (message: string) => void }) {
   )
 }
 
-function StatusSection({ workspace }: { workspace: string }) {
+function StatusSection({ workspace, onToast }: { workspace: string; onToast: (message: string) => void }) {
   const snapshot = useResource<Snapshot>(`/api/archiver/image-description/policy?workspace=${encodeURIComponent(workspace)}`)
   if (snapshot.loading && !snapshot.data) return <Loading what="이미지 설명 현황을" />
   if (snapshot.error && !snapshot.data) return <Failed what="이미지 설명 현황을" detail={snapshot.error.message} onRetry={snapshot.reload} />
@@ -218,6 +316,13 @@ function StatusSection({ workspace }: { workspace: string }) {
           </tbody>
         </table>
       </div>
+      <NoticeTable
+        workspace={workspace}
+        rows={data.notices ?? []}
+        error={data.noticesError ?? ''}
+        onToast={onToast}
+        reload={snapshot.reload}
+      />
     </Section>
   )
 }
@@ -465,7 +570,7 @@ export function ImageDescriptionPage({ onToast, workspaces, canEditGlobal = true
           {workspaces.map((ws) => <option key={ws} value={ws}>{ws}</option>)}
         </select>
       </div>
-      {workspace ? <StatusSection workspace={workspace} /> : <div className="hint">워크스페이스를 고르세요.</div>}
+      {workspace ? <StatusSection workspace={workspace} onToast={onToast} /> : <div className="hint">워크스페이스를 고르세요.</div>}
       {workspace && <PdfVisionSection key={workspace} workspace={workspace} canEditGlobal={canEditGlobal} onToast={onToast} />}
     </>
   )

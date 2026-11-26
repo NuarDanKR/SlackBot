@@ -58,6 +58,7 @@ FILES=(
   archiver_vision_schema.sql  # B-80 dormant policy/approval/budget ledger, default OFF
   archiver_image_description_schema.sql  # B-81 dormant catalog/policy/derived index, default OFF
   archiver_image_transcript_schema.sql  # B-81 후속 OCR 전사 원장·사진 검색 투영(Master 읽기 전용)
+  image_status_notice_schema.sql  # B-100 이미지 처리 상태 댓글(이미지당 하나, chat.update)
   conversion_alert_schema.sql
   archiving_schema.sql        # Archiving Bot. 채널 모드·수집 상태·revision·감사
   workspace_service_schema.sql  # workspace 하나에 서비스 여럿. workspace 를 참조한다
