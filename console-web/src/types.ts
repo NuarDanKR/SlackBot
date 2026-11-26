@@ -197,6 +197,8 @@ export interface AnswerRecordDetail extends AnswerRecordSummary {
   answer: string
   scope: string
   citations: string[]
+  // 근거를 찾은 경로(B-93). 검색 순서대로의 코드. 이 칸이 생기기 전 기록은 빈 목록이다.
+  searchPath: string[]
   error: string
   requestTs: string
   responseTs: string

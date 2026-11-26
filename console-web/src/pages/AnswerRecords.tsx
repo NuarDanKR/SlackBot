@@ -12,6 +12,18 @@ const FEEDBACK_LABEL: Record<string, string> = {
 }
 const STATUS_LABEL = { answered: '답변 완료', needs_review: '확인 필요', failed: '답변 실패' } as const
 const STATUS_TONE = { answered: 'ok', needs_review: 'watch', failed: 'bad' } as const
+// 근거를 찾은 경로(B-93). 코드는 서버 `QARecord.search_path` 와 같다. 모르는 코드는 그대로 보여 준다.
+const SEARCH_PATH_LABEL: Record<string, string> = {
+  exhaustive: '전수',
+  index: '색인',
+  scan_no_index: '파일 훑음(색인 읽기 실패)',
+  scan_index_empty: '파일 재훑음(색인 0건)',
+}
+// 빈 목록은 「검색을 안 했다」가 아니라 이 칸이 생기기 전 기록이다.
+function searchPathText(path: string[]): string {
+  if (path.length === 0) return '기록 없음'
+  return path.map((code) => SEARCH_PATH_LABEL[code] ?? code).join(' → ')
+}
 
 export function AnswerRecords({
   user,
@@ -169,7 +181,7 @@ function RecordDetail({ item }: { item: AnswerRecordDetail }) {
     {item.resultStatus === 'failed' && <div className="notice bad"><div><div className="notice-title">업무 답변을 생성하지 못했습니다</div><div className="notice-detail">Slack 전달 여부와 별개인 답변 생성 실패입니다. 사유 코드: <span className="mono">{item.failureCode || item.specialistErrorCode || 'answer_failed'}</span></div></div></div>}
     <div className="original-block"><div className="original-label">질문 원본 · {item.at ? new Date(item.at).toLocaleString('ko-KR') : '-'}</div><div className="original-text">{item.question || '질문 본문이 기록되지 않았습니다.'}</div></div>
     <div className="original-block"><div className="original-label">전달된 답변</div><div className="original-text">{item.answer || '답변 본문이 기록되지 않았습니다.'}</div></div>
-    <dl className="answer-trace"><div><dt>분류·라우팅</dt><dd>{item.intent || '-'} · {item.source || '-'}{item.plannerModel ? ` · ${item.plannerModel}` : ''}</dd></div><div><dt>권한·근거</dt><dd>{item.scope || '범위 미기록'} · 검색 {item.hits}건</dd></div><div><dt>모델 실행</dt><dd>{item.model} · {fmt.ms(item.ms)} · {item.costUsd ? fmt.usd(item.costUsd) : '-'}</dd></div><div><dt>전달</dt><dd>{item.responseTs || '응답 시각 미기록'}</dd></div></dl>
+    <dl className="answer-trace"><div><dt>분류·라우팅</dt><dd>{item.intent || '-'} · {item.source || '-'}{item.plannerModel ? ` · ${item.plannerModel}` : ''}</dd></div><div><dt>권한·근거</dt><dd>{item.scope || '범위 미기록'} · 검색 {item.hits}건 · 경로: {searchPathText(item.searchPath ?? [])}</dd></div><div><dt>모델 실행</dt><dd>{item.model} · {fmt.ms(item.ms)} · {item.costUsd ? fmt.usd(item.costUsd) : '-'}</dd></div><div><dt>전달</dt><dd>{item.responseTs || '응답 시각 미기록'}</dd></div></dl>
     {item.taskTraces.length > 0 && <div className="original-block"><div className="original-label">작업별 처리</div><div className="table-wrap"><table className="table"><thead><tr><th>작업</th><th>요구 능력</th><th>신뢰도</th><th>응답 주체</th><th>결과</th></tr></thead><tbody>{item.taskTraces.map((trace) => <tr key={`${item.decisionId}-${trace.task_index}`}><td className="mono">{trace.task_kind}</td><td className="mono">{trace.required_capability || '-'}</td><td>{Math.round(trace.routing_confidence * 100)}%</td><td className="mono">{trace.final_responder || 'none'}{trace.attempted_specialists.length > 0 && <div className="hint">시도: {trace.attempted_specialists.join(', ')}</div>}</td><td>{trace.result || '-'}{trace.error_code && <div className="hint mono">{trace.error_code}</div>}</td></tr>)}</tbody></table></div></div>}
     <div className="original-block"><div className="original-label">출처</div>{item.citations.length ? <ul className="citation-list">{item.citations.map((citation, index) => <li key={`${citation}-${index}`}>{citation}</li>)}</ul> : <p className="hint">기록된 출처가 없습니다.</p>}</div>
     <div className="original-block"><div className="original-label">사람 검토·피드백</div>{item.feedback.length ? <div className="feedback-detail-list">{item.feedback.map((feedback) => <div className="feedback-detail" key={feedback.id}><strong>{FEEDBACK_LABEL[feedback.kind] ?? feedback.kind}</strong><span>{feedback.at ? new Date(feedback.at).toLocaleString('ko-KR') : ''} · {feedback.actor}</span>{feedback.text && <p>{feedback.text}</p>}{feedback.handled && <p className="hint">처리됨 · {feedback.handledBy}{feedback.handledNote ? ` · ${feedback.handledNote}` : ''}</p>}</div>)}</div> : <p className="hint">연결된 피드백이 없습니다.</p>}</div>
