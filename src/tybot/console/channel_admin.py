@@ -51,6 +51,7 @@ class ChannelRow:
     attachment_lines: int = 0
     messages: int = 0
     attachments: int = 0
+    attachment_kinds: dict = field(default_factory=lambda: {"document": 0, "image": 0, "canvas": 0, "other": 0})
     last_ingested: str = ""
     answers: int = 0
     last_answer: str = ""
@@ -99,6 +100,7 @@ class ChannelRow:
             "attachmentLines": self.attachment_lines,
             "messages": self.messages,
             "attachments": self.attachments,
+            "attachmentKinds": dict(self.attachment_kinds),
             "lastIngestedAt": self.last_ingested,
             "answers": self.answers,
             "lastAnswerAt": self.last_answer,
@@ -161,6 +163,9 @@ def build_rows(
         row.attachment_lines += int(doc.get("attachmentLines") or 0)
         row.messages += int(doc.get("messages") or 0)
         row.attachments += int(doc.get("attachments") or 0)
+        for kind, n in (doc.get("attachmentKinds") or {}).items():
+            if kind in row.attachment_kinds:
+                row.attachment_kinds[kind] += int(n or 0)
         last = str(doc.get("lastIngestedAt") or "")
         if last > row.last_ingested:
             row.last_ingested = last
