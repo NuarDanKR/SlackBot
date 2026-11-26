@@ -7,8 +7,10 @@ import pytest
 
 from tybot.archive import image_description_worker as worker
 from tybot.archive.image_description import (
+    ERROR_MODEL_ERROR,
     PROMPT_REVISION,
     STATUS_DESCRIBED,
+    STATUS_FAILED,
     ImageDescription,
     ImageInput,
     ImageInputError,
@@ -119,6 +121,24 @@ def test_a_blocked_result_closes_without_a_revision(monkeypatch):
     run = worker.dispatch_reserved_image(store, "job-1", IMAGE, router=object(), checks={})
     assert run.state == "closed_without_revision"
     assert run.revision_id == ""
+
+
+def test_a_transport_failure_returns_only_its_safe_circuit_breaker_code(monkeypatch):
+    failed = replace(
+        RESULT,
+        status=STATUS_FAILED,
+        description="",
+        tags=(),
+        error_code=ERROR_MODEL_ERROR,
+        usage=ImageUsage(model="free-vision-v1"),
+    )
+    monkeypatch.setattr(worker, "describe_image", lambda *args, **kwargs: failed)
+    run = worker.dispatch_reserved_image(
+        Store(revision=""), "job-1", IMAGE, router=object(), checks={}
+    )
+
+    assert run.state == "closed_without_revision"
+    assert run.code == ERROR_MODEL_ERROR
 
 
 def test_worker_does_not_return_the_sensitive_model_result(monkeypatch):

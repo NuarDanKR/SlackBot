@@ -862,8 +862,11 @@ class ImageDescriptionStore:
             # A transport exception has no provider receipt, so it must not claim
             # an actual provider.  It is still a terminal failed call: the dispatch
             # was committed before the request, and retrying could charge twice.
-            # Keep the useful failure code, but disable the catalog's free claim
-            # because the cost is unknowable without a receipt.
+            # Keep the useful failure code. A request that failed before a
+            # provider receipt is evidence of temporary transport failure, not
+            # evidence that an owner-approved free/unlimited catalog entry
+            # changed. The exact dispatch remains terminal to avoid a duplicate
+            # call, but later sources may use the catalog again.
             unreceipted_transport_failure = (
                 result.status == STATUS_FAILED
                 and result.error_code in {ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR}
@@ -885,7 +888,9 @@ class ImageDescriptionStore:
                     raise ImageDescriptionDenied("invalid_usage")
             actual_usd = _money(usage.cost_usd)
             cost_code = (
-                "cost_unverified"
+                ""
+                if unreceipted_transport_failure
+                else "cost_unverified"
                 if actual_usd is None
                 else "unexpected_charge"
                 if actual_usd > 0

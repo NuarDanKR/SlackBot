@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from tybot.archive.attachment_doc import AttachmentDoc
-from tybot.archive.image_description import PROMPT_REVISION, ImageInput
+from tybot.archive.image_description import ERROR_MODEL_ERROR, PROMPT_REVISION, ImageInput
 from tybot.archive.image_description_clearance import SafetyAssessment
 from tybot.archive.image_description_coordinator import (
     run_approved_batch,
@@ -385,6 +385,45 @@ def test_dispatch_failure_is_unknown_and_does_not_leak(monkeypatch):
     assert batch.items[0].state == "unknown"
     assert batch.items[0].code == "dispatch_failed"
     assert "private" not in repr(batch)
+
+
+def test_one_transport_failure_defers_the_rest_of_the_batch(monkeypatch):
+    calls = []
+
+    def fail_once(*_args, **_kwargs):
+        calls.append(True)
+        return ImageDescriptionRun(
+            "job-1", "closed_without_revision", code=ERROR_MODEL_ERROR
+        )
+
+    monkeypatch.setattr(
+        "tybot.archive.image_description_coordinator.dispatch_reserved_image",
+        fail_once,
+    )
+    batch = run_approved_batch(
+        [
+            _doc(),
+            _doc(file_id="F99999999", sha256="b" * 64),
+        ],
+        workspace="tyit",
+        store=Store(),
+        router=object(),
+        load_image=_image,
+        approval_id_for=lambda _candidate: "approval-1",
+        checks_for=lambda *_args: {
+            "source_verified": True,
+            "access_verified": True,
+            "pii_blocked": False,
+            "bot_generated": False,
+        },
+        dispatch_expires_at=NOW + timedelta(minutes=5),
+    )
+
+    assert len(calls) == 1
+    assert [item.code for item in batch.items] == [
+        ERROR_MODEL_ERROR,
+        "provider_temporarily_unavailable",
+    ]
 
 
 def test_other_workspaces_are_not_selected(monkeypatch):

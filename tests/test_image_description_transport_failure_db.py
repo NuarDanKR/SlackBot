@@ -232,7 +232,7 @@ def test_a_transport_failure_closes_the_job_and_publishes_nothing(conn, error_co
     job = _one(conn, "SELECT * FROM archiver_image_description_job WHERE id=%s", (receipt.dispatch_id,))
     # 1. dispatching → failed, 끝난 시각이 있다
     assert job["state"] == "failed" and job["finished_at"] is not None
-    assert job["error_code"] == f"{error_code},cost_unverified"
+    assert job["error_code"] == error_code
     # 2. 영수증이 없으면 실제 모델·provider 를 적지 않는다
     assert job["actual_model"] is None and job["actual_provider"] is None
     assert job["actual_usd"] is None
@@ -250,12 +250,12 @@ def test_a_transport_failure_closes_the_job_and_publishes_nothing(conn, error_co
         "SELECT * FROM archiver_image_model_catalog WHERE provider=%s AND model=%s",
         (PROVIDER, MODEL),
     )
-    assert catalog["zero_cost_verified"] is False
-    assert catalog["quota_state"] == "unknown" and catalog["quota_remaining"] is None
-    assert catalog["updated_by"] == "runtime-cost-guard"
+    assert catalog["zero_cost_verified"] is True
+    assert catalog["quota_state"] == "available" and catalog["quota_remaining"] == 2
+    assert catalog["updated_by"] == "seed"
 
 
-def test_the_blocked_catalog_stops_the_next_image_before_any_job(conn):
+def test_a_transport_failure_does_not_disable_the_next_image(conn):
     store, revision = _ready(conn)
     first = _image()
     _approve(store, revision, approval_id="approval-1", original=first.original_sha256)
@@ -265,10 +265,9 @@ def test_the_blocked_catalog_stops_the_next_image_before_any_job(conn):
 
     second = _image(original="c" * 64, payload=b"\x89PNG-another-image")
     _approve(store, revision, approval_id="approval-2", original=second.original_sha256)
-    with pytest.raises(ImageDescriptionDenied) as denied:
-        _reserve(store, second, "approval-2")
-    assert denied.value.args[0] in {"zero_cost_not_verified", "quota_unknown"}
-    assert _one(conn, "SELECT count(*) AS n FROM archiver_image_description_job")["n"] == 1
+    second_receipt = _reserve(store, second, "approval-2")
+    assert second_receipt.dispatch_id
+    assert _one(conn, "SELECT count(*) AS n FROM archiver_image_description_job")["n"] == 2
 
 
 def test_the_same_original_is_never_reserved_again_even_after_reverification(conn):

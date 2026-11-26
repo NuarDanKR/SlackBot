@@ -16,7 +16,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from .image_description import PROMPT_REVISION, ImageInput
+from .image_description import (
+    ERROR_MODEL_ERROR,
+    ERROR_MODEL_TIMEOUT,
+    PROMPT_REVISION,
+    ImageInput,
+)
 from .image_description_clearance import verify_current_access
 from .image_description_original import load_original
 from .image_description_runner import CALLER_CHECKS
@@ -147,7 +152,13 @@ def run_approved_batch(
     }
     items: list[ImageDescriptionBatchItem] = []
 
+    provider_unavailable = False
     for candidate in selection.candidates:
+        if provider_unavailable:
+            items.append(
+                _item(candidate, "blocked", code="provider_temporarily_unavailable")
+            )
+            continue
         doc = by_key.get(candidate.dedupe_key)
         if doc is None:
             items.append(_item(candidate, "blocked", code="source_changed"))
@@ -222,6 +233,11 @@ def run_approved_batch(
             revision_id=run.revision_id,
         )
         items.append(item)
+        if run.code in {ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR}:
+            # One transient provider/transport failure is enough for this run.
+            # Leave later candidates unreserved for the next timer instead of
+            # turning one outage into 50 terminal provider calls.
+            provider_unavailable = True
         # Notification is only an acknowledgement of an already-published
         # search projection.  It never changes the worker result and cannot
         # cause a second provider call when its local outbox is unavailable.

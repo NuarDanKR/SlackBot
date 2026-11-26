@@ -512,7 +512,7 @@ def test_an_unknown_cost_blocks_publication_and_disables_the_free_claim() -> Non
 
 
 @pytest.mark.parametrize("error_code", [ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR])
-def test_a_transport_failure_without_a_provider_receipt_is_terminal_and_disables_free_claim(
+def test_a_transport_failure_without_a_provider_receipt_is_terminal_without_disabling_catalog(
     error_code: str,
 ) -> None:
     connection = ScriptedConnection([GLOBAL, JOB])
@@ -527,10 +527,9 @@ def test_a_transport_failure_without_a_provider_receipt_is_terminal_and_disables
     assert ImageDescriptionStore(connection).finish_and_publish("job-1", result) == ""
     assert not _inserts(connection)
     job_update = next(event for event in _updates(connection) if "description_job" in event[0])
-    assert job_update[1][0:2] == ("failed", f"{error_code},cost_unverified")
+    assert job_update[1][0:2] == ("failed", error_code)
     assert job_update[1][2:4] == (None, None)
-    catalog_update = next(event for event in _updates(connection) if "model_catalog" in event[0])
-    assert catalog_update[1] == ("approved-provider", "free-vision-v1")
+    assert not any("model_catalog" in event[0] for event in _updates(connection))
 
 
 def test_a_receipted_parse_failure_keeps_its_specific_error_code() -> None:

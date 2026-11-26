@@ -9,7 +9,13 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import dataclass
 
-from .image_description import ImageInput, ImageInputError, describe_image
+from .image_description import (
+    ERROR_MODEL_ERROR,
+    ERROR_MODEL_TIMEOUT,
+    ImageInput,
+    ImageInputError,
+    describe_image,
+)
 
 
 class ImageDescriptionWorkerError(RuntimeError):
@@ -70,8 +76,15 @@ def dispatch_reserved_image(
             "publish_failed",
             type(exc).__name__,
         ) from None
+    safe_code = (
+        result.error_code
+        if not revision_id
+        and result.error_code in {ERROR_MODEL_TIMEOUT, ERROR_MODEL_ERROR}
+        else ""
+    )
     return ImageDescriptionRun(
         job_id=job_id,
         state="published" if revision_id else "closed_without_revision",
         revision_id=revision_id,
+        code=safe_code,
     )

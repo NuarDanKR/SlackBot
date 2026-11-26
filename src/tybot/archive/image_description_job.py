@@ -182,6 +182,19 @@ def run_once(
             limit=limit,
             completion_notifier=notify,
         )
+        code_counts = Counter(
+            code
+            for item in batch.items
+            if (code := getattr(item, "code", ""))
+        )
+        if code_counts:
+            log.warning(
+                "image description batch blockers ws=%s codes=%s",
+                workspace,
+                ",".join(
+                    f"{code}:{count}" for code, count in sorted(code_counts.items())
+                ),
+            )
     return _summary(workspace, policy.revision, batch)
 
 
