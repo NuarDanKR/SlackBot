@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from . import document_evidence, documents, summary_guide
 from .access import RequestContext, can_access
-from .archive.store import ArchiveStore, SearchHit
+from .archive.store import ArchiveStore, SearchHit, note_summary_scan
 from .attachment_review import find_sendable, status_line
 from .channels import source_label
 from .evidence_refs import MAX_REFS, live_ref, ref_from_hit, refs_from_hits
@@ -1843,7 +1844,13 @@ class AnswerEngine:
             )
             visible_docs = []
 
+        # 기간 스캔이 도는 요약만 숫자를 남긴다(B-93). 문서 집합 요약·좁혀 묻는 후속 질문은
+        # 이 루프를 타지 않아(`visible_docs` 가 비어 있다) 남기지 않는다.
+        scan_started = time.perf_counter()
+        scan_visible = scan_window = scan_used = scan_channels = scan_capped = 0
+        scanned = bool(visible_docs)
         for doc in visible_docs:
+            scan_visible += len(doc.raw_lines)
             recent = [
                 ln for ln in doc.raw_lines
                 if TS_RE.match(ln.ts) and (not cutoff or ln.ts[:10] >= cutoff)
@@ -1851,7 +1858,12 @@ class AnswerEngine:
             recent = _match_terms(recent, terms)
             if not recent:
                 continue
+            scan_window += len(recent)
+            scan_channels += 1
+            if len(recent) > self._max_lines_per_channel:
+                scan_capped += 1
             recent = recent[-self._max_lines_per_channel :]
+            scan_used += len(recent)
             total += len(recent)
             recent_hits = [SearchHit(doc=doc, line=line, score=1) for line in recent]
             summary_hits.extend(recent_hits)
@@ -1876,6 +1888,13 @@ class AnswerEngine:
                 )
             citations.extend(doc_citations)
             specialist_parts.append((block, doc_citations, recent_hits))
+
+        if scanned:
+            note_summary_scan(
+                visible_lines=scan_visible, window_lines=scan_window, used_lines=scan_used,
+                channels=scan_channels, capped_channels=scan_capped,
+                ms=round((time.perf_counter() - scan_started) * 1000),
+            )
 
         if not scoped:
             # PDF 쪽 전사(B-80)는 **명시적 문서 질의**일 때만 찾는다 — 주제어(`terms`)나

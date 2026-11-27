@@ -319,6 +319,14 @@ class QARecord:
     # 코드뿐이다. 질문·본문·파일 경로는 넣지 않는다. 옛 기록에는 이 칸이 없어 빈 목록이고,
     # 빈 목록은 「검색을 안 했다」가 아니라 「모른다」일 수 있다.
     search_path: list[str] = field(default_factory=list)
+    # 검색마다 `{"visible_lines": 볼 수 있던 줄 수, "ms": 검색만 걸린 시간}`(B-93).
+    # `search_path` 와 같은 순서·같은 길이다. `elapsed_ms` 는 LLM 시간이 섞여 있어서
+    # 검색만의 시간이 따로 필요하다. 숫자뿐이다. 옛 기록에는 이 칸이 없다.
+    search_stats: list[dict[str, int]] = field(default_factory=list)
+    # 요약 질문의 기간 스캔 숫자(B-93). 요약은 `search()` 를 안 타서 위 두 칸이 비고, 대신
+    # 채널당 상한(기본 60줄)에 얼마나 잘렸는지를 여기에 남긴다. 키는 `store.SUMMARY_STAT_KEYS`.
+    # 숫자뿐이다. 요약이 아니거나 문서 집합 요약이면 빈 목록이고, 옛 기록에는 칸이 없다.
+    summary_stats: list[dict[str, int]] = field(default_factory=list)
 
     @classmethod
     def build(cls, **kw) -> QARecord:

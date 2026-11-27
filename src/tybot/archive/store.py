@@ -5,10 +5,12 @@ v1 평면 파일과 v2 ``workspaces/<ws>/channels/<id>__<name>/raw/<date>.md``�
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
 import threading
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -33,15 +35,57 @@ _legacy_warning_lock = threading.Lock()
 #   index            DB 색인 후보에서 근거를 찾았다
 #   scan_no_index    색인을 읽지 못해 파일을 훑었다(장애·미색인)
 #   scan_index_empty 색인 후보에서 쓸 줄이 0건이라 파일을 다시 훑었다
+#
+# 경로와 짝으로 **검색마다 두 숫자**를 남긴다(`search_stats`). 15만 줄 문턱을 숫자로
+# 조정하려면 「몇 줄을 볼 때 검색이 몇 ms 걸렸나」가 필요한데, QA 기록의 `elapsed_ms` 는
+# 분류·답변 LLM 시간이 섞여 있어 검색만 떼어 볼 수 없다.
+#   visible_lines  이 검색이 볼 수 있던 채널 원문 줄 수(질문자 권한·채널 범위 적용 후)
+#   ms             `search()` 한 번의 걸린 시간(밀리초, 파일 재훑기 포함)
+# 두 목록은 같은 순서·같은 길이다(검색 1회 = 경로 1개 = 숫자 1쌍).
 SEARCH_TRAIL_MAX = 16
 _search_trail: ContextVar[list[str] | None] = ContextVar(
     "tybot_search_trail", default=None
+)
+_search_stats: ContextVar[list[dict[str, int]] | None] = ContextVar(
+    "tybot_search_stats", default=None
+)
+
+
+# 요약(`AnswerEngine.summarize`)은 `search()` 를 거치지 않고 **기간 스캔**으로 줄을 모은 뒤
+# 채널마다 최근 N줄(`max_lines_per_channel`, 기본 60)로 자른다. 그 N 에는 근거가 문서에 없어서
+# 얼마나 잘리는지 숫자가 필요하다. 같은 메모장 수명(`begin_search_trail`)을 쓴다.
+#   visible_lines    요약이 볼 수 있던 원문 줄 수(권한·워크스페이스 필터 적용 후)
+#   window_lines     기간·주제어로 거른 뒤 후보 줄 수
+#   used_lines       채널당 상한을 적용한 뒤 실제로 쓴 줄 수(잘린 줄 = window - used)
+#   channels         후보 줄이 있던 채널 수
+#   capped_channels  그중 상한에 걸려 잘린 채널 수
+#   ms               이 스캔만 걸린 시간(밀리초, LLM 제외)
+_summary_stats: ContextVar[list[dict[str, int]] | None] = ContextVar(
+    "tybot_summary_stats", default=None
+)
+SUMMARY_STAT_KEYS = (
+    "visible_lines", "window_lines", "used_lines", "channels", "capped_channels", "ms",
 )
 
 
 def begin_search_trail() -> None:
     """지금 실행 중인 질문의 검색 경로 메모장을 새로 연다(이전 값은 버린다)."""
     _search_trail.set([])
+    _search_stats.set([])
+    _summary_stats.set([])
+
+
+def summary_stats() -> list[dict[str, int]]:
+    """요약 스캔마다의 숫자(`SUMMARY_STAT_KEYS`). 메모장을 열지 않았으면 빈 목록."""
+    return [dict(item) for item in (_summary_stats.get() or [])]
+
+
+def note_summary_scan(**counts: int) -> None:
+    """요약 기간 스캔 한 번의 숫자를 남긴다. 메모장이 없거나 상한이면 아무것도 안 한다."""
+    stats = _summary_stats.get()
+    if stats is None or len(stats) >= SEARCH_TRAIL_MAX:
+        return
+    stats.append({key: max(0, int(counts.get(key, 0))) for key in SUMMARY_STAT_KEYS})
 
 
 def search_trail() -> list[str]:
@@ -49,10 +93,40 @@ def search_trail() -> list[str]:
     return list(_search_trail.get() or [])
 
 
-def _note_search_path(path: str) -> None:
+def search_stats() -> list[dict[str, int]]:
+    """검색마다의 `{"visible_lines", "ms"}`(경로와 같은 순서). 메모장을 열지 않았으면 빈 목록."""
+    return [dict(item) for item in (_search_stats.get() or [])]
+
+
+def _timed_search(fn):
+    """`search()` 가 끝날 때 방금 남긴 숫자 쌍에 걸린 시간을 채운다.
+
+    검색 한 번은 숫자 쌍을 **많아야 하나** 남긴다(토큰이 없어 일찍 돌아오면 0개). 메모장이
+    없거나 상한에 막혀 안 남겼으면 아무것도 하지 않는다.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        stats = _search_stats.get()
+        before = len(stats) if stats is not None else 0
+        started = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if stats is not None and len(stats) > before:
+                stats[before]["ms"] = round((time.perf_counter() - started) * 1000)
+
+    return wrapper
+
+
+def _note_search_path(path: str, visible_lines: int = 0) -> None:
     trail = _search_trail.get()
     if trail is not None and len(trail) < SEARCH_TRAIL_MAX:
         trail.append(path)
+        stats = _search_stats.get()
+        if stats is not None:
+            # ms 는 `search()` 가 끝날 때 채운다. 그 전에 예외로 끝나도 0 으로 남는다.
+            stats.append({"visible_lines": max(0, int(visible_lines)), "ms": 0})
 
 
 def _legacy_changed(root: Path, count: int) -> bool:
@@ -1202,6 +1276,7 @@ class ArchiveStore:
 
         return rel_path(path, self.root)
 
+    @_timed_search
     def search(
         self,
         query: str,
@@ -1246,21 +1321,23 @@ class ArchiveStore:
             # 먼저 권한을 적용한 문서에서 범위를 더 좁힌다. 반대로 이 인자로
             # visible_docs 밖 문서를 열 수는 없다.
             docs = [doc for doc in docs if doc.channel in channels]
+        # 경로를 고르는 데 쓰든 안 쓰든 항상 센다 — 줄 수는 QA 기록에 남는다(B-93).
+        # 줄 목록 길이만 더하므로 비용은 문서 수에 비례하는 정수 덧셈이다.
+        visible_lines = sum(len(doc.raw_lines) for doc in docs)
         if not exhaustive and exhaustive_max_lines > 0:
-            visible_lines = sum(len(doc.raw_lines) for doc in docs)
             exhaustive = visible_lines <= exhaustive_max_lines
             logger.info(
                 "검색 경로 %s visible_lines=%d max=%d",
                 "전수" if exhaustive else "색인", visible_lines, exhaustive_max_lines,
             )
         if exhaustive:
-            _note_search_path("exhaustive")
+            _note_search_path("exhaustive", visible_lines)
             return self._scan_attachment_fallback(
                 query, tokens, docs, ctx, limit, channels, per_document=per_document
             )
         found = search_index.candidates(query, sorted({d.channel for d in docs if d.channel}))
         if found is None:
-            _note_search_path("scan_no_index")
+            _note_search_path("scan_no_index", visible_lines)
             return self._scan_attachment_fallback(
                 query, tokens, docs, ctx, limit, channels, per_document=per_document
             )
@@ -1318,11 +1395,11 @@ class ArchiveStore:
         if not hits:
             # 색인이 아직 안 돌았을 수 있다. 0건으로 답하기 전에 파일을 한 번 본다 —
             # 「색인 없음」이 「자료 없음」으로 보이는 것이 이 기능의 가장 나쁜 실패다.
-            _note_search_path("scan_index_empty")
+            _note_search_path("scan_index_empty", visible_lines)
             return self._scan_attachment_fallback(
                 query, tokens, docs, ctx, limit, channels, per_document=per_document
             )
-        _note_search_path("index")
+        _note_search_path("index", visible_lines)
 
         # 색인에 **일부** 결과가 있으면 예전에는 여기서 끝났다. 그래서 방금 들어온
         # 줄(예: 재변환한 첨부)이 조용히 검색에서 빠졌다 — 오류도 0건도 아니라

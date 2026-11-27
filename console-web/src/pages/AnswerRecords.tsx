@@ -20,9 +20,38 @@ const SEARCH_PATH_LABEL: Record<string, string> = {
   scan_index_empty: '파일 재훑음(색인 0건)',
 }
 // 빈 목록은 「검색을 안 했다」가 아니라 이 칸이 생기기 전 기록이다.
-function searchPathText(path: string[]): string {
+function searchPathText(path: string[], stats: { visibleLines: number; ms: number }[] = []): string {
   if (path.length === 0) return '기록 없음'
-  return path.map((code) => SEARCH_PATH_LABEL[code] ?? code).join(' → ')
+  // 숫자는 경로와 같은 순서로 짝지어 붙는다. 숫자가 없는 옛 기록은 이름만 보인다.
+  return path.map((code, i) => {
+    const name = SEARCH_PATH_LABEL[code] ?? code
+    const stat = stats[i]
+    return stat ? `${name}(${linesText(stat.visibleLines)} · ${fmt.ms(stat.ms)})` : name
+  }).join(' → ')
+}
+// 요약 질문은 검색이 아니라 기간 스캔이라 경로 대신 이 줄을 쓴다(B-93). 「읽은 줄 → 기간 안 줄 →
+// 쓴 줄」 로 어디서 줄어드는지 보이고, 채널당 상한(기본 60줄)에 걸려 잘린 줄이 있으면 따로 말한다.
+function summaryStatsText(stats: AnswerRecordDetail['summaryStats']): string {
+  if (stats.length === 0) return ''
+  return stats.map((s) => {
+    const cut = s.windowLines - s.usedLines
+    const head = `읽은 ${linesText(s.visibleLines)} → 기간 안 ${linesText(s.windowLines)} → 쓴 ${linesText(s.usedLines)}`
+    const tail = cut > 0 ? ` · 상한에 ${linesText(cut)} 잘림(채널 ${s.cappedChannels}/${s.channels}개)` : ' · 잘린 줄 없음'
+    return `${head}${tail} · ${fmt.ms(s.ms)}`
+  }).join(' / ')
+}
+// 「권한·근거」 칸 끝에 붙는 문장. 요약은 검색 경로가 없으니 「경로: 기록 없음」 대신 스캔 숫자를 보인다.
+function scanText(item: AnswerRecordDetail): string {
+  const path = item.searchPath ?? []
+  const summary = summaryStatsText(item.summaryStats ?? [])
+  const parts: string[] = []
+  if (path.length > 0 || !summary) parts.push(`경로: ${searchPathText(path, item.searchStats ?? [])}`)
+  if (summary) parts.push(`요약 스캔: ${summary}`)
+  return parts.join(' · ')
+}
+// 줄 수: 1만 줄부터는 「12.4만 줄」, 그 아래는 「8,200줄」. 15만 줄 문턱과 견주어 읽기 쉽게 한다.
+function linesText(lines: number): string {
+  return lines >= 10000 ? `${(lines / 10000).toFixed(1)}만 줄` : `${fmt.int(lines)}줄`
 }
 
 export function AnswerRecords({
@@ -181,7 +210,7 @@ function RecordDetail({ item }: { item: AnswerRecordDetail }) {
     {item.resultStatus === 'failed' && <div className="notice bad"><div><div className="notice-title">업무 답변을 생성하지 못했습니다</div><div className="notice-detail">Slack 전달 여부와 별개인 답변 생성 실패입니다. 사유 코드: <span className="mono">{item.failureCode || item.specialistErrorCode || 'answer_failed'}</span></div></div></div>}
     <div className="original-block"><div className="original-label">질문 원본 · {item.at ? new Date(item.at).toLocaleString('ko-KR') : '-'}</div><div className="original-text">{item.question || '질문 본문이 기록되지 않았습니다.'}</div></div>
     <div className="original-block"><div className="original-label">전달된 답변</div><div className="original-text">{item.answer || '답변 본문이 기록되지 않았습니다.'}</div></div>
-    <dl className="answer-trace"><div><dt>분류·라우팅</dt><dd>{item.intent || '-'} · {item.source || '-'}{item.plannerModel ? ` · ${item.plannerModel}` : ''}</dd></div><div><dt>권한·근거</dt><dd>{item.scope || '범위 미기록'} · 검색 {item.hits}건 · 경로: {searchPathText(item.searchPath ?? [])}</dd></div><div><dt>모델 실행</dt><dd>{item.model} · {fmt.ms(item.ms)} · {item.costUsd ? fmt.usd(item.costUsd) : '-'}</dd></div><div><dt>전달</dt><dd>{item.responseTs || '응답 시각 미기록'}</dd></div></dl>
+    <dl className="answer-trace"><div><dt>분류·라우팅</dt><dd>{item.intent || '-'} · {item.source || '-'}{item.plannerModel ? ` · ${item.plannerModel}` : ''}</dd></div><div><dt>권한·근거</dt><dd>{item.scope || '범위 미기록'} · 검색 {item.hits}건 · {scanText(item)}</dd></div><div><dt>모델 실행</dt><dd>{item.model} · {fmt.ms(item.ms)} · {item.costUsd ? fmt.usd(item.costUsd) : '-'}</dd></div><div><dt>전달</dt><dd>{item.responseTs || '응답 시각 미기록'}</dd></div></dl>
     {item.taskTraces.length > 0 && <div className="original-block"><div className="original-label">작업별 처리</div><div className="table-wrap"><table className="table"><thead><tr><th>작업</th><th>요구 능력</th><th>신뢰도</th><th>응답 주체</th><th>결과</th></tr></thead><tbody>{item.taskTraces.map((trace) => <tr key={`${item.decisionId}-${trace.task_index}`}><td className="mono">{trace.task_kind}</td><td className="mono">{trace.required_capability || '-'}</td><td>{Math.round(trace.routing_confidence * 100)}%</td><td className="mono">{trace.final_responder || 'none'}{trace.attempted_specialists.length > 0 && <div className="hint">시도: {trace.attempted_specialists.join(', ')}</div>}</td><td>{trace.result || '-'}{trace.error_code && <div className="hint mono">{trace.error_code}</div>}</td></tr>)}</tbody></table></div></div>}
     <div className="original-block"><div className="original-label">출처</div>{item.citations.length ? <ul className="citation-list">{item.citations.map((citation, index) => <li key={`${citation}-${index}`}>{citation}</li>)}</ul> : <p className="hint">기록된 출처가 없습니다.</p>}</div>
     <div className="original-block"><div className="original-label">사람 검토·피드백</div>{item.feedback.length ? <div className="feedback-detail-list">{item.feedback.map((feedback) => <div className="feedback-detail" key={feedback.id}><strong>{FEEDBACK_LABEL[feedback.kind] ?? feedback.kind}</strong><span>{feedback.at ? new Date(feedback.at).toLocaleString('ko-KR') : ''} · {feedback.actor}</span>{feedback.text && <p>{feedback.text}</p>}{feedback.handled && <p className="hint">처리됨 · {feedback.handledBy}{feedback.handledNote ? ` · ${feedback.handledNote}` : ''}</p>}</div>)}</div> : <p className="hint">연결된 피드백이 없습니다.</p>}</div>

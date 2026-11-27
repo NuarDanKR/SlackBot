@@ -199,6 +199,13 @@ export interface AnswerRecordDetail extends AnswerRecordSummary {
   citations: string[]
   // 근거를 찾은 경로(B-93). 검색 순서대로의 코드. 이 칸이 생기기 전 기록은 빈 목록이다.
   searchPath: string[]
+  // 검색마다의 볼 수 있던 줄 수·검색 시간(B-93). `searchPath` 와 같은 순서. 옛 기록은 빈 목록이다.
+  searchStats: { visibleLines: number; ms: number }[]
+  // 요약 질문의 기간 스캔 숫자(B-93). 읽은 줄 → 기간 안 줄 → 쓴 줄. 요약이 아니면 빈 목록이다.
+  summaryStats: {
+    visibleLines: number; windowLines: number; usedLines: number
+    channels: number; cappedChannels: number; ms: number
+  }[]
   error: string
   requestTs: string
   responseTs: string

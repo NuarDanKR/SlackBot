@@ -139,6 +139,59 @@ def search_path(row: dict) -> list[str]:
     return [item for item in value if isinstance(item, str) and item][:16]
 
 
+def search_stats(row: dict) -> list[dict[str, int]]:
+    """검색마다의 `{"visibleLines": 볼 수 있던 줄 수, "ms": 검색 시간}`(B-93).
+
+    `search_path` 와 **같은 순서**라 화면이 인덱스로 짝짓는다. 그래서 항목을 하나라도
+    못 믿으면 일부만 남기지 않고 통째로 빈 목록으로 돌려준다(짝이 어긋난 숫자는 거짓이다).
+    칸이 생기기 전의 옛 기록도 빈 목록이다. 숫자뿐이라 본문이 가려진 기록에도 보인다.
+    """
+    value = row.get("search_stats")
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, int]] = []
+    for item in value[:16]:
+        if not isinstance(item, dict):
+            return []
+        lines, ms = item.get("visible_lines"), item.get("ms")
+        # bool 은 int 의 하위형이라 따로 막는다(True 가 1줄로 읽히는 것을 방지).
+        if any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in (lines, ms)):
+            return []
+        out.append({"visibleLines": lines, "ms": ms})
+    return out
+
+
+#: 요약 기간 스캔 한 번의 숫자 키(`archive.store.SUMMARY_STAT_KEYS` 와 같다).
+_SUMMARY_KEYS = (
+    "visible_lines", "window_lines", "used_lines", "channels", "capped_channels", "ms",
+)
+_SUMMARY_CAMEL = {
+    "visible_lines": "visibleLines", "window_lines": "windowLines", "used_lines": "usedLines",
+    "channels": "channels", "capped_channels": "cappedChannels", "ms": "ms",
+}
+
+
+def summary_stats(row: dict) -> list[dict[str, int]]:
+    """요약 질문의 기간 스캔 숫자(B-93) — 읽은 줄 → 기간 안 줄 → 쓴 줄, 잘린 채널 수, 시간.
+
+    키가 하나라도 없거나 음수·정수가 아니면 **통째로 빈 목록**이다(일부만 남기면 줄이 어디서
+    잘렸는지 읽는 사람이 틀리게 읽는다). 칸이 생기기 전의 옛 기록·요약이 아닌 질문도 빈 목록이다.
+    숫자뿐이라 본문이 가려진 기록에도 보인다.
+    """
+    value = row.get("summary_stats")
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, int]] = []
+    for item in value[:16]:
+        if not isinstance(item, dict):
+            return []
+        numbers = [item.get(key) for key in _SUMMARY_KEYS]
+        if any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in numbers):
+            return []
+        out.append({_SUMMARY_CAMEL[key]: n for key, n in zip(_SUMMARY_KEYS, numbers, strict=True)})
+    return out
+
+
 #: 본문을 가린 VIP 기록에서도 보여 주는 작업 기록 키 — 처리 경로만, 내용은 없다.
 _TRACE_KEYS = (
     "task_index", "task_kind", "required_capability", "routing_confidence",
@@ -356,6 +409,8 @@ def detail(row: dict, feedback: list[dict], *, show_body: bool = True) -> dict:
         "scope": str(row.get("scope") or ""),
         "hits": int(row.get("hits") or 0),
         "searchPath": search_path(row),
+        "searchStats": search_stats(row),
+        "summaryStats": summary_stats(row),
         "citations": list(row.get("citations") or []),
         "model": str(row.get("model") or "-"),
         "costUsd": float(row.get("cost_usd") or 0),
