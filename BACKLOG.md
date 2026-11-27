@@ -94,6 +94,7 @@ _최종 갱신: 2026-11-12_
 |---|---|---|---|---|
 | [B-99](#b-99) | **섀도 수집 완전 제거 — 옛 `workspaces/` 쓰기 차단과 단일 Archiver 경로** | **최우선 (긴급·운영 장애)** | 진행중 (Claude 총괄/2026-11-20 · **1단계 완료, 배포 대기** · **2단계 코드 완료, 배포 대기** — 전환 절차 `docs/deploy/archiver-unit-switch.md`) | B-65, B-68, B-94, B-98 |
 | [B-100](#b-100) | **B-94 확장 — 이미지 Vision 처리 상태를 Slack 스레드 댓글 하나(고쳐 가며)와 콘솔에서 확실히 보이기** | **높음** | 진행중 (Claude/2026-11-26 · 코드·시험 완료, 커밋·배포 대기) | B-94, B-99, B-81 |
+| [B-101](#b-101) | **비용 가드가 끈 Vision 무료 카탈로그를 콘솔에서 재검증(다시 켜기)** | **높음** | 진행중 (Claude/2026-11-27 · 코드·시험 완료, 배포 대기) | B-81, B-100 |
 | [B-85](#b-85) | **답변 캐시와 사용자별 TYBot/VIPBot 일일 성공 답변 10회 제한** | **최우선** | 완료 (Codex/2026-11-10) | B-19, B-27b, B-83 |
 | [B-86](#b-86) | **PII·민감정보 결정적 마스킹 후 아카이브·답변 허용** | **최우선** | 완료 (Claude/2026-11-10) | B-07, B-49, B-70 |
 | [B-87](#b-87) | **`/채널 상태` 필수 앱 참여 진단 — Archiver·TYBot·rhwp·Hermes** | **최우선** | 완료 (Claude/2026-11-11) | B-37, B-65, B-72 |
@@ -1365,6 +1366,44 @@ worker·파생 색인·API와 콘솔 계약을 맡는다. B-80 문서 페이지 
 Slack 토큰 부여. B-99 섀도 제거 로직 변경.
 
 ---
+
+## B-101
+### 비용 가드가 끈 Vision 무료 카탈로그를 콘솔에서 재검증(다시 켜기)
+
+**높음 · 진행중 (Claude/2026-11-27 · 코드·시험 완료, 배포 대기) · 의존 B-81, B-100**
+
+**왜(2026-11-27 장애).** tyit 에 올린 새 이미지가 「⚠️ Vision LLM 처리 안 됨 · 처리 조건을
+통과하지 못했습니다」 로 끝났다. 워커 로그는 15분마다
+`codes=zero_cost_not_verified:44,original_outside_root:5,doc_coordinate_mismatch:1`.
+- 11-24 11:46 Gemini 호출 한 건이 **타임아웃**(응답·토큰·비용 전부 NULL)으로 끝났고, 당시
+  코드는 그것을 `cost_unverified` 로 판정해 비용 가드가 카탈로그
+  `google/gemini-3.1-flash-lite` 를 `zero_cost_verified=false`·`quota_state=unknown`·
+  `updated_by=runtime-cost-guard` 로 닫았다(`image_description_store.finish_and_publish`).
+- 판정 오류는 `cf0ebf5`(11-26)에서 고쳤지만 **이미 닫힌 행은 되살리지 않는다.** 처음 켠 것도
+  SQL 이었고 다시 켤 자리가 서버 SQL 뿐이라, tyit Vision 이 사흘간 통째로 꺼져 있었다.
+- 「운영 기능은 콘솔에 둔다」 위반 — 서버 담당자 없이는 아무도 못 켠다.
+
+**구현(2026-11-27).** `src/tybot/console/image_catalog_reverify.py` · 콘솔 이미지 설명 화면
+「현황」 카탈로그 표의 **다시 켜기/재검증** 단추.
+- `GET /api/archiver/image-description/catalog/reverify` — 쓰지 않는다. 누가 껐는지
+  (`disabledByGuard`), 비용 가드가 막은 최근 작업 5건(사유 코드·금액, 실제 과금이면
+  `chargeSeen`), 이 모델로 **정책이 켜진 워크스페이스**(다시 켜면 다음 배치에서 막혔던
+  이미지가 한꺼번에 나가는 범위)를 먼저 보인다.
+- `POST` — 무료 확인·한도(`unlimited` 또는 남은 횟수)·검증 시각·검증 판
+  (`console-reverified-<UTC>`)만 새로 적는다. Vision 지원·자격·민감도·지역은 안 바꾸고,
+  Vision 미지원·자격 없음이면 **거절**한다(켰다고 믿고 안 도는 상태 방지).
+  사유·「프로바이더 콘솔에서 과금 없음 확인」 체크 필수, `verification_revision` 충돌 시 409,
+  저장은 `ImageDescriptionStore.save_catalog`(전역 정책 행 잠금 후 revision 재비교).
+- 카탈로그는 전역이라 **전체 워크스페이스 관리자만**(일부만 보는 관리자 403). CSRF 검사.
+  감사 `image_model_catalog_reverify` 에 이전 판·이전 실행자·사유를 남긴다.
+- 현황 표에 「마지막 변경」 칸 — `runtime-cost-guard` 면 「비용 가드가 닫음」 칩.
+- 모델·worker 를 부르지 않는다. 다음 15분 배치가 현재 사실로 다시 판정한다.
+
+**남은 것.**
+- [ ] 배포 후 콘솔에서 tyit 카탈로그 다시 켜기(SQL 복구를 먼저 했으면 「재검증」 으로 보임) →
+  다음 배치 로그에서 `zero_cost_not_verified` 사라짐 확인
+- [ ] `original_outside_root`·`doc_coordinate_mismatch` 는 별건 — 원본 좌표가 격리된 옛
+  `workspaces/` 를 가리키는 건으로 보인다(B-98/B-99). 건별 확인 후 처리
 
 ## B-96
 ### 봇 등급별 모델 — VIPBot 한 단계 위(판단 Sonnet·Hermes Opus)

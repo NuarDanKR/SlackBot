@@ -3453,6 +3453,17 @@ image_description_policy_router = image_description_policy_routes.build_router(
 )
 app.include_router(image_description_policy_router)
 
+# B-101 비용 가드가 끈 Vision 무료 카탈로그를 콘솔에서 다시 켠다(전체 워크스페이스 관리자).
+from . import image_catalog_reverify  # noqa: E402
+
+image_catalog_reverify_router = image_catalog_reverify.build_router(
+    current_user=current_user,
+    require_admin=_require_admin,
+    check_write_request=_check_write_request,
+    audit_event=_audit_event,
+)
+app.include_router(image_catalog_reverify_router)
+
 # B-80 PDF 쪽 Vision 전사 — 정책·요금표·예산과 현황. 정산 근거(요금표)를 콘솔에서 고친다.
 from . import pdf_vision_routes  # noqa: E402
 

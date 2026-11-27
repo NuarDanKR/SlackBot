@@ -80,6 +80,8 @@ def _catalog_response(row: dict) -> dict:
         "quotaState": row["quota_state"],
         "quotaRemaining": row["quota_remaining"],
         "quotaResetsAt": row["quota_resets_at"],
+        # 누가 마지막으로 바꿨나 — `runtime-cost-guard` 면 비용 가드가 끈 것이다(B-101).
+        "updatedBy": row.get("updated_by") or "",
         "updatedAt": row["updated_at"],
     }
 
@@ -122,7 +124,7 @@ def snapshot(workspace: str, *, limit: int = 50, connect=None) -> dict:
                     """SELECT provider,model,supports_vision,zero_cost_verified,
                               verified_at,verification_revision,max_sensitivity,
                               allowed_regions,credential_ready,quota_state,
-                              quota_remaining,quota_resets_at,updated_at
+                              quota_remaining,quota_resets_at,updated_by,updated_at
                          FROM archiver_image_model_catalog
                         ORDER BY provider,model"""
                 )

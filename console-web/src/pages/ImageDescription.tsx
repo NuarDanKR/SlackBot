@@ -24,6 +24,180 @@ interface CatalogRow {
   credentialReady: boolean
   quotaState: string
   quotaRemaining: number | null
+  verificationRevision?: string
+  updatedBy?: string
+  updatedAt?: string | null
+}
+
+/** B-101 재검증 전에 보는 것. 비용 가드가 막은 작업과 다시 돌 워크스페이스. */
+interface ReverifyInspect {
+  provider: string
+  model: string
+  zeroCostVerified: boolean
+  quotaState: string
+  verificationRevision: string
+  verifiedAt: string | null
+  updatedBy: string
+  updatedAt: string | null
+  disabledByGuard: boolean
+  supportsVision: boolean
+  credentialReady: boolean
+  chargeSeen: boolean
+  costJobs: { createdAt: string; workspace: string; errorCode: string; actualUsd: string | null }[]
+  affectedWorkspaces: { workspace: string; enabled: boolean }[]
+}
+
+const REVERIFY_PATH = '/api/archiver/image-description/catalog/reverify'
+
+/**
+ * B-101 — 비용 가드(`runtime-cost-guard`)가 끈 무료 카탈로그를 다시 켭니다.
+ * 켜면 막혀 있던 이미지가 다음 15분 배치에서 한꺼번에 나가므로, 범위와 원인을 먼저 보여 줍니다.
+ */
+function CatalogReverifyPanel({ row, onClose, onDone, onToast }: {
+  row: CatalogRow
+  onClose: () => void
+  onDone: () => void
+  onToast: (message: string) => void
+}) {
+  const query = `${REVERIFY_PATH}?provider=${encodeURIComponent(row.provider)}&model=${encodeURIComponent(row.model)}`
+  const info = useResource<ReverifyInspect>(query)
+  const [quotaState, setQuotaState] = useState<'unlimited' | 'available'>('unlimited')
+  const [remaining, setRemaining] = useState('')
+  const [reason, setReason] = useState('')
+  const [confirmed, setConfirmed] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (info.loading && !info.data) return <Loading what="재검증 정보를" />
+  if (info.error && !info.data) return <Failed what="재검증 정보를" detail={info.error.message} onRetry={info.reload} />
+  const data = info.data
+  if (!data) return null
+
+  const remainingNumber = Number(remaining)
+  const quotaOk = quotaState === 'unlimited' || (Number.isInteger(remainingNumber) && remainingNumber > 0)
+  const blocked = !data.supportsVision || !data.credentialReady
+  const ready = !blocked && quotaOk && confirmed && reason.trim().length > 0 && !busy
+  const running = data.affectedWorkspaces.filter((w) => w.enabled)
+  const idle = data.affectedWorkspaces.filter((w) => !w.enabled)
+  const runningText = running.length ? running.map((w) => w.workspace).join(', ') : '없음'
+
+  async function save(target: ReverifyInspect) {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post(REVERIFY_PATH, {
+        provider: target.provider,
+        model: target.model,
+        expectedRevision: target.verificationRevision,
+        quotaState,
+        quotaRemaining: quotaState === 'available' ? remainingNumber : null,
+        confirmNoCharge: confirmed,
+        reason: reason.trim(),
+      })
+      onToast('무료 확인을 다시 적었습니다. 다음 15분 배치부터 Vision 이 다시 돕니다.')
+      onDone()
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : String(caught))
+    } finally {
+      setBusy(false)
+      setAsking(false)
+    }
+  }
+
+  return (
+    <div className="card card-pad model-setting">
+      <div className="form-row">
+        <strong className="mono">{data.provider}/{data.model}</strong>
+        {data.zeroCostVerified ? <Chip tone="ok">무료 확인됨</Chip> : <Chip tone="bad">무료 미확인 — 호출 막힘</Chip>}
+        <button className="btn btn-sm" onClick={onClose}>닫기</button>
+      </div>
+      <p className="hint">
+        마지막 변경: {data.updatedAt ? fmt.dayClock(data.updatedAt) : '-'} · <span className="mono">{data.updatedBy}</span>
+        {' · 검증 판 '}<span className="mono">{data.verificationRevision || '-'}</span>
+      </p>
+      {data.disabledByGuard && (
+        <div className="notice warn"><div>
+          <div className="notice-title">비용 가드가 자동으로 껐습니다</div>
+          <div className="notice-detail">
+            Vision 호출 한 건이 「비용 확인 불가」 또는 「과금」 으로 끝나면, 같은 모델이 계속 과금되지 않게 카탈로그를 닫습니다.
+            타임아웃·전송 오류처럼 응답이 아예 없던 경우는 과금 근거가 아닙니다(2026-11-26 배포 이후로는 그것으로 닫지 않습니다).
+          </div>
+        </div></div>
+      )}
+      {data.chargeSeen && (
+        <div className="notice bad"><div>
+          <div className="notice-title">실제 과금 기록이 있습니다</div>
+          <div className="notice-detail">아래 작업에 금액이 찍혀 있습니다. 요금제·무료 한도를 먼저 확인하지 않고 다시 켜면 같은 과금이 반복됩니다.</div>
+        </div></div>
+      )}
+      {blocked && (
+        <div className="notice bad"><div>
+          <div className="notice-title">다시 켜도 돌지 않습니다</div>
+          <div className="notice-detail">
+            {!data.supportsVision && 'Vision 지원이 확인되지 않은 모델입니다. '}
+            {!data.credentialReady && 'Vision 전용 자격이 준비되지 않았습니다. '}
+            이 칸은 재검증으로 바뀌지 않습니다.
+          </div>
+        </div></div>
+      )}
+      <div className="table-wrap">
+        <table className="table">
+          <thead><tr><th>비용 가드가 막은 작업</th><th>워크스페이스</th><th>사유</th><th>금액(USD)</th></tr></thead>
+          <tbody>
+            {data.costJobs.length === 0 && <tr><td colSpan={4} className="hint">기록이 없습니다.</td></tr>}
+            {data.costJobs.map((job) => (
+              <tr key={`${job.createdAt}/${job.workspace}`}>
+                <td>{fmt.dayClock(job.createdAt)}</td>
+                <td>{job.workspace}</td>
+                <td className="mono">{job.errorCode || '-'}</td>
+                <td className="mono">{job.actualUsd ?? '영수증 없음'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="hint">
+        다시 켜면 이 모델을 쓰는 워크스페이스에서 막혀 있던 이미지가 <strong>다음 15분 배치에서 한꺼번에</strong> 나가고,
+        각 이미지 스레드의 상태 댓글이 고쳐집니다. 정책이 켜진 곳: {runningText}
+        {idle.length > 0 && ` (이 모델이지만 정책이 꺼진 곳: ${idle.map((w) => w.workspace).join(', ')})`}
+      </p>
+      <div className="field">
+        <label className="field-label" htmlFor="reverify-quota">무료 한도</label>
+        <select id="reverify-quota" className="input" value={quotaState}
+          onChange={(e) => setQuotaState(e.target.value === 'available' ? 'available' : 'unlimited')}>
+          <option value="unlimited">무제한(오너 승인)</option>
+          <option value="available">남은 횟수 지정</option>
+        </select>
+      </div>
+      {quotaState === 'available' && (
+        <div className="field">
+          <label className="field-label" htmlFor="reverify-remaining">남은 무료 호출 수</label>
+          <input id="reverify-remaining" className="input mono" inputMode="numeric" value={remaining}
+            onChange={(e) => setRemaining(e.target.value.replace(/[^0-9]/g, ''))} />
+        </div>
+      )}
+      <div className="field">
+        <label className="field-label" htmlFor="reverify-reason">사유 (감사 기록, 필수)</label>
+        <input id="reverify-reason" className="input" maxLength={500} value={reason}
+          placeholder="예: 11-24 타임아웃 오판 — Google 콘솔에서 과금 0 확인"
+          onChange={(e) => setReason(e.target.value)} />
+      </div>
+      <label className="form-row">
+        <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+        <span>프로바이더 콘솔에서 이 모델의 과금이 없음(또는 무료 한도 안)을 직접 확인했습니다.</span>
+      </label>
+      {error && <div className="notice bad"><div><div className="notice-title">재검증하지 못했습니다</div><div className="notice-detail">{error}</div></div></div>}
+      <div className="form-row">
+        <button className="btn btn-primary" disabled={!ready} onClick={() => setAsking(true)}>무료 확인 다시 적기</button>
+      </div>
+      <ConfirmDialog open={asking} danger
+        title={`${data.provider}/${data.model} 을 다시 켤까요?`}
+        detail={`다음 15분 배치에서 막혀 있던 이미지가 한꺼번에 이 모델로 나갑니다(정책이 켜진 곳: ${runningText}). 실행자와 사유는 감사 기록에 남습니다.`}
+        confirmLabel="다시 켜기" busy={busy} onCancel={() => setAsking(false)}
+        onConfirm={() => void save(data)} />
+    </div>
+  )
 }
 
 interface JobRow {
@@ -261,6 +435,7 @@ function SecretsSection({ onToast }: { onToast: (message: string) => void }) {
 
 function StatusSection({ workspace, onToast }: { workspace: string; onToast: (message: string) => void }) {
   const snapshot = useResource<Snapshot>(`/api/archiver/image-description/policy?workspace=${encodeURIComponent(workspace)}`)
+  const [reverify, setReverify] = useState<CatalogRow | null>(null)
   if (snapshot.loading && !snapshot.data) return <Loading what="이미지 설명 현황을" />
   if (snapshot.error && !snapshot.data) return <Failed what="이미지 설명 현황을" detail={snapshot.error.message} onRetry={snapshot.reload} />
   const data = snapshot.data
@@ -280,9 +455,9 @@ function StatusSection({ workspace, onToast }: { workspace: string; onToast: (me
       </div>
       <div className="table-wrap">
         <table className="table">
-          <thead><tr><th>모델</th><th>Vision</th><th>무료 확인</th><th>자격</th><th>무료 한도</th></tr></thead>
+          <thead><tr><th>모델</th><th>Vision</th><th>무료 확인</th><th>자격</th><th>무료 한도</th><th>마지막 변경</th><th /></tr></thead>
           <tbody>
-            {data.catalog.length === 0 && <tr><td colSpan={5} className="hint">카탈로그가 비어 있습니다.</td></tr>}
+            {data.catalog.length === 0 && <tr><td colSpan={7} className="hint">카탈로그가 비어 있습니다.</td></tr>}
             {data.catalog.map((row) => (
               <tr key={`${row.provider}/${row.model}`}>
                 <td className="mono">{row.provider}/{row.model}</td>
@@ -290,11 +465,26 @@ function StatusSection({ workspace, onToast }: { workspace: string; onToast: (me
                 <td>{row.zeroCostVerified ? <Chip tone="ok">확인</Chip> : <Chip tone="bad">미확인</Chip>}</td>
                 <td>{row.credentialReady ? '준비' : '없음'}</td>
                 <td>{row.quotaState}{row.quotaRemaining !== null ? ` · ${row.quotaRemaining}` : ''}</td>
+                <td>
+                  {row.updatedBy === 'runtime-cost-guard'
+                    ? <Chip tone="bad">비용 가드가 닫음</Chip>
+                    : <span className="mono">{row.updatedBy || '-'}</span>}
+                </td>
+                <td className="nowrap">
+                  <button className="btn btn-sm" onClick={() => setReverify(row)}>
+                    {row.zeroCostVerified ? '재검증' : '다시 켜기'}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {reverify && (
+        <CatalogReverifyPanel key={`${reverify.provider}/${reverify.model}`} row={reverify} onToast={onToast}
+          onClose={() => setReverify(null)}
+          onDone={() => { setReverify(null); snapshot.reload() }} />
+      )}
       <div className="table-wrap">
         <table className="table">
           <thead><tr><th>상태</th><th>사유</th><th>채널·파일</th><th>프롬프트 판</th><th>실제 모델</th><th>시각</th></tr></thead>
