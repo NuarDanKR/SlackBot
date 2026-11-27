@@ -69,7 +69,7 @@ def test_path_stays_when_the_body_is_hidden():
 
 def _recorded_codes() -> set[str]:
     source = (ROOT / "src/tybot/archive/store.py").read_text(encoding="utf-8")
-    return set(re.findall(r'_note_search_path\("([a-z_]+)"\)', source))
+    return set(re.findall(r'_note_search_path\("([a-z_]+)"', source))
 
 
 def test_the_console_names_every_code_the_recorder_can_write():

@@ -68,7 +68,9 @@ from ..archive.store import (
     RawLine,
     SearchHit,
     begin_search_trail,
+    search_stats,
     search_trail,
+    summary_stats,
 )
 from ..archive.write_owner import OwnerLookup
 from ..archive.writer import KST
@@ -3494,6 +3496,8 @@ class WorkspaceBot:
                     cache_before, _bot_cache_metric_snapshot(self)
                 ),
                 search_path=search_trail(),
+                search_stats=search_stats(),
+                summary_stats=summary_stats(),
             )
             self.qa_log.write(rec)
         finally:
@@ -3844,6 +3848,8 @@ class WorkspaceBot:
                     cache_before, _bot_cache_metric_snapshot(self)
                 ),
                 search_path=search_trail(),
+                search_stats=search_stats(),
+                summary_stats=summary_stats(),
             )
             log.info("%s", rec.log_line())
             self.qa_log.write(rec)
